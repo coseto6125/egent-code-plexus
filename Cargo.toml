@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "crates/gnx-core",
+]
+resolver = "2"

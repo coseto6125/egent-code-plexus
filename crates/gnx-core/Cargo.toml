@@ -1,0 +1,12 @@
+[package]
+name = "gnx-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rkyv = "0.8.16"
+bytecheck = "0.8.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+memmap2 = "0.9.10"
