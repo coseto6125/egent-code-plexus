@@ -1,0 +1,14 @@
+[package]
+name = "gnx-analyzer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gnx-core = { path = "../gnx-core" }
+tree-sitter = "0.22.6"
+tree-sitter-typescript = "0.21.2"
+rayon = "1.10.0"
+crossbeam-channel = "0.5.12"
+ignore = "0.4.22"
+anyhow = "1.0.82"
+tracing = "0.1.40"
