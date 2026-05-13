@@ -47,7 +47,6 @@ impl LanguageProvider for TypeScriptProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
-        let idx_import = self.query.capture_index_for_name("import");
 
         for m in matches {
             let mut name_node = None;
