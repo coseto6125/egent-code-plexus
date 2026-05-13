@@ -23,7 +23,10 @@ impl AnalyzerPipeline {
         let ext = path.extension()?.to_str()?;
         match ext {
             "ts" | "tsx" => self.providers.iter().find(|p| p.name() == "typescript").map(|p| p.as_ref()),
-            // Add other languages here in the future
+            "py" | "pyi" => self.providers.iter().find(|p| p.name() == "python").map(|p| p.as_ref()),
+            "go" => self.providers.iter().find(|p| p.name() == "go").map(|p| p.as_ref()),
+            "rs" => self.providers.iter().find(|p| p.name() == "rust").map(|p| p.as_ref()),
+            "java" => self.providers.iter().find(|p| p.name() == "java").map(|p| p.as_ref()),
             _ => None,
         }
     }
