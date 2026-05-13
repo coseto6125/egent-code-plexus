@@ -251,9 +251,9 @@ dependencies = [
 
 [[package]]
 name = "etoon"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b69f377b50dd2a2c26bd26b0bf99edcbb8bc086a3b33066d1c11330def02f67"
+checksum = "046da7b291854aa560f3b888e8de425d07a406248b4f92ce7f3b8060db6fc92e"
 dependencies = [
  "itoa",
  "pyo3",
