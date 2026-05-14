@@ -13,7 +13,7 @@ pub struct QueryArgs {
     pub repo: Option<String>,
 
     /// Output format
-    #[arg(long, default_value = "toon")]
+    #[arg(long, default_value = "text")]
     pub format: Option<String>,
 }
 
@@ -65,7 +65,7 @@ pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), String> {
                         
                         // Output the highly token-optimized string format
                         results.push(serde_json::json!(format!(
-                            "{}:{}:l{}-{} [score:{:.4}]",
+                            "[{}] {}:{} ({}) [score:{:.4}]",
                             kind_to_str(&node.kind),
                             file_node.path.resolve(&graph.string_pool),
                             node.span.0.to_native() + 1, // Convert 0-based to 1-based
@@ -104,9 +104,15 @@ pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), String> {
         let bytes = serde_json::to_vec(&json).map_err(|e| e.to_string())?;
         let output = _etoon::toon::encode(&bytes).map_err(|e| e.to_string())?;
         println!("{}", output);
-    } else {
+    } else if args.format.as_deref() == Some("json") {
         let s = serde_json::to_string(&json).map_err(|e| e.to_string())?;
         println!("{}", s);
+    } else {
+        for r in &results {
+            if let Some(s) = r.as_str() {
+                println!("{}", s);
+            }
+        }
     }
 
     Ok(())
