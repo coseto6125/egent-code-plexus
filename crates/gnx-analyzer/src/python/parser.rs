@@ -1,5 +1,5 @@
 use crate::calls::extract_calls;
-use crate::framework_helpers::{enclosing_function_name, node_span};
+use crate::framework_helpers::{MODULE_LEVEL_SOURCE, enclosing_function_name, node_span};
 use gnx_core::analyzer::provider::LanguageProvider;
 use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use gnx_core::graph::NodeKind;
@@ -31,6 +31,8 @@ struct PythonCaptureIndices {
     fastapi_route_app: Option<u32>,
     fastapi_route_method: Option<u32>,
     fastapi_route_handler: Option<u32>,
+    django_url_handler: Option<u32>,
+    celery_task_handler: Option<u32>,
 }
 
 impl PythonProvider {
@@ -61,6 +63,8 @@ impl PythonProvider {
             fastapi_route_app: query.capture_index_for_name("fastapi.route.app"),
             fastapi_route_method: query.capture_index_for_name("fastapi.route.method"),
             fastapi_route_handler: query.capture_index_for_name("fastapi.route.handler"),
+            django_url_handler: query.capture_index_for_name("django.url.handler"),
+            celery_task_handler: query.capture_index_for_name("celery.task.handler"),
         };
         Ok(Self { query, indices })
     }
@@ -168,6 +172,30 @@ impl LanguageProvider for PythonProvider {
                     fa_route_method_node = Some(cap.node);
                 } else if cap_idx == idx.fastapi_route_handler {
                     fa_route_handler_node = Some(cap.node);
+                } else if cap_idx == idx.django_url_handler {
+                    if let Ok(target_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        route_refs.push(RawFrameworkRef {
+                            source_name: MODULE_LEVEL_SOURCE.to_string(),
+                            target_name: target_name.to_string(),
+                            confidence: 0.9,
+                            reason: "django-url-path".to_string(),
+                            span: node_span(&cap.node),
+                        });
+                    }
+                } else if cap_idx == idx.celery_task_handler {
+                    if let Ok(target_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        route_refs.push(RawFrameworkRef {
+                            source_name: MODULE_LEVEL_SOURCE.to_string(),
+                            target_name: target_name.to_string(),
+                            confidence: 0.9,
+                            reason: "celery-task".to_string(),
+                            span: node_span(&cap.node),
+                        });
+                    }
                 }
             }
 
