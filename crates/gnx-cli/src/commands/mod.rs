@@ -3,6 +3,7 @@ pub mod context;
 pub mod detect_changes;
 pub mod format;
 pub mod hook_handle;
+pub mod hook_watcher;
 pub mod impact;
 pub mod init;
 pub mod query;
