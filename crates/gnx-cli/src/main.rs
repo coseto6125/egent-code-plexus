@@ -48,6 +48,8 @@ enum Commands {
     /// Internal: detached watcher dispatched by hook-handle (do not invoke directly).
     #[command(hide = true)]
     HookWatcher(commands::hook_watcher::HookWatcherArgs),
+    /// Remove orphan index dir + registry branch entry for the given branch
+    Prune(commands::prune::PruneArgs),
 }
 
 fn main() {
@@ -92,6 +94,15 @@ fn main() {
         return;
     }
 
+    // Prune removes orphan index dir + registry entry; no graph needed
+    if let Commands::Prune(args) = &cli.command {
+        if let Err(e) = commands::prune::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -99,7 +110,7 @@ fn main() {
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::RouteMap(args) => args.repo.as_deref(),
         Commands::DetectChanges(args) => args.repo.as_deref(),
-        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) => None,
+        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -122,7 +133,7 @@ fn main() {
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),
-        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) => Ok(()), // Handled above
+        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
