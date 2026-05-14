@@ -10,6 +10,7 @@
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use gnx_core::registry::{Registry, RegistryFile, RepoEntry};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Args, Debug, Clone)]
 pub struct ListArgs {
@@ -45,7 +46,10 @@ fn text_lines(reg: &RegistryFile, registry_path: &str) -> Vec<String> {
             format!("registry: {registry_path}"),
         ];
     }
-    let name_w = reg.repos.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
+    // East Asian Width: CJK chars occupy 2 terminal columns. `str::len()`
+    // returns UTF-8 bytes; `{:<N}` pads to char count. Both misalign on CJK.
+    let name_w = reg.repos.iter().map(|r| display_width(&r.name)).max().unwrap_or(0).max(4);
+    let group_w = 20usize;
     let mut lines = Vec::with_capacity(reg.repos.len() + 2);
     let mut total_branches = 0usize;
     for r in &reg.repos {
@@ -55,9 +59,10 @@ fn text_lines(reg: &RegistryFile, registry_path: &str) -> Vec<String> {
         let count = r.branches.len();
         let unit = if count == 1 { "branch" } else { "branches" };
         lines.push(format!(
-            "{name:<name_w$}  {group:<20}  {count} {unit}  last: {last}",
+            "{name}{name_pad}  {group}{group_pad}  {count} {unit}  last: {last}",
             name = r.name,
-            name_w = name_w,
+            name_pad = pad(&r.name, name_w),
+            group_pad = pad(&group, group_w),
         ));
     }
     lines.push(String::new());
@@ -68,6 +73,14 @@ fn text_lines(reg: &RegistryFile, registry_path: &str) -> Vec<String> {
         b = total_branches,
     ));
     lines
+}
+
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+fn pad(s: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(display_width(s)))
 }
 
 fn latest_indexed_at(repo: &RepoEntry) -> Option<&str> {
@@ -136,6 +149,21 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("(no repos indexed)"));
         assert!(joined.contains("/tmp/x"));
+    }
+
+    #[test]
+    fn text_lines_align_by_display_width_for_cjk_names() {
+        let mut reg = sample();
+        reg.repos[0].name = "搜尋系統".into(); // 4 chars, 8 columns
+        reg.repos[1].name = "agent".into();    // 5 chars, 5 columns
+        let lines = text_lines(&reg, "/h");
+        // name_w should be 8 (cols of 搜尋系統), so `agent` row gets 3 trailing
+        // spaces before the "  (group:..." separator. Total leading segment
+        // for both rows must reach 8 visible columns before the gap.
+        let row_cjk = lines.iter().find(|l| l.contains("搜尋系統")).unwrap();
+        let row_ascii = lines.iter().find(|l| l.starts_with("agent")).unwrap();
+        assert!(row_cjk.starts_with("搜尋系統  "),  "cjk row: {row_cjk:?}");
+        assert!(row_ascii.starts_with("agent     "), "ascii row: {row_ascii:?}");
     }
 
     #[test]
