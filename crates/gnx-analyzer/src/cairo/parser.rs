@@ -66,12 +66,8 @@ impl LanguageProvider for CairoProvider {
                     if kind.is_none() {
                         kind = Some(NodeKind::Function);
                     }
-                } else if Some(cap_idx) == idx_struct_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Class);
-                    }
-                } else if Some(cap_idx) == idx_class_name {
+                } else if Some(cap_idx) == idx_struct_name || Some(cap_idx) == idx_class_name {
+                    // struct 與 class 在 gnx NodeKind 統一映射為 Class。
                     name_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Class);
@@ -82,9 +78,9 @@ impl LanguageProvider for CairoProvider {
                         kind = Some(NodeKind::Const);
                     }
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(
-                        &source[cap.node.start_byte()..cap.node.end_byte()],
-                    ) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.to_string());
                     }
                 } else if Some(cap_idx) == idx_import_source {
@@ -101,9 +97,7 @@ impl LanguageProvider for CairoProvider {
 
             // Emit symbol node.
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                {
+                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
@@ -138,12 +132,7 @@ impl LanguageProvider for CairoProvider {
             }
         }
 
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["call_expression"],
-        );
+        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

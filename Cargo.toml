@@ -8,8 +8,11 @@ members = [
 # 避免 cargo / clippy --workspace --all-targets 編到 vendor 自身的 #[cfg(test)] 區塊
 # （tree-sitter-move 的測試 mod 依賴 tree-sitter，但 vendor Cargo.toml 沒列為 dev-dep）。
 exclude = [
+    "crates/vendor/tree-sitter-cairo",
     "crates/vendor/tree-sitter-move",
+    "crates/vendor/tree-sitter-nim",
     "crates/vendor/tree-sitter-swift",
+    "crates/vendor/tree-sitter-vyper",
 ]
 resolver = "2"
 
