@@ -1,0 +1,10 @@
+use axum::{Router, routing::{get, post}};
+
+async fn login_handler() -> &'static str { "ok" }
+async fn logout_handler() -> &'static str { "bye" }
+
+fn build_routes() -> Router {
+    Router::new()
+        .route("/login", post(login_handler))
+        .route("/logout", get(logout_handler))
+}
