@@ -7,6 +7,7 @@ mod engine;
 mod git;
 mod git_state;
 mod graph_path;
+mod incremental_cache;
 mod output;
 pub mod reanalyze;
 pub mod search;
