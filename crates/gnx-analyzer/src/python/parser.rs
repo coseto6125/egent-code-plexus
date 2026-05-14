@@ -1,6 +1,6 @@
 use crate::calls::extract_calls;
 use gnx_core::analyzer::provider::LanguageProvider;
-use gnx_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
+use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use gnx_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -13,8 +13,12 @@ pub struct PythonProvider {
 impl PythonProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_python::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        let query = Query::new(&language, &query_source)?;
         Ok(Self { query })
     }
 }
@@ -56,6 +60,13 @@ impl LanguageProvider for PythonProvider {
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
         let idx_route_call = self.query.capture_index_for_name("route.call");
+
+        let idx_fastapi_depends_target =
+            self.query.capture_index_for_name("fastapi.depends.target");
+
+        // Collect (target_name, span) for FastAPI Depends() refs; resolve
+        // the enclosing function via span containment after nodes are built.
+        let mut pending_depends: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -113,6 +124,22 @@ impl LanguageProvider for PythonProvider {
                     root_span_node = Some(cap.node);
                 } else if cap_idx == idx_function || cap_idx == idx_class {
                     root_span_node = Some(cap.node);
+                } else if cap_idx == idx_fastapi_depends_target {
+                    if let Ok(target_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        let start = cap.node.start_position();
+                        let end = cap.node.end_position();
+                        pending_depends.push((
+                            target_name.to_string(),
+                            (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                        ));
+                    }
                 }
             }
 
@@ -219,6 +246,28 @@ impl LanguageProvider for PythonProvider {
         // Extract call sites and attach to enclosing function/method nodes.
         extract_calls(tree.root_node(), source, &mut nodes, &["call"]);
 
+        // Resolve FastAPI Depends() refs: find the innermost enclosing
+        // Function/Method node whose span contains the capture span.
+        let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
+        for (target_name, span) in pending_depends {
+            let enclosing = nodes
+                .iter()
+                .filter(|n| {
+                    matches!(n.kind, NodeKind::Function | NodeKind::Method)
+                        && span_contains(n.span, span)
+                })
+                .min_by_key(|n| span_area(n.span));
+            if let Some(source_node) = enclosing {
+                framework_refs.push(RawFrameworkRef {
+                    source_name: source_node.name.clone(),
+                    target_name,
+                    confidence: 0.6,
+                    reason: "fastapi-depends".to_string(),
+                    span,
+                });
+            }
+        }
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
@@ -226,7 +275,23 @@ impl LanguageProvider for PythonProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
         })
     }
+}
+
+/// Returns true if `outer` fully contains `inner` (inclusive of equal bounds).
+fn span_contains(outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)) -> bool {
+    let (o_sr, o_sc, o_er, o_ec) = outer;
+    let (i_sr, i_sc, i_er, i_ec) = inner;
+    let start_ok = (o_sr, o_sc) <= (i_sr, i_sc);
+    let end_ok = (i_er, i_ec) <= (o_er, o_ec);
+    start_ok && end_ok
+}
+
+/// Rough size proxy used to pick the innermost containing span.
+/// Compares row span first, then column span — small wins.
+fn span_area(span: (u32, u32, u32, u32)) -> (u32, u32) {
+    let (sr, sc, er, ec) = span;
+    (er.saturating_sub(sr), ec.saturating_sub(sc))
 }
