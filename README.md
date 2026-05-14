@@ -1,74 +1,63 @@
-# Graph Nexus for LLM
+# gnx-rs
 
-A code intelligence graph I built for working with LLMs and AI agents. Indexes any codebase across 14 languages in milliseconds, then answers structural questions like *who calls this*, *what's the blast radius if I change this function*, or *what's related to the auth flow*.
-
-Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same core idea (structural knowledge graph of a repo), rewritten in Rust for speed and reshaped around how I actually use this with Claude / Cursor every day. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE).
-
-> Required Notice: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus). Not affiliated with or endorsed by the upstream GitNexus project. Noncommercial use only.
-
-Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via Tantivy + BGE-M3 dense vectors), framework-aware route extraction. The CLI is `gnx`.
+> **Unofficial Rust reimplementation of [GitNexus](https://github.com/abhigyanpatwari/GitNexus)**
+> 
+> **Graph-powered code intelligence for AI agents.** Index any codebase into a knowledge graph, then query it via CLI.
+>
+> by [Abhigyan Patwari](https://github.com/abhigyanpatwari), licensed under
+> [PolyForm Noncommercial 1.0.0](./LICENSE).
+>
+> Required Notice: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus)
+>
+> Not affiliated with or endorsed by the upstream GitNexus project. Noncommercial use only.
 
 [繁體中文說明 (Traditional Chinese)](./README_zh-TW.md)
 
-## 🚀 Key Features
+---
 
-*   **Blazing Fast & Zero-Copy**: Uses Tree-sitter + Rayon multi-threading for parsing, and `rkyv` for zero-copy memory-mapped `graph.bin` retrieval. It processes large repos in milliseconds.
-*   **14 Languages Supported**: C, C#, C++, Dart, Go, Java, JavaScript, Kotlin, PHP, Python, Ruby, Rust, Swift, TypeScript.
-*   **LLM-Native Output**: Emits extreme token-efficient formats ([TOON](https://crates.io/crates/etoon)) and concise string summaries. No hallucination-inducing formatting.
-*   **Hybrid Search Engine**:
-    *   **Semantic Search**: Uses **BGE-M3 INT8 Quantized Model** via `fastembed-rs` (`--embeddings`). Cross-lingual concept matching (e.g., search "Session Management" in Chinese, find English functions) with AVX2 CPU acceleration and massive memory reduction.
-    *   **Lexical Search**: Uses **Tantivy (BM25)** for zero-latency, full-text tokenized keyword matching.
-*   **Incremental Caching**: Only re-computes ASTs and Embeddings for modified files (SHA-256 Content Hash). Graph rebuilds drop from ~50s (Cold Start) to **< 0.25s**!
-*   **Zero-Maintenance Route Extraction**: Purely based on RFC 7231 HTTP constants. Extracts API routes from both Declarative (e.g., `@Get`) and Imperative (e.g., `app.get()`) definitions across all languages.
-*   **RAG Document Indexing**: Securely isolates `.md` (Markdown) and `.yaml` (GitHub Actions) files into parallel structures, parsing sections natively for LLM documentation retrieval without polluting the code execution graph.
+## The Workflow Upgrade: `gnx-rs` vs Upstream
 
-## 📦 Installation
+`gnx-rs` takes the phenomenal conceptual model of GitNexus and completely reimagines the execution architecture. By stripping out the background daemon and shifting to a zero-copy memory-mapped structure in Rust, it delivers a drastically better day-to-day experience for both human developers and LLM Agents (Claude, Cursor, etc.).
 
-```bash
-cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx
-```
+Here is what changes when you type `gnx` instead of `gitnexus`:
 
-After install, the binary is named `gnx` (the package on crates.io is `graph-nexus`).
+| Workflow & Experience | Upstream GitNexus (Node.js) | gnx-rs (Rust) |
+| :--- | :--- | :--- |
+| **Startup Friction** | Requires starting and maintaining a background Daemon server before use. | **Zero Friction**. A stateless CLI. Runs instantly and terminates immediately. |
+| **Graph Updates (`analyze`)** | Full codebase rebuild on every change, taking significant time. | **SHA-256 Incremental Updates**. Changing a single file takes `< 0.25s` to rebuild the graph. |
+| **Search Engine (`query`)** | Manual toggle required (`--mode semantic` or `bm25`). | **Automatic Hybrid RRF**. Simultaneously runs Vector + BM25 search, automatically fusing results. |
+| **Context Purity** | Often returns irrelevant Markdown files mixed with code symbols. | **RAG Isolation**. Code symbols and Markdown/YAML docs are returned in clean, separated blocks. |
+| **Blast Radius (`review`)** | Diff line-number shifting can cause phantom false-positive changes. | **Set-Diff Symbol Matching**. 100% accurate change detection based on AST identity, immune to line shifts. |
+| **API Route Maps** | Relies on hardcoded, framework-specific matchers. | **Universal HTTP Deduction**. Extracts routes based on RFC 7231 constants, working across unknown frameworks. |
+| **LLM Token Economy** | Outputs verbose, nested JSON structures. | **80% Token Reduction**. Emits ultra-condensed [TOON](https://crates.io/crates/etoon) format designed specifically for LLM context windows. |
 
-## ⚡ Usage
+## Quick Start
 
 ```bash
+cargo install --git https://github.com/coseto6125/gnx-rs --bin gnx
+
 # 1. Build a code graph for the current repo (Extremely fast, < 1s)
 gnx analyze --repo .
 
 # 2. Build with BGE-M3 Semantic Embeddings (Downloads ~540MB INT8 model on first run)
 gnx analyze --repo . --embeddings
-
-# 3. Hybrid Search: Semantic Concept (Requires --embeddings)
-gnx query --query "authentication flow"
-
-# 4. Hybrid Search: Exact Keyword BM25 (Uses Tantivy)
-gnx query --query "loginUser"
-
-# 5. Extract all API Routes across the Microservice
-gnx route-map --repo .
-
-# 6. Find a symbol's blast-radius / execution flow
-gnx impact --target validateUser --direction upstream
-
-# 7. Explore Context (Metadata, Decorators, Signatures)
-gnx context --name validateUser
 ```
 
-All commands accept `--format text|json|toon`. The default for query is a highly token-optimized text format.
+## Supported Languages (14)
+C, C#, C++, Dart, Go, Java, JavaScript, Kotlin, PHP, Python, Ruby, Rust, Swift, TypeScript.
 
-## 🏗️ Architecture
+## Architecture Highlights
 
 ```
 crates/
-├── graph-nexus-core        # Zero-copy graph (rkyv), Incremental Caching, Graph Queries
-├── graph-nexus-analyzer    # Tree-sitter parsers, BGE-M3 Embedder, HTTP Route Detector
-└── graph-nexus-cli         # `gnx` binary, Tantivy BM25 Engine, Token-optimized Output
+├── gnx-core        # Zero-copy graph (rkyv), Incremental Caching, Graph Queries
+├── gnx-analyzer    # Tree-sitter parsers, BGE-M3 Embedder, HTTP Route Detector
+└── gnx-cli         # `gnx` binary, Tantivy BM25 Engine, Token-optimized Output
 ```
 
 The analyzer streams parsed nodes through an MPSC channel into a single builder thread that assembles the graph, applies Route & Document extraction rules, and writes a zero-copy `.gitnexus-rs/graph.bin`. Read operations (like `context` and `query`) memory-map this file directly for zero-latency lookups.
 
-## 📄 License
+## License
 
 Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). Personal use, research,
 hobby projects, and noncommercial organizations are explicitly permitted purposes.
@@ -76,11 +65,10 @@ hobby projects, and noncommercial organizations are explicitly permitted purpose
 **Commercial use is not granted by this license.** If you need commercial rights,
 contact the upstream GitNexus author Abhigyan Patwari.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-*   [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by Abhigyan Patwari — original design, CLI surface, and conceptual model.
-*   [tree-sitter](https://tree-sitter.github.io/) — robust incremental AST parsing.
-*   [fastembed-rs](https://github.com/Anush008/fastembed-rs) — local ONNX inference engine.
-*   [rkyv](https://rkyv.org/) — ultimate zero-copy deserialization.
-*   [Tantivy](https://github.com/quickwit-oss/tantivy) — blazing fast Rust full-text search.
-*   [BGE-M3 INT8](https://huggingface.co/MahradHosseini/bge-m3-onnx-int8) — High-quality community quantized multi-lingual model.
+- [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by Abhigyan Patwari — original design, CLI surface, and conceptual model
+- [tree-sitter](https://tree-sitter.github.io/) — incremental parsing
+- [fastembed-rs](https://github.com/Anush008/fastembed-rs) — local ONNX inference for BGE-M3
+- [rkyv](https://rkyv.org/) — zero-copy deserialization
+- [Tantivy](https://github.com/quickwit-oss/tantivy) — blazing fast Rust full-text search
