@@ -105,7 +105,6 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), String> {
             "uid": target_node.uid.resolve(&graph.string_pool),
             "name": target_node.name.resolve(&graph.string_pool),
             "filePath": target_file.path.resolve(&graph.string_pool),
-            "kind": kind_to_str(&target_node.kind)
         });
         outgoing.entry(rel_str).or_default().push(entry);
     }
@@ -128,14 +127,15 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), String> {
         incoming.entry(rel_str).or_default().push(entry);
     }
 
-    let json = serde_json::json!({
+    let result = serde_json::json!({
         "status": "found",
         "symbol": {
             "uid": node.uid.resolve(&graph.string_pool),
             "name": node.name.resolve(&graph.string_pool),
             "kind": kind_to_str(&node.kind),
             "filePath": file_node.path.resolve(&graph.string_pool),
-            "endLine": node.span.2.to_native(),
+            "startLine": node.span.0.to_native() - 1,
+            "endLine": node.span.2.to_native() - 1,
         },
         "incoming": incoming,
         "outgoing": outgoing,
@@ -143,11 +143,11 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), String> {
     });
 
     if args.format.as_deref() == Some("toon") {
-        let bytes = serde_json::to_vec(&json).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
         let output = _etoon::toon::encode(&bytes).map_err(|e| e.to_string())?;
         println!("{}", output);
     } else {
-        let s = serde_json::to_string(&json).map_err(|e| e.to_string())?;
+        let s = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
         println!("{}", s);
     }
     Ok(())

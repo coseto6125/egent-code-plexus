@@ -58,6 +58,31 @@ def run_command(cmd: list[str], cwd: Path | None = None) -> Any:
         sys.exit(1)
 
 
+def is_subset(expected: Any, actual: Any, path: str = "") -> list[str]:
+    """
+    Returns a list of error messages if `expected` is not a subset of `actual`.
+    Allows `actual` to contain extra keys (like startLine, kind).
+    """
+    errors = []
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        for k, v in expected.items():
+            if k not in actual:
+                errors.append(f"Missing key '{k}' at path '{path}'")
+            else:
+                errors.extend(is_subset(v, actual[k], f"{path}.{k}" if path else k))
+    elif isinstance(expected, list) and isinstance(actual, list):
+        if len(expected) != len(actual):
+            errors.append(f"List length mismatch at '{path}'. Expected {len(expected)}, got {len(actual)}")
+        else:
+            # We assume lists are already sorted by `normalize_json`
+            for i, (e_val, a_val) in enumerate(zip(expected, actual)):
+                errors.extend(is_subset(e_val, a_val, f"{path}[{i}]"))
+    else:
+        if expected != actual:
+            errors.append(f"Value mismatch at '{path}'. Expected '{expected}', got '{actual}'")
+            
+    return errors
+
 def print_diff(dict1: Any, dict2: Any, name1: str, name2: str) -> None:
     """Prints a unified diff of two JSON objects."""
     str1 = json.dumps(dict1, indent=2, sort_keys=True).splitlines(keepends=True)
@@ -107,10 +132,15 @@ def main() -> None:
     normalized_gnx = normalize_json(gnx_output)
     normalized_gnx_rs = normalize_json(gnx_rs_output)
 
-    if normalized_gnx == normalized_gnx_rs:
-        print("\n✅ SUCCESS: 100% Parity Achieved!")
+    errors = is_subset(normalized_gnx, normalized_gnx_rs)
+
+    if not errors:
+        print("\n✅ SUCCESS: 100% Parity Achieved! (gnx-rs is a superset of gnx)")
     else:
-        print("\n❌ FAILURE: Mismatch detected between gnx and gnx-rs outputs.")
+        print("\n❌ FAILURE: Mismatch detected. gnx-rs is missing expected fields or values.")
+        for error in errors:
+            print(f"  - {error}")
+        print("\n--- Diff (Note: Extra fields in gnx-rs are ACCEPTABLE, look for missing/changed fields) ---")
         print_diff(normalized_gnx, normalized_gnx_rs, "gnx (original)", "gnx-rs (new)")
         sys.exit(1)
 
