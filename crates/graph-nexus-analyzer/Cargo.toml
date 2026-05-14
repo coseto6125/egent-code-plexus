@@ -50,6 +50,7 @@ tree-sitter-verilog = "1.0.3"
 tree-sitter-vyper = { path = "../vendor/tree-sitter-vyper" }
 tree-sitter-sequel = "0.3.11"
 tree-sitter-zig = "1.1.2"
+rustc-hash = "2"
 
 [lints]
 workspace = true
