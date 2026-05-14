@@ -91,6 +91,9 @@ enum Commands {
     Index(commands::index::IndexArgs),
     /// Delete a registry entry by name or absolute path
     Remove(commands::remove::RemoveArgs),
+    /// Enumerate calls to known HTTP / DB / Redis / queue clients
+    #[command(alias = "tool_map")]
+    ToolMap(commands::tool_map::ToolMapArgs),
 }
 
 fn main() {
@@ -250,6 +253,7 @@ fn main() {
         Commands::Clean(args) => args.repo.to_str(),
         Commands::Config(args) => args.repo.as_deref(),
         Commands::ApiImpact(args) => args.repo.as_deref(),
+        Commands::ToolMap(args) => args.repo.as_deref(),
         Commands::Analyze(_)
         | Commands::AnalyzeHere(_)
         | Commands::Init(_)
@@ -290,6 +294,7 @@ fn main() {
         Commands::Process(args) => commands::process::run(args, &engine),
         Commands::Cluster(args) => commands::cluster::run(args, &engine),
         Commands::ApiImpact(args) => commands::api_impact::run(args, &engine),
+        Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
         Commands::Analyze(_)
         | Commands::AnalyzeHere(_)
         | Commands::Init(_)
