@@ -54,3 +54,36 @@ pub fn enclosing_function_name(nodes: &[RawNode], inner_span: Span) -> Option<St
         .min_by_key(|n| span_area(n.span))
         .map(|n| n.name.clone())
 }
+
+/// Find the innermost `Class` `RawNode` containing `inner_span`.
+/// Returns `(class_name, class_span)`, or `None` if no enclosing class
+/// (module-level fn/call).
+pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, Span)> {
+    nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class))
+        .filter(|n| span_contains(n.span, inner_span))
+        .min_by_key(|n| span_area(n.span))
+        .map(|n| (n.name.clone(), n.span))
+}
+
+/// Enumerate `Function`/`Method` `RawNode` whose span lies inside `class_span`,
+/// skipping dunder methods (`__init__`, `__repr__`, ...) and `exclude_name`
+/// (the caller — prevents self-fan-out).
+///
+/// Python parser currently emits class-bound `def`s as `NodeKind::Function`, so
+/// we accept both kinds to stay grammar-agnostic.
+pub fn enumerate_class_methods(
+    nodes: &[RawNode],
+    class_span: Span,
+    exclude_name: &str,
+) -> Vec<String> {
+    nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .filter(|n| span_contains(class_span, n.span))
+        .filter(|n| !(n.name.starts_with("__") && n.name.ends_with("__")))
+        .filter(|n| n.name != exclude_name)
+        .map(|n| n.name.clone())
+        .collect()
+}
