@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{collect_local_types, extract_python_calls};
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_class, enclosing_function_name, enumerate_class_methods, has_import_from, node_span,
@@ -525,8 +525,14 @@ impl LanguageProvider for PythonProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call"]);
+        // Extract call sites with receiver-type binding. Replaces the shared
+        // `extract_calls` for Python so `x.method()` can be rewritten to
+        // `Type.method` when `x`'s type is known from a local annotation
+        // (typed param or annotated assignment) — fed back into the resolver's
+        // Tier 2.5 qualifier-scoped lookup. Falls back to bare member name
+        // when no annotation is in scope.
+        let local_types = collect_local_types(tree.root_node(), source);
+        extract_python_calls(tree.root_node(), source, &mut nodes, &local_types);
 
         // Resolve FastAPI Depends() refs: find the innermost enclosing
         // Function/Method node whose span contains the capture span. The site
