@@ -1,7 +1,7 @@
 //! registry.json schema and atomic IO. Spec §2.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -60,20 +60,7 @@ impl RegistryFile {
             let bak = bak_path(path);
             fs::copy(path, &bak)?;
         }
-
-        let tmp = path.with_extension("json.tmp");
-        {
-            let mut f = fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&tmp)?;
-            let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, path)?;
-        Ok(())
+        crate::registry::io::atomic_write_json(path, value)
     }
 
     /// Read registry.json. On parse failure, try .bak. On both failures
@@ -199,7 +186,14 @@ fn try_read(path: &Path) -> io::Result<RegistryFile> {
         return Err(io::Error::new(io::ErrorKind::NotFound, "no registry"));
     }
     let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes).map_err(io::Error::other)
+    let parsed: RegistryFile = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if parsed.version != 1 {
+        return Err(io::Error::other(format!(
+            "unsupported registry version {} (expected 1); run `gnx analyze --force` to rebuild",
+            parsed.version
+        )));
+    }
+    Ok(parsed)
 }
 
 /// Remove user:pass from a remote URL. SSH URLs (`git@host:path`) and
