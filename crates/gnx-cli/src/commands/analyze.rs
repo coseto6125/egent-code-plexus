@@ -50,7 +50,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                         match ext {
                             "ts" | "tsx" | "py" | "pyi" | "go" | "rs" | "java" | "js" | "jsx"
                             | "mjs" | "cjs" | "php" | "rb" | "kt" | "kts" | "cs" | "c" | "h"
-                            | "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart" => {
+                            | "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart"
+                            | "md" | "txt" | "rst" => {
                                 let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                                 files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                             }

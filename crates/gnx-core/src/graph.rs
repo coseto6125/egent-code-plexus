@@ -16,6 +16,9 @@ pub enum NodeKind {
     Const,
     Import,
     Route,
+    Process,
+    Document,
+    Section,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +34,8 @@ pub enum RelType {
     HasProperty,
     Accesses,
     HandlesRoute,
+    StepInProcess,
+    References,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -41,6 +46,7 @@ pub struct Node {
     pub file_idx: u32,
     pub kind: NodeKind,
     pub span: (u32, u32, u32, u32), // start_line, start_col, end_line, end_col
+    pub community_id: u16,           // 0 = unassigned
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -53,12 +59,23 @@ pub struct Edge {
     pub reason: StrRef,
 }
 
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(compare(PartialEq))]
+#[rkyv(derive(Debug))]
+pub enum FileCategory {
+    Source,
+    Test,
+    Document,
+    Config,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct File {
     pub path: StrRef,
     pub mtime: u64,
     pub content_hash: [u8; 32],
+    pub category: FileCategory,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug)]
@@ -75,6 +92,13 @@ pub struct ZeroCopyGraph {
     pub in_edge_idx: Vec<u32>,
     pub name_index: Vec<u32>,
     pub embeddings: Option<Vec<Vec<f32>>>,
+
+    /// Boundary index: `nodes[process_start..]` are all `NodeKind::Process`.
+    /// For node_idx >= process_start, `process_k = node_idx - process_start`
+    /// and its trace lives in `traces_data[traces_offsets[k]..traces_offsets[k+1]]`.
+    pub process_start: u32,
+    pub traces_offsets: Vec<u32>,
+    pub traces_data: Vec<u32>,
 }
 
 #[cfg(test)]
@@ -93,13 +117,19 @@ mod tests {
             magic: *b"GNX-RS\0\0",
             fingerprint: [0; 32],
             string_pool: pool.bytes,
-            files: vec![],
+            files: vec![File {
+                path: name_ref.clone(),
+                mtime: 0,
+                content_hash: [0; 32],
+                category: FileCategory::Source,
+            }],
             nodes: vec![Node {
                 uid: uid_ref,
                 name: name_ref,
                 file_idx: 0,
                 kind: NodeKind::Function,
                 span: (1, 0, 5, 0),
+                community_id: 0,
             }],
             edges: vec![],
             out_offsets: vec![0, 0],
@@ -107,6 +137,9 @@ mod tests {
             in_edge_idx: vec![],
             name_index: vec![],
             embeddings: None,
+            process_start: 1,
+            traces_offsets: vec![],
+            traces_data: vec![],
             };
 
         // Serialize
