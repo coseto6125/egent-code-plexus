@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{FileMeta, ResolveTarget, SymbolTable};
+use crate::resolution::path_aliases::PathAliases;
 
 pub type NodeId = u32;
 
@@ -46,6 +47,12 @@ pub struct Resolver<'a> {
     /// branch in `record`, no `RefCell` touch). `Some(_)` only when the
     /// builder enabled dumping via [`Resolver::enable_dump`].
     decisions: Option<RefCell<Vec<ResolverDecision>>>,
+    /// Module-specifier aliases sourced from project config (TS
+    /// `tsconfig.json` `compilerOptions.paths`, etc.). Consulted during
+    /// Tier 2 import resolution before the relative-resolution fallback so
+    /// `@/utils` maps to `src/utils` (then existing extension/index
+    /// probing finishes the lookup).
+    path_aliases: PathAliases,
 }
 
 impl<'a> Resolver<'a> {
@@ -54,7 +61,16 @@ impl<'a> Resolver<'a> {
         Self {
             symbol_table,
             decisions: None,
+            path_aliases: PathAliases::new(),
         }
+    }
+
+    /// Replace the resolver's empty default alias set. Used by the builder
+    /// to forward project-level config (`tsconfig.json` etc.) into the
+    /// Tier-2 specifier expansion.
+    pub fn with_path_aliases(mut self, aliases: PathAliases) -> Self {
+        self.path_aliases = aliases;
+        self
     }
 
     /// Turn on the decision recorder. Each subsequent `resolve_symbol` call
@@ -119,15 +135,18 @@ impl<'a> Resolver<'a> {
             if is_match {
                 let exported_name = &import.imported_name;
                 let mut hit: Option<NodeId> = None;
-                for_each_specifier_candidate(source_file, &import.source, |candidate| {
-                    match self.symbol_table.lookup_in_file(candidate, exported_name) {
+                for_each_specifier_candidate(
+                    source_file,
+                    &import.source,
+                    &self.path_aliases,
+                    |candidate| match self.symbol_table.lookup_in_file(candidate, exported_name) {
                         Some(id) => {
                             hit = Some(id);
                             false // stop enumerating
                         }
                         None => true, // keep going
-                    }
-                });
+                    },
+                );
                 if let Some(node_id) = hit {
                     results.push((node_id, ResolutionTier::ImportScoped.base_confidence()));
                     self.record(
@@ -317,12 +336,36 @@ const INDEX_SUFFIXES: &[&str] = &[
 /// total allocations per call are bounded by O(1) heap activity once
 /// the closure starts running. This matters on the resolver hot path
 /// where Tier 2 fires once per (callsite, heritage, type, framework-ref).
-fn for_each_specifier_candidate<F>(source_file: &std::path::Path, specifier: &str, mut visit: F)
-where
+fn for_each_specifier_candidate<F>(
+    source_file: &std::path::Path,
+    specifier: &str,
+    aliases: &PathAliases,
+    mut visit: F,
+) where
     F: FnMut(&str) -> bool,
 {
     if !visit(specifier) {
         return;
+    }
+
+    // Alias expansion (TS `tsconfig.json` paths, etc.) runs *before*
+    // relative resolution: aliased specifiers like `@/utils` never look
+    // like a relative path and would otherwise fall straight through to
+    // the Tier-3 global fallback. Each expansion goes through the same
+    // extension/index suffix probing as the relative branch.
+    if !aliases.is_empty() {
+        let mut stopped = false;
+        aliases.expand(specifier, |expanded| {
+            if probe_with_suffixes(expanded, &mut visit) {
+                true
+            } else {
+                stopped = true;
+                false
+            }
+        });
+        if stopped {
+            return;
+        }
     }
 
     let dir = source_file.parent().unwrap_or(std::path::Path::new(""));
@@ -374,26 +417,39 @@ where
 
     let Some(base) = base else { return };
 
-    if !visit(&base) {
-        return;
+    probe_with_suffixes(&base, &mut visit);
+}
+
+/// Probe `base`, then `base + ext` for each known extension, then
+/// `base + index_suffix` for each known index suffix. Returns `false`
+/// if the visitor short-circuited, `true` if all probes were exhausted
+/// without finding a hit. Factored out of `for_each_specifier_candidate`
+/// so the alias-expansion branch reuses the same probing pattern.
+fn probe_with_suffixes<F>(base: &str, visit: &mut F) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    if !visit(base) {
+        return false;
     }
     let mut buf = String::with_capacity(base.len() + 16);
     for ext in EXT_CANDIDATES {
         buf.clear();
-        buf.push_str(&base);
+        buf.push_str(base);
         buf.push_str(ext);
         if !visit(&buf) {
-            return;
+            return false;
         }
     }
     for suf in INDEX_SUFFIXES {
         buf.clear();
-        buf.push_str(&base);
+        buf.push_str(base);
         buf.push_str(suf);
         if !visit(&buf) {
-            return;
+            return false;
         }
     }
+    true
 }
 
 impl<'a> Resolver<'a> {
@@ -431,18 +487,23 @@ impl<'a> Resolver<'a> {
             }
             let exported = &import.imported_name;
             let mut hit: Option<String> = None;
-            for_each_specifier_candidate(source_file, &import.source, |candidate| {
-                if self
-                    .symbol_table
-                    .lookup_in_file(candidate, exported)
-                    .is_some()
-                {
-                    hit = Some(candidate.to_string());
-                    false
-                } else {
-                    true
-                }
-            });
+            for_each_specifier_candidate(
+                source_file,
+                &import.source,
+                &self.path_aliases,
+                |candidate| {
+                    if self
+                        .symbol_table
+                        .lookup_in_file(candidate, exported)
+                        .is_some()
+                    {
+                        hit = Some(candidate.to_string());
+                        false
+                    } else {
+                        true
+                    }
+                },
+            );
             if hit.is_some() {
                 return hit;
             }
@@ -492,7 +553,8 @@ mod tests {
 
     fn cands(src: &str, spec: &str) -> Vec<String> {
         let mut out = Vec::new();
-        for_each_specifier_candidate(&PathBuf::from(src), spec, |c| {
+        let aliases = PathAliases::new();
+        for_each_specifier_candidate(&PathBuf::from(src), spec, &aliases, |c| {
             out.push(c.to_string());
             true
         });

@@ -1,4 +1,5 @@
 use crate::resolution::index::{ResolveTarget, SymbolTable};
+use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
 use graph_nexus_core::graph::{
@@ -110,6 +111,9 @@ pub struct GraphBuilder {
     /// JSONL line per resolution attempt to this path. Used by the oracle
     /// verification harness (see specs/2026-05-15-resolver-oracle-harness.md).
     resolver_dump_path: Option<std::path::PathBuf>,
+    /// Module-specifier aliases (TS `tsconfig.json` `compilerOptions.paths`,
+    /// etc.) — forwarded to the resolver before Pass 2 starts.
+    path_aliases: PathAliases,
 }
 
 impl Default for GraphBuilder {
@@ -126,7 +130,13 @@ impl GraphBuilder {
             old_file_hashes: HashMap::new(),
             old_embeddings_cache: HashMap::new(),
             resolver_dump_path: None,
+            path_aliases: PathAliases::new(),
         }
+    }
+
+    pub fn with_path_aliases(mut self, aliases: PathAliases) -> Self {
+        self.path_aliases = aliases;
+        self
     }
 
     pub fn with_embeddings(mut self, generate: bool) -> Self {
@@ -327,7 +337,8 @@ impl GraphBuilder {
         }
 
         // Pass 2: Resolve imports and build edges
-        let mut resolver = Resolver::new(&symbol_table);
+        let mut resolver =
+            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
         if self.resolver_dump_path.is_some() {
             resolver.enable_dump();
         }
