@@ -1,7 +1,9 @@
 use crate::graph::NodeKind;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct RawNode {
     pub name: String,
     pub kind: NodeKind,
@@ -16,14 +18,16 @@ pub struct RawNode {
     pub calls: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct RawImport {
     pub source: String,
     pub imported_name: String,
     pub alias: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct RawRoute {
     pub method: String,
     pub path: String,
@@ -31,14 +35,16 @@ pub struct RawRoute {
     pub span: (u32, u32, u32, u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct RawDocumentBlock {
     pub name: String,
     pub is_section: bool,
     pub span: (u32, u32, u32, u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct RawFrameworkRef {
     pub source_name: String,
     pub target_name: String,
@@ -51,7 +57,8 @@ pub struct RawFrameworkRef {
 /// be uniquely picked at static-analysis time, but where the analyzer can
 /// enumerate the candidate set. The builder emits one `References` edge per
 /// candidate with confidence `base_confidence / sqrt(N)` (floored at 0.1).
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct RawFanoutRef {
     pub source_name: String,
     pub candidates: Vec<String>,
@@ -69,16 +76,20 @@ pub struct RawFanoutRef {
 /// implicit in their owning `LocalGraph`) because blind spots are
 /// passed through to graph-level metadata where the source file must
 /// remain identifiable after the LocalGraph is consumed.
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct BlindSpot {
     pub kind: String,
+    #[rkyv(with = rkyv::with::AsString)]
     pub file_path: PathBuf,
     pub span: (u32, u32, u32, u32),
     pub hint: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
 pub struct LocalGraph {
+    #[rkyv(with = rkyv::with::AsString)]
     pub file_path: PathBuf,
     pub content_hash: [u8; 32],
     pub nodes: Vec<RawNode>,

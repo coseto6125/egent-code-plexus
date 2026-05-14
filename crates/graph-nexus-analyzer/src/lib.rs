@@ -1,4 +1,13 @@
 // graph-nexus-analyzer
+
+/// SHA256 fingerprint of every parser.rs / queries.scm / shared helper
+/// file at build time, set by `build.rs`. Re-exported here so downstream
+/// crates can pin cache invalidation to "anything in the parser layer
+/// changed" without depending on the build.rs env var (which is scoped
+/// to *this* crate's compilation only — `env!()` resolves in the caller's
+/// crate context, not the dep's).
+pub const PARSER_FINGERPRINT: &str = env!("GRAPH_NEXUS_PARSER_FINGERPRINT");
+
 pub mod bash;
 pub mod c;
 pub mod c_sharp;
