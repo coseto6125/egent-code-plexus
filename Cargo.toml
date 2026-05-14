@@ -24,8 +24,7 @@ homepage = "https://github.com/e-nor/gitnexus-rs"
 keywords = ["git", "code-intelligence", "graph"]
 categories = ["development-tools"]
 
-# ==================== workspace lints ====================
-# 預設清單 + 對既有 pre-existing 問題的精準 allow。後續清理時逐項拔掉 allow。
+# 工作區層級 lints 設定。目前無 override；後續可在此精準 allow/warn/deny
+# 特定 lint 規則，所有 crate 透過 [lints] workspace = true opt-in。
 [workspace.lints.clippy]
-# TODO: louvain.rs:164 — 外圈 for-loop 末尾無條件 break，max_passes 失效。修需懂 Louvain 演算法意圖。
-never_loop = "allow"
+
