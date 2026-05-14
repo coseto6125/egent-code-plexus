@@ -21,9 +21,8 @@ pub struct ListArgs {
 
 pub fn run(args: ListArgs) -> Result<(), gnx_core::GnxError> {
     let home_gnx = gnx_core::registry::resolve_home_gnx();
-    let registry = Registry::open(&home_gnx).map_err(|e| {
-        gnx_core::GnxError::InvalidArgument(format!("registry open: {e}"))
-    })?;
+    let registry = Registry::open(&home_gnx)
+        .map_err(|e| gnx_core::GnxError::InvalidArgument(format!("registry open: {e}")))?;
     let registry_path = home_gnx.display().to_string();
     let value = build_value(registry.snapshot(), &registry_path);
     emit(&value, OutputFormat::parse(args.format.as_deref()))
@@ -48,13 +47,23 @@ fn text_lines(reg: &RegistryFile, registry_path: &str) -> Vec<String> {
     }
     // East Asian Width: CJK chars occupy 2 terminal columns. `str::len()`
     // returns UTF-8 bytes; `{:<N}` pads to char count. Both misalign on CJK.
-    let name_w = reg.repos.iter().map(|r| display_width(&r.name)).max().unwrap_or(0).max(4);
+    let name_w = reg
+        .repos
+        .iter()
+        .map(|r| display_width(&r.name))
+        .max()
+        .unwrap_or(0)
+        .max(4);
     let group_w = 20usize;
     let mut lines = Vec::with_capacity(reg.repos.len() + 2);
     let mut total_branches = 0usize;
     for r in &reg.repos {
         total_branches += r.branches.len();
-        let group = r.group.as_deref().map(|g| format!("(group: {g})")).unwrap_or_default();
+        let group = r
+            .group
+            .as_deref()
+            .map(|g| format!("(group: {g})"))
+            .unwrap_or_default();
         let last = latest_indexed_at(r).unwrap_or("-");
         let count = r.branches.len();
         let unit = if count == 1 { "branch" } else { "branches" };
@@ -127,7 +136,10 @@ mod tests {
                     group: None,
                 },
             ],
-            groups: vec![GroupEntry { name: "search".into(), members: vec!["neptune".into()] }],
+            groups: vec![GroupEntry {
+                name: "search".into(),
+                members: vec!["neptune".into()],
+            }],
         }
     }
 
@@ -155,15 +167,18 @@ mod tests {
     fn text_lines_align_by_display_width_for_cjk_names() {
         let mut reg = sample();
         reg.repos[0].name = "搜尋系統".into(); // 4 chars, 8 columns
-        reg.repos[1].name = "agent".into();    // 5 chars, 5 columns
+        reg.repos[1].name = "agent".into(); // 5 chars, 5 columns
         let lines = text_lines(&reg, "/h");
         // name_w should be 8 (cols of 搜尋系統), so `agent` row gets 3 trailing
         // spaces before the "  (group:..." separator. Total leading segment
         // for both rows must reach 8 visible columns before the gap.
         let row_cjk = lines.iter().find(|l| l.contains("搜尋系統")).unwrap();
         let row_ascii = lines.iter().find(|l| l.starts_with("agent")).unwrap();
-        assert!(row_cjk.starts_with("搜尋系統  "),  "cjk row: {row_cjk:?}");
-        assert!(row_ascii.starts_with("agent     "), "ascii row: {row_ascii:?}");
+        assert!(row_cjk.starts_with("搜尋系統  "), "cjk row: {row_cjk:?}");
+        assert!(
+            row_ascii.starts_with("agent     "),
+            "ascii row: {row_ascii:?}"
+        );
     }
 
     #[test]
@@ -175,6 +190,8 @@ mod tests {
         assert!(v["groups"].as_array().unwrap().len() == 1);
         let results = v["results"].as_array().unwrap();
         assert!(!results.is_empty());
-        assert!(results.iter().any(|r| r.as_str().unwrap().contains("neptune")));
+        assert!(results
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("neptune")));
     }
 }
