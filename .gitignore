@@ -12,6 +12,11 @@ target/
 # Local index
 .gitnexus-rs/
 
+# Vendored 3rd-party grammar repos: keep src/queries/bindings, drop bloat
+crates/vendor/*/node_modules/
+crates/vendor/*/.git/
+crates/vendor/*/build/
+
 # Scratch / one-off migration scripts (repo root)
 /test*.py
 /test*.rs
