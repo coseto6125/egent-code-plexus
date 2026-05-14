@@ -25,8 +25,8 @@ name = "gnx_cli"
 path = "src/lib.rs"
 
 [dependencies]
-gnx-core = { path = "../gnx-core" }
-gnx-analyzer = { path = "../gnx-analyzer" }
+gnx-core = { path = "../gnx-core", version = "0.1.0" }
+gnx-analyzer = { path = "../gnx-analyzer", version = "0.1.0" }
 clap = { version = "4.5.4", features = ["derive"] }
 serde_json = "1.0.115"
 memmap2 = "0.9.10"
