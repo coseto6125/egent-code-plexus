@@ -40,6 +40,8 @@ enum Commands {
     RouteMap(commands::route_map::RouteMapArgs),
     /// Detect changed symbols & affected execution flows from git diff
     DetectChanges(commands::detect_changes::DetectChangesArgs),
+    /// Install reference-transaction hook for branch tracking
+    Init(commands::init::InitArgs),
 }
 
 fn main() {
@@ -57,6 +59,15 @@ fn main() {
         return;
     }
 
+    // Init doesn't need a graph either — it installs the git hook
+    if let Commands::Init(args) = &cli.command {
+        if let Err(e) = commands::init::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -64,7 +75,7 @@ fn main() {
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::RouteMap(args) => args.repo.as_deref(),
         Commands::DetectChanges(args) => args.repo.as_deref(),
-        Commands::Analyze(_) => None,
+        Commands::Analyze(_) | Commands::Init(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -87,7 +98,7 @@ fn main() {
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),
-        Commands::Analyze(_) => Ok(()), // Handled above
+        Commands::Analyze(_) | Commands::Init(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
