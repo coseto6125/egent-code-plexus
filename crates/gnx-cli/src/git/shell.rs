@@ -4,7 +4,6 @@
 use super::{parse_diff_hunks, DiffScope, FileDiff, GitDiffProvider};
 use gnx_core::GnxError;
 use std::path::Path;
-use std::process::Command;
 
 pub struct ShellGitProvider;
 
@@ -24,7 +23,7 @@ impl GitDiffProvider for ShellGitProvider {
         }
         args.push(ZERO_CONTEXT);
 
-        let output = Command::new("git")
+        let output = super::safe_exec::git()
             .args(&args)
             .current_dir(repo)
             .output()
