@@ -20,3 +20,57 @@
         (#match? @fastapi.route.method "^(get|post|put|delete|patch)$"))))
   definition: (function_definition
     name: (identifier) @fastapi.route.handler))
+
+;; ---- Django ----
+;; Django: `urlpatterns = [path("/x", handler, ...), ...]`.
+;; Match `path()` calls only inside an assignment whose LHS identifier is `urlpatterns`,
+;; so unrelated `path()` calls elsewhere in the file are not captured.
+;; The handler argument can be a bare identifier (`login_view`) or an attribute
+;; (`views.user_list`) — capture the trailing identifier in both shapes.
+(assignment
+  left: (identifier) @_pats (#eq? @_pats "urlpatterns")
+  right: (list
+    (call
+      function: (identifier) @_path_fn (#eq? @_path_fn "path")
+      arguments: (argument_list
+        .
+        (string)
+        .
+        (identifier) @django.url.handler))))
+
+(assignment
+  left: (identifier) @_pats (#eq? @_pats "urlpatterns")
+  right: (list
+    (call
+      function: (identifier) @_path_fn (#eq? @_path_fn "path")
+      arguments: (argument_list
+        .
+        (string)
+        .
+        (attribute
+          attribute: (identifier) @django.url.handler)))))
+
+;; ---- Celery ----
+;; Celery: `@shared_task` (bare marker decorator) on a function definition.
+(decorated_definition
+  (decorator
+    (identifier) @_dec (#eq? @_dec "shared_task"))
+  definition: (function_definition
+    name: (identifier) @celery.task.handler))
+
+;; Celery: `@<obj>.task` (marker attribute) on a function definition.
+(decorated_definition
+  (decorator
+    (attribute
+      attribute: (identifier) @_dec (#eq? @_dec "task")))
+  definition: (function_definition
+    name: (identifier) @celery.task.handler))
+
+;; Celery: `@<obj>.task(...)` (call attribute) on a function definition.
+(decorated_definition
+  (decorator
+    (call
+      function: (attribute
+        attribute: (identifier) @_dec (#eq? @_dec "task"))))
+  definition: (function_definition
+    name: (identifier) @celery.task.handler))

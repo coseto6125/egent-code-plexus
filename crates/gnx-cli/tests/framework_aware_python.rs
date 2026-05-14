@@ -242,3 +242,75 @@ fn fastapi_route_decorators_create_framework_refs() {
         assert!(r.confidence > 0.0 && r.confidence <= 1.0);
     }
 }
+
+#[test]
+fn django_urlpatterns_create_framework_refs() {
+    let src = include_str!("fixtures/django_urls.py");
+    let provider = PythonProvider::new().unwrap();
+    let local = provider
+        .parse_file("urls.py".as_ref(), src.as_bytes())
+        .unwrap();
+
+    let refs: Vec<_> = local
+        .framework_refs
+        .iter()
+        .filter(|r| r.reason == "django-url-path")
+        .collect();
+    assert_eq!(
+        refs.len(),
+        4,
+        "expected 4 django-url-path refs, got {}: {:?}",
+        refs.len(),
+        local.framework_refs
+    );
+
+    let targets: Vec<&str> = refs.iter().map(|r| r.target_name.as_str()).collect();
+    for expected in ["user_list", "user_detail", "login_view", "fallback_handler"] {
+        assert!(targets.contains(&expected), "missing {} in {:?}", expected, targets);
+    }
+
+    // Negative: `os.path("/tmp")` outside urlpatterns must NOT be captured.
+    // Asserting exactly 4 above already enforces this.
+
+    for r in &refs {
+        assert!(r.confidence > 0.0 && r.confidence <= 1.0);
+    }
+}
+
+#[test]
+fn celery_task_decorators_create_framework_refs() {
+    let src = include_str!("fixtures/celery_tasks.py");
+    let provider = PythonProvider::new().unwrap();
+    let local = provider
+        .parse_file("tasks.py".as_ref(), src.as_bytes())
+        .unwrap();
+
+    let refs: Vec<_> = local
+        .framework_refs
+        .iter()
+        .filter(|r| r.reason == "celery-task")
+        .collect();
+    assert_eq!(
+        refs.len(),
+        3,
+        "expected 3 celery-task refs, got {}: {:?}",
+        refs.len(),
+        local.framework_refs
+    );
+
+    let targets: Vec<&str> = refs.iter().map(|r| r.target_name.as_str()).collect();
+    for expected in ["send_email", "process_data", "retry_job"] {
+        assert!(targets.contains(&expected), "missing {} in {:?}", expected, targets);
+    }
+
+    // Negative: @cached_property MUST NOT match.
+    assert!(
+        !targets.contains(&"something"),
+        "cached_property should not be captured: {:?}",
+        targets
+    );
+
+    for r in &refs {
+        assert!(r.confidence > 0.0 && r.confidence <= 1.0);
+    }
+}
