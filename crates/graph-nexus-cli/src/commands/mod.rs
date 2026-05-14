@@ -11,6 +11,7 @@ pub mod init;
 pub mod list;
 pub mod prune;
 pub mod query;
+pub mod rename;
 pub mod rename_branch;
 pub mod route_map;
 pub mod summarize;

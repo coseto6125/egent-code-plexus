@@ -53,6 +53,8 @@ enum Commands {
     Prune(commands::prune::PruneArgs),
     /// Rename a branch's index dir + registry entry
     RenameBranch(commands::rename_branch::RenameBranchArgs),
+    /// AST-powered multi-file symbol rename (Python, MVP)
+    Rename(commands::rename::RenameArgs),
     /// List all repos in the registry (compact | json | toon)
     List(commands::list::ListArgs),
     /// LLM-friendly project overview (markdown / json) from graph.bin
@@ -161,6 +163,7 @@ fn main() {
         Commands::RouteMap(args) => args.repo.as_deref(),
         Commands::DetectChanges(args) => args.repo.as_deref(),
         Commands::Summarize(args) => args.repo.as_deref(),
+        Commands::Rename(args) => args.repo.as_deref(),
         Commands::Analyze(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)
@@ -194,6 +197,7 @@ fn main() {
         Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),
         Commands::Summarize(args) => commands::summarize::run(args, &engine),
+        Commands::Rename(args) => commands::rename::run(args, &engine),
         Commands::Analyze(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)
