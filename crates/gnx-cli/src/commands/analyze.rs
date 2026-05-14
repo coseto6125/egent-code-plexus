@@ -60,6 +60,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
             Ok(entry) => {
                 let path = entry.path();
                 if path.is_file() {
+                    eprintln!("[DEBUG SCAN] found file: {:?}", path);
                     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                     // Extension-less Dockerfile variants: check basename before extension.
                     let is_dockerfile_basename = matches!(file_name, "Dockerfile" | "dockerfile");
@@ -75,6 +76,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                         };
                     if is_dockerfile_basename || is_gha_workflow {
                         let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
+                        eprintln!("[DEBUG] queued for analysis: {:?} (is_gha={is_gha_workflow})", rel_path);
                         files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                     } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                         match ext {
