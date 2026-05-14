@@ -1,7 +1,12 @@
 use crate::calls::extract_calls;
-use crate::framework_helpers::{enclosing_function_name, node_span, MODULE_LEVEL_SOURCE};
+use crate::framework_helpers::{
+    enclosing_class, enclosing_function_name, enumerate_class_methods, node_span, Span,
+    MODULE_LEVEL_SOURCE,
+};
 use gnx_core::analyzer::provider::LanguageProvider;
-use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
+use gnx_core::analyzer::types::{
+    LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode, RawRoute,
+};
 use gnx_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -33,6 +38,7 @@ struct PythonCaptureIndices {
     fastapi_route_handler: Option<u32>,
     django_url_handler: Option<u32>,
     celery_task_handler: Option<u32>,
+    reflection_getattr_site: Option<u32>,
 }
 
 impl PythonProvider {
@@ -65,6 +71,7 @@ impl PythonProvider {
             fastapi_route_handler: query.capture_index_for_name("fastapi.route.handler"),
             django_url_handler: query.capture_index_for_name("django.url.handler"),
             celery_task_handler: query.capture_index_for_name("celery.task.handler"),
+            reflection_getattr_site: query.capture_index_for_name("reflection.getattr.site"),
         };
         Ok(Self { query, indices })
     }
@@ -99,6 +106,10 @@ impl LanguageProvider for PythonProvider {
 
         // Directly emitted route decorator refs (no span resolution needed).
         let mut route_refs: Vec<RawFrameworkRef> = Vec::new();
+
+        // Reflection fan-out sites: outer `getattr(self, name)()` call spans.
+        // Resolved after `nodes` is populated (need enclosing class + sibling methods).
+        let mut pending_getattr_sites: Vec<Span> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -196,6 +207,8 @@ impl LanguageProvider for PythonProvider {
                             span: node_span(&cap.node),
                         });
                     }
+                } else if cap_idx == idx.reflection_getattr_site {
+                    pending_getattr_sites.push(node_span(&cap.node));
                 }
             }
 
@@ -323,6 +336,30 @@ impl LanguageProvider for PythonProvider {
             }
         }
 
+        // Resolve reflection-getattr fan-out sites: enclosing method (source)
+        // dispatches to any sibling method on the same class. Skip sites with
+        // no enclosing class (module-level) or no enclosing fn (defensive).
+        let mut fanout_refs: Vec<RawFanoutRef> = Vec::new();
+        for span in pending_getattr_sites {
+            let Some(source_name) = enclosing_function_name(&nodes, span) else {
+                continue;
+            };
+            let Some((_class_name, class_span)) = enclosing_class(&nodes, span) else {
+                continue;
+            };
+            let candidates = enumerate_class_methods(&nodes, class_span, &source_name);
+            if candidates.is_empty() {
+                continue;
+            }
+            fanout_refs.push(RawFanoutRef {
+                source_name,
+                candidates,
+                base_confidence: 0.5,
+                reason: "reflection-getattr-fanout".to_string(),
+                span,
+            });
+        }
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
@@ -331,7 +368,7 @@ impl LanguageProvider for PythonProvider {
             imports,
             documents: vec![],
             framework_refs,
-            fanout_refs: vec![],
+            fanout_refs,
         })
     }
 }

@@ -74,3 +74,17 @@
         attribute: (identifier) @_dec (#eq? @_dec "task"))))
   definition: (function_definition
     name: (identifier) @celery.task.handler))
+
+;; ---- Reflection fan-out (Phase 2) ----
+;; `getattr(self, name_var)(...)` — dynamic dispatch on `self`. The second
+;; positional argument must be an `(identifier)` (not a `(string)`), so static
+;; lookups like `getattr(self, "fixed")()` are excluded. The outer call's span
+;; is the fan-out site; the inner `getattr` call confirms the shape.
+(call
+  function: (call
+    function: (identifier) @_g (#eq? @_g "getattr")
+    arguments: (argument_list
+      .
+      (identifier) @_obj (#eq? @_obj "self")
+      .
+      (identifier) @reflection.getattr.name_var))) @reflection.getattr.site
