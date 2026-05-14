@@ -55,6 +55,12 @@ impl LanguageProvider for GoProvider {
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
+        let idx_route_call = self.query.capture_index_for_name("route.call");
+        let idx_route_method = self.query.capture_index_for_name("route.method");
+        let idx_route_path = self.query.capture_index_for_name("route.path");
+
+        let mut routes = Vec::new();
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -65,6 +71,11 @@ impl LanguageProvider for GoProvider {
             let mut is_import = false;
             let mut import_alias = None;
             let mut import_source = None;
+
+            let mut is_route = false;
+            let mut route_method_node = None;
+            let mut route_path_node = None;
+            let mut route_span_node = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -101,6 +112,13 @@ impl LanguageProvider for GoProvider {
                     import_alias = Some(cap.node);
                 } else if cap_idx == idx_import_source {
                     import_source = Some(cap.node);
+                } else if cap_idx == idx_route_call {
+                    is_route = true;
+                    route_span_node = Some(cap.node);
+                } else if cap_idx == idx_route_method {
+                    route_method_node = Some(cap.node);
+                } else if cap_idx == idx_route_path {
+                    route_path_node = Some(cap.node);
                 }
             }
 
@@ -118,6 +136,28 @@ impl LanguageProvider for GoProvider {
                         is_exported,
                         heritage,
                         type_annotation,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                    });
+                }
+            }
+
+            if is_route {
+                if let (Some(m_node), Some(p_node), Some(span_node)) = (route_method_node, route_path_node, route_span_node) {
+                    let method_str = std::str::from_utf8(&source[m_node.start_byte()..m_node.end_byte()]).unwrap_or("").to_string();
+                    let path_raw = std::str::from_utf8(&source[p_node.start_byte()..p_node.end_byte()]).unwrap_or("");
+                    let path_str = path_raw.trim_matches(|c| c == '"' || c == '`').to_string();
+                    let start = span_node.start_position();
+                    let end = span_node.end_position();
+
+                    routes.push(gnx_core::analyzer::types::RawRoute {
+                        method: method_str,
+                        path: path_str,
+                        handler: None,
                         span: (
                             start.row as u32,
                             start.column as u32,
@@ -162,7 +202,7 @@ impl LanguageProvider for GoProvider {
         imports.dedup_by(|a, b| a.source == b.source && a.imported_name == b.imported_name);
 
         Ok(LocalGraph {
-            routes: vec![],
+            routes,
             file_path: path.to_path_buf(),
             nodes,
             imports,

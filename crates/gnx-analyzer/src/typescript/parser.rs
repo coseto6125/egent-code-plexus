@@ -1,5 +1,5 @@
 use gnx_core::analyzer::provider::LanguageProvider;
-use gnx_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use gnx_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
 use gnx_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -37,6 +37,7 @@ impl LanguageProvider for TypeScriptProvider {
 
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
+        let mut routes: Vec<RawRoute> = Vec::new();
 
         // Capture indices
         let idx_function_name = self.query.capture_index_for_name("function.name");
@@ -52,11 +53,16 @@ impl LanguageProvider for TypeScriptProvider {
         let idx_export = self.query.capture_index_for_name("export");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
+        let idx_decorator = self.query.capture_index_for_name("decorator");
 
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_import = self.query.capture_index_for_name("import");
+
+        let idx_route_method = self.query.capture_index_for_name("route.method");
+        let idx_route_path = self.query.capture_index_for_name("route.path");
+        let idx_route_call = self.query.capture_index_for_name("route.call");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -65,11 +71,16 @@ impl LanguageProvider for TypeScriptProvider {
             let mut is_exported = false;
             let mut heritage = Vec::new();
             let mut type_annotation = None;
+            let mut decorators = Vec::new();
 
             let mut import_name = None;
             let mut import_alias = None;
             let mut import_src = None;
             let mut is_import = false;
+
+            let mut route_method = None;
+            let mut route_path = None;
+            let mut is_route = false;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -96,6 +107,10 @@ impl LanguageProvider for TypeScriptProvider {
                     if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
                         type_annotation = Some(t.to_string());
                     }
+                } else if cap_idx == idx_decorator {
+                    if let Ok(d) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        decorators.push(d.to_string());
+                    }
                 } else if cap_idx == idx_import_name {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx_import_alias {
@@ -104,6 +119,13 @@ impl LanguageProvider for TypeScriptProvider {
                     import_src = Some(cap.node);
                 } else if cap_idx == idx_import {
                     is_import = true;
+                } else if cap_idx == idx_route_method {
+                    route_method = Some(cap.node);
+                } else if cap_idx == idx_route_path {
+                    route_path = Some(cap.node);
+                } else if cap_idx == idx_route_call {
+                    is_route = true;
+                    root_span_node = Some(cap.node);
                 } else if cap_idx == idx_function
                     || cap_idx == idx_class
                     || cap_idx == idx_method
@@ -141,6 +163,13 @@ impl LanguageProvider for TypeScriptProvider {
                             if type_annotation.is_some() {
                                 node.type_annotation = type_annotation.clone();
                             }
+                            if !decorators.is_empty() {
+                                for d in &decorators {
+                                    if !node.decorators.contains(d) {
+                                        node.decorators.push(d.clone());
+                                    }
+                                }
+                            }
                             existing_found = true;
                             break;
                         }
@@ -148,13 +177,13 @@ impl LanguageProvider for TypeScriptProvider {
 
                     if !existing_found {
                         nodes.push(RawNode {
-            decorators: vec![],
+                            decorators: decorators.clone(),
                             name: name_str.to_string(),
                             kind: k,
                             span: node_span,
                             is_exported,
-                            heritage,
-                            type_annotation,
+                            heritage: heritage.clone(),
+                            type_annotation: type_annotation.clone(),
                         });
                     }
                 }
@@ -181,10 +210,34 @@ impl LanguageProvider for TypeScriptProvider {
                     }
                 }
             }
+
+            // Process routes
+            if is_route {
+                if let (Some(r_method), Some(r_path), Some(root)) = (route_method, route_path, root_span_node) {
+                    if let (Ok(method_str), Ok(path_str)) = (
+                        std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
+                        std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
+                    ) {
+                        let start = root.start_position();
+                        let end = root.end_position();
+                        routes.push(RawRoute {
+                            method: method_str.to_string(),
+                            path: path_str.to_string(),
+                            handler: None,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                        });
+                    }
+                }
+            }
         }
 
         Ok(LocalGraph {
-            routes: vec![],
+            routes,
             file_path: path.to_path_buf(),
             nodes,
             imports,

@@ -42,3 +42,9 @@
   name: (aliased_import
     name: (dotted_name) @import.name
     alias: (identifier) @import.alias)) @import
+
+;; Routes
+(call
+  function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))
+  arguments: (argument_list (string) @route.path)
+) @route.call

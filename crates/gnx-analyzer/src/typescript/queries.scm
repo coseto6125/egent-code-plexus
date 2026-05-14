@@ -76,12 +76,14 @@
 
 ;; Classes
 (class_declaration
+  (decorator)* @decorator
   name: (type_identifier) @class.name
   (extends_clause value: (identifier) @heritage)?
 ) @class
 
 (export_statement
   (class_declaration
+    (decorator)* @decorator
     name: (type_identifier) @class.name
     (extends_clause value: (identifier) @heritage)?
   ) @class
@@ -126,3 +128,9 @@
   )
   source: (string (string_fragment) @import.source)
 ) @import
+
+;; Routes
+(call_expression
+  function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))
+  arguments: (arguments (string (string_fragment) @route.path))
+) @route.call
