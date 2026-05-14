@@ -80,6 +80,9 @@ impl LanguageProvider for RubyProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
+                        is_exported: false,
+                        heritage: vec![],
+                        type_annotation: None,
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -95,6 +98,7 @@ impl LanguageProvider for RubyProvider {
             if let Some(i_name) = import_name {
                 if let Ok(name_str) = std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]) {
                     imports.push(RawImport {
+                        alias: None,
                         imported_name: name_str.to_string(),
                         source: name_str.to_string(),
                     });

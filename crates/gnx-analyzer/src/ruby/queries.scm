@@ -3,7 +3,8 @@
   name: [
     (constant)
     (scope_resolution)
-  ] @name.class) @class
+  ] @name.class
+  superclass: (superclass)? @heritage) @class
 
 ;; Modules
 (module

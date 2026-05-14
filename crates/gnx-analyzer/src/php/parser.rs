@@ -90,6 +90,9 @@ impl LanguageProvider for PhpProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
+                        is_exported: false,
+                        heritage: vec![],
+                        type_annotation: None,
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -113,6 +116,7 @@ impl LanguageProvider for PhpProvider {
                     };
 
                     imports.push(RawImport {
+                        alias: None,
                         imported_name: name_str,
                         source: src_str.to_string(),
                     });

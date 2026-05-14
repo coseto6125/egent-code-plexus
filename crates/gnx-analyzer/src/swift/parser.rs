@@ -90,6 +90,9 @@ impl LanguageProvider for SwiftProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
+                        is_exported: false,
+                        heritage: vec![],
+                        type_annotation: None,
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -107,6 +110,7 @@ impl LanguageProvider for SwiftProvider {
                     (std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]), std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]))
                 {
                     imports.push(RawImport {
+                        alias: None,
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
                     });

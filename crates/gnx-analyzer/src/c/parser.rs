@@ -72,6 +72,9 @@ impl LanguageProvider for CProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
+                        is_exported: false,
+                        heritage: vec![],
+                        type_annotation: None,
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -87,6 +90,7 @@ impl LanguageProvider for CProvider {
             if let Some(i_src) = import_src {
                 if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
                     imports.push(RawImport {
+                        alias: None,
                         imported_name: "*".to_string(),
                         source: src_str.to_string(),
                     });

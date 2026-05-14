@@ -44,19 +44,28 @@ impl LanguageProvider for RustProvider {
         let idx_name_interface = self.query.capture_index_for_name("name.interface");
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_import_alias = self.query.capture_index_for_name("import.alias");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
 
+        let idx_export = self.query.capture_index_for_name("export");
+        let idx_heritage = self.query.capture_index_for_name("heritage");
+        let idx_type = self.query.capture_index_for_name("type");
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
+            let mut is_exported = false;
+            let mut heritage = Vec::new();
+            let mut type_annotation = None;
 
             let mut import_name = None;
             let mut import_src = None;
+            let mut import_alias = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -76,12 +85,24 @@ impl LanguageProvider for RustProvider {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
+                } else if Some(cap_idx) == idx_import_alias {
+                    import_alias = Some(cap.node);
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
                     || Some(cap_idx) == idx_interface
                 {
                     root_span_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_export {
+                    is_exported = true;
+                } else if Some(cap_idx) == idx_heritage {
+                    if let Ok(h_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        heritage.push(h_str.to_string());
+                    }
+                } else if Some(cap_idx) == idx_type {
+                    if let Ok(t_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        type_annotation = Some(t_str.to_string());
+                    }
                 }
             }
 
@@ -90,6 +111,9 @@ impl LanguageProvider for RustProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
+                        is_exported,
+                        heritage,
+                        type_annotation,
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -106,7 +130,14 @@ impl LanguageProvider for RustProvider {
                 if let (Ok(name_str), Ok(src_str)) =
                     (std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]), std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]))
                 {
+                    let alias = if let Some(a_node) = import_alias {
+                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()]).ok().map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+
                     imports.push(RawImport {
+                        alias,
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
                     });

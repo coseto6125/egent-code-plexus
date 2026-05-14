@@ -1,17 +1,25 @@
 ;; Classes
 (class_declaration
-  name: (identifier) @name.class) @class
+  (modifiers)? @export
+  name: (identifier) @name.class
+  interfaces: (super_interfaces)? @heritage
+  superclass: (superclass)? @heritage) @class
 
 ;; Interfaces
 (interface_declaration
-  name: (identifier) @name.interface) @interface
+  (modifiers)? @export
+  name: (identifier) @name.interface
+  interfaces: (extends_interfaces)? @heritage) @interface
 
 ;; Methods
 (method_declaration
+  (modifiers)? @export
+  type: _ @type
   name: (identifier) @name.method) @method
 
 ;; Constructors
 (constructor_declaration
+  (modifiers)? @export
   name: (identifier) @name.method) @method
 
 ;; Imports

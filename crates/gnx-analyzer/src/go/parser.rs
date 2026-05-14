@@ -38,60 +38,80 @@ impl LanguageProvider for GoProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_name_function = self.query.capture_index_for_name("name.function");
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
-        let idx_name_interface = self.query.capture_index_for_name("name.interface");
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-        let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_struct_name = self.query.capture_index_for_name("struct.name");
+        let idx_interface_name = self.query.capture_index_for_name("interface.name");
+        let idx_method_name = self.query.capture_index_for_name("method.name");
+        let idx_function_name = self.query.capture_index_for_name("function.name");
 
-        let idx_function = self.query.capture_index_for_name("function");
-        let idx_class = self.query.capture_index_for_name("class");
-        let idx_method = self.query.capture_index_for_name("method");
+        let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
+        let idx_method = self.query.capture_index_for_name("method");
+        let idx_function = self.query.capture_index_for_name("function");
+
+        let idx_heritage = self.query.capture_index_for_name("heritage");
+        let idx_type = self.query.capture_index_for_name("type");
+
+        let idx_import = self.query.capture_index_for_name("import");
+        let idx_import_alias = self.query.capture_index_for_name("import.alias");
+        let idx_import_source = self.query.capture_index_for_name("import.source");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
-            let mut root_span_node = None;
+            let mut root_node = None;
+            let mut heritage = Vec::new();
+            let mut type_annotation = None;
 
-            let mut import_name = None;
-            let mut import_src = None;
+            let mut is_import = false;
+            let mut import_alias = None;
+            let mut import_source = None;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_function {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_name_class {
+                let cap_idx = Some(cap.index);
+                if cap_idx == idx_struct_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_method {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_name_interface {
+                } else if cap_idx == idx_interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
-                } else if Some(cap_idx) == idx_import_name {
-                    import_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_source {
-                    import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_interface
-                {
-                    root_span_node = Some(cap.node);
+                } else if cap_idx == idx_method_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Method);
+                } else if cap_idx == idx_function_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Function);
+                } else if cap_idx == idx_struct || cap_idx == idx_interface || cap_idx == idx_method || cap_idx == idx_function {
+                    root_node = Some(cap.node);
+                } else if cap_idx == idx_heritage {
+                    if let Ok(h_name) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        heritage.push(h_name.to_string());
+                    }
+                } else if cap_idx == idx_type {
+                    if let Ok(t_name) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        type_annotation = Some(t_name.to_string());
+                    }
+                } else if cap_idx == idx_import {
+                    is_import = true;
+                } else if cap_idx == idx_import_alias {
+                    import_alias = Some(cap.node);
+                } else if cap_idx == idx_import_source {
+                    import_source = Some(cap.node);
                 }
             }
 
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_node) {
+                if let Ok(name) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                    let name = name.to_string();
+                    let is_exported = name.chars().next().map_or(false, |c| c.is_uppercase());
                     let start = root.start_position();
                     let end = root.end_position();
+
                     nodes.push(RawNode {
-                        name: name_str.to_string(),
+                        name,
                         kind: k,
+                        is_exported,
+                        heritage,
+                        type_annotation,
                         span: (
                             start.row as u32,
                             start.column as u32,
@@ -102,37 +122,37 @@ impl LanguageProvider for GoProvider {
                 }
             }
 
-            if let Some(i_src) = import_src {
-                if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
-                    let clean_src = src_str.trim_matches(|c| c == '"' || c == '`').to_string();
-                    let imported_name = if let Some(i_name) = import_name {
-                        if let Ok(name_str) = std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]) {
-                            name_str.to_string()
+            if is_import {
+                if let Some(src_node) = import_source {
+                    if let Ok(src_quoted) = std::str::from_utf8(&source[src_node.start_byte()..src_node.end_byte()]) {
+                        let source_path = src_quoted.trim_matches(|c| c == '"' || c == '`').to_string();
+                        
+                        let alias = if let Some(alias_node) = import_alias {
+                            std::str::from_utf8(&source[alias_node.start_byte()..alias_node.end_byte()]).ok().map(|s| s.to_string())
                         } else {
-                            clean_src.clone()
-                        }
-                    } else if let Some(slash_idx) = clean_src.rfind('/') {
-                        clean_src[slash_idx + 1..].to_string()
-                    } else {
-                        clean_src.clone()
-                    };
+                            None
+                        };
 
-                    // Prevent duplicate import pushing since the query matches might overlap
-                    // but usually tree-sitter will return one match per import
-                    imports.push(RawImport {
-                        imported_name,
-                        source: clean_src,
-                    });
+                        let imported_name = if let Some(ref a) = alias {
+                            a.clone()
+                        } else if let Some(last_part) = source_path.split('/').last() {
+                            last_part.to_string()
+                        } else {
+                            source_path.clone()
+                        };
+
+                        imports.push(RawImport {
+                            source: source_path,
+                            alias,
+                            imported_name,
+                        });
+                    }
                 }
             }
         }
 
-        // Deduplicate imports as multiple captures might match the same import statement
-        imports.sort_by(|a, b| {
-            a.source
-                .cmp(&b.source)
-                .then(a.imported_name.cmp(&b.imported_name))
-        });
+        // Deduplicate imports
+        imports.sort_by(|a, b| a.source.cmp(&b.source).then(a.imported_name.cmp(&b.imported_name)));
         imports.dedup_by(|a, b| a.source == b.source && a.imported_name == b.imported_name);
 
         Ok(LocalGraph {

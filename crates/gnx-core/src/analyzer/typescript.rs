@@ -12,7 +12,7 @@ impl LanguageProvider for TypeScriptProvider {
 
     fn parse_file(&self, path: &Path, _source: &[u8]) -> Result<LocalGraph> {
         // Minimal mock implementation for the pipeline MVP.
-        // Full tree-sitter extraction logic matching original GitNexus behavior 
+        // Full tree-sitter extraction logic matching original GitNexus behavior
         // will be added in the next planning phase.
         Ok(LocalGraph {
             file_path: path.to_path_buf(),

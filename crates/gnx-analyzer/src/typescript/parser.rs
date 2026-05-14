@@ -35,54 +35,81 @@ impl LanguageProvider for TypeScriptProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes = Vec::new();
-        let mut imports = Vec::new();
+        let mut nodes: Vec<RawNode> = Vec::new();
+        let mut imports: Vec<RawImport> = Vec::new();
 
         // Need mapping for capture indices
-        let idx_name_function = self.query.capture_index_for_name("name.function");
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
-        let idx_name_interface = self.query.capture_index_for_name("name.interface");
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-        let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_function_name = self.query.capture_index_for_name("function.name");
+        let idx_class_name = self.query.capture_index_for_name("class.name");
+        let idx_method_name = self.query.capture_index_for_name("method.name");
+        let idx_interface_name = self.query.capture_index_for_name("interface.name");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
 
+        let idx_export = self.query.capture_index_for_name("export");
+        let idx_heritage = self.query.capture_index_for_name("heritage");
+        let idx_type = self.query.capture_index_for_name("type");
+
+        let idx_import_name = self.query.capture_index_for_name("import.name");
+        let idx_import_alias = self.query.capture_index_for_name("import.alias");
+        let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_import = self.query.capture_index_for_name("import");
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
+            let mut is_exported = false;
+            let mut heritage = Vec::new();
+            let mut type_annotation = None;
 
             let mut import_name = None;
+            let mut import_alias = None;
             let mut import_src = None;
+            let mut is_import = false;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_function {
+                let cap_idx_opt = Some(cap.index);
+
+                if cap_idx_opt == idx_function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_name_class {
+                } else if cap_idx_opt == idx_class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_method {
+                } else if cap_idx_opt == idx_method_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_name_interface {
+                } else if cap_idx_opt == idx_interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
-                } else if Some(cap_idx) == idx_import_name {
+                } else if cap_idx_opt == idx_export {
+                    is_exported = true;
+                } else if cap_idx_opt == idx_heritage {
+                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        heritage.push(h.to_string());
+                    }
+                } else if cap_idx_opt == idx_type {
+                    if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        type_annotation = Some(t.to_string());
+                    }
+                } else if cap_idx_opt == idx_import_name {
                     import_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_source {
+                } else if cap_idx_opt == idx_import_alias {
+                    import_alias = Some(cap.node);
+                } else if cap_idx_opt == idx_import_source {
                     import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_interface
+                } else if cap_idx_opt == idx_function
+                    || cap_idx_opt == idx_class
+                    || cap_idx_opt == idx_method
+                    || cap_idx_opt == idx_interface
                 {
                     root_span_node = Some(cap.node);
+                } else if cap_idx_opt == idx_import {
+                    is_import = true;
                 }
             }
 
@@ -90,27 +117,63 @@ impl LanguageProvider for TypeScriptProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    nodes.push(RawNode {
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                    });
+
+                    let node_span = (
+                        start.row as u32,
+                        start.column as u32,
+                        end.row as u32,
+                        end.column as u32,
+                    );
+
+                    let mut found = false;
+                    for existing in &mut nodes {
+                        if existing.span == node_span && existing.name == name_str {
+                            if is_exported {
+                                existing.is_exported = true;
+                            }
+                            if !heritage.is_empty() {
+                                existing.heritage.extend(heritage.clone());
+                                existing.heritage.sort();
+                                existing.heritage.dedup();
+                            }
+                            if type_annotation.is_some() {
+                                existing.type_annotation = type_annotation.clone();
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        nodes.push(RawNode {
+                            name: name_str.to_string(),
+                            kind: k,
+                            span: node_span,
+                            is_exported,
+                            heritage,
+                            type_annotation,
+                        });
+                    }
                 }
             }
 
-            if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                if let (Ok(name_str), Ok(src_str)) =
-                    (std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]), std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]))
-                {
-                    imports.push(RawImport {
-                        imported_name: name_str.to_string(),
-                        source: src_str.to_string(),
-                    });
+            if is_import {
+                if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
+                    if let (Ok(name_str), Ok(src_str)) = (
+                        std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
+                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                    ) {
+                        let alias_str = import_alias.and_then(|a| {
+                            std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
+                                .ok()
+                                .map(|s| s.to_string())
+                        });
+                        imports.push(RawImport {
+                            alias: alias_str,
+                            imported_name: name_str.to_string(),
+                            source: src_str.to_string(),
+                        });
+                    }
                 }
             }
         }

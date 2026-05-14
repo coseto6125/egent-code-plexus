@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(pool.resolve(&ref1), "hello");
         assert_eq!(pool.resolve(&ref2), "world");
         assert_eq!(pool.resolve(&ref3), "hello");
-        
+
         // ref1 and ref3 should point to the exact same offset
         assert_eq!(ref1.offset, ref3.offset);
     }

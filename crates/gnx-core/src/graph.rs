@@ -1,5 +1,5 @@
-use rkyv::{Archive, Deserialize, Serialize};
 use crate::pool::StrRef;
+use rkyv::{Archive, Deserialize, Serialize};
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(compare(PartialEq))]
@@ -106,10 +106,10 @@ mod tests {
 
         // Deserialize / Zero-copy access
         let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
-        
+
         assert_eq!(archived.magic, *b"GNX-RS\0\0");
         assert_eq!(archived.nodes.len(), 1);
-        
+
         // Resolve string using the archived string pool
         let archived_node = &archived.nodes[0];
         let name_str = archived_node.name.resolve(&archived.string_pool);
