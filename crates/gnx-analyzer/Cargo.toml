@@ -36,3 +36,11 @@ tree-sitter-solidity = "1.2.13"
 tree-sitter-crystal = { git = "https://github.com/crystal-lang-tools/tree-sitter-crystal" }
 tree-sitter-move = { path = "../vendor/tree-sitter-move" }
 tree-sitter-containerfile = "0.8.0"
+tree-sitter-hcl = "1.1.0"
+tree-sitter-cairo = { path = "../vendor/tree-sitter-cairo" }
+# tree-sitter-nim is not published to crates.io; using vendored alaviss/tree-sitter-nim
+# (v0.6.2) which declares tree-sitter = "~0.25" — compatible with workspace "0.25".
+tree-sitter-nim = { path = "../vendor/tree-sitter-nim" }
+tree-sitter-verilog = "1.0.3"
+tree-sitter-vyper = { path = "../vendor/tree-sitter-vyper" }
+tree-sitter-sequel = "0.3.11"

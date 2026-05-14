@@ -7,12 +7,19 @@ use gnx_analyzer::{
     python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
     swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
     markdown::parser::MarkdownProvider, yaml::parser::YamlProvider,
+    github_actions::parser::GitHubActionsProvider,
     bash::parser::BashProvider,
     lua::parser::LuaProvider,
     solidity::parser::SolidityProvider,
     crystal::parser::CrystalProvider,
     move_lang::parser::MoveProvider,
     dockerfile::parser::DockerfileProvider,
+    nim::parser::NimProvider,
+    hcl::parser::HclProvider,
+    cairo::parser::CairoProvider,
+    sql::parser::SqlProvider,
+    vyper::parser::VyperProvider,
+    verilog::parser::VerilogProvider,
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -56,7 +63,17 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                     // Extension-less Dockerfile variants: check basename before extension.
                     let is_dockerfile_basename = matches!(file_name, "Dockerfile" | "dockerfile");
-                    if is_dockerfile_basename {
+                    // GitHub Actions: path-based routing for .github/workflows/*.yml|yaml
+                    let is_gha_workflow = path.extension()
+                        .and_then(|e| e.to_str())
+                        .map_or(false, |e| matches!(e, "yml" | "yaml"))
+                        && {
+                            let components: Vec<_> = path.components().collect();
+                            components.windows(2).any(|w| {
+                                w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows"
+                            })
+                        };
+                    if is_dockerfile_basename || is_gha_workflow {
                         let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                         files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                     } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -65,7 +82,9 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                             | "mjs" | "cjs" | "php" | "rb" | "kt" | "kts" | "cs" | "c" | "h"
                             | "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart"
                             | "md" | "txt" | "rst" | "sh" | "bash" | "lua" | "luau" | "cr"
-                            | "sol" | "move" | "dockerfile" => {
+                            | "sol" | "move" | "dockerfile" | "nim"
+                            | "tf" | "tfvars" | "hcl" | "vy" | "sql" | "cairo"
+                            | "v" | "sv" | "vh" | "svh" => {
                                 let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                                 files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                             }
@@ -138,6 +157,12 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(MoveProvider::new().unwrap()));
     pipeline.register_provider(Box::new(SolidityProvider::new().unwrap()));
     pipeline.register_provider(Box::new(DockerfileProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(NimProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(HclProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(SqlProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(VyperProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(VerilogProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(CairoProvider::new().unwrap()));
 
     // Step 3: Analyze and load cache concurrently
     let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(

@@ -20,6 +20,20 @@ impl AnalyzerPipeline {
         self.providers.push(provider);
     }
 
+    /// Parse a single file from in-memory bytes without touching disk.
+    /// The `rel_path` is used only for provider selection (extension lookup)
+    /// and is stored verbatim in the returned `LocalGraph.file_path`.
+    pub fn parse_file_raw(
+        &self,
+        rel_path: &std::path::Path,
+        source: &[u8],
+    ) -> anyhow::Result<LocalGraph> {
+        let provider = self
+            .find_provider(rel_path)
+            .ok_or_else(|| anyhow::anyhow!("no provider for {:?}", rel_path))?;
+        provider.parse_file(rel_path, source)
+    }
+
     fn find_provider(&self, path: &std::path::Path) -> Option<&dyn LanguageProvider> {
         // Check basename for extension-less files like `Dockerfile` before extension lookup.
         let file_name = path.file_name()?.to_str()?;
@@ -29,6 +43,22 @@ impl AnalyzerPipeline {
                 .iter()
                 .find(|p| p.name() == "dockerfile")
                 .map(|p| p.as_ref());
+        }
+
+        // GitHub Actions: path-based routing — .github/workflows/*.yml|yaml
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if matches!(ext, "yml" | "yaml") {
+                let is_gha = path.components().collect::<Vec<_>>().windows(2).any(|w| {
+                    w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows"
+                });
+                if is_gha {
+                    return self
+                        .providers
+                        .iter()
+                        .find(|p| p.name() == "github-actions")
+                        .map(|p| p.as_ref());
+                }
+            }
         }
 
         let ext = path.extension()?.to_str()?;
@@ -132,6 +162,36 @@ impl AnalyzerPipeline {
                 .providers
                 .iter()
                 .find(|p| p.name() == "solidity")
+                .map(|p| p.as_ref()),
+            "tf" | "tfvars" | "hcl" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "hcl")
+                .map(|p| p.as_ref()),
+            "nim" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "nim")
+                .map(|p| p.as_ref()),
+            "sql" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "sql")
+                .map(|p| p.as_ref()),
+            "vy" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "vyper")
+                .map(|p| p.as_ref()),
+            "cairo" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "cairo")
+                .map(|p| p.as_ref()),
+            "v" | "sv" | "vh" | "svh" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "verilog")
                 .map(|p| p.as_ref()),
             _ => None,
         }
