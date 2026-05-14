@@ -50,6 +50,27 @@
         (attribute
           attribute: (identifier) @django.url.handler)))))
 
+;; Django signals — Pattern A: `@receiver(<signal>, ...)` decorator on def.
+;; Capture signal name (first positional arg) and decorated function name.
+(decorated_definition
+  (decorator
+    (call
+      function: (identifier) @_r (#eq? @_r "receiver")
+      arguments: (argument_list
+        . (identifier) @django.signal.receiver_name)))
+  definition: (function_definition
+    name: (identifier) @django.signal.receiver_handler))
+
+;; Django signals — Pattern B: `<signal>.connect(<handler_ident>, ...)` direct call.
+;; Match only when handler arg is a bare identifier (excludes lambda/attribute/call),
+;; keeping coverage near 90% with high precision.
+(call
+  function: (attribute
+    object: (identifier) @django.signal.connect_name
+    attribute: (identifier) @_c (#eq? @_c "connect"))
+  arguments: (argument_list
+    . (identifier) @django.signal.connect_handler))
+
 ;; ---- Celery ----
 ;; Celery: `@shared_task` (bare marker decorator) on a function definition.
 (decorated_definition

@@ -37,6 +37,10 @@ struct PythonCaptureIndices {
     fastapi_route_method: Option<u32>,
     fastapi_route_handler: Option<u32>,
     django_url_handler: Option<u32>,
+    django_signal_receiver_name: Option<u32>,
+    django_signal_receiver_handler: Option<u32>,
+    django_signal_connect_name: Option<u32>,
+    django_signal_connect_handler: Option<u32>,
     celery_task_handler: Option<u32>,
     reflection_getattr_site: Option<u32>,
     blind_eval: Option<u32>,
@@ -76,6 +80,13 @@ impl PythonProvider {
             fastapi_route_method: query.capture_index_for_name("fastapi.route.method"),
             fastapi_route_handler: query.capture_index_for_name("fastapi.route.handler"),
             django_url_handler: query.capture_index_for_name("django.url.handler"),
+            django_signal_receiver_name: query
+                .capture_index_for_name("django.signal.receiver_name"),
+            django_signal_receiver_handler: query
+                .capture_index_for_name("django.signal.receiver_handler"),
+            django_signal_connect_name: query.capture_index_for_name("django.signal.connect_name"),
+            django_signal_connect_handler: query
+                .capture_index_for_name("django.signal.connect_handler"),
             celery_task_handler: query.capture_index_for_name("celery.task.handler"),
             reflection_getattr_site: query.capture_index_for_name("reflection.getattr.site"),
             blind_eval: query.capture_index_for_name("blind.eval"),
@@ -148,6 +159,11 @@ impl LanguageProvider for PythonProvider {
             let mut fa_route_method_node = None;
             let mut fa_route_handler_node = None;
 
+            let mut dj_recv_name_node = None;
+            let mut dj_recv_handler_node = None;
+            let mut dj_connect_name_node = None;
+            let mut dj_connect_handler_node = None;
+
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
                 if cap_idx == idx.function_name {
@@ -211,6 +227,14 @@ impl LanguageProvider for PythonProvider {
                             span: node_span(&cap.node),
                         });
                     }
+                } else if cap_idx == idx.django_signal_receiver_name {
+                    dj_recv_name_node = Some(cap.node);
+                } else if cap_idx == idx.django_signal_receiver_handler {
+                    dj_recv_handler_node = Some(cap.node);
+                } else if cap_idx == idx.django_signal_connect_name {
+                    dj_connect_name_node = Some(cap.node);
+                } else if cap_idx == idx.django_signal_connect_handler {
+                    dj_connect_handler_node = Some(cap.node);
                 } else if cap_idx == idx.celery_task_handler {
                     if let Ok(target_name) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -285,6 +309,38 @@ impl LanguageProvider for PythonProvider {
                         target_name: handler_str.to_string(),
                         confidence: 0.9,
                         reason: format!("fastapi-route-{}", method_str),
+                        span: node_span(&handler_n),
+                    });
+                }
+            }
+
+            if let (Some(sig_n), Some(handler_n)) = (dj_recv_name_node, dj_recv_handler_node) {
+                if let (Ok(sig_str), Ok(handler_str)) = (
+                    std::str::from_utf8(&source[sig_n.start_byte()..sig_n.end_byte()]),
+                    std::str::from_utf8(&source[handler_n.start_byte()..handler_n.end_byte()]),
+                ) {
+                    pending_django_refs.push(RawFrameworkRef {
+                        source_name: sig_str.to_string(),
+                        target_name: handler_str.to_string(),
+                        confidence: 0.9,
+                        reason: "django-signal-receiver".to_string(),
+                        span: node_span(&handler_n),
+                    });
+                }
+            }
+
+            if let (Some(sig_n), Some(handler_n)) =
+                (dj_connect_name_node, dj_connect_handler_node)
+            {
+                if let (Ok(sig_str), Ok(handler_str)) = (
+                    std::str::from_utf8(&source[sig_n.start_byte()..sig_n.end_byte()]),
+                    std::str::from_utf8(&source[handler_n.start_byte()..handler_n.end_byte()]),
+                ) {
+                    pending_django_refs.push(RawFrameworkRef {
+                        source_name: sig_str.to_string(),
+                        target_name: handler_str.to_string(),
+                        confidence: 0.9,
+                        reason: "django-signal-connect".to_string(),
                         span: node_span(&handler_n),
                     });
                 }
