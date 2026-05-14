@@ -1,0 +1,49 @@
+use crate::engine::Engine;
+use clap::Args;
+use gnx_core::graph::ArchivedNodeKind;
+
+#[derive(Args, Debug)]
+pub struct RouteMapArgs {
+    #[arg(long)]
+    pub repo: Option<String>,
+
+    /// Output format
+    #[arg(long, default_value = "toon")]
+    pub format: Option<String>,
+}
+
+pub fn run(args: RouteMapArgs, engine: &Engine) -> Result<(), String> {
+    let graph = engine.graph().map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+
+    for node in graph.nodes.iter() {
+        if matches!(&node.kind, ArchivedNodeKind::Route) {
+            let name = node.name.resolve(&graph.string_pool);
+            let file_node = &graph.files[node.file_idx.to_native() as usize];
+            results.push(serde_json::json!({
+                "uid": node.uid.resolve(&graph.string_pool),
+                "name": name,
+                "kind": "Route",
+                "filePath": file_node.path.resolve(&graph.string_pool),
+                "line": node.span.0.to_native(),
+            }));
+        }
+    }
+
+    let json = serde_json::json!({
+        "status": "success",
+        "results": results,
+    });
+
+    if args.format.as_deref() == Some("toon") {
+        let bytes = serde_json::to_vec(&json).map_err(|e| e.to_string())?;
+        let output = _etoon::toon::encode(&bytes).map_err(|e| e.to_string())?;
+        println!("{}", output);
+    } else {
+        let s = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+        println!("{}", s);
+    }
+
+    Ok(())
+}

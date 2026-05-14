@@ -72,6 +72,63 @@ impl GraphBuilder {
             file_idx += 1;
         }
 
+        // Pass 1.5: Extract Routes
+        let mut route_edges = Vec::new();
+        let mut current_handler_idx = 0;
+        let mut file_idx = 0;
+        for local_graph in &self.local_graphs {
+            let path_str = local_graph.file_path.to_string_lossy().to_string();
+            
+            for raw_node in &local_graph.nodes {
+                let handler_idx = current_handler_idx;
+                
+                for dec in &raw_node.decorators {
+                    if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
+                        let route_name = format!("{} {}", detected.method, detected.path);
+                        let uid_str = format!("Route:{}:{}", path_str, route_name);
+                        
+                        let route_idx = nodes.len() as u32;
+                        nodes.push(Node {
+                            uid: string_pool.add(&uid_str),
+                            name: string_pool.add(&route_name),
+                            file_idx,
+                            kind: gnx_core::graph::NodeKind::Route,
+                            span: raw_node.span,
+                        });
+                        
+                        route_edges.push(Edge {
+                            source: handler_idx,
+                            target: route_idx,
+                            rel_type: RelType::HandlesRoute,
+                            confidence: 1.0,
+                            reason: string_pool.add("decorator"),
+                        });
+                    }
+                }
+                current_handler_idx += 1;
+            }
+
+            for raw_route in &local_graph.routes {
+                if let Some(detected) = crate::route_detector::detect_from_call(raw_route) {
+                    let route_name = format!("{} {}", detected.method, detected.path);
+                    let uid_str = format!("Route:{}:{}", path_str, route_name);
+                    
+                    let route_idx = nodes.len() as u32;
+                    nodes.push(Node {
+                        uid: string_pool.add(&uid_str),
+                        name: string_pool.add(&route_name),
+                        file_idx,
+                        kind: gnx_core::graph::NodeKind::Route,
+                        span: raw_route.span,
+                    });
+                    
+                    // Imperative routes might not easily map to a specific handler.
+                    // We just register the Route node here.
+                }
+            }
+            file_idx += 1;
+        }
+
         // Pass 2: Resolve imports and build edges
         let resolver = Resolver::new(&symbol_table);
         let mut edges = Vec::new();
@@ -113,6 +170,8 @@ impl GraphBuilder {
                 current_node_idx += 1;
             }
         }
+
+        edges.extend(route_edges);
 
         // Final pass: Construct CSR (out_offsets and in_offsets)
         // Sort edges by source to build out_offsets easily

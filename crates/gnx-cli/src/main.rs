@@ -31,6 +31,8 @@ enum Commands {
     Impact(commands::impact::ImpactArgs),
     /// Analyze repository (Mock for parity harness)
     Analyze(commands::analyze::AnalyzeArgs),
+    /// List all API routes
+    RouteMap(commands::route_map::RouteMapArgs),
 }
 
 fn main() {
@@ -55,6 +57,7 @@ fn main() {
         Commands::Context(args) => args.repo.as_ref(),
         Commands::Query(args) => args.repo.as_ref(),
         Commands::Impact(args) => args.repo.as_ref(),
+        Commands::RouteMap(args) => args.repo.as_ref(),
         Commands::Analyze(_) => None,
     };
 
@@ -74,6 +77,7 @@ fn main() {
         Commands::Context(args) => commands::context::run(args, &engine),
         Commands::Query(args) => commands::query::run(args, &engine),
         Commands::Impact(args) => commands::impact::run(args, &engine),
+        Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::Analyze(_) => Ok(()), // Handled above
     };
 

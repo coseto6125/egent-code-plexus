@@ -15,3 +15,4 @@ pub mod cpp;
 pub mod swift;
 pub mod dart;
 pub mod embeddings;
+pub mod route_detector;
