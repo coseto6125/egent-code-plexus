@@ -30,3 +30,9 @@ tree-sitter-md = "*"
 fastembed = "5"
 hf-hub = "0.5.0"
 tree-sitter-yaml = "0.7.2"
+tree-sitter-lua = "0.5.0"
+tree-sitter-bash = "0.25.1"
+tree-sitter-solidity = "1.2.13"
+tree-sitter-crystal = { git = "https://github.com/crystal-lang-tools/tree-sitter-crystal" }
+tree-sitter-move = { path = "../vendor/tree-sitter-move" }
+tree-sitter-containerfile = "0.8.0"

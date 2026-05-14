@@ -93,6 +93,11 @@ impl AnalyzerPipeline {
                 .iter()
                 .find(|p| p.name() == "dart")
                 .map(|p| p.as_ref()),
+            "sh" | "bash" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "bash")
+                .map(|p| p.as_ref()),
             _ => None,
         }
     }

@@ -7,6 +7,11 @@ use gnx_analyzer::{
     python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
     swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
     markdown::parser::MarkdownProvider, yaml::parser::YamlProvider,
+    bash::parser::BashProvider,
+    lua::parser::LuaProvider,
+    solidity::parser::SolidityProvider,
+    crystal::parser::CrystalProvider,
+    move_lang::parser::MoveProvider,
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -52,7 +57,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                             "ts" | "tsx" | "py" | "pyi" | "go" | "rs" | "java" | "js" | "jsx"
                             | "mjs" | "cjs" | "php" | "rb" | "kt" | "kts" | "cs" | "c" | "h"
                             | "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart"
-                            | "md" | "txt" | "rst" => {
+                            | "md" | "txt" | "rst" | "sh" | "bash" | "lua" | "luau" | "cr" | "sol" => {
                                 let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                                 files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                             }
@@ -119,6 +124,10 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(DartProvider::new().unwrap()));
     pipeline.register_provider(Box::new(MarkdownProvider::new().unwrap()));
     pipeline.register_provider(Box::new(YamlProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(BashProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(LuaProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(CrystalProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(SolidityProvider::new().unwrap()));
 
     // Step 3: Analyze and load cache concurrently
     let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(
