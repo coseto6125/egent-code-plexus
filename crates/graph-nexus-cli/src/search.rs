@@ -31,8 +31,17 @@ impl TantivyEngine {
 
         let index = Index::create_in_dir(&index_dir, schema.clone())
             .map_err(|e| format!("create tantivy index: {e}"))?;
+        // 2 worker threads × 30MB each: the sweet spot for our corpus
+        // shape (10k-150k tiny `(uid, name)` docs). Empirically 2t × 30MB
+        // beats 1t × 50MB (~350ms → ~240ms on a 150k-symbol corpus,
+        // measured on .sample_repo). 4 threads regresses (~290-370ms) —
+        // overhead of coordinating 4 workers exceeds the gain when each
+        // doc is only a few dozen bytes. Per-thread budget must stay
+        // above tantivy's `MEMORY_BUDGET_NUM_BYTES_MIN` (15MB) or
+        // `writer_with_num_threads` errors out and analyze.rs's
+        // best-effort `if let Err = ...` silently leaves an empty index.
         let mut index_writer: IndexWriter = index
-            .writer(50_000_000)
+            .writer_with_num_threads(2, 60_000_000)
             .map_err(|e| format!("acquire tantivy writer (lock held?): {e}"))?;
 
         for node in graph.nodes.iter() {
