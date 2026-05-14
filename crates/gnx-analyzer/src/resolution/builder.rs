@@ -41,6 +41,7 @@ impl GraphBuilder {
         // Pass 1: Register all nodes into SymbolTable and StringPool
         let mut current_node_idx = 0;
         let mut file_idx = 0;
+        let mut embed_texts = Vec::new();
 
         for local_graph in &self.local_graphs {
             let path_str = local_graph.file_path.to_string_lossy().to_string();
@@ -59,13 +60,33 @@ impl GraphBuilder {
                 let uid_ref = string_pool.add(&uid_str);
                 let name_ref = string_pool.add(&raw_node.name);
 
-                nodes.push(Node {
+                                nodes.push(Node {
                     uid: uid_ref,
                     name: name_ref,
                     file_idx,
                     kind: raw_node.kind,
                     span: raw_node.span,
                 });
+
+                if self.generate_embeddings {
+                    let mut text_parts = Vec::new();
+                    text_parts.push(format!("{:?}: {}", raw_node.kind, raw_node.name));
+                    text_parts.push(format!("Path: {}", path_str));
+                    if raw_node.is_exported {
+                        text_parts.push("Export: true".to_string());
+                    }
+                    if !raw_node.decorators.is_empty() {
+                        text_parts.push(raw_node.decorators.join(" "));
+                    }
+                    if let Some(ty) = &raw_node.type_annotation {
+                        text_parts.push(format!("Type: {}", ty));
+                    }
+                    if !raw_node.heritage.is_empty() {
+                        text_parts.push(format!("Heritage: {}", raw_node.heritage.join(", ")));
+                    }
+                    embed_texts.push(text_parts.join("
+"));
+                }
 
                 current_node_idx += 1;
             }
@@ -87,7 +108,7 @@ impl GraphBuilder {
                         let route_name = format!("{} {}", detected.method, detected.path);
                         let uid_str = format!("Route:{}:{}", path_str, route_name);
                         
-                        let route_idx = nodes.len() as u32;
+                                                let route_idx = nodes.len() as u32;
                         nodes.push(Node {
                             uid: string_pool.add(&uid_str),
                             name: string_pool.add(&route_name),
@@ -95,6 +116,11 @@ impl GraphBuilder {
                             kind: gnx_core::graph::NodeKind::Route,
                             span: raw_node.span,
                         });
+                        
+                        if self.generate_embeddings {
+                            embed_texts.push(format!("Route: {}
+Path: {}", route_name, path_str));
+                        }
                         
                         route_edges.push(Edge {
                             source: handler_idx,
@@ -113,7 +139,7 @@ impl GraphBuilder {
                     let route_name = format!("{} {}", detected.method, detected.path);
                     let uid_str = format!("Route:{}:{}", path_str, route_name);
                     
-                    let route_idx = nodes.len() as u32;
+                                        let route_idx = nodes.len() as u32;
                     nodes.push(Node {
                         uid: string_pool.add(&uid_str),
                         name: string_pool.add(&route_name),
@@ -121,6 +147,11 @@ impl GraphBuilder {
                         kind: gnx_core::graph::NodeKind::Route,
                         span: raw_route.span,
                     });
+                    
+                    if self.generate_embeddings {
+                        embed_texts.push(format!("Route: {}
+Path: {}", route_name, path_str));
+                    }
                     
                     // Imperative routes might not easily map to a specific handler.
                     // We just register the Route node here.
@@ -199,17 +230,10 @@ impl GraphBuilder {
             in_offsets[i + 1] += in_offsets[i];
         }
 
-        let embeddings = if self.generate_embeddings {
-            tracing::info!("Generating embeddings for {} nodes...", nodes.len());
-            let mut texts = Vec::with_capacity(nodes.len());
-            for n in &nodes {
-                let name = std::str::from_utf8(
-                    &string_pool.bytes[n.name.offset as usize..(n.name.offset as usize + n.name.len as usize)]
-                ).unwrap_or("");
-                texts.push(name.to_string());
-            }
+        let embeddings = if self.generate_embeddings && !embed_texts.is_empty() {
+            tracing::info!("Generating embeddings for {} nodes...", embed_texts.len());
             if let Ok(embedder) = crate::embeddings::Embedder::new() {
-                match embedder.embed(texts) {
+                match embedder.embed(embed_texts) {
                     Ok(embs) => Some(embs),
                     Err(e) => {
                         tracing::warn!("Failed to embed nodes: {}", e);
