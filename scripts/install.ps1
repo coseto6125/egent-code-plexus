@@ -1,7 +1,7 @@
 # graph-nexus 一鍵安裝（Windows PowerShell 5.1+）
 #
-#   irm https://github.com/e-nor/gitnexus-rs/releases/latest/download/install.ps1 | iex
-#   irm https://github.com/e-nor/gitnexus-rs/releases/download/v0.1.0/install.ps1 | iex
+#   irm https://github.com/coseto6125/graph-nexus/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/coseto6125/graph-nexus/releases/download/v0.1.0/install.ps1 | iex
 #
 # 環境變數：
 #   $env:GNX_VERSION        指定版本（不含 v）。預設 latest。
@@ -10,7 +10,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$repo = 'e-nor/gitnexus-rs'
+$repo = 'coseto6125/graph-nexus'
 $bin  = 'gnx'
 
 # ---- 解析版本 ----
@@ -93,4 +93,4 @@ if (-not $userPath -or -not ($userPath -split ';' | Where-Object { $_ -ieq $inst
 }
 
 Write-Host "  Verify provenance:"
-Write-Host "    gh attestation verify $installDir\$bin.exe --owner e-nor"
+Write-Host "    gh attestation verify $installDir\$bin.exe --owner coseto6125"

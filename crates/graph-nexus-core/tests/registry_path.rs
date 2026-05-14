@@ -37,7 +37,7 @@ fn rejects_special_chars() {
 
 #[test]
 fn accepts_valid_names() {
-    assert_eq!(sanitize_segment("gitnexus-rs").unwrap(), "gitnexus-rs");
+    assert_eq!(sanitize_segment("graph-nexus").unwrap(), "graph-nexus");
     assert_eq!(sanitize_segment("my_repo.2").unwrap(), "my_repo.2");
     assert_eq!(sanitize_segment("ABC-123").unwrap(), "ABC-123");
 }
@@ -70,14 +70,14 @@ use graph_nexus_core::registry::derive_repo_name;
 
 #[test]
 fn derives_from_ssh_url() {
-    let r = derive_repo_name(Some("git@github.com:E-NoR/gitnexus-rs.git")).unwrap();
-    assert_eq!(r, "gitnexus-rs");
+    let r = derive_repo_name(Some("git@github.com:coseto6125/graph-nexus.git")).unwrap();
+    assert_eq!(r, "graph-nexus");
 }
 
 #[test]
 fn derives_from_https_url() {
-    let r = derive_repo_name(Some("https://github.com/E-NoR/gitnexus-rs.git")).unwrap();
-    assert_eq!(r, "gitnexus-rs");
+    let r = derive_repo_name(Some("https://github.com/coseto6125/graph-nexus.git")).unwrap();
+    assert_eq!(r, "graph-nexus");
 }
 
 #[test]
@@ -101,8 +101,8 @@ use std::path::Path;
 
 #[test]
 fn uid_strips_repo_prefix() {
-    let abs = Path::new("/home/enor/gitnexus-rs/src/auth.ts");
-    let repo = Path::new("/home/enor/gitnexus-rs");
+    let abs = Path::new("/home/enor/graph-nexus/src/auth.ts");
+    let repo = Path::new("/home/enor/graph-nexus");
     assert_eq!(uid_path(abs, repo).unwrap(), "src/auth.ts");
 }
 
@@ -144,15 +144,15 @@ fn fake_home() -> PathBuf {
 fn index_path_basic() {
     let layout = IndexLayout::resolve(
         &fake_home(),
-        "gitnexus-rs",
+        "graph-nexus",
         "main",
-        "/home/test/code/gitnexus-rs",
+        "/home/test/code/graph-nexus",
         &[],
     )
     .unwrap();
     assert_eq!(
         layout.index_dir,
-        PathBuf::from("/home/test/.gnx/gitnexus-rs/main")
+        PathBuf::from("/home/test/.gnx/graph-nexus/main")
     );
     assert_eq!(layout.disambiguator, None);
 }
@@ -160,14 +160,14 @@ fn index_path_basic() {
 #[test]
 fn index_path_collision_gets_hash() {
     let existing = vec![(
-        "gitnexus-rs".to_string(),
+        "graph-nexus".to_string(),
         "/home/test/other-worktree".to_string(),
     )];
     let layout = IndexLayout::resolve(
         &fake_home(),
-        "gitnexus-rs",
+        "graph-nexus",
         "main",
-        "/home/test/code/gitnexus-rs",
+        "/home/test/code/graph-nexus",
         &existing,
     )
     .unwrap();
@@ -175,7 +175,7 @@ fn index_path_collision_gets_hash() {
         layout
             .index_dir
             .to_string_lossy()
-            .starts_with("/home/test/.gnx/gitnexus-rs-"),
+            .starts_with("/home/test/.gnx/graph-nexus-"),
         "got {:?}",
         layout.index_dir
     );
@@ -186,14 +186,14 @@ fn index_path_collision_gets_hash() {
 fn index_path_same_worktree_no_collision() {
     // Same repo name + same worktree path → not a collision
     let existing = vec![(
-        "gitnexus-rs".to_string(),
-        "/home/test/code/gitnexus-rs".to_string(),
+        "graph-nexus".to_string(),
+        "/home/test/code/graph-nexus".to_string(),
     )];
     let layout = IndexLayout::resolve(
         &fake_home(),
-        "gitnexus-rs",
+        "graph-nexus",
         "main",
-        "/home/test/code/gitnexus-rs",
+        "/home/test/code/graph-nexus",
         &existing,
     )
     .unwrap();

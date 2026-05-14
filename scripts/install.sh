@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 # graph-nexus 一鍵安裝（Linux / macOS）
 #
-#   curl -sSfL https://github.com/e-nor/gitnexus-rs/releases/latest/download/install.sh | sh
-#   curl -sSfL https://github.com/e-nor/gitnexus-rs/releases/download/v0.1.0/install.sh | sh
+#   curl -sSfL https://github.com/coseto6125/graph-nexus/releases/latest/download/install.sh | sh
+#   curl -sSfL https://github.com/coseto6125/graph-nexus/releases/download/v0.1.0/install.sh | sh
 #
 # 環境變數：
 #   GNX_VERSION   指定版本（不含 v 前綴）。預設 latest。
@@ -11,7 +11,7 @@
 
 set -eu
 
-REPO="e-nor/gitnexus-rs"
+REPO="coseto6125/graph-nexus"
 BIN="gnx"
 GNX_VERSION="${GNX_VERSION:-latest}"
 
@@ -103,4 +103,4 @@ case ":$PATH:" in
 esac
 
 echo "  Verify provenance:"
-echo "    gh attestation verify $GNX_INSTALL_DIR/$BIN --owner e-nor"
+echo "    gh attestation verify $GNX_INSTALL_DIR/$BIN --owner coseto6125"

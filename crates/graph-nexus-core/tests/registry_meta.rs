@@ -9,8 +9,8 @@ fn meta_round_trip() {
         node_count: 12453,
         delta_size: 0,
         last_compact_at: Some("2026-05-14T02:00:00Z".into()),
-        worktree_path: "/home/enor/gitnexus-rs".into(),
-        remote_url: "git@github.com:E-NoR/gitnexus-rs.git".into(),
+        worktree_path: "/home/enor/graph-nexus".into(),
+        remote_url: "git@github.com:coseto6125/graph-nexus.git".into(),
         schema_version: 1,
     };
     let json = serde_json::to_string(&original).unwrap();

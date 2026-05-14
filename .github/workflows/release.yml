@@ -158,7 +158,7 @@ jobs:
 
             ### From git tag (source build)
             ```
-            cargo install --git https://github.com/e-nor/gitnexus-rs --tag ${{ github.ref_name }} graph-nexus
+            cargo install --git https://github.com/coseto6125/graph-nexus --tag ${{ github.ref_name }} graph-nexus
             ```
 
             ### Pre-built binary via `cargo-binstall`
@@ -168,19 +168,19 @@ jobs:
 
             ### One-shot installer scripts (Linux / macOS)
             ```
-            curl -sSfL https://github.com/e-nor/gitnexus-rs/releases/download/${{ github.ref_name }}/install.sh | sh
+            curl -sSfL https://github.com/coseto6125/graph-nexus/releases/download/${{ github.ref_name }}/install.sh | sh
             ```
 
             ### One-shot installer (Windows PowerShell)
             ```
-            irm https://github.com/e-nor/gitnexus-rs/releases/download/${{ github.ref_name }}/install.ps1 | iex
+            irm https://github.com/coseto6125/graph-nexus/releases/download/${{ github.ref_name }}/install.ps1 | iex
             ```
 
             ### Manual download
             Pick a `.tar.gz` / `.zip` matching your platform from Assets below.
             Each has a `.sha256` for integrity. Verify build provenance with:
             ```
-            gh attestation verify ./gnx --owner e-nor
+            gh attestation verify ./gnx --owner coseto6125
             ```
 
   # ==================== Publish to crates.io ====================

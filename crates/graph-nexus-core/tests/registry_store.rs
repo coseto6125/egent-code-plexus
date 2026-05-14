@@ -9,13 +9,13 @@ fn round_trip_serialize_deserialize() {
     let original = RegistryFile {
         version: 1,
         repos: vec![RepoEntry {
-            name: "gitnexus-rs".into(),
-            remote_url: "git@github.com:E-NoR/gitnexus-rs.git".into(),
-            worktree_path: "/home/enor/gitnexus-rs".into(),
-            index_dir_root: "/home/enor/.gnx/gitnexus-rs".into(),
+            name: "graph-nexus".into(),
+            remote_url: "git@github.com:coseto6125/graph-nexus.git".into(),
+            worktree_path: "/home/enor/graph-nexus".into(),
+            index_dir_root: "/home/enor/.gnx/graph-nexus".into(),
             branches: vec![BranchEntry {
                 name: "main".into(),
-                index_dir: "/home/enor/.gnx/gitnexus-rs/main".into(),
+                index_dir: "/home/enor/.gnx/graph-nexus/main".into(),
                 indexed_at: "2026-05-14T03:00:00Z".into(),
                 node_count: 12453,
                 delta_size: 0,

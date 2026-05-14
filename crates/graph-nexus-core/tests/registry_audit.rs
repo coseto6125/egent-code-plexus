@@ -5,7 +5,7 @@ use graph_nexus_core::registry::{AuditEvent, AuditLog};
 #[test]
 fn event_serializes_to_jsonl() {
     let e = AuditEvent::AnalyzeComplete {
-        repo: "gitnexus-rs".into(),
+        repo: "graph-nexus".into(),
         branch: "main".into(),
         files: 234,
         nodes: 12453,
@@ -28,7 +28,7 @@ fn append_event_to_fresh_file() {
         kind: "rename".into(),
         from: Some("old".into()),
         to: Some("new".into()),
-        repo: "gitnexus-rs".into(),
+        repo: "graph-nexus".into(),
     })
     .unwrap();
 
