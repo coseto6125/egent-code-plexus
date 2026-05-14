@@ -6,6 +6,7 @@ use gnx_analyzer::{
     javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider, php::parser::PhpProvider,
     python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
     swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
+    markdown::parser::MarkdownProvider, yaml::parser::YamlProvider,
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -86,8 +87,9 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(CSharpProvider::new().unwrap()));
     pipeline.register_provider(Box::new(CProvider::new().unwrap()));
     pipeline.register_provider(Box::new(CppProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(SwiftProvider::new().unwrap()));
     pipeline.register_provider(Box::new(DartProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(MarkdownProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(YamlProvider::new().unwrap()));
 
     // Step 3: Analyze and load cache concurrently
     let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(

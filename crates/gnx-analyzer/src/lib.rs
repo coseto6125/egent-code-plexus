@@ -1,4 +1,5 @@
 // gnx-analyzer
+pub mod calls;
 pub mod go;
 pub mod java;
 pub mod python;
@@ -15,5 +16,6 @@ pub mod cpp;
 pub mod swift;
 pub mod dart;
 pub mod markdown;
+pub mod yaml;
 pub mod embeddings;
 pub mod route_detector;
