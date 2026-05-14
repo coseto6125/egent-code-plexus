@@ -164,6 +164,37 @@ mod tests {
     }
 
     #[test]
+    fn text_lines_uses_singular_or_plural_branch_unit() {
+        let mut reg = sample();
+        // First repo has 1 branch → "1 branch". Add a second branch to second repo → "2 branches".
+        reg.repos[1].branches.push(BranchEntry {
+            name: "feat__y".into(),
+            index_dir: "/h/.gnx/agent/feat__y".into(),
+            indexed_at: "2026-05-14T09:00".into(),
+            node_count: 50,
+            delta_size: 0,
+            embedding_status: "skipped".into(),
+        });
+        let lines = text_lines(&reg, "/h");
+        let neptune_row = lines.iter().find(|l| l.contains("neptune")).unwrap();
+        let agent_row = lines.iter().find(|l| l.starts_with("agent")).unwrap();
+        assert!(
+            neptune_row.contains("1 branch  "),
+            "singular form: {neptune_row:?}"
+        );
+        assert!(
+            agent_row.contains("2 branches  "),
+            "plural form: {agent_row:?}"
+        );
+        // Summary also uses plural at top level: 2 repos, 3 branches total
+        let summary = lines.last().unwrap();
+        assert!(
+            summary.contains("2 repos, 3 branches"),
+            "summary: {summary:?}"
+        );
+    }
+
+    #[test]
     fn text_lines_align_by_display_width_for_cjk_names() {
         let mut reg = sample();
         reg.repos[0].name = "搜尋系統".into(); // 4 chars, 8 columns

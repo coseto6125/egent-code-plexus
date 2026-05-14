@@ -212,4 +212,72 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         assert!(!probe_writable(&file));
     }
+
+    /// Single test covers all `resolve_home_gnx` scenarios sequentially —
+    /// HOME is process-global and racing with parallel tests would corrupt
+    /// other env readers. Since only `resolve_home_gnx` reads HOME in this
+    /// crate, serial mutation inside one test is safe.
+    #[test]
+    fn resolve_home_gnx_covers_happy_path_fast_path_and_fallback() {
+        let orig_home = std::env::var_os("HOME");
+
+        // (1) HOME unset → tmp fallback
+        std::env::remove_var("HOME");
+        let p = resolve_home_gnx();
+        assert!(
+            p.starts_with(std::env::temp_dir()),
+            "no-HOME should fall back to temp_dir, got {p:?}"
+        );
+        assert!(p.ends_with(".gnx"), "fallback path tail should end in .gnx");
+
+        // (2) HOME set + writable, no registry.json → probe runs, returns <HOME>/.gnx, no leftover probe
+        let writable = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", writable.path());
+        let p = resolve_home_gnx();
+        assert_eq!(p, writable.path().join(".gnx"));
+        assert!(p.exists(), "probe path should be created");
+        assert!(
+            !p.join(".gnx-write-probe").exists(),
+            "probe file should be cleaned up"
+        );
+
+        // (3) Fast path: registry.json exists → no probe write attempted
+        std::fs::write(p.join("registry.json"), b"{}").unwrap();
+        let probe_file = p.join(".gnx-write-probe");
+        std::fs::write(&probe_file, b"stale").unwrap(); // marker
+        let _ = resolve_home_gnx();
+        // probe path should NOT have been touched (still has our stale marker)
+        assert_eq!(
+            std::fs::read(&probe_file).unwrap(),
+            b"stale",
+            "fast path must not run probe_writable"
+        );
+        let _ = std::fs::remove_file(&probe_file);
+
+        // (4) HOME points to read-only dir without registry.json → tmp fallback
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro = tempfile::tempdir().unwrap();
+            let mut perms = std::fs::metadata(ro.path()).unwrap().permissions();
+            perms.set_mode(0o500);
+            std::fs::set_permissions(ro.path(), perms).unwrap();
+            std::env::set_var("HOME", ro.path());
+            let p = resolve_home_gnx();
+            assert!(
+                p.starts_with(std::env::temp_dir()),
+                "read-only HOME should fall back, got {p:?}"
+            );
+            // restore so tempdir cleanup works
+            let mut p2 = std::fs::metadata(ro.path()).unwrap().permissions();
+            p2.set_mode(0o700);
+            std::fs::set_permissions(ro.path(), p2).unwrap();
+        }
+
+        // restore HOME
+        match orig_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
