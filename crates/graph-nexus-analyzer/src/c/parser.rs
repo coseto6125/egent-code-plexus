@@ -14,6 +14,20 @@ thread_local! {
         parser
     });
 }
+/// Returns true if `node` (a `function_definition`) has a `static` storage class specifier
+/// among its direct children.
+fn has_static_specifier(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    let result = node.children(&mut cursor).any(|child| {
+        child.kind() == "storage_class_specifier"
+            && source
+                .get(child.start_byte()..child.end_byte())
+                .and_then(|b| std::str::from_utf8(b).ok())
+                == Some("static")
+    });
+    result
+}
+
 pub struct CProvider {
     query: Query,
 }
@@ -86,9 +100,12 @@ impl LanguageProvider for CProvider {
                             .map(|s| s.to_string())
                     });
 
+                    // A function with `static` storage class is translation-unit private.
+                    let is_exported = !has_static_specifier(root, source);
+
                     nodes.push(RawNode {
                         decorators: vec![],
-                        is_exported: true,
+                        is_exported,
                         heritage: vec![],
                         type_annotation,
                         name: name_str.to_string(),
