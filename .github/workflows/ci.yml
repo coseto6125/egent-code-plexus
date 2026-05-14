@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一 ref 連續推送時，取消還在跑的舊 run，省額度。
+# main 分支不取消（保留完整 history）。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Swatinem 建議：CI 關掉 incremental compile，cold cache 更快、target/ cache 更小。
+  CARGO_INCREMENTAL: 0
+  # 縮短 panic 處理時間 + 不展開 macro 反向追蹤，build 略快。
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  # ==================== Code Quality ====================
+  code-quality:
+    name: Code Quality (Linting & Formatting)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-build   # 與 test-ubuntu 共用 target/，避免互相覆蓋
+
+      - name: Run rustfmt check
+        run: |
+          echo "::group::Rustfmt"
+          cargo fmt --all -- --check
+          echo "::endgroup::"
+
+      - name: Run clippy
+        run: |
+          echo "::group::Clippy"
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          echo "::endgroup::"
+
+  # ==================== Cross-Platform Tests (nextest) ====================
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # ubuntu 與 code-quality 共用 cache，macos/windows 獨立
+          shared-key: ${{ matrix.os == 'ubuntu-latest' && 'linux-build' || matrix.os }}
+
+      - name: Run tests (nextest)
+        run: |
+          echo "::group::cargo nextest"
+          cargo nextest run --workspace --all-features --no-fail-fast
+          echo "::endgroup::"
+
+  # ==================== Supply-chain Audit ====================
+  audit:
+    name: Supply-chain (audit & deny)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (audit 需要 cargo metadata 來解 Cargo.lock)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & advisory-db
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: audit
+          # audit/deny 只讀 lockfile，不需快取 target/
+          cache-targets: false
+
+      - name: Install cargo-audit & cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: Run cargo-audit
+        run: |
+          echo "::group::cargo audit"
+          cargo audit
+          echo "::endgroup::"
+
+      - name: Run cargo-deny
+        run: |
+          echo "::group::cargo deny"
+          cargo deny check
+          echo "::endgroup::"
+
+  # ==================== Workflow Lint ====================
+  actionlint:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install actionlint
+        uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint
+
+      - name: Run actionlint
+        run: |
+          echo "::group::actionlint"
+          actionlint -color
+          echo "::endgroup::"
+
+  # ==================== Python Lint (parity scripts) ====================
+  python-lint:
+    name: Python Lint (parity scripts)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Ruff lint
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: 'check tests/parity test_route_embed.py'
+
+      - name: Run Ruff format check
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: 'format --check tests/parity test_route_embed.py'
