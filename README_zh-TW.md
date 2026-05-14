@@ -1,10 +1,22 @@
 # Graph Nexus for LLM
 
-我寫來給 LLM / AI agent 用的代碼智能圖譜。十幾種語言、毫秒級建圖，然後可以問它「誰呼叫了這個」、「我改這個函式的爆炸半徑多大」、「跟 auth flow 相關的有哪些」這類結構性問題。
+給 **LLM 與 AI 程式碼代理（AI code agents）** 用的代碼智能圖譜 — **不是給人類 IDE 整合用的**。十幾種語言、毫秒級建圖，然後可以問它「誰呼叫了這個」、「我改這個函式的爆炸半徑多大」、「跟 auth flow 相關的有哪些」這類結構性問題。
 
-致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)）— 同樣的核心想法（repo 的結構化知識圖譜），用 Rust 重寫。基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。
+致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)）— 同樣的核心想法（repo 的結構化知識圖譜），用 Rust 重寫成面向**另一群受眾**的版本。基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。
 
 > 必備聲明: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus)。本專案與上游 GitNexus 無關聯亦未獲其背書。僅限非商業用途。完整第三方授權清單見 [NOTICES.md](./NOTICES.md)。
+
+## 為什麼上游已存在還要 Rust 重寫?
+
+GitNexus 面向**人類開發者 + IDE 整合** — 長駐 MCP server、豐富 Wiki 渲染、import 解析不出來時用啟發式（Jaccard 相似度等）「猜」邊界，讓圖在人眼中看起來連貫。
+
+graph-nexus 面向 **AI 程式碼代理**，遵守更嚴格的合約：
+
+- **零幻覺 (Zero hallucination).** Analyzer 解析不出 binding 時記錄 `BlindSpot`、**不發邊**。Agent 寧可拿到「我不知道」也不要看似合理但其實錯的依賴 — 順著幻覺走會浪費比承認不確定還多的 token。
+- **無狀態 mmap、毫秒級回應.** 每次 `gnx` 都是 one-shot CLI：開 `graph.bin`（rkyv + zero-copy mmap）→ 查 → 退。沒有背景 daemon、沒有 warmup。Agent 一個任務內可查 30 次，第 2 次起只付 OS file cache 成本。
+- **Token 經濟.** 輸出格式（`etoon`、`cypher`、compact JSON）為 LLM context window 調過。沒有樹狀 UI、沒語法高亮，只給 agent 需要的最小圖投影。
+
+GitNexus 是給開發者的重量級知識圖譜平台；graph-nexus 是給 AI agent 的**外科手術刀** — 毫秒級延遲的底層靜態分析檢索引擎。
 
 底層細節：rkyv + mmap 的 zero-copy 硬碟儲存、Tantivy BM25 + BGE-M3 dense vector 混合檢索、框架路由自動抽取。CLI 命令是 `gnx`。
 

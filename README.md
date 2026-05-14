@@ -1,10 +1,22 @@
 # Graph Nexus for LLM
 
-A code intelligence graph I built for working with LLMs and AI agents. Indexes any codebase across 14 languages in milliseconds, then answers structural questions like *who calls this*, *what's the blast radius if I change this function*, or *what's related to the auth flow*.
+A code intelligence graph built for **LLMs and AI code agents** — not for human IDE integration. Indexes any codebase across 14 languages in milliseconds, then answers structural questions like *who calls this*, *what's the blast radius if I change this function*, or *what's related to the auth flow*.
 
-Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same core idea (structural knowledge graph of a repo), rewritten in Rust for speed. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE).
+Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same core idea (a structural knowledge graph of a repo), rewritten in Rust for a different audience. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE).
 
 > Required Notice: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus). Not affiliated with or endorsed by the upstream GitNexus project. Noncommercial use only. See [NOTICES.md](./NOTICES.md) for the full third-party attribution list.
+
+## Why a Rust rewrite when upstream already exists?
+
+GitNexus targets **human developers + IDE integration** — a long-running MCP server, rich Wiki rendering, and heuristic fallbacks (Jaccard similarity, etc.) that "guess" relationships when imports can't be statically resolved, so the graph stays coherent to a human reader.
+
+graph-nexus targets **AI code agents** under a stricter contract:
+
+- **Zero hallucination.** When the analyzer cannot resolve a binding, it records a `BlindSpot` and emits no edge. Agents prefer "I don't know" over a plausible-looking wrong answer — acting on a hallucinated dependency wastes more tokens than admitting uncertainty.
+- **Stateless mmap, millisecond responses.** Each `gnx` invocation is a one-shot CLI: open `graph.bin` via `rkyv` zero-copy memory map, answer, exit. No background daemon, no warmup. An agent firing 30 queries in a single task pays only OS file-cache cost from the second query onward.
+- **Token-economic output.** Output formats (`etoon`, `cypher`, compact JSON) are tuned for the LLM context window, not for human eyes. No tree-rendered UI, no syntax highlighting — only the minimum graph projection the agent needs.
+
+Where GitNexus is a heavyweight knowledge-graph platform for developers, graph-nexus is a **surgical instrument for AI agents** — a millisecond-latency static-analysis retrieval engine.
 
 Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via Tantivy + BGE-M3 dense vectors), framework-aware route extraction. The CLI is `gnx`.
 
