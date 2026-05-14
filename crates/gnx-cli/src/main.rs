@@ -55,6 +55,8 @@ enum Commands {
     RenameBranch(commands::rename_branch::RenameBranchArgs),
     /// List all repos in the registry (compact | json | toon)
     List(commands::list::ListArgs),
+    /// LLM-friendly project overview (markdown / json) from graph.bin
+    Summarize(commands::summarize::SummarizeArgs),
 }
 
 fn main() {
@@ -133,6 +135,7 @@ fn main() {
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::RouteMap(args) => args.repo.as_deref(),
         Commands::DetectChanges(args) => args.repo.as_deref(),
+        Commands::Summarize(args) => args.repo.as_deref(),
         Commands::Analyze(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)
@@ -162,6 +165,7 @@ fn main() {
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),
+        Commands::Summarize(args) => commands::summarize::run(args, &engine),
         Commands::Analyze(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)

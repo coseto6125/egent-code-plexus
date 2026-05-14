@@ -68,13 +68,13 @@ fn kind_str(g: &ArchivedZeroCopyGraph, idx: usize) -> String {
 }
 
 /// A: 一個檔一個代表 symbol（in-degree 最大者）
-fn render_a(
-    g: &ArchivedZeroCopyGraph,
-    by_file: &BTreeMap<u32, Vec<usize>>,
-    in_deg: &[u32],
-) {
+fn render_a(g: &ArchivedZeroCopyGraph, by_file: &BTreeMap<u32, Vec<usize>>, in_deg: &[u32]) {
     println!("# Project Summary (A: file tree + representative symbol)\n");
-    println!("Total: {} files, {} symbols\n", by_file.len(), g.nodes.len());
+    println!(
+        "Total: {} files, {} symbols\n",
+        by_file.len(),
+        g.nodes.len()
+    );
     for (&fi, nodes) in by_file {
         let path = file_path(g, fi);
         let rep = nodes.iter().copied().max_by_key(|&i| in_deg[i]);
@@ -93,7 +93,11 @@ fn render_b(
     top_k: usize,
 ) {
     println!("# Project Summary (B: file tree + top-{top_k} symbols per file)\n");
-    println!("Total: {} files, {} symbols\n", by_file.len(), g.nodes.len());
+    println!(
+        "Total: {} files, {} symbols\n",
+        by_file.len(),
+        g.nodes.len()
+    );
     for (&fi, nodes) in by_file {
         let path = file_path(g, fi);
         println!("## `{}`", path);
@@ -126,7 +130,10 @@ fn render_c(g: &ArchivedZeroCopyGraph, in_deg: &[u32], top_k: usize) {
 
     let mut by_comm: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
     for (i, n) in g.nodes.iter().enumerate() {
-        by_comm.entry(n.community_id.to_native()).or_default().push(i);
+        by_comm
+            .entry(n.community_id.to_native())
+            .or_default()
+            .push(i);
     }
     println!(
         "Total: {} communities, {} symbols\n",
