@@ -1,4 +1,4 @@
-use gnx_core::graph::{Node, NodeKind, ZeroCopyGraph, ArchivedZeroCopyGraph};
+use gnx_core::graph::{ArchivedZeroCopyGraph, Node, NodeKind, ZeroCopyGraph};
 use gnx_core::pool::StringPool;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
@@ -47,12 +47,12 @@ fn test_mmap_graph_access() {
     let mmap = unsafe { Mmap::map(&file).unwrap() };
 
     let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&mmap).unwrap();
-    
+
     assert_eq!(archived.fingerprint, [1; 32]);
-    
+
     let first_node = &archived.nodes[0];
     assert_eq!(first_node.kind, gnx_core::graph::NodeKind::Function);
-    
+
     let resolved_name = first_node.name.resolve(&archived.string_pool);
     assert_eq!(resolved_name, "mmap_func");
 }

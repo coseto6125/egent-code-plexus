@@ -7,7 +7,11 @@ mod engine;
 use engine::Engine;
 
 #[derive(Parser)]
-#[command(name = "gnx-rs", version = "0.1.0", about = "GitNexus stateless query engine (mmap)")]
+#[command(
+    name = "gnx-rs",
+    version = "0.1.0",
+    about = "GitNexus stateless query engine (mmap)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -36,7 +40,8 @@ fn main() {
 
     // Analyze command doesn't need to load the graph first, it creates it
     if let Commands::Analyze(args) = &cli.command {
-        if let Err(e) = commands::analyze::run(args.clone()) { // needs Clone for args or pass by ref, maybe refactoring needed, wait... actually just pass by value
+        if let Err(e) = commands::analyze::run(args.clone()) {
+            // needs Clone for args or pass by ref, maybe refactoring needed, wait... actually just pass by value
             eprintln!("Command failed: {}", e);
             std::process::exit(1);
         }
@@ -44,7 +49,7 @@ fn main() {
     }
 
     let mut graph_path = cli.graph;
-    
+
     // Attempt to extract repo from subcommand args if available to override default graph path
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_ref(),
@@ -52,7 +57,7 @@ fn main() {
         Commands::Impact(args) => args.repo.as_ref(),
         Commands::Analyze(_) => None,
     };
-    
+
     if let Some(repo) = repo_opt {
         graph_path = std::path::PathBuf::from(repo).join(".gitnexus-rs/graph.bin");
     }

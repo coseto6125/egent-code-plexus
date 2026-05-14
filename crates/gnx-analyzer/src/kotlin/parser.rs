@@ -11,8 +11,7 @@ pub struct KotlinProvider {
 
 impl KotlinProvider {
     pub fn new() -> anyhow::Result<Self> {
-        extern "C" { fn tree_sitter_kotlin() -> *const std::ffi::c_void; }
-        let language = unsafe { tree_sitter::Language::from_raw(tree_sitter_kotlin() as _) };
+        let language = tree_sitter_kotlin::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
         Ok(Self { query })
@@ -25,8 +24,7 @@ impl LanguageProvider for KotlinProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        extern "C" { fn tree_sitter_kotlin() -> *const std::ffi::c_void; }
-        let language = unsafe { tree_sitter::Language::from_raw(tree_sitter_kotlin() as _) };
+        let language = tree_sitter_kotlin::LANGUAGE.into();
         let mut parser = Parser::new();
         parser.set_language(&language)?;
 

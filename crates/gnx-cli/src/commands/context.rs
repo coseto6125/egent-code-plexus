@@ -1,5 +1,5 @@
-use clap::Args;
 use crate::engine::Engine;
+use clap::Args;
 use gnx_core::graph::{ArchivedNodeKind, ArchivedRelType};
 use std::collections::HashMap;
 
@@ -20,7 +20,7 @@ pub struct ContextArgs {
 
 pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), String> {
     let graph = engine.graph().map_err(|e| e.to_string())?;
-    
+
     // Find matching nodes
     let mut matching_nodes = Vec::new();
     for (i, node) in graph.nodes.iter().enumerate() {
@@ -99,7 +99,7 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), String> {
         let edge = &graph.edges[i];
         let target_node = &graph.nodes[edge.target.to_native() as usize];
         let target_file = &graph.files[target_node.file_idx.to_native() as usize];
-        
+
         let rel_str = rel_to_str(&edge.rel_type).to_string();
         let entry = serde_json::json!({
             "uid": target_node.uid.resolve(&graph.string_pool),
@@ -118,7 +118,7 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), String> {
         let edge = &graph.edges[edge_idx];
         let source_node = &graph.nodes[edge.source.to_native() as usize];
         let source_file = &graph.files[source_node.file_idx.to_native() as usize];
-        
+
         let rel_str = rel_to_str(&edge.rel_type).to_string();
         let entry = serde_json::json!({
             "uid": source_node.uid.resolve(&graph.string_pool),

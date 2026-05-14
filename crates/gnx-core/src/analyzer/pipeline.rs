@@ -106,9 +106,10 @@ impl AnalyzerPipeline {
             s.spawn(|_| {
                 files.into_par_iter().for_each_with(tx, |sender, path| {
                     if let Some(provider) = self.find_provider(&path) {
-                        // In reality we'd read the file here. Passing empty bytes for now.
-                        if let Ok(local_graph) = provider.parse_file(&path, &[]) {
-                            let _ = sender.send(local_graph);
+                        if let Ok(source) = std::fs::read(&path) {
+                            if let Ok(local_graph) = provider.parse_file(&path, &source) {
+                                let _ = sender.send(local_graph);
+                            }
                         }
                     }
                 });

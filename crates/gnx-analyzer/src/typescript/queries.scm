@@ -21,12 +21,12 @@
 
 ;; Classes
 (class_declaration
-  name: (identifier) @class.name
+  name: (type_identifier) @class.name
   (extends_clause value: [(identifier) (member_expression)] @heritage)?) @class
 
 (export_statement
   (class_declaration
-    name: (identifier) @class.name
+    name: (type_identifier) @class.name
     (extends_clause value: [(identifier) (member_expression)] @heritage)?) @class) @export
 
 ;; Methods
@@ -36,17 +36,17 @@
 
 ;; Interfaces
 (interface_declaration
-  name: (identifier) @interface.name
+  name: (type_identifier) @interface.name
   (extends_clause [(identifier) (member_expression)] @heritage)?) @interface
 
 (export_statement
   (interface_declaration
-    name: (identifier) @interface.name
+    name: (type_identifier) @interface.name
     (extends_clause [(identifier) (member_expression)] @heritage)?) @interface) @export
 
 ;; Imports (Named)
 (import_statement
-  import: (import_clause
+  (import_clause
     (named_imports
       (import_specifier
         name: (identifier) @import.name
@@ -55,6 +55,6 @@
 
 ;; Imports (Default)
 (import_statement
-  import: (import_clause
+  (import_clause
     (identifier) @import.name)
   source: (string (string_fragment) @import.source)) @import

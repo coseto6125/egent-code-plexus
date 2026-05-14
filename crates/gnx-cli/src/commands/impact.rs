@@ -1,5 +1,5 @@
-use clap::{Args, ValueEnum};
 use crate::engine::Engine;
+use clap::{Args, ValueEnum};
 use gnx_core::graph::ArchivedNodeKind;
 use std::collections::{HashSet, VecDeque};
 
@@ -33,7 +33,7 @@ pub struct ImpactArgs {
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), String> {
     let graph = engine.graph().map_err(|e| e.to_string())?;
-    
+
     // Find the target node index by UID
     let mut start_idx = None;
     for (i, node) in graph.nodes.iter().enumerate() {
@@ -66,7 +66,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), String> {
     while let Some((curr_idx, curr_depth)) = queue.pop_front() {
         let curr_node = &graph.nodes[curr_idx];
         let file_node = &graph.files[curr_node.file_idx.to_native() as usize];
-        
+
         results.push(serde_json::json!({
             "uid": curr_node.uid.resolve(&graph.string_pool),
             "name": curr_node.name.resolve(&graph.string_pool),

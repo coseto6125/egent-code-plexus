@@ -1,5 +1,5 @@
-use clap::Args;
 use crate::engine::Engine;
+use clap::Args;
 use gnx_core::graph::ArchivedNodeKind;
 
 #[derive(Args, Debug)]
@@ -18,7 +18,7 @@ pub struct QueryArgs {
 
 pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), String> {
     let graph = engine.graph().map_err(|e| e.to_string())?;
-    
+
     let mut results = Vec::new();
     let query_lower = args.query.to_lowercase();
 
@@ -50,7 +50,7 @@ pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), String> {
         let s = serde_json::to_string(&json).map_err(|e| e.to_string())?;
         println!("{}", s);
     }
-    
+
     Ok(())
 }
 

@@ -20,7 +20,7 @@ tree-sitter-go = "*"
 tree-sitter-javascript = "*"
 tree-sitter-php = "*"
 tree-sitter-ruby = "*"
-tree-sitter-kotlin = "*"
+tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin" }
 tree-sitter-c-sharp = "*"
 tree-sitter-c = "*"
 tree-sitter-cpp = "*"
