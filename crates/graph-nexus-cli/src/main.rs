@@ -61,6 +61,8 @@ enum Commands {
     VerifyResolver(commands::verify_resolver::VerifyResolverArgs),
     /// Print framework coverage + blind-spot catalog + graph status (LLM contract)
     Doctor(commands::doctor::DoctorArgs),
+    /// Execute a Cypher query against the graph
+    Cypher(commands::cypher::CypherArgs),
 }
 
 fn main() {
@@ -154,6 +156,7 @@ fn main() {
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
         Commands::Query(args) => args.repo.as_deref(),
+        Commands::Cypher(args) => args.repo.as_deref(),
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::RouteMap(args) => args.repo.as_deref(),
         Commands::DetectChanges(args) => args.repo.as_deref(),
@@ -186,6 +189,7 @@ fn main() {
     let result: Result<(), graph_nexus_core::GnxError> = match cli.command {
         Commands::Context(args) => commands::context::run(args, &engine),
         Commands::Query(args) => commands::query::run(args, &engine),
+        Commands::Cypher(args) => commands::cypher::run(args, &engine),
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),

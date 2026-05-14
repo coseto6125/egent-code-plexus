@@ -13,6 +13,51 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"GNX-RS\0\0";
 /// `graph.bin` and a fresh CLI does not silently misinterpret old data.
 pub const GRAPH_FORMAT_VERSION: u32 = 1;
 
+impl std::str::FromStr for NodeKind {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "file" => Ok(NodeKind::File),
+            "function" => Ok(NodeKind::Function),
+            "class" => Ok(NodeKind::Class),
+            "method" => Ok(NodeKind::Method),
+            "interface" => Ok(NodeKind::Interface),
+            "constructor" => Ok(NodeKind::Constructor),
+            "property" => Ok(NodeKind::Property),
+            "variable" => Ok(NodeKind::Variable),
+            "const" => Ok(NodeKind::Const),
+            "import" => Ok(NodeKind::Import),
+            "route" => Ok(NodeKind::Route),
+            "process" => Ok(NodeKind::Process),
+            "document" => Ok(NodeKind::Document),
+            "section" => Ok(NodeKind::Section),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::str::FromStr for RelType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "CALLS" => Ok(RelType::Calls),
+            "EXTENDS" => Ok(RelType::Extends),
+            "IMPORTS" => Ok(RelType::Imports),
+            "IMPLEMENTS" => Ok(RelType::Implements),
+            "HAS_METHOD" => Ok(RelType::HasMethod),
+            "HAS_PROPERTY" => Ok(RelType::HasProperty),
+            "ACCESSES" => Ok(RelType::Accesses),
+            "HANDLES_ROUTE" => Ok(RelType::HandlesRoute),
+            "STEP_IN_PROCESS" => Ok(RelType::StepInProcess),
+            "REFERENCES" => Ok(RelType::References),
+            "DEFINES" => Ok(RelType::Defines),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
