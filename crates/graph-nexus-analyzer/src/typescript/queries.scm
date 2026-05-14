@@ -129,8 +129,14 @@
   source: (string (string_fragment) @import.source)
 ) @import
 
-;; Routes
+;; Routes — `app.METHOD(path, handler)` form.
+;; `route.handler` captures the named handler argument when present so the
+;; builder can emit a `HandlesRoute` edge from the handler function back
+;; to the Route node. Inline / anonymous handlers (arrow fn, fn literal)
+;; are not captured and the edge is skipped — the Route node still lands.
 (call_expression
   function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))
-  arguments: (arguments (string (string_fragment) @route.path))
+  arguments: (arguments
+    (string (string_fragment) @route.path)
+    (identifier)? @route.handler)
 ) @route.call

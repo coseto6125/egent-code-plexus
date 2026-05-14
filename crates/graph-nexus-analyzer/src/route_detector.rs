@@ -57,12 +57,69 @@ pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
     let lower = raw.method.to_lowercase();
     let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
 
-    if looks_like_path(&raw.path) {
+    // Raw path may arrive wrapped in `"…"` / `'…'` because Python / TS
+    // tree-sitter `string` nodes carry the literal quote bytes. Peel them
+    // so downstream Route nodes get names like `GET /api/users`, not
+    // `GET "/api/users"`. Fall back to the raw text if it isn't quoted.
+    let stripped = strip_string_quotes(&raw.path);
+    if looks_like_path(stripped) {
         Some(DetectedRoute {
             method: method.to_uppercase(),
-            path: raw.path.clone(),
+            path: stripped.to_string(),
         })
     } else {
         None
+    }
+}
+
+/// Trim matching surrounding single / double quotes from a string literal
+/// captured as raw source text. Returns the inner slice when both ends
+/// match, otherwise the original string.
+fn strip_string_quotes(s: &str) -> &str {
+    for q in ['"', '\''] {
+        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw(method: &str, path: &str) -> RawRoute {
+        RawRoute {
+            method: method.to_string(),
+            path: path.to_string(),
+            handler: None,
+            span: (0, 0, 0, 0),
+        }
+    }
+
+    #[test]
+    fn detect_from_call_strips_double_quoted_path() {
+        let r = detect_from_call(&raw("get", "\"/api/users\"")).unwrap();
+        assert_eq!(r.method, "GET");
+        assert_eq!(r.path, "/api/users");
+    }
+
+    #[test]
+    fn detect_from_call_strips_single_quoted_path() {
+        let r = detect_from_call(&raw("post", "'/users/:id'")).unwrap();
+        assert_eq!(r.method, "POST");
+        assert_eq!(r.path, "/users/:id");
+    }
+
+    #[test]
+    fn detect_from_call_preserves_unquoted_path() {
+        let r = detect_from_call(&raw("delete", "/items/{id}")).unwrap();
+        assert_eq!(r.method, "DELETE");
+        assert_eq!(r.path, "/items/{id}");
+    }
+
+    #[test]
+    fn detect_from_call_rejects_non_path_string() {
+        assert!(detect_from_call(&raw("get", "not_a_path!")).is_none());
     }
 }

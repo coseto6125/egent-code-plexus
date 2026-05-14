@@ -37,6 +37,10 @@ struct TypeScriptCaptureIndices {
     route_method: Option<u32>,
     route_path: Option<u32>,
     route_call: Option<u32>,
+    /// Named handler argument of `app.METHOD(path, handler)` — used by the
+    /// builder to materialize a `HandlesRoute` edge from the handler back
+    /// to the Route node. Absent for inline arrow / anonymous handlers.
+    route_handler: Option<u32>,
     express_handler: Option<u32>,
     nestjs_class: Option<u32>,
     nestjs_method: Option<u32>,
@@ -71,6 +75,7 @@ impl TypeScriptProvider {
             route_method: query.capture_index_for_name("route.method"),
             route_path: query.capture_index_for_name("route.path"),
             route_call: query.capture_index_for_name("route.call"),
+            route_handler: query.capture_index_for_name("route.handler"),
             express_handler: query.capture_index_for_name("express.route.handler"),
             nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
             nestjs_method: query.capture_index_for_name("nestjs.method.name"),
@@ -124,6 +129,7 @@ impl LanguageProvider for TypeScriptProvider {
 
             let mut route_method = None;
             let mut route_path = None;
+            let mut route_handler_node: Option<tree_sitter::Node> = None;
             let mut is_route = false;
 
             let mut nestjs_class_node: Option<tree_sitter::Node> = None;
@@ -179,6 +185,8 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
+                } else if cap_idx == idx.route_handler {
+                    route_handler_node = Some(cap.node);
                 } else if cap_idx == idx.express_handler {
                     if let Ok(handler_name) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -292,10 +300,15 @@ impl LanguageProvider for TypeScriptProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
+                        let handler_name = route_handler_node.and_then(|n| {
+                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                                .ok()
+                                .map(|s| s.to_string())
+                        });
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
-                            handler: None,
+                            handler: handler_name,
                             span: node_span(&root),
                         });
                     }

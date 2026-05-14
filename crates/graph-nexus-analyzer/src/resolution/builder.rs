@@ -332,8 +332,23 @@ impl GraphBuilder {
                         }
                     }
 
-                    // Imperative routes might not easily map to a specific handler.
-                    // We just register the Route node here.
+                    // Resolve the imperative-route handler, if the parser captured
+                    // a named handler (e.g. `app.get("/x", loginHandler)`). The
+                    // handler must be a function/method registered in the same
+                    // file; inline arrow functions are not captured.
+                    if let Some(handler_name) = raw_route.handler.as_deref() {
+                        if let Some(handler_node_id) =
+                            symbol_table.lookup_in_file(&path_str, handler_name)
+                        {
+                            route_edges.push(Edge {
+                                source: handler_node_id,
+                                target: route_idx,
+                                rel_type: RelType::HandlesRoute,
+                                confidence: 1.0,
+                                reason: string_pool.add("call-arg"),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1530,8 +1545,7 @@ mod tests {
         // Serial path: dump enabled forces the serial branch
         let tmp = tempfile::TempDir::new().unwrap();
         let dump_path = tmp.path().join("dump.jsonl");
-        let mut serial_builder =
-            GraphBuilder::new().with_resolver_dump(Some(dump_path.clone()));
+        let mut serial_builder = GraphBuilder::new().with_resolver_dump(Some(dump_path.clone()));
         for lg in build_fixtures() {
             serial_builder.add_graph(lg);
         }

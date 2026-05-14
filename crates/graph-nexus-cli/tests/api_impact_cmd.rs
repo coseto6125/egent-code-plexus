@@ -128,14 +128,7 @@ fn run_api_impact(repo: &Path, home: &Path, extra: &[&str]) -> Value {
         .unwrap_or_else(|e| panic!("{args:?} JSON parse failed: {e}\nstdout={stdout}"))
 }
 
-// TODO: re-enable after analyzer emits `HANDLES_ROUTE` edges from each
-// Route node to its handler function. Currently `route_map` confirms
-// Route nodes ARE created (e.g. `GET /api/users`) but the per-route
-// handler edge isn't materialized in graph.bin — so api_impact correctly
-// finds the Route but `route.out_edges` filtered by HandlesRoute is
-// empty. This is a graph-completeness gap, not an api_impact bug.
 #[test]
-#[ignore]
 fn api_impact_finds_route_handler_and_callers() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -199,10 +192,7 @@ fn api_impact_not_found_for_unknown_route() {
     );
 }
 
-// TODO: re-enable after HANDLES_ROUTE edges land (same blocker as the
-// `_finds_route_handler_and_callers` test above).
 #[test]
-#[ignore]
 fn api_impact_method_filter_disambiguates_same_path() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
