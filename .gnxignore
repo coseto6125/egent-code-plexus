@@ -1,0 +1,3 @@
+crates/vendor/**/*.c
+crates/vendor/**/*.cpp
+crates/vendor/**/*.h
