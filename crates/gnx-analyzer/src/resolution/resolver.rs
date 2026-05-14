@@ -24,7 +24,7 @@ pub enum DecisionTier {
 /// One resolver attempt, captured when the dump buffer is enabled. The
 /// builder serializes a sibling JSONL view of these (resolving
 /// `target_id → target_file` via [`SymbolTable::file_of`]) — see
-/// `docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md`.
+/// `docs/specs/2026-05-15-resolver-oracle-harness.md`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolverDecision {
     pub src_file: String,

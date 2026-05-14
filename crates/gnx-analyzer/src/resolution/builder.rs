@@ -497,7 +497,7 @@ impl GraphBuilder {
         }
 
         // Optional: flush the resolver decision dump now that pass 2 is done.
-        // Spec: docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md
+        // Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
         if let Some(dump_path) = self.resolver_dump_path.as_ref() {
             if let Some(decisions) = resolver.take_decisions() {
                 if let Err(e) = write_resolver_dump(dump_path, &decisions, &symbol_table) {

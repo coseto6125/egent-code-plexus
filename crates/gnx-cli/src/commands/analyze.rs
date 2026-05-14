@@ -28,7 +28,7 @@ pub struct AnalyzeArgs {
 
     /// Optional path to write a JSONL dump of every resolver decision.
     /// Used by the oracle verification harness; off by default.
-    /// Spec: docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md
+    /// Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
     #[arg(long)]
     pub dump_resolver: Option<std::path::PathBuf>,
 }

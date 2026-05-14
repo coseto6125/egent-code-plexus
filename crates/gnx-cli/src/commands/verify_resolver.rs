@@ -1,6 +1,6 @@
 //! `gnx verify-resolver` — diff our resolver dump against a language oracle.
 //!
-//! Spec: `docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md`.
+//! Spec: `docs/specs/2026-05-15-resolver-oracle-harness.md`.
 //!
 //! Reads two JSONL files (oracle output + gnx `--dump-resolver` output),
 //! joins on `(src_file, name)`, classifies each match into TP / FP_ghost /

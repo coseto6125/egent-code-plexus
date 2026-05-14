@@ -2,7 +2,7 @@
 
 Per-language module-resolution oracles for the resolver verification harness.
 Each oracle emits the JSONL contract defined in
-`docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md` so that
+`docs/specs/2026-05-15-resolver-oracle-harness.md` so that
 `gnx verify-resolver` can diff our resolver's decisions against an
 authoritative source.
 
@@ -21,7 +21,7 @@ unresolved) goes to stderr.
 Run:
 
 ```bash
-node scripts/oracles/ts_oracle.mjs <repoPath> > dumps/oracle.ts.jsonl
+node scripts/parity/oracles/ts_oracle.mjs <repoPath> > dumps/oracle.ts.jsonl
 ```
 
 Requirements: Node >=18 and the `typescript` package must be resolvable
