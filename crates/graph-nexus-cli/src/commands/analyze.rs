@@ -26,6 +26,14 @@ pub struct AnalyzeArgs {
     #[arg(long, default_value_t = false)]
     pub embeddings: bool,
 
+    /// Drop the existing embeddings cache entirely during analysis.
+    #[arg(long, default_value_t = false)]
+    pub drop_embeddings: bool,
+
+    /// Force full analysis even if the graph seems up to date.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+
     /// Optional path to write a JSONL dump of every resolver decision.
     /// Used by the oracle verification harness; off by default.
     /// Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
@@ -179,21 +187,23 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
         || {
             let mut hashes = std::collections::HashMap::new();
             let mut embs = std::collections::HashMap::new();
-            if embeddings_flag {
+            if !args.force {
                 if let Ok(old_engine) = crate::engine::Engine::load(&bin_path) {
                     if let Ok(old_graph) = old_engine.graph() {
                         for file in old_graph.files.iter() {
                             let path = file.path.resolve(&old_graph.string_pool);
                             hashes.insert(path.to_string(), file.content_hash);
                         }
-                        if let rkyv::option::ArchivedOption::Some(old_embs) = &old_graph.embeddings
-                        {
-                            for (idx, node) in old_graph.nodes.iter().enumerate() {
-                                if let Some(emb) = old_embs.get(idx) {
-                                    let uid = node.uid.resolve(&old_graph.string_pool);
-                                    let vec_f32: Vec<f32> =
-                                        emb.iter().map(|x| x.to_native()).collect();
-                                    embs.insert(uid.to_string(), vec_f32);
+                        if embeddings_flag && !args.drop_embeddings {
+                            if let rkyv::option::ArchivedOption::Some(old_embs) = &old_graph.embeddings
+                            {
+                                for (idx, node) in old_graph.nodes.iter().enumerate() {
+                                    if let Some(emb) = old_embs.get(idx) {
+                                        let uid = node.uid.resolve(&old_graph.string_pool);
+                                        let vec_f32: Vec<f32> =
+                                            emb.iter().map(|x| x.to_native()).collect();
+                                        embs.insert(uid.to_string(), vec_f32);
+                                    }
                                 }
                             }
                         }
