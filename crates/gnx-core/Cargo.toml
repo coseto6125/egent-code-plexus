@@ -14,6 +14,13 @@ ignore = "0.4.22"
 anyhow = "1.0.82"
 sha2 = "0.10.8"
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+fs2 = "0.4"
+url = "2.5"
+unicode-normalization = "0.1"
+hex = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 
 [build-dependencies]
 cc = "1.0.94"
@@ -21,3 +28,4 @@ cc = "1.0.94"
 [dev-dependencies]
 tempfile = "3.27.0"
 memmap2 = "0.9.10"
+filetime = "0.2"
