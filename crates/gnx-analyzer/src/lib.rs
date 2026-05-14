@@ -30,5 +30,7 @@ pub mod cairo;
 pub mod vyper;
 pub mod verilog;
 pub mod sql;
+pub mod zig;
+pub mod docker_compose;
 pub mod embeddings;
 pub mod route_detector;

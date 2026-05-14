@@ -44,6 +44,16 @@ impl AnalyzerPipeline {
                 .find(|p| p.name() == "dockerfile")
                 .map(|p| p.as_ref());
         }
+        if matches!(
+            file_name,
+            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+        ) {
+            return self
+                .providers
+                .iter()
+                .find(|p| p.name() == "docker-compose")
+                .map(|p| p.as_ref());
+        }
 
         // GitHub Actions: path-based routing — .github/workflows/*.yml|yaml
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -192,6 +202,11 @@ impl AnalyzerPipeline {
                 .providers
                 .iter()
                 .find(|p| p.name() == "verilog")
+                .map(|p| p.as_ref()),
+            "zig" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "zig")
                 .map(|p| p.as_ref()),
             _ => None,
         }

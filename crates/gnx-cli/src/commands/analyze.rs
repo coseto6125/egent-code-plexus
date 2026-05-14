@@ -20,6 +20,8 @@ use gnx_analyzer::{
     sql::parser::SqlProvider,
     vyper::parser::VyperProvider,
     verilog::parser::VerilogProvider,
+    zig::parser::ZigProvider,
+    docker_compose::parser::DockerComposeProvider,
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -63,6 +65,10 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                     // Extension-less Dockerfile variants: check basename before extension.
                     let is_dockerfile_basename = matches!(file_name, "Dockerfile" | "dockerfile");
+                    let is_compose_basename = matches!(
+                        file_name,
+                        "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+                    );
                     // GitHub Actions: path-based routing for .github/workflows/*.yml|yaml
                     let is_gha_workflow = path.extension()
                         .and_then(|e| e.to_str())
@@ -73,7 +79,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                                 w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows"
                             })
                         };
-                    if is_dockerfile_basename || is_gha_workflow {
+                    if is_dockerfile_basename || is_compose_basename || is_gha_workflow {
                         let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                         files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                     } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -84,7 +90,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                             | "md" | "txt" | "rst" | "sh" | "bash" | "lua" | "luau" | "cr"
                             | "sol" | "move" | "dockerfile" | "nim"
                             | "tf" | "tfvars" | "hcl" | "vy" | "sql" | "cairo"
-                            | "v" | "sv" | "vh" | "svh" => {
+                            | "v" | "sv" | "vh" | "svh" | "zig" => {
                                 let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                                 files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                             }
@@ -164,6 +170,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(VyperProvider::new().unwrap()));
     pipeline.register_provider(Box::new(VerilogProvider::new().unwrap()));
     pipeline.register_provider(Box::new(CairoProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(ZigProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(DockerComposeProvider::new().unwrap()));
 
     // Step 3: Analyze and load cache concurrently
     let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(
