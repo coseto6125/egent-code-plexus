@@ -193,7 +193,10 @@ fn detect_changes_with_real_diff() {
     // traces ⇒ affected_count ≥ 1 ⇒ risk ∈ {medium, high, critical}.
     let summary = &result["summary"];
     let risk = summary["risk_level"].as_str().unwrap();
-    assert_ne!(risk, "none", "risk should not be 'none' when there are changes");
+    assert_ne!(
+        risk, "none",
+        "risk should not be 'none' when there are changes"
+    );
 
     // ── changed_files count = 1 (only auth.ts).
     assert_eq!(summary["changed_files"].as_u64().unwrap(), 1);
