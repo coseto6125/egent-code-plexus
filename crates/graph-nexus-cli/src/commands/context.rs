@@ -81,6 +81,8 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
             "uid": target_node.uid.resolve(&graph.string_pool),
             "name": target_node.name.resolve(&graph.string_pool),
             "filePath": target_file.path.resolve(&graph.string_pool),
+            "reason": edge.reason.resolve(&graph.string_pool),
+            "confidence": edge.confidence.to_native(),
         });
         outgoing.entry(rel_str).or_default().push(entry);
     }
@@ -99,6 +101,8 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
             "uid": source_node.uid.resolve(&graph.string_pool),
             "name": source_node.name.resolve(&graph.string_pool),
             "filePath": source_file.path.resolve(&graph.string_pool),
+            "reason": edge.reason.resolve(&graph.string_pool),
+            "confidence": edge.confidence.to_native(),
         });
         incoming.entry(rel_str).or_default().push(entry);
     }

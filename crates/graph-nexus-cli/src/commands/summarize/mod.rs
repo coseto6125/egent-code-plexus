@@ -5,6 +5,7 @@
 //! + 跳過 in_deg=0 孤兒 + 同名符號補 "shadowed by N" 提示。
 
 pub mod analysis;
+pub mod blind_spots;
 pub mod ranking;
 pub mod render;
 
@@ -62,6 +63,9 @@ pub fn run(args: SummarizeArgs, engine: &Engine) -> Result<(), GnxError> {
     let top_files = ranking::top_files(&by_file, &stats, args.top_files);
     let top_communities = ranking::top_communities(g, &by_community, args.top_communities);
     let top_entry_points = ranking::top_entry_points(g, &stats, 10); // Hardcoded top 10 for entry points
+                                                                     // Reuse `--top-files` so a user widening the hot-files view also widens
+                                                                     // the blind-spot top-files breakdown (same intent: see more of the long tail).
+    let blind_spot_stats = blind_spots::collect(g, args.top_files);
 
     let input = render::RenderInput {
         graph: g,
@@ -74,6 +78,7 @@ pub fn run(args: SummarizeArgs, engine: &Engine) -> Result<(), GnxError> {
         name_collisions: &name_collisions,
         top_symbols_per_file: args.top_symbols,
         exclude_orphans: !args.include_orphans,
+        blind_spots: &blind_spot_stats,
     };
 
     let text = match args.format {

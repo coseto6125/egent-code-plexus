@@ -1,6 +1,7 @@
 //! Render the analysis result into LLM-friendly markdown or JSON.
 
 use super::analysis::DegreeStats;
+use super::blind_spots::BlindSpotStats;
 use super::ranking::{CommunitySummary, FileSummary};
 use crate::commands::format::kind_to_str;
 use graph_nexus_core::graph::ArchivedZeroCopyGraph;
@@ -19,6 +20,7 @@ pub struct RenderInput<'a> {
     pub name_collisions: &'a HashMap<String, Vec<usize>>,
     pub top_symbols_per_file: usize,
     pub exclude_orphans: bool,
+    pub blind_spots: &'a BlindSpotStats,
 }
 
 /// 共用中介表示：markdown 與 json 渲染都只需這幾個欄位，避免重複算 shadowed_by。
@@ -70,6 +72,39 @@ fn resolve_symbols<'a>(input: &'a RenderInput<'a>, file_idx: u32) -> Vec<SymbolE
         .collect()
 }
 
+/// Append the "Blind Spots" Markdown section to `out`. Always renders, even
+/// when total=0 — the section's presence signals the LLM that gnx did look
+/// for reflection sites (and confirmed none), versus the section being
+/// missing for an unrelated reason.
+fn render_blind_spots_md(out: &mut String, bs: &BlindSpotStats) {
+    writeln!(out, "## Blind Spots\n").unwrap();
+    if bs.total == 0 {
+        writeln!(out, "Total: 0 sites.\n").unwrap();
+        return;
+    }
+    writeln!(
+        out,
+        "Total: {} site{} across {} file{}.\n",
+        bs.total,
+        if bs.total == 1 { "" } else { "s" },
+        bs.distinct_files,
+        if bs.distinct_files == 1 { "" } else { "s" },
+    )
+    .unwrap();
+    writeln!(out, "By kind:").unwrap();
+    for (kind, count) in &bs.by_kind {
+        writeln!(out, "- `{kind}`: {count}").unwrap();
+    }
+    writeln!(out).unwrap();
+    if !bs.top_files.is_empty() {
+        writeln!(out, "Top files:").unwrap();
+        for (rank, (path, count)) in bs.top_files.iter().enumerate() {
+            writeln!(out, "{}. `{}` — {}", rank + 1, path, count).unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+}
+
 pub fn markdown(input: &RenderInput) -> String {
     let g = input.graph;
     // 容量估算：header ~512 + top_files × (~64 base + symbols × ~80) + top_communities × ~80
@@ -106,9 +141,9 @@ pub fn markdown(input: &RenderInput) -> String {
             .unwrap();
         }
         writeln!(out).unwrap();
-        }
+    }
 
-        if !input.top_entry_points.is_empty() {
+    if !input.top_entry_points.is_empty() {
         writeln!(out, "## Top Entry Points (Routes)\n").unwrap();
         for (rank, ep) in input.top_entry_points.iter().enumerate() {
             let handler_str = ep.handler_name.as_deref().unwrap_or("<unknown>");
@@ -123,9 +158,9 @@ pub fn markdown(input: &RenderInput) -> String {
             .unwrap();
         }
         writeln!(out).unwrap();
-        }
+    }
 
-        writeln!(out, "## Architecture (Communities)\n").unwrap();
+    writeln!(out, "## Architecture (Communities)\n").unwrap();
     if input.top_communities.is_empty() {
         writeln!(out, "_(no communities detected)_\n").unwrap();
     } else {
@@ -150,6 +185,8 @@ pub fn markdown(input: &RenderInput) -> String {
         }
         writeln!(out).unwrap();
     }
+
+    render_blind_spots_md(&mut out, input.blind_spots);
 
     writeln!(out, "## Per-file detail\n").unwrap();
     let total_files = input.by_file.len();
@@ -230,31 +267,46 @@ pub fn json(input: &RenderInput) -> serde_json::Value {
             })
         })
         .collect();
-let communities: Vec<_> = input
-    .top_communities
-    .iter()
-    .map(|cs| {
-        serde_json::json!({
-            "community_id": cs.community_id,
-            "symbol_count": cs.symbol_count,
-            "file_count": cs.file_count,
-            "anchor_file": cs.anchor_file_idx.map(|fi| file_path(g, fi)),
+    let communities: Vec<_> = input
+        .top_communities
+        .iter()
+        .map(|cs| {
+            serde_json::json!({
+                "community_id": cs.community_id,
+                "symbol_count": cs.symbol_count,
+                "file_count": cs.file_count,
+                "anchor_file": cs.anchor_file_idx.map(|fi| file_path(g, fi)),
+            })
         })
-    })
-    .collect();
+        .collect();
 
-let entry_points: Vec<_> = input
-    .top_entry_points
-    .iter()
-    .map(|ep| {
-        serde_json::json!({
-            "route_name": ep.route_name,
-            "handler_name": ep.handler_name,
-            "file_path": file_path(g, ep.file_idx),
-            "score": ep.score,
+    let entry_points: Vec<_> = input
+        .top_entry_points
+        .iter()
+        .map(|ep| {
+            serde_json::json!({
+                "route_name": ep.route_name,
+                "handler_name": ep.handler_name,
+                "file_path": file_path(g, ep.file_idx),
+                "score": ep.score,
+            })
         })
-    })
-    .collect();
+        .collect();
+
+    // Blind spots: stable shape — total/by_kind/top_files always present, even
+    // when the graph recorded zero sites. Downstream LLM tooling can rely on
+    // the keys existing without a presence check.
+    let bs = input.blind_spots;
+    let bs_by_kind: serde_json::Map<String, serde_json::Value> = bs
+        .by_kind
+        .iter()
+        .map(|(k, c)| (k.clone(), serde_json::json!(c)))
+        .collect();
+    let bs_top_files: Vec<_> = bs
+        .top_files
+        .iter()
+        .map(|(p, c)| serde_json::json!({ "path": p, "count": c }))
+        .collect();
 
     serde_json::json!({
         "files_total": g.files.len(),
@@ -263,5 +315,10 @@ let entry_points: Vec<_> = input
         "top_communities": communities,
         "top_entry_points": entry_points,
         "truncated_file_count": input.by_file.len().saturating_sub(input.top_files.len()),
+        "blind_spots": {
+            "total": bs.total,
+            "by_kind": bs_by_kind,
+            "top_files": bs_top_files,
+        },
     })
 }

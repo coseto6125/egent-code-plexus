@@ -114,6 +114,10 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
                         "name": tgt_name.to_string(),
                         "filePath": tgt_path.to_string(),
                         "kind": format!("{:?}", tgt_node.kind),
+                    },
+                    "edge": {
+                        "reason": edge.reason.resolve(&graph.string_pool),
+                        "confidence": edge.confidence.to_native(),
                     }
                 }));
             }
@@ -140,6 +144,28 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
                     ""
                 };
 
+                // Variable-length paths aggregate multiple hops; only surface
+                // edge reason/confidence when the path is a single hop (depth
+                // == 1) and a direct edge exists. Otherwise the per-hop edge
+                // is ambiguous so emit nulls to keep the field shape stable.
+                let direct_edge = if depth == 1 {
+                    edges_slice
+                        .iter()
+                        .find(|e| e.target.to_native() as usize == tgt_idx as usize)
+                } else {
+                    None
+                };
+                let edge_block = match direct_edge {
+                    Some(edge) => serde_json::json!({
+                        "reason": edge.reason.resolve(&graph.string_pool),
+                        "confidence": edge.confidence.to_native(),
+                    }),
+                    None => serde_json::json!({
+                        "reason": serde_json::Value::Null,
+                        "confidence": serde_json::Value::Null,
+                    }),
+                };
+
                 results.push(serde_json::json!({
                     "source": {
                         "name": name.to_string(),
@@ -149,7 +175,8 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
                         "filePath": tgt_path.to_string(),
                         "kind": format!("{:?}", tgt_node.kind),
                     },
-                    "depth": depth
+                    "depth": depth,
+                    "edge": edge_block,
                 }));
             }
         }

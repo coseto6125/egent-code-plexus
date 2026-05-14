@@ -10,11 +10,13 @@
 //! Two output formats: `compact` (YAML-ish, default; LLM-readable) and
 //! `json`. Both expose the same schema.
 
+use crate::engine::Engine;
 use crate::graph_path;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_analyzer::framework_confidence as fc;
 use graph_nexus_core::{GnxError, HIGH_TRUST_CONFIDENCE};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug, Clone)]
@@ -169,11 +171,57 @@ const BLIND_SPOT_CATALOG: &[BlindSpotKind] = &[
     },
 ];
 
+/// Tally live blind-spot sites from the loaded graph: aggregate by `kind`,
+/// and surface the top-5 files by total occurrence count. Returns `null`
+/// when the graph cannot be loaded (missing file, magic/version mismatch)
+/// so doctor stays useful on a fresh checkout with no graph yet.
+fn live_blind_spots(graph_path: &Path) -> serde_json::Value {
+    let Ok(engine) = Engine::load(graph_path) else {
+        return serde_json::Value::Null;
+    };
+    let Ok(graph) = engine.graph() else {
+        return serde_json::Value::Null;
+    };
+
+    let mut by_kind: HashMap<&str, usize> = HashMap::new();
+    let mut by_file: HashMap<&str, usize> = HashMap::new();
+    for bs in graph.blind_spots.iter() {
+        let kind = bs.kind.resolve(&graph.string_pool);
+        let path = bs.file_path.resolve(&graph.string_pool);
+        *by_kind.entry(kind).or_insert(0) += 1;
+        *by_file.entry(path).or_insert(0) += 1;
+    }
+
+    // by_kind: sort by count desc, then kind asc for deterministic output.
+    let mut kind_entries: Vec<(&str, usize)> = by_kind.into_iter().collect();
+    kind_entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let by_kind_json: serde_json::Map<String, serde_json::Value> = kind_entries
+        .iter()
+        .map(|(k, n)| ((*k).to_string(), serde_json::json!(n)))
+        .collect();
+
+    // top_files: top-5 by count desc, then path asc.
+    let mut file_entries: Vec<(&str, usize)> = by_file.into_iter().collect();
+    file_entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let top_files: Vec<serde_json::Value> = file_entries
+        .iter()
+        .take(5)
+        .map(|(path, count)| serde_json::json!({"file": path, "count": count}))
+        .collect();
+
+    serde_json::json!({
+        "total": graph.blind_spots.len(),
+        "by_kind": serde_json::Value::Object(by_kind_json),
+        "top_files": top_files,
+    })
+}
+
 /// Build the doctor payload as a JSON value (schema shared between
 /// compact + json output paths).
 fn build_payload(graph_path: &std::path::Path) -> serde_json::Value {
     let exists = graph_path.exists();
     let size_bytes = std::fs::metadata(graph_path).map(|m| m.len()).ok();
+    let live_bs = live_blind_spots(graph_path);
 
     let framework_coverage: Vec<serde_json::Value> = FRAMEWORK_COVERAGE
         .iter()
@@ -208,6 +256,7 @@ fn build_payload(graph_path: &std::path::Path) -> serde_json::Value {
         },
         "framework_coverage": framework_coverage,
         "blind_spot_catalog": blind_spot_catalog,
+        "live_blind_spots": live_bs,
         "confidence_thresholds": {
             "high_trust_only": HIGH_TRUST_CONFIDENCE,
             "fanout_base": fc::FANOUT_BASE,
@@ -276,6 +325,42 @@ fn render_compact(value: &serde_json::Value) -> String {
         ));
     }
     out.push('\n');
+
+    // live_blind_spots — only shown when graph.bin was loadable. On a
+    // fresh checkout with no graph, the section is silently skipped so
+    // doctor remains useful before the first `gnx analyze`.
+    let lbs = &value["live_blind_spots"];
+    if lbs.is_object() {
+        out.push_str("live_blind_spots:\n");
+        out.push_str(&format!(
+            "  total: {}\n",
+            lbs["total"].as_u64().unwrap_or(0)
+        ));
+        out.push_str("  by_kind:\n");
+        if let Some(by_kind) = lbs["by_kind"].as_object() {
+            // JSON map is alphabetical (BTreeMap); re-sort to count-desc
+            // for LLM readability (most-frequent kind first).
+            let mut entries: Vec<(&String, u64)> = by_kind
+                .iter()
+                .map(|(k, v)| (k, v.as_u64().unwrap_or(0)))
+                .collect();
+            entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            for (kind, count) in entries {
+                out.push_str(&format!("    {kind}: {count}\n"));
+            }
+        }
+        out.push_str("  top_files:\n");
+        if let Some(rows) = lbs["top_files"].as_array() {
+            for row in rows {
+                out.push_str(&format!(
+                    "    - file: {}\n      count: {}\n",
+                    row["file"].as_str().unwrap_or(""),
+                    row["count"].as_u64().unwrap_or(0),
+                ));
+            }
+        }
+        out.push('\n');
+    }
 
     out.push_str("confidence_thresholds:\n");
     out.push_str(&format!(
@@ -366,6 +451,16 @@ mod tests {
     }
 
     #[test]
+    fn build_payload_emits_null_live_blind_spots_when_graph_missing() {
+        let v = build_payload(std::path::Path::new("/tmp/does/not/exist"));
+        assert!(
+            v["live_blind_spots"].is_null(),
+            "expected null live_blind_spots when graph.bin absent, got: {}",
+            v["live_blind_spots"]
+        );
+    }
+
+    #[test]
     fn render_compact_emits_required_section_headers() {
         let v = build_payload(std::path::Path::new("/tmp/x"));
         let s = render_compact(&v);
@@ -374,5 +469,18 @@ mod tests {
         assert!(s.contains("confidence_thresholds:"));
         assert!(s.contains("fastapi-depends"));
         assert!(s.contains("python-eval"));
+    }
+
+    #[test]
+    fn render_compact_skips_live_blind_spots_section_when_null() {
+        // No graph.bin at this path => live_blind_spots is null => the
+        // section must be silently omitted so doctor stays useful on a
+        // fresh checkout before the first `gnx analyze`.
+        let v = build_payload(std::path::Path::new("/tmp/does/not/exist"));
+        let s = render_compact(&v);
+        assert!(
+            !s.contains("live_blind_spots"),
+            "compact output should omit live_blind_spots when null; got:\n{s}"
+        );
     }
 }

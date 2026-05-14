@@ -315,7 +315,22 @@ pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
         })
         .collect();
 
-    let result = json!({
+    // Blind-spot warning: any changed file that also contains eval / exec /
+    // dynamic-import sites means the diff's effective blast radius may be
+    // larger than what graph traversal sees. Surface per-file counts so the
+    // LLM knows to widen its grep before trusting `affected_processes`.
+    let changed_set: std::collections::HashSet<&str> =
+        changed_paths.iter().map(|s| s.as_str()).collect();
+    let mut blind_spot_by_file: std::collections::BTreeMap<String, u32> =
+        std::collections::BTreeMap::new();
+    for bs in graph.blind_spots.iter() {
+        let fp = bs.file_path.resolve(&graph.string_pool);
+        if changed_set.contains(fp) {
+            *blind_spot_by_file.entry(fp.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let mut result = json!({
         "summary": {
             "changed_count": changed_symbols.len(),
             "affected_count": process_count,
@@ -325,6 +340,15 @@ pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
         "changed_symbols": changed_symbols,
         "affected_processes": affected_arr,
     });
+
+    if !blind_spot_by_file.is_empty() {
+        let total: u32 = blind_spot_by_file.values().sum();
+        result["blind_spot_warning"] = json!({
+            "total": total,
+            "by_file": blind_spot_by_file,
+            "note": "diff touches files with eval/exec/dynamic-import — affected_processes may understate blast radius",
+        });
+    }
 
     if format == OutputFormat::Toon {
         let compact = compact_output(&result);
