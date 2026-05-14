@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bootstrap Wave 1 language sample repos into .sample_repo/<lang>/
-# Run from repo root: bash tests/parity/bootstrap_sample_repos.sh
+# Run from repo root: bash scripts/parity/bootstrap_sample_repos.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

@@ -106,9 +106,9 @@ Run pattern:
 gnx analyze --repo <corpus> --dump-resolver dumps/gnx.<lang>.jsonl
 
 # 2. dump oracle decisions
-node   scripts/oracles/ts_oracle.mjs <corpus> > dumps/oracle.ts.jsonl
-python scripts/oracles/py_oracle.py  <corpus> > dumps/oracle.py.jsonl
-bash   scripts/oracles/rs_oracle.sh  <corpus> > dumps/oracle.rs.jsonl
+node   scripts/parity/oracles/ts_oracle.mjs <corpus> > dumps/oracle.ts.jsonl
+python scripts/parity/oracles/py_oracle.py  <corpus> > dumps/oracle.py.jsonl
+bash   scripts/parity/oracles/rs_oracle.sh  <corpus> > dumps/oracle.rs.jsonl
 
 # 3. diff
 gnx verify-resolver --oracle ... --gnx ... --lang ts --report report.ts.md
@@ -120,7 +120,7 @@ gnx verify-resolver --oracle ... --gnx ... --lang ts --report report.ts.md
 2. **gnx dump** in resolver.rs (~80 LOC).
 3. **3 oracles** built in parallel via sub-agents (~80 LOC each).
 4. **verify-resolver CLI** + diff harness (~200 LOC).
-5. **Baseline run** → commit `docs/superpowers/specs/resolver-baseline.md`.
+5. **Baseline run** → commit `docs/specs/2026-05-15-resolver-baseline.md`.
 6. **L0 normalization** in SymbolTable (~60 LOC + tests).
 7. **Post-L0 run** → append delta to the baseline doc.
 

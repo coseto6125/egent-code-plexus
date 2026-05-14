@@ -10,9 +10,9 @@
 
 ## Phase 0 — Status (done before dispatch)
 
-- ✅ Worker brief written: `docs/superpowers/plans/parser-worker-brief.md`
+- ✅ Worker brief written: `docs/plans/parser-worker-brief.md`
 - ✅ Verified Swift `@name.X` convention is intentional legacy, not a bug — workers will use majority `@X.name` convention
-- ✅ Verified `tests/parity/run_parity.py` exists
+- ✅ Verified `scripts/parity/run_parity.py` exists
 - ✅ Confirmed registration sites in `crates/gnx-cli/src/commands/analyze.rs` (lines ~50 and ~76)
 - ✅ Confirmed `crates/gnx-analyzer/src/lib.rs` is a flat `pub mod <lang>;` list
 - ✅ Confirmed `crates/gnx-analyzer/Cargo.toml` `[dependencies]` section pattern
@@ -31,7 +31,7 @@
 
 ### Notes per language
 
-**Lua** — queries.scm draft already exists in `docs/superpowers/specs/2026-05-14-gnx-rs-parser-expansion.md` §5.3, use it as a starting point but verify each pattern against actual tree-sitter-lua node types.
+**Lua** — queries.scm draft already exists in `docs/specs/2026-05-14-gnx-rs-parser-expansion.md` §5.3, use it as a starting point but verify each pattern against actual tree-sitter-lua node types.
 
 **Solidity** — most important captures: `contract_declaration`, `library_declaration`, `interface_declaration`, `function_definition`, `modifier_definition`, `event_definition`, `import_directive`, `inheritance_specifier`. Treat `contract` / `library` / `interface` all as `NodeKind::Class`.
 
@@ -48,7 +48,7 @@
 ## Dispatch mechanics
 
 Each worker runs in its own git worktree (Agent `isolation: "worktree"`). The agent:
-1. Reads `docs/superpowers/plans/parser-worker-brief.md`
+1. Reads `docs/plans/parser-worker-brief.md`
 2. Reads the row of this table for its assigned language
 3. Implements the parser end-to-end per the brief's hard constraints
 4. Commits on its worktree branch

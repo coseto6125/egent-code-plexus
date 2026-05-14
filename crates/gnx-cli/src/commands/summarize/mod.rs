@@ -1,6 +1,6 @@
 //! `gnx summarize` — LLM-friendly project overview.
 //!
-//! 對應 design doc: docs/superpowers/specs/2026-05-14-gnx-summarize-design.md
+//! 對應 design doc: docs/specs/2026-05-14-gnx-summarize-design.md
 //! 採 D 變體：分層 (top hot files → architecture/communities → per-file detail)
 //! + 跳過 in_deg=0 孤兒 + 同名符號補 "shadowed by N" 提示。
 

@@ -2,10 +2,10 @@
 """Rust module-resolution oracle for the resolver verification harness.
 
 Emits one JSONL line per `use` binding to stdout, plus a summary on stderr.
-Schema matches docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md.
+Schema matches docs/specs/2026-05-15-resolver-oracle-harness.md.
 
 Usage:
-    python3 scripts/oracles/rs_oracle.py <repoPath> > oracle.jsonl
+    python3 scripts/parity/oracles/rs_oracle.py <repoPath> > oracle.jsonl
 
 Resolution model (structural, not full rustc):
 

@@ -186,7 +186,7 @@ LLM 看到 3 條 0.29 conf 的 `reflection-getattr-fanout` 邊 →
 - `obj.method()` 普通呼叫（不該被誤抓）
 
 ### Task 4 — docs
-- 更新 `docs/superpowers/evals/` 加 Phase 2 設計記錄
+- 更新 `docs/evals/` 加 Phase 2 設計記錄
 - Update README（如有）說明 fanout edges 的解讀
 
 ---

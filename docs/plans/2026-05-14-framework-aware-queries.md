@@ -8,7 +8,7 @@
 
 **Tech Stack:** tree-sitter 0.25 query syntax, Rust 2021, 既有 gnx-core/gnx-analyzer crate boundary。
 
-**Eval reference:** `docs/superpowers/evals/2026-05-14-framework-aware-queries.md`。
+**Eval reference:** `docs/evals/2026-05-14-framework-aware-queries.md`。
 
 ---
 

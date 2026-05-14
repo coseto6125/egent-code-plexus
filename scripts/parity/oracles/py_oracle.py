@@ -3,10 +3,10 @@
 
 Emits one JSONL line per imported binding to stdout, with a 5-line summary on
 stderr. Contract documented in
-``docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md``.
+``docs/specs/2026-05-15-resolver-oracle-harness.md``.
 
 Usage:
-    python3 scripts/oracles/py_oracle.py <repoPath> > oracle.jsonl
+    python3 scripts/parity/oracles/py_oracle.py <repoPath> > oracle.jsonl
 
 Resolution strategy:
     * Parse each ``*.py`` / ``*.pyi`` file with ``ast``.

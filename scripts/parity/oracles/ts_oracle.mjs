@@ -2,11 +2,11 @@
 // TypeScript module-resolution oracle for the resolver verification harness.
 //
 // Emits one JSONL line per imported binding to stdout, plus a 5-line
-// summary on stderr. Schema matches docs/superpowers/specs/
+// summary on stderr. Schema matches docs/specs/
 // 2026-05-15-resolver-oracle-harness.md.
 //
 // Usage:
-//   node scripts/oracles/ts_oracle.mjs <repoPath> > oracle.jsonl
+//   node scripts/parity/oracles/ts_oracle.mjs <repoPath> > oracle.jsonl
 //
 // Requires: Node >=18 and the `typescript` package resolvable on this host.
 // If `typescript` is not in the current project's node_modules we fall back

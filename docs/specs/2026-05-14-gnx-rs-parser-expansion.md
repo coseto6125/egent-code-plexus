@@ -79,7 +79,7 @@ Tree-sitter query writing is high-template, low-novel-reasoning work: Sonnet is 
 
 Each subagent is a fresh context — it must re-read sample parsers, `queries.scm` templates, and the target grammar's `node-types.json`. To avoid 26× duplicated reads:
 
--   **Shared brief**: write a single `docs/superpowers/plans/parser-worker-brief.md` containing (a) the parser template anatomy, (b) capture naming conventions, (c) verification commands. Each subagent's prompt opens with "read this brief, then [task-specific instructions]" — the brief's content becomes a prompt-cache hit if subagents fire within the 5-minute window.
+-   **Shared brief**: write a single `docs/plans/parser-worker-brief.md` containing (a) the parser template anatomy, (b) capture naming conventions, (c) verification commands. Each subagent's prompt opens with "read this brief, then [task-specific instructions]" — the brief's content becomes a prompt-cache hit if subagents fire within the 5-minute window.
 -   **No shared mutable state during fan-out**: each subagent works on one `crates/gnx-analyzer/src/<lang>/queries.scm` and nothing else. The Config wirings are batched in a separate serial phase (§3.3 Phase 2) so they all touch `config_detector` cleanly.
 
 ### 3.3 Batch table
@@ -97,7 +97,7 @@ Total wall-clock: **~2.5 days** with parallelization vs ~6 days serial. Total es
 
 ## 4. Worker brief contents
 
-The shared `docs/superpowers/plans/parser-worker-brief.md` (to be written in Phase 0) must include:
+The shared `docs/plans/parser-worker-brief.md` (to be written in Phase 0) must include:
 
 0.  **Phase 0 hard prerequisite — Swift capture-name alignment**: `crates/gnx-analyzer/src/swift/queries.scm` currently uses `@name.class` / `@name.function`, but `swift/parser.rs` calls `capture_index_for_name("class.name")` etc. (the standard convention used by the other 13 langs). The mismatch means Swift currently produces empty parse output silently — no error, no symbols. **Fix this before any Swift gap-fill worker runs**, otherwise the workers will spin on queries that look correct but resolve to empty captures. Standardize on `@class.name` / `@function.name` to match the other parsers.
 1.  **Anatomy of a parser**: walk through `c/parser.rs` (smallest reference, 127 lines) — `Provider::new` loads grammar + query, `parse_file` runs query, captures iterated, `RawNode` / `RawImport` emitted into `LocalGraph`.
@@ -242,9 +242,9 @@ Each goes through the same template as Lua. Bash + SQL + HCL group is particular
 ```
 Day 1 (Opus or Sonnet, serial)
   └─ Phase 0: setup
-     ├─ docs/superpowers/plans/parser-worker-brief.md
+     ├─ docs/plans/parser-worker-brief.md
      ├─ Swift capture-name alignment fix (queries.scm ↔ parser.rs)
-     ├─ Verification harness sanity check (tests/parity/run_parity.py)
+     ├─ Verification harness sanity check (scripts/parity/run_parity.py)
      └─ One trial cell run end-to-end (e.g. JS Type Annotation)
 
 Day 2 AM (Sonnet, parallel × 8)
@@ -283,4 +283,4 @@ Before Phase 1 fan-out, verify:
 ## 10. Open questions
 
 -   **Embedding vector storage for new langs**: Lua / Bash chunks may produce many short symbols. Should embedder skip < N tokens? Already a concern for existing langs, treat uniformly.
--   **Parity harness ground truth**: do we have upstream gitnexus indexing the same fixtures for diff comparison? `tests/parity/run_parity.py` depends on a locally-installed `gnx` CLI; the multi-language extension `all_languages_parity.py` expects `.sample_repo/<Lang>/` dirs that aren't in the repo. Phase 5 may reduce to internal consistency checks unless we wire up upstream fixtures.
+-   **Parity harness ground truth**: do we have upstream gitnexus indexing the same fixtures for diff comparison? `scripts/parity/run_parity.py` depends on a locally-installed `gnx` CLI; the multi-language extension `all_languages_parity.py` expects `.sample_repo/<Lang>/` dirs that aren't in the repo. Phase 5 may reduce to internal consistency checks unless we wire up upstream fixtures.

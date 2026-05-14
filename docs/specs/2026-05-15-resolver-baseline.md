@@ -1,7 +1,7 @@
 # Resolver baseline & L0-delta numbers
 
 Captured 2026-05-15 via the oracle harness in
-`docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md`.
+`docs/specs/2026-05-15-resolver-oracle-harness.md`.
 
 ## Methodology
 
@@ -131,17 +131,17 @@ cargo build -p gnx-rs --release
 
 # TS
 (cd .sample_repo/TypeScript && gnx analyze --repo . --dump-resolver dumps/gnx.ts.jsonl)
-node scripts/oracles/ts_oracle.mjs .sample_repo/TypeScript > dumps/oracle.ts.jsonl
+node scripts/parity/oracles/ts_oracle.mjs .sample_repo/TypeScript > dumps/oracle.ts.jsonl
 gnx verify-resolver --lang ts --oracle dumps/oracle.ts.jsonl --gnx dumps/gnx.ts.jsonl --report report.ts.md
 
 # Py
 (cd .sample_repo/Python && gnx analyze --repo . --dump-resolver dumps/gnx.py.jsonl)
-python3 scripts/oracles/py_oracle.py .sample_repo/Python > dumps/oracle.py.jsonl
+python3 scripts/parity/oracles/py_oracle.py .sample_repo/Python > dumps/oracle.py.jsonl
 gnx verify-resolver --lang py --oracle dumps/oracle.py.jsonl --gnx dumps/gnx.py.jsonl --report report.py.md
 
 # Rs
 (cd .sample_repo/Rust && gnx analyze --repo . --dump-resolver dumps/gnx.rs.jsonl)
-python3 scripts/oracles/rs_oracle.py .sample_repo/Rust > dumps/oracle.rs.jsonl
+python3 scripts/parity/oracles/rs_oracle.py .sample_repo/Rust > dumps/oracle.rs.jsonl
 gnx verify-resolver --lang rs --oracle dumps/oracle.rs.jsonl --gnx dumps/gnx.rs.jsonl --report report.rs.md
 ```
 

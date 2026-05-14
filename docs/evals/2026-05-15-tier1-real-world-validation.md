@@ -131,4 +131,4 @@ Tier 1 Express query 只覆蓋 `app.method(path, named_handler_ident)` —這在
 *Validation by main controller (Opus 4.7, 1M context).*
 *Samples cloned to `.sample_repo/` (gitignored).*
 *Date: 2026-05-15.*
-*Related: `docs/superpowers/evals/2026-05-14-framework-aware-queries.md` (go/no-go), `docs/superpowers/plans/2026-05-14-framework-aware-queries.md` (Tier 1 plan).*
+*Related: `docs/evals/2026-05-14-framework-aware-queries.md` (go/no-go), `docs/plans/2026-05-14-framework-aware-queries.md` (Tier 1 plan).*
