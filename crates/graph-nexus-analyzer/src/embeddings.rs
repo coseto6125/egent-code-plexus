@@ -15,6 +15,26 @@ const EMBED_MAX_LENGTH: usize = 128;
 /// specific positions. Must match the active EmbeddingModel below.
 const EMBED_DIM_FALLBACK: usize = 1024;
 
+/// Inference batch passed to fastembed. Bounds peak resident memory:
+/// passing `None` lets fastembed slurp the full input into a single
+/// tokenize + session.run, which can hit several GiB on 20k+ corpora and
+/// OOM on laptops / WSL2. 32 keeps peak ~100–300 MiB at the cost of a
+/// slight throughput loss. Tune via `GNX_EMBED_BATCH`.
+///
+/// Upstream GitNexus reference: triage scripts use 32 (BAAI/bge-m3 INT8
+/// on CPU, ~0.5s/batch); the JS main pipeline ships batchSize=16 +
+/// subBatchSize=8 (transformers.js / V8 overhead is higher than Rust
+/// fastembed + AVX2), env-tunable via GITNEXUS_EMBEDDING_BATCH_SIZE.
+const EMBED_BATCH_DEFAULT: usize = 32;
+
+fn resolve_embed_batch() -> usize {
+    std::env::var("GNX_EMBED_BATCH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(EMBED_BATCH_DEFAULT)
+}
+
 /// Resolve the model cache directory using HuggingFace conventions so that
 /// gnx shares the download with transformers / sentence-transformers /
 /// any other HF-aware tool on the same machine. Precedence:
@@ -143,7 +163,7 @@ impl Embedder {
                 .model
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-            model.embed(unique_texts, None)?
+            model.embed(unique_texts, Some(resolve_embed_batch()))?
         };
 
         let dim = unique_embeddings
