@@ -120,9 +120,9 @@ Match the capture name **exactly** in `capture_index_for_name(...)` — `capture
 
 Choose Class vs Struct based on language convention. Rust has both; most languages just use Class.
 
-## 4. Wiring into the pipeline (3 sites + 1 dep)
+## 4. Wiring into the pipeline (4 sites + 1 dep)
 
-Each new language needs **four** edits outside its own directory:
+Each new language needs **five** edits outside its own directory. The fifth (pipeline.rs) is non-obvious and **was missed by all 7 Wave 1 workers initially** — without it your provider is registered but never called.
 
 ### 4.1 `crates/gnx-analyzer/Cargo.toml`
 
@@ -164,6 +164,24 @@ pipeline.register_provider(Box::new(<Lang>Provider::new().unwrap()));
 ```
 
 **Both edits must happen together.** Registering a provider without routing the extension means the provider is loaded but never called on files. Routing an extension without registering the provider means the file is scanned but skipped silently.
+
+### 4.4 `crates/gnx-core/src/analyzer/pipeline.rs` — **DON'T MISS THIS**
+
+`pipeline.rs` has a `find_provider()` function with its own extension→provider match arm. Without adding your extensions here, your provider is registered but never receives files (they pass scanning but silently get no provider dispatch). Search for the existing match arm and add your extension:
+
+```rust
+// in find_provider() inside pipeline.rs
+match ext {
+    "ts" | "tsx" => "typescript",
+    // ... existing arms ...
+    "<your_ext>" => "<your_lang_name>",   // ← add this
+    _ => return None,
+}
+```
+
+The string on the right must match the value returned by your `LanguageProvider::name()` method.
+
+For languages with no extension (e.g. `Dockerfile`), you'll need to extend the dispatch to also check filename basename — see how Wave 1's Dockerfile worker handled it.
 
 ## 5. Fixture
 
