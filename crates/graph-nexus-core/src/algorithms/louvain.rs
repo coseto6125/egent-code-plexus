@@ -250,7 +250,7 @@ mod tests {
     fn n(pool: &mut StringPool, name: &str, kind: NodeKind) -> Node {
         let r = pool.add(name);
         Node {
-            uid: r.clone(),
+            uid: r,
             name: r,
             file_idx: 0,
             kind,

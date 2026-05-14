@@ -15,7 +15,7 @@ use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_analyzer::framework_confidence as fc;
 use graph_nexus_core::{GnxError, HIGH_TRUST_CONFIDENCE};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -239,7 +239,10 @@ fn render_compact(value: &serde_json::Value) -> String {
     }
     out.push('\n');
 
-    let fc_arr = value["framework_coverage"].as_array().cloned().unwrap_or_default();
+    let fc_arr = value["framework_coverage"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     out.push_str(&format!(
         "framework_coverage[{}]{{language,framework,pattern,reason_tag,confidence}}:\n",
         fc_arr.len()
@@ -256,7 +259,10 @@ fn render_compact(value: &serde_json::Value) -> String {
     }
     out.push('\n');
 
-    let bs_arr = value["blind_spot_catalog"].as_array().cloned().unwrap_or_default();
+    let bs_arr = value["blind_spot_catalog"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     out.push_str(&format!(
         "blind_spot_catalog[{}]{{language,kind,pattern}}:\n",
         bs_arr.len()
@@ -287,7 +293,7 @@ fn render_compact(value: &serde_json::Value) -> String {
     out
 }
 
-pub fn run(args: DoctorArgs, graph_arg: &PathBuf) -> Result<(), GnxError> {
+pub fn run(args: DoctorArgs, graph_arg: &Path) -> Result<(), GnxError> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let graph_path = graph_path::resolve(graph_arg, &cwd);
     let payload = build_payload(&graph_path);

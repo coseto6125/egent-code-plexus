@@ -52,10 +52,7 @@ fn doctor_lists_framework_coverage() {
     );
 
     // Confidence thresholds
-    assert!(
-        stdout.contains("high_trust_only"),
-        "missing threshold info"
-    );
+    assert!(stdout.contains("high_trust_only"), "missing threshold info");
 }
 
 #[test]

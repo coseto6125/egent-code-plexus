@@ -165,7 +165,7 @@ mod tests {
             fingerprint: [0; 32],
             string_pool: pool.bytes,
             files: vec![File {
-                path: name_ref.clone(),
+                path: name_ref,
                 mtime: 0,
                 content_hash: [0; 32],
                 category: FileCategory::Source,

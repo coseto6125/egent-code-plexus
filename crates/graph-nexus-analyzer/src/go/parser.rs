@@ -4,8 +4,7 @@ use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor};
-
+use tree_sitter::{Query, QueryCursor};
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -34,12 +33,9 @@ impl LanguageProvider for GoProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        
-        let tree = PARSER.with(|p| {
-            p.borrow_mut()
-                .parse(source, None)
-        }).ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
-
+        let tree = PARSER
+            .with(|p| p.borrow_mut().parse(source, None))
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
