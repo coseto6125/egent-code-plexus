@@ -1,6 +1,6 @@
 use crate::calls::extract_calls;
 use gnx_core::analyzer::provider::LanguageProvider;
-use gnx_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use gnx_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -13,8 +13,12 @@ pub struct RustProvider {
 impl RustProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_rust::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        let query = Query::new(&language, &query_source)?;
         Ok(Self { query })
     }
 }
@@ -57,6 +61,15 @@ impl LanguageProvider for RustProvider {
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_decorator = self.query.capture_index_for_name("decorator");
+
+        let idx_axum_handler = self.query.capture_index_for_name("axum.route.handler");
+
+        // Side-table: top-level free `fn` byte ranges + names, used to resolve
+        // the enclosing function for framework-ref captures via byte-range containment.
+        let mut fn_spans: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+        // Collected framework-ref captures (handler ident text + capture node span info).
+        let mut axum_handler_captures: Vec<(String, usize, usize, (u32, u32, u32, u32))> =
+            Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -127,6 +140,24 @@ impl LanguageProvider for RustProvider {
                     {
                         decorators.push(d_str.to_string());
                     }
+                } else if Some(cap_idx) == idx_axum_handler {
+                    if let Ok(h_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        let start = cap.node.start_position();
+                        let end = cap.node.end_position();
+                        axum_handler_captures.push((
+                            h_str.to_string(),
+                            cap.node.start_byte(),
+                            cap.node.end_byte(),
+                            (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                        ));
+                    }
                 }
             }
 
@@ -134,6 +165,12 @@ impl LanguageProvider for RustProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
+                    if matches!(k, NodeKind::Function | NodeKind::Method) {
+                        fn_spans.push((
+                            name_str.to_string(),
+                            root.start_byte()..root.end_byte(),
+                        ));
+                    }
                     nodes.push(RawNode {
                         decorators,
                         is_exported,
@@ -182,6 +219,25 @@ impl LanguageProvider for RustProvider {
             &["call_expression", "macro_invocation"],
         );
 
+        // Resolve enclosing function for each framework-ref capture via byte-range
+        // containment; pick the innermost (smallest) function that contains the capture.
+        let mut framework_refs = Vec::with_capacity(axum_handler_captures.len());
+        for (handler_name, cap_start, cap_end, span) in axum_handler_captures {
+            let enclosing = fn_spans
+                .iter()
+                .filter(|(_, range)| range.start <= cap_start && cap_end <= range.end)
+                .min_by_key(|(_, range)| range.end - range.start);
+            if let Some((fn_name, _)) = enclosing {
+                framework_refs.push(RawFrameworkRef {
+                    source_name: fn_name.clone(),
+                    target_name: handler_name,
+                    confidence: 0.8,
+                    reason: "axum-route-handler".to_string(),
+                    span,
+                });
+            }
+        }
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes: vec![],
@@ -189,7 +245,7 @@ impl LanguageProvider for RustProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
         })
     }
 }
