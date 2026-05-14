@@ -81,6 +81,16 @@ enum Commands {
     Status(commands::status::StatusArgs),
     /// Interactive wizard to edit `.gitnexus-rs/config.toml`
     Config(commands::config::ConfigArgs),
+    /// Index the current working directory (wraps `analyze --repo .`)
+    #[command(alias = "analyze_here")]
+    AnalyzeHere(commands::analyze_here::AnalyzeHereArgs),
+    /// Given an HTTP route path, surface handler + upstream callers
+    #[command(alias = "api_impact")]
+    ApiImpact(commands::api_impact::ApiImpactArgs),
+    /// Recovery: register an existing `.gitnexus-rs/` folder into the registry
+    Index(commands::index::IndexArgs),
+    /// Delete a registry entry by name or absolute path
+    Remove(commands::remove::RemoveArgs),
 }
 
 fn main() {
@@ -93,6 +103,33 @@ fn main() {
         if let Err(e) = commands::analyze::run(args.clone()) {
             // needs Clone for args or pass by ref, maybe refactoring needed, wait... actually just pass by value
             eprintln!("Command failed: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // AnalyzeHere wraps Analyze with cwd; same no-graph-needed property.
+    if let Commands::AnalyzeHere(args) = &cli.command {
+        if let Err(e) = commands::analyze_here::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Index is a pure registry write (registers existing `.gitnexus-rs/` into registry).
+    if let Commands::Index(args) = &cli.command {
+        if let Err(e) = commands::index::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Remove deletes a registry entry + on-disk index folder; no graph needed.
+    if let Commands::Remove(args) = &cli.command {
+        if let Err(e) = commands::remove::run(args.clone()) {
+            eprintln!("Command failed: {e}");
             std::process::exit(1);
         }
         return;
@@ -212,7 +249,9 @@ fn main() {
         Commands::Status(args) => args.repo.as_deref(),
         Commands::Clean(args) => args.repo.to_str(),
         Commands::Config(args) => args.repo.as_deref(),
+        Commands::ApiImpact(args) => args.repo.as_deref(),
         Commands::Analyze(_)
+        | Commands::AnalyzeHere(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
@@ -220,7 +259,9 @@ fn main() {
         | Commands::RenameBranch(_)
         | Commands::List(_)
         | Commands::VerifyResolver(_)
-        | Commands::Doctor(_) => None,
+        | Commands::Doctor(_)
+        | Commands::Index(_)
+        | Commands::Remove(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -248,7 +289,9 @@ fn main() {
         Commands::Rename(args) => commands::rename::run(args, &engine),
         Commands::Process(args) => commands::process::run(args, &engine),
         Commands::Cluster(args) => commands::cluster::run(args, &engine),
+        Commands::ApiImpact(args) => commands::api_impact::run(args, &engine),
         Commands::Analyze(_)
+        | Commands::AnalyzeHere(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
@@ -259,7 +302,9 @@ fn main() {
         | Commands::Doctor(_)
         | Commands::Clean(_)
         | Commands::Status(_)
-        | Commands::Config(_) => Ok(()), // Handled above
+        | Commands::Config(_)
+        | Commands::Index(_)
+        | Commands::Remove(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
