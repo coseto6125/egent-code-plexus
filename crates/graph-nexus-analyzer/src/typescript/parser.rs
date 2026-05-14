@@ -1,8 +1,8 @@
-use crate::calls::extract_calls;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
+use super::receiver_types::{collect_local_types, extract_ts_calls};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{
     LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
@@ -333,8 +333,12 @@ impl LanguageProvider for TypeScriptProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
+        // Extract call sites with receiver-type binding:
+        // - `this.method()` → resolved to `ClassName.method` via enclosing class
+        // - `obj.method()` where `obj` has a type annotation → `Type.method`
+        // - everything else falls back to the bare/qualified method name.
+        let local_types = collect_local_types(tree.root_node(), source);
+        extract_ts_calls(tree.root_node(), source, &mut nodes, &local_types);
 
         // Framework-presence gates: only emit Express/NestJS refs when the file
         // actually imports the matching package.

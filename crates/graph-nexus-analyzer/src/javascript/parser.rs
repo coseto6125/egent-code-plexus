@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::extract_js_calls;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
 use graph_nexus_core::graph::NodeKind;
@@ -235,8 +235,11 @@ impl LanguageProvider for JavaScriptProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
+        // Extract call sites with receiver-type binding:
+        // - `this.method()` inside a class body → `ClassName.method`
+        // - `obj.method()` (no type info in JS) → `obj.method` (qualified for resolver)
+        // - `fn()` → `fn`
+        extract_js_calls(tree.root_node(), source, &mut nodes);
 
         Ok(LocalGraph {
             content_hash: [0; 32],
