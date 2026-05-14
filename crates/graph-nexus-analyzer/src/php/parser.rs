@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::extract_php_calls;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -270,18 +270,17 @@ impl LanguageProvider for PhpProvider {
 
         let mut nodes: Vec<RawNode> = node_map.into_values().collect();
 
-        // Extract call sites and attach to enclosing function/method nodes.
+        // Extract call sites with receiver-type binding.
+        // Handles $this->method(), parent::method(), self::method(), static::method().
+        // function_call_expression (bare calls) still go through the shared helper.
+        use crate::calls::extract_calls;
         extract_calls(
             tree.root_node(),
             source,
             &mut nodes,
-            &[
-                "function_call_expression",
-                "method_call_expression",
-                "scoped_call_expression",
-                "member_call_expression",
-            ],
+            &["function_call_expression"],
         );
+        extract_php_calls(tree.root_node(), source, &mut nodes);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

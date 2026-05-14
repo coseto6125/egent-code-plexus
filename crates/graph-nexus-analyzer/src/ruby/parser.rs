@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::extract_ruby_calls;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
 use graph_nexus_core::graph::NodeKind;
@@ -163,13 +163,9 @@ impl LanguageProvider for RubyProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["call", "method_call"],
-        );
+        // Extract call sites with receiver-type binding.
+        // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
+        extract_ruby_calls(tree.root_node(), source, &mut nodes);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

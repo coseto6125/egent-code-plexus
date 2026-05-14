@@ -105,10 +105,10 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 | Java | ✓ | ⚠️ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ⚠️ |
 | Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ⚠️ | ⚠️ |
 | C# | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
-| Go | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ✓ | ✓ | ⚠️ | ⚠️ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ⚠️ |
-| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ⚠️ | ⚠️ | ⚠️ | ✓ |
-| Ruby | ✓ | — | ⚠️ | ✓ | — | ⚠️ | ✅ | ⚠️ | ✓ |
+| Go | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✓ | ⚠️ | ⚠️ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ⚠️ |
+| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✓ |
+| Ruby | ✓ | — | ⚠️ | ✓ | — | ✓ | ✅ | ⚠️ | ✓ |
 | Swift | ✅ | — | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
 | C | ✅ | — | ⚠️ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
 | C++ | ✅ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
@@ -116,7 +116,7 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 
 **Where graph-nexus goes beyond upstream** (15 ✅ cells): C/C++ get Imports & Heritage that upstream doesn't claim; Java/Kotlin/Rust/Ruby/Dart get Config parsing for toolchains upstream doesn't cover; PHP gets Heritage; Go/C++/Dart get Named Bindings; Swift/C/C++ get basic Imports.
 
-**Where graph-nexus lags upstream** (most ⚠️ cells): **Constructor Inference** is the biggest gap — Python, TypeScript, and JavaScript now have full receiver-type binding; the other 11 languages are partial. **Frameworks & Entry Points** for Kotlin / C# / Swift / C / C++ / Dart aren't wired (upstream claims all four corners; we have parsers but no framework helpers registered).
+**Where graph-nexus lags upstream** (most ⚠️ cells): **Constructor Inference** is the biggest gap — Python, PHP, and Ruby have full receiver-type binding; the other 11 languages are partial. **Frameworks & Entry Points** for Kotlin / C# / Swift / C / C++ / Dart aren't wired (upstream claims all four corners; we have parsers but no framework helpers registered).
 
 Beyond these 14, the Rust providers also cover **17 additional languages** (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig) at the structural level — no upstream baseline to compare against.
 
