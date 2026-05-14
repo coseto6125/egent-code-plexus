@@ -127,6 +127,7 @@ impl LanguageProvider for YamlProvider {
             imports: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         })
     }
 }

@@ -103,6 +103,22 @@ pub struct File {
     pub category: FileCategory,
 }
 
+/// File-level record of a truly unresolvable code pattern (eval/dynamic
+/// import/cross-object reflection/...). Persisted in the graph so that
+/// `gnx context` / `gnx analyze` can surface blind spots to the LLM,
+/// telling it "we cannot see past this site — confirm manually".
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct BlindSpotRecord {
+    pub kind: StrRef,
+    pub file_path: StrRef,
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+    pub hint: StrRef,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug)]
 #[rkyv(derive(Debug))]
 pub struct ZeroCopyGraph {
@@ -125,6 +141,10 @@ pub struct ZeroCopyGraph {
     pub process_start: u32,
     pub traces_offsets: Vec<u32>,
     pub traces_data: Vec<u32>,
+
+    /// File-level metadata: unresolvable code patterns detected during analysis.
+    /// Not graph edges — just sites the LLM should flag for manual review.
+    pub blind_spots: Vec<BlindSpotRecord>,
 }
 
 #[cfg(test)]
@@ -167,6 +187,7 @@ mod tests {
             process_start: 1,
             traces_offsets: vec![],
             traces_data: vec![],
+            blind_spots: vec![],
         };
 
         // Serialize

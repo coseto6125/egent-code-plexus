@@ -41,6 +41,7 @@ fn test_mmap_graph_access() {
         process_start: 1,
         traces_offsets: vec![],
         traces_data: vec![],
+        blind_spots: vec![],
     };
 
     // Use rkyv::to_bytes for rkyv 0.8.x

@@ -60,6 +60,23 @@ pub struct RawFanoutRef {
     pub span: (u32, u32, u32, u32),
 }
 
+/// Truly unresolvable code pattern (eval/exec/dynamic-import/cross-object
+/// reflection/...). Unlike `RawFanoutRef`, candidates cannot even be
+/// enumerated — the analyzer just records "this is a blind spot" so
+/// downstream LLM tooling can flag the location for manual inspection.
+///
+/// Carries `file_path` directly (unlike other Raw* types whose file is
+/// implicit in their owning `LocalGraph`) because blind spots are
+/// passed through to graph-level metadata where the source file must
+/// remain identifiable after the LocalGraph is consumed.
+#[derive(Debug, Clone)]
+pub struct BlindSpot {
+    pub kind: String,
+    pub file_path: PathBuf,
+    pub span: (u32, u32, u32, u32),
+    pub hint: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalGraph {
     pub file_path: PathBuf,
@@ -70,4 +87,5 @@ pub struct LocalGraph {
     pub routes: Vec<RawRoute>,
     pub framework_refs: Vec<RawFrameworkRef>,
     pub fanout_refs: Vec<RawFanoutRef>,
+    pub blind_spots: Vec<BlindSpot>,
 }

@@ -369,6 +369,7 @@ impl LanguageProvider for PythonProvider {
             documents: vec![],
             framework_refs,
             fanout_refs,
+            blind_spots: vec![],
         })
     }
 }

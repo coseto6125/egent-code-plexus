@@ -1,7 +1,9 @@
 use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::resolver::Resolver;
 use gnx_core::analyzer::types::{LocalGraph, RawNode};
-use gnx_core::graph::{Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph};
+use gnx_core::graph::{
+    BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph,
+};
 use gnx_core::pool::StringPool;
 
 fn determine_category(path: &str) -> FileCategory {
@@ -475,6 +477,25 @@ impl GraphBuilder {
 
         edges.extend(route_edges);
 
+        // Pass: blind spots — pure metadata passthrough, no edges created.
+        // Each local_graph's blind_spots are interned and stored in the graph's
+        // file-level metadata for `gnx context` / `gnx analyze` to surface to
+        // the LLM (truly unresolvable patterns like eval/dynamic-import).
+        let mut all_blind_spots: Vec<BlindSpotRecord> = Vec::new();
+        for local_graph in &self.local_graphs {
+            for bs in &local_graph.blind_spots {
+                all_blind_spots.push(BlindSpotRecord {
+                    kind: string_pool.add(&bs.kind),
+                    file_path: string_pool.add(&bs.file_path.to_string_lossy()),
+                    start_row: bs.span.0,
+                    start_col: bs.span.1,
+                    end_row: bs.span.2,
+                    end_col: bs.span.3,
+                    hint: string_pool.add(&bs.hint),
+                });
+            }
+        }
+
         // Optional: flush the resolver decision dump now that pass 2 is done.
         // Spec: docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md
         if let Some(dump_path) = self.resolver_dump_path.as_ref() {
@@ -689,6 +710,7 @@ impl GraphBuilder {
             traces_offsets,
             traces_data,
             files,
+            blind_spots: all_blind_spots,
         }
     }
 }
@@ -777,6 +799,7 @@ mod tests {
             routes: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -796,6 +819,7 @@ mod tests {
             routes: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -934,6 +958,7 @@ mod tests {
                 reason: "reflection-getattr-fanout".into(),
                 span: (0, 0, 0, 0),
             }],
+            blind_spots: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1015,6 +1040,7 @@ mod tests {
                 reason: "reflection-getattr-fanout".into(),
                 span: (0, 0, 0, 0),
             }],
+            blind_spots: vec![],
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -1074,6 +1100,7 @@ mod tests {
                 reason: "fastapi-depends".into(),
                 span: (0, 0, 0, 0),
             }],
+            blind_spots: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1114,6 +1141,7 @@ mod tests {
             routes: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         }
     }
 
@@ -1176,5 +1204,70 @@ mod tests {
             1,
             "unique callable must emit exactly one CALLS edge"
         );
+    }
+
+    /// Task A acceptance: `LocalGraph.blind_spots` survive the builder pass
+    /// and land in `ZeroCopyGraph.blind_spots` with all fields (kind /
+    /// file_path / span / hint) preserved via the string pool. Locks in
+    /// the contract that Task B (Python detector) and Task C (CLI
+    /// surface) rely on.
+    #[test]
+    fn blind_spots_pass_through_to_graph() {
+        use gnx_core::analyzer::types::BlindSpot;
+
+        let g = LocalGraph {
+            file_path: "test.py".into(),
+            content_hash: [0; 32],
+            nodes: vec![],
+            documents: vec![],
+            imports: vec![],
+            routes: vec![],
+            framework_refs: vec![],
+            fanout_refs: vec![],
+            blind_spots: vec![
+                BlindSpot {
+                    kind: "python-eval".into(),
+                    file_path: "test.py".into(),
+                    span: (10, 4, 10, 25),
+                    hint: "eval(arg) — runtime code execution".into(),
+                },
+                BlindSpot {
+                    kind: "python-dynamic-import".into(),
+                    file_path: "test.py".into(),
+                    span: (15, 0, 15, 40),
+                    hint: "importlib.import_module(...) — dynamic loading".into(),
+                },
+            ],
+        };
+
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(g);
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.blind_spots.len(),
+            2,
+            "expected 2 blind spots in graph, got {}",
+            graph.blind_spots.len()
+        );
+
+        let resolve = |sref: &gnx_core::pool::StrRef| -> &str {
+            let start = sref.offset as usize;
+            let end = start + sref.len as usize;
+            std::str::from_utf8(&graph.string_pool[start..end]).expect("utf-8")
+        };
+
+        let kinds: Vec<&str> = graph.blind_spots.iter().map(|bs| resolve(&bs.kind)).collect();
+        assert!(kinds.contains(&"python-eval"));
+        assert!(kinds.contains(&"python-dynamic-import"));
+
+        // Spot-check the first record's span + file_path + hint round-trip.
+        let bs0 = &graph.blind_spots[0];
+        assert_eq!(resolve(&bs0.file_path), "test.py");
+        assert_eq!(bs0.start_row, 10);
+        assert_eq!(bs0.start_col, 4);
+        assert_eq!(bs0.end_row, 10);
+        assert_eq!(bs0.end_col, 25);
+        assert_eq!(resolve(&bs0.hint), "eval(arg) — runtime code execution");
     }
 }
