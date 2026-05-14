@@ -4,17 +4,28 @@
 use gnx_core::graph::ArchivedZeroCopyGraph;
 use std::collections::{BTreeMap, HashMap};
 
-/// In/out degree per node index.
+/// In/out degree per node index, plus a centrality signal
+/// (`cross_community_in_deg`) counting only incoming edges that *cross* a
+/// community boundary.
+///
+/// `cross_community_in_deg[i]` is the count of edges whose target is `i` AND
+/// whose source's `community_id` differs from `i`'s `community_id`. Edges into
+/// orphan community 0 are still counted across distinct communities. This
+/// signal upranks files acting as bridges / public API surface and downranks
+/// files that only receive traffic from their own tightly-coupled cluster
+/// (e.g. vendored grammar internals).
 #[derive(Debug, Clone, Default)]
 pub struct DegreeStats {
     pub in_deg: Vec<u32>,
     pub out_deg: Vec<u32>,
+    pub cross_community_in_deg: Vec<u32>,
 }
 
 pub fn degree_stats(g: &ArchivedZeroCopyGraph) -> DegreeStats {
     let n = g.nodes.len();
     let mut in_deg = vec![0u32; n];
     let mut out_deg = vec![0u32; n];
+    let mut cross_community_in_deg = vec![0u32; n];
     for e in g.edges.iter() {
         let s = e.source.to_native() as usize;
         let t = e.target.to_native() as usize;
@@ -23,9 +34,16 @@ pub fn degree_stats(g: &ArchivedZeroCopyGraph) -> DegreeStats {
         }
         if t < n {
             in_deg[t] = in_deg[t].saturating_add(1);
+            if s < n && g.nodes[s].community_id.to_native() != g.nodes[t].community_id.to_native() {
+                cross_community_in_deg[t] = cross_community_in_deg[t].saturating_add(1);
+            }
         }
     }
-    DegreeStats { in_deg, out_deg }
+    DegreeStats {
+        in_deg,
+        out_deg,
+        cross_community_in_deg,
+    }
 }
 
 /// Group node indices by file_idx. BTreeMap keeps deterministic file ordering.

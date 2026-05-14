@@ -24,7 +24,9 @@ pub struct SummarizeArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Top-N hottest files in summary (sorted by aggregated in-degree).
+    /// Top-N hottest files in summary, ranked by cross-community in-edge
+    /// centrality (bridge-traffic). Falls back to total in-degree when the
+    /// graph is single-community.
     #[arg(long, default_value_t = 10)]
     pub top_files: usize,
 

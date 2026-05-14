@@ -94,11 +94,12 @@ pub fn markdown(input: &RenderInput) -> String {
         for (rank, fs) in input.top_files.iter().enumerate() {
             writeln!(
                 out,
-                "{}. `{}` — {} symbol{}, {} aggregated in_deg",
+                "{}. `{}` — {} symbol{} · {} cross-community in-edges · {} total in-edges",
                 rank + 1,
                 file_path(g, fs.file_idx),
                 fs.symbol_count,
                 if fs.symbol_count == 1 { "" } else { "s" },
+                fs.cross_community_in_deg,
                 fs.total_in_deg,
             )
             .unwrap();
@@ -206,6 +207,7 @@ pub fn json(input: &RenderInput) -> serde_json::Value {
                 "path": file_path(g, fs.file_idx),
                 "symbol_count": fs.symbol_count,
                 "total_in_deg": fs.total_in_deg,
+                "cross_community_in_deg": fs.cross_community_in_deg,
                 "top_symbols": symbols,
             })
         })

@@ -4,15 +4,29 @@ use super::analysis::DegreeStats;
 use gnx_core::graph::ArchivedZeroCopyGraph;
 use std::collections::BTreeMap;
 
-/// File-level summary: aggregate symbol count + sum of in_deg across symbols.
+/// File-level summary: aggregate symbol count, sum of in_deg, and sum of
+/// cross-community in_deg across the file's symbols.
 #[derive(Debug, Clone)]
 pub struct FileSummary {
     pub file_idx: u32,
     pub symbol_count: usize,
     pub total_in_deg: u32,
+    /// Primary ranking signal — sum of incoming edges from nodes in a
+    /// *different* community than the receiving node. Counts "bridge" traffic
+    /// that crosses module boundaries, which is a better proxy for "core /
+    /// public API" than raw `in_deg` (which inflates with tightly-coupled
+    /// internal call chains, e.g. vendored grammar helpers).
+    pub cross_community_in_deg: u32,
 }
 
-/// Top-N files ordered by aggregated in_deg (descending), then by symbol_count.
+/// Top-N files ranked by centrality.
+///
+/// Sort key (descending):
+///   1. `cross_community_in_deg` — bridge-traffic centrality.
+///   2. `total_in_deg` — general inbound traffic (degrades gracefully when the
+///      whole repo lands in a single community, e.g. very small projects).
+///   3. `symbol_count` — bigger surface area wins ties.
+///   4. `file_idx` — deterministic tiebreak.
 ///
 /// 用 `select_nth_unstable_by` 做 partial-sort (O(n) + O(k log k))，避免對全
 /// 集合 sort_by(O(n log n))。對大型 repo 收斂 K << N 時差異顯著。
@@ -25,10 +39,13 @@ pub fn top_files(
         .iter()
         .map(|(&fi, nodes)| {
             let total_in_deg: u32 = nodes.iter().map(|&i| stats.in_deg[i]).sum();
+            let cross_community_in_deg: u32 =
+                nodes.iter().map(|&i| stats.cross_community_in_deg[i]).sum();
             FileSummary {
                 file_idx: fi,
                 symbol_count: nodes.len(),
                 total_in_deg,
+                cross_community_in_deg,
             }
         })
         .collect();
@@ -36,8 +53,9 @@ pub fn top_files(
         return Vec::new();
     }
     let cmp = |a: &FileSummary, b: &FileSummary| {
-        b.total_in_deg
-            .cmp(&a.total_in_deg)
+        b.cross_community_in_deg
+            .cmp(&a.cross_community_in_deg)
+            .then_with(|| b.total_in_deg.cmp(&a.total_in_deg))
             .then_with(|| b.symbol_count.cmp(&a.symbol_count))
             .then_with(|| a.file_idx.cmp(&b.file_idx))
     };
@@ -138,7 +156,24 @@ mod tests {
     use super::*;
 
     fn fake_stats(in_deg: Vec<u32>, out_deg: Vec<u32>) -> DegreeStats {
-        DegreeStats { in_deg, out_deg }
+        let n = in_deg.len();
+        DegreeStats {
+            in_deg,
+            out_deg,
+            cross_community_in_deg: vec![0; n],
+        }
+    }
+
+    fn fake_stats_with_xc(
+        in_deg: Vec<u32>,
+        out_deg: Vec<u32>,
+        cross_community_in_deg: Vec<u32>,
+    ) -> DegreeStats {
+        DegreeStats {
+            in_deg,
+            out_deg,
+            cross_community_in_deg,
+        }
     }
 
     #[test]
@@ -169,6 +204,41 @@ mod tests {
         let result = top_files(&by_file, &stats, 3);
         let totals: Vec<u32> = result.iter().map(|f| f.total_in_deg).collect();
         assert_eq!(totals, vec![60, 50, 40]);
+    }
+
+    #[test]
+    fn top_files_ranks_by_cross_community_first() {
+        // file 0: in_deg [50], cross_community [5]  → primary key 5
+        // file 1: in_deg [100], cross_community [0] → primary key 0 (loses despite higher in_deg)
+        // file 2: in_deg [20], cross_community [20] → primary key 20 (wins)
+        // Pin: cross_community_in_deg dominates total_in_deg in ranking, so a
+        // file with low overall traffic but high bridge-traffic outranks a
+        // popular file whose callers are all internal to its own community.
+        let stats = fake_stats_with_xc(vec![50, 100, 20], vec![0, 0, 0], vec![5, 0, 20]);
+        let mut by_file: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        by_file.insert(0, vec![0]);
+        by_file.insert(1, vec![1]);
+        by_file.insert(2, vec![2]);
+        let result = top_files(&by_file, &stats, 10);
+        assert_eq!(result[0].file_idx, 2);
+        assert_eq!(result[1].file_idx, 0);
+        assert_eq!(result[2].file_idx, 1);
+    }
+
+    #[test]
+    fn top_files_falls_back_to_in_deg_when_no_cross_community() {
+        // All files single-community (cross_community all zero) → tiebreaker
+        // walks to total_in_deg. Pins graceful degradation for trivially small
+        // single-cluster repos where centrality signal is degenerate.
+        let stats = fake_stats(vec![10, 20, 5], vec![0, 0, 0]);
+        let mut by_file: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        by_file.insert(0, vec![0]);
+        by_file.insert(1, vec![1]);
+        by_file.insert(2, vec![2]);
+        let result = top_files(&by_file, &stats, 10);
+        assert_eq!(result[0].file_idx, 1);
+        assert_eq!(result[1].file_idx, 0);
+        assert_eq!(result[2].file_idx, 2);
     }
 
     #[test]
