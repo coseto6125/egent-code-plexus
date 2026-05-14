@@ -14,14 +14,23 @@
   name: (identifier) @interface.name
   interfaces: (interfaces (type (_) @heritage))?) @interface
 
-;; Methods
+;; Methods — capture full method_declaration so the span covers the body,
+;; otherwise call-extraction can't attach call sites to the enclosing method.
 (method_declaration
   signature: (method_signature
     (function_signature
       return_type: (type)? @type
       name: (identifier) @method.name))) @method
 
-;; Functions
+;; Functions — capture full function_declaration (signature + body) so calls
+;; inside the body land in this node's span. The bare function_signature
+;; alternative is kept for top-level signatures without a body
+;; (e.g. abstract / external declarations).
+(function_declaration
+  (function_signature
+    return_type: (type)? @type
+    name: (identifier) @function.name)) @function
+
 (function_signature
   return_type: (type)? @type
   name: (identifier) @function.name) @function
