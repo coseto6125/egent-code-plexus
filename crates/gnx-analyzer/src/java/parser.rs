@@ -1,6 +1,7 @@
 use crate::calls::extract_calls;
+use crate::framework_helpers::node_span;
 use gnx_core::analyzer::provider::LanguageProvider;
-use gnx_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use gnx_core::graph::NodeKind;
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,14 +10,58 @@ use tree_sitter::{Parser, Query, QueryCursor};
 
 pub struct JavaProvider {
     query: Query,
+    indices: JavaCaptureIndices,
+}
+
+struct JavaCaptureIndices {
+    class_name: Option<u32>,
+    interface_name: Option<u32>,
+    method_name: Option<u32>,
+    import_name: Option<u32>,
+    import_source: Option<u32>,
+    class: Option<u32>,
+    interface: Option<u32>,
+    method: Option<u32>,
+    export: Option<u32>,
+    heritage: Option<u32>,
+    type_ann: Option<u32>,
+    decorator: Option<u32>,
+    // Spring @Autowired field injection.
+    spring_autowired_class: Option<u32>,
+    spring_autowired_target: Option<u32>,
+    // Spring @RestController / @Controller route methods.
+    spring_route_class: Option<u32>,
+    spring_route_handler: Option<u32>,
 }
 
 impl JavaProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_java::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        let query = Query::new(&language, &query_source)?;
+        let indices = JavaCaptureIndices {
+            class_name: query.capture_index_for_name("class.name"),
+            interface_name: query.capture_index_for_name("interface.name"),
+            method_name: query.capture_index_for_name("method.name"),
+            import_name: query.capture_index_for_name("import.name"),
+            import_source: query.capture_index_for_name("import.source"),
+            class: query.capture_index_for_name("class"),
+            interface: query.capture_index_for_name("interface"),
+            method: query.capture_index_for_name("method"),
+            export: query.capture_index_for_name("export"),
+            heritage: query.capture_index_for_name("heritage"),
+            type_ann: query.capture_index_for_name("type"),
+            decorator: query.capture_index_for_name("decorator"),
+            spring_autowired_class: query.capture_index_for_name("spring.autowired.class"),
+            spring_autowired_target: query.capture_index_for_name("spring.autowired.target"),
+            spring_route_class: query.capture_index_for_name("spring.route.class"),
+            spring_route_handler: query.capture_index_for_name("spring.route.handler"),
+        };
+        Ok(Self { query, indices })
     }
 }
 
@@ -39,21 +84,9 @@ impl LanguageProvider for JavaProvider {
 
         let mut node_map: HashMap<usize, RawNode> = HashMap::new();
         let mut imports = Vec::new();
+        let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
 
-        let idx_name_class = self.query.capture_index_for_name("class.name");
-        let idx_name_interface = self.query.capture_index_for_name("interface.name");
-        let idx_name_method = self.query.capture_index_for_name("method.name");
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-        let idx_import_source = self.query.capture_index_for_name("import.source");
-
-        let idx_class = self.query.capture_index_for_name("class");
-        let idx_interface = self.query.capture_index_for_name("interface");
-        let idx_method = self.query.capture_index_for_name("method");
-
-        let idx_export = self.query.capture_index_for_name("export");
-        let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_type = self.query.capture_index_for_name("type");
-        let idx_decorator = self.query.capture_index_for_name("decorator");
+        let idx = &self.indices;
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -67,46 +100,63 @@ impl LanguageProvider for JavaProvider {
             let mut import_name = None;
             let mut import_src = None;
 
+            // Spring @Autowired captures.
+            let mut autowired_class_node: Option<tree_sitter::Node> = None;
+            let mut autowired_target_node: Option<tree_sitter::Node> = None;
+            // Spring route handler captures.
+            let mut route_class_node: Option<tree_sitter::Node> = None;
+            let mut route_handler_node: Option<tree_sitter::Node> = None;
+
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx_name_class {
+                if cap_idx == idx.class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
-                } else if cap_idx == idx_name_interface {
+                } else if cap_idx == idx.interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
-                } else if cap_idx == idx_name_method {
+                } else if cap_idx == idx.method_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
-                } else if cap_idx == idx_import_name {
+                } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
-                } else if cap_idx == idx_import_source {
+                } else if cap_idx == idx.import_source {
                     import_src = Some(cap.node);
-                } else if cap_idx == idx_class || cap_idx == idx_interface || cap_idx == idx_method
+                } else if cap_idx == idx.class
+                    || cap_idx == idx.interface
+                    || cap_idx == idx.method
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);
                     }
-                } else if cap_idx == idx_export {
+                } else if cap_idx == idx.export {
                     is_exported = true;
-                } else if cap_idx == idx_heritage {
+                } else if cap_idx == idx.heritage {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         heritage.push(h_str.to_string());
                     }
-                } else if cap_idx == idx_type {
+                } else if cap_idx == idx.type_ann {
                     if let Ok(t_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         type_annotation = Some(t_str.to_string());
                     }
-                } else if cap_idx == idx_decorator {
+                } else if cap_idx == idx.decorator {
                     if let Ok(d_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         decorators.push(d_str.to_string());
                     }
+                } else if cap_idx == idx.spring_autowired_class {
+                    autowired_class_node = Some(cap.node);
+                } else if cap_idx == idx.spring_autowired_target {
+                    autowired_target_node = Some(cap.node);
+                } else if cap_idx == idx.spring_route_class {
+                    route_class_node = Some(cap.node);
+                } else if cap_idx == idx.spring_route_handler {
+                    route_handler_node = Some(cap.node);
                 }
             }
 
@@ -169,6 +219,38 @@ impl LanguageProvider for JavaProvider {
                     }
                 }
             }
+
+            // Spring @Autowired: enclosing class -> injected type.
+            if let (Some(cls), Some(tgt)) = (autowired_class_node, autowired_target_node) {
+                if let (Ok(class_name), Ok(target_name)) = (
+                    std::str::from_utf8(&source[cls.start_byte()..cls.end_byte()]),
+                    std::str::from_utf8(&source[tgt.start_byte()..tgt.end_byte()]),
+                ) {
+                    framework_refs.push(RawFrameworkRef {
+                        source_name: class_name.to_string(),
+                        target_name: target_name.to_string(),
+                        confidence: 0.8,
+                        reason: "spring-autowired".to_string(),
+                        span: node_span(&tgt),
+                    });
+                }
+            }
+
+            // Spring @RestController/@Controller: class -> route handler method.
+            if let (Some(cls), Some(mth)) = (route_class_node, route_handler_node) {
+                if let (Ok(class_name), Ok(method_name)) = (
+                    std::str::from_utf8(&source[cls.start_byte()..cls.end_byte()]),
+                    std::str::from_utf8(&source[mth.start_byte()..mth.end_byte()]),
+                ) {
+                    framework_refs.push(RawFrameworkRef {
+                        source_name: class_name.to_string(),
+                        target_name: method_name.to_string(),
+                        confidence: 0.9,
+                        reason: "spring-route-handler".to_string(),
+                        span: node_span(&mth),
+                    });
+                }
+            }
         }
 
         let mut nodes: Vec<RawNode> = node_map.into_values().collect();
@@ -188,7 +270,7 @@ impl LanguageProvider for JavaProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
         })
     }
 }
