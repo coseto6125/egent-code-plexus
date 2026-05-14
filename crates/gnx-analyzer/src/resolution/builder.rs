@@ -1257,7 +1257,11 @@ mod tests {
             std::str::from_utf8(&graph.string_pool[start..end]).expect("utf-8")
         };
 
-        let kinds: Vec<&str> = graph.blind_spots.iter().map(|bs| resolve(&bs.kind)).collect();
+        let kinds: Vec<&str> = graph
+            .blind_spots
+            .iter()
+            .map(|bs| resolve(&bs.kind))
+            .collect();
         assert!(kinds.contains(&"python-eval"));
         assert!(kinds.contains(&"python-dynamic-import"));
 

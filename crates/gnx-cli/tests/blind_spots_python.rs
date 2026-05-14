@@ -109,11 +109,7 @@ fn blind_spot_hints_are_llm_readable() {
 
     for bs in &local.blind_spots {
         assert!(!bs.hint.is_empty(), "hint must not be empty: {:?}", bs);
-        assert!(
-            bs.hint.len() > 20,
-            "hint too short to be helpful: {:?}",
-            bs
-        );
+        assert!(bs.hint.len() > 20, "hint too short to be helpful: {:?}", bs);
         // Hint must reference the pattern type semantically.
         assert!(
             bs.hint.contains(" — ") || bs.hint.contains(": "),
