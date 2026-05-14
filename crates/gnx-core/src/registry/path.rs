@@ -140,3 +140,69 @@ fn hash8(s: &str) -> String {
     let digest = Sha256::digest(s.as_bytes());
     hex::encode(&digest[..4])
 }
+
+/// Resolve the gnx home directory used for `registry.json` and per-branch
+/// index dirs. Tries `$HOME/.gnx` first; if HOME is unset or the directory
+/// cannot be created and written to (read-only FS, permission denied, CI
+/// sandbox), falls back to `<temp_dir>/gnx-rs-fallback/.gnx`.
+///
+/// Reads and writes within a single CLI invocation use the same resolved
+/// path: a project indexed in fallback mode is queryable from the same
+/// environment without extra flags.
+pub fn resolve_home_gnx() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let candidate = PathBuf::from(home).join(".gnx");
+        if probe_writable(&candidate) {
+            return candidate;
+        }
+    }
+    std::env::temp_dir().join("gnx-rs-fallback").join(".gnx")
+}
+
+fn probe_writable(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".gnx-write-probe");
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_writable_true_for_normal_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(probe_writable(tmp.path()));
+        // probe file should be cleaned up
+        assert!(!tmp.path().join(".gnx-write-probe").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_writable_false_for_readonly_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let ro = tmp.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        let mut perms = std::fs::metadata(&ro).unwrap().permissions();
+        perms.set_mode(0o500); // read+exec, no write
+        std::fs::set_permissions(&ro, perms).unwrap();
+        assert!(!probe_writable(&ro));
+        // restore perms so tempdir cleanup works
+        let mut p = std::fs::metadata(&ro).unwrap().permissions();
+        p.set_mode(0o700);
+        std::fs::set_permissions(&ro, p).unwrap();
+    }
+
+    #[test]
+    fn probe_writable_false_when_path_is_an_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!probe_writable(&file));
+    }
+}

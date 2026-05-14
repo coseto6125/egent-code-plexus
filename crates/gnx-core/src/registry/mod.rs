@@ -15,7 +15,7 @@ pub use audit::{AuditEvent, AuditLog};
 pub use lock::FileLock;
 pub use meta::BranchMeta;
 pub use path::{
-    derive_repo_name, sanitize_branch, sanitize_segment, uid_path,
+    derive_repo_name, resolve_home_gnx, sanitize_branch, sanitize_segment, uid_path,
     IndexLayout, PathError,
 };
 pub use store::{

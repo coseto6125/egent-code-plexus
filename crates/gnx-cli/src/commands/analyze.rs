@@ -110,10 +110,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
         format!("git_state resolve: {e}")
     })?;
 
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| "HOME env not set".to_string())?;
-    let home_gnx = home.join(".gnx");
+    let home_gnx = gnx_core::registry::resolve_home_gnx();
 
     let existing_repos: Vec<(String, String)> = {
         let reg = gnx_core::registry::Registry::open(&home_gnx)

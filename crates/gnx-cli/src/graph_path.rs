@@ -21,11 +21,7 @@ pub fn resolve(graph: &Path, cwd: &Path) -> PathBuf {
         Ok(s) => s,
         Err(_) => return graph.to_path_buf(),
     };
-    let home = match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h),
-        None => return graph.to_path_buf(),
-    };
-    let home_gnx = home.join(".gnx");
+    let home_gnx = gnx_core::registry::resolve_home_gnx();
 
     let existing_repos: Vec<(String, String)> = {
         let reg = match gnx_core::registry::Registry::open(&home_gnx) {

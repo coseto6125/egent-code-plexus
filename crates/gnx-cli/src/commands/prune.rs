@@ -15,10 +15,7 @@ pub fn run(args: PruneArgs) -> Result<(), gnx_core::GnxError> {
         gnx_core::GnxError::InvalidArgument(format!("git_state: {e}"))
     })?;
 
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| gnx_core::GnxError::InvalidArgument("HOME not set".into()))?;
-    let home_gnx = home.join(".gnx");
+    let home_gnx = gnx_core::registry::resolve_home_gnx();
 
     let branch_seg = gnx_core::registry::sanitize_branch(&args.branch).map_err(|e| {
         gnx_core::GnxError::InvalidArgument(format!("branch: {e}"))
