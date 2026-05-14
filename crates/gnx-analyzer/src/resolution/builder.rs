@@ -452,10 +452,12 @@ impl GraphBuilder {
 
                 for candidate_name in &fanout_ref.candidates {
                     // Resolve candidate via same-file → import-scoped → global.
+                    // Reflection dispatch targets methods → Callable.
                     let targets = resolver.resolve_symbol(
                         &local_graph.file_path,
                         candidate_name,
                         &local_graph.imports,
+                        ResolveTarget::Callable,
                     );
                     for (target_id, _) in targets {
                         let reason_ref = string_pool.add(&fanout_ref.reason);
