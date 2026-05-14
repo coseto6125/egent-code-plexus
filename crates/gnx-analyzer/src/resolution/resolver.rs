@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use crate::resolution::heuristics::ResolutionTier;
-use crate::resolution::index::SymbolTable;
+use crate::resolution::index::{ResolveTarget, SymbolTable};
 
 pub type NodeId = u32;
 
@@ -67,11 +67,16 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolves a symbol name to possible target nodes with confidence scores.
+    ///
+    /// `target` constrains Tier-3 (Global) fallback so a bare `format()` /
+    /// `new()` doesn't fan out to every same-named symbol in the graph.
+    /// Tier-3 returns at most one match — ambiguity → zero edges.
     pub fn resolve_symbol(
         &self,
         source_file: &Path,
         symbol_name: &str,
         raw_imports: &[RawImport],
+        target: ResolveTarget,
     ) -> Vec<(NodeId, f32)> {
         let mut results = Vec::new();
         let source_file_str = source_file.to_string_lossy();
@@ -136,10 +141,12 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        // Tier 3: Try Global (Fallback). Whether or not we get a hit, we
-        // surface the specifier (if any matched the symbol) so the dump can
-        // tell Tier-3 ghost edges and FN_dangling apart.
-        let global_matches = self.symbol_table.lookup_global(symbol_name);
+        // Tier 3: Global fallback — emit only when the kind-filtered candidate
+        // set is unique. Refusing to guess on ambiguity is the dominant defence
+        // against bare-name fan-out (`new`, `format`, `default`, `main`, ...).
+        // `alt_count` in the dump still surfaces the raw same-name count so the
+        // verification harness can distinguish suppressed-ambiguous from
+        // truly-unresolved.
         let specifier = raw_imports
             .iter()
             .find(|i| match &i.alias {
@@ -147,21 +154,17 @@ impl<'a> Resolver<'a> {
                 None => i.imported_name == symbol_name,
             })
             .map(|i| i.source.as_str());
+        let raw_count = self.symbol_table.global_match_count(symbol_name);
 
-        if let Some(&first) = global_matches.first() {
-            let alt = (global_matches.len() - 1) as u32;
-            for node_id in global_matches {
-                results.push((node_id, ResolutionTier::Global.base_confidence()));
-            }
-            // Dump records the first match + alt_count so the diff harness
-            // can compute FP_overmatch without serializing every alternative.
+        if let Some(node_id) = self.symbol_table.lookup_unique_global(symbol_name, target) {
+            results.push((node_id, ResolutionTier::Global.base_confidence()));
             self.record(
                 &source_file_str,
                 symbol_name,
                 specifier,
                 DecisionTier::Global,
-                Some(first),
-                alt,
+                Some(node_id),
+                raw_count.saturating_sub(1),
                 Some(ResolutionTier::Global.base_confidence()),
             );
         } else {
@@ -171,7 +174,7 @@ impl<'a> Resolver<'a> {
                 specifier,
                 DecisionTier::Unresolved,
                 None,
-                0,
+                raw_count,
                 None,
             );
         }
@@ -428,5 +431,90 @@ mod tests {
             c.iter().any(|s| s.ends_with("/index.tsx")),
             "should include some /index.tsx candidate: {c:?}"
         );
+    }
+
+    // ── Tier-3 cap (kind-filtered + unique-only) ────────────────────────────
+
+    use gnx_core::graph::NodeKind;
+
+    /// Build a SymbolTable from `(file, name, kind)` triples — ids auto-assigned
+    /// monotonically (matching the dense-id invariant `register_node` enforces).
+    fn st_with(nodes: &[(&str, &str, NodeKind)]) -> SymbolTable {
+        let mut st = SymbolTable::new();
+        for (id, (file, name, kind)) in nodes.iter().enumerate() {
+            st.register_node(file, name, id as u32, *kind);
+        }
+        st
+    }
+
+    #[test]
+    fn tier3_ambiguous_callable_emits_no_edge() {
+        // Two same-named methods in different files → ambiguous bare call
+        // refuses to guess. Pins the dominant defence against fan-out
+        // (common names like `new`/`format`/`default`/`main`).
+        let st = st_with(&[
+            ("a.rs", "new", NodeKind::Method),
+            ("b.rs", "new", NodeKind::Method),
+        ]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(&PathBuf::from("c.rs"), "new", &[], ResolveTarget::Callable);
+        assert!(
+            out.is_empty(),
+            "ambiguous bare callable must not emit, got {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn tier3_unique_callable_emits_one_edge() {
+        // Single global match → still emit. The cap is about ambiguity,
+        // not killing all cross-file resolution.
+        let st = st_with(&[("a.rs", "process_request", NodeKind::Function)]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(
+            &PathBuf::from("c.rs"),
+            "process_request",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert_eq!(out, vec![(0, ResolutionTier::Global.base_confidence())]);
+    }
+
+    #[test]
+    fn tier3_kind_filter_excludes_non_callable() {
+        // One Function + one Variable share the name. Callable target sees
+        // only the Function → uniqueness restored → edge emitted. Without
+        // the kind filter, both would match → ambiguous → no edge.
+        let st = st_with(&[
+            ("a.rs", "config", NodeKind::Function),
+            ("b.rs", "config", NodeKind::Variable),
+        ]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(
+            &PathBuf::from("c.rs"),
+            "config",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert_eq!(out, vec![(0, ResolutionTier::Global.base_confidence())]);
+    }
+
+    #[test]
+    fn tier1_same_file_still_wins() {
+        // SameFile resolution unaffected by kind filter — Variable in same
+        // file beats global resolution path. Pins that the fix only changes
+        // Tier-3 semantics.
+        let st = st_with(&[
+            ("a.rs", "helper", NodeKind::Variable),
+            ("b.rs", "helper", NodeKind::Function),
+        ]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(
+            &PathBuf::from("a.rs"),
+            "helper",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert_eq!(out, vec![(0, ResolutionTier::SameFile.base_confidence())]);
     }
 }

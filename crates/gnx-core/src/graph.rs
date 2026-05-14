@@ -21,6 +21,19 @@ pub enum NodeKind {
     Section,
 }
 
+impl NodeKind {
+    /// True when the node represents an invokable target (CALLS edge sink).
+    pub const fn is_callable(self) -> bool {
+        matches!(self, Self::Function | Self::Method | Self::Constructor)
+    }
+
+    /// True when the node represents an extendable / type-binding target
+    /// (EXTENDS edges, type annotations).
+    pub const fn is_type(self) -> bool {
+        matches!(self, Self::Class | Self::Interface)
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]

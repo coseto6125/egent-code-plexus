@@ -1,4 +1,4 @@
-use crate::resolution::index::SymbolTable;
+use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::resolver::Resolver;
 use gnx_core::analyzer::types::{LocalGraph, RawNode};
 use gnx_core::graph::{Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph};
@@ -179,7 +179,12 @@ impl GraphBuilder {
             });
 
             for raw_node in &local_graph.nodes {
-                symbol_table.register_node(&path_str, &raw_node.name, current_node_idx);
+                symbol_table.register_node(
+                    &path_str,
+                    &raw_node.name,
+                    current_node_idx,
+                    raw_node.kind,
+                );
 
                 let uid_str = format!("{:?}:{}:{}", raw_node.kind, path_str, raw_node.name);
                 let uid_ref = string_pool.add(&uid_str);
@@ -335,8 +340,12 @@ impl GraphBuilder {
             for raw_node in &local_graph.nodes {
                 // Resolve heritage (base classes, traits) — emit Extends edge.
                 for base in &raw_node.heritage {
-                    let targets =
-                        resolver.resolve_symbol(&local_graph.file_path, base, &local_graph.imports);
+                    let targets = resolver.resolve_symbol(
+                        &local_graph.file_path,
+                        base,
+                        &local_graph.imports,
+                        ResolveTarget::Type,
+                    );
                     for (target_id, confidence) in targets {
                         edges.push(Edge {
                             source: current_node_idx,
@@ -354,6 +363,7 @@ impl GraphBuilder {
                         &local_graph.file_path,
                         callee,
                         &local_graph.imports,
+                        ResolveTarget::Callable,
                     );
                     for (target_id, confidence) in targets {
                         if target_id == current_node_idx {
@@ -375,6 +385,7 @@ impl GraphBuilder {
                         &local_graph.file_path,
                         type_ann,
                         &local_graph.imports,
+                        ResolveTarget::Type,
                     );
                     for (target_id, confidence) in targets {
                         edges.push(Edge {
@@ -399,11 +410,12 @@ impl GraphBuilder {
                 );
 
                 if let Some(source_id) = source_id {
-                    // Resolve target: same-file → import-scoped → global
+                    // Framework refs target callables (e.g. FastAPI `Depends(get_db)`).
                     let targets = resolver.resolve_symbol(
                         &local_graph.file_path,
                         &fw_ref.target_name,
                         &local_graph.imports,
+                        ResolveTarget::Callable,
                     );
 
                     for (target_id, _) in targets {
@@ -873,5 +885,88 @@ mod tests {
             fw_edges.len()
         );
         assert!((fw_edges[0].confidence - 0.6).abs() < 1e-6);
+    }
+
+    /// Build a single-node `LocalGraph` for end-to-end resolver tests.
+    fn mk_file(path: &str, name: &str, kind: NodeKind, calls: Vec<String>) -> LocalGraph {
+        LocalGraph {
+            file_path: path.into(),
+            content_hash: [0; 32],
+            nodes: vec![RawNode {
+                name: name.into(),
+                kind,
+                span: (0, 0, 0, 0),
+                is_exported: false,
+                heritage: vec![],
+                type_annotation: None,
+                decorators: vec![],
+                calls,
+            }],
+            documents: vec![],
+            imports: vec![],
+            routes: vec![],
+            framework_refs: vec![],
+        }
+    }
+
+    /// Two same-named callables in different files must NOT both receive a
+    /// CALLS edge from an ambiguous bare call site. Pin against fan-out
+    /// regression for common names (`new` / `format` / `default` / ...).
+    #[test]
+    fn ambiguous_bare_callee_emits_no_calls_edge() {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(mk_file(
+            "caller.rs",
+            "caller_fn",
+            NodeKind::Function,
+            vec!["new".into()],
+        ));
+        builder.add_graph(mk_file("a.rs", "new", NodeKind::Method, vec![]));
+        builder.add_graph(mk_file("b.rs", "new", NodeKind::Method, vec![]));
+        let graph = builder.build();
+
+        let calls_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.rel_type == RelType::Calls)
+            .collect();
+        assert_eq!(
+            calls_edges.len(),
+            0,
+            "ambiguous bare callee must produce zero CALLS edges, got {}: {:?}",
+            calls_edges.len(),
+            calls_edges
+        );
+    }
+
+    /// Sibling: a uniquely-named callable still resolves via Tier 3 — the cap
+    /// suppresses fan-out, not all cross-file resolution.
+    #[test]
+    fn unique_global_callable_still_emits_calls_edge() {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(mk_file(
+            "caller.rs",
+            "caller_fn",
+            NodeKind::Function,
+            vec!["uniquely_named_helper".into()],
+        ));
+        builder.add_graph(mk_file(
+            "lib.rs",
+            "uniquely_named_helper",
+            NodeKind::Function,
+            vec![],
+        ));
+        let graph = builder.build();
+
+        let calls_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.rel_type == RelType::Calls)
+            .collect();
+        assert_eq!(
+            calls_edges.len(),
+            1,
+            "unique callable must emit exactly one CALLS edge"
+        );
     }
 }
