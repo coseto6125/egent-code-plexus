@@ -5,6 +5,7 @@ mod commands;
 mod engine;
 mod git;
 mod git_state;
+mod graph_path;
 mod output;
 pub mod search;
 
@@ -56,21 +57,21 @@ fn main() {
         return;
     }
 
-    let mut graph_path = cli.graph;
-
-    // Attempt to extract repo from subcommand args if available to override default graph path
+    // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
-        Commands::Context(args) => args.repo.as_ref(),
-        Commands::Query(args) => args.repo.as_ref(),
-        Commands::Impact(args) => args.repo.as_ref(),
-        Commands::RouteMap(args) => args.repo.as_ref(),
-        Commands::DetectChanges(args) => args.repo.as_ref(),
+        Commands::Context(args) => args.repo.as_deref(),
+        Commands::Query(args) => args.repo.as_deref(),
+        Commands::Impact(args) => args.repo.as_deref(),
+        Commands::RouteMap(args) => args.repo.as_deref(),
+        Commands::DetectChanges(args) => args.repo.as_deref(),
         Commands::Analyze(_) => None,
     };
+    let cwd = repo_opt
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    if let Some(repo) = repo_opt {
-        graph_path = std::path::PathBuf::from(repo).join(".gitnexus-rs/graph.bin");
-    }
+    let graph_path = graph_path::resolve(&cli.graph, &cwd);
 
     let engine = match Engine::load(&graph_path) {
         Ok(e) => e,
