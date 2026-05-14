@@ -209,6 +209,11 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     // Step 5: Save graph
     let save_start = Instant::now();
 
+    // Acquire exclusive lock before saving to prevent concurrent write corruption
+    let lock_path = bin_path.with_extension("lock");
+    let _lock = gnx_core::registry::FileLock::acquire_exclusive(&lock_path)
+        .map_err(|e| format!("Failed to acquire index lock: {}", e))?;
+
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&global_graph)
         .map_err(|e| format!("Serialization error: {}", e))?;
     let mut file =

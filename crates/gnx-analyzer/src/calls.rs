@@ -40,11 +40,17 @@ pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
             .utf8_text(source)
             .ok()
             .map(|s| s.to_string()),
-        "member_expression" | "field_access" | "navigation_expression" => target
-            .child_by_field_name("property")
-            .or_else(|| target.child_by_field_name("field"))
-            .or_else(|| target.child_by_field_name("name"))
-            .and_then(|p| p.utf8_text(source).ok().map(|s| s.to_string())),
+        "member_expression" | "field_access" | "navigation_expression" => {
+            // Prefer the full text of the member expression (e.g., "z.record") to preserve namespace context.
+            // If extracting the full text fails, fall back to just the property name.
+            target.utf8_text(source).ok().map(|s| s.to_string()).or_else(|| {
+                target
+                    .child_by_field_name("property")
+                    .or_else(|| target.child_by_field_name("field"))
+                    .or_else(|| target.child_by_field_name("name"))
+                    .and_then(|p| p.utf8_text(source).ok().map(|s| s.to_string()))
+            })
+        }
         "scoped_identifier" | "qualified_name" | "scoped_call_expression" => target
             .child_by_field_name("name")
             .or_else(|| target.named_child(target.named_child_count().saturating_sub(1)))
