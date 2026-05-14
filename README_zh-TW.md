@@ -1,53 +1,63 @@
-# Graph Nexus
+# Graph Nexus for LLM
 
-> **非官方的 [GitNexus](https://github.com/abhigyanpatwari/GitNexus) Rust 重製版**  
->
-> **專為 AI Agent 打造的圖譜化程式碼智慧引擎。** 將您的程式庫索引為知識圖譜，並透過 CLI 極速檢索。
->
-> 原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)，基於
-> [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。
->
-> 必備聲明: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus)
->
-> 本專案與上游 GitNexus 無關聯亦未獲其背書。僅限非商業用途。
+我寫來給 LLM / AI agent 用的代碼智能圖譜。十幾種語言、毫秒級建圖，然後可以問它「誰呼叫了這個」、「我改這個函式的爆炸半徑多大」、「跟 auth flow 相關的有哪些」這類結構性問題。
+
+致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)）— 同樣的核心想法（repo 的結構化知識圖譜），用 Rust 重寫。基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。
+
+> 必備聲明: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus)。本專案與上游 GitNexus 無關聯亦未獲其背書。僅限非商業用途。完整第三方授權清單見 [NOTICES.md](./NOTICES.md)。
+
+底層細節：rkyv + mmap 的 zero-copy 硬碟儲存、Tantivy BM25 + BGE-M3 dense vector 混合檢索、框架路由自動抽取。CLI 命令是 `gnx`。
 
 [English README](./README.md)
 
----
+## 🚀 核心亮點
 
-## 操作體驗進化：**Graph Nexus** 與上游原版的比較
+*   **極速與零拷貝 (Zero-Copy)**：結合 Tree-sitter 與 Rayon 多執行緒進行語法分析，並使用 `rkyv` 打造 Zero-copy 的記憶體映射 (mmap) `graph.bin`。解析超大型專案只需不到一秒鐘。
+*   **支援 14 種語言**：C, C#, C++, Dart, Go, Java, JavaScript, Kotlin, PHP, Python, Ruby, Rust, Swift, TypeScript。
+*   **LLM 原生輸出**：產出極度節省 Token 的格式（[TOON](https://crates.io/crates/etoon)）與簡潔的字串摘要，杜絕複雜 JSON 括號引發的 LLM 幻覺。
+*   **混合檢索引擎 (Hybrid Search)**：
+    *   **語意搜尋 (Semantic)**：透過 `fastembed-rs` (`--embeddings`) 載入 **BGE-M3 INT8 量化模型**。支援精準的跨語言概念對齊（例如：搜中文「會話管理」，精準命中英文的 `SessionInterface`），並利用 AVX2 指令集大幅降低 CPU 負載與記憶體。
+    *   **全文關鍵字 (Lexical)**：內建 **Tantivy (BM25)** 搜尋引擎，提供零延遲的精確關鍵字分詞比對。
+*   **增量快取 (Incremental Caching)**：透過 SHA-256 檔案雜湊比對，只有被修改的檔案才會重新執行 AST 與神經網路運算。這讓圖譜重構時間從 50 秒（冷啟動）瞬間暴跌至 **小於 0.25 秒**！
+*   **零維護的路由萃取 (Route Extraction)**：拋棄寫死框架名稱的過度設計，純粹依賴 RFC 7231 HTTP 標準協定常數。完美兼容聲明式（如 `@Get`）與指令式（如 `app.get()`）寫法，一鍵透視微服務全域 API。
+*   **RAG 文件獨立索引**：安全地將 Markdown (`.md`) 與 GitHub Actions (`.yaml`) 隔離至專屬的文件陣列，並原生解析標題段落 (`Section`)。這讓 LLM 能夠精準查閱架構文件，又不會污染程式碼的執行流。
 
-**Graph Nexus** 繼承了 GitNexus 卓越的概念模型，但在底層執行架構上進行了徹底的顛覆。我們拔除了背景 Daemon，轉向基於 Rust 的零拷貝記憶體映射 (mmap) 架構。這不僅為了追求極致效能，更為了解決開發者與 LLM Agent (如 Claude, Cursor) 在日常工作流中所遭遇的痛點。
-
-當您敲下 `gnx` 指令時，您將感受到以下巨大差異：
-
-| 實際操作場景 (Workflow) | 原版 GitNexus (Node.js) | Graph Nexus (Rust) |
-| :--- | :--- | :--- |
-| **啟動門檻 (Startup)** | 需要先啟動並維護背景 Daemon 伺服器 | **零阻力**。純 CLI 無狀態工具，隨用隨棄，不佔系統資源 |
-| **圖譜更新 (`analyze`)** | 每次變更皆需全盤重建程式碼樹，耗時長 | **SHA-256 增量更新**。修改單一檔案只需 `< 0.25秒` 即可刷新圖譜 |
-| **日常檢索 (`query`)** | 需要手動指定 `--mode` 切換語意或關鍵字 | **無縫混合 (RRF)**。一鍵並發雙引擎，自動將語意與 BM25 結果融合去重 |
-| **上下文純粹度 (Context)** | 程式碼結果經常混雜無關的 Markdown 文件 | **RAG 文件隔離**。將程式碼與文檔清楚劃分為雙區塊，徹底消除 LLM 幻覺 |
-| **變更偵測 (`review`)** | 依賴 Git 行號平移，易產生「沒改卻被標記」的誤判 | **純 AST 符號比對**。基於圖譜身分進行 Set Diff，100% 精準找出被改動的函數 |
-| **微服務盤點 (`route-map`)**| 仰賴開發者寫死特定框架的特徵規則 | **通用 HTTP 推導**。基於 RFC 7231 常數，一鍵透視所有未知框架的 API |
-| **LLM 耗用 Token 數** | 輸出大量冗長的 JSON 與不必要的括號結構 | **斷崖式下降 80%**。專為 LLM 視窗打造的單行 [TOON](https://crates.io/crates/etoon) 格式摘要 |
-
-## 🚀 快速上手
+## 📦 安裝
 
 ```bash
-# 從 GitHub 安裝
 cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx
+```
 
+安裝後，執行檔名稱為 `gnx`（在 crates.io 上的套件名為 `graph-nexus`）。
+
+## ⚡ 使用方式
+
+```bash
 # 1. 為當前專案建立程式碼圖譜 (極速，低於 1 秒)
 gnx analyze --repo .
 
 # 2. 建立附帶 BGE-M3 向量的圖譜 (初次執行會下載 ~540MB 的 INT8 模型)
 gnx analyze --repo . --embeddings
+
+# 3. 混合檢索：語意與概念搜尋 (需要先執行 --embeddings)
+gnx query --query "資料庫連線池設定"
+
+# 4. 混合檢索：精確關鍵字 BM25 (使用 Tantivy)
+gnx query --query "DatabaseConnection"
+
+# 5. 一鍵萃取微服務中所有的 API 路由
+gnx route-map --repo .
+
+# 6. 尋找特定符號的爆炸半徑 / 上游呼叫鏈 (Refactor 前必備)
+gnx impact --target validateUser --direction upstream
+
+# 7. 探索上下文 (包含 Metadata、裝飾器、簽名)
+gnx context --name validateUser
 ```
 
-## 支援的 14 種語言
-C, C#, C++, Dart, Go, Java, JavaScript, Kotlin, PHP, Python, Ruby, Rust, Swift, TypeScript.
+所有指令皆支援 `--format text|json|toon`。`query` 的預設輸出為極度優化的 `text` 格式。
 
-## 🏗️ 系統架構亮點
+## 🏗️ 系統架構
 
 ```
 crates/
@@ -63,11 +73,3 @@ crates/
 基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。明確允許個人使用、學術研究、業餘專案與非營利組織。
 
 **本授權不允許商業使用。** 如需商業授權，請聯繫上游 GitNexus 原作者 Abhigyan Patwari。
-
-## 🙏 致謝名單
-
-*   [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by Abhigyan Patwari — 原始設計與概念模型。
-*   [tree-sitter](https://tree-sitter.github.io/) — 強健的增量 AST 解析。
-*   [fastembed-rs](https://github.com/Anush008/fastembed-rs) — 本地 ONNX 向量推論引擎。
-*   [rkyv](https://rkyv.org/) — 終極的零拷貝序列化套件。
-*   [Tantivy](https://github.com/quickwit-oss/tantivy) — 極速 Rust 全文檢索引擎。
