@@ -6,17 +6,17 @@
 
 > 必備聲明: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus)。本專案與上游 GitNexus 無關聯亦未獲其背書。僅限非商業用途。完整第三方授權清單見 [NOTICES.md](./NOTICES.md)。
 
-## 為什麼上游已存在還要 Rust 重寫?
+## 跟上游 GitNexus 的差別
 
-GitNexus 面向**人類開發者 + IDE 整合** — 長駐 MCP server、豐富 Wiki 渲染、import 解析不出來時用啟發式（Jaccard 相似度等）「猜」邊界，讓圖在人眼中看起來連貫。
+| 維度 | GitNexus | graph-nexus | 為什麼對 LLM agent 更合適 |
+|---|---|---|---|
+| **受眾** | 人類開發者 + IDE 整合 | AI 程式碼代理 | 優化目標決定下面每一行 |
+| **運行模式** | 長駐 MCP server | One-shot CLI、rkyv mmap zero-copy | 每次查詢亞秒級；agent 一個任務內可發 30+ 查詢、無 warm-up 成本 |
+| **import 解析不出來時** | 用啟發式（Jaccard 等）「猜」邊界讓圖連貫 | 記 `BlindSpot`、**不發邊** — 絕不憑空捏造 | Agent 不會誤信幻覺依賴；老實的「我不知道」比自信的錯答更省 token |
+| **輸出格式** | Wiki / UI 豐富渲染 | `etoon` / `cypher` / compact JSON | 沒有 UI 樣板吃 context window，token 全花在圖本身 |
+| **支援語言數** | 14 (TypeScript, JavaScript, Python, Java, Kotlin, C#, Go, Rust, PHP, Ruby, Swift, C, C++, Dart) | 31 — 上面 14 種 + Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig | Mixed-stack repo（DevOps config / Web3 合約 / infra-as-code）不再是盲區 |
 
-graph-nexus 面向 **AI 程式碼代理**，遵守更嚴格的合約：
-
-- **零幻覺 (Zero hallucination).** Analyzer 解析不出 binding 時記錄 `BlindSpot`、**不發邊**。Agent 寧可拿到「我不知道」也不要看似合理但其實錯的依賴 — 順著幻覺走會浪費比承認不確定還多的 token。
-- **無狀態 mmap、毫秒級回應.** 每次 `gnx` 都是 one-shot CLI：開 `graph.bin`（rkyv + zero-copy mmap）→ 查 → 退。沒有背景 daemon、沒有 warmup。Agent 一個任務內可查 30 次，第 2 次起只付 OS file cache 成本。
-- **Token 經濟.** 輸出格式（`etoon`、`cypher`、compact JSON）為 LLM context window 調過。沒有樹狀 UI、沒語法高亮，只給 agent 需要的最小圖投影。
-
-GitNexus 是給開發者的重量級知識圖譜平台；graph-nexus 是給 AI agent 的**外科手術刀** — 毫秒級延遲的底層靜態分析檢索引擎。
+> 語言深度有差。graph-nexus 在 31 種語言做結構層級（function / class / method / imports）解析，但**還沒**追上 GitNexus 在每種語言提供的完整 9 維度覆蓋（Named Bindings、Heritage、Constructor Inference、Config 等）。31 是廣度，不是 parity。
 
 底層細節：rkyv + mmap 的 zero-copy 硬碟儲存、Tantivy BM25 + BGE-M3 dense vector 混合檢索、框架路由自動抽取。CLI 命令是 `gnx`。
 
