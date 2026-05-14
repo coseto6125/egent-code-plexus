@@ -27,6 +27,12 @@
     name: (identifier) @name.class
     (class_heritage (identifier) @heritage)?) @class) @export
 
+;; Constructor (JS `constructor()` inside class body — parser upgrades
+;; from Method on the same span if/when this pattern fires too)
+(method_definition
+  name: (property_identifier) @name.constructor
+  (#eq? @name.constructor "constructor")) @constructor
+
 ;; Methods
 (method_definition
   name: (property_identifier) @name.method) @method

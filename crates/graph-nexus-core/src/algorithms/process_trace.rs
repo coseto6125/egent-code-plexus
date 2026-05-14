@@ -50,7 +50,10 @@ pub enum ProcessType {
 }
 
 fn is_function_like(kind: NodeKind) -> bool {
-    matches!(kind, NodeKind::Function | NodeKind::Method)
+    matches!(
+        kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    )
 }
 
 /// Heuristic: test files don't make good entry points for execution-flow

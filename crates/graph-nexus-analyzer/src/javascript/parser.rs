@@ -47,6 +47,7 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_name_function = self.query.capture_index_for_name("name.function");
         let idx_name_class = self.query.capture_index_for_name("name.class");
         let idx_name_method = self.query.capture_index_for_name("name.method");
+        let idx_name_constructor = self.query.capture_index_for_name("name.constructor");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_export = self.query.capture_index_for_name("export");
         let idx_decorator = self.query.capture_index_for_name("decorator");
@@ -58,6 +59,7 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
+        let idx_constructor = self.query.capture_index_for_name("constructor");
 
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
@@ -90,6 +92,9 @@ impl LanguageProvider for JavaScriptProvider {
                 } else if Some(cap_idx) == idx_name_method {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if Some(cap_idx) == idx_name_constructor {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Constructor);
                 } else if Some(cap_idx) == idx_heritage {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -120,6 +125,7 @@ impl LanguageProvider for JavaScriptProvider {
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
+                    || Some(cap_idx) == idx_constructor
                 {
                     root_span_node = Some(cap.node);
                 }
@@ -139,6 +145,14 @@ impl LanguageProvider for JavaScriptProvider {
                     let mut existing_found = false;
                     for node in &mut nodes {
                         if node.span == node_span && node.name == name_str {
+                            // Upgrade Method → Constructor on same span when
+                            // the ctor pattern fires; tree-sitter match order
+                            // between patterns is not specified.
+                            if matches!(k, NodeKind::Constructor)
+                                && matches!(node.kind, NodeKind::Method)
+                            {
+                                node.kind = NodeKind::Constructor;
+                            }
                             if is_exported {
                                 node.is_exported = true;
                             }

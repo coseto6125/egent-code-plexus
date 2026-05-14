@@ -26,11 +26,13 @@ struct JavaCaptureIndices {
     class_name: Option<u32>,
     interface_name: Option<u32>,
     method_name: Option<u32>,
+    constructor_name: Option<u32>,
     import_name: Option<u32>,
     import_source: Option<u32>,
     class: Option<u32>,
     interface: Option<u32>,
     method: Option<u32>,
+    constructor: Option<u32>,
     export: Option<u32>,
     heritage: Option<u32>,
     type_ann: Option<u32>,
@@ -56,11 +58,13 @@ impl JavaProvider {
             class_name: query.capture_index_for_name("class.name"),
             interface_name: query.capture_index_for_name("interface.name"),
             method_name: query.capture_index_for_name("method.name"),
+            constructor_name: query.capture_index_for_name("constructor.name"),
             import_name: query.capture_index_for_name("import.name"),
             import_source: query.capture_index_for_name("import.source"),
             class: query.capture_index_for_name("class"),
             interface: query.capture_index_for_name("interface"),
             method: query.capture_index_for_name("method"),
+            constructor: query.capture_index_for_name("constructor"),
             export: query.capture_index_for_name("export"),
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
@@ -124,11 +128,17 @@ impl LanguageProvider for JavaProvider {
                 } else if cap_idx == idx.method_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if cap_idx == idx.constructor_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Constructor);
                 } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx.import_source {
                     import_src = Some(cap.node);
-                } else if cap_idx == idx.class || cap_idx == idx.interface || cap_idx == idx.method
+                } else if cap_idx == idx.class
+                    || cap_idx == idx.interface
+                    || cap_idx == idx.method
+                    || cap_idx == idx.constructor
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);
