@@ -8,6 +8,8 @@ Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhi
 
 ## vs. upstream GitNexus
 
+> **Not a drop-in replacement.** Upstream is a broader Node/TypeScript agent platform (MCP server, resources, hooks, generated skills); graph-nexus is a stateless Rust CLI optimized for shell-mediated LLM calls — different scope, different tradeoffs.
+
 | Dimension | GitNexus | graph-nexus | Why it matters for an LLM agent |
 |---|---|---|---|
 | **Audience** | Human devs + IDE integration | AI code agents | Optimisation target shapes every other row |
@@ -16,7 +18,18 @@ Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhi
 | **Output format** | Wiki / UI rendering | `etoon` / `cypher` / compact JSON | No UI cruft eating context window; tokens spent on graph, not on layout |
 | **Languages parsed** | 14 (TypeScript, JavaScript, Python, Java, Kotlin, C#, Go, Rust, PHP, Ruby, Swift, C, C++, Dart) | 31 — same 14 plus Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig | Mixed-stack repos (DevOps configs, Web3 contracts, infra-as-code) stop being black holes |
 
-> Language depth varies. graph-nexus parses 31 languages at the structural level (functions / classes / methods / imports); it does not yet match GitNexus's full 9-dimension coverage (Named Bindings, Heritage, Constructor Inference, Config, ...) on every language. Treat the 31 count as breadth, not parity.
+> Language depth varies. graph-nexus parses 31 languages at the structural level (functions / classes / methods / imports); it does not yet match GitNexus's full 9-dimension coverage (Named Bindings, Heritage, Constructor Inference, Config, ...) on every language. Treat the 31 count as breadth, not parity — see [Language Matrix](#language-matrix) below.
+
+### Tool & integration coverage
+
+| LLM-facing area | Upstream GitNexus (`._source_code`) | Graph Nexus Rust (`gnx`) |
+| :--- | :--- | :--- |
+| **Agent integration** | MCP server, resources, prompts, setup, hooks, generated skills | Stateless CLI; use through shell/tool wrappers. **No built-in MCP server yet.** |
+| **Core query tools** | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `query`, `context`, `impact`, `detect-changes`, `route-map`, `cypher`, `summarize`, `rename` |
+| **Context output** | Rich MCP responses and generated repo skills | Compact `toon`/JSON/text for shell-mediated LLM calls |
+| **Search** | Documented BM25 + semantic + RRF hybrid search | Embeddings when available; otherwise Tantivy BM25 fallback |
+| **Runtime/storage** | Node.js + LadybugDB | Rust + mmap `rkyv` graph file |
+| **Best fit** | Agent runtimes with strong MCP/editor integration | Local LLM harnesses/scripts that want a small executable with few moving parts |
 
 Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via Tantivy + BGE-M3 dense vectors), framework-aware route extraction. The CLI is `gnx`.
 
@@ -35,9 +48,15 @@ Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via
 
 ## 📦 Installation
 
-```bash
-cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx
-```
+| Platform / user | Command | Notes |
+| :--- | :--- | :--- |
+| macOS Homebrew | `brew tap coseto6125/tap && brew install graph-nexus` | Use after the tap formula is published. Package: `graph-nexus`; binary: `gnx` |
+| Linux / macOS | `curl -sSfL https://github.com/coseto6125/graph-nexus/releases/latest/download/install.sh \| sh` | Installs the prebuilt GitHub Release binary |
+| Windows PowerShell | `irm https://github.com/coseto6125/graph-nexus/releases/latest/download/install.ps1 \| iex` | Installs the prebuilt GitHub Release binary |
+| Rust source build | `cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx` | Works before crates.io publishing |
+| Manual | Download from [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | Pick the archive for your target and verify `.sha256` |
+
+> `cargo install graph-nexus` is intentionally not listed yet: crates.io publish is blocked until all analyzer grammar dependencies are available as publishable crate dependencies.
 
 After install, the binary is named `gnx` (the package on crates.io is `graph-nexus`).
 
@@ -67,6 +86,29 @@ gnx context --name validateUser
 ```
 
 All commands accept `--format text|json|toon`. The default for query is a highly token-optimized text format.
+
+## Language Matrix
+
+For the 14 languages graph-nexus shares with upstream, here's the per-dimension coverage. Legend: `✓` supported, `△` partial / basic, **缺** upstream documents this but the Rust path is missing or not fully wired, `—` not claimed / not applicable.
+
+| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | △ | △ | ✓ | ✓ |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | △ | △ | ✓ | ✓ |
+| Python | ✓ | ✓ | ✓ | ✓ | ✓ | △ | **缺** | ✓ | ✓ |
+| Java | ✓ | △ | ✓ | ✓ | ✓ | △ | — | ✓ | ✓ |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | △ | — | **缺** | ✓ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | △ | **缺** | **缺** | ✓ |
+| Go | ✓ | — | ✓ | ✓ | ✓ | △ | **缺** | △ | ✓ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | △ | — | ✓ | ✓ |
+| PHP | ✓ | ✓ | △ | ✓ | ✓ | △ | **缺** | △ | ✓ |
+| Ruby | ✓ | — | △ | ✓ | — | △ | — | △ | ✓ |
+| Swift | **缺** | **缺** | **缺** | **缺** | **缺** | **缺** | **缺** | **缺** | **缺** |
+| C | △ | — | △ | — | ✓ | △ | — | **缺** | ✓ |
+| C++ | △ | — | △ | ✓ | ✓ | △ | — | **缺** | ✓ |
+| Dart | ✓ | — | △ | ✓ | ✓ | △ | — | **缺** | ✓ |
+
+Swift parser code exists, but `gnx analyze` currently does not register the Swift provider. Extra Rust-side providers exist for Bash, Lua, Crystal, Solidity, Move, Dockerfile, Docker Compose, GitHub Actions, HCL, SQL, Vyper, Cairo, Nim, Verilog, YAML, Markdown, and Zig (the 17 languages beyond upstream's 14-language matrix); they are outside upstream's matrix and vary in depth.
 
 ## 🏗️ Architecture
 

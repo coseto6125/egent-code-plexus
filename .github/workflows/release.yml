@@ -151,19 +151,10 @@ jobs:
           body: |
             ## Install
 
-            ### From crates.io (source build, strongest trust)
+            ### macOS Homebrew
             ```
-            cargo install graph-nexus
-            ```
-
-            ### From git tag (source build)
-            ```
-            cargo install --git https://github.com/coseto6125/graph-nexus --tag ${{ github.ref_name }} graph-nexus
-            ```
-
-            ### Pre-built binary via `cargo-binstall`
-            ```
-            cargo binstall graph-nexus
+            brew tap coseto6125/tap
+            brew install graph-nexus
             ```
 
             ### One-shot installer scripts (Linux / macOS)
@@ -176,12 +167,91 @@ jobs:
             irm https://github.com/coseto6125/graph-nexus/releases/download/${{ github.ref_name }}/install.ps1 | iex
             ```
 
+            ### From git tag (source build)
+            ```
+            cargo install --git https://github.com/coseto6125/graph-nexus --tag ${{ github.ref_name }} --bin gnx
+            ```
+
             ### Manual download
             Pick a `.tar.gz` / `.zip` matching your platform from Assets below.
             Each has a `.sha256` for integrity. Verify build provenance with:
             ```
             gh attestation verify ./gnx --owner coseto6125
             ```
+
+  # ==================== Homebrew Tap ====================
+  # Requires:
+  #   1. GitHub repo: coseto6125/homebrew-tap
+  #   2. Secret HOMEBREW_TAP_TOKEN with write access to that repo
+  homebrew-tap:
+    name: Update Homebrew tap
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && inputs.dry_run != 'true'
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate Homebrew formula
+        id: formula
+        shell: bash
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; skipping Homebrew tap update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          arm_sha_file="dist/gnx-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz.sha256"
+          x86_sha_file="dist/gnx-${GITHUB_REF_NAME}-x86_64-apple-darwin.tar.gz.sha256"
+
+          if [ ! -f "$arm_sha_file" ] || [ ! -f "$x86_sha_file" ]; then
+            echo "::error::Missing macOS sha256 files in dist/."
+            ls -la dist
+            exit 1
+          fi
+
+          arm_sha="$(awk '{print $1}' "$arm_sha_file")"
+          x86_sha="$(awk '{print $1}' "$x86_sha_file")"
+
+          mkdir -p generated/Formula
+          sed \
+            -e "s/@VERSION@/${version}/g" \
+            -e "s/@SHA256_ARM64_DARWIN@/${arm_sha}/g" \
+            -e "s/@SHA256_X86_64_DARWIN@/${x86_sha}/g" \
+            packaging/homebrew/graph-nexus.rb.template \
+            > generated/Formula/graph-nexus.rb
+
+      - name: Push formula to tap
+        if: steps.formula.outputs.skip != 'true'
+        shell: bash
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/coseto6125/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp generated/Formula/graph-nexus.rb tap/Formula/graph-nexus.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- Formula/graph-nexus.rb; then
+            echo "Homebrew formula is already up to date."
+            exit 0
+          fi
+
+          git add Formula/graph-nexus.rb
+          git commit -m "graph-nexus ${GITHUB_REF_NAME}"
+          git push
 
   # ==================== Publish to crates.io ====================
   # 狀態：
