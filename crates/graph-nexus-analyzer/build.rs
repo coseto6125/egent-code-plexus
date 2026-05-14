@@ -15,7 +15,18 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const TOP_LEVEL_FILES: &[&str] = &["calls.rs", "framework_helpers.rs", "route_detector.rs"];
+// Top-level helpers at `src/*.rs` whose content affects parse output.
+// `framework_confidence.rs` carries the confidence constants written into
+// `RawFrameworkRef.confidence` — a change there reshapes cached graphs even
+// without touching parser.rs.
+// `embeddings.rs`, `ast_test.rs`, `lib.rs` are excluded — embedding code is
+// runtime-only, ast_test is a dev helper, and lib.rs is just re-exports.
+const TOP_LEVEL_FILES: &[&str] = &[
+    "calls.rs",
+    "framework_helpers.rs",
+    "framework_confidence.rs",
+    "route_detector.rs",
+];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -80,10 +91,19 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
             None => continue,
         };
 
-        let is_parser_or_queries = name == "parser.rs" || name == "queries.scm";
-        let is_top_level = path.parent() == Some(root) && TOP_LEVEL_FILES.contains(&name);
+        // Language subdir files (`src/<lang>/...`): any `.rs` plus
+        // `queries.scm`. `parser.rs` alone misses helpers like
+        // `python/receiver_types.rs` and `python/identifier_finder.rs`
+        // which feed into the parser's output and so must invalidate the
+        // cache on change. Including `mod.rs` is harmless — it usually
+        // just declares submodules so its hash co-varies with theirs.
+        let in_lang_subdir = path.parent() != Some(root);
+        let is_lang_source = in_lang_subdir && name.ends_with(".rs");
+        let is_queries = name == "queries.scm";
+        let is_top_level_helper =
+            path.parent() == Some(root) && TOP_LEVEL_FILES.contains(&name);
 
-        if is_parser_or_queries || is_top_level {
+        if is_lang_source || is_queries || is_top_level_helper {
             out.push(path);
         }
     }
