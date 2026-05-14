@@ -674,7 +674,8 @@ impl GraphBuilder {
         };
 
         ZeroCopyGraph {
-            magic: *b"GNX-RS\0\0",
+            magic: gnx_core::graph::GRAPH_MAGIC,
+            version: gnx_core::graph::GRAPH_FORMAT_VERSION,
             fingerprint: [0; 32],
             string_pool: string_pool.bytes,
             nodes,

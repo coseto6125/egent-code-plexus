@@ -1,6 +1,18 @@
 use crate::pool::StrRef;
 use rkyv::{Archive, Deserialize, Serialize};
 
+/// Magic bytes at the head of every `graph.bin`. Used by the reader to
+/// reject non-gnx files (or files truncated below the header length)
+/// before rkyv attempts a structural cast.
+pub const GRAPH_MAGIC: [u8; 8] = *b"GNX-RS\0\0";
+
+/// On-disk graph format version. Bump whenever `ZeroCopyGraph`'s field
+/// layout changes in a way that would make older binaries unreadable by
+/// the new reader (or vice-versa). The reader refuses any version it
+/// does not recognize, so a stale CLI does not segfault on a fresh
+/// `graph.bin` and a fresh CLI does not silently misinterpret old data.
+pub const GRAPH_FORMAT_VERSION: u32 = 1;
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
@@ -95,6 +107,7 @@ pub struct File {
 #[rkyv(derive(Debug))]
 pub struct ZeroCopyGraph {
     pub magic: [u8; 8],
+    pub version: u32,
     pub fingerprint: [u8; 32],
     pub string_pool: Vec<u8>,
     pub files: Vec<File>,
@@ -127,7 +140,8 @@ mod tests {
         let uid_ref = pool.add("Function:src/main.ts:main");
 
         let graph = ZeroCopyGraph {
-            magic: *b"GNX-RS\0\0",
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
             fingerprint: [0; 32],
             string_pool: pool.bytes,
             files: vec![File {
@@ -161,7 +175,8 @@ mod tests {
         // Deserialize / Zero-copy access
         let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
 
-        assert_eq!(archived.magic, *b"GNX-RS\0\0");
+        assert_eq!(archived.magic, GRAPH_MAGIC);
+        assert_eq!(archived.version.to_native(), GRAPH_FORMAT_VERSION);
         assert_eq!(archived.nodes.len(), 1);
 
         // Resolve string using the archived string pool
