@@ -2,7 +2,7 @@ use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
-use gnx_core::GnxError;
+use gnx_core::{GnxError, HIGH_TRUST_CONFIDENCE};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -95,7 +95,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
                 for i in in_start..in_end {
                     let edge_idx = graph.in_edge_idx[i].to_native() as usize;
                     let edge = &graph.edges[edge_idx];
-                    if args.high_trust_only && edge.confidence.to_native() < 0.8 {
+                    if args.high_trust_only && edge.confidence.to_native() < HIGH_TRUST_CONFIDENCE {
                         continue;
                     }
                     let next_idx = edge.source.to_native() as usize;
@@ -110,7 +110,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
                 let out_end = graph.out_offsets[curr_idx + 1].to_native() as usize;
                 for i in out_start..out_end {
                     let edge = &graph.edges[i];
-                    if args.high_trust_only && edge.confidence.to_native() < 0.8 {
+                    if args.high_trust_only && edge.confidence.to_native() < HIGH_TRUST_CONFIDENCE {
                         continue;
                     }
                     let next_idx = edge.target.to_native() as usize;

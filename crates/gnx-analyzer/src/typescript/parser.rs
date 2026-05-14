@@ -1,4 +1,5 @@
 use crate::calls::extract_calls;
+use crate::framework_helpers::{enclosing_function_name, node_span, MODULE_LEVEL_SOURCE};
 use gnx_core::analyzer::provider::LanguageProvider;
 use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use gnx_core::graph::NodeKind;
@@ -8,6 +9,32 @@ use tree_sitter::{Parser, Query, QueryCursor};
 
 pub struct TypeScriptProvider {
     query: Query,
+    indices: TypeScriptCaptureIndices,
+}
+
+struct TypeScriptCaptureIndices {
+    function_name: Option<u32>,
+    class_name: Option<u32>,
+    method_name: Option<u32>,
+    interface_name: Option<u32>,
+    function: Option<u32>,
+    class: Option<u32>,
+    method: Option<u32>,
+    interface: Option<u32>,
+    export: Option<u32>,
+    heritage: Option<u32>,
+    type_ann: Option<u32>,
+    decorator: Option<u32>,
+    import_name: Option<u32>,
+    import_alias: Option<u32>,
+    import_source: Option<u32>,
+    import: Option<u32>,
+    route_method: Option<u32>,
+    route_path: Option<u32>,
+    route_call: Option<u32>,
+    express_handler: Option<u32>,
+    nestjs_class: Option<u32>,
+    nestjs_method: Option<u32>,
 }
 
 impl TypeScriptProvider {
@@ -19,7 +46,31 @@ impl TypeScriptProvider {
             include_str!("frameworks.scm"),
         );
         let query = Query::new(&language, &query_source)?;
-        Ok(Self { query })
+        let indices = TypeScriptCaptureIndices {
+            function_name: query.capture_index_for_name("function.name"),
+            class_name: query.capture_index_for_name("class.name"),
+            method_name: query.capture_index_for_name("method.name"),
+            interface_name: query.capture_index_for_name("interface.name"),
+            function: query.capture_index_for_name("function"),
+            class: query.capture_index_for_name("class"),
+            method: query.capture_index_for_name("method"),
+            interface: query.capture_index_for_name("interface"),
+            export: query.capture_index_for_name("export"),
+            heritage: query.capture_index_for_name("heritage"),
+            type_ann: query.capture_index_for_name("type"),
+            decorator: query.capture_index_for_name("decorator"),
+            import_name: query.capture_index_for_name("import.name"),
+            import_alias: query.capture_index_for_name("import.alias"),
+            import_source: query.capture_index_for_name("import.source"),
+            import: query.capture_index_for_name("import"),
+            route_method: query.capture_index_for_name("route.method"),
+            route_path: query.capture_index_for_name("route.path"),
+            route_call: query.capture_index_for_name("route.call"),
+            express_handler: query.capture_index_for_name("express.route.handler"),
+            nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
+            nestjs_method: query.capture_index_for_name("nestjs.method.name"),
+        };
+        Ok(Self { query, indices })
     }
 }
 
@@ -49,35 +100,7 @@ impl LanguageProvider for TypeScriptProvider {
         // NestJS @Controller method decorators: (class_name, method_name, method_span).
         let mut pending_nestjs_handlers: Vec<(String, String, (u32, u32, u32, u32))> = Vec::new();
 
-        // Capture indices
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_method_name = self.query.capture_index_for_name("method.name");
-        let idx_interface_name = self.query.capture_index_for_name("interface.name");
-
-        let idx_function = self.query.capture_index_for_name("function");
-        let idx_class = self.query.capture_index_for_name("class");
-        let idx_method = self.query.capture_index_for_name("method");
-        let idx_interface = self.query.capture_index_for_name("interface");
-
-        let idx_export = self.query.capture_index_for_name("export");
-        let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_type = self.query.capture_index_for_name("type");
-        let idx_decorator = self.query.capture_index_for_name("decorator");
-
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-        let idx_import_alias = self.query.capture_index_for_name("import.alias");
-        let idx_import_source = self.query.capture_index_for_name("import.source");
-        let idx_import = self.query.capture_index_for_name("import");
-
-        let idx_route_method = self.query.capture_index_for_name("route.method");
-        let idx_route_path = self.query.capture_index_for_name("route.path");
-        let idx_route_call = self.query.capture_index_for_name("route.call");
-
-        let idx_express_handler = self.query.capture_index_for_name("express.route.handler");
-
-        let idx_nestjs_class = self.query.capture_index_for_name("nestjs.controller.class");
-        let idx_nestjs_method = self.query.capture_index_for_name("nestjs.method.name");
+        let idx = &self.indices;
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -103,77 +126,68 @@ impl LanguageProvider for TypeScriptProvider {
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
 
-                if cap_idx == idx_function_name {
+                if cap_idx == idx.function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if cap_idx == idx_class_name {
+                } else if cap_idx == idx.class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
-                } else if cap_idx == idx_method_name {
+                } else if cap_idx == idx.method_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
-                } else if cap_idx == idx_interface_name {
+                } else if cap_idx == idx.interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
-                } else if cap_idx == idx_export {
+                } else if cap_idx == idx.export {
                     is_exported = true;
-                } else if cap_idx == idx_heritage {
+                } else if cap_idx == idx.heritage {
                     if let Ok(h) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         heritage.push(h.to_string());
                     }
-                } else if cap_idx == idx_type {
+                } else if cap_idx == idx.type_ann {
                     if let Ok(t) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         type_annotation = Some(t.to_string());
                     }
-                } else if cap_idx == idx_decorator {
+                } else if cap_idx == idx.decorator {
                     if let Ok(d) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         decorators.push(d.to_string());
                     }
-                } else if cap_idx == idx_import_name {
+                } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
-                } else if cap_idx == idx_import_alias {
+                } else if cap_idx == idx.import_alias {
                     import_alias = Some(cap.node);
-                } else if cap_idx == idx_import_source {
+                } else if cap_idx == idx.import_source {
                     import_src = Some(cap.node);
-                } else if cap_idx == idx_import {
+                } else if cap_idx == idx.import {
                     is_import = true;
-                } else if cap_idx == idx_route_method {
+                } else if cap_idx == idx.route_method {
                     route_method = Some(cap.node);
-                } else if cap_idx == idx_route_path {
+                } else if cap_idx == idx.route_path {
                     route_path = Some(cap.node);
-                } else if cap_idx == idx_route_call {
+                } else if cap_idx == idx.route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
-                } else if cap_idx == idx_express_handler {
+                } else if cap_idx == idx.express_handler {
                     if let Ok(handler_name) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        let start = cap.node.start_position();
-                        let end = cap.node.end_position();
-                        pending_express_handlers.push((
-                            handler_name.to_string(),
-                            (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
-                        ));
+                        pending_express_handlers
+                            .push((handler_name.to_string(), node_span(&cap.node)));
                     }
-                } else if cap_idx == idx_nestjs_class {
+                } else if cap_idx == idx.nestjs_class {
                     nestjs_class_node = Some(cap.node);
-                } else if cap_idx == idx_nestjs_method {
+                } else if cap_idx == idx.nestjs_method {
                     nestjs_method_node = Some(cap.node);
-                } else if cap_idx == idx_function
-                    || cap_idx == idx_class
-                    || cap_idx == idx_method
-                    || cap_idx == idx_interface
+                } else if cap_idx == idx.function
+                    || cap_idx == idx.class
+                    || cap_idx == idx.method
+                    || cap_idx == idx.interface
                 {
                     root_span_node = Some(cap.node);
                 }
@@ -182,18 +196,11 @@ impl LanguageProvider for TypeScriptProvider {
             // Process definitions
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let start = root.start_position();
-                    let end = root.end_position();
-                    let node_span = (
-                        start.row as u32,
-                        start.column as u32,
-                        end.row as u32,
-                        end.column as u32,
-                    );
+                    let span = node_span(&root);
 
                     let mut existing_found = false;
                     for node in &mut nodes {
-                        if node.span == node_span && node.name == name_str {
+                        if node.span == span && node.name == name_str {
                             if is_exported {
                                 node.is_exported = true;
                             }
@@ -224,7 +231,7 @@ impl LanguageProvider for TypeScriptProvider {
                             decorators: decorators.clone(),
                             name: name_str.to_string(),
                             kind: k,
-                            span: node_span,
+                            span,
                             is_exported,
                             heritage: heritage.clone(),
                             type_annotation: type_annotation.clone(),
@@ -262,17 +269,10 @@ impl LanguageProvider for TypeScriptProvider {
                     std::str::from_utf8(&source[cls.start_byte()..cls.end_byte()]),
                     std::str::from_utf8(&source[mth.start_byte()..mth.end_byte()]),
                 ) {
-                    let start = mth.start_position();
-                    let end = mth.end_position();
                     pending_nestjs_handlers.push((
                         class_name.to_string(),
                         method_name.to_string(),
-                        (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
+                        node_span(&mth),
                     ));
                 }
             }
@@ -286,18 +286,11 @@ impl LanguageProvider for TypeScriptProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
-                        let start = root.start_position();
-                        let end = root.end_position();
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
                             handler: None,
-                            span: (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
+                            span: node_span(&root),
                         });
                     }
                 }
@@ -308,13 +301,12 @@ impl LanguageProvider for TypeScriptProvider {
         extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
 
         // Resolve framework-ref enclosing functions via span containment.
-        // If the capture is at module-level, source_name is left empty.
+        // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent with Actix).
         let mut framework_refs: Vec<RawFrameworkRef> = pending_express_handlers
             .into_iter()
             .map(|(target, cap_span)| {
                 let source_name = enclosing_function_name(&nodes, cap_span)
-                    .map(str::to_string)
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
                 RawFrameworkRef {
                     source_name,
                     target_name: target,
@@ -346,35 +338,4 @@ impl LanguageProvider for TypeScriptProvider {
             framework_refs,
         })
     }
-}
-
-/// Return the name of the smallest function/method `RawNode` whose span fully
-/// contains `inner`. Returns `None` if `inner` is module-level.
-fn enclosing_function_name(
-    nodes: &[RawNode],
-    inner: (u32, u32, u32, u32),
-) -> Option<&str> {
-    let mut best: Option<&RawNode> = None;
-    for n in nodes {
-        if !matches!(n.kind, NodeKind::Function | NodeKind::Method) {
-            continue;
-        }
-        if span_contains(n.span, inner) {
-            best = match best {
-                None => Some(n),
-                Some(b) if span_contains(b.span, n.span) => Some(n),
-                Some(b) => Some(b),
-            };
-        }
-    }
-    best.map(|n| n.name.as_str())
-}
-
-/// `outer` fully contains `inner` (inclusive on the outer bounds).
-fn span_contains(outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)) -> bool {
-    let (o_sr, o_sc, o_er, o_ec) = outer;
-    let (i_sr, i_sc, i_er, i_ec) = inner;
-    let starts_before_or_at = (o_sr < i_sr) || (o_sr == i_sr && o_sc <= i_sc);
-    let ends_after_or_at = (o_er > i_er) || (o_er == i_er && o_ec >= i_ec);
-    starts_before_or_at && ends_after_or_at
 }
