@@ -6,6 +6,7 @@ pub mod hook_handle;
 pub mod hook_watcher;
 pub mod impact;
 pub mod prune;
+pub mod rename_branch;
 pub mod init;
 pub mod query;
 pub mod route_map;

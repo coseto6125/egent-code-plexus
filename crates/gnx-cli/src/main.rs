@@ -50,6 +50,8 @@ enum Commands {
     HookWatcher(commands::hook_watcher::HookWatcherArgs),
     /// Remove orphan index dir + registry branch entry for the given branch
     Prune(commands::prune::PruneArgs),
+    /// Rename a branch's index dir + registry entry
+    RenameBranch(commands::rename_branch::RenameBranchArgs),
 }
 
 fn main() {
@@ -103,6 +105,15 @@ fn main() {
         return;
     }
 
+    // RenameBranch renames index dir + registry entry; no graph needed
+    if let Commands::RenameBranch(args) = &cli.command {
+        if let Err(e) = commands::rename_branch::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -110,7 +121,7 @@ fn main() {
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::RouteMap(args) => args.repo.as_deref(),
         Commands::DetectChanges(args) => args.repo.as_deref(),
-        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) => None,
+        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) | Commands::RenameBranch(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -133,7 +144,7 @@ fn main() {
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),
-        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) => Ok(()), // Handled above
+        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) | Commands::RenameBranch(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
