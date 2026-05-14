@@ -1,4 +1,5 @@
 use crate::calls::extract_calls;
+use crate::framework_helpers::{node_span, MODULE_LEVEL_SOURCE};
 use gnx_core::analyzer::provider::LanguageProvider;
 use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use gnx_core::graph::NodeKind;
@@ -8,6 +9,28 @@ use tree_sitter::{Parser, Query, QueryCursor};
 
 pub struct RustProvider {
     query: Query,
+    indices: RustCaptureIndices,
+}
+
+struct RustCaptureIndices {
+    name_struct: Option<u32>,
+    name_enum: Option<u32>,
+    name_trait: Option<u32>,
+    name_function: Option<u32>,
+    import_name: Option<u32>,
+    import_source: Option<u32>,
+    import_alias: Option<u32>,
+    function: Option<u32>,
+    class: Option<u32>,
+    method: Option<u32>,
+    interface: Option<u32>,
+    export: Option<u32>,
+    heritage: Option<u32>,
+    type_ann: Option<u32>,
+    decorator: Option<u32>,
+    axum_handler: Option<u32>,
+    actix_method: Option<u32>,
+    actix_handler: Option<u32>,
 }
 
 impl RustProvider {
@@ -19,7 +42,27 @@ impl RustProvider {
             include_str!("frameworks.scm"),
         );
         let query = Query::new(&language, &query_source)?;
-        Ok(Self { query })
+        let indices = RustCaptureIndices {
+            name_struct: query.capture_index_for_name("struct_item.name"),
+            name_enum: query.capture_index_for_name("enum_item.name"),
+            name_trait: query.capture_index_for_name("trait_item.name"),
+            name_function: query.capture_index_for_name("function_item.name"),
+            import_name: query.capture_index_for_name("import.name"),
+            import_source: query.capture_index_for_name("import.source"),
+            import_alias: query.capture_index_for_name("import.alias"),
+            function: query.capture_index_for_name("function"),
+            class: query.capture_index_for_name("class"),
+            method: query.capture_index_for_name("method"),
+            interface: query.capture_index_for_name("interface"),
+            export: query.capture_index_for_name("export"),
+            heritage: query.capture_index_for_name("heritage"),
+            type_ann: query.capture_index_for_name("type"),
+            decorator: query.capture_index_for_name("decorator"),
+            axum_handler: query.capture_index_for_name("axum.route.handler"),
+            actix_method: query.capture_index_for_name("actix.route.method"),
+            actix_handler: query.capture_index_for_name("actix.route.handler"),
+        };
+        Ok(Self { query, indices })
     }
 }
 
@@ -43,28 +86,7 @@ impl LanguageProvider for RustProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_name_struct = self.query.capture_index_for_name("struct_item.name");
-        let idx_name_enum = self.query.capture_index_for_name("enum_item.name");
-        let idx_name_trait = self.query.capture_index_for_name("trait_item.name");
-        let idx_name_function = self.query.capture_index_for_name("function_item.name");
-
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-        let idx_import_source = self.query.capture_index_for_name("import.source");
-        let idx_import_alias = self.query.capture_index_for_name("import.alias");
-
-        let idx_function = self.query.capture_index_for_name("function");
-        let idx_class = self.query.capture_index_for_name("class");
-        let idx_method = self.query.capture_index_for_name("method");
-        let idx_interface = self.query.capture_index_for_name("interface");
-
-        let idx_export = self.query.capture_index_for_name("export");
-        let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_type = self.query.capture_index_for_name("type");
-        let idx_decorator = self.query.capture_index_for_name("decorator");
-
-        let idx_axum_handler = self.query.capture_index_for_name("axum.route.handler");
-        let idx_actix_method = self.query.capture_index_for_name("actix.route.method");
-        let idx_actix_handler = self.query.capture_index_for_name("actix.route.handler");
+        let idx = &self.indices;
 
         // Side-table: top-level free `fn` byte ranges + names, used to resolve
         // the enclosing function for framework-ref captures via byte-range containment.
@@ -93,82 +115,75 @@ impl LanguageProvider for RustProvider {
             let mut actix_handler: Option<tree_sitter::Node> = None;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_struct || Some(cap_idx) == idx_name_enum {
+                let cap_idx = Some(cap.index);
+                if cap_idx == idx.name_struct || cap_idx == idx.name_enum {
                     // struct 與 enum 在 gnx NodeKind 統一映射為 Class。
                     name_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Class);
                     }
-                } else if Some(cap_idx) == idx_name_trait {
+                } else if cap_idx == idx.name_trait {
                     name_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Interface);
                     }
-                } else if Some(cap_idx) == idx_name_function {
+                } else if cap_idx == idx.name_function {
                     name_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Function);
                     }
-                } else if Some(cap_idx) == idx_import_name {
+                } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_source {
+                } else if cap_idx == idx.import_source {
                     import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_alias {
+                } else if cap_idx == idx.import_alias {
                     import_alias = Some(cap.node);
-                } else if Some(cap_idx) == idx_function {
+                } else if cap_idx == idx.function {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_class {
+                } else if cap_idx == idx.class {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_method {
+                } else if cap_idx == idx.method {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_interface {
+                } else if cap_idx == idx.interface {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
-                } else if Some(cap_idx) == idx_export {
+                } else if cap_idx == idx.export {
                     is_exported = true;
-                } else if Some(cap_idx) == idx_heritage {
+                } else if cap_idx == idx.heritage {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         heritage.push(h_str.to_string());
                     }
-                } else if Some(cap_idx) == idx_type {
+                } else if cap_idx == idx.type_ann {
                     if let Ok(t_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         type_annotation = Some(t_str.to_string());
                     }
-                } else if Some(cap_idx) == idx_decorator {
+                } else if cap_idx == idx.decorator {
                     if let Ok(d_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         decorators.push(d_str.to_string());
                     }
-                } else if Some(cap_idx) == idx_axum_handler {
+                } else if cap_idx == idx.axum_handler {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        let start = cap.node.start_position();
-                        let end = cap.node.end_position();
                         axum_handler_captures.push((
                             h_str.to_string(),
                             cap.node.start_byte(),
                             cap.node.end_byte(),
-                            (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
+                            node_span(&cap.node),
                         ));
                     }
-                } else if Some(cap_idx) == idx_actix_method {
+                } else if cap_idx == idx.actix_method {
                     actix_method = Some(cap.node);
-                } else if Some(cap_idx) == idx_actix_handler {
+                } else if cap_idx == idx.actix_handler {
                     actix_handler = Some(cap.node);
                 }
             }
@@ -180,25 +195,16 @@ impl LanguageProvider for RustProvider {
                         &source[handler_node.start_byte()..handler_node.end_byte()],
                     ),
                 ) {
-                    let start = handler_node.start_position();
-                    let end = handler_node.end_position();
                     actix_handler_captures.push((
                         method_str.to_string(),
                         handler_str.to_string(),
-                        (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
+                        node_span(&handler_node),
                     ));
                 }
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let start = root.start_position();
-                    let end = root.end_position();
                     if matches!(k, NodeKind::Function | NodeKind::Method) {
                         fn_spans.push((
                             name_str.to_string(),
@@ -212,12 +218,7 @@ impl LanguageProvider for RustProvider {
                         type_annotation,
                         name: name_str.to_string(),
                         kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
+                        span: node_span(&root),
                         calls: Vec::new(),
                     });
                 }
@@ -273,10 +274,10 @@ impl LanguageProvider for RustProvider {
         }
 
         // Actix attribute-macro routes: emit one ref per #[verb] → fn pair.
-        // No natural source — use "<module>" sentinel; confidence 0.9 (syntactic, unambiguous).
+        // No natural source — use module-level sentinel; confidence 0.9 (syntactic, unambiguous).
         for (method, handler, span) in actix_handler_captures {
             framework_refs.push(RawFrameworkRef {
-                source_name: "<module>".to_string(),
+                source_name: MODULE_LEVEL_SOURCE.to_string(),
                 target_name: handler,
                 confidence: 0.9,
                 reason: format!("actix-route-{}", method),

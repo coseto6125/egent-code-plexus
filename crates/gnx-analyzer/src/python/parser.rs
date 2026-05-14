@@ -1,4 +1,5 @@
 use crate::calls::extract_calls;
+use crate::framework_helpers::{enclosing_function_name, node_span};
 use gnx_core::analyzer::provider::LanguageProvider;
 use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use gnx_core::graph::NodeKind;
@@ -8,6 +9,28 @@ use tree_sitter::{Parser, Query, QueryCursor};
 
 pub struct PythonProvider {
     query: Query,
+    indices: PythonCaptureIndices,
+}
+
+struct PythonCaptureIndices {
+    function_name: Option<u32>,
+    class_name: Option<u32>,
+    type_ann: Option<u32>,
+    heritage: Option<u32>,
+    export: Option<u32>,
+    import_name: Option<u32>,
+    import_source: Option<u32>,
+    import_alias: Option<u32>,
+    decorator: Option<u32>,
+    function: Option<u32>,
+    class: Option<u32>,
+    route_method: Option<u32>,
+    route_path: Option<u32>,
+    route_call: Option<u32>,
+    fastapi_depends_target: Option<u32>,
+    fastapi_route_app: Option<u32>,
+    fastapi_route_method: Option<u32>,
+    fastapi_route_handler: Option<u32>,
 }
 
 impl PythonProvider {
@@ -19,7 +42,27 @@ impl PythonProvider {
             include_str!("frameworks.scm"),
         );
         let query = Query::new(&language, &query_source)?;
-        Ok(Self { query })
+        let indices = PythonCaptureIndices {
+            function_name: query.capture_index_for_name("function.name"),
+            class_name: query.capture_index_for_name("class.name"),
+            type_ann: query.capture_index_for_name("type"),
+            heritage: query.capture_index_for_name("heritage"),
+            export: query.capture_index_for_name("export"),
+            import_name: query.capture_index_for_name("import.name"),
+            import_source: query.capture_index_for_name("import.source"),
+            import_alias: query.capture_index_for_name("import.alias"),
+            decorator: query.capture_index_for_name("decorator"),
+            function: query.capture_index_for_name("function"),
+            class: query.capture_index_for_name("class"),
+            route_method: query.capture_index_for_name("route.method"),
+            route_path: query.capture_index_for_name("route.path"),
+            route_call: query.capture_index_for_name("route.call"),
+            fastapi_depends_target: query.capture_index_for_name("fastapi.depends.target"),
+            fastapi_route_app: query.capture_index_for_name("fastapi.route.app"),
+            fastapi_route_method: query.capture_index_for_name("fastapi.route.method"),
+            fastapi_route_handler: query.capture_index_for_name("fastapi.route.handler"),
+        };
+        Ok(Self { query, indices })
     }
 }
 
@@ -44,29 +87,7 @@ impl LanguageProvider for PythonProvider {
         let mut imports: Vec<RawImport> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
 
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_type = self.query.capture_index_for_name("type");
-        let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_export = self.query.capture_index_for_name("export");
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-        let idx_import_source = self.query.capture_index_for_name("import.source");
-        let idx_import_alias = self.query.capture_index_for_name("import.alias");
-        let idx_decorator = self.query.capture_index_for_name("decorator");
-
-        let idx_function = self.query.capture_index_for_name("function");
-        let idx_class = self.query.capture_index_for_name("class");
-
-        let idx_route_method = self.query.capture_index_for_name("route.method");
-        let idx_route_path = self.query.capture_index_for_name("route.path");
-        let idx_route_call = self.query.capture_index_for_name("route.call");
-
-        let idx_fastapi_depends_target =
-            self.query.capture_index_for_name("fastapi.depends.target");
-
-        let idx_fastapi_route_app = self.query.capture_index_for_name("fastapi.route.app");
-        let idx_fastapi_route_method = self.query.capture_index_for_name("fastapi.route.method");
-        let idx_fastapi_route_handler = self.query.capture_index_for_name("fastapi.route.handler");
+        let idx = &self.indices;
 
         // Collect (target_name, span) for FastAPI Depends() refs; resolve
         // the enclosing function via span containment after nodes are built.
@@ -98,64 +119,54 @@ impl LanguageProvider for PythonProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx_function_name {
+                if cap_idx == idx.function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if cap_idx == idx_class_name {
+                } else if cap_idx == idx.class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
-                } else if cap_idx == idx_type {
+                } else if cap_idx == idx.type_ann {
                     type_annotation_node = Some(cap.node);
-                } else if cap_idx == idx_heritage {
+                } else if cap_idx == idx.heritage {
                     if let Ok(h) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         heritage.push(h.to_string());
                     }
-                } else if cap_idx == idx_export {
+                } else if cap_idx == idx.export {
                     is_exported_explicit = true;
-                } else if cap_idx == idx_decorator {
+                } else if cap_idx == idx.decorator {
                     if let Ok(d_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         decorators.push(d_str.to_string());
                     }
-                } else if cap_idx == idx_import_name {
+                } else if cap_idx == idx.import_name {
                     import_name_node = Some(cap.node);
-                } else if cap_idx == idx_import_source {
+                } else if cap_idx == idx.import_source {
                     import_src_node = Some(cap.node);
-                } else if cap_idx == idx_import_alias {
+                } else if cap_idx == idx.import_alias {
                     import_alias_node = Some(cap.node);
-                } else if cap_idx == idx_route_method {
+                } else if cap_idx == idx.route_method {
                     route_method = Some(cap.node);
-                } else if cap_idx == idx_route_path {
+                } else if cap_idx == idx.route_path {
                     route_path = Some(cap.node);
-                } else if cap_idx == idx_route_call {
+                } else if cap_idx == idx.route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
-                } else if cap_idx == idx_function || cap_idx == idx_class {
+                } else if cap_idx == idx.function || cap_idx == idx.class {
                     root_span_node = Some(cap.node);
-                } else if cap_idx == idx_fastapi_depends_target {
+                } else if cap_idx == idx.fastapi_depends_target {
                     if let Ok(target_name) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        let start = cap.node.start_position();
-                        let end = cap.node.end_position();
-                        pending_depends.push((
-                            target_name.to_string(),
-                            (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
-                        ));
+                        pending_depends.push((target_name.to_string(), node_span(&cap.node)));
                     }
-                } else if cap_idx == idx_fastapi_route_app {
+                } else if cap_idx == idx.fastapi_route_app {
                     fa_route_app_node = Some(cap.node);
-                } else if cap_idx == idx_fastapi_route_method {
+                } else if cap_idx == idx.fastapi_route_method {
                     fa_route_method_node = Some(cap.node);
-                } else if cap_idx == idx_fastapi_route_handler {
+                } else if cap_idx == idx.fastapi_route_handler {
                     fa_route_handler_node = Some(cap.node);
                 }
             }
@@ -168,33 +179,19 @@ impl LanguageProvider for PythonProvider {
                     std::str::from_utf8(&source[method_n.start_byte()..method_n.end_byte()]),
                     std::str::from_utf8(&source[handler_n.start_byte()..handler_n.end_byte()]),
                 ) {
-                    let start = handler_n.start_position();
-                    let end = handler_n.end_position();
                     route_refs.push(RawFrameworkRef {
                         source_name: app_str.to_string(),
                         target_name: handler_str.to_string(),
                         confidence: 0.9,
                         reason: format!("fastapi-route-{}", method_str),
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
+                        span: node_span(&handler_n),
                     });
                 }
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let start = root.start_position();
-                    let end = root.end_position();
-                    let span = (
-                        start.row as u32,
-                        start.column as u32,
-                        end.row as u32,
-                        end.column as u32,
-                    );
+                    let span = node_span(&root);
 
                     let type_str = type_annotation_node.and_then(|t| {
                         std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
@@ -267,18 +264,11 @@ impl LanguageProvider for PythonProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
-                        let start = root.start_position();
-                        let end = root.end_position();
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
                             handler: None,
-                            span: (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
+                            span: node_span(&root),
                         });
                     }
                 }
@@ -292,16 +282,9 @@ impl LanguageProvider for PythonProvider {
         // Function/Method node whose span contains the capture span.
         let mut framework_refs: Vec<RawFrameworkRef> = route_refs;
         for (target_name, span) in pending_depends {
-            let enclosing = nodes
-                .iter()
-                .filter(|n| {
-                    matches!(n.kind, NodeKind::Function | NodeKind::Method)
-                        && span_contains(n.span, span)
-                })
-                .min_by_key(|n| span_area(n.span));
-            if let Some(source_node) = enclosing {
+            if let Some(source_name) = enclosing_function_name(&nodes, span) {
                 framework_refs.push(RawFrameworkRef {
-                    source_name: source_node.name.clone(),
+                    source_name,
                     target_name,
                     confidence: 0.6,
                     reason: "fastapi-depends".to_string(),
@@ -320,20 +303,4 @@ impl LanguageProvider for PythonProvider {
             framework_refs,
         })
     }
-}
-
-/// Returns true if `outer` fully contains `inner` (inclusive of equal bounds).
-fn span_contains(outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)) -> bool {
-    let (o_sr, o_sc, o_er, o_ec) = outer;
-    let (i_sr, i_sc, i_er, i_ec) = inner;
-    let start_ok = (o_sr, o_sc) <= (i_sr, i_sc);
-    let end_ok = (i_er, i_ec) <= (o_er, o_ec);
-    start_ok && end_ok
-}
-
-/// Rough size proxy used to pick the innermost containing span.
-/// Compares row span first, then column span — small wins.
-fn span_area(span: (u32, u32, u32, u32)) -> (u32, u32) {
-    let (sr, sc, er, ec) = span;
-    (er.saturating_sub(sr), ec.saturating_sub(sc))
 }

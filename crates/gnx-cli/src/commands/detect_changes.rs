@@ -23,6 +23,7 @@ use crate::reanalyze::make_pipeline;
 use clap::Args;
 use gnx_core::algorithms::process_trace::is_test_path;
 use gnx_core::graph::{ArchivedNodeKind, NodeKind};
+use gnx_core::HIGH_TRUST_CONFIDENCE;
 use gnx_core::graph_query::processes_containing;
 use gnx_core::GnxError;
 use serde_json::{json, Value};
@@ -279,7 +280,9 @@ pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
                 let out_s = graph.out_offsets[a].to_native() as usize;
                 let out_e = graph.out_offsets[a + 1].to_native() as usize;
                 for edge in &graph.edges[out_s..out_e] {
-                    if edge.target.to_native() == b && edge.confidence.to_native() < 0.8 {
+                    if edge.target.to_native() == b
+                        && edge.confidence.to_native() < HIGH_TRUST_CONFIDENCE
+                    {
                         return false;
                     }
                 }

@@ -10,6 +10,7 @@ pub mod dart;
 pub mod docker_compose;
 pub mod dockerfile;
 pub mod embeddings;
+pub mod framework_helpers;
 pub mod github_actions;
 pub mod go;
 pub mod hcl;
