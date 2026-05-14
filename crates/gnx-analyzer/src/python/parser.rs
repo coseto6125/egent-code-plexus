@@ -74,6 +74,15 @@ fn push_django_signal_ref(
     }
 }
 
+
+thread_local! {
+    static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
+        let mut parser = tree_sitter::Parser::new();
+        let language = tree_sitter_python::LANGUAGE.into();
+        parser.set_language(&language).expect("Failed to set language");
+        parser
+    });
+}
 pub struct PythonProvider {
     query: Query,
     indices: PythonCaptureIndices,
@@ -168,13 +177,12 @@ impl LanguageProvider for PythonProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let language = tree_sitter_python::LANGUAGE.into();
-        let mut parser = Parser::new();
-        parser.set_language(&language)?;
+        
+        let tree = PARSER.with(|p| {
+            p.borrow_mut()
+                .parse(source, None)
+        }).ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
-        let tree = parser
-            .parse(source, None)
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse python file"))?;
 
         let idx = &self.indices;
 

@@ -5,6 +5,15 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
+
+thread_local! {
+    static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
+        let mut parser = tree_sitter::Parser::new();
+        let language = tree_sitter_containerfile::LANGUAGE.into();
+        parser.set_language(&language).expect("Failed to set language");
+        parser
+    });
+}
 pub struct DockerfileProvider {
     query: Query,
 }
@@ -24,13 +33,12 @@ impl LanguageProvider for DockerfileProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let language = tree_sitter_containerfile::LANGUAGE.into();
-        let mut parser = Parser::new();
-        parser.set_language(&language)?;
+        
+        let tree = PARSER.with(|p| {
+            p.borrow_mut()
+                .parse(source, None)
+        }).ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
-        let tree = parser
-            .parse(source, None)
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse Dockerfile"))?;
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
