@@ -17,7 +17,7 @@
 (function_item
   (visibility_modifier)? @export
   name: (identifier) @function_item.name
-  return_type: (_) @type) @function
+  return_type: (_)? @type) @function
 
 ;; Methods in impl
 (impl_item

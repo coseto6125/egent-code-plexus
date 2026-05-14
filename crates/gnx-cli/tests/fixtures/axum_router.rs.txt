@@ -2,9 +2,20 @@ use axum::{Router, routing::{get, post}};
 
 async fn login_handler() -> &'static str { "ok" }
 async fn logout_handler() -> &'static str { "bye" }
+async fn root_handler() -> &'static str { "/" }
 
 fn build_routes() -> Router {
     Router::new()
         .route("/login", post(login_handler))
         .route("/logout", get(logout_handler))
+}
+
+// Real-world canonical axum pattern: async fn main() with no return type.
+// Pinned regression: rust/queries.scm must extract this as Function so
+// the framework_ref's enclosing-fn lookup succeeds.
+#[tokio::main]
+async fn main() {
+    let app = Router::new().route("/", get(root_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }

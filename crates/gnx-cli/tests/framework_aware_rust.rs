@@ -10,9 +10,10 @@ fn axum_route_creates_framework_refs_for_handlers() {
         .parse_file("test.rs".as_ref(), src.as_bytes())
         .unwrap();
 
-    // Expect 2 framework_refs from .route(_, METHOD(handler)):
+    // Expect 3 framework_refs from .route(_, METHOD(handler)):
     //   build_routes  --axum-route-handler-->  login_handler
     //   build_routes  --axum-route-handler-->  logout_handler
+    //   main          --axum-route-handler-->  root_handler   (regression: fn main() with no return type)
     let handler_refs: Vec<_> = local
         .framework_refs
         .iter()
@@ -20,34 +21,36 @@ fn axum_route_creates_framework_refs_for_handlers() {
         .collect();
     assert_eq!(
         handler_refs.len(),
-        2,
-        "expected 2 axum-route-handler refs, got {}: {:?}",
+        3,
+        "expected 3 axum-route-handler refs, got {}: {:?}",
         handler_refs.len(),
         local.framework_refs
     );
 
-    let targets: Vec<&str> = handler_refs
+    let pairs: Vec<(&str, &str)> = handler_refs
         .iter()
-        .map(|r| r.target_name.as_str())
+        .map(|r| (r.source_name.as_str(), r.target_name.as_str()))
         .collect();
     assert!(
-        targets.contains(&"login_handler"),
-        "missing login_handler in {:?}",
-        targets
+        pairs.contains(&("build_routes", "login_handler")),
+        "missing build_routes→login_handler in {:?}",
+        pairs
     );
     assert!(
-        targets.contains(&"logout_handler"),
-        "missing logout_handler in {:?}",
-        targets
+        pairs.contains(&("build_routes", "logout_handler")),
+        "missing build_routes→logout_handler in {:?}",
+        pairs
+    );
+    // Regression guard: `fn main()` (no return type) must be extracted so
+    // its framework_ref isn't silently dropped (rust/queries.scm bug).
+    assert!(
+        pairs.contains(&("main", "root_handler")),
+        "missing main→root_handler — fn main() without return type was not extracted; \
+         check rust/queries.scm's `return_type: (_)?` modifier. Got: {:?}",
+        pairs
     );
 
-    // All from enclosing fn build_routes.
     for r in &handler_refs {
-        assert_eq!(
-            r.source_name, "build_routes",
-            "wrong source_name: {}",
-            r.source_name
-        );
         assert!(
             r.confidence > 0.0 && r.confidence <= 1.0,
             "confidence out of range: {}",
