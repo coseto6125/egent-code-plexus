@@ -73,9 +73,9 @@ impl LanguageProvider for VyperProvider {
                 } else if Some(ci) == idx_function || Some(ci) == idx_const {
                     root_span_node = Some(cap.node);
                 } else if Some(ci) == idx_decorator {
-                    if let Ok(d) = std::str::from_utf8(
-                        &source[cap.node.start_byte()..cap.node.end_byte()],
-                    ) {
+                    if let Ok(d) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d.to_string());
                     }
                 } else if Some(ci) == idx_import_source {
@@ -84,9 +84,7 @@ impl LanguageProvider for VyperProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                {
+                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
                     // Deduplicate by span (multiple query patterns can match the same node)
@@ -139,6 +137,7 @@ impl LanguageProvider for VyperProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

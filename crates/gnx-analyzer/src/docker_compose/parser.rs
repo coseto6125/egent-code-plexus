@@ -76,16 +76,10 @@ fn key_str<'s>(key_node: Node, source: &'s [u8]) -> &'s str {
     // Key can be: flow_node → plain_scalar → string_scalar  (text lives there)
     // or just plain_scalar for simple keys.
     let mut n = key_node;
-    loop {
-        match n.kind() {
-            "flow_node" | "plain_scalar" => {
-                if let Some(c) = n.child(0) {
-                    n = c;
-                } else {
-                    break;
-                }
-            }
-            _ => break,
+    while matches!(n.kind(), "flow_node" | "plain_scalar") {
+        match n.child(0) {
+            Some(c) => n = c,
+            None => break,
         }
     }
     node_text(n, source).trim()
@@ -97,7 +91,10 @@ fn scalar_str<'s>(val_node: Node, source: &'s [u8]) -> Option<&'s str> {
     let mut n = val_node;
     loop {
         match n.kind() {
-            "block_node" | "flow_node" | "plain_scalar" | "double_quote_scalar"
+            "block_node"
+            | "flow_node"
+            | "plain_scalar"
+            | "double_quote_scalar"
             | "single_quote_scalar" => {
                 if let Some(c) = n.child(0) {
                     n = c;
@@ -187,6 +184,7 @@ impl LanguageProvider for DockerComposeProvider {
                         nodes,
                         imports,
                         documents: vec![],
+                        framework_refs: vec![],
                     });
                 }
             }
@@ -315,6 +313,7 @@ impl LanguageProvider for DockerComposeProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

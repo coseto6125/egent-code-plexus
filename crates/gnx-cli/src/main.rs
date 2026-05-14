@@ -133,7 +133,13 @@ fn main() {
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::RouteMap(args) => args.repo.as_deref(),
         Commands::DetectChanges(args) => args.repo.as_deref(),
-        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) | Commands::RenameBranch(_) | Commands::List(_) => None,
+        Commands::Analyze(_)
+        | Commands::Init(_)
+        | Commands::HookHandle(_)
+        | Commands::HookWatcher(_)
+        | Commands::Prune(_)
+        | Commands::RenameBranch(_)
+        | Commands::List(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -156,7 +162,13 @@ fn main() {
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::RouteMap(args) => commands::route_map::run(args, &engine),
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),
-        Commands::Analyze(_) | Commands::Init(_) | Commands::HookHandle(_) | Commands::HookWatcher(_) | Commands::Prune(_) | Commands::RenameBranch(_) | Commands::List(_) => Ok(()), // Handled above
+        Commands::Analyze(_)
+        | Commands::Init(_)
+        | Commands::HookHandle(_)
+        | Commands::HookWatcher(_)
+        | Commands::Prune(_)
+        | Commands::RenameBranch(_)
+        | Commands::List(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {

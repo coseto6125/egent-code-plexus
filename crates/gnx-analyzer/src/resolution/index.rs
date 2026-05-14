@@ -7,14 +7,14 @@ pub type NodeId = u32;
 #[derive(Debug, Default)]
 pub struct SymbolTable {
     /// Maps `file_path` -> `node_name` -> `node_id`.
-    /// 
+    ///
     /// Using a nested HashMap allows us to look up symbols by `&str` without
     /// needing to allocate a `(String, String)` tuple just for the query key.
     /// This provides fast O(1) lookups for `SameFile` and `ImportScoped` resolution.
     file_scoped: HashMap<String, HashMap<String, u32>>,
-    
+
     /// Maps a `node_name` to a list of node IDs across all files.
-    /// 
+    ///
     /// This is used for `ResolutionTier::Global` lookups where we need to find
     /// all possible candidates for a given symbol name.
     global_scoped: HashMap<String, Vec<u32>>,
@@ -42,7 +42,7 @@ impl SymbolTable {
     }
 
     /// Looks up a node ID by its file path and node name.
-    /// 
+    ///
     /// Returns `Some(node_id)` if found, or `None` if the symbol doesn't exist
     /// in the specified file.
     pub fn lookup_in_file(&self, file_path: &str, node_name: &str) -> Option<u32> {
@@ -52,7 +52,7 @@ impl SymbolTable {
     }
 
     /// Looks up all node IDs that share the given global node name.
-    /// 
+    ///
     /// Returns a list of matching `node_id`s, or an empty list if none are found.
     pub fn lookup_global(&self, node_name: &str) -> Vec<u32> {
         self.global_scoped

@@ -105,9 +105,9 @@ impl LanguageProvider for SolidityProvider {
                         kind = Some(NodeKind::Const);
                     }
                 } else if Some(ci) == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(
-                        &source[cap.node.start_byte()..cap.node.end_byte()],
-                    ) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.to_string());
                     }
                 } else if Some(ci) == idx_import_source {
@@ -116,9 +116,7 @@ impl LanguageProvider for SolidityProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                {
+                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
@@ -163,6 +161,7 @@ impl LanguageProvider for SolidityProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

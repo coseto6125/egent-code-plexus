@@ -51,7 +51,11 @@ pub fn resolve(cwd: &Path) -> Result<GitState, GitStateError> {
                 .to_string();
             // sanitize_segment rejects leading `.` or `-`; strip them first.
             let cleaned = basename.trim_start_matches(['.', '-']);
-            let candidate = if cleaned.is_empty() { "unknown" } else { cleaned };
+            let candidate = if cleaned.is_empty() {
+                "unknown"
+            } else {
+                cleaned
+            };
             sanitize_segment(candidate)?
         }
     };

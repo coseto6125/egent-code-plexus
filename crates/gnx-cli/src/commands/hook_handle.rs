@@ -22,7 +22,7 @@ pub fn run(args: HookHandleArgs) -> Result<(), gnx_core::GnxError> {
     let deleted: Vec<String> = stdin
         .lock()
         .lines()
-        .filter_map(Result::ok)
+        .map_while(Result::ok)
         .filter_map(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() != 3 {

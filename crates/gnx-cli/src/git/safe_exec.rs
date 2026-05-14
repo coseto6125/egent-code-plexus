@@ -15,10 +15,14 @@ use std::process::Command;
 pub fn git() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
-        "-c", "protocol.ext.allow=never",
-        "-c", "core.fsmonitor=",
-        "-c", "core.editor=false",
-        "-c", "credential.helper=",
+        "-c",
+        "protocol.ext.allow=never",
+        "-c",
+        "core.fsmonitor=",
+        "-c",
+        "core.editor=false",
+        "-c",
+        "credential.helper=",
     ]);
     cmd
 }

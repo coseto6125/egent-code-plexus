@@ -87,13 +87,17 @@ impl LanguageProvider for JavaScriptProvider {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h_str.to_string());
                     }
                 } else if Some(cap_idx) == idx_export {
                     is_exported = true;
                 } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d_str.to_string());
                     }
                 } else if Some(cap_idx) == idx_import_name {
@@ -162,18 +166,21 @@ impl LanguageProvider for JavaScriptProvider {
                             name: name_str.to_string(),
                             kind: k,
                             span: node_span,
-                                                    calls: Vec::new(),
+                            calls: Vec::new(),
                         });
                     }
                 }
             }
 
             if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                if let (Ok(name_str), Ok(src_str)) =
-                    (std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]), std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]))
-                {
+                if let (Ok(name_str), Ok(src_str)) = (
+                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                ) {
                     let alias = import_alias.and_then(|a| {
-                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]).ok().map(|s| s.to_string())
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
                     });
 
                     imports.push(RawImport {
@@ -185,7 +192,9 @@ impl LanguageProvider for JavaScriptProvider {
             }
 
             if is_route {
-                if let (Some(r_method), Some(r_path), Some(root)) = (route_method, route_path, root_span_node) {
+                if let (Some(r_method), Some(r_path), Some(root)) =
+                    (route_method, route_path, root_span_node)
+                {
                     if let (Ok(method_str), Ok(path_str)) = (
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
@@ -217,7 +226,8 @@ impl LanguageProvider for JavaScriptProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

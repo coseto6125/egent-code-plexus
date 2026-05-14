@@ -1,6 +1,5 @@
 use super::provider::LanguageProvider;
 use super::types::LocalGraph;
-use crossbeam_channel::bounded;
 use rayon::prelude::*;
 use std::path::PathBuf;
 
@@ -58,9 +57,11 @@ impl AnalyzerPipeline {
         // GitHub Actions: path-based routing — .github/workflows/*.yml|yaml
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if matches!(ext, "yml" | "yaml") {
-                let is_gha = path.components().collect::<Vec<_>>().windows(2).any(|w| {
-                    w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows"
-                });
+                let is_gha = path
+                    .components()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|w| w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows");
                 if is_gha {
                     return self
                         .providers
@@ -219,19 +220,22 @@ impl AnalyzerPipeline {
         // Producer (A): parse files concurrently
         rayon::scope(|s| {
             s.spawn(|_| {
-                files.into_par_iter().for_each_with(tx, |sender, (abs_path, rel_path)| {
-                    if let Some(provider) = self.find_provider(&rel_path) {
-                        if let Ok(source) = std::fs::read(&abs_path) {
-                            if let Ok(mut local_graph) = provider.parse_file(&rel_path, &source) {
-                                use sha2::{Sha256, Digest};
-                                let mut hasher = Sha256::new();
-                                hasher.update(&source);
-                                local_graph.content_hash = hasher.finalize().into();
-                                let _ = sender.send(local_graph);
+                files
+                    .into_par_iter()
+                    .for_each_with(tx, |sender, (abs_path, rel_path)| {
+                        if let Some(provider) = self.find_provider(&rel_path) {
+                            if let Ok(source) = std::fs::read(&abs_path) {
+                                if let Ok(mut local_graph) = provider.parse_file(&rel_path, &source)
+                                {
+                                    use sha2::{Digest, Sha256};
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(&source);
+                                    local_graph.content_hash = hasher.finalize().into();
+                                    let _ = sender.send(local_graph);
+                                }
                             }
                         }
-                    }
-                });
+                    });
             });
         });
 

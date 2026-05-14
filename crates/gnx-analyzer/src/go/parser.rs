@@ -36,7 +36,7 @@ impl LanguageProvider for GoProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes= Vec::new();
+        let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
         let idx_struct_name = self.query.capture_index_for_name("struct.name");
@@ -92,16 +92,24 @@ impl LanguageProvider for GoProvider {
                 } else if cap_idx == idx_function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if cap_idx == idx_struct || cap_idx == idx_interface || cap_idx == idx_method || cap_idx == idx_function {
+                } else if cap_idx == idx_struct
+                    || cap_idx == idx_interface
+                    || cap_idx == idx_method
+                    || cap_idx == idx_function
+                {
                     root_node = Some(cap.node);
                 } else if cap_idx == idx_heritage {
-                    if let Ok(h_name) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h_name.to_string());
                     }
                 } else if cap_idx == idx_type {
-                    if let Ok(t_name) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(t_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         if let Some(ref mut existing) = type_annotation {
-                            existing.push_str(" ");
+                            existing.push(' ');
                             existing.push_str(t_name);
                         } else {
                             type_annotation = Some(t_name.to_string());
@@ -126,12 +134,12 @@ impl LanguageProvider for GoProvider {
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let name = name_str.to_string();
-                    let is_exported = name.chars().next().map_or(false, |c| c.is_uppercase());
+                    let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
                     let start = root.start_position();
                     let end = root.end_position();
 
                     nodes.push(RawNode {
-            decorators: vec![],
+                        decorators: vec![],
                         name,
                         kind: k,
                         is_exported,
@@ -143,15 +151,22 @@ impl LanguageProvider for GoProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                calls: Vec::new(),
+                        calls: Vec::new(),
                     });
                 }
             }
 
             if is_route {
-                if let (Some(m_node), Some(p_node), Some(span_node)) = (route_method_node, route_path_node, route_span_node) {
-                    let method_str = std::str::from_utf8(&source[m_node.start_byte()..m_node.end_byte()]).unwrap_or("").to_string();
-                    let path_raw = std::str::from_utf8(&source[p_node.start_byte()..p_node.end_byte()]).unwrap_or("");
+                if let (Some(m_node), Some(p_node), Some(span_node)) =
+                    (route_method_node, route_path_node, route_span_node)
+                {
+                    let method_str =
+                        std::str::from_utf8(&source[m_node.start_byte()..m_node.end_byte()])
+                            .unwrap_or("")
+                            .to_string();
+                    let path_raw =
+                        std::str::from_utf8(&source[p_node.start_byte()..p_node.end_byte()])
+                            .unwrap_or("");
                     let path_str = path_raw.trim_matches(|c| c == '"' || c == '`').to_string();
                     let start = span_node.start_position();
                     let end = span_node.end_position();
@@ -172,18 +187,26 @@ impl LanguageProvider for GoProvider {
 
             if is_import {
                 if let Some(src_node) = import_source {
-                    if let Ok(src_quoted) = std::str::from_utf8(&source[src_node.start_byte()..src_node.end_byte()]) {
-                        let source_path = src_quoted.trim_matches(|c| c == '"' || c == '`').to_string();
-                        
+                    if let Ok(src_quoted) =
+                        std::str::from_utf8(&source[src_node.start_byte()..src_node.end_byte()])
+                    {
+                        let source_path = src_quoted
+                            .trim_matches(|c| c == '"' || c == '`')
+                            .to_string();
+
                         let alias = if let Some(alias_node) = import_alias {
-                            std::str::from_utf8(&source[alias_node.start_byte()..alias_node.end_byte()]).ok().map(|s| s.to_string())
+                            std::str::from_utf8(
+                                &source[alias_node.start_byte()..alias_node.end_byte()],
+                            )
+                            .ok()
+                            .map(|s| s.to_string())
                         } else {
                             None
                         };
 
                         let imported_name = if let Some(ref a) = alias {
                             a.clone()
-                        } else if let Some(last_part) = source_path.split('/').last() {
+                        } else if let Some(last_part) = source_path.split('/').next_back() {
                             last_part.to_string()
                         } else {
                             source_path.clone()
@@ -200,7 +223,11 @@ impl LanguageProvider for GoProvider {
         }
 
         // Deduplicate imports
-        imports.sort_by(|a, b| a.source.cmp(&b.source).then(a.imported_name.cmp(&b.imported_name)));
+        imports.sort_by(|a, b| {
+            a.source
+                .cmp(&b.source)
+                .then(a.imported_name.cmp(&b.imported_name))
+        });
         imports.dedup_by(|a, b| a.source == b.source && a.imported_name == b.imported_name);
 
         // Extract call sites and attach to enclosing function/method nodes.
@@ -212,7 +239,8 @@ impl LanguageProvider for GoProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

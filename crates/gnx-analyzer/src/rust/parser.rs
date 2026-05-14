@@ -36,7 +36,7 @@ impl LanguageProvider for RustProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes= Vec::new();
+        let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
         let idx_name_struct = self.query.capture_index_for_name("struct_item.name");
@@ -73,18 +73,22 @@ impl LanguageProvider for RustProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_struct {
+                if Some(cap_idx) == idx_name_struct || Some(cap_idx) == idx_name_enum {
+                    // struct 與 enum 在 gnx NodeKind 統一映射為 Class。
                     name_node = Some(cap.node);
-                    if kind.is_none() { kind = Some(NodeKind::Class); }
-                } else if Some(cap_idx) == idx_name_enum {
-                    name_node = Some(cap.node);
-                    if kind.is_none() { kind = Some(NodeKind::Class); }
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Class);
+                    }
                 } else if Some(cap_idx) == idx_name_trait {
                     name_node = Some(cap.node);
-                    if kind.is_none() { kind = Some(NodeKind::Interface); }
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Interface);
+                    }
                 } else if Some(cap_idx) == idx_name_function {
                     name_node = Some(cap.node);
-                    if kind.is_none() { kind = Some(NodeKind::Function); }
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Function);
+                    }
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
@@ -106,15 +110,21 @@ impl LanguageProvider for RustProvider {
                 } else if Some(cap_idx) == idx_export {
                     is_exported = true;
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h_str.to_string());
                     }
                 } else if Some(cap_idx) == idx_type {
-                    if let Ok(t_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(t_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(t_str.to_string());
                     }
                 } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d_str.to_string());
                     }
                 }
@@ -137,7 +147,7 @@ impl LanguageProvider for RustProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
                 }
             }
@@ -145,10 +155,12 @@ impl LanguageProvider for RustProvider {
             if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
                 if let (Ok(name_str), Ok(src_str)) = (
                     std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
                 ) {
                     let alias = if let Some(a_node) = import_alias {
-                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()]).ok().map(|s| s.to_string())
+                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
                     } else {
                         None
                     };
@@ -176,7 +188,8 @@ impl LanguageProvider for RustProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

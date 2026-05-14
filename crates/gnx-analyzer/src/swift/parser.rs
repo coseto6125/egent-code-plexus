@@ -36,7 +36,7 @@ impl LanguageProvider for SwiftProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes= Vec::new();
+        let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
         let idx_name_function = self.query.capture_index_for_name("name.function");
@@ -94,21 +94,29 @@ impl LanguageProvider for SwiftProvider {
                 {
                     root_span_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_export {
-                    if let Ok(export_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(export_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         if export_str == "public" || export_str == "open" {
                             is_exported = true;
                         }
                     }
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(heritage_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(heritage_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(heritage_str.to_string());
                     }
                 } else if Some(cap_idx) == idx_type {
-                    if let Ok(type_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(type_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(type_str.to_string());
                     }
                 } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d_str.to_string());
                     }
                 }
@@ -131,15 +139,16 @@ impl LanguageProvider for SwiftProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
                 }
             }
 
             if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                if let (Ok(name_str), Ok(src_str)) =
-                    (std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]), std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]))
-                {
+                if let (Ok(name_str), Ok(src_str)) = (
+                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                ) {
                     imports.push(RawImport {
                         alias: None,
                         imported_name: name_str.to_string(),
@@ -158,7 +167,8 @@ impl LanguageProvider for SwiftProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

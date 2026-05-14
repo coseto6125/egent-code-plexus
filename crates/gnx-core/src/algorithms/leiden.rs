@@ -127,8 +127,8 @@ pub fn detect_communities(nodes: &[Node], edges: &[Edge], config: &LeidenConfig)
                 adj[i].clear();
             }
         }
-        for i in 0..n {
-            adj[i].retain(|&(t, _)| connected[t as usize]);
+        for adj_i in adj.iter_mut() {
+            adj_i.retain(|&(t, _)| connected[t as usize]);
         }
     }
 
@@ -335,7 +335,7 @@ fn refine(
     // Group nodes by current partition.
     let mut groups: HashMap<u32, Vec<u32>> = HashMap::new();
     for (i, &c) in partition.iter().enumerate() {
-        groups.entry(c).or_insert_with(Vec::new).push(i as u32);
+        groups.entry(c).or_default().push(i as u32);
     }
     let mut group_keys: Vec<u32> = groups.keys().copied().collect();
     group_keys.sort();
@@ -493,7 +493,10 @@ mod tests {
         let hub_comm = a[0];
         let chain_partners: Vec<u32> = vec![1, 3, 5, 7];
         let shares = chain_partners.iter().any(|&p| a[p as usize] == hub_comm);
-        assert!(shares, "hub should share a community with ≥1 chain neighbor; assignments={a:?}");
+        assert!(
+            shares,
+            "hub should share a community with ≥1 chain neighbor; assignments={a:?}"
+        );
 
         // No node should be unassigned.
         for (i, &c) in a.iter().enumerate() {

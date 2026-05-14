@@ -10,10 +10,7 @@ use std::path::{Path, PathBuf};
 #[serde(tag = "event")]
 pub enum AuditEvent {
     #[serde(rename = "analyze.start")]
-    AnalyzeStart {
-        repo: String,
-        branch: String,
-    },
+    AnalyzeStart { repo: String, branch: String },
     #[serde(rename = "analyze.complete")]
     AnalyzeComplete {
         repo: String,
@@ -44,10 +41,7 @@ pub enum AuditEvent {
         branch: Option<String>,
     },
     #[serde(rename = "oom.aborted")]
-    OomAborted {
-        phase: String,
-        peak_rss_mb: u64,
-    },
+    OomAborted { phase: String, peak_rss_mb: u64 },
 }
 
 impl AuditEvent {

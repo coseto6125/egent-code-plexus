@@ -130,7 +130,7 @@ pub fn detect_processes(
 
     // Sort by length descending, cap at max_processes.
     let mut sorted = endpoint_deduped;
-    sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.len()));
     sorted.truncate(config.max_processes);
 
     // Annotate with process_type via community spread.
@@ -255,7 +255,7 @@ fn dedup_subsets(traces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
         return traces;
     }
     let mut sorted = traces;
-    sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.len()));
 
     let mut unique: Vec<Vec<u32>> = Vec::new();
     for t in sorted {
@@ -281,7 +281,7 @@ fn dedup_by_endpoints(traces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
         return traces;
     }
     let mut sorted = traces;
-    sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.len()));
 
     let mut by_pair: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
     for t in sorted {
@@ -378,7 +378,12 @@ mod tests {
         nodes[1].community_id = 2; // different community
         nodes[2].community_id = 1;
         let edges = vec![e(0, 1), e(1, 2)];
-        let result = detect_processes(&nodes, &edges, &["src/x.rs".into()], &ProcessConfig::default());
+        let result = detect_processes(
+            &nodes,
+            &edges,
+            &["src/x.rs".into()],
+            &ProcessConfig::default(),
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].process_type, ProcessType::CrossCommunity);
     }
@@ -401,7 +406,12 @@ mod tests {
             },
             e(1, 2),
         ];
-        let result = detect_processes(&nodes, &edges, &["src/x.rs".into()], &ProcessConfig::default());
+        let result = detect_processes(
+            &nodes,
+            &edges,
+            &["src/x.rs".into()],
+            &ProcessConfig::default(),
+        );
         // 0→1 dropped, so only 1→2 (2 steps, below min 3) → no traces.
         assert!(result.is_empty());
     }

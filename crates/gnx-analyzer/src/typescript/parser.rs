@@ -101,15 +101,21 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx_export {
                     is_exported = true;
                 } else if cap_idx == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.to_string());
                     }
                 } else if cap_idx == idx_type {
-                    if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(t) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(t.to_string());
                     }
                 } else if cap_idx == idx_decorator {
-                    if let Ok(d) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d.to_string());
                     }
                 } else if cap_idx == idx_import_name {
@@ -185,7 +191,7 @@ impl LanguageProvider for TypeScriptProvider {
                             is_exported,
                             heritage: heritage.clone(),
                             type_annotation: type_annotation.clone(),
-                                                    calls: Vec::new(),
+                            calls: Vec::new(),
                         });
                     }
                 }
@@ -215,7 +221,9 @@ impl LanguageProvider for TypeScriptProvider {
 
             // Process routes
             if is_route {
-                if let (Some(r_method), Some(r_path), Some(root)) = (route_method, route_path, root_span_node) {
+                if let (Some(r_method), Some(r_path), Some(root)) =
+                    (route_method, route_path, root_span_node)
+                {
                     if let (Ok(method_str), Ok(path_str)) = (
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
@@ -247,7 +255,8 @@ impl LanguageProvider for TypeScriptProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

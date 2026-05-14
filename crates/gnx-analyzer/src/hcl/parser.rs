@@ -79,9 +79,7 @@ impl LanguageProvider for HclProvider {
 
             // Push a declaration node if we have a name + kind + span.
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                {
+                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let full_name = if let Some(pfx) = prefix_node {
                         // resource / data → combine "type.name" for uniqueness.
                         if let Ok(pfx_str) =
@@ -139,6 +137,7 @@ impl LanguageProvider for HclProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

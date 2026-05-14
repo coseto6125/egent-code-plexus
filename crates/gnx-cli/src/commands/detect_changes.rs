@@ -8,10 +8,10 @@
 //!      ("new") content.
 //!   3. Hash each node's body lines (start_row..=end_row) for both sides.
 //!   4. Diff by (kind, name, file) key:
-//!        new-only                → change_type="added"
-//!        old-only                → change_type="removed"
-//!        both, hash differs      → change_type="modified"
-//!        both, hash same         → skip (line-shift only; body unchanged)
+//!      - new-only                → change_type="added"
+//!      - old-only                → change_type="removed"
+//!      - both, hash differs      → change_type="modified"
+//!      - both, hash same         → skip (line-shift only; body unchanged)
 //!   5. For modified/removed, find the node index in the archived graph
 //!      to power the existing affected-process BFS.
 
@@ -21,8 +21,8 @@ use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::output::{emit, OutputFormat};
 use crate::reanalyze::make_pipeline;
 use clap::Args;
-use gnx_core::graph::{ArchivedNodeKind, NodeKind};
 use gnx_core::algorithms::process_trace::is_test_path;
+use gnx_core::graph::{ArchivedNodeKind, NodeKind};
 use gnx_core::graph_query::processes_containing;
 use gnx_core::GnxError;
 use serde_json::{json, Value};
@@ -139,7 +139,10 @@ pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
     let changed_files_set: HashSet<&str> = changed_paths.iter().map(|s| s.as_str()).collect();
     let mut old_graph_idx: HashMap<(String, String, String), u32> = HashMap::new();
     for (idx, node) in graph.nodes.iter().enumerate() {
-        if matches!(node.kind, ArchivedNodeKind::File | ArchivedNodeKind::Process) {
+        if matches!(
+            node.kind,
+            ArchivedNodeKind::File | ArchivedNodeKind::Process
+        ) {
             continue;
         }
         let file_node = &graph.files[node.file_idx.to_native() as usize];
@@ -428,11 +431,16 @@ fn compact_output(result: &Value) -> String {
         let line = sym["line"].as_u64().unwrap_or(0) + 1;
         let file = sym["filePath"].as_str().unwrap_or("");
         out.push('\n');
-        out.push_str(&format!("  {} {} {}:{}  {}", prefix, abbr, name, line, file));
+        out.push_str(&format!(
+            "  {} {} {}:{}  {}",
+            prefix, abbr, name, line, file
+        ));
     }
 
     // Flows — group by entry, then by process_type.
-    let procs = result["affected_processes"].as_array().unwrap_or(&empty_arr);
+    let procs = result["affected_processes"]
+        .as_array()
+        .unwrap_or(&empty_arr);
 
     // (entry_name, entry_kind_abbr) → (cross_terminals, intra_terminals)
     let mut cross_by_entry: HashMap<(String, String), Vec<String>> = HashMap::new();
@@ -441,7 +449,12 @@ fn compact_output(result: &Value) -> String {
     // Collect entry kinds from changed_symbols for look-up.
     let entry_kind_map: HashMap<&str, &str> = sorted_syms
         .iter()
-        .map(|s| (s["name"].as_str().unwrap_or(""), s["type"].as_str().unwrap_or("")))
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap_or(""),
+                s["type"].as_str().unwrap_or(""),
+            )
+        })
         .collect();
 
     for proc in procs {

@@ -115,7 +115,12 @@ impl LanguageProvider for VerilogProvider {
         }
 
         // Verilog uses function_subroutine_call for subroutine invocations inside always/initial blocks.
-        extract_calls(tree.root_node(), source, &mut nodes, &["function_subroutine_call"]);
+        extract_calls(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["function_subroutine_call"],
+        );
 
         Ok(LocalGraph {
             content_hash: [0; 32],
@@ -124,6 +129,7 @@ impl LanguageProvider for VerilogProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

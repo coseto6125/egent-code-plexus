@@ -3,23 +3,43 @@
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str { env!("CARGO_BIN_EXE_gnx") }
+fn gnx_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_gnx")
+}
 
 fn init_repo(path: &Path) {
-    Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(path).output().unwrap();
     Command::new("git")
-        .args(["remote", "add", "origin", "git@github.com:E-NoR/routing-test.git"])
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:E-NoR/routing-test.git",
+        ])
         .current_dir(path)
         .output()
         .unwrap();
     std::fs::create_dir_all(path.join("src")).unwrap();
     std::fs::write(path.join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
-    Command::new("git").args(["add", "-A"]).current_dir(path).output().unwrap();
+    Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(path)
+        .output()
+        .unwrap();
     Command::new("git")
         .args([
-            "-c", "user.email=t@t",
-            "-c", "user.name=t",
-            "commit", "-q", "-m", "init",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
         ])
         .current_dir(path)
         .output()

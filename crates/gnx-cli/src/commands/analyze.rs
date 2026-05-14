@@ -1,27 +1,18 @@
 use clap::Args;
 use gnx_analyzer::resolution::builder::GraphBuilder;
 use gnx_analyzer::{
-    c::parser::CProvider, c_sharp::parser::CSharpProvider, cpp::parser::CppProvider,
-    dart::parser::DartProvider, go::parser::GoProvider, java::parser::JavaProvider,
-    javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider, php::parser::PhpProvider,
-    python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
-    swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
-    markdown::parser::MarkdownProvider, yaml::parser::YamlProvider,
-    github_actions::parser::GitHubActionsProvider,
-    bash::parser::BashProvider,
-    lua::parser::LuaProvider,
-    solidity::parser::SolidityProvider,
-    crystal::parser::CrystalProvider,
-    move_lang::parser::MoveProvider,
-    dockerfile::parser::DockerfileProvider,
-    nim::parser::NimProvider,
-    hcl::parser::HclProvider,
-    cairo::parser::CairoProvider,
-    sql::parser::SqlProvider,
-    vyper::parser::VyperProvider,
-    verilog::parser::VerilogProvider,
+    bash::parser::BashProvider, c::parser::CProvider, c_sharp::parser::CSharpProvider,
+    cairo::parser::CairoProvider, cpp::parser::CppProvider, crystal::parser::CrystalProvider,
+    dart::parser::DartProvider, docker_compose::parser::DockerComposeProvider,
+    dockerfile::parser::DockerfileProvider, github_actions::parser::GitHubActionsProvider,
+    go::parser::GoProvider, hcl::parser::HclProvider, java::parser::JavaProvider,
+    javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
+    lua::parser::LuaProvider, markdown::parser::MarkdownProvider, move_lang::parser::MoveProvider,
+    nim::parser::NimProvider, php::parser::PhpProvider, python::parser::PythonProvider,
+    ruby::parser::RubyProvider, rust::parser::RustProvider, solidity::parser::SolidityProvider,
+    sql::parser::SqlProvider, typescript::parser::TypeScriptProvider,
+    verilog::parser::VerilogProvider, vyper::parser::VyperProvider, yaml::parser::YamlProvider,
     zig::parser::ZigProvider,
-    docker_compose::parser::DockerComposeProvider,
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -53,9 +44,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     let scan_start = Instant::now();
     let mut files_to_analyze = Vec::new();
 
-    let walker = WalkBuilder::new(&repo_path)
-        .hidden(false)
-        .build();
+    let walker = WalkBuilder::new(&repo_path).hidden(false).build();
 
     for result in walker {
         match result {
@@ -67,12 +56,16 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                     let is_dockerfile_basename = matches!(file_name, "Dockerfile" | "dockerfile");
                     let is_compose_basename = matches!(
                         file_name,
-                        "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+                        "docker-compose.yml"
+                            | "docker-compose.yaml"
+                            | "compose.yml"
+                            | "compose.yaml"
                     );
                     // GitHub Actions: path-based routing for .github/workflows/*.yml|yaml
-                    let is_gha_workflow = path.extension()
+                    let is_gha_workflow = path
+                        .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| matches!(e, "yml" | "yaml"))
+                        .is_some_and(|e| matches!(e, "yml" | "yaml"))
                         && {
                             let components: Vec<_> = path.components().collect();
                             components.windows(2).any(|w| {
@@ -82,20 +75,17 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                     if is_dockerfile_basename || is_compose_basename || is_gha_workflow {
                         let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                         files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
-                    } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                        match ext {
-                            "ts" | "tsx" | "py" | "pyi" | "go" | "rs" | "java" | "js" | "jsx"
-                            | "mjs" | "cjs" | "php" | "rb" | "kt" | "kts" | "cs" | "c" | "h"
-                            | "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart"
-                            | "md" | "txt" | "rst" | "sh" | "bash" | "lua" | "luau" | "cr"
-                            | "sol" | "move" | "dockerfile" | "nim"
-                            | "tf" | "tfvars" | "hcl" | "vy" | "sql" | "cairo"
-                            | "v" | "sv" | "vh" | "svh" | "zig" => {
-                                let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
-                                files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
-                            }
-                            _ => {}
-                        }
+                    } else if let Some(
+                        "ts" | "tsx" | "py" | "pyi" | "go" | "rs" | "java" | "js" | "jsx" | "mjs"
+                        | "cjs" | "php" | "rb" | "kt" | "kts" | "cs" | "c" | "h" | "cpp" | "hpp"
+                        | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart" | "md" | "txt" | "rst"
+                        | "sh" | "bash" | "lua" | "luau" | "cr" | "sol" | "move" | "dockerfile"
+                        | "nim" | "tf" | "tfvars" | "hcl" | "vy" | "sql" | "cairo" | "v" | "sv"
+                        | "vh" | "svh" | "zig",
+                    ) = path.extension().and_then(|s| s.to_str())
+                    {
+                        let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
+                        files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                     }
                 }
             }
@@ -106,9 +96,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     }
     let scan_duration = scan_start.elapsed();
 
-    let state = crate::git_state::resolve(&repo_path).map_err(|e| {
-        format!("git_state resolve: {e}")
-    })?;
+    let state =
+        crate::git_state::resolve(&repo_path).map_err(|e| format!("git_state resolve: {e}"))?;
 
     let home_gnx = gnx_core::registry::resolve_home_gnx();
 
@@ -183,11 +172,13 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                             let path = file.path.resolve(&old_graph.string_pool);
                             hashes.insert(path.to_string(), file.content_hash);
                         }
-                        if let rkyv::option::ArchivedOption::Some(old_embs) = &old_graph.embeddings {
+                        if let rkyv::option::ArchivedOption::Some(old_embs) = &old_graph.embeddings
+                        {
                             for (idx, node) in old_graph.nodes.iter().enumerate() {
                                 if let Some(emb) = old_embs.get(idx) {
                                     let uid = node.uid.resolve(&old_graph.string_pool);
-                                    let vec_f32: Vec<f32> = emb.iter().map(|x| x.to_native()).collect();
+                                    let vec_f32: Vec<f32> =
+                                        emb.iter().map(|x| x.to_native()).collect();
                                     embs.insert(uid.to_string(), vec_f32);
                                 }
                             }
@@ -196,7 +187,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                 }
             }
             (hashes, embs)
-        }
+        },
     );
     let analyze_duration = analyze_start.elapsed();
 

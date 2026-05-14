@@ -1,6 +1,5 @@
 use gnx_core::analyzer::provider::LanguageProvider;
 use gnx_core::analyzer::types::{LocalGraph, RawDocumentBlock};
-use gnx_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -39,9 +38,18 @@ impl LanguageProvider for YamlProvider {
 
         let mut documents = Vec::new();
 
-        let idx_document = self.query.capture_index_for_name("document").unwrap_or(u32::MAX);
-        let idx_section = self.query.capture_index_for_name("section").unwrap_or(u32::MAX);
-        let idx_section_name = self.query.capture_index_for_name("section.name").unwrap_or(u32::MAX);
+        let idx_document = self
+            .query
+            .capture_index_for_name("document")
+            .unwrap_or(u32::MAX);
+        let idx_section = self
+            .query
+            .capture_index_for_name("section")
+            .unwrap_or(u32::MAX);
+        let idx_section_name = self
+            .query
+            .capture_index_for_name("section.name")
+            .unwrap_or(u32::MAX);
 
         let mut has_document = false;
 
@@ -68,8 +76,12 @@ impl LanguageProvider for YamlProvider {
                 if let Some(root) = root_node {
                     let start = root.start_position();
                     let end = root.end_position();
-                    
-                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
 
                     documents.push(RawDocumentBlock {
                         name: filename,
@@ -85,20 +97,22 @@ impl LanguageProvider for YamlProvider {
                 }
             } else if is_section {
                 if let (Some(root), Some(n_node)) = (root_node, section_name) {
-                    if let Ok(name_str) = std::str::from_utf8(&source[n_node.start_byte()..n_node.end_byte()]) {
+                    if let Ok(name_str) =
+                        std::str::from_utf8(&source[n_node.start_byte()..n_node.end_byte()])
+                    {
                         let start = root.start_position();
                         let end = root.end_position();
-                        
+
                         documents.push(RawDocumentBlock {
-                        name: name_str.trim().to_string(),
-                        is_section: true,
-                        span: (
+                            name: name_str.trim().to_string(),
+                            is_section: true,
+                            span: (
                                 start.row as u32,
                                 start.column as u32,
                                 end.row as u32,
                                 end.column as u32,
                             ),
-                    });
+                        });
                     }
                 }
             }
@@ -111,6 +125,7 @@ impl LanguageProvider for YamlProvider {
             nodes: vec![],
             documents,
             imports: vec![],
+            framework_refs: vec![],
         })
     }
 }

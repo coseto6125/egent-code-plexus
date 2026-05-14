@@ -1,5 +1,5 @@
-use tree_sitter::{Query, QueryCursor, Parser};
 use streaming_iterator::StreamingIterator;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 fn main() {
     let code = "open class Session: @unchecked Sendable {}";
@@ -7,7 +7,7 @@ fn main() {
     let language = tree_sitter_swift::LANGUAGE.into();
     parser.set_language(&language).unwrap();
     let tree = parser.parse(code, None).unwrap();
-    
+
     let query_source = "
 (class_declaration
   name: (type_identifier) @name.class
@@ -17,9 +17,9 @@ fn main() {
     let query = Query::new(&language, query_source).unwrap();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
-    
+
     let mut count = 0;
-    while let Some(_) = matches.next() {
+    while matches.next().is_some() {
         count += 1;
     }
     println!("Matches found: {}", count);

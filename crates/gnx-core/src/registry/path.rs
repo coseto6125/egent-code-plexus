@@ -1,7 +1,7 @@
 //! Path sanitization, repo/branch derivation, UID path normalization.
 
-use thiserror::Error;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Error)]
@@ -64,7 +64,7 @@ pub fn derive_repo_name(remote_url: Option<&str>) -> Result<String, PathError> {
         return Err(PathError::Illegal(url.to_string()));
     }
     let after_colon_or_slash = url
-        .rsplit_once(|c| c == ':' || c == '/')
+        .rsplit_once([':', '/'])
         .map(|(_, tail)| tail)
         .unwrap_or(url);
     let stripped = after_colon_or_slash
@@ -131,7 +131,10 @@ impl IndexLayout {
             }
         }
 
-        Ok(Self { index_dir, disambiguator })
+        Ok(Self {
+            index_dir,
+            disambiguator,
+        })
     }
 }
 

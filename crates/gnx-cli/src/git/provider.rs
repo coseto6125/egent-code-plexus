@@ -21,9 +21,7 @@ impl DiffScope {
             "all" => Ok(DiffScope::All),
             "compare" => {
                 let r = base_ref.ok_or_else(|| {
-                    GnxError::InvalidArgument(
-                        "base_ref is required for scope=compare".to_string(),
-                    )
+                    GnxError::InvalidArgument("base_ref is required for scope=compare".to_string())
                 })?;
                 Ok(DiffScope::Compare(r.to_string()))
             }

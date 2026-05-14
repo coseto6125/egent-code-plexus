@@ -73,31 +73,39 @@ impl LanguageProvider for KotlinProvider {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
                 } else if Some(cap_idx) == idx_export {
-                    if let Ok(text) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(text) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         if text.contains("private") || text.contains("internal") {
                             is_exported = false;
                         }
                     }
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.to_string());
                     }
                 } else if Some(cap_idx) == idx_type {
-                    if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(t) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(t.to_string());
                     }
                 } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d.to_string());
                     }
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_alias {
                     import_alias = Some(cap.node);
-                } else if Some(cap_idx) == idx_class || Some(cap_idx) == idx_function {
-                    if root_span_node.is_none() {
-                        root_span_node = Some(cap.node);
-                    }
+                } else if (Some(cap_idx) == idx_class || Some(cap_idx) == idx_function)
+                    && root_span_node.is_none()
+                {
+                    root_span_node = Some(cap.node);
                 }
             }
 
@@ -105,7 +113,7 @@ impl LanguageProvider for KotlinProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    
+
                     let node_id = root.id();
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
                         decorators: vec![],
@@ -120,9 +128,9 @@ impl LanguageProvider for KotlinProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
-                    
+
                     if !is_exported {
                         entry.is_exported = false;
                     }
@@ -143,13 +151,17 @@ impl LanguageProvider for KotlinProvider {
             }
 
             if let Some(i_src) = import_src {
-                if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
+                if let Ok(src_str) =
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                {
                     let alias = if let Some(a_node) = import_alias {
-                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()]).ok().map(|s| s.to_string())
+                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
                     } else {
                         None
                     };
-                    
+
                     imports.push(RawImport {
                         alias,
                         imported_name: src_str.to_string(),
@@ -170,7 +182,8 @@ impl LanguageProvider for KotlinProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

@@ -36,7 +36,7 @@ impl LanguageProvider for CProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes= Vec::new();
+        let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
         let idx_function_name = self.query.capture_index_for_name("function.name");
@@ -83,7 +83,7 @@ impl LanguageProvider for CProvider {
                     });
 
                     nodes.push(RawNode {
-            decorators: vec![],
+                        decorators: vec![],
                         is_exported: true,
                         heritage: vec![],
                         type_annotation,
@@ -95,13 +95,15 @@ impl LanguageProvider for CProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                calls: Vec::new(),
+                        calls: Vec::new(),
                     });
                 }
             }
 
             if let Some(i_src) = import_src {
-                if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
+                if let Ok(src_str) =
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                {
                     imports.push(RawImport {
                         alias: None,
                         imported_name: "*".to_string(),
@@ -120,7 +122,8 @@ impl LanguageProvider for CProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

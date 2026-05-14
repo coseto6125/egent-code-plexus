@@ -1,0 +1,221 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (build only, no publish/release)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write       # GitHub Release 上傳
+  id-token: write       # SLSA OIDC token
+  attestations: write   # actions/attest-build-provenance
+
+# 同一 tag/手動觸發避免重複跑，但不取消已 publish 中的（保證 release atomicity）
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  BIN_NAME: gnx
+
+jobs:
+  # ==================== Multi-platform binary builds ====================
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 每個 target 獨立 cache（不同 ABI，無法共用 target/）
+          # 與 ci.yml 的 cache 分離，因為 release 是 --release profile
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="${BIN_NAME}-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${name}/"
+          cp README.md LICENSE NOTICE "dist/${name}/" 2>/dev/null || true
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "${env:BIN_NAME}-${env:GITHUB_REF_NAME}-${{ matrix.target }}"
+          if (-not $env:GITHUB_REF_NAME) { $name = "${env:BIN_NAME}-dev-${{ matrix.target }}" }
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" "dist/$name/"
+          foreach ($f in @('README.md','LICENSE','NOTICE')) {
+            if (Test-Path $f) { Copy-Item $f "dist/$name/" }
+          }
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ASCII "dist/$name.zip.sha256"
+
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.tar.gz dist/*.zip'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  # ==================== GitHub Release ====================
+  github-release:
+    name: GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && inputs.dry_run != 'true'
+
+    steps:
+      - name: Checkout (for install scripts)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Stage install scripts into dist
+        run: |
+          cp scripts/install.sh  dist/install.sh
+          cp scripts/install.ps1 dist/install.ps1
+          ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/install.sh
+            dist/install.ps1
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ### From crates.io (source build, strongest trust)
+            ```
+            cargo install gnx-rs
+            ```
+
+            ### From git tag (source build)
+            ```
+            cargo install --git https://github.com/e-nor/gitnexus-rs --tag ${{ github.ref_name }} gnx-rs
+            ```
+
+            ### Pre-built binary via `cargo-binstall`
+            ```
+            cargo binstall gnx-rs
+            ```
+
+            ### One-shot installer scripts (Linux / macOS)
+            ```
+            curl -sSfL https://github.com/e-nor/gitnexus-rs/releases/download/${{ github.ref_name }}/install.sh | sh
+            ```
+
+            ### One-shot installer (Windows PowerShell)
+            ```
+            irm https://github.com/e-nor/gitnexus-rs/releases/download/${{ github.ref_name }}/install.ps1 | iex
+            ```
+
+            ### Manual download
+            Pick a `.tar.gz` / `.zip` matching your platform from Assets below.
+            Each has a `.sha256` for integrity. Verify build provenance with:
+            ```
+            gh attestation verify ./gnx --owner e-nor
+            ```
+
+  # ==================== Publish to crates.io ====================
+  # 狀態：
+  #   gnx-core ── publish-ready (cargo publish --dry-run 通過)
+  #   gnx-analyzer ── 阻塞於 git/vendor deps 沒 version：
+  #     - tree-sitter-crystal (git dep) 需給 version 或改 crates.io 版
+  #     - tree-sitter-kotlin (git dep) 同上
+  #     - tree-sitter-move / tree-sitter-swift (vendored path dep) 需先發到
+  #       crates.io 或標 publish = false 在 vendor side
+  #   gnx-rs ── 需 gnx-core + gnx-analyzer 先 publish
+  # Token 設定：repo Settings → Secrets → CARGO_REGISTRY_TOKEN
+  # 解掉上述阻塞後，把 if: false 改為:
+  #   if: startsWith(github.ref, 'refs/tags/') && inputs.dry_run != 'true'
+  publish-crates:
+    name: Publish to crates.io
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Publish gnx-core
+        run: cargo publish -p gnx-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish gnx-analyzer
+        run: cargo publish -p gnx-analyzer --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish gnx-rs (cli)
+        run: cargo publish -p gnx-rs --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

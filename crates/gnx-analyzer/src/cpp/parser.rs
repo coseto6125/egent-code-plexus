@@ -36,7 +36,7 @@ impl LanguageProvider for CppProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes= Vec::new();
+        let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
         let idx_name_function = self.query.capture_index_for_name("name.function");
@@ -53,7 +53,8 @@ impl LanguageProvider for CppProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_import = self.query.capture_index_for_name("import");
 
-        let is_header = path.extension()
+        let is_header = path
+            .extension()
             .map(|ext| ext == "h" || ext == "hpp" || ext == "hxx" || ext == "hh")
             .unwrap_or(false);
 
@@ -101,17 +102,24 @@ impl LanguageProvider for CppProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    
+
                     let type_annotation = type_node.and_then(|t| {
-                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()]).ok().map(|s| s.trim().to_string())
+                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                            .ok()
+                            .map(|s| s.trim().to_string())
                     });
 
-                    let heritage = heritage_nodes.iter().filter_map(|h| {
-                        std::str::from_utf8(&source[h.start_byte()..h.end_byte()]).ok().map(|s| s.to_string())
-                    }).collect();
+                    let heritage = heritage_nodes
+                        .iter()
+                        .filter_map(|h| {
+                            std::str::from_utf8(&source[h.start_byte()..h.end_byte()])
+                                .ok()
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
 
                     nodes.push(RawNode {
-            decorators: vec![],
+                        decorators: vec![],
                         is_exported: is_header || is_exported_by_query,
                         heritage,
                         type_annotation,
@@ -123,21 +131,27 @@ impl LanguageProvider for CppProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                calls: Vec::new(),
+                        calls: Vec::new(),
                     });
                 }
             }
 
             if is_import {
                 if let Some(src_node) = import_src_node {
-                    if let Ok(src_str) = std::str::from_utf8(&source[src_node.start_byte()..src_node.end_byte()]) {
+                    if let Ok(src_str) =
+                        std::str::from_utf8(&source[src_node.start_byte()..src_node.end_byte()])
+                    {
                         let mut src_s = src_str.to_string();
-                        if (src_s.starts_with('"') && src_s.ends_with('"')) || (src_s.starts_with('<') && src_s.ends_with('>')) {
+                        if (src_s.starts_with('"') && src_s.ends_with('"'))
+                            || (src_s.starts_with('<') && src_s.ends_with('>'))
+                        {
                             src_s = src_s[1..src_s.len() - 1].to_string();
                         }
 
                         let alias = import_alias_node.and_then(|a| {
-                            std::str::from_utf8(&source[a.start_byte()..a.end_byte()]).ok().map(|s| s.to_string())
+                            std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
+                                .ok()
+                                .map(|s| s.to_string())
                         });
 
                         let imported_name = src_s.clone();
@@ -158,7 +172,9 @@ impl LanguageProvider for CppProvider {
                 .then(a.source.cmp(&b.source))
                 .then(a.alias.cmp(&b.alias))
         });
-        imports.dedup_by(|a, b| a.imported_name == b.imported_name && a.source == b.source && a.alias == b.alias);
+        imports.dedup_by(|a, b| {
+            a.imported_name == b.imported_name && a.source == b.source && a.alias == b.alias
+        });
 
         // Extract call sites and attach to enclosing function/method nodes.
         extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
@@ -169,7 +185,8 @@ impl LanguageProvider for CppProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

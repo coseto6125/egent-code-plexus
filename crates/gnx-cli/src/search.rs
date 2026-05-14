@@ -1,8 +1,8 @@
-use std::path::Path;
-use tantivy::schema::*;
-use tantivy::{Index, IndexWriter, ReloadPolicy, query::QueryParser, collector::TopDocs};
 use gnx_core::graph::ZeroCopyGraph;
 use std::fs;
+use std::path::Path;
+use tantivy::schema::*;
+use tantivy::{collector::TopDocs, query::QueryParser, Index, IndexWriter, ReloadPolicy};
 
 pub struct TantivyEngine;
 
@@ -51,7 +51,11 @@ impl TantivyEngine {
             Err(_) => return vec![],
         };
 
-        let reader = match index.reader_builder().reload_policy(ReloadPolicy::OnCommitWithDelay).try_into() {
+        let reader = match index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+        {
             Ok(r) => r,
             Err(_) => return vec![],
         };

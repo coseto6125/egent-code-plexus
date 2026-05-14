@@ -43,10 +43,10 @@ fn extract_string_args(s: &str) -> Vec<String> {
 pub fn detect_from_decorator(decorator: &str) -> Option<DetectedRoute> {
     let lower = decorator.to_lowercase();
     let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
-    
+
     let string_args = extract_string_args(decorator);
     let path = string_args.iter().find(|s| looks_like_path(s))?;
-    
+
     Some(DetectedRoute {
         method: method.to_uppercase(),
         path: path.clone(),
@@ -56,7 +56,7 @@ pub fn detect_from_decorator(decorator: &str) -> Option<DetectedRoute> {
 pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
     let lower = raw.method.to_lowercase();
     let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
-    
+
     if looks_like_path(&raw.path) {
         Some(DetectedRoute {
             method: method.to_uppercase(),

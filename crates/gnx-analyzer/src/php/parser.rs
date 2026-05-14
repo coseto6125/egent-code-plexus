@@ -36,8 +36,8 @@ impl LanguageProvider for PhpProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        use std::collections::HashMap;
         use gnx_core::analyzer::types::RawRoute;
+        use std::collections::HashMap;
         let mut node_map: HashMap<usize, RawNode> = HashMap::new();
         let mut imports = Vec::new();
         let mut routes = Vec::new();
@@ -97,21 +97,29 @@ impl LanguageProvider for PhpProvider {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
                 } else if Some(cap_idx) == idx_type_function || Some(cap_idx) == idx_type_method {
-                    if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(t) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(t.to_string());
                     }
                 } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d.to_string());
                     }
                 } else if Some(cap_idx) == idx_export {
-                    if let Ok(mod_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(mod_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         if mod_str == "private" || mod_str == "protected" {
                             is_exported = false;
                         }
                     }
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.to_string());
                     }
                 } else if Some(cap_idx) == idx_import_source {
@@ -129,11 +137,15 @@ impl LanguageProvider for PhpProvider {
                         root_span_node = Some(cap.node);
                     }
                 } else if Some(cap_idx) == idx_route_method {
-                    if let Ok(m_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(m_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         route_method = Some(m_str.to_uppercase());
                     }
                 } else if Some(cap_idx) == idx_route_path {
-                    if let Ok(p_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(p_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         let path = p_str.trim_matches(|c| c == '\'' || c == '"').to_string();
                         route_path = Some(path);
                     }
@@ -142,11 +154,20 @@ impl LanguageProvider for PhpProvider {
                 }
             }
 
-            if let (Some(rm), Some(rp), Some(rs_node)) = (route_method, route_path, route_span_node) {
+            if let (Some(rm), Some(rp), Some(rs_node)) = (route_method, route_path, route_span_node)
+            {
                 let start = rs_node.start_position();
                 let end = rs_node.end_position();
                 let exists = routes.iter().any(|r: &RawRoute| {
-                    r.method == rm && r.path == rp && r.span == (start.row as u32, start.column as u32, end.row as u32, end.column as u32)
+                    r.method == rm
+                        && r.path == rp
+                        && r.span
+                            == (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            )
                 });
                 if !exists {
                     routes.push(RawRoute {
@@ -167,7 +188,7 @@ impl LanguageProvider for PhpProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    
+
                     let node_id = root.id();
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
                         decorators: vec![],
@@ -182,9 +203,9 @@ impl LanguageProvider for PhpProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
-                    
+
                     if !is_exported {
                         entry.is_exported = false;
                     }
@@ -205,10 +226,18 @@ impl LanguageProvider for PhpProvider {
             }
 
             if let Some(i_src) = import_src {
-                if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
+                if let Ok(src_str) =
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                {
                     let full_src = if let Some(p) = import_prefix {
-                        if let Ok(p_str) = std::str::from_utf8(&source[p.start_byte()..p.end_byte()]) {
-                            format!("{}\\{}", p_str.trim_end_matches('\\'), src_str.trim_start_matches('\\'))
+                        if let Ok(p_str) =
+                            std::str::from_utf8(&source[p.start_byte()..p.end_byte()])
+                        {
+                            format!(
+                                "{}\\{}",
+                                p_str.trim_end_matches('\\'),
+                                src_str.trim_start_matches('\\')
+                            )
                         } else {
                             src_str.to_string()
                         }
@@ -217,7 +246,9 @@ impl LanguageProvider for PhpProvider {
                     };
 
                     let alias = if let Some(a) = import_alias {
-                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]).ok().map(|s| s.to_string())
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
                     } else {
                         None
                     };
@@ -225,7 +256,7 @@ impl LanguageProvider for PhpProvider {
                     let imported_name = if let Some(ref a_str) = alias {
                         a_str.clone()
                     } else {
-                        full_src.split('\\').last().unwrap_or("").to_string()
+                        full_src.split('\\').next_back().unwrap_or("").to_string()
                     };
 
                     imports.push(RawImport {
@@ -258,7 +289,8 @@ impl LanguageProvider for PhpProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

@@ -1283,6 +1283,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
 ]
 
 [[package]]
@@ -4030,7 +4031,6 @@ name = "tree-sitter-swift"
 version = "0.7.2"
 dependencies = [
  "cc",
- "tree-sitter",
  "tree-sitter-language",
 ]
 
@@ -4059,7 +4059,6 @@ name = "tree-sitter-vyper"
 version = "0.1.0"
 dependencies = [
  "cc",
- "tree-sitter",
  "tree-sitter-language",
 ]
 

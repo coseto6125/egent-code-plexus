@@ -34,7 +34,8 @@ pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), GnxError> {
 
                     let q_norm = query_vec.iter().map(|v| v * v).sum::<f32>().sqrt();
 
-                    let mut scored_nodes: Vec<_> = graph.nodes
+                    let mut scored_nodes: Vec<_> = graph
+                        .nodes
                         .par_iter()
                         .enumerate()
                         .filter_map(|(idx, node)| {
@@ -85,7 +86,11 @@ pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), GnxError> {
         let tantivy_results = crate::search::TantivyEngine::search(&repo_path, &args.query);
 
         for (score, uid) in tantivy_results {
-            if let Some(node) = graph.nodes.iter().find(|n| n.uid.resolve(&graph.string_pool) == uid) {
+            if let Some(node) = graph
+                .nodes
+                .iter()
+                .find(|n| n.uid.resolve(&graph.string_pool) == uid)
+            {
                 let name = node.name.resolve(&graph.string_pool);
                 let file_node = &graph.files[node.file_idx.to_native() as usize];
 

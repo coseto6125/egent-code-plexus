@@ -4,6 +4,17 @@ description = "Unofficial Rust reimplementation of GitNexus — code intelligenc
 version = "0.1.0"
 edition = "2021"
 default-run = "gnx"
+license.workspace = true
+repository.workspace = true
+
+# cargo-binstall 元資料：使 `cargo binstall gnx-rs` 直接抓 GitHub Release 預編 binary，
+# 跳過 source compile。{ target } / { archive-suffix } / { binary-ext } 由 binstall 依平台自動代入。
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/gnx-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "gnx-v{ version }-{ target }/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [[bin]]
 name = "gnx"
@@ -14,8 +25,8 @@ name = "gnx_cli"
 path = "src/lib.rs"
 
 [dependencies]
-gnx-core = { path = "../gnx-core" }
-gnx-analyzer = { path = "../gnx-analyzer" }
+gnx-core = { path = "../gnx-core", version = "0.1.0" }
+gnx-analyzer = { path = "../gnx-analyzer", version = "0.1.0" }
 clap = { version = "4.5.4", features = ["derive"] }
 serde_json = "1.0.115"
 memmap2 = "0.9.10"
@@ -34,3 +45,6 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 serde_json = "1.0"
+
+[lints]
+workspace = true

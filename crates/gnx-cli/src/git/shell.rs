@@ -34,7 +34,11 @@ impl GitDiffProvider for ShellGitProvider {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             return Err(GnxError::GitDiff {
-                reason: format!("git exited with status {}: {}", output.status, stderr.trim()),
+                reason: format!(
+                    "git exited with status {}: {}",
+                    output.status,
+                    stderr.trim()
+                ),
             });
         }
 

@@ -29,12 +29,12 @@ pub fn file_idx_by_suffix(graph: &ArchivedZeroCopyGraph, relative_path: &str) ->
 ///
 /// Span semantics: `node.span = (start_line, start_col, end_line, end_col)`.
 /// Overlap test: `node.start_line <= end_line && node.end_line >= start_line`.
-pub fn nodes_overlapping_lines<'g>(
-    graph: &'g ArchivedZeroCopyGraph,
+pub fn nodes_overlapping_lines(
+    graph: &ArchivedZeroCopyGraph,
     file_idx: u32,
     start_line: u32,
     end_line: u32,
-) -> Vec<(u32, &'g ArchivedNode)> {
+) -> Vec<(u32, &ArchivedNode)> {
     let mut out = Vec::new();
     for (i, node) in graph.nodes.iter().enumerate() {
         if node.file_idx.to_native() != file_idx {
@@ -125,10 +125,7 @@ fn bfs(
 ///
 /// Process nodes live at `nodes[process_start..]`. The trace for process k
 /// (where `node_idx = process_start + k`) is `traces_data[off[k]..off[k+1]]`.
-pub fn processes_containing(
-    graph: &ArchivedZeroCopyGraph,
-    node_idx: u32,
-) -> Vec<(u32, u32)> {
+pub fn processes_containing(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Vec<(u32, u32)> {
     let process_start = graph.process_start.to_native();
     let n_processes = graph.traces_offsets.len().saturating_sub(1);
     let mut out = Vec::new();

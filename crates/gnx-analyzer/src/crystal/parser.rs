@@ -66,7 +66,9 @@ impl LanguageProvider for CrystalProvider {
                 } else if cap_idx == idx_class {
                     class_root = Some(cap.node);
                 } else if cap_idx == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.to_string());
                     }
                 } else if cap_idx == idx_method_name {
@@ -83,7 +85,9 @@ impl LanguageProvider for CrystalProvider {
             }
 
             if let (Some(name_node), Some(root)) = (class_name_node, class_root) {
-                if let Ok(name_str) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
@@ -105,7 +109,9 @@ impl LanguageProvider for CrystalProvider {
             }
 
             if let (Some(name_node), Some(root)) = (method_name_node, method_root) {
-                if let Ok(name_str) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
@@ -127,7 +133,9 @@ impl LanguageProvider for CrystalProvider {
             }
 
             if let Some(src_node) = import_source_node {
-                if let Ok(src_str) = std::str::from_utf8(&source[src_node.start_byte()..src_node.end_byte()]) {
+                if let Ok(src_str) =
+                    std::str::from_utf8(&source[src_node.start_byte()..src_node.end_byte()])
+                {
                     imports.push(RawImport {
                         alias: None,
                         imported_name: src_str.to_string(),
@@ -137,7 +145,9 @@ impl LanguageProvider for CrystalProvider {
             }
 
             if let (Some(name_node), Some(root)) = (const_name_node, const_root) {
-                if let Ok(name_str) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
@@ -159,12 +169,7 @@ impl LanguageProvider for CrystalProvider {
             }
         }
 
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["call"],
-        );
+        extract_calls(tree.root_node(), source, &mut nodes, &["call"]);
 
         Ok(LocalGraph {
             content_hash: [0; 32],
@@ -173,6 +178,7 @@ impl LanguageProvider for CrystalProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

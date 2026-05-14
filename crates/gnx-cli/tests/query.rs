@@ -57,9 +57,14 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
         .unwrap();
     let _ = Command::new("git")
         .args([
-            "-c", "user.email=t@t",
-            "-c", "user.name=t",
-            "commit", "-q", "-m", "init",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
         ])
         .current_dir(repo)
         .output()
@@ -111,13 +116,7 @@ fn query_bm25_outputs_sources_without_scores_by_default() {
 
     let result = run_query(
         tmp.path(),
-        &[
-            "query",
-            "--query",
-            "handleLogin",
-            "--format",
-            "json",
-        ],
+        &["query", "--query", "handleLogin", "--format", "json"],
     );
     let results = result["results"].as_array().unwrap();
     assert!(!results.is_empty());
@@ -134,13 +133,7 @@ fn query_debug_outputs_rrf_and_source_details() {
 
     let result = run_query(
         tmp.path(),
-        &[
-            "query",
-            "--query",
-            "handleLogin",
-            "--format",
-            "json",
-        ],
+        &["query", "--query", "handleLogin", "--format", "json"],
     );
     let results = result["results"].as_array().unwrap();
     assert!(!results.is_empty());
@@ -156,13 +149,7 @@ fn query_multi_hybrid_accepts_explicit_query_lanes() {
 
     let result = run_query(
         tmp.path(),
-        &[
-            "query",
-            "--query",
-            "verifyPassword",
-            "--format",
-            "json",
-        ],
+        &["query", "--query", "verifyPassword", "--format", "json"],
     );
     let results = result["results"].as_array().unwrap();
     assert!(!results.is_empty());

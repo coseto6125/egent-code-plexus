@@ -36,7 +36,7 @@ impl LanguageProvider for RubyProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes= Vec::new();
+        let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
 
@@ -68,7 +68,9 @@ impl LanguageProvider for RubyProvider {
                 if cap_idx == idx_name {
                     node_name = Some(cap.node);
                 } else if cap_idx == idx_heritage {
-                    if let Ok(h_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h_str.to_string());
                     }
                 } else if cap_idx == idx_class {
@@ -83,7 +85,9 @@ impl LanguageProvider for RubyProvider {
                 } else if cap_idx == idx_import_name {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx_decorator {
-                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d_str.to_string());
                     }
                 } else if cap_idx == idx_route_method {
@@ -96,7 +100,9 @@ impl LanguageProvider for RubyProvider {
             }
 
             if let (Some(name_node), Some(k), Some(root)) = (node_name, kind, root_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
@@ -112,13 +118,15 @@ impl LanguageProvider for RubyProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
                 }
             }
 
             if let Some(i_node) = import_name {
-                if let Ok(name_str) = std::str::from_utf8(&source[i_node.start_byte()..i_node.end_byte()]) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[i_node.start_byte()..i_node.end_byte()])
+                {
                     imports.push(RawImport {
                         alias: None,
                         imported_name: name_str.to_string(),
@@ -127,7 +135,9 @@ impl LanguageProvider for RubyProvider {
                 }
             }
 
-            if let (Some(r_method), Some(r_path), Some(r_root)) = (route_method, route_path, route_root) {
+            if let (Some(r_method), Some(r_path), Some(r_root)) =
+                (route_method, route_path, route_root)
+            {
                 if let (Ok(method_str), Ok(path_str)) = (
                     std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                     std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
@@ -163,7 +173,8 @@ impl LanguageProvider for RubyProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

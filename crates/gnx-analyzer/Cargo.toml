@@ -1,10 +1,13 @@
 [package]
 name = "gnx-analyzer"
+description = "Multi-language tree-sitter parser and route detector for gnx-rs (Rust, TypeScript, Python, Go, Java, Swift, etc.)"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-gnx-core = { path = "../gnx-core" }
+gnx-core = { path = "../gnx-core", version = "0.1.0" }
 tree-sitter = "0.25"
 tree-sitter-typescript = "*"
 rayon = "1.10.0"
@@ -45,3 +48,6 @@ tree-sitter-verilog = "1.0.3"
 tree-sitter-vyper = { path = "../vendor/tree-sitter-vyper" }
 tree-sitter-sequel = "0.3.11"
 tree-sitter-zig = "1.1.2"
+
+[lints]
+workspace = true

@@ -14,7 +14,7 @@ impl NimProvider {
     pub fn new() -> anyhow::Result<Self> {
         // alaviss/tree-sitter-nim exposes language() rather than the LANGUAGE constant;
         // calling .into() converts it to tree_sitter::Language, compatible with 0.25 API.
-        let language = tree_sitter_nim::language().into();
+        let language = tree_sitter_nim::language();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
         Ok(Self { query })
@@ -27,7 +27,7 @@ impl LanguageProvider for NimProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let language = tree_sitter_nim::language().into();
+        let language = tree_sitter_nim::language();
         let mut parser = Parser::new();
         parser.set_language(&language)?;
 
@@ -80,17 +80,14 @@ impl LanguageProvider for NimProvider {
 
             // Emit a node for proc/func/method/iterator/template/macro/type/const.
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                {
+                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     // exported_symbol nodes include the trailing `*`; strip it for the name.
                     let clean_name = name_str.trim_end_matches('*');
                     let start = root.start_position();
                     let end = root.end_position();
 
                     // Nim procedures are exported when their name ends with `*`.
-                    let is_exported = name_str.ends_with('*')
-                        || !clean_name.starts_with('_');
+                    let is_exported = name_str.ends_with('*') || !clean_name.starts_with('_');
 
                     nodes.push(RawNode {
                         decorators: vec![],
@@ -156,6 +153,7 @@ impl LanguageProvider for NimProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

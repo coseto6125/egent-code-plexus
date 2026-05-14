@@ -4,6 +4,16 @@ members = [
     "crates/gnx-analyzer",
     "crates/gnx-cli",
 ]
+# vendor 內 grammar crates 仍透過 path dep 引用，但不視為 workspace member ──
+# 避免 cargo / clippy --workspace --all-targets 編到 vendor 自身的 #[cfg(test)] 區塊
+# （tree-sitter-move 的測試 mod 依賴 tree-sitter，但 vendor Cargo.toml 沒列為 dev-dep）。
+exclude = [
+    "crates/vendor/tree-sitter-cairo",
+    "crates/vendor/tree-sitter-move",
+    "crates/vendor/tree-sitter-nim",
+    "crates/vendor/tree-sitter-swift",
+    "crates/vendor/tree-sitter-vyper",
+]
 resolver = "2"
 
 [workspace.package]
@@ -16,3 +26,8 @@ repository = "https://github.com/e-nor/gitnexus-rs"
 homepage = "https://github.com/e-nor/gitnexus-rs"
 keywords = ["git", "code-intelligence", "graph"]
 categories = ["development-tools"]
+
+# 工作區層級 lints 設定。目前無 override；後續可在此精準 allow/warn/deny
+# 特定 lint 規則，所有 crate 透過 [lints] workspace = true opt-in。
+[workspace.lints.clippy]
+

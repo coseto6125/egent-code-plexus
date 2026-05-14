@@ -91,35 +91,44 @@ impl LanguageProvider for CSharpProvider {
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_alias {
-                    if let Ok(text) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(text) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         import_alias = Some(text.to_string());
                     }
                 } else if Some(cap_idx) == idx_export {
-                    if let Ok(text) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(text) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         if text == "public" {
                             is_exported = true;
                         }
                     }
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(text) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(text) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage_list.push(text.to_string());
                     }
                 } else if Some(cap_idx) == idx_type {
-                    if let Ok(text) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(text) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(text.to_string());
                     }
                 } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(text) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(text) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(text.to_string());
                     }
-                } else if Some(cap_idx) == idx_function
+                } else if (Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_interface
+                    || Some(cap_idx) == idx_interface)
+                    && root_span_node.is_none()
                 {
-                    if root_span_node.is_none() {
-                        root_span_node = Some(cap.node);
-                    }
+                    root_span_node = Some(cap.node);
                 }
             }
 
@@ -127,7 +136,7 @@ impl LanguageProvider for CSharpProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    
+
                     let node_id = root.id();
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
                         decorators: vec![],
@@ -142,9 +151,9 @@ impl LanguageProvider for CSharpProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
-                    
+
                     if is_exported {
                         entry.is_exported = true;
                     }
@@ -165,9 +174,10 @@ impl LanguageProvider for CSharpProvider {
             }
 
             if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                if let (Ok(name_str), Ok(src_str)) =
-                    (std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]), std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]))
-                {
+                if let (Ok(name_str), Ok(src_str)) = (
+                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                ) {
                     imports.push(RawImport {
                         alias: import_alias,
                         imported_name: name_str.to_string(),
@@ -193,7 +203,8 @@ impl LanguageProvider for CSharpProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

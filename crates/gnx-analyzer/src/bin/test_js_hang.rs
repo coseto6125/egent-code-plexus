@@ -6,11 +6,10 @@ use std::fs;
 fn main() {
     let mut files = Vec::new();
     let repo_path = std::path::PathBuf::from(".sample_repo/JavaScript");
-    for result in WalkBuilder::new(&repo_path).build() {
-        if let Ok(entry) = result {
-            if entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("js") {
-                files.push(entry.path().to_path_buf());
-            }
+    for entry in WalkBuilder::new(&repo_path).build().flatten() {
+        if entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("js")
+        {
+            files.push(entry.path().to_path_buf());
         }
     }
 

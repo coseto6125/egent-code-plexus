@@ -39,6 +39,15 @@ pub struct RawDocumentBlock {
 }
 
 #[derive(Debug, Clone)]
+pub struct RawFrameworkRef {
+    pub source_name: String,
+    pub target_name: String,
+    pub confidence: f32,
+    pub reason: String,
+    pub span: (u32, u32, u32, u32),
+}
+
+#[derive(Debug, Clone)]
 pub struct LocalGraph {
     pub file_path: PathBuf,
     pub content_hash: [u8; 32],
@@ -46,4 +55,5 @@ pub struct LocalGraph {
     pub documents: Vec<RawDocumentBlock>,
     pub imports: Vec<RawImport>,
     pub routes: Vec<RawRoute>,
+    pub framework_refs: Vec<RawFrameworkRef>,
 }

@@ -86,19 +86,16 @@ impl LanguageProvider for DockerfileProvider {
             // FROM → emit import (image_name node text as source).
             // Also emit a synthetic import node so the image is queryable.
             if let (Some(src), Some(root)) = (import_src_node, import_root_node) {
-                if let Ok(src_str) =
-                    std::str::from_utf8(&source[src.start_byte()..src.end_byte()])
+                if let Ok(src_str) = std::str::from_utf8(&source[src.start_byte()..src.end_byte()])
                 {
                     // Grab full image_spec text (name + optional tag) for a richer import string.
                     // src is image_name; its parent is image_spec which may include image_tag.
                     let full_image = src
                         .parent()
                         .and_then(|spec| {
-                            std::str::from_utf8(
-                                &source[spec.start_byte()..spec.end_byte()],
-                            )
-                            .ok()
-                            .map(|s| s.to_string())
+                            std::str::from_utf8(&source[spec.start_byte()..spec.end_byte()])
+                                .ok()
+                                .map(|s| s.to_string())
                         })
                         .unwrap_or_else(|| src_str.to_string());
 
@@ -244,6 +241,7 @@ impl LanguageProvider for DockerfileProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

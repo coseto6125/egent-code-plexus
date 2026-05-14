@@ -11,7 +11,12 @@ fn init_repo(path: &Path) {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["remote", "add", "origin", "git@github.com:E-NoR/test-repo.git"])
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:E-NoR/test-repo.git",
+        ])
         .current_dir(path)
         .output()
         .unwrap();
@@ -23,9 +28,14 @@ fn init_repo(path: &Path) {
         .unwrap();
     Command::new("git")
         .args([
-            "-c", "user.email=t@t",
-            "-c", "user.name=t",
-            "commit", "-q", "-m", "init",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
         ])
         .current_dir(path)
         .output()
@@ -42,7 +52,10 @@ fn resolves_repo_name_branch_worktree() {
     assert_eq!(state.branch, "main");
     let canonical = tmp.path().canonicalize().unwrap();
     assert_eq!(state.worktree_path, canonical);
-    assert_eq!(state.remote_url.as_deref(), Some("git@github.com:E-NoR/test-repo.git"));
+    assert_eq!(
+        state.remote_url.as_deref(),
+        Some("git@github.com:E-NoR/test-repo.git")
+    );
 }
 
 #[test]
@@ -54,9 +67,22 @@ fn falls_back_to_basename_if_no_remote() {
         .output()
         .unwrap();
     std::fs::write(tmp.path().join("x"), "x").unwrap();
-    Command::new("git").args(["add", "x"]).current_dir(tmp.path()).output().unwrap();
     Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i"])
+        .args(["add", "x"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "i",
+        ])
         .current_dir(tmp.path())
         .output()
         .unwrap();

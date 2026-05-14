@@ -28,7 +28,10 @@ impl<'a> Resolver<'a> {
         let source_file_str = source_file.to_string_lossy();
 
         // Tier 1: Try SameFile
-        if let Some(node_id) = self.symbol_table.lookup_in_file(&source_file_str, symbol_name) {
+        if let Some(node_id) = self
+            .symbol_table
+            .lookup_in_file(&source_file_str, symbol_name)
+        {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
             return results; // Highest precedence, return early
         }
@@ -44,7 +47,10 @@ impl<'a> Resolver<'a> {
                 // The actual name exported by the source file
                 let exported_name = &import.imported_name;
 
-                if let Some(node_id) = self.symbol_table.lookup_in_file(&import.source, exported_name) {
+                if let Some(node_id) = self
+                    .symbol_table
+                    .lookup_in_file(&import.source, exported_name)
+                {
                     results.push((node_id, ResolutionTier::ImportScoped.base_confidence()));
                     return results;
                 }

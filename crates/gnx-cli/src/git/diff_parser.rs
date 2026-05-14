@@ -92,7 +92,13 @@ index abc..def 100644
         let r = parse_diff_hunks(diff);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].file_path, "src/foo.rs");
-        assert_eq!(r[0].hunks, vec![DiffHunk { start_line: 10, end_line: 14 }]);
+        assert_eq!(
+            r[0].hunks,
+            vec![DiffHunk {
+                start_line: 10,
+                end_line: 14
+            }]
+        );
     }
 
     #[test]
@@ -107,7 +113,13 @@ index abc..def 100644
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].file_path, "a.rs");
         assert_eq!(r[1].file_path, "b.rs");
-        assert_eq!(r[1].hunks[0], DiffHunk { start_line: 10, end_line: 12 });
+        assert_eq!(
+            r[1].hunks[0],
+            DiffHunk {
+                start_line: 10,
+                end_line: 12
+            }
+        );
     }
 
     #[test]
@@ -142,6 +154,12 @@ index abc..def 100644
 @@ -1 +1 @@
 ";
         let r = parse_diff_hunks(diff);
-        assert_eq!(r[0].hunks, vec![DiffHunk { start_line: 1, end_line: 1 }]);
+        assert_eq!(
+            r[0].hunks,
+            vec![DiffHunk {
+                start_line: 1,
+                end_line: 1
+            }]
+        );
     }
 }

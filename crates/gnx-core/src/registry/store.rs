@@ -135,16 +135,14 @@ impl RegistryFile {
                     delta_size: meta.delta_size,
                     embedding_status: "unknown".into(),
                 };
-                let entry = by_repo
-                    .entry(repo_name.clone())
-                    .or_insert_with(|| {
-                        (
-                            meta.worktree_path.clone(),
-                            meta.remote_url.clone(),
-                            meta.indexed_at.clone(),
-                            vec![],
-                        )
-                    });
+                let entry = by_repo.entry(repo_name.clone()).or_insert_with(|| {
+                    (
+                        meta.worktree_path.clone(),
+                        meta.remote_url.clone(),
+                        meta.indexed_at.clone(),
+                        vec![],
+                    )
+                });
                 // If this branch is newer, take its worktree_path / remote_url
                 if meta.indexed_at.as_str() > entry.2.as_str() {
                     entry.0 = meta.worktree_path.clone();
@@ -157,14 +155,16 @@ impl RegistryFile {
 
         let repos = by_repo
             .into_iter()
-            .map(|(name, (worktree_path, remote_url, _latest, branches))| RepoEntry {
-                name: name.clone(),
-                remote_url,
-                worktree_path,
-                index_dir_root: home_gnx.join(&name).to_string_lossy().into(),
-                branches,
-                group: None,
-            })
+            .map(
+                |(name, (worktree_path, remote_url, _latest, branches))| RepoEntry {
+                    name: name.clone(),
+                    remote_url,
+                    worktree_path,
+                    index_dir_root: home_gnx.join(&name).to_string_lossy().into(),
+                    branches,
+                    group: None,
+                },
+            )
             .collect();
 
         Ok(RegistryFile {

@@ -36,7 +36,7 @@ impl LanguageProvider for DartProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes= Vec::new();
+        let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
         let idx_class_name = self.query.capture_index_for_name("class.name");
@@ -81,11 +81,15 @@ impl LanguageProvider for DartProvider {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
                 } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.trim().to_string());
                     }
                 } else if Some(cap_idx) == idx_type {
-                    if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(t) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(t.trim().to_string());
                     }
                 } else if Some(cap_idx) == idx_import_source {
@@ -93,7 +97,9 @@ impl LanguageProvider for DartProvider {
                 } else if Some(cap_idx) == idx_import_alias {
                     import_alias = Some(cap.node);
                 } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d_str.to_string());
                     }
                 }
@@ -114,7 +120,7 @@ impl LanguageProvider for DartProvider {
                     let is_exported = !name_str.starts_with('_');
                     let start = root.start_position();
                     let end = root.end_position();
-                    
+
                     nodes.push(RawNode {
                         decorators,
                         is_exported,
@@ -128,15 +134,21 @@ impl LanguageProvider for DartProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
                 }
             }
 
             if let Some(i_src) = import_source {
-                if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
-                    let clean_src = src_str.trim().trim_matches('\'').trim_matches('"').to_string();
-                    
+                if let Ok(src_str) =
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                {
+                    let clean_src = src_str
+                        .trim()
+                        .trim_matches('\'')
+                        .trim_matches('"')
+                        .to_string();
+
                     let alias_str = if let Some(i_alias) = import_alias {
                         std::str::from_utf8(&source[i_alias.start_byte()..i_alias.end_byte()])
                             .ok()
@@ -171,7 +183,8 @@ impl LanguageProvider for DartProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

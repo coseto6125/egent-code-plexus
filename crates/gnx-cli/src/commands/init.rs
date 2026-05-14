@@ -39,10 +39,7 @@ pub fn run(args: InitArgs) -> Result<(), gnx_core::GnxError> {
         if existing.contains("gnx hook-handle") || existing.contains("hook-handle") {
             None
         } else if args.force || args.no_chain {
-            let bak = hook_path.with_extension(format!(
-                "bak.{}",
-                chrono::Utc::now().timestamp()
-            ));
+            let bak = hook_path.with_extension(format!("bak.{}", chrono::Utc::now().timestamp()));
             std::fs::rename(&hook_path, &bak)?;
             eprintln!("Existing hook backed up to {}", bak.display());
             None
@@ -76,6 +73,9 @@ pub fn run(args: InitArgs) -> Result<(), gnx_core::GnxError> {
         std::fs::set_permissions(&hook_path, perms)?;
     }
 
-    eprintln!("Installed reference-transaction hook at {}", hook_path.display());
+    eprintln!(
+        "Installed reference-transaction hook at {}",
+        hook_path.display()
+    );
     Ok(())
 }

@@ -28,9 +28,14 @@ fn init_repo(path: &std::path::Path) {
         .unwrap();
     Command::new("git")
         .args([
-            "-c", "user.email=t@t",
-            "-c", "user.name=t",
-            "commit", "-q", "-m", "i",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "i",
         ])
         .current_dir(path)
         .output()
@@ -69,7 +74,10 @@ fn rename_branch_moves_index_dir() {
 
     assert!(!from_dir.exists(), "expected from_dir to be removed");
     assert!(to_dir.exists(), "expected to_dir to exist after rename");
-    assert!(to_dir.join("graph.bin").exists(), "expected graph.bin in to_dir");
+    assert!(
+        to_dir.join("graph.bin").exists(),
+        "expected graph.bin in to_dir"
+    );
 }
 
 #[test]

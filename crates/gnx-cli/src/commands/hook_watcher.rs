@@ -30,10 +30,7 @@ pub fn run(args: HookWatcherArgs) -> Result<(), gnx_core::GnxError> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let pattern = format!(
-        "Branch: renamed refs/heads/{} to refs/heads/",
-        args.branch
-    );
+    let pattern = format!("Branch: renamed refs/heads/{} to refs/heads/", args.branch);
     let mut rename_target: Option<String> = None;
     for cur in &branches {
         let out = safe_exec::git()

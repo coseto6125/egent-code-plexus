@@ -88,8 +88,7 @@ impl LanguageProvider for LuaProvider {
             // Apply PascalCase heuristic for table-as-class (struct captures)
             if is_struct {
                 if let Some(n) = name_node {
-                    if let Ok(name_str) =
-                        std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                    if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
                     {
                         if is_pascal_case(name_str) {
                             kind = Some(NodeKind::Class);
@@ -162,6 +161,7 @@ impl LanguageProvider for LuaProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

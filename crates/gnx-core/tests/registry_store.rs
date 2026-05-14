@@ -93,7 +93,11 @@ fn read_falls_back_to_bak_on_corrupt_main() {
     let path = tmp.path().join("registry.json");
     let bak = tmp.path().join("registry.json.bak");
 
-    let v1 = RegistryFile { version: 1, repos: vec![], groups: vec![] };
+    let v1 = RegistryFile {
+        version: 1,
+        repos: vec![],
+        groups: vec![],
+    };
     RegistryFile::write_atomic(&path, &v1).unwrap();
     let v2 = v1.clone();
     RegistryFile::write_atomic(&path, &v2).unwrap();

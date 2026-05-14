@@ -5,6 +5,8 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Query};
 
 pub struct GitHubActionsProvider {
+    // 目前 parse_file 重建 Query；此 field 保留供未來重用避免重編 query.scm。
+    #[allow(dead_code)]
     query: Query,
 }
 
@@ -72,8 +74,12 @@ fn mapping_pairs<'a>(mapping: Node<'a>, source: &'a [u8]) -> Vec<(&'a str, Node<
         if child.kind() != "block_mapping_pair" {
             continue;
         }
-        let Some(key_node) = child.child_by_field_name("key") else { continue };
-        let Some(val_node) = child.child_by_field_name("value") else { continue };
+        let Some(key_node) = child.child_by_field_name("key") else {
+            continue;
+        };
+        let Some(val_node) = child.child_by_field_name("value") else {
+            continue;
+        };
         if let Some(k) = scalar_text(key_node, source) {
             pairs.push((k, val_node));
         }
@@ -148,8 +154,12 @@ fn action_name(uses_value: &str) -> String {
 
 /// Parse the first word of a `run:` command as the "command name".
 fn run_command_name(run_value: &str) -> Option<String> {
-    let first_word = run_value.trim().split_whitespace().next()?;
-    if first_word.is_empty() { None } else { Some(first_word.to_string()) }
+    let first_word = run_value.split_whitespace().next()?;
+    if first_word.is_empty() {
+        None
+    } else {
+        Some(first_word.to_string())
+    }
 }
 
 impl LanguageProvider for GitHubActionsProvider {
@@ -182,14 +192,21 @@ impl LanguageProvider for GitHubActionsProvider {
                     file_path: path.to_path_buf(),
                     nodes,
                     documents: vec![],
-                    imports,
+                    imports: vec![],
+                    framework_refs: vec![],
                 });
             }
         };
 
         let top_mapping = doc
             .named_child(0)
-            .and_then(|bn| if bn.kind() == "block_node" { bn.named_child(0) } else { Some(bn) })
+            .and_then(|bn| {
+                if bn.kind() == "block_node" {
+                    bn.named_child(0)
+                } else {
+                    Some(bn)
+                }
+            })
             .filter(|n| n.kind() == "block_mapping");
 
         let Some(top_mapping) = top_mapping else {
@@ -199,7 +216,8 @@ impl LanguageProvider for GitHubActionsProvider {
                 file_path: path.to_path_buf(),
                 nodes,
                 documents: vec![],
-                imports,
+                imports: vec![],
+                framework_refs: vec![],
             });
         };
 
@@ -227,8 +245,7 @@ impl LanguageProvider for GitHubActionsProvider {
         }
 
         // Extract jobs map
-        let jobs_block = mapping_value(top_mapping, "jobs", source)
-            .and_then(unwrap_block_mapping);
+        let jobs_block = mapping_value(top_mapping, "jobs", source).and_then(unwrap_block_mapping);
 
         if let Some(jobs_mapping) = jobs_block {
             for (job_key, job_val_node) in mapping_pairs(jobs_mapping, source) {
@@ -278,7 +295,8 @@ impl LanguageProvider for GitHubActionsProvider {
             file_path: path.to_path_buf(),
             nodes,
             documents: vec![],
-            imports,
+            imports: vec![],
+            framework_refs: vec![],
         })
     }
 }
@@ -307,8 +325,12 @@ fn walk_steps(
         if item.kind() != "block_sequence_item" {
             continue;
         }
-        let Some(step_block) = item.named_child(0) else { continue };
-        let Some(step_mapping) = unwrap_block_mapping(step_block) else { continue };
+        let Some(step_block) = item.named_child(0) else {
+            continue;
+        };
+        let Some(step_mapping) = unwrap_block_mapping(step_block) else {
+            continue;
+        };
 
         let pairs = mapping_pairs(step_mapping, source);
         let start = item.start_position();

@@ -46,7 +46,7 @@ pub struct Node {
     pub file_idx: u32,
     pub kind: NodeKind,
     pub span: (u32, u32, u32, u32), // start_line, start_col, end_line, end_col
-    pub community_id: u16,           // 0 = unassigned
+    pub community_id: u16,          // 0 = unassigned
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -140,7 +140,7 @@ mod tests {
             process_start: 1,
             traces_offsets: vec![],
             traces_data: vec![],
-            };
+        };
 
         // Serialize
         let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();

@@ -136,7 +136,9 @@ fn uid_errors_if_not_under_repo() {
 use gnx_core::registry::IndexLayout;
 use std::path::PathBuf;
 
-fn fake_home() -> PathBuf { PathBuf::from("/home/test/.gnx") }
+fn fake_home() -> PathBuf {
+    PathBuf::from("/home/test/.gnx")
+}
 
 #[test]
 fn index_path_basic() {
@@ -170,9 +172,10 @@ fn index_path_collision_gets_hash() {
     )
     .unwrap();
     assert!(
-        layout.index_dir.to_string_lossy().starts_with(
-            "/home/test/.gnx/gitnexus-rs-"
-        ),
+        layout
+            .index_dir
+            .to_string_lossy()
+            .starts_with("/home/test/.gnx/gitnexus-rs-"),
         "got {:?}",
         layout.index_dir
     );
@@ -202,13 +205,6 @@ fn index_path_rejects_escape_via_relative_segments() {
     // Even though sanitize_segment rejects ".." now, this guards
     // against future refactors that loosen the segment check.
     // Using a normal call to verify the assertion path doesn't false-alarm:
-    let layout = IndexLayout::resolve(
-        &fake_home(),
-        "valid-repo",
-        "main",
-        "/path",
-        &[],
-    )
-    .unwrap();
+    let layout = IndexLayout::resolve(&fake_home(), "valid-repo", "main", "/path", &[]).unwrap();
     assert!(layout.index_dir.starts_with(fake_home()));
 }

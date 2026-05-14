@@ -1,3 +1,6 @@
+# 宣告獨立 workspace 邊界，避免被外圍 workspace 吸收。
+[workspace]
+
 [package]
 name = "tree-sitter-cairo"
 description = "Cairo 1.0 grammar for the tree-sitter parsing library (patched for tree-sitter 0.25)"

@@ -85,13 +85,17 @@ impl LanguageProvider for PythonProvider {
                 } else if cap_idx == idx_type {
                     type_annotation_node = Some(cap.node);
                 } else if cap_idx == idx_heritage {
-                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h.to_string());
                     }
                 } else if cap_idx == idx_export {
                     is_exported_explicit = true;
                 } else if cap_idx == idx_decorator {
-                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d_str.to_string());
                     }
                 } else if cap_idx == idx_import_name {
@@ -122,9 +126,11 @@ impl LanguageProvider for PythonProvider {
                         end.row as u32,
                         end.column as u32,
                     );
-                    
+
                     let type_str = type_annotation_node.and_then(|t| {
-                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()]).ok().map(|s| s.to_string())
+                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
                     });
 
                     if let Some(existing) = nodes.iter_mut().find(|node| node.span == span) {
@@ -152,22 +158,28 @@ impl LanguageProvider for PythonProvider {
                             name: name_str.to_string(),
                             kind: k,
                             span,
-                                                    calls: Vec::new(),
+                            calls: Vec::new(),
                         });
                     }
                 }
             }
 
             if let Some(i_name) = import_name_node {
-                if let Ok(name_str) = std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()])
+                {
                     let src_str = if let Some(i_src) = import_src_node {
-                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]).unwrap_or("").to_string()
+                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                            .unwrap_or("")
+                            .to_string()
                     } else {
                         "".to_string()
                     };
-                    
+
                     let alias = import_alias_node.and_then(|a| {
-                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]).ok().map(|s| s.to_string())
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
                     });
 
                     imports.push(RawImport {
@@ -179,7 +191,9 @@ impl LanguageProvider for PythonProvider {
             }
 
             if is_route {
-                if let (Some(r_method), Some(r_path), Some(root)) = (route_method, route_path, root_span_node) {
+                if let (Some(r_method), Some(r_path), Some(root)) =
+                    (route_method, route_path, root_span_node)
+                {
                     if let (Ok(method_str), Ok(path_str)) = (
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
@@ -211,7 +225,8 @@ impl LanguageProvider for PythonProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

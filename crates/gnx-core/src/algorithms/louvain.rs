@@ -130,14 +130,12 @@ pub fn detect_communities(nodes: &[Node], edges: &[Edge], config: &LouvainConfig
             }
         }
         // Re-drop edges whose endpoint was just dropped.
-        for i in 0..n {
-            adj[i].retain(|&(t, _)| connected[t as usize]);
+        for adj_i in adj.iter_mut() {
+            adj_i.retain(|&(t, _)| connected[t as usize]);
         }
     }
 
-    let active_nodes: Vec<u32> = (0..n as u32)
-        .filter(|&i| connected[i as usize])
-        .collect();
+    let active_nodes: Vec<u32> = (0..n as u32).filter(|&i| connected[i as usize]).collect();
     if active_nodes.is_empty() {
         return assignments;
     }
@@ -163,79 +161,69 @@ pub fn detect_communities(nodes: &[Node], edges: &[Edge], config: &LouvainConfig
 
     let mut rng = XorShift64::new(config.seed);
 
-    for _pass in 0..config.max_passes {
-        let mut order = active_nodes.clone();
-        let mut improved = false;
+    // Single-level Louvain: one outer pass refines node→community assignments
+    // until no node moves (`iter_improved == false`) or `max_iterations` cap.
+    // For multi-level we'd rebuild `adj` from the contracted community graph
+    // and recurse; single-level already captures dominant structure for our
+    // scale (≤ 25K symbols). `config.max_passes` is reserved for that future
+    // expansion and currently unused.
+    let mut order = active_nodes.clone();
+    for _iter in 0..config.max_iterations {
+        rng.shuffle(&mut order);
+        let mut iter_improved = false;
 
-        for _iter in 0..config.max_iterations {
-            rng.shuffle(&mut order);
-            let mut iter_improved = false;
+        for &i in &order {
+            let ci = community[i as usize];
+            let ki = k[i as usize];
 
-            for &i in &order {
-                let ci = community[i as usize];
-                let ki = k[i as usize];
-
-                // Sum of weights from i to each neighbor community (excluding self-loops).
-                let mut k_i_to: HashMap<u32, f64> = HashMap::new();
-                for &(j, w) in &adj[i as usize] {
-                    if j == i {
-                        continue;
-                    }
-                    let cj = community[j as usize];
-                    *k_i_to.entry(cj).or_insert(0.0) += w;
+            // Sum of weights from i to each neighbor community (excluding self-loops).
+            let mut k_i_to: HashMap<u32, f64> = HashMap::new();
+            for &(j, w) in &adj[i as usize] {
+                if j == i {
+                    continue;
                 }
+                let cj = community[j as usize];
+                *k_i_to.entry(cj).or_insert(0.0) += w;
+            }
 
-                // Remove i from its current community.
-                if let Some(s) = sigma_tot.get_mut(&ci) {
-                    *s -= ki;
+            // Remove i from its current community.
+            if let Some(s) = sigma_tot.get_mut(&ci) {
+                *s -= ki;
+            }
+
+            // Find best community.
+            let mut best_c = ci;
+            let mut best_gain = 0.0_f64;
+
+            let k_i_ci = *k_i_to.get(&ci).unwrap_or(&0.0);
+            let sigma_ci = *sigma_tot.get(&ci).unwrap_or(&0.0);
+            // ΔQ if we stay = k_i,ci / m - ki * sigma_tot_ci / (2m^2)
+            let stay_gain = k_i_ci / (two_m / 2.0) - ki * sigma_ci / (two_m * two_m / 2.0);
+
+            for (&cand, &k_i_c) in &k_i_to {
+                if cand == ci {
+                    continue;
                 }
-
-                // Find best community.
-                let mut best_c = ci;
-                let mut best_gain = 0.0_f64;
-
-                let k_i_ci = *k_i_to.get(&ci).unwrap_or(&0.0);
-                let sigma_ci = *sigma_tot.get(&ci).unwrap_or(&0.0);
-                // ΔQ if we stay = k_i,ci / m - ki * sigma_tot_ci / (2m^2)
-                let stay_gain = k_i_ci / (two_m / 2.0) - ki * sigma_ci / (two_m * two_m / 2.0);
-
-                for (&cand, &k_i_c) in &k_i_to {
-                    if cand == ci {
-                        continue;
-                    }
-                    let sigma_c = *sigma_tot.get(&cand).unwrap_or(&0.0);
-                    let gain = k_i_c / (two_m / 2.0) - ki * sigma_c / (two_m * two_m / 2.0);
-                    if gain > best_gain + config.min_modularity_gain && gain > stay_gain {
-                        best_gain = gain;
-                        best_c = cand;
-                    }
-                }
-
-                // Commit move.
-                community[i as usize] = best_c;
-                *sigma_tot.entry(best_c).or_insert(0.0) += ki;
-
-                if best_c != ci {
-                    iter_improved = true;
+                let sigma_c = *sigma_tot.get(&cand).unwrap_or(&0.0);
+                let gain = k_i_c / (two_m / 2.0) - ki * sigma_c / (two_m * two_m / 2.0);
+                if gain > best_gain + config.min_modularity_gain && gain > stay_gain {
+                    best_gain = gain;
+                    best_c = cand;
                 }
             }
 
-            if !iter_improved {
-                break;
+            // Commit move.
+            community[i as usize] = best_c;
+            *sigma_tot.entry(best_c).or_insert(0.0) += ki;
+
+            if best_c != ci {
+                iter_improved = true;
             }
-            improved = true;
         }
 
-        if !improved {
+        if !iter_improved {
             break;
         }
-        // Aggregation phase (community contraction). We do this implicitly: in
-        // the next pass, nodes already in the same community will move
-        // together because their neighborhoods are summed via k_i_to.
-        // For multi-level Louvain we'd rebuild `adj` here. Single-level pass
-        // already captures the dominant community structure; subsequent passes
-        // refine it. For our scale (≤ 25K symbols) this is sufficient.
-        break;
     }
 
     // Renumber communities densely starting at 1, then fold into u16.

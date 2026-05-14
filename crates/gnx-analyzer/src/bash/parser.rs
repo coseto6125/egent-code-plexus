@@ -111,6 +111,7 @@ impl LanguageProvider for BashProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

@@ -82,22 +82,29 @@ impl LanguageProvider for JavaProvider {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx_import_source {
                     import_src = Some(cap.node);
-                } else if cap_idx == idx_class || cap_idx == idx_interface || cap_idx == idx_method {
+                } else if cap_idx == idx_class || cap_idx == idx_interface || cap_idx == idx_method
+                {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);
                     }
                 } else if cap_idx == idx_export {
                     is_exported = true;
                 } else if cap_idx == idx_heritage {
-                    if let Ok(h_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(h_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         heritage.push(h_str.to_string());
                     }
                 } else if cap_idx == idx_type {
-                    if let Ok(t_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(t_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         type_annotation = Some(t_str.to_string());
                     }
                 } else if cap_idx == idx_decorator {
-                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                    if let Ok(d_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
                         decorators.push(d_str.to_string());
                     }
                 }
@@ -107,9 +114,9 @@ impl LanguageProvider for JavaProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    
+
                     let node_id = root.id();
-                    
+
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
                         decorators: vec![],
                         is_exported,
@@ -123,9 +130,9 @@ impl LanguageProvider for JavaProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                                            calls: Vec::new(),
+                        calls: Vec::new(),
                     });
-                    
+
                     for h in heritage {
                         if !entry.heritage.contains(&h) {
                             entry.heritage.push(h);
@@ -150,9 +157,9 @@ impl LanguageProvider for JavaProvider {
                     std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
                     std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
                 ) {
-                    let exists = imports.iter().any(|i: &RawImport| {
-                        i.imported_name == name_str && i.source == src_str
-                    });
+                    let exists = imports
+                        .iter()
+                        .any(|i: &RawImport| i.imported_name == name_str && i.source == src_str);
                     if !exists {
                         imports.push(RawImport {
                             alias: None,
@@ -180,7 +187,8 @@ impl LanguageProvider for JavaProvider {
             file_path: path.to_path_buf(),
             nodes,
             imports,
-                    documents: vec![],
+            documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

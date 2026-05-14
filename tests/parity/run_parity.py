@@ -16,7 +16,7 @@ def normalize_json(data: Any) -> Any:
     """
     if isinstance(data, dict):
         return {k: normalize_json(v) for k, v in sorted(data.items())}
-    elif isinstance(data, list):
+    if isinstance(data, list):
         normalized_list = [normalize_json(item) for item in data]
         try:
             return sorted(normalized_list)
@@ -42,17 +42,18 @@ def run_command(cmd: list[str], cwd: Path | None = None) -> Any:
         if start_idx == -1 and list_start_idx == -1:
             raise json.JSONDecodeError("No JSON object found", output, 0)
 
-        if start_idx != -1 and list_start_idx != -1:
-            actual_start = min(start_idx, list_start_idx)
-        else:
-            actual_start = max(start_idx, list_start_idx)
+        actual_start = (
+            min(start_idx, list_start_idx)
+            if start_idx != -1 and list_start_idx != -1
+            else max(start_idx, list_start_idx)
+        )
 
         return json.loads(output[actual_start:])
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {' '.join(cmd)}")
         print(f"Error output:\n{e.stderr}\n{e.stdout}")
         sys.exit(1)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         print(f"Failed to parse JSON from command: {' '.join(cmd)}")
         print(f"Output was:\n{result.stdout}")
         sys.exit(1)
@@ -72,16 +73,18 @@ def is_subset(expected: Any, actual: Any, path: str = "") -> list[str]:
                 errors.extend(is_subset(v, actual[k], f"{path}.{k}" if path else k))
     elif isinstance(expected, list) and isinstance(actual, list):
         if len(expected) != len(actual):
-            errors.append(f"List length mismatch at '{path}'. Expected {len(expected)}, got {len(actual)}")
+            errors.append(
+                f"List length mismatch at '{path}'. Expected {len(expected)}, got {len(actual)}"
+            )
         else:
             # We assume lists are already sorted by `normalize_json`
-            for i, (e_val, a_val) in enumerate(zip(expected, actual)):
+            for i, (e_val, a_val) in enumerate(zip(expected, actual, strict=False)):
                 errors.extend(is_subset(e_val, a_val, f"{path}[{i}]"))
-    else:
-        if expected != actual:
-            errors.append(f"Value mismatch at '{path}'. Expected '{expected}', got '{actual}'")
-            
+    elif expected != actual:
+        errors.append(f"Value mismatch at '{path}'. Expected '{expected}', got '{actual}'")
+
     return errors
+
 
 def print_diff(dict1: Any, dict2: Any, name1: str, name2: str) -> None:
     """Prints a unified diff of two JSON objects."""
@@ -93,8 +96,12 @@ def print_diff(dict1: Any, dict2: Any, name1: str, name2: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run shadow parity validation between gnx and gnx-rs")
-    parser.add_argument("fixture_path", type=Path, help="Path to the TypeScript fixture file or directory")
+    parser = argparse.ArgumentParser(
+        description="Run shadow parity validation between gnx and gnx-rs"
+    )
+    parser.add_argument(
+        "fixture_path", type=Path, help="Path to the TypeScript fixture file or directory"
+    )
     parser.add_argument("symbol", type=str, help="Symbol to query for context")
     args = parser.parse_args()
 
@@ -111,7 +118,16 @@ def main() -> None:
 
     print("\n[Analyze Phase]")
     gnx_analyze_cmd = ["gnx", "analyze", "--repo", str(fixture_path)]
-    gnx_rs_analyze_cmd = ["cargo", "run", "--bin", "gnx-rs", "--", "analyze", "--repo", str(fixture_path)]
+    gnx_rs_analyze_cmd = [
+        "cargo",
+        "run",
+        "--bin",
+        "gnx-rs",
+        "--",
+        "analyze",
+        "--repo",
+        str(fixture_path),
+    ]
 
     print("Running original gnx analyze...")
     subprocess.run(gnx_analyze_cmd, cwd=workspace_root, capture_output=True, check=False)
@@ -120,8 +136,30 @@ def main() -> None:
     subprocess.run(gnx_rs_analyze_cmd, cwd=workspace_root, capture_output=True, check=False)
 
     print(f"\n[Context Phase: {symbol}]")
-    gnx_context_cmd = ["gnx", "context", "--name", symbol, "--repo", str(fixture_path), "--format", "json"]
-    gnx_rs_context_cmd = ["cargo", "run", "--bin", "gnx-rs", "--", "context", "--name", symbol, "--repo", str(fixture_path), "--format", "json"]
+    gnx_context_cmd = [
+        "gnx",
+        "context",
+        "--name",
+        symbol,
+        "--repo",
+        str(fixture_path),
+        "--format",
+        "json",
+    ]
+    gnx_rs_context_cmd = [
+        "cargo",
+        "run",
+        "--bin",
+        "gnx-rs",
+        "--",
+        "context",
+        "--name",
+        symbol,
+        "--repo",
+        str(fixture_path),
+        "--format",
+        "json",
+    ]
 
     print("Running original gnx context...")
     gnx_output = run_command(gnx_context_cmd, cwd=workspace_root)
@@ -140,7 +178,9 @@ def main() -> None:
         print("\n❌ FAILURE: Mismatch detected. gnx-rs is missing expected fields or values.")
         for error in errors:
             print(f"  - {error}")
-        print("\n--- Diff (Note: Extra fields in gnx-rs are ACCEPTABLE, look for missing/changed fields) ---")
+        print(
+            "\n--- Diff (Note: Extra fields in gnx-rs are ACCEPTABLE, look for missing/changed fields) ---"
+        )
         print_diff(normalized_gnx, normalized_gnx_rs, "gnx (original)", "gnx-rs (new)")
         sys.exit(1)
 

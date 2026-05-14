@@ -126,6 +126,7 @@ impl LanguageProvider for SqlProvider {
             nodes,
             imports,
             documents: vec![],
+            framework_refs: vec![],
         })
     }
 }

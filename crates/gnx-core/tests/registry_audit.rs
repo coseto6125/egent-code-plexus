@@ -104,7 +104,8 @@ fn cleanup_old_keeps_recent_rotated() {
     .unwrap();
 
     let log = AuditLog::open(&log_path).unwrap();
-    log.cleanup_old(Duration::from_secs(90 * 24 * 3600)).unwrap();
+    log.cleanup_old(Duration::from_secs(90 * 24 * 3600))
+        .unwrap();
 
     assert!(
         recent_rotated.exists(),
@@ -121,14 +122,11 @@ fn deletes_rotated_older_than_90_days() {
     let old_rotated = tmp.path().join("audit.log.1");
     std::fs::write(&old_rotated, "old data").unwrap();
     let old_time = SystemTime::now() - Duration::from_secs(100 * 24 * 3600);
-    filetime::set_file_mtime(
-        &old_rotated,
-        filetime::FileTime::from_system_time(old_time),
-    )
-    .unwrap();
+    filetime::set_file_mtime(&old_rotated, filetime::FileTime::from_system_time(old_time)).unwrap();
 
     let log = AuditLog::open(&log_path).unwrap();
-    log.cleanup_old(Duration::from_secs(90 * 24 * 3600)).unwrap();
+    log.cleanup_old(Duration::from_secs(90 * 24 * 3600))
+        .unwrap();
 
     assert!(!old_rotated.exists(), "expected old rotated to be deleted");
 }

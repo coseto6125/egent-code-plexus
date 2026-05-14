@@ -1,9 +1,9 @@
 use anyhow::Result;
 use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
+use hf_hub::api::sync::ApiBuilder;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use hf_hub::api::sync::ApiBuilder;
 
 /// Symbol names rarely exceed ~30 tokens. 128 covers enriched text
 /// (name + decorators + signature) with safety margin while cutting
@@ -37,8 +37,7 @@ fn resolve_cache_dir() -> PathBuf {
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
-                .join(".cache")
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".cache")
         });
     cache_root.join("huggingface").join("hub")
 }
@@ -54,10 +53,19 @@ impl Embedder {
         eprintln!("   Cache dir: {}", cache_dir.display());
         eprintln!("   (If the model is not present, it will download ~1.2GB of weights from HuggingFace.)");
 
-        let api = ApiBuilder::new().with_cache_dir(cache_dir.clone()).with_progress(true).build()?;
-        
-        let model_repo = api.repo(hf_hub::Repo::new("MahradHosseini/bge-m3-onnx-int8".to_string(), hf_hub::RepoType::Model));
-        let tok_repo = api.repo(hf_hub::Repo::new("BAAI/bge-m3".to_string(), hf_hub::RepoType::Model));
+        let api = ApiBuilder::new()
+            .with_cache_dir(cache_dir.clone())
+            .with_progress(true)
+            .build()?;
+
+        let model_repo = api.repo(hf_hub::Repo::new(
+            "MahradHosseini/bge-m3-onnx-int8".to_string(),
+            hf_hub::RepoType::Model,
+        ));
+        let tok_repo = api.repo(hf_hub::Repo::new(
+            "BAAI/bge-m3".to_string(),
+            hf_hub::RepoType::Model,
+        ));
 
         let model_file = model_repo.get("model_quantized.onnx")?;
         let tokenizer_file = tok_repo.get("tokenizer.json")?;
@@ -65,7 +73,7 @@ impl Embedder {
         let special_tokens_map_file = tok_repo.get("special_tokens_map.json")?;
         let tokenizer_config_file = tok_repo.get("tokenizer_config.json")?;
 
-        let mut model_def = UserDefinedEmbeddingModel::new(
+        let model_def = UserDefinedEmbeddingModel::new(
             std::fs::read(model_file)?,
             TokenizerFiles {
                 tokenizer_file: std::fs::read(tokenizer_file)?,
@@ -131,7 +139,10 @@ impl Embedder {
         let unique_embeddings = if unique_texts.is_empty() {
             Vec::new()
         } else {
-            let mut model = self.model.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            let mut model = self
+                .model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             model.embed(unique_texts, None)?
         };
 
