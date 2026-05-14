@@ -7,6 +7,7 @@ mod git;
 mod git_state;
 mod graph_path;
 mod output;
+pub mod reanalyze;
 pub mod search;
 
 use engine::Engine;
