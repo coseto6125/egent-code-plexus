@@ -41,9 +41,19 @@ use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// Bump when `CacheFile` / `CachedEntry` / `LocalGraph` (or any transitively
-/// archived type) gains/removes/reorders a field. rkyv archived layout is
-/// not forward-compatible across struct changes.
+/// **Strictly manual** invariant: bump this when `CacheFile` /
+/// `CachedEntry` / `LocalGraph` (or any transitively archived type:
+/// `RawNode`, `RawImport`, `RawRoute`, `RawDocumentBlock`,
+/// `RawFrameworkRef`, `RawFanoutRef`, `BlindSpot`) gains, removes,
+/// reorders, or retypes a field. There is no compile-time guard that
+/// catches a forgotten bump.
+///
+/// **rkyv does NOT detect this**. `rkyv::access` validates pointer
+/// alignment and bounds against the *current* archived layout — it
+/// happily reads cache bytes written by an older struct shape and
+/// silently misinterprets fields whose offsets shifted. A
+/// schema-version mismatch is the only signal that catches "fields
+/// added since last build" before it corrupts query results.
 pub const CACHE_SCHEMA_VERSION: u32 = 1;
 
 /// Compile-time fingerprint over every parser.rs / queries.scm / shared
@@ -156,8 +166,10 @@ pub fn load_cache(path: &Path) -> Option<CacheIndex> {
         Err(_) => return None, // missing or unreadable — first run / clean state
     };
 
-    // rkyv structural validation catches truncation, corruption, and
-    // schema-shape changes. The two explicit equality checks below catch
+    // rkyv structural validation catches truncation, mis-aligned
+    // pointers, and out-of-bounds offsets. It does NOT catch field
+    // additions / reorderings within a struct — see
+    // `CACHE_SCHEMA_VERSION` doc. The two explicit equality checks below catch
     // the "shape is right but contents are stale" case.
     let archived = match rkyv::access::<ArchivedCacheFile, rkyv::rancor::Error>(&bytes) {
         Ok(a) => a,
