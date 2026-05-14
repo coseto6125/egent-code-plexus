@@ -1,6 +1,7 @@
-import subprocess
 import json
+import subprocess
 import time
+
 
 def run_command(cmd):
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -10,10 +11,12 @@ def run_command(cmd):
         return None
     return result.stdout
 
+
 def print_section(title):
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print(f" {title} ")
-    print("="*50)
+    print("=" * 50)
+
 
 # 1. Analyze Flask Repo (Python)
 print_section("1. Analyzing Flask Repo (.sample_repo/Python)")
@@ -21,7 +24,9 @@ run_command("cargo run --bin gnx -- analyze --repo .sample_repo/Python")
 
 # 2. Extract Route Map
 print_section("2. Extracting API Routes (route_map) from Flask")
-routes_json = run_command("cargo run --bin gnx -- route-map --repo .sample_repo/Python --format json")
+routes_json = run_command(
+    "cargo run --bin gnx -- route-map --repo .sample_repo/Python --format json"
+)
 if routes_json:
     try:
         data = json.loads(routes_json)
@@ -41,13 +46,17 @@ print(f"Embeddings generation took {time.time() - start_time:.2f} seconds.")
 
 # 4. Semantic Query
 print_section("4. Semantic Query: 'cookie and session management'")
-query_json = run_command("cargo run --bin gnx -- query --query 'cookie and session management' --repo .sample_repo/Python --format json")
+query_json = run_command(
+    "cargo run --bin gnx -- query --query 'cookie and session management' --repo .sample_repo/Python --format json"
+)
 if query_json:
     try:
         data = json.loads(query_json)
         results = data.get("results", [])
         print(f"Found {len(results)} results via Semantic Search:")
         for res in results[:5]:  # Print top 5
-            print(f"- [{res['score']:.4f}] {res['kind']} {res['name']} ({res['filePath']}:{res['line']})")
+            print(
+                f"- [{res['score']:.4f}] {res['kind']} {res['name']} ({res['filePath']}:{res['line']})"
+            )
     except Exception as e:
         print(f"Failed to parse JSON: {e}")

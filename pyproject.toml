@@ -1,0 +1,20 @@
+# 此 repo 為 Rust 專案。Python 僅用於 tests/parity/ 對拍腳本與少量 ad-hoc tooling。
+# ruff 設定只挑語法/邏輯類 lint，跳過 docstring/type-hint/subprocess-security 等風格類。
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# F = pyflakes（語法/未用變數/未定義名稱）
+# E = pycodestyle errors（非 warnings）
+# I = isort
+# UP = pyupgrade（過時語法）
+# B = bugbear（常見 bug 模式）
+select = ["F", "E", "I", "UP", "B"]
+ignore = [
+  "E501",  # 行長度（line-length 已設）
+]
+
+[tool.ruff.format]
+line-ending = "lf"

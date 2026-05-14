@@ -1,0 +1,51 @@
+# cargo-deny configuration
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+# ==================== Advisories (RustSec) ====================
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "warn"
+ignore = [
+    # paste 1.0.15 unmaintained (透過 tokenizers → fastembed 引入)。
+    # 上游若改用 pastey 即可解；非漏洞，僅 advisory。
+    "RUSTSEC-2024-0436",
+]
+
+# ==================== Licenses ====================
+[licenses]
+confidence-threshold = 0.93
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+  "NCSA",                 # LLVM 系 crate（rav1e 一支）使用 MIT AND NCSA
+  "CDLA-Permissive-2.0",  # webpki-roots 採用，Linux Foundation 標準
+]
+exceptions = []
+
+# ==================== Bans ====================
+[bans]
+multiple-versions = "warn"   # workspace 常見，warn 不擋 CI
+wildcards = "warn"           # tree-sitter-typescript = "*" 會被抓，先 warn
+allow-wildcard-paths = true
+deny = []
+skip = []
+skip-tree = []
+
+# ==================== Sources ====================
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
