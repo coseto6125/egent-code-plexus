@@ -18,6 +18,11 @@ pub struct SymbolTable {
     /// This is used for `ResolutionTier::Global` lookups where we need to find
     /// all possible candidates for a given symbol name.
     global_scoped: HashMap<String, Vec<u32>>,
+
+    /// Reverse map `node_id` → owning `file_path`. Populated by
+    /// `register_node` alongside the other indexes; consumed by the resolver
+    /// decision dump to report the resolved target file.
+    id_to_file: HashMap<u32, String>,
 }
 
 impl SymbolTable {
@@ -39,6 +44,9 @@ impl SymbolTable {
             .entry(node_name.to_string())
             .or_default()
             .push(node_id);
+
+        // Register reverse map for dump-side lookup
+        self.id_to_file.insert(node_id, file_path.to_string());
     }
 
     /// Looks up a node ID by its file path and node name.
@@ -59,5 +67,11 @@ impl SymbolTable {
             .get(node_name)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Reverse lookup: given a `node_id`, return its owning file path. Used by
+    /// the resolver decision dump to materialize `target_file` in JSONL output.
+    pub fn file_of(&self, node_id: u32) -> Option<&str> {
+        self.id_to_file.get(&node_id).map(|s| s.as_str())
     }
 }

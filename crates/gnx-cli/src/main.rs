@@ -57,6 +57,8 @@ enum Commands {
     List(commands::list::ListArgs),
     /// LLM-friendly project overview (markdown / json) from graph.bin
     Summarize(commands::summarize::SummarizeArgs),
+    /// Diff a resolver dump against a language oracle (TS / Python / Rust)
+    VerifyResolver(commands::verify_resolver::VerifyResolverArgs),
 }
 
 fn main() {
@@ -128,6 +130,15 @@ fn main() {
         return;
     }
 
+    // VerifyResolver diffs JSONL files; no graph needed
+    if let Commands::VerifyResolver(args) = &cli.command {
+        if let Err(e) = commands::verify_resolver::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -142,7 +153,8 @@ fn main() {
         | Commands::HookWatcher(_)
         | Commands::Prune(_)
         | Commands::RenameBranch(_)
-        | Commands::List(_) => None,
+        | Commands::List(_)
+        | Commands::VerifyResolver(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -172,7 +184,8 @@ fn main() {
         | Commands::HookWatcher(_)
         | Commands::Prune(_)
         | Commands::RenameBranch(_)
-        | Commands::List(_) => Ok(()), // Handled above
+        | Commands::List(_)
+        | Commands::VerifyResolver(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {

@@ -104,6 +104,10 @@ pub struct GraphBuilder {
     generate_embeddings: bool,
     old_file_hashes: HashMap<String, [u8; 32]>,
     old_embeddings_cache: HashMap<String, Vec<f32>>,
+    /// When `Some`, the resolver pass 2 buffers every decision and writes a
+    /// JSONL line per resolution attempt to this path. Used by the oracle
+    /// verification harness (see specs/2026-05-15-resolver-oracle-harness.md).
+    resolver_dump_path: Option<std::path::PathBuf>,
 }
 
 impl Default for GraphBuilder {
@@ -119,6 +123,7 @@ impl GraphBuilder {
             generate_embeddings: false,
             old_file_hashes: HashMap::new(),
             old_embeddings_cache: HashMap::new(),
+            resolver_dump_path: None,
         }
     }
 
@@ -134,6 +139,11 @@ impl GraphBuilder {
     ) -> Self {
         self.old_file_hashes = hashes;
         self.old_embeddings_cache = embs;
+        self
+    }
+
+    pub fn with_resolver_dump(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.resolver_dump_path = path;
         self
     }
 
@@ -311,6 +321,9 @@ impl GraphBuilder {
 
         // Pass 2: Resolve imports and build edges
         let resolver = Resolver::new(&symbol_table);
+        if self.resolver_dump_path.is_some() {
+            resolver.enable_dump();
+        }
         let mut edges = Vec::new();
         let mut current_node_idx = 0;
 
@@ -408,6 +421,16 @@ impl GraphBuilder {
         }
 
         edges.extend(route_edges);
+
+        // Optional: flush the resolver decision dump now that pass 2 is done.
+        // Spec: docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md
+        if let Some(dump_path) = self.resolver_dump_path.as_ref() {
+            if let Some(decisions) = resolver.take_decisions() {
+                if let Err(e) = write_resolver_dump(dump_path, &decisions, &symbol_table) {
+                    tracing::warn!("Failed to write resolver dump to {:?}: {}", dump_path, e);
+                }
+            }
+        }
 
         // Pass 3: Community detection (Leiden) over Calls/Extends/Implements edges.
         // Leiden's refinement phase prevents the badly-connected-hub failure
@@ -614,6 +637,84 @@ impl GraphBuilder {
             files,
         }
     }
+}
+
+/// Serialize captured resolver decisions to a JSONL file. Schema matches
+/// the oracle harness contract: one decision per line, fields ordered for
+/// readable diffs (`src_file`, `name`, `specifier`, `tier`, `target_file`,
+/// `alt_count`, `confidence`).
+fn write_resolver_dump(
+    path: &std::path::Path,
+    decisions: &[crate::resolution::resolver::ResolverDecision],
+    symbol_table: &SymbolTable,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut line = String::with_capacity(256);
+    for d in decisions {
+        let target_file = d.target_id.and_then(|id| symbol_table.file_of(id));
+        line.clear();
+        line.push('{');
+        write_json_str(&mut line, "src_file", &d.src_file);
+        line.push(',');
+        write_json_str(&mut line, "name", &d.name);
+        line.push(',');
+        line.push_str("\"specifier\":");
+        match &d.specifier {
+            Some(s) => push_quoted(&mut line, s),
+            None => line.push_str("null"),
+        }
+        line.push(',');
+        write_json_str(&mut line, "tier", d.tier);
+        line.push(',');
+        line.push_str("\"target_file\":");
+        match target_file {
+            Some(s) => push_quoted(&mut line, s),
+            None => line.push_str("null"),
+        }
+        line.push(',');
+        line.push_str("\"alt_count\":");
+        line.push_str(&d.alt_count.to_string());
+        line.push(',');
+        line.push_str("\"confidence\":");
+        match d.confidence {
+            Some(c) => line.push_str(&format!("{c:.3}")),
+            None => line.push_str("null"),
+        }
+        line.push('}');
+        line.push('\n');
+        f.write_all(line.as_bytes())?;
+    }
+    f.flush()?;
+    Ok(())
+}
+
+fn write_json_str(buf: &mut String, key: &str, val: &str) {
+    buf.push('"');
+    buf.push_str(key);
+    buf.push_str("\":");
+    push_quoted(buf, val);
+}
+
+fn push_quoted(buf: &mut String, s: &str) {
+    buf.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => buf.push_str("\\\\"),
+            '"' => buf.push_str("\\\""),
+            '\n' => buf.push_str("\\n"),
+            '\r' => buf.push_str("\\r"),
+            '\t' => buf.push_str("\\t"),
+            c if (c as u32) < 0x20 => buf.push_str(&format!("\\u{:04x}", c as u32)),
+            c => buf.push(c),
+        }
+    }
+    buf.push('"');
 }
 
 #[cfg(test)]

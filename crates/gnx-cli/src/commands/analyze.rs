@@ -27,6 +27,12 @@ pub struct AnalyzeArgs {
 
     #[arg(long, default_value_t = false)]
     pub embeddings: bool,
+
+    /// Optional path to write a JSONL dump of every resolver decision.
+    /// Used by the oracle verification harness; off by default.
+    /// Spec: docs/superpowers/specs/2026-05-15-resolver-oracle-harness.md
+    #[arg(long)]
+    pub dump_resolver: Option<std::path::PathBuf>,
 }
 
 pub fn run(args: AnalyzeArgs) -> Result<(), String> {
@@ -195,7 +201,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     let build_start = Instant::now();
     let mut builder = GraphBuilder::new()
         .with_embeddings(args.embeddings)
-        .with_cache(old_file_hashes, old_embeddings_cache);
+        .with_cache(old_file_hashes, old_embeddings_cache)
+        .with_resolver_dump(args.dump_resolver.clone());
     for graph in local_graphs {
         builder.add_graph(graph);
     }

@@ -12,3 +12,4 @@ pub mod query;
 pub mod rename_branch;
 pub mod route_map;
 pub mod summarize;
+pub mod verify_resolver;
