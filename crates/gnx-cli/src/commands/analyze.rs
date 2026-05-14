@@ -15,11 +15,9 @@ use gnx_analyzer::{
     move_lang::parser::MoveProvider,
     dockerfile::parser::DockerfileProvider,
     nim::parser::NimProvider,
-    hcl::parser::HclProvider,
     cairo::parser::CairoProvider,
     sql::parser::SqlProvider,
     vyper::parser::VyperProvider,
-    verilog::parser::VerilogProvider,
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -159,10 +157,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(SolidityProvider::new().unwrap()));
     pipeline.register_provider(Box::new(DockerfileProvider::new().unwrap()));
     pipeline.register_provider(Box::new(NimProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(HclProvider::new().unwrap()));
     pipeline.register_provider(Box::new(SqlProvider::new().unwrap()));
     pipeline.register_provider(Box::new(VyperProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(VerilogProvider::new().unwrap()));
     pipeline.register_provider(Box::new(CairoProvider::new().unwrap()));
 
     // Step 3: Analyze and load cache concurrently
