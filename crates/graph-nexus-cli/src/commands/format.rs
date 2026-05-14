@@ -19,6 +19,7 @@ pub fn kind_to_str(kind: &ArchivedNodeKind) -> &'static str {
         ArchivedNodeKind::Process => "Process",
         ArchivedNodeKind::Document => "Document",
         ArchivedNodeKind::Section => "Section",
+        ArchivedNodeKind::EntryPoint => "EntryPoint",
     }
 }
 

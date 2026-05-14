@@ -401,6 +401,7 @@ fn node_kind_to_str(kind: &NodeKind) -> &'static str {
         NodeKind::Process => "Process",
         NodeKind::Document => "Document",
         NodeKind::Section => "Section",
+        NodeKind::EntryPoint => "EntryPoint",
     }
 }
 
