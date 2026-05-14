@@ -1,11 +1,13 @@
 //! Registry: central name registry, per-branch metadata, audit log.
 //! See spec §1-§2, §9.
 
+mod audit;
 mod lock;
 mod meta;
 mod path;
 mod store;
 
+pub use audit::{AuditEvent, AuditLog};
 pub use lock::FileLock;
 pub use meta::BranchMeta;
 pub use path::{

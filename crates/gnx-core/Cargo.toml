@@ -28,3 +28,4 @@ cc = "1.0.94"
 [dev-dependencies]
 tempfile = "3.27.0"
 memmap2 = "0.9.10"
+filetime = "0.2"
