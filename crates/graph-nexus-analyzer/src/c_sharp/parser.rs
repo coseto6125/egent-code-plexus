@@ -47,6 +47,7 @@ impl LanguageProvider for CSharpProvider {
         let idx_name_function = self.query.capture_index_for_name("name.function");
         let idx_name_class = self.query.capture_index_for_name("name.class");
         let idx_name_method = self.query.capture_index_for_name("name.method");
+        let idx_name_constructor = self.query.capture_index_for_name("name.constructor");
         let idx_name_interface = self.query.capture_index_for_name("name.interface");
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
@@ -60,6 +61,7 @@ impl LanguageProvider for CSharpProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
+        let idx_constructor = self.query.capture_index_for_name("constructor");
         let idx_interface = self.query.capture_index_for_name("interface");
 
         while let Some(m) = matches.next() {
@@ -87,6 +89,9 @@ impl LanguageProvider for CSharpProvider {
                 } else if Some(cap_idx) == idx_name_method {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if Some(cap_idx) == idx_name_constructor {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Constructor);
                 } else if Some(cap_idx) == idx_name_interface {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
@@ -129,6 +134,7 @@ impl LanguageProvider for CSharpProvider {
                 } else if (Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
+                    || Some(cap_idx) == idx_constructor
                     || Some(cap_idx) == idx_interface)
                     && root_span_node.is_none()
                 {

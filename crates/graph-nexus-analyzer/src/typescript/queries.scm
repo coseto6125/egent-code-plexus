@@ -89,6 +89,15 @@
   ) @class
 ) @export
 
+;; Constructor (TS/JS `constructor()` inside a class body — predicate
+;; ensures the generic method pattern below still matches every method
+;; including this one; parser upgrades the kind from Method when this
+;; pattern also fires on the same span)
+(method_definition
+  name: (property_identifier) @constructor.name
+  (#eq? @constructor.name "constructor")
+) @constructor
+
 ;; Methods
 (method_definition
   name: (property_identifier) @method.name

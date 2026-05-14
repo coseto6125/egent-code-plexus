@@ -50,8 +50,8 @@
 (constructor_declaration
   (attribute_list)* @decorator
   (modifier)* @export
-  name: (identifier) @name.method
-) @method
+  name: (identifier) @name.constructor
+) @constructor
 
 ;; Local Functions
 (local_function_statement

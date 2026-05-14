@@ -21,10 +21,12 @@ struct TypeScriptCaptureIndices {
     function_name: Option<u32>,
     class_name: Option<u32>,
     method_name: Option<u32>,
+    constructor_name: Option<u32>,
     interface_name: Option<u32>,
     function: Option<u32>,
     class: Option<u32>,
     method: Option<u32>,
+    constructor: Option<u32>,
     interface: Option<u32>,
     export: Option<u32>,
     heritage: Option<u32>,
@@ -59,10 +61,12 @@ impl TypeScriptProvider {
             function_name: query.capture_index_for_name("function.name"),
             class_name: query.capture_index_for_name("class.name"),
             method_name: query.capture_index_for_name("method.name"),
+            constructor_name: query.capture_index_for_name("constructor.name"),
             interface_name: query.capture_index_for_name("interface.name"),
             function: query.capture_index_for_name("function"),
             class: query.capture_index_for_name("class"),
             method: query.capture_index_for_name("method"),
+            constructor: query.capture_index_for_name("constructor"),
             interface: query.capture_index_for_name("interface"),
             export: query.capture_index_for_name("export"),
             heritage: query.capture_index_for_name("heritage"),
@@ -147,6 +151,9 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.method_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if cap_idx == idx.constructor_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Constructor);
                 } else if cap_idx == idx.interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
@@ -201,6 +208,7 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.function
                     || cap_idx == idx.class
                     || cap_idx == idx.method
+                    || cap_idx == idx.constructor
                     || cap_idx == idx.interface
                 {
                     root_span_node = Some(cap.node);
@@ -215,6 +223,15 @@ impl LanguageProvider for TypeScriptProvider {
                     let mut existing_found = false;
                     for node in &mut nodes {
                         if node.span == span && node.name == name_str {
+                            // Upgrade a Method classification to Constructor
+                            // when the ctor pattern fires for the same span.
+                            // Match order between patterns is not specified,
+                            // so handle either arrival order here.
+                            if matches!(k, NodeKind::Constructor)
+                                && matches!(node.kind, NodeKind::Method)
+                            {
+                                node.kind = NodeKind::Constructor;
+                            }
                             if is_exported {
                                 node.is_exported = true;
                             }
