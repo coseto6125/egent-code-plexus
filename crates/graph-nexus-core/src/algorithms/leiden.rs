@@ -249,10 +249,23 @@ fn local_move(
     config: &LeidenConfig,
 ) -> bool {
     let n = adj.len();
-    let mut sigma_tot: HashMap<u32, f64> = HashMap::new();
+    // Dense sigma_tot indexed by community_id. At recursive levels the
+    // super-community labels are inherited from the parent level, so the
+    // max community id can exceed adj.len(); size the buffer by the
+    // actual max we'll see (+1) to keep all accesses in-bounds while
+    // staying tight on memory for the typical small-graph case.
+    let max_cid = community.iter().copied().max().unwrap_or(0) as usize;
+    let dense_len = max_cid + 1;
+    let mut sigma_tot: Vec<f64> = vec![0.0; dense_len];
     for i in 0..n {
-        *sigma_tot.entry(community[i]).or_insert(0.0) += degree[i];
+        sigma_tot[community[i] as usize] += degree[i];
     }
+
+    // Sparse-set scratch for k_i,C: a dense f64 buffer plus a list of
+    // touched community ids so we can O(neighbors) reset between nodes
+    // without zeroing the whole buffer. Lives across all iterations.
+    let mut k_i_to_dense: Vec<f64> = vec![0.0; dense_len];
+    let mut k_i_to_touched: Vec<u32> = Vec::new();
 
     let mut overall_moved = false;
     let mut rng = XorShift64::new(config.seed);
@@ -269,33 +282,35 @@ fn local_move(
             let ci = community[i];
             let ki = degree[i];
 
-            // k_i,C for each neighbor community C.
-            let mut k_i_to: HashMap<u32, f64> = HashMap::new();
+            // k_i,C accumulation via dense buffer + touched-set.
             for &(j, w) in &adj[i] {
                 if j as usize == i {
                     continue;
                 }
                 let cj = community[j as usize];
-                *k_i_to.entry(cj).or_insert(0.0) += w;
+                let slot = &mut k_i_to_dense[cj as usize];
+                if *slot == 0.0 {
+                    k_i_to_touched.push(cj);
+                }
+                *slot += w;
             }
 
             // Pull i out of its current community.
-            if let Some(s) = sigma_tot.get_mut(&ci) {
-                *s -= ki;
-            }
+            sigma_tot[ci as usize] -= ki;
 
             // Stay-gain: ΔQ if we put i back in ci (= baseline to beat).
-            let k_i_ci = *k_i_to.get(&ci).unwrap_or(&0.0);
-            let sigma_ci = *sigma_tot.get(&ci).unwrap_or(&0.0);
+            let k_i_ci = k_i_to_dense[ci as usize];
+            let sigma_ci = sigma_tot[ci as usize];
             let stay_gain = k_i_ci / (two_m / 2.0) - ki * sigma_ci / (two_m * two_m / 2.0);
 
             let mut best_c = ci;
             let mut best_gain = stay_gain;
-            for (&cand, &k_i_c) in &k_i_to {
+            for &cand in &k_i_to_touched {
                 if cand == ci {
                     continue;
                 }
-                let sigma_c = *sigma_tot.get(&cand).unwrap_or(&0.0);
+                let k_i_c = k_i_to_dense[cand as usize];
+                let sigma_c = sigma_tot[cand as usize];
                 let gain = k_i_c / (two_m / 2.0) - ki * sigma_c / (two_m * two_m / 2.0);
                 if gain > best_gain + config.min_modularity_gain {
                     best_gain = gain;
@@ -304,11 +319,18 @@ fn local_move(
             }
 
             community[i] = best_c;
-            *sigma_tot.entry(best_c).or_insert(0.0) += ki;
+            sigma_tot[best_c as usize] += ki;
             if best_c != ci {
                 iter_moved = true;
                 overall_moved = true;
             }
+
+            // O(touched) reset — preserves the dense buffer's "all zeros"
+            // invariant for the next node without zeroing the entire Vec.
+            for &cand in &k_i_to_touched {
+                k_i_to_dense[cand as usize] = 0.0;
+            }
+            k_i_to_touched.clear();
         }
 
         if !iter_moved {
@@ -342,17 +364,25 @@ fn refine(
 
     let mut rng = XorShift64::new(config.seed.wrapping_add(0xdead_beef));
 
+    // Shared dense-buffers across groups — sized once to n since refined
+    // ids are always in 0..n (singleton init, merges only). `is_member`
+    // doubles as the members_set check, reset O(group_size) between
+    // groups via the membership list itself.
+    let mut sigma_tot: Vec<f64> = vec![0.0; n];
+    let mut k_i_to_dense: Vec<f64> = vec![0.0; n];
+    let mut k_i_to_touched: Vec<u32> = Vec::new();
+    let mut is_member: Vec<bool> = vec![false; n];
+
     for c in group_keys {
         let members = groups.remove(&c).unwrap();
         if members.len() <= 1 {
             continue;
         }
-        let members_set: std::collections::HashSet<u32> = members.iter().copied().collect();
 
-        // sigma_tot restricted to refined sub-communities within `members`.
-        let mut sigma_tot: HashMap<u32, f64> = HashMap::new();
+        // Mark membership + seed sigma_tot for this group's refined sub-communities.
         for &m in &members {
-            *sigma_tot.entry(refined[m as usize]).or_insert(0.0) += degree[m as usize];
+            is_member[m as usize] = true;
+            sigma_tot[refined[m as usize] as usize] += degree[m as usize];
         }
 
         let mut order: Vec<u32> = members.clone();
@@ -364,30 +394,33 @@ fn refine(
                 let ci_r = refined[i as usize];
                 let ki = degree[i as usize];
 
-                let mut k_i_to: HashMap<u32, f64> = HashMap::new();
+                // k_i,C accumulation via dense buffer + touched-set.
                 for &(j, w) in &adj[i as usize] {
-                    if !members_set.contains(&j) {
+                    if !is_member[j as usize] {
                         continue;
                     }
                     let cj_r = refined[j as usize];
-                    *k_i_to.entry(cj_r).or_insert(0.0) += w;
+                    let slot = &mut k_i_to_dense[cj_r as usize];
+                    if *slot == 0.0 {
+                        k_i_to_touched.push(cj_r);
+                    }
+                    *slot += w;
                 }
 
-                if let Some(s) = sigma_tot.get_mut(&ci_r) {
-                    *s -= ki;
-                }
+                sigma_tot[ci_r as usize] -= ki;
 
-                let k_i_ci = *k_i_to.get(&ci_r).unwrap_or(&0.0);
-                let sigma_ci = *sigma_tot.get(&ci_r).unwrap_or(&0.0);
+                let k_i_ci = k_i_to_dense[ci_r as usize];
+                let sigma_ci = sigma_tot[ci_r as usize];
                 let stay_gain = k_i_ci / (two_m / 2.0) - ki * sigma_ci / (two_m * two_m / 2.0);
 
                 let mut best_c = ci_r;
                 let mut best_gain = stay_gain;
-                for (&cand, &k_i_c) in &k_i_to {
+                for &cand in &k_i_to_touched {
                     if cand == ci_r {
                         continue;
                     }
-                    let sigma_c = *sigma_tot.get(&cand).unwrap_or(&0.0);
+                    let k_i_c = k_i_to_dense[cand as usize];
+                    let sigma_c = sigma_tot[cand as usize];
                     let gain = k_i_c / (two_m / 2.0) - ki * sigma_c / (two_m * two_m / 2.0);
                     if gain > best_gain + config.min_modularity_gain {
                         best_gain = gain;
@@ -396,14 +429,26 @@ fn refine(
                 }
 
                 refined[i as usize] = best_c;
-                *sigma_tot.entry(best_c).or_insert(0.0) += ki;
+                sigma_tot[best_c as usize] += ki;
                 if best_c != ci_r {
                     iter_moved = true;
                 }
+
+                // O(touched) reset of k_i_to dense buffer.
+                for &cand in &k_i_to_touched {
+                    k_i_to_dense[cand as usize] = 0.0;
+                }
+                k_i_to_touched.clear();
             }
             if !iter_moved {
                 break;
             }
+        }
+
+        // O(members) reset of sigma_tot + is_member for the next group.
+        for &m in &members {
+            sigma_tot[refined[m as usize] as usize] = 0.0;
+            is_member[m as usize] = false;
         }
     }
     refined
