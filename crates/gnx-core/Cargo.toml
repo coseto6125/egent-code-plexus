@@ -1,5 +1,6 @@
 [package]
 name = "gnx-core"
+description = "Core graph storage and algorithms for gnx-rs (zero-copy on-disk graph, registry, community detection)"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
