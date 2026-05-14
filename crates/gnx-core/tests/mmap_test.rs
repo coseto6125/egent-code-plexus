@@ -1,4 +1,6 @@
-use gnx_core::graph::{ArchivedZeroCopyGraph, Node, NodeKind, ZeroCopyGraph};
+use gnx_core::graph::{
+    ArchivedZeroCopyGraph, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
+};
 use gnx_core::pool::StringPool;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
@@ -17,7 +19,8 @@ fn test_mmap_graph_access() {
     let uid_ref = pool.add("Function:test.ts:mmap_func");
 
     let graph = ZeroCopyGraph {
-        magic: *b"GNX-RS\0\0",
+        magic: GRAPH_MAGIC,
+        version: GRAPH_FORMAT_VERSION,
         fingerprint: [1; 32],
         string_pool: pool.bytes,
         files: vec![],

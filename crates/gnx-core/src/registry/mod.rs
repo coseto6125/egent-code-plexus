@@ -9,6 +9,7 @@ mod path;
 mod store;
 
 pub use audit::{AuditEvent, AuditLog};
+pub use io::atomic_write_bytes;
 /// Internal implementation detail. Not part of public API.
 /// Use only within gnx-core or in tests.
 #[doc(hidden)]

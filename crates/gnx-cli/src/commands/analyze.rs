@@ -16,8 +16,6 @@ use gnx_analyzer::{
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
-use std::fs::File;
-use std::io::Write;
 use std::time::Instant;
 
 #[derive(Args, Debug, Clone)]
@@ -219,12 +217,11 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
 
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&global_graph)
         .map_err(|e| format!("Serialization error: {}", e))?;
-    let mut file =
-        File::create(&bin_path).map_err(|e| format!("Failed to create graph.bin: {}", e))?;
-    file.write_all(&bytes)
-        .map_err(|e| format!("Failed to write to graph.bin: {}", e))?;
-    file.sync_all()
-        .map_err(|e| format!("Failed to sync graph.bin: {}", e))?;
+    // Atomic write: a Ctrl+C between `write_all` and `rename` leaves a
+    // recognizable `graph.bin.tmp` sibling, never a half-written
+    // `graph.bin` that the next reader would mmap and segfault on.
+    gnx_core::registry::atomic_write_bytes(&bin_path, &bytes)
+        .map_err(|e| format!("Failed to write graph.bin: {}", e))?;
     let save_duration = save_start.elapsed();
 
     // Meta + registry + audit (post-save)
@@ -299,9 +296,16 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
         });
     }
 
-    // Step 6: Build Tantivy Index
+    // Step 6: Build Tantivy Index (best-effort — graph.bin is the
+    // primary artifact; BM25 fallback degrades to exact-name resolution
+    // if the writer lock is held by a zombie or the prior commit is
+    // corrupt, and self-heals on the next analyze run).
     let index_start = Instant::now();
-    crate::search::TantivyEngine::build_index(&repo_path, &global_graph);
+    if let Err(e) = crate::search::TantivyEngine::build_index(&repo_path, &global_graph) {
+        eprintln!(
+            "warning: full-text index build failed ({e}); exact-name queries still work — rerun `gnx analyze` to retry"
+        );
+    }
     let index_duration = index_start.elapsed();
 
     let total_duration = start_time.elapsed();
