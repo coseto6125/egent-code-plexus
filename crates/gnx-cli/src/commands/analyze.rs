@@ -47,6 +47,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     // Step 1: Scan files
     let scan_start = Instant::now();
     let mut files_to_analyze = Vec::new();
+    let mut skipped_large_files = 0;
+    const MAX_FILE_SIZE: u64 = 512 * 1024; // 512 KB
 
     let walker = WalkBuilder::new(&repo_path).hidden(false).build();
 
@@ -55,6 +57,14 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
             Ok(entry) => {
                 let path = entry.path();
                 if path.is_file() {
+                    // Layer 2: File size limit (spec §1.10)
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.len() > MAX_FILE_SIZE {
+                            skipped_large_files += 1;
+                            continue;
+                        }
+                    }
+
                     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                     // Extension-less Dockerfile variants: check basename before extension.
                     let is_dockerfile_basename = matches!(file_name, "Dockerfile" | "dockerfile");
@@ -309,6 +319,13 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     let index_duration = index_start.elapsed();
 
     let total_duration = start_time.elapsed();
+
+    if skipped_large_files > 0 {
+        eprintln!(
+            "Skipped: {} files > 512KB (preventing memory exhaustion).",
+            skipped_large_files
+        );
+    }
 
     println!("Graph analysis complete.");
     println!("  Scan time:    {:?}", scan_duration);
