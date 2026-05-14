@@ -35,6 +35,7 @@ impl AnalyzerPipeline {
     }
 
     fn find_provider(&self, path: &std::path::Path) -> Option<&dyn LanguageProvider> {
+        eprintln!("[PIPELINE DEBUG] find_provider for {:?}", path);
         // Check basename for extension-less files like `Dockerfile` before extension lookup.
         let file_name = path.file_name()?.to_str()?;
         if matches!(file_name, "Dockerfile" | "dockerfile") {
@@ -47,16 +48,21 @@ impl AnalyzerPipeline {
 
         // GitHub Actions: path-based routing — .github/workflows/*.yml|yaml
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            eprintln!("[PIPELINE DEBUG] ext={:?}", ext);
             if matches!(ext, "yml" | "yaml") {
-                let is_gha = path.components().collect::<Vec<_>>().windows(2).any(|w| {
-                    w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows"
+                let components: Vec<_> = path.components().collect();
+                eprintln!("[PIPELINE DEBUG] components={:?}", components);
+                let is_gha = components.windows(2).any(|w| {
+                    let a = w[0].as_os_str();
+                    let b = w[1].as_os_str();
+                    eprintln!("[PIPELINE DEBUG] window: {:?}/{:?}", a, b);
+                    a == ".github" && b == "workflows"
                 });
+                eprintln!("[PIPELINE DEBUG] is_gha={}", is_gha);
                 if is_gha {
-                    return self
-                        .providers
-                        .iter()
-                        .find(|p| p.name() == "github-actions")
-                        .map(|p| p.as_ref());
+                    let found = self.providers.iter().find(|p| p.name() == "github-actions");
+                    eprintln!("[PIPELINE DEBUG] provider found={}", found.is_some());
+                    return found.map(|p| p.as_ref());
                 }
             }
         }

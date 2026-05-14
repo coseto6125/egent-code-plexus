@@ -1,0 +1,24 @@
+[package]
+name = "tree-sitter-cairo"
+description = "Cairo 1.0 grammar for the tree-sitter parsing library (patched for tree-sitter 0.25)"
+version = "0.0.1"
+keywords = ["incremental", "parsing", "cairo"]
+categories = ["parsing", "text-editors"]
+repository = "https://github.com/tree-sitter/tree-sitter-cairo"
+edition = "2021"
+license = "MIT"
+
+build = "bindings/rust/build.rs"
+include = [
+  "bindings/rust/*",
+  "src/*",
+]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1.0"
+
+[build-dependencies]
+cc = "1.0"
