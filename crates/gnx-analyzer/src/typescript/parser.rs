@@ -1,6 +1,6 @@
 use crate::calls::extract_calls;
 use gnx_core::analyzer::provider::LanguageProvider;
-use gnx_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
+use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use gnx_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -13,8 +13,12 @@ pub struct TypeScriptProvider {
 impl TypeScriptProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        let query = Query::new(&language, &query_source)?;
         Ok(Self { query })
     }
 }
@@ -39,6 +43,9 @@ impl LanguageProvider for TypeScriptProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
+        // Pending framework-handler captures: (handler_name, capture_span).
+        // Enclosing function is resolved after all nodes are collected.
+        let mut pending_express_handlers: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
 
         // Capture indices
         let idx_function_name = self.query.capture_index_for_name("function.name");
@@ -64,6 +71,8 @@ impl LanguageProvider for TypeScriptProvider {
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
         let idx_route_call = self.query.capture_index_for_name("route.call");
+
+        let idx_express_handler = self.query.capture_index_for_name("express.route.handler");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -133,6 +142,22 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx_route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
+                } else if cap_idx == idx_express_handler {
+                    if let Ok(handler_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        let start = cap.node.start_position();
+                        let end = cap.node.end_position();
+                        pending_express_handlers.push((
+                            handler_name.to_string(),
+                            (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                        ));
+                    }
                 } else if cap_idx == idx_function
                     || cap_idx == idx_class
                     || cap_idx == idx_method
@@ -249,6 +274,24 @@ impl LanguageProvider for TypeScriptProvider {
         // Extract call sites and attach to enclosing function/method nodes.
         extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
 
+        // Resolve framework-ref enclosing functions via span containment.
+        // If the capture is at module-level, source_name is left empty.
+        let framework_refs: Vec<RawFrameworkRef> = pending_express_handlers
+            .into_iter()
+            .map(|(target, cap_span)| {
+                let source_name = enclosing_function_name(&nodes, cap_span)
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                RawFrameworkRef {
+                    source_name,
+                    target_name: target,
+                    confidence: 0.8,
+                    reason: "express-route-handler".to_string(),
+                    span: cap_span,
+                }
+            })
+            .collect();
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
@@ -256,7 +299,38 @@ impl LanguageProvider for TypeScriptProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
         })
     }
+}
+
+/// Return the name of the smallest function/method `RawNode` whose span fully
+/// contains `inner`. Returns `None` if `inner` is module-level.
+fn enclosing_function_name(
+    nodes: &[RawNode],
+    inner: (u32, u32, u32, u32),
+) -> Option<&str> {
+    let mut best: Option<&RawNode> = None;
+    for n in nodes {
+        if !matches!(n.kind, NodeKind::Function | NodeKind::Method) {
+            continue;
+        }
+        if span_contains(n.span, inner) {
+            best = match best {
+                None => Some(n),
+                Some(b) if span_contains(b.span, n.span) => Some(n),
+                Some(b) => Some(b),
+            };
+        }
+    }
+    best.map(|n| n.name.as_str())
+}
+
+/// `outer` fully contains `inner` (inclusive on the outer bounds).
+fn span_contains(outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)) -> bool {
+    let (o_sr, o_sc, o_er, o_ec) = outer;
+    let (i_sr, i_sc, i_er, i_ec) = inner;
+    let starts_before_or_at = (o_sr < i_sr) || (o_sr == i_sr && o_sc <= i_sc);
+    let ends_after_or_at = (o_er > i_er) || (o_er == i_er && o_ec >= i_ec);
+    starts_before_or_at && ends_after_or_at
 }
