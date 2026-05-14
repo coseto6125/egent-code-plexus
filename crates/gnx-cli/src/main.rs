@@ -59,6 +59,8 @@ enum Commands {
     Summarize(commands::summarize::SummarizeArgs),
     /// Diff a resolver dump against a language oracle (TS / Python / Rust)
     VerifyResolver(commands::verify_resolver::VerifyResolverArgs),
+    /// Print framework coverage + blind-spot catalog + graph status (LLM contract)
+    Doctor(commands::doctor::DoctorArgs),
 }
 
 fn main() {
@@ -139,6 +141,15 @@ fn main() {
         return;
     }
 
+    // Doctor reports a static support contract + graph file status; no graph load needed.
+    if let Commands::Doctor(args) = &cli.command {
+        if let Err(e) = commands::doctor::run(args.clone(), &cli.graph) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -154,7 +165,8 @@ fn main() {
         | Commands::Prune(_)
         | Commands::RenameBranch(_)
         | Commands::List(_)
-        | Commands::VerifyResolver(_) => None,
+        | Commands::VerifyResolver(_)
+        | Commands::Doctor(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -185,7 +197,8 @@ fn main() {
         | Commands::Prune(_)
         | Commands::RenameBranch(_)
         | Commands::List(_)
-        | Commands::VerifyResolver(_) => Ok(()), // Handled above
+        | Commands::VerifyResolver(_)
+        | Commands::Doctor(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
