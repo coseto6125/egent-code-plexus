@@ -1,5 +1,6 @@
 pub mod analyze;
 pub mod context;
+pub mod cypher;
 pub mod detect_changes;
 pub mod doctor;
 pub mod format;

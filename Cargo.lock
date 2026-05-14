@@ -1292,6 +1292,7 @@ dependencies = [
  "ignore",
  "memmap2",
  "rayon",
+ "regex",
  "rkyv",
  "serde",
  "serde_json",
