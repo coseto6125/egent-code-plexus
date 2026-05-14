@@ -536,9 +536,10 @@ static bool eat_operators(
     return false;
 }
 
+// `valid_symbols` 已自簽名移除：原始 upstream 接收但函式內從未讀取，
+// 觸發 -Wunused-parameter。Caller 端同步更新。
 static enum ParseDirective eat_comment(
     TSLexer *lexer,
-    const bool *valid_symbols,
     bool mark_end,
     enum TokenType *symbol_result
 ) {
@@ -628,7 +629,7 @@ static enum ParseDirective eat_whitespace(
             // comes after it. We care about what comes after it for the purpose of suppressing the newline.
 
             enum TokenType multiline_comment_result;
-            any_comment = eat_comment(lexer, valid_symbols, /* mark_end */ false, &multiline_comment_result);
+            any_comment = eat_comment(lexer, /* mark_end */ false, &multiline_comment_result);
             if (any_comment == STOP_PARSING_TOKEN_FOUND) {
                 // This is a multiline comment. This scanner should be parsing those, so we might want to bail out and
                 // emit it instead. However, we only want to do that if we haven't advanced through a _single_ line
@@ -883,7 +884,7 @@ bool tree_sitter_swift_external_scanner_scan(
 
     // Now consume comments (before custom operators so that those aren't treated as comments)
     enum TokenType comment_result;
-    enum ParseDirective comment = ws_directive == CONTINUE_PARSING_SLASH_CONSUMED ? ws_directive : eat_comment(lexer, valid_symbols, /* mark_end */ true, &comment_result);
+    enum ParseDirective comment = ws_directive == CONTINUE_PARSING_SLASH_CONSUMED ? ws_directive : eat_comment(lexer, /* mark_end */ true, &comment_result);
     if (comment == STOP_PARSING_TOKEN_FOUND) {
         lexer->mark_end(lexer);
         lexer->result_symbol = comment_result;
