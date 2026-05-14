@@ -6,7 +6,8 @@
 //! implementation.
 
 use crate::graph::{ArchivedNode, ArchivedZeroCopyGraph};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
+use fixedbitset::FixedBitSet;
 
 /// Find the file_idx whose stored path ends with `relative_path`.
 ///
@@ -51,46 +52,87 @@ pub fn nodes_overlapping_lines(
 
 /// BFS upstream (callers) from `start_idx` up to `max_depth`.
 /// Returns visited indices including the start, paired with depth (0 = start).
+
 pub fn callers_of(
     graph: &ArchivedZeroCopyGraph,
     start_idx: u32,
     max_depth: usize,
 ) -> Vec<(u32, usize)> {
-    bfs(graph, start_idx, max_depth, Direction::Upstream)
+    let config = BfsConfig {
+        max_depth,
+        ..Default::default()
+    };
+    bfs(graph, start_idx, &config, Direction::Upstream)
 }
 
+
 /// BFS downstream (callees) from `start_idx`.
+
 pub fn callees_of(
     graph: &ArchivedZeroCopyGraph,
     start_idx: u32,
     max_depth: usize,
 ) -> Vec<(u32, usize)> {
-    bfs(graph, start_idx, max_depth, Direction::Downstream)
+    let config = BfsConfig {
+        max_depth,
+        ..Default::default()
+    };
+    bfs(graph, start_idx, &config, Direction::Downstream)
 }
+
 
 enum Direction {
     Upstream,
     Downstream,
 }
 
+
+pub struct BfsConfig<'a> {
+    pub max_depth: usize,
+    pub max_nodes: usize,
+    /// If Some, only traverse edges of these types
+    pub allowed_rel_types: Option<&'a [crate::graph::RelType]>,
+}
+
+impl Default for BfsConfig<'_> {
+    fn default() -> Self {
+        Self {
+            max_depth: usize::MAX,
+            max_nodes: 10_000,
+            allowed_rel_types: None,
+        }
+    }
+}
+
 fn bfs(
     graph: &ArchivedZeroCopyGraph,
     start_idx: u32,
-    max_depth: usize,
+    config: &BfsConfig,
     dir: Direction,
 ) -> Vec<(u32, usize)> {
-    let mut visited: HashSet<u32> = HashSet::new();
-    let mut queue: VecDeque<(u32, usize)> = VecDeque::new();
-    let mut out: Vec<(u32, usize)> = Vec::new();
+    let num_nodes = graph.nodes.len();
+    let mut visited = FixedBitSet::with_capacity(num_nodes);
+    let mut queue: VecDeque<(u32, usize)> = VecDeque::with_capacity(1024);
+    let mut out: Vec<(u32, usize)> = Vec::with_capacity(1024);
+
+    if start_idx as usize >= num_nodes {
+        return out;
+    }
 
     queue.push_back((start_idx, 0));
-    visited.insert(start_idx);
+    visited.insert(start_idx as usize);
 
     while let Some((idx, depth)) = queue.pop_front() {
         out.push((idx, depth));
-        if depth >= max_depth {
+        
+        if out.len() >= config.max_nodes {
+            break;
+        }
+
+        if depth >= config.max_depth {
             continue;
         }
+
         match dir {
             Direction::Upstream => {
                 let s = graph.in_offsets[idx as usize].to_native() as usize;
@@ -98,8 +140,17 @@ fn bfs(
                 for i in s..e {
                     let edge_idx = graph.in_edge_idx[i].to_native() as usize;
                     let edge = &graph.edges[edge_idx];
+                    
+                    if let Some(allowed) = config.allowed_rel_types {
+                        let rel: crate::graph::RelType = rkyv::deserialize::<crate::graph::RelType, rkyv::rancor::Error>(&edge.rel_type).unwrap();
+                        if !allowed.contains(&rel) {
+                            continue;
+                        }
+                    }
+
                     let next = edge.source.to_native();
-                    if visited.insert(next) {
+                    if !visited.contains(next as usize) {
+                        visited.insert(next as usize);
                         queue.push_back((next, depth + 1));
                     }
                 }
@@ -107,10 +158,18 @@ fn bfs(
             Direction::Downstream => {
                 let s = graph.out_offsets[idx as usize].to_native() as usize;
                 let e = graph.out_offsets[idx as usize + 1].to_native() as usize;
-                for i in s..e {
-                    let edge = &graph.edges[i];
+                let edges_slice = &graph.edges[s..e];
+                for edge in edges_slice {
+                    if let Some(allowed) = config.allowed_rel_types {
+                        let rel: crate::graph::RelType = rkyv::deserialize::<crate::graph::RelType, rkyv::rancor::Error>(&edge.rel_type).unwrap();
+                        if !allowed.contains(&rel) {
+                            continue;
+                        }
+                    }
+
                     let next = edge.target.to_native();
-                    if visited.insert(next) {
+                    if !visited.contains(next as usize) {
+                        visited.insert(next as usize);
                         queue.push_back((next, depth + 1));
                     }
                 }
@@ -119,6 +178,7 @@ fn bfs(
     }
     out
 }
+
 
 /// Given a `node_idx`, return the indices of Process nodes whose trace
 /// contains it, along with the 1-indexed step position.
