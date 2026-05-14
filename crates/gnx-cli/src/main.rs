@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod commands;
 mod engine;
 mod git;
+mod git_state;
 mod output;
 pub mod search;
 

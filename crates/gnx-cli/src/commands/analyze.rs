@@ -68,8 +68,37 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     }
     let scan_duration = scan_start.elapsed();
 
-    let gitnexus_dir = repo_path.join(".gitnexus-rs");
-    let bin_path = gitnexus_dir.join("graph.bin");
+    let state = crate::git_state::resolve(&repo_path).map_err(|e| {
+        format!("git_state resolve: {e}")
+    })?;
+
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "HOME env not set".to_string())?;
+    let home_gnx = home.join(".gnx");
+
+    let existing_repos: Vec<(String, String)> = {
+        let reg = gnx_core::registry::Registry::open(&home_gnx)
+            .map_err(|e| format!("registry open: {e}"))?;
+        reg.snapshot()
+            .repos
+            .iter()
+            .map(|r| (r.name.clone(), r.worktree_path.clone()))
+            .collect()
+    };
+    let layout = gnx_core::registry::IndexLayout::resolve(
+        &home_gnx,
+        &state.repo_name,
+        &state.branch,
+        state.worktree_path.to_string_lossy().as_ref(),
+        &existing_repos,
+    )
+    .map_err(|e| format!("layout resolve: {e}"))?;
+    std::fs::create_dir_all(&layout.index_dir)
+        .map_err(|e| format!("Failed to create index dir: {e}"))?;
+
+    let bin_path = layout.index_dir.join("graph.bin");
+    let meta_path = layout.index_dir.join("meta.json");
     let embeddings_flag = args.embeddings;
 
     // Step 2: Initialize pipeline and register providers
@@ -134,8 +163,6 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
 
     // Step 5: Save graph
     let save_start = Instant::now();
-    std::fs::create_dir_all(&gitnexus_dir)
-        .map_err(|e| format!("Failed to create .gitnexus-rs dir: {}", e))?;
 
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&global_graph)
         .map_err(|e| format!("Serialization error: {}", e))?;
@@ -146,6 +173,78 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     file.sync_all()
         .map_err(|e| format!("Failed to sync graph.bin: {}", e))?;
     let save_duration = save_start.elapsed();
+
+    // Meta + registry + audit (post-save)
+    let node_count = global_graph.nodes.len();
+    let file_count = global_graph.files.len();
+    let indexed_at = chrono::Utc::now().to_rfc3339();
+    let meta = gnx_core::registry::BranchMeta {
+        indexed_at: indexed_at.clone(),
+        node_count: node_count as u32,
+        delta_size: 0,
+        last_compact_at: None,
+        worktree_path: state.worktree_path.to_string_lossy().into(),
+        remote_url: state
+            .remote_url
+            .as_deref()
+            .map(gnx_core::registry::strip_credentials)
+            .unwrap_or_default(),
+        schema_version: 1,
+    };
+    gnx_core::registry::BranchMeta::write_atomic(&meta_path, &meta)
+        .map_err(|e| format!("Failed to write meta.json: {e}"))?;
+
+    {
+        let mut registry = gnx_core::registry::Registry::open(&home_gnx)
+            .map_err(|e| format!("registry reopen: {e}"))?;
+        let branch_entry = gnx_core::registry::BranchEntry {
+            name: state.branch.clone(),
+            index_dir: layout.index_dir.to_string_lossy().into(),
+            indexed_at: indexed_at.clone(),
+            node_count: node_count as u32,
+            delta_size: 0,
+            embedding_status: if args.embeddings {
+                "in_progress".into()
+            } else {
+                "skipped".into()
+            },
+        };
+        let mut branches = vec![branch_entry.clone()];
+        if let Some(existing) = registry
+            .snapshot()
+            .repos
+            .iter()
+            .find(|r| r.name == state.repo_name)
+        {
+            branches = existing.branches.clone();
+            if let Some(b) = branches.iter_mut().find(|b| b.name == state.branch) {
+                *b = branch_entry;
+            } else {
+                branches.push(branch_entry);
+            }
+        }
+        let repo_entry = gnx_core::registry::RepoEntry {
+            name: state.repo_name.clone(),
+            remote_url: meta.remote_url.clone(),
+            worktree_path: state.worktree_path.to_string_lossy().into(),
+            index_dir_root: home_gnx.join(&state.repo_name).to_string_lossy().into(),
+            branches,
+            group: None,
+        };
+        registry
+            .upsert_repo(repo_entry)
+            .map_err(|e| format!("registry upsert: {e}"))?;
+    }
+
+    if let Ok(audit) = gnx_core::registry::AuditLog::open(&home_gnx.join("audit.log")) {
+        let _ = audit.append(&gnx_core::registry::AuditEvent::AnalyzeComplete {
+            repo: state.repo_name.clone(),
+            branch: state.branch.clone(),
+            files: file_count as u32,
+            nodes: node_count as u32,
+            duration_ms: start_time.elapsed().as_millis() as u64,
+        });
+    }
 
     // Step 6: Build Tantivy Index
     let index_start = Instant::now();
