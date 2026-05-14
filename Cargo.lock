@@ -1505,6 +1505,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "streaming-iterator",
+ "tempfile",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",

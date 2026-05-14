@@ -817,7 +817,16 @@ fn pass2_emit_framework_and_fanout(
             &local_graph.imports,
             ResolveTarget::Callable,
         );
-        let reason_ref = reason_cache[&fw_ref.reason];
+        // `reason_cache` is filled by the same caller that walked
+        // `self.local_graphs` to seed it, so every reason should be
+        // present. Use `.get(...)` rather than `[]` indexing so a
+        // future caller that forgets to pre-seed degrades to "skip
+        // this batch of edges" instead of panicking mid-analyze on
+        // a rayon worker (consistent with the best-effort policy of
+        // every other Pass 2 error path).
+        let Some(&reason_ref) = reason_cache.get(&fw_ref.reason) else {
+            continue;
+        };
         for (target_id, _) in targets {
             edges.push(Edge {
                 source: source_id,
@@ -837,7 +846,9 @@ fn pass2_emit_framework_and_fanout(
             continue;
         }
         let confidence = (fanout_ref.base_confidence / n.sqrt()).max(0.1);
-        let reason_ref = reason_cache[&fanout_ref.reason];
+        let Some(&reason_ref) = reason_cache.get(&fanout_ref.reason) else {
+            continue;
+        };
         for candidate_name in &fanout_ref.candidates {
             let targets = resolver.resolve_symbol(
                 &local_graph.file_path,
@@ -1410,5 +1421,149 @@ mod tests {
         assert_eq!(bs0.end_row, 10);
         assert_eq!(bs0.end_col, 25);
         assert_eq!(resolve(&bs0.hint), "eval(arg) — runtime code execution");
+    }
+
+    /// Pins the contract that Pass-2 emits the same edge set whether the
+    /// dump-enabled serial path or the dump-disabled parallel path runs.
+    /// Without this test, all 8 existing builder tests exercise only the
+    /// parallel path (none set `with_resolver_dump`), so a divergence
+    /// between the two `pass2_emit_*` call sites would slip through
+    /// until a user enables the oracle harness.
+    ///
+    /// The fixtures cover all five edge-emission categories so the test
+    /// would catch:
+    ///   * heritage (`Extends`) — Class with base
+    ///   * calls (`Calls`) — Function with callee
+    ///   * type_annotation (`Accesses`)
+    ///   * framework_refs (`References` via Spring fixture)
+    ///   * fanout_refs (`References` via reflection fixture)
+    #[test]
+    fn pass2_parallel_and_serial_emit_identical_edges() {
+        use graph_nexus_core::analyzer::types::{RawFanoutRef, RawFrameworkRef};
+
+        fn build_fixtures() -> Vec<LocalGraph> {
+            vec![
+                LocalGraph {
+                    file_path: "src/foo.rs".into(),
+                    content_hash: [0; 32],
+                    nodes: vec![RawNode {
+                        name: "Foo".into(),
+                        kind: NodeKind::Class,
+                        span: (0, 0, 10, 0),
+                        is_exported: true,
+                        heritage: vec!["Bar".into()],
+                        type_annotation: Some("Other".into()),
+                        decorators: vec![],
+                        calls: vec!["other_fn".into()],
+                    }],
+                    documents: vec![],
+                    imports: vec![],
+                    routes: vec![],
+                    framework_refs: vec![RawFrameworkRef {
+                        source_name: "Foo".into(),
+                        target_name: "other_fn".into(),
+                        confidence: 0.9,
+                        reason: "spring-autowired".into(),
+                        span: (1, 0, 1, 10),
+                    }],
+                    fanout_refs: vec![RawFanoutRef {
+                        source_name: "Foo".into(),
+                        candidates: vec!["other_fn".into(), "Bar".into()],
+                        base_confidence: 0.6,
+                        reason: "python-getattr".into(),
+                        span: (2, 0, 2, 5),
+                    }],
+                    blind_spots: vec![],
+                },
+                LocalGraph {
+                    file_path: "src/bar.rs".into(),
+                    content_hash: [0; 32],
+                    nodes: vec![
+                        RawNode {
+                            name: "Bar".into(),
+                            kind: NodeKind::Class,
+                            span: (0, 0, 5, 0),
+                            is_exported: true,
+                            heritage: vec![],
+                            type_annotation: None,
+                            decorators: vec![],
+                            calls: vec![],
+                        },
+                        RawNode {
+                            name: "Other".into(),
+                            kind: NodeKind::Class,
+                            span: (6, 0, 10, 0),
+                            is_exported: true,
+                            heritage: vec![],
+                            type_annotation: None,
+                            decorators: vec![],
+                            calls: vec![],
+                        },
+                        RawNode {
+                            name: "other_fn".into(),
+                            kind: NodeKind::Function,
+                            span: (11, 0, 12, 0),
+                            is_exported: true,
+                            heritage: vec![],
+                            type_annotation: None,
+                            decorators: vec![],
+                            calls: vec![],
+                        },
+                    ],
+                    documents: vec![],
+                    imports: vec![],
+                    routes: vec![],
+                    framework_refs: vec![],
+                    fanout_refs: vec![],
+                    blind_spots: vec![],
+                },
+            ]
+        }
+
+        // Parallel path (production): no dump enabled
+        let mut parallel_builder = GraphBuilder::new();
+        for lg in build_fixtures() {
+            parallel_builder.add_graph(lg);
+        }
+        let parallel_graph = parallel_builder.build();
+
+        // Serial path: dump enabled forces the serial branch
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dump_path = tmp.path().join("dump.jsonl");
+        let mut serial_builder =
+            GraphBuilder::new().with_resolver_dump(Some(dump_path.clone()));
+        for lg in build_fixtures() {
+            serial_builder.add_graph(lg);
+        }
+        let serial_graph = serial_builder.build();
+
+        // Compare edges as multisets — flat_map_iter ordering across rayon
+        // workers can differ from the serial nested loop, but the SET of
+        // (source, target, rel_type) tuples must match. `RelType` doesn't
+        // derive Ord, so we use `{:?}` formatting as a stable key.
+        let parallel_edges: std::collections::BTreeSet<(u32, u32, String)> = parallel_graph
+            .edges
+            .iter()
+            .map(|e| (e.source, e.target, format!("{:?}", e.rel_type)))
+            .collect();
+        let serial_edges: std::collections::BTreeSet<(u32, u32, String)> = serial_graph
+            .edges
+            .iter()
+            .map(|e| (e.source, e.target, format!("{:?}", e.rel_type)))
+            .collect();
+        assert_eq!(
+            parallel_edges, serial_edges,
+            "parallel Pass 2 must emit the same edges as the serial dump path",
+        );
+
+        // Node counts identical (both paths build identical SymbolTable + StringPool)
+        assert_eq!(parallel_graph.nodes.len(), serial_graph.nodes.len());
+
+        // Sanity: dump file actually exists for the serial run (proves the
+        // serial branch was the one taken).
+        assert!(
+            dump_path.exists(),
+            "serial branch must have produced a resolver dump file",
+        );
     }
 }
