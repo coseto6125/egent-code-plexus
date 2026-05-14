@@ -149,10 +149,14 @@ fn hash8(s: &str) -> String {
 /// Reads and writes within a single CLI invocation use the same resolved
 /// path: a project indexed in fallback mode is queryable from the same
 /// environment without extra flags.
+///
+/// Fast path: if `registry.json` already exists inside the home candidate,
+/// the dir was writable at some point and we skip the probe entirely (one
+/// stat instead of create+write+unlink on every invocation).
 pub fn resolve_home_gnx() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         let candidate = PathBuf::from(home).join(".gnx");
-        if probe_writable(&candidate) {
+        if candidate.join("registry.json").exists() || probe_writable(&candidate) {
             return candidate;
         }
     }

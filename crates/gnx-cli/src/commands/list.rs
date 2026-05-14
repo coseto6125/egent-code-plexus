@@ -1,24 +1,21 @@
 //! `gnx list` — enumerate repos in the registry.
 //!
-//! Three output formats:
-//! * `compact` (default) — terminal-friendly, one repo per line
-//! * `json` — structured, for scripts and parsers
-//! * `toon` — minimal text optimised for LLM context windows
+//! Routes through [`crate::output::emit`] for consistency with every other
+//! command. User-facing formats: `text` (default-style human output), `json`,
+//! `toon` (default; etoon-encoded for LLM context). The TOON / JSON payload
+//! exposes the full `RegistryFile` fields (version, repos[], groups[]). The
+//! text-format human lines include node counts in the form `<branch>:<n>n`
+//! where `n` is the branch's `node_count`.
 
-use clap::{Args, ValueEnum};
+use crate::output::{emit, OutputFormat};
+use clap::Args;
 use gnx_core::registry::{Registry, RegistryFile, RepoEntry};
 
 #[derive(Args, Debug, Clone)]
 pub struct ListArgs {
-    #[arg(long, value_enum, default_value_t = ListFormat::Compact)]
-    pub format: ListFormat,
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub enum ListFormat {
-    Compact,
-    Json,
-    Toon,
+    /// Output format: text | json | toon (default: toon)
+    #[arg(long, default_value = "toon")]
+    pub format: Option<String>,
 }
 
 pub fn run(args: ListArgs) -> Result<(), gnx_core::GnxError> {
@@ -26,20 +23,27 @@ pub fn run(args: ListArgs) -> Result<(), gnx_core::GnxError> {
     let registry = Registry::open(&home_gnx).map_err(|e| {
         gnx_core::GnxError::InvalidArgument(format!("registry open: {e}"))
     })?;
-    let snapshot = registry.snapshot();
-
-    let out = match args.format {
-        ListFormat::Compact => render_compact(snapshot, &home_gnx.display().to_string()),
-        ListFormat::Json => render_json(snapshot, &home_gnx.display().to_string())?,
-        ListFormat::Toon => render_toon(snapshot),
-    };
-    println!("{out}");
-    Ok(())
+    let registry_path = home_gnx.display().to_string();
+    let value = build_value(registry.snapshot(), &registry_path);
+    emit(&value, OutputFormat::parse(args.format.as_deref()))
 }
 
-fn render_compact(reg: &RegistryFile, registry_path: &str) -> String {
+fn build_value(reg: &RegistryFile, registry_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "registry": registry_path,
+        "version": reg.version,
+        "repos": reg.repos,
+        "groups": reg.groups,
+        "results": text_lines(reg, registry_path),
+    })
+}
+
+fn text_lines(reg: &RegistryFile, registry_path: &str) -> Vec<String> {
     if reg.repos.is_empty() {
-        return format!("(no repos indexed)\nregistry: {registry_path}");
+        return vec![
+            "(no repos indexed)".into(),
+            format!("registry: {registry_path}"),
+        ];
     }
     let name_w = reg.repos.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
     let mut lines = Vec::with_capacity(reg.repos.len() + 2);
@@ -63,43 +67,7 @@ fn render_compact(reg: &RegistryFile, registry_path: &str) -> String {
         plural = if reg.repos.len() == 1 { "" } else { "s" },
         b = total_branches,
     ));
-    lines.join("\n")
-}
-
-fn render_json(reg: &RegistryFile, registry_path: &str) -> Result<String, gnx_core::GnxError> {
-    let value = serde_json::json!({
-        "registry": registry_path,
-        "version": reg.version,
-        "repos": reg.repos,
-        "groups": reg.groups,
-    });
-    serde_json::to_string_pretty(&value)
-        .map_err(|e| gnx_core::GnxError::InvalidArgument(format!("json: {e}")))
-}
-
-fn render_toon(reg: &RegistryFile) -> String {
-    let mut lines = Vec::with_capacity(reg.repos.len() + reg.groups.len() + 2);
-    lines.push("repos:".to_string());
-    if reg.repos.is_empty() {
-        lines.push("  (none)".to_string());
-    } else {
-        for r in &reg.repos {
-            let group = r.group.as_deref().map(|g| format!(" @{g}")).unwrap_or_default();
-            let branches: Vec<String> = r
-                .branches
-                .iter()
-                .map(|b| format!("{}:{}n", b.name, b.node_count))
-                .collect();
-            lines.push(format!("  - {name}{group} [{br}]", name = r.name, br = branches.join(",")));
-        }
-    }
-    if !reg.groups.is_empty() {
-        lines.push("groups:".to_string());
-        for g in &reg.groups {
-            lines.push(format!("  - {n}[{m}]", n = g.name, m = g.members.join(",")));
-        }
-    }
-    lines.join("\n")
+    lines
 }
 
 fn latest_indexed_at(repo: &RepoEntry) -> Option<&str> {
@@ -151,40 +119,34 @@ mod tests {
     }
 
     #[test]
-    fn render_compact_shows_repos_and_summary() {
-        let s = render_compact(&sample(), "/home/x/.gnx");
-        assert!(s.contains("neptune"));
-        assert!(s.contains("(group: search)"));
-        assert!(s.contains("agent"));
-        assert!(s.contains("2026-05-14T10:00"));
-        assert!(s.contains("2 repos, 2 branches"));
-        assert!(s.contains("/home/x/.gnx"));
+    fn text_lines_summary_includes_repos_groups_and_totals() {
+        let lines = text_lines(&sample(), "/home/x/.gnx");
+        let joined = lines.join("\n");
+        assert!(joined.contains("neptune"));
+        assert!(joined.contains("(group: search)"));
+        assert!(joined.contains("agent"));
+        assert!(joined.contains("2026-05-14T10:00"));
+        assert!(joined.contains("2 repos, 2 branches"));
+        assert!(joined.contains("/home/x/.gnx"));
     }
 
     #[test]
-    fn render_compact_handles_empty_registry() {
-        let s = render_compact(&RegistryFile::empty(), "/tmp/x");
-        assert!(s.contains("(no repos indexed)"));
-        assert!(s.contains("/tmp/x"));
+    fn text_lines_empty_registry_shows_message_and_path() {
+        let lines = text_lines(&RegistryFile::empty(), "/tmp/x");
+        let joined = lines.join("\n");
+        assert!(joined.contains("(no repos indexed)"));
+        assert!(joined.contains("/tmp/x"));
     }
 
     #[test]
-    fn render_json_contains_registry_path_and_repos() {
-        let s = render_json(&sample(), "/home/x/.gnx").unwrap();
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    fn build_value_carries_registry_repos_and_text_results() {
+        let v = build_value(&sample(), "/home/x/.gnx");
         assert_eq!(v["registry"], "/home/x/.gnx");
         assert_eq!(v["repos"].as_array().unwrap().len(), 2);
         assert_eq!(v["repos"][0]["name"], "neptune");
-    }
-
-    #[test]
-    fn render_toon_compact_with_group_and_node_counts() {
-        let s = render_toon(&sample());
-        assert!(s.contains("- neptune @search"));
-        assert!(s.contains("main:1200n"));
-        assert!(s.contains("- agent"));
-        assert!(s.contains("feat__x:88n"));
-        assert!(s.contains("groups:"));
-        assert!(s.contains("search[neptune]"));
+        assert!(v["groups"].as_array().unwrap().len() == 1);
+        let results = v["results"].as_array().unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.as_str().unwrap().contains("neptune")));
     }
 }
