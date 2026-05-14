@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{build_receiver_map, collect_local_types, extract_go_calls};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -234,8 +234,12 @@ impl LanguageProvider for GoProvider {
         });
         imports.dedup_by(|a, b| a.source == b.source && a.imported_name == b.imported_name);
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
+        // Extract call sites with receiver-type binding. Replaces the shared
+        // `extract_calls` for Go so `obj.Method()` can be recorded as
+        // `Type.Method` when `obj`'s type is locally known.
+        let recv_map = build_receiver_map(tree.root_node(), source);
+        let local_types = collect_local_types(tree.root_node(), source, &recv_map);
+        extract_go_calls(tree.root_node(), source, &mut nodes, &local_types);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

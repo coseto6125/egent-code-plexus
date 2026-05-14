@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{build_impl_map, collect_local_types, extract_rust_calls};
 use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span, MODULE_LEVEL_SOURCE};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
@@ -249,13 +249,13 @@ impl LanguageProvider for RustProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["call_expression", "macro_invocation"],
-        );
+        // Extract call sites with receiver-type binding. Replaces the shared
+        // `extract_calls` for Rust so `self.method()` inside an impl block and
+        // `obj.method()` with locally-typed `obj` are recorded as `Type.method`
+        // for the resolver's qualifier-scoped (Tier 2.5) lookup.
+        let impl_map = build_impl_map(tree.root_node(), source);
+        let local_types = collect_local_types(tree.root_node(), source, &impl_map);
+        extract_rust_calls(tree.root_node(), source, &mut nodes, &local_types);
 
         // Framework-presence gates: only claim Axum/Actix refs when the file
         // actually `use`s the matching crate. Saves us from false positives in
