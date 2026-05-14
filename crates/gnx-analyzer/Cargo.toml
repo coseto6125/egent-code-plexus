@@ -27,3 +27,4 @@ tree-sitter-cpp = "*"
 tree-sitter-swift = { path = "../vendor/tree-sitter-swift" }
 tree-sitter-dart = "*"
 fastembed = "5"
+hf-hub = "0.5.0"
