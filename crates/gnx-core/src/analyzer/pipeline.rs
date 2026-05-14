@@ -21,6 +21,16 @@ impl AnalyzerPipeline {
     }
 
     fn find_provider(&self, path: &std::path::Path) -> Option<&dyn LanguageProvider> {
+        // Check basename for extension-less files like `Dockerfile` before extension lookup.
+        let file_name = path.file_name()?.to_str()?;
+        if matches!(file_name, "Dockerfile" | "dockerfile") {
+            return self
+                .providers
+                .iter()
+                .find(|p| p.name() == "dockerfile")
+                .map(|p| p.as_ref());
+        }
+
         let ext = path.extension()?.to_str()?;
         match ext {
             "ts" | "tsx" => self
@@ -97,6 +107,11 @@ impl AnalyzerPipeline {
                 .providers
                 .iter()
                 .find(|p| p.name() == "bash")
+                .map(|p| p.as_ref()),
+            "dockerfile" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "dockerfile")
                 .map(|p| p.as_ref()),
             _ => None,
         }

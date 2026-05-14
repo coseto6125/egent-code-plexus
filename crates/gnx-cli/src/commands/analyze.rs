@@ -12,6 +12,7 @@ use gnx_analyzer::{
     solidity::parser::SolidityProvider,
     crystal::parser::CrystalProvider,
     move_lang::parser::MoveProvider,
+    dockerfile::parser::DockerfileProvider,
 };
 use gnx_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -52,12 +53,19 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
             Ok(entry) => {
                 let path = entry.path();
                 if path.is_file() {
-                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    // Extension-less Dockerfile variants: check basename before extension.
+                    let is_dockerfile_basename = matches!(file_name, "Dockerfile" | "dockerfile");
+                    if is_dockerfile_basename {
+                        let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
+                        files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
+                    } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                         match ext {
                             "ts" | "tsx" | "py" | "pyi" | "go" | "rs" | "java" | "js" | "jsx"
                             | "mjs" | "cjs" | "php" | "rb" | "kt" | "kts" | "cs" | "c" | "h"
                             | "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart"
-                            | "md" | "txt" | "rst" | "sh" | "bash" | "lua" | "luau" | "cr" | "sol" => {
+                            | "md" | "txt" | "rst" | "sh" | "bash" | "lua" | "luau" | "cr"
+                            | "sol" | "move" | "dockerfile" => {
                                 let rel_path = path.strip_prefix(&repo_path).unwrap_or(path);
                                 files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
                             }
@@ -127,7 +135,9 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(BashProvider::new().unwrap()));
     pipeline.register_provider(Box::new(LuaProvider::new().unwrap()));
     pipeline.register_provider(Box::new(CrystalProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(MoveProvider::new().unwrap()));
     pipeline.register_provider(Box::new(SolidityProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(DockerfileProvider::new().unwrap()));
 
     // Step 3: Analyze and load cache concurrently
     let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(
