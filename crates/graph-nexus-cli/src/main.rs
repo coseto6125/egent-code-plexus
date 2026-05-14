@@ -66,6 +66,14 @@ enum Commands {
     Doctor(commands::doctor::DoctorArgs),
     /// Execute a Cypher query against the graph
     Cypher(commands::cypher::CypherArgs),
+    /// Delete a repo's index
+    Clean(commands::clean::CleanArgs),
+    /// List members of a specific community (cluster)
+    Cluster(commands::cluster::ClusterArgs),
+    /// Output the per-process step trace
+    Process(commands::process::ProcessArgs),
+    /// Check per-repo staleness
+    Status(commands::status::StatusArgs),
 }
 
 fn main() {
@@ -155,6 +163,24 @@ fn main() {
         return;
     }
 
+    // Clean removes the index dir; no graph needed
+    if let Commands::Clean(args) = &cli.command {
+        if let Err(e) = commands::clean::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Status does basic staleness checks; no heavy graph loaded needed
+    if let Commands::Status(args) = &cli.command {
+        if let Err(e) = commands::status::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -165,6 +191,10 @@ fn main() {
         Commands::DetectChanges(args) => args.repo.as_deref(),
         Commands::Summarize(args) => args.repo.as_deref(),
         Commands::Rename(args) => args.repo.as_deref(),
+        Commands::Process(args) => args.repo.as_deref(),
+        Commands::Cluster(args) => args.repo.as_deref(),
+        Commands::Status(args) => args.repo.as_deref(),
+        Commands::Clean(args) => args.repo.to_str(),
         Commands::Analyze(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)
@@ -199,6 +229,8 @@ fn main() {
         Commands::DetectChanges(args) => commands::detect_changes::run(args, &engine),
         Commands::Summarize(args) => commands::summarize::run(args, &engine),
         Commands::Rename(args) => commands::rename::run(args, &engine),
+        Commands::Process(args) => commands::process::run(args, &engine),
+        Commands::Cluster(args) => commands::cluster::run(args, &engine),
         Commands::Analyze(_)
         | Commands::Init(_)
         | Commands::HookHandle(_)
@@ -207,7 +239,9 @@ fn main() {
         | Commands::RenameBranch(_)
         | Commands::List(_)
         | Commands::VerifyResolver(_)
-        | Commands::Doctor(_) => Ok(()), // Handled above
+        | Commands::Doctor(_)
+        | Commands::Clean(_)
+        | Commands::Status(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
