@@ -299,6 +299,92 @@ fn django_urlpatterns_create_framework_refs() {
 }
 
 #[test]
+fn django_receiver_decorator_creates_framework_refs() {
+    let src = include_str!("fixtures/django_signals.py");
+    let provider = PythonProvider::new().unwrap();
+    let local = provider
+        .parse_file("signals.py".as_ref(), src.as_bytes())
+        .unwrap();
+
+    let receivers: Vec<_> = local
+        .framework_refs
+        .iter()
+        .filter(|r| r.reason == "django-signal-receiver")
+        .collect();
+    assert_eq!(
+        receivers.len(),
+        2,
+        "expected 2 @receiver refs, got {}: {:?}",
+        receivers.len(),
+        local.framework_refs
+    );
+
+    let pairs: Vec<(&str, &str)> = receivers
+        .iter()
+        .map(|r| (r.source_name.as_str(), r.target_name.as_str()))
+        .collect();
+    assert!(
+        pairs.contains(&("post_save", "saved_handler")),
+        "missing post_save→saved_handler in {:?}",
+        pairs
+    );
+    assert!(
+        pairs.contains(&("pre_delete", "deleted_handler")),
+        "missing pre_delete→deleted_handler in {:?}",
+        pairs
+    );
+
+    for r in &receivers {
+        assert!(r.confidence > 0.0 && r.confidence <= 1.0);
+    }
+}
+
+#[test]
+fn django_signal_connect_creates_framework_refs() {
+    let src = include_str!("fixtures/django_signals.py");
+    let provider = PythonProvider::new().unwrap();
+    let local = provider
+        .parse_file("signals.py".as_ref(), src.as_bytes())
+        .unwrap();
+
+    let connects: Vec<_> = local
+        .framework_refs
+        .iter()
+        .filter(|r| r.reason == "django-signal-connect")
+        .collect();
+    // 3 connect() with identifier arg: user_handler, order_handler, cleanup_handler.
+    // Lambda + attribute access NOT captured.
+    assert_eq!(
+        connects.len(),
+        3,
+        "expected 3 .connect() refs (lambda/attribute excluded), got {}: {:?}",
+        connects.len(),
+        local.framework_refs
+    );
+
+    let pairs: Vec<(&str, &str)> = connects
+        .iter()
+        .map(|r| (r.source_name.as_str(), r.target_name.as_str()))
+        .collect();
+    for expected in [
+        ("post_save", "user_handler"),
+        ("post_save", "order_handler"),
+        ("pre_delete", "cleanup_handler"),
+    ] {
+        assert!(
+            pairs.contains(&expected),
+            "missing {:?} in {:?}",
+            expected,
+            pairs
+        );
+    }
+
+    for r in &connects {
+        assert!(r.confidence > 0.0 && r.confidence <= 1.0);
+    }
+}
+
+#[test]
 fn celery_task_decorators_create_framework_refs() {
     let src = include_str!("fixtures/celery_tasks.py");
     let provider = PythonProvider::new().unwrap();
