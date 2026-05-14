@@ -41,8 +41,12 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_name_function = self.query.capture_index_for_name("name.function");
         let idx_name_class = self.query.capture_index_for_name("name.class");
         let idx_name_method = self.query.capture_index_for_name("name.method");
+        let idx_heritage = self.query.capture_index_for_name("heritage");
+        let idx_export = self.query.capture_index_for_name("export");
+
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_import_alias = self.query.capture_index_for_name("import.alias");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
@@ -52,9 +56,12 @@ impl LanguageProvider for JavaScriptProvider {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
+            let mut heritage = Vec::new();
+            let mut is_exported = false;
 
             let mut import_name = None;
             let mut import_src = None;
+            let mut import_alias = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -67,10 +74,18 @@ impl LanguageProvider for JavaScriptProvider {
                 } else if Some(cap_idx) == idx_name_method {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if Some(cap_idx) == idx_heritage {
+                    if let Ok(h_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        heritage.push(h_str.to_string());
+                    }
+                } else if Some(cap_idx) == idx_export {
+                    is_exported = true;
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
+                } else if Some(cap_idx) == idx_import_alias {
+                    import_alias = Some(cap.node);
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
@@ -84,8 +99,8 @@ impl LanguageProvider for JavaScriptProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
-                        is_exported: false,
-                        heritage: vec![],
+                        is_exported,
+                        heritage,
                         type_annotation: None,
                         name: name_str.to_string(),
                         kind: k,
@@ -103,8 +118,12 @@ impl LanguageProvider for JavaScriptProvider {
                 if let (Ok(name_str), Ok(src_str)) =
                     (std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]), std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]))
                 {
+                    let alias = import_alias.and_then(|a| {
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]).ok().map(|s| s.to_string())
+                    });
+
                     imports.push(RawImport {
-                        alias: None,
+                        alias,
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
                     });

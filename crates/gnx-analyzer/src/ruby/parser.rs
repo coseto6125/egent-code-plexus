@@ -38,50 +38,49 @@ impl LanguageProvider for RubyProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_module = self.query.capture_index_for_name("name.module");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-
+        let idx_name = self.query.capture_index_for_name("name");
+        let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_module = self.query.capture_index_for_name("module");
         let idx_method = self.query.capture_index_for_name("method");
+        let idx_import_name = self.query.capture_index_for_name("import.name");
 
         while let Some(m) = matches.next() {
-            let mut name_node = None;
+            let mut node_name = None;
             let mut kind = None;
-            let mut root_span_node = None;
-
+            let mut root_node = None;
+            let mut heritage = Vec::new();
             let mut import_name = None;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_class {
-                    name_node = Some(cap.node);
+                let cap_idx = Some(cap.index);
+                if cap_idx == idx_name {
+                    node_name = Some(cap.node);
+                } else if cap_idx == idx_heritage {
+                    if let Ok(h_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        heritage.push(h_str.to_string());
+                    }
+                } else if cap_idx == idx_class {
                     kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_module {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class); // Treat module as Class for graph purposes
-                } else if Some(cap_idx) == idx_name_method {
-                    name_node = Some(cap.node);
+                    root_node = Some(cap.node);
+                } else if cap_idx == idx_module {
+                    kind = Some(NodeKind::Class); // Modules are treated as Class for graph
+                    root_node = Some(cap.node);
+                } else if cap_idx == idx_method {
                     kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_import_name {
+                    root_node = Some(cap.node);
+                } else if cap_idx == idx_import_name {
                     import_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_module
-                    || Some(cap_idx) == idx_method
-                {
-                    root_span_node = Some(cap.node);
                 }
             }
 
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+            if let (Some(name_node), Some(k), Some(root)) = (node_name, kind, root_node) {
+                if let Ok(name_str) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
-                        is_exported: false,
-                        heritage: vec![],
+                        is_exported: true,
+                        heritage,
                         type_annotation: None,
                         name: name_str.to_string(),
                         kind: k,
@@ -95,8 +94,8 @@ impl LanguageProvider for RubyProvider {
                 }
             }
 
-            if let Some(i_name) = import_name {
-                if let Ok(name_str) = std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]) {
+            if let Some(i_node) = import_name {
+                if let Ok(name_str) = std::str::from_utf8(&source[i_node.start_byte()..i_node.end_byte()]) {
                     imports.push(RawImport {
                         alias: None,
                         imported_name: name_str.to_string(),

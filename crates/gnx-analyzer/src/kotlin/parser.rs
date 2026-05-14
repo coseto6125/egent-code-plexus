@@ -38,8 +38,12 @@ impl LanguageProvider for KotlinProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_function = self.query.capture_index_for_name("name.function");
+        let idx_class_name = self.query.capture_index_for_name("class.name");
+        let idx_function_name = self.query.capture_index_for_name("function.name");
+        let idx_export = self.query.capture_index_for_name("export");
+        let idx_heritage = self.query.capture_index_for_name("heritage");
+        let idx_type = self.query.capture_index_for_name("type");
+        let idx_alias = self.query.capture_index_for_name("alias");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
         let idx_class = self.query.capture_index_for_name("class");
@@ -49,19 +53,39 @@ impl LanguageProvider for KotlinProvider {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
+            let mut is_exported = true;
+            let mut heritage = Vec::new();
+            let mut type_annotation = None;
 
             let mut import_src = None;
+            let mut import_alias = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_class {
+                if Some(cap_idx) == idx_class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_function {
+                } else if Some(cap_idx) == idx_function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
+                } else if Some(cap_idx) == idx_export {
+                    if let Ok(text) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        if text.contains("private") || text.contains("internal") {
+                            is_exported = false;
+                        }
+                    }
+                } else if Some(cap_idx) == idx_heritage {
+                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        heritage.push(h.to_string());
+                    }
+                } else if Some(cap_idx) == idx_type {
+                    if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        type_annotation = Some(t.to_string());
+                    }
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
+                } else if Some(cap_idx) == idx_alias {
+                    import_alias = Some(cap.node);
                 } else if Some(cap_idx) == idx_class || Some(cap_idx) == idx_function {
                     root_span_node = Some(cap.node);
                 }
@@ -72,9 +96,9 @@ impl LanguageProvider for KotlinProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
-                        is_exported: false,
-                        heritage: vec![],
-                        type_annotation: None,
+                        is_exported,
+                        heritage,
+                        type_annotation,
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -89,8 +113,14 @@ impl LanguageProvider for KotlinProvider {
 
             if let Some(i_src) = import_src {
                 if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
+                    let alias = if let Some(a_node) = import_alias {
+                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()]).ok().map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+                    
                     imports.push(RawImport {
-                        alias: None,
+                        alias,
                         imported_name: src_str.to_string(),
                         source: src_str.to_string(),
                     });

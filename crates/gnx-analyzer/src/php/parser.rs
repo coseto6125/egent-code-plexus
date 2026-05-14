@@ -42,8 +42,14 @@ impl LanguageProvider for PhpProvider {
         let idx_name_class = self.query.capture_index_for_name("name.class");
         let idx_name_interface = self.query.capture_index_for_name("name.interface");
         let idx_name_method = self.query.capture_index_for_name("name.method");
-        let idx_import_name = self.query.capture_index_for_name("import.name");
+        let idx_type_function = self.query.capture_index_for_name("type.function");
+        let idx_type_method = self.query.capture_index_for_name("type.method");
+        let idx_export = self.query.capture_index_for_name("export");
+        let idx_heritage = self.query.capture_index_for_name("heritage");
+
         let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_import_alias = self.query.capture_index_for_name("import.alias");
+        let idx_import_prefix = self.query.capture_index_for_name("import.prefix");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
@@ -54,9 +60,13 @@ impl LanguageProvider for PhpProvider {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
+            let mut is_exported = true;
+            let mut heritage = Vec::new();
+            let mut type_annotation = None;
 
-            let mut import_name = None;
             let mut import_src = None;
+            let mut import_alias = None;
+            let mut import_prefix = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -72,10 +82,26 @@ impl LanguageProvider for PhpProvider {
                 } else if Some(cap_idx) == idx_name_method {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_import_name {
-                    import_name = Some(cap.node);
+                } else if Some(cap_idx) == idx_type_function || Some(cap_idx) == idx_type_method {
+                    if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        type_annotation = Some(t.to_string());
+                    }
+                } else if Some(cap_idx) == idx_export {
+                    if let Ok(mod_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        if mod_str == "private" || mod_str == "protected" {
+                            is_exported = false;
+                        }
+                    }
+                } else if Some(cap_idx) == idx_heritage {
+                    if let Ok(h) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        heritage.push(h.to_string());
+                    }
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
+                } else if Some(cap_idx) == idx_import_alias {
+                    import_alias = Some(cap.node);
+                } else if Some(cap_idx) == idx_import_prefix {
+                    import_prefix = Some(cap.node);
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_interface
@@ -90,9 +116,9 @@ impl LanguageProvider for PhpProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
-                        is_exported: false,
-                        heritage: vec![],
-                        type_annotation: None,
+                        is_exported,
+                        heritage,
+                        type_annotation,
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -107,18 +133,32 @@ impl LanguageProvider for PhpProvider {
 
             if let Some(i_src) = import_src {
                 if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]) {
-                    let name_str = if let Some(i_name) = import_name {
-                        std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]).unwrap_or("").to_string()
+                    let full_src = if let Some(p) = import_prefix {
+                        if let Ok(p_str) = std::str::from_utf8(&source[p.start_byte()..p.end_byte()]) {
+                            format!("{}\\{}", p_str.trim_end_matches('\\'), src_str.trim_start_matches('\\'))
+                        } else {
+                            src_str.to_string()
+                        }
                     } else {
-                        // In PHP, if no alias is provided, the imported name is the last part of the source
-                        let s = src_str.trim_matches('\\');
-                        s.split('\\').last().unwrap_or("").to_string()
+                        src_str.to_string()
+                    };
+
+                    let alias = if let Some(a) = import_alias {
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]).ok().map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+
+                    let imported_name = if let Some(ref a_str) = alias {
+                        a_str.clone()
+                    } else {
+                        full_src.split('\\').last().unwrap_or("").to_string()
                     };
 
                     imports.push(RawImport {
-                        alias: None,
-                        imported_name: name_str,
-                        source: src_str.to_string(),
+                        alias,
+                        imported_name,
+                        source: full_src,
                     });
                 }
             }

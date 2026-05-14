@@ -3,15 +3,17 @@
   name: [
     (constant)
     (scope_resolution)
-  ] @name.class
-  superclass: (superclass)? @heritage) @class
+  ] @name
+  superclass: (superclass [ (constant) (scope_resolution) (identifier) ] @heritage)?
+) @class
 
 ;; Modules
 (module
   name: [
     (constant)
     (scope_resolution)
-  ] @name.module) @module
+  ] @name
+) @module
 
 ;; Methods
 (method
@@ -20,7 +22,8 @@
     (constant)
     (operator)
     (setter)
-  ] @name.method) @method
+  ] @name
+) @method
 
 (singleton_method
   name: [
@@ -28,7 +31,8 @@
     (constant)
     (operator)
     (setter)
-  ] @name.method) @method
+  ] @name
+) @method
 
 ;; Requires
 (call

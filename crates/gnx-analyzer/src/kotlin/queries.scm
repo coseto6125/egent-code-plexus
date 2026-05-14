@@ -1,22 +1,38 @@
 ; Imports
 (import_header
   (identifier) @import.source
-  (import_alias (simple_identifier) @import.alias)?) @import
+  (import_alias (simple_identifier) @alias)?) @import
 
 ; Classes
 (class_declaration
   (modifiers)? @export
-  (type_identifier) @name.class
-  (delegation_specifiers)? @heritage) @class
+  (type_identifier) @class.name
+  (delegation_specifiers
+    (delegation_specifier
+      [
+        (user_type (type_identifier) @heritage)
+        (constructor_invocation (user_type (type_identifier) @heritage))
+      ]
+    )
+  )*
+) @class
 
 ; Objects
 (object_declaration
   (modifiers)? @export
-  (type_identifier) @name.class
-  (delegation_specifiers)? @heritage) @class
+  (type_identifier) @class.name
+  (delegation_specifiers
+    (delegation_specifier
+      [
+        (user_type (type_identifier) @heritage)
+        (constructor_invocation (user_type (type_identifier) @heritage))
+      ]
+    )
+  )*
+) @class
 
 ; Functions
 (function_declaration
   (modifiers)? @export
-  (simple_identifier) @name.function
+  (simple_identifier) @function.name
   (user_type)? @type) @function

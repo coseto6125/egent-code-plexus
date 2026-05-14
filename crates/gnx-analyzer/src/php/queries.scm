@@ -1,18 +1,25 @@
 ;; Functions
 (function_definition
-  name: (name) @name.function) @function
+  name: (name) @name.function
+  return_type: (_) @type.function ?) @function
 
 ;; Classes
 (class_declaration
-  name: (name) @name.class) @class
+  (modifier_list (visibility_modifier) @export)?
+  name: (name) @name.class
+  (base_clause (qualified_name) @heritage)?
+  (class_interface_clause (qualified_name_list (qualified_name) @heritage))?) @class
 
 ;; Interfaces
 (interface_declaration
-  name: (name) @name.interface) @interface
+  name: (name) @name.interface
+  (interface_extends_clause (qualified_name_list (qualified_name) @heritage))?) @interface
 
 ;; Methods
 (method_declaration
-  name: (name) @name.method) @method
+  (method_modifiers (visibility_modifier) @export)?
+  name: (name) @name.method
+  return_type: (_) @type.method ?) @method
 
 ;; Namespaces
 (namespace_definition
@@ -20,10 +27,11 @@
 
 ;; Imports
 (namespace_use_clause
-  name: (name) @import.source
-  alias: (name)? @import.name) @import
+  name: (qualified_name) @import.source
+  alias: (use_as_clause (name) @import.alias)?) @import
 
 (namespace_use_group
+  prefix: (qualified_name) @import.prefix
   (namespace_use_clause
-    name: (name) @import.source
-    alias: (name)? @import.name)) @import
+    name: (qualified_name) @import.source
+    alias: (use_as_clause (name) @import.alias)?)) @import
