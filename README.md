@@ -89,26 +89,36 @@ All commands accept `--format text|json|toon`. The default for query is a highly
 
 ## Language Matrix
 
-For the 14 languages graph-nexus shares with upstream, here's the per-dimension coverage from an evidence-based audit of `crates/graph-nexus-analyzer/src/<lang>/`. Legend: `✓` clearly supported, `△` partial / basic, `—` not applicable / not implemented.
+For the 14 languages graph-nexus shares with upstream, here's the per-cell delta from an evidence-based audit. Each cell compares upstream GitNexus's claimed support against our actual implementation in `crates/graph-nexus-analyzer/src/<lang>/`.
+
+**Legend**:
+- ✓ &nbsp;both upstream and graph-nexus support this
+- ✅ &nbsp;**upstream doesn't claim it, graph-nexus does** (where we go beyond upstream)
+- ⚠️ &nbsp;**upstream claims it, graph-nexus is missing or partial** (where we lag)
+- — &nbsp;neither claims it
 
 | Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | △ | ✓ | ✓ | ✓ |
-| JavaScript | ✓ | ✓ | ✓ | ✓ | — | △ | ✓ | △ | ✓ |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ | ✓ |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ⚠️ | ✓ | ⚠️ | ✓ |
 | Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Java | ✓ | △ | ✓ | ✓ | ✓ | △ | △ | ✓ | △ |
-| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | △ | △ | — | — |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | △ | △ | — | — |
-| Go | ✓ | ✓ | — | ✓ | △ | △ | ✓ | △ | △ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | △ | ✓ | ✓ | △ |
-| PHP | ✓ | ✓ | ✓ | ✓ | ✓ | △ | △ | △ | ✓ |
-| Ruby | ✓ | — | — | ✓ | — | △ | △ | △ | ✓ |
-| Swift | ✓ | — | ✓ | ✓ | △ | △ | △ | — | — |
-| C | ✓ | — | — | △ | △ | △ | △ | — | — |
-| C++ | ✓ | ✓ | ✓ | ✓ | △ | △ | △ | — | — |
-| Dart | ✓ | ✓ | — | ✓ | △ | △ | △ | — | — |
+| Java | ✓ | ⚠️ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ⚠️ |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ⚠️ | ⚠️ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
+| Go | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✓ | ⚠️ | ⚠️ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ⚠️ |
+| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ⚠️ | ⚠️ | ⚠️ | ✓ |
+| Ruby | ✓ | — | ⚠️ | ✓ | — | ⚠️ | ✅ | ⚠️ | ✓ |
+| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
+| C | ✅ | — | ⚠️ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
+| C++ | ✅ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
+| Dart | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
 
-Takeaways: **Imports** are universal; **Heritage** covers 13/14 (Go is exception). **Python** is the strongest (full receiver-type binding for `Ctor` is Python-only today). **Config parsing** is wired for 5 toolchains: `tsconfig.json` / `package.json` / `go.mod` / `Cargo.toml` / `pyproject.toml`. Constructor inference is generally only `△` outside Python. Beyond these 14, the Rust providers cover 17 more languages (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig) at the structural level only.
+**Where graph-nexus goes beyond upstream** (15 ✅ cells): C/C++ get Imports & Heritage that upstream doesn't claim; Java/Kotlin/Rust/Ruby/Dart get Config parsing for toolchains upstream doesn't cover; PHP gets Heritage; Go/C++/Dart get Named Bindings; Swift/C/C++ get basic Imports.
+
+**Where graph-nexus lags upstream** (most ⚠️ cells): **Constructor Inference** is the biggest gap — only Python has full receiver-type binding; the other 13 languages are partial. **Frameworks & Entry Points** for Kotlin / C# / Swift / C / C++ / Dart aren't wired (upstream claims all four corners; we have parsers but no framework helpers registered).
+
+Beyond these 14, the Rust providers also cover **17 additional languages** (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig) at the structural level — no upstream baseline to compare against.
 
 ## 🏗️ Architecture
 

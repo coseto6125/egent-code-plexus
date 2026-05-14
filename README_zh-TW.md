@@ -89,26 +89,36 @@ gnx context --name validateUser
 
 ## 語言矩陣
 
-graph-nexus 與上游共有的 14 種語言，逐維度覆蓋如下（基於 `crates/graph-nexus-analyzer/src/<lang>/` 程式碼 audit）。圖例：`✓` 明確支援、`△` 部分 / 基本、`—` 不適用 / 未實作。
+graph-nexus 與上游共有的 14 種語言，每個 cell 直接對照上游宣稱的支援度 vs 我們實際 audit 結果（`crates/graph-nexus-analyzer/src/<lang>/`）。
+
+**圖例**：
+- ✓ &nbsp;上游有、我們也有
+- ✅ &nbsp;**上游沒宣稱，我們有**（我們贏的地方）
+- ⚠️ &nbsp;**上游有，我們缺或部分**（我們落後的地方）
+- — &nbsp;雙方都沒有
 
 | 語言 | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | △ | ✓ | ✓ | ✓ |
-| JavaScript | ✓ | ✓ | ✓ | ✓ | — | △ | ✓ | △ | ✓ |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ | ✓ |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ⚠️ | ✓ | ⚠️ | ✓ |
 | Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Java | ✓ | △ | ✓ | ✓ | ✓ | △ | △ | ✓ | △ |
-| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | △ | △ | — | — |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | △ | △ | — | — |
-| Go | ✓ | ✓ | — | ✓ | △ | △ | ✓ | △ | △ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | △ | ✓ | ✓ | △ |
-| PHP | ✓ | ✓ | ✓ | ✓ | ✓ | △ | △ | △ | ✓ |
-| Ruby | ✓ | — | — | ✓ | — | △ | △ | △ | ✓ |
-| Swift | ✓ | — | ✓ | ✓ | △ | △ | △ | — | — |
-| C | ✓ | — | — | △ | △ | △ | △ | — | — |
-| C++ | ✓ | ✓ | ✓ | ✓ | △ | △ | △ | — | — |
-| Dart | ✓ | ✓ | — | ✓ | △ | △ | △ | — | — |
+| Java | ✓ | ⚠️ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ⚠️ |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ⚠️ | ⚠️ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
+| Go | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✓ | ⚠️ | ⚠️ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ⚠️ |
+| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ⚠️ | ⚠️ | ⚠️ | ✓ |
+| Ruby | ✓ | — | ⚠️ | ✓ | — | ⚠️ | ✅ | ⚠️ | ✓ |
+| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
+| C | ✅ | — | ⚠️ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
+| C++ | ✅ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
+| Dart | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
 
-重點：**Imports** 全面支援；**Heritage** 14 中 13 都有（Go 例外）。**Python 最完整**（Constructor 接收者型別綁定目前只在 Python 完整實作）。**Config 解析**目前覆蓋 5 種 toolchain：`tsconfig.json` / `package.json` / `go.mod` / `Cargo.toml` / `pyproject.toml`。Constructor inference 在 Python 外大多 `△`。除了這 14 種以外，Rust 端還有 17 個 provider（Bash、Crystal、Cairo、Dockerfile、Docker Compose、GitHub Actions、HCL、Lua、Markdown、Move、Nim、Solidity、SQL、Verilog、Vyper、YAML、Zig），但僅停留在結構層級。
+**我們超越上游的地方**（15 個 ✅）：C / C++ 拿到上游沒宣稱的 Imports & Heritage；Java/Kotlin/Rust/Ruby/Dart 拿到上游沒做的 toolchain Config 解析；PHP 拿到 Heritage；Go/C++/Dart 拿到 Named Bindings；Swift/C/C++ 拿到基本 Imports。
+
+**我們落後上游的地方**（多數 ⚠️）：**Constructor Inference** 是最大缺口 — 只有 Python 有完整的 receiver-type binding，其他 13 種都還是 partial。**Frameworks & Entry Points** 在 Kotlin / C# / Swift / C / C++ / Dart 沒接（上游全部有，我們 parser 在但沒接 framework helper）。
+
+除了這 14 種以外，Rust 端還有 **17 個 provider**（Bash、Crystal、Cairo、Dockerfile、Docker Compose、GitHub Actions、HCL、Lua、Markdown、Move、Nim、Solidity、SQL、Verilog、Vyper、YAML、Zig）停留在結構層級 — 上游沒對應基準可比。
 
 ## 🏗️ 系統架構
 
