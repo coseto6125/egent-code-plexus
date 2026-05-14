@@ -27,3 +27,5 @@ crates/vendor/*/build/
 /test*.scm
 /fix_*.py
 /refactor_*.py
+/optimize_*.py
+/update_*.py
