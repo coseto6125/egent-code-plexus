@@ -91,11 +91,12 @@ impl LanguageProvider for RustProvider {
         // Side-table: top-level free `fn` byte ranges + names, used to resolve
         // the enclosing function for framework-ref captures via byte-range containment.
         let mut fn_spans: Vec<(String, std::ops::Range<usize>)> = Vec::new();
-        // Collected framework-ref captures (handler ident text + capture node span info).
-        let mut axum_handler_captures: Vec<(String, usize, usize, (u32, u32, u32, u32))> =
-            Vec::new();
-        // Collected Actix attribute-macro captures: (method, handler, span).
-        let mut actix_handler_captures: Vec<(String, String, (u32, u32, u32, u32))> = Vec::new();
+        // (handler_ident, capture_start_byte, capture_end_byte, span)
+        type AxumCapture = (String, usize, usize, (u32, u32, u32, u32));
+        // (method, handler_ident, span)
+        type ActixCapture = (String, String, (u32, u32, u32, u32));
+        let mut axum_handler_captures: Vec<AxumCapture> = Vec::new();
+        let mut actix_handler_captures: Vec<ActixCapture> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -206,10 +207,7 @@ impl LanguageProvider for RustProvider {
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     if matches!(k, NodeKind::Function | NodeKind::Method) {
-                        fn_spans.push((
-                            name_str.to_string(),
-                            root.start_byte()..root.end_byte(),
-                        ));
+                        fn_spans.push((name_str.to_string(), root.start_byte()..root.end_byte()));
                     }
                     nodes.push(RawNode {
                         decorators,

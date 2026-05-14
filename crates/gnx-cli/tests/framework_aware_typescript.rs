@@ -84,7 +84,12 @@ fn nestjs_controller_methods_become_framework_refs() {
         ("UsersController", "create"),
         ("UsersController", "remove"),
     ] {
-        assert!(pairs.contains(&expected), "missing {:?} in {:?}", expected, pairs);
+        assert!(
+            pairs.contains(&expected),
+            "missing {:?} in {:?}",
+            expected,
+            pairs
+        );
     }
 
     // Negative: notARoute must NOT appear (no @Controller on enclosing class).

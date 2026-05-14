@@ -1,5 +1,5 @@
 use crate::calls::extract_calls;
-use crate::framework_helpers::{MODULE_LEVEL_SOURCE, enclosing_function_name, node_span};
+use crate::framework_helpers::{enclosing_function_name, node_span, MODULE_LEVEL_SOURCE};
 use gnx_core::analyzer::provider::LanguageProvider;
 use gnx_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use gnx_core::graph::NodeKind;
@@ -199,9 +199,11 @@ impl LanguageProvider for PythonProvider {
                 }
             }
 
-            if let (Some(app_n), Some(method_n), Some(handler_n)) =
-                (fa_route_app_node, fa_route_method_node, fa_route_handler_node)
-            {
+            if let (Some(app_n), Some(method_n), Some(handler_n)) = (
+                fa_route_app_node,
+                fa_route_method_node,
+                fa_route_handler_node,
+            ) {
                 if let (Ok(app_str), Ok(method_str), Ok(handler_str)) = (
                     std::str::from_utf8(&source[app_n.start_byte()..app_n.end_byte()]),
                     std::str::from_utf8(&source[method_n.start_byte()..method_n.end_byte()]),

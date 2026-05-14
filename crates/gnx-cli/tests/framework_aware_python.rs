@@ -81,7 +81,12 @@ fn setup_fastapi_repo(repo: &Path, home: &Path) {
     run_git(repo, &["init", "-q", "-b", "main"]);
     run_git(
         repo,
-        &["remote", "add", "origin", "git@github.com:E-NoR/fw-test.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:E-NoR/fw-test.git",
+        ],
     );
     run_git(repo, &["add", "-A"]);
     run_git(
@@ -220,7 +225,13 @@ fn fastapi_route_decorators_create_framework_refs() {
 
     let triples: Vec<(&str, &str, &str)> = route_refs
         .iter()
-        .map(|r| (r.source_name.as_str(), r.target_name.as_str(), r.reason.as_str()))
+        .map(|r| {
+            (
+                r.source_name.as_str(),
+                r.target_name.as_str(),
+                r.reason.as_str(),
+            )
+        })
         .collect();
     for expected in [
         ("app", "read_user", "fastapi-route-get"),
@@ -228,7 +239,12 @@ fn fastapi_route_decorators_create_framework_refs() {
         ("router", "delete_item", "fastapi-route-delete"),
         ("router", "patch_item", "fastapi-route-patch"),
     ] {
-        assert!(triples.contains(&expected), "missing {:?} in {:?}", expected, triples);
+        assert!(
+            triples.contains(&expected),
+            "missing {:?} in {:?}",
+            expected,
+            triples
+        );
     }
 
     // Negative: @app.middleware MUST NOT match (not an HTTP verb).
@@ -266,7 +282,12 @@ fn django_urlpatterns_create_framework_refs() {
 
     let targets: Vec<&str> = refs.iter().map(|r| r.target_name.as_str()).collect();
     for expected in ["user_list", "user_detail", "login_view", "fallback_handler"] {
-        assert!(targets.contains(&expected), "missing {} in {:?}", expected, targets);
+        assert!(
+            targets.contains(&expected),
+            "missing {} in {:?}",
+            expected,
+            targets
+        );
     }
 
     // Negative: `os.path("/tmp")` outside urlpatterns must NOT be captured.
@@ -300,7 +321,12 @@ fn celery_task_decorators_create_framework_refs() {
 
     let targets: Vec<&str> = refs.iter().map(|r| r.target_name.as_str()).collect();
     for expected in ["send_email", "process_data", "retry_job"] {
-        assert!(targets.contains(&expected), "missing {} in {:?}", expected, targets);
+        assert!(
+            targets.contains(&expected),
+            "missing {} in {:?}",
+            expected,
+            targets
+        );
     }
 
     // Negative: @cached_property MUST NOT match.

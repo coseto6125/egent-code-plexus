@@ -97,8 +97,9 @@ impl LanguageProvider for TypeScriptProvider {
         // Pending framework-handler captures: (handler_name, capture_span).
         // Enclosing function is resolved after all nodes are collected.
         let mut pending_express_handlers: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
-        // NestJS @Controller method decorators: (class_name, method_name, method_span).
-        let mut pending_nestjs_handlers: Vec<(String, String, (u32, u32, u32, u32))> = Vec::new();
+        // (class_name, method_name, method_span)
+        type NestJsHandler = (String, String, (u32, u32, u32, u32));
+        let mut pending_nestjs_handlers: Vec<NestJsHandler> = Vec::new();
 
         let idx = &self.indices;
 

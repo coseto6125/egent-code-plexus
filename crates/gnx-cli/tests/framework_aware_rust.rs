@@ -91,7 +91,12 @@ fn actix_attribute_macros_create_framework_refs() {
         ("actix-route-delete", "delete_item"),
         ("actix-route-patch", "patch_item"),
     ] {
-        assert!(pairs.contains(&expected), "missing {:?} in {:?}", expected, pairs);
+        assert!(
+            pairs.contains(&expected),
+            "missing {:?} in {:?}",
+            expected,
+            pairs
+        );
     }
 
     // Negative: #[allow(dead_code)] MUST NOT match.

@@ -122,9 +122,7 @@ impl LanguageProvider for JavaProvider {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx.import_source {
                     import_src = Some(cap.node);
-                } else if cap_idx == idx.class
-                    || cap_idx == idx.interface
-                    || cap_idx == idx.method
+                } else if cap_idx == idx.class || cap_idx == idx.interface || cap_idx == idx.method
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);
