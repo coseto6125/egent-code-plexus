@@ -43,6 +43,7 @@ fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
         process_start: 1,
         traces_offsets: vec![],
         traces_data: vec![],
+        blind_spots: vec![],
     };
     rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
 }
