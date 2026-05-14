@@ -125,6 +125,7 @@ impl LanguageProvider for CProvider {
             documents: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         })
     }
 }

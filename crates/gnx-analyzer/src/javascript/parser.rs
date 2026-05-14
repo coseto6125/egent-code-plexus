@@ -229,6 +229,7 @@ impl LanguageProvider for JavaScriptProvider {
             documents: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         })
     }
 }

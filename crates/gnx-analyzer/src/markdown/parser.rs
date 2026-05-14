@@ -128,6 +128,7 @@ impl LanguageProvider for MarkdownProvider {
             imports: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         })
     }
 }

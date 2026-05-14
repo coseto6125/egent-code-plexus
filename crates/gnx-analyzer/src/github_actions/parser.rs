@@ -195,6 +195,7 @@ impl LanguageProvider for GitHubActionsProvider {
                     imports: vec![],
                     framework_refs: vec![],
                     fanout_refs: vec![],
+                    blind_spots: vec![],
                 });
             }
         };
@@ -220,6 +221,7 @@ impl LanguageProvider for GitHubActionsProvider {
                 imports: vec![],
                 framework_refs: vec![],
                 fanout_refs: vec![],
+                blind_spots: vec![],
             });
         };
 
@@ -300,6 +302,7 @@ impl LanguageProvider for GitHubActionsProvider {
             imports: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
+            blind_spots: vec![],
         })
     }
 }
