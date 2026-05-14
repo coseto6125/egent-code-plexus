@@ -5,7 +5,9 @@ use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
 use graph_nexus_core::graph::{
     BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph,
 };
-use graph_nexus_core::pool::StringPool;
+use graph_nexus_core::pool::{StrRef, StringPool};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 fn determine_category(path: &str) -> FileCategory {
     let lower_path = path.to_lowercase().replace('\\', "/");
@@ -337,156 +339,139 @@ impl GraphBuilder {
         }
 
         // Pass 2: Resolve imports and build edges
-        let mut resolver =
-            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
-        if self.resolver_dump_path.is_some() {
-            resolver.enable_dump();
+        //
+        // Pass 2 strategy: dump-disabled path (production hot path) runs in
+        // parallel over `local_graphs` via rayon. Dump-enabled path (oracle
+        // harness, off by default) falls back to serial because
+        // `Resolver.decisions` is `RefCell<Vec<_>>` and not `Sync`.
+        //
+        // To enable parallelism we pre-compute two artifacts serially before
+        // the par_iter so the inner closure only needs read-only access to
+        // the resolver + symbol_table:
+        //   1. `start_indices[graph_idx]` — base `current_node_idx` for each
+        //      `local_graph` (prefix-sum of node counts). Replaces the
+        //      `current_node_idx += 1` accumulator that previously coupled
+        //      graphs sequentially.
+        //   2. `reason_cache` — every unique `framework_refs.reason` /
+        //      `fanout_refs.reason` interned into `string_pool` up front.
+        //      `string_pool.add` is `&mut self` so the inner loop can't
+        //      touch it; pre-interning + lookup-by-cache is `&StrRef`-only.
+
+        let mut start_indices: Vec<u32> = Vec::with_capacity(self.local_graphs.len());
+        {
+            let mut acc: u32 = 0;
+            for lg in &self.local_graphs {
+                start_indices.push(acc);
+                acc += lg.nodes.len() as u32;
+            }
         }
-        let mut edges = Vec::new();
-        let mut current_node_idx = 0;
 
         let reason_heritage = string_pool.add("heritage");
         let reason_type = string_pool.add("type_annotation");
         let reason_call = string_pool.add("call");
 
-        for local_graph in &self.local_graphs {
-            for raw_node in &local_graph.nodes {
-                // Resolve heritage (base classes, traits) — emit Extends edge.
-                for base in &raw_node.heritage {
-                    let targets = resolver.resolve_symbol(
-                        &local_graph.file_path,
-                        base,
-                        &local_graph.imports,
-                        ResolveTarget::Type,
-                    );
-                    for (target_id, confidence) in targets {
-                        edges.push(Edge {
-                            source: current_node_idx,
-                            target: target_id,
-                            rel_type: RelType::Extends,
-                            confidence,
-                            reason: reason_heritage,
-                        });
-                    }
-                }
-
-                // Resolve calls (function invocations from this node's body).
-                for callee in &raw_node.calls {
-                    let targets = resolver.resolve_symbol(
-                        &local_graph.file_path,
-                        callee,
-                        &local_graph.imports,
-                        ResolveTarget::Callable,
-                    );
-                    for (target_id, confidence) in targets {
-                        if target_id == current_node_idx {
-                            continue; // skip self-recursion edges (Louvain/process noise)
-                        }
-                        edges.push(Edge {
-                            source: current_node_idx,
-                            target: target_id,
-                            rel_type: RelType::Calls,
-                            confidence,
-                            reason: reason_call,
-                        });
-                    }
-                }
-
-                // Resolve type annotation
-                if let Some(type_ann) = &raw_node.type_annotation {
-                    let targets = resolver.resolve_symbol(
-                        &local_graph.file_path,
-                        type_ann,
-                        &local_graph.imports,
-                        ResolveTarget::Type,
-                    );
-                    for (target_id, confidence) in targets {
-                        edges.push(Edge {
-                            source: current_node_idx,
-                            target: target_id,
-                            rel_type: RelType::Accesses,
-                            confidence,
-                            reason: reason_type,
-                        });
-                    }
-                }
-
-                current_node_idx += 1;
+        let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
+        for lg in &self.local_graphs {
+            for fw_ref in &lg.framework_refs {
+                reason_cache
+                    .entry(fw_ref.reason.clone())
+                    .or_insert_with(|| string_pool.add(&fw_ref.reason));
             }
-
-            // Resolve framework refs (confidence-weighted edges with custom reasons)
-            for fw_ref in &local_graph.framework_refs {
-                // Resolve source node in current file
-                let source_id = symbol_table.lookup_in_file(
-                    &local_graph.file_path.to_string_lossy(),
-                    &fw_ref.source_name,
-                );
-
-                if let Some(source_id) = source_id {
-                    // Framework refs target callables (e.g. FastAPI `Depends(get_db)`).
-                    let targets = resolver.resolve_symbol(
-                        &local_graph.file_path,
-                        &fw_ref.target_name,
-                        &local_graph.imports,
-                        ResolveTarget::Callable,
-                    );
-
-                    // Hoist reason interning out of inner loop — `StrRef` is `Copy`.
-                    let reason_ref = string_pool.add(&fw_ref.reason);
-                    for (target_id, _) in targets {
-                        edges.push(Edge {
-                            source: source_id,
-                            target: target_id,
-                            rel_type: RelType::References,
-                            confidence: fw_ref.confidence,
-                            reason: reason_ref,
-                        });
-                    }
-                }
-            }
-
-            // Pass: fanout refs — emit one Edge per resolved candidate with
-            // confidence = base / sqrt(N), floored at 0.1. Used for reflection-
-            // style dynamic dispatch where the static analyzer can enumerate
-            // candidates but cannot pick the one that actually runs at runtime.
-            for fanout_ref in &local_graph.fanout_refs {
-                let source_id = symbol_table.lookup_in_file(
-                    &local_graph.file_path.to_string_lossy(),
-                    &fanout_ref.source_name,
-                );
-
-                let Some(source_id) = source_id else { continue };
-
-                let n = fanout_ref.candidates.len() as f32;
-                if n < 1.0 {
-                    continue;
-                }
-
-                let confidence = (fanout_ref.base_confidence / n.sqrt()).max(0.1);
-                // Hoist reason interning out of both inner loops — `StrRef` is `Copy`.
-                let reason_ref = string_pool.add(&fanout_ref.reason);
-
-                for candidate_name in &fanout_ref.candidates {
-                    // Resolve candidate via same-file → import-scoped → global.
-                    // Reflection dispatch targets methods → Callable.
-                    let targets = resolver.resolve_symbol(
-                        &local_graph.file_path,
-                        candidate_name,
-                        &local_graph.imports,
-                        ResolveTarget::Callable,
-                    );
-                    for (target_id, _) in targets {
-                        edges.push(Edge {
-                            source: source_id,
-                            target: target_id,
-                            rel_type: RelType::References,
-                            confidence,
-                            reason: reason_ref,
-                        });
-                    }
-                }
+            for fanout_ref in &lg.fanout_refs {
+                reason_cache
+                    .entry(fanout_ref.reason.clone())
+                    .or_insert_with(|| string_pool.add(&fanout_ref.reason));
             }
         }
+
+        let dump_enabled = self.resolver_dump_path.is_some();
+        let path_aliases = self.path_aliases.clone();
+
+        // Resolver carries decisions: RefCell<...> which is `!Sync`, so when
+        // dumping is enabled we run the serial path. When disabled (the
+        // production case) we create a fresh `Resolver` *inside* each
+        // par_iter worker so each thread owns its own state.
+        let mut resolver_for_dump = if dump_enabled {
+            let mut r = Resolver::new(&symbol_table).with_path_aliases(path_aliases.clone());
+            r.enable_dump();
+            Some(r)
+        } else {
+            None
+        };
+
+        let local_graphs = &self.local_graphs;
+        let symbol_table_ref = &symbol_table;
+        let reason_cache_ref = &reason_cache;
+
+        let edges: Vec<Edge> = if let Some(resolver) = resolver_for_dump.as_mut() {
+            // Serial dump path — original loop, with reason lookups going
+            // through `reason_cache` (filled above) instead of inline
+            // `string_pool.add`.
+            let mut edges = Vec::new();
+            let mut current_node_idx = 0u32;
+            for local_graph in local_graphs {
+                for raw_node in &local_graph.nodes {
+                    pass2_emit_node_edges(
+                        resolver,
+                        local_graph,
+                        raw_node,
+                        current_node_idx,
+                        reason_heritage,
+                        reason_type,
+                        reason_call,
+                        &mut edges,
+                    );
+                    current_node_idx += 1;
+                }
+                pass2_emit_framework_and_fanout(
+                    resolver,
+                    symbol_table_ref,
+                    local_graph,
+                    reason_cache_ref,
+                    &mut edges,
+                );
+            }
+            edges
+        } else {
+            // Parallel path. Each rayon worker drives a `flat_map` chunk;
+            // we pay one Resolver construction per local_graph (cheap —
+            // borrows symbol_table, clones path_aliases). For ~14k files
+            // on .sample_repo that's ~14k path_aliases.clone() calls
+            // totalling a few ms — far below the parallelism gain.
+            local_graphs
+                .par_iter()
+                .enumerate()
+                .flat_map_iter(|(graph_idx, local_graph)| {
+                    let resolver =
+                        Resolver::new(symbol_table_ref).with_path_aliases(path_aliases.clone());
+                    let start_idx = start_indices[graph_idx];
+                    let mut local_edges: Vec<Edge> = Vec::new();
+                    for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
+                        let current_node_idx = start_idx + node_offset as u32;
+                        pass2_emit_node_edges(
+                            &resolver,
+                            local_graph,
+                            raw_node,
+                            current_node_idx,
+                            reason_heritage,
+                            reason_type,
+                            reason_call,
+                            &mut local_edges,
+                        );
+                    }
+                    pass2_emit_framework_and_fanout(
+                        &resolver,
+                        symbol_table_ref,
+                        local_graph,
+                        reason_cache_ref,
+                        &mut local_edges,
+                    );
+                    local_edges
+                })
+                .collect()
+        };
+        let mut edges = edges;
+        let resolver_dump_drain = resolver_for_dump.as_mut();
 
         edges.extend(route_edges);
 
@@ -511,10 +496,15 @@ impl GraphBuilder {
 
         // Optional: flush the resolver decision dump now that pass 2 is done.
         // Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
+        // Only the serial dump-enabled path keeps a `Resolver` alive past
+        // Pass 2; the parallel path constructs ephemeral per-graph resolvers
+        // with `decisions: None`, so a dump-disabled run has nothing to flush.
         if let Some(dump_path) = self.resolver_dump_path.as_ref() {
-            if let Some(decisions) = resolver.take_decisions() {
-                if let Err(e) = write_resolver_dump(dump_path, &decisions, &symbol_table) {
-                    tracing::warn!("Failed to write resolver dump to {:?}: {}", dump_path, e);
+            if let Some(resolver) = resolver_dump_drain {
+                if let Some(decisions) = resolver.take_decisions() {
+                    if let Err(e) = write_resolver_dump(dump_path, &decisions, &symbol_table) {
+                        tracing::warn!("Failed to write resolver dump to {:?}: {}", dump_path, e);
+                    }
                 }
             }
         }
@@ -734,6 +724,140 @@ impl GraphBuilder {
 /// resolved `target_file` (looked up from `target_id` via the symbol
 /// table). Delegating to `serde_json` keeps escaping (Unicode controls,
 /// surrogates, line separators) compliant with RFC 8259.
+/// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
+/// annotation. Factored out so the serial dump path and the parallel
+/// hot path can share the same per-node logic.
+#[allow(clippy::too_many_arguments)]
+fn pass2_emit_node_edges(
+    resolver: &Resolver<'_>,
+    local_graph: &LocalGraph,
+    raw_node: &RawNode,
+    current_node_idx: u32,
+    reason_heritage: StrRef,
+    reason_type: StrRef,
+    reason_call: StrRef,
+    edges: &mut Vec<Edge>,
+) {
+    for base in &raw_node.heritage {
+        let targets = resolver.resolve_symbol(
+            &local_graph.file_path,
+            base,
+            &local_graph.imports,
+            ResolveTarget::Type,
+        );
+        for (target_id, confidence) in targets {
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type: RelType::Extends,
+                confidence,
+                reason: reason_heritage,
+            });
+        }
+    }
+
+    for callee in &raw_node.calls {
+        let targets = resolver.resolve_symbol(
+            &local_graph.file_path,
+            callee,
+            &local_graph.imports,
+            ResolveTarget::Callable,
+        );
+        for (target_id, confidence) in targets {
+            if target_id == current_node_idx {
+                continue; // self-recursion edges are Louvain / process noise
+            }
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type: RelType::Calls,
+                confidence,
+                reason: reason_call,
+            });
+        }
+    }
+
+    if let Some(type_ann) = &raw_node.type_annotation {
+        let targets = resolver.resolve_symbol(
+            &local_graph.file_path,
+            type_ann,
+            &local_graph.imports,
+            ResolveTarget::Type,
+        );
+        for (target_id, confidence) in targets {
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type: RelType::Accesses,
+                confidence,
+                reason: reason_type,
+            });
+        }
+    }
+}
+
+/// Emit Pass-2 framework-ref + fanout-ref edges for one `local_graph`.
+/// Reason interning is pre-baked into `reason_cache` (see Pass 2 setup);
+/// every entry that reaches this function is guaranteed to be in the map.
+fn pass2_emit_framework_and_fanout(
+    resolver: &Resolver<'_>,
+    symbol_table: &SymbolTable,
+    local_graph: &LocalGraph,
+    reason_cache: &FxHashMap<String, StrRef>,
+    edges: &mut Vec<Edge>,
+) {
+    let file_path_lossy = local_graph.file_path.to_string_lossy();
+
+    for fw_ref in &local_graph.framework_refs {
+        let source_id = symbol_table.lookup_in_file(&file_path_lossy, &fw_ref.source_name);
+        let Some(source_id) = source_id else { continue };
+        let targets = resolver.resolve_symbol(
+            &local_graph.file_path,
+            &fw_ref.target_name,
+            &local_graph.imports,
+            ResolveTarget::Callable,
+        );
+        let reason_ref = reason_cache[&fw_ref.reason];
+        for (target_id, _) in targets {
+            edges.push(Edge {
+                source: source_id,
+                target: target_id,
+                rel_type: RelType::References,
+                confidence: fw_ref.confidence,
+                reason: reason_ref,
+            });
+        }
+    }
+
+    for fanout_ref in &local_graph.fanout_refs {
+        let source_id = symbol_table.lookup_in_file(&file_path_lossy, &fanout_ref.source_name);
+        let Some(source_id) = source_id else { continue };
+        let n = fanout_ref.candidates.len() as f32;
+        if n < 1.0 {
+            continue;
+        }
+        let confidence = (fanout_ref.base_confidence / n.sqrt()).max(0.1);
+        let reason_ref = reason_cache[&fanout_ref.reason];
+        for candidate_name in &fanout_ref.candidates {
+            let targets = resolver.resolve_symbol(
+                &local_graph.file_path,
+                candidate_name,
+                &local_graph.imports,
+                ResolveTarget::Callable,
+            );
+            for (target_id, _) in targets {
+                edges.push(Edge {
+                    source: source_id,
+                    target: target_id,
+                    rel_type: RelType::References,
+                    confidence,
+                    reason: reason_ref,
+                });
+            }
+        }
+    }
+}
+
 fn write_resolver_dump(
     path: &std::path::Path,
     decisions: &[crate::resolution::resolver::ResolverDecision],
