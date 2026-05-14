@@ -66,6 +66,10 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     }
     let scan_duration = scan_start.elapsed();
 
+    let gitnexus_dir = repo_path.join(".gitnexus-rs");
+    let bin_path = gitnexus_dir.join("graph.bin");
+    let embeddings_flag = args.embeddings;
+
     // Step 2: Initialize pipeline and register providers
     let analyze_start = Instant::now();
     let mut pipeline = AnalyzerPipeline::new();
@@ -84,13 +88,41 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(SwiftProvider::new().unwrap()));
     pipeline.register_provider(Box::new(DartProvider::new().unwrap()));
 
-    // Step 3: Analyze
-    let local_graphs = pipeline.analyze(files_to_analyze);
+    // Step 3: Analyze and load cache concurrently
+    let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(
+        || pipeline.analyze(files_to_analyze),
+        || {
+            let mut hashes = std::collections::HashMap::new();
+            let mut embs = std::collections::HashMap::new();
+            if embeddings_flag {
+                if let Ok(old_engine) = crate::engine::Engine::load(&bin_path) {
+                    if let Ok(old_graph) = old_engine.graph() {
+                        for file in old_graph.files.iter() {
+                            let path = file.path.resolve(&old_graph.string_pool);
+                            hashes.insert(path.to_string(), file.content_hash);
+                        }
+                        if let rkyv::option::ArchivedOption::Some(old_embs) = &old_graph.embeddings {
+                            for (idx, node) in old_graph.nodes.iter().enumerate() {
+                                if let Some(emb) = old_embs.get(idx) {
+                                    let uid = node.uid.resolve(&old_graph.string_pool);
+                                    let vec_f32: Vec<f32> = emb.iter().map(|x| x.to_native()).collect();
+                                    embs.insert(uid.to_string(), vec_f32);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (hashes, embs)
+        }
+    );
     let analyze_duration = analyze_start.elapsed();
 
     // Step 4: Build global graph
     let build_start = Instant::now();
-    let mut builder = GraphBuilder::new().with_embeddings(args.embeddings);
+    let mut builder = GraphBuilder::new()
+        .with_embeddings(args.embeddings)
+        .with_cache(old_file_hashes, old_embeddings_cache);
     for graph in local_graphs {
         builder.add_graph(graph);
     }
@@ -99,10 +131,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
 
     // Step 5: Save graph
     let save_start = Instant::now();
-    let gitnexus_dir = repo_path.join(".gitnexus-rs");
     std::fs::create_dir_all(&gitnexus_dir)
         .map_err(|e| format!("Failed to create .gitnexus-rs dir: {}", e))?;
-    let bin_path = gitnexus_dir.join("graph.bin");
 
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&global_graph)
         .map_err(|e| format!("Serialization error: {}", e))?;
