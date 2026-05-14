@@ -3,9 +3,13 @@
 
 mod lock;
 mod path;
+mod store;
 
 pub use lock::FileLock;
 pub use path::{
     derive_repo_name, sanitize_branch, sanitize_segment, uid_path,
     IndexLayout, PathError,
+};
+pub use store::{
+    strip_credentials, BranchEntry, GroupEntry, RegistryFile, RepoEntry,
 };
