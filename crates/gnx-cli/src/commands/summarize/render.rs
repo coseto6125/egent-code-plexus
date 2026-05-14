@@ -20,6 +20,15 @@ pub struct RenderInput<'a> {
     pub exclude_orphans: bool,
 }
 
+/// 共用中介表示：markdown 與 json 渲染都只需這幾個欄位，避免重複算 shadowed_by。
+struct SymbolEntry<'a> {
+    name: &'a str,
+    kind: &'static str,
+    in_deg: u32,
+    /// 0 = 此 name 唯一；N>0 = 另有 N 處同名節點
+    shadowed_by: usize,
+}
+
 fn file_path(g: &ArchivedZeroCopyGraph, file_idx: u32) -> String {
     let i = file_idx as usize;
     if i >= g.files.len() {
@@ -28,15 +37,46 @@ fn file_path(g: &ArchivedZeroCopyGraph, file_idx: u32) -> String {
     g.files[i].path.resolve(&g.string_pool).to_string()
 }
 
-fn node_name(g: &ArchivedZeroCopyGraph, idx: usize) -> &str {
-    g.nodes[idx].name.resolve(&g.string_pool)
+fn nodes_in_file<'a>(input: &'a RenderInput<'a>, file_idx: u32) -> &'a [usize] {
+    input
+        .by_file
+        .get(&file_idx)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+/// 對一個 file 取出 top-K symbol 的中介表示。markdown / json 共用。
+fn resolve_symbols<'a>(input: &'a RenderInput<'a>, file_idx: u32) -> Vec<SymbolEntry<'a>> {
+    let nodes = nodes_in_file(input, file_idx);
+    let picked = super::ranking::top_symbols_in_file(
+        nodes,
+        input.stats,
+        input.top_symbols_per_file,
+        input.exclude_orphans,
+    );
+    picked
+        .into_iter()
+        .map(|i| {
+            let name = input.graph.nodes[i].name.resolve(&input.graph.string_pool);
+            let occurrences = input.name_collisions.get(name).map(Vec::len).unwrap_or(1);
+            SymbolEntry {
+                name,
+                kind: kind_to_str(&input.graph.nodes[i].kind),
+                in_deg: input.stats.in_deg[i],
+                shadowed_by: occurrences.saturating_sub(1),
+            }
+        })
+        .collect()
 }
 
 pub fn markdown(input: &RenderInput) -> String {
     let g = input.graph;
-    let mut out = String::with_capacity(4096);
+    // 容量估算：header ~512 + top_files × (~64 base + symbols × ~80) + top_communities × ~80
+    let capacity = 512
+        + input.top_files.len() * (64 + input.top_symbols_per_file * 80)
+        + input.top_communities.len() * 80;
+    let mut out = String::with_capacity(capacity);
 
-    // Header
     writeln!(out, "# Project Summary\n").unwrap();
     writeln!(
         out,
@@ -47,7 +87,6 @@ pub fn markdown(input: &RenderInput) -> String {
     )
     .unwrap();
 
-    // Top hot files
     writeln!(out, "## Top hot files\n").unwrap();
     if input.top_files.is_empty() {
         writeln!(out, "_(no files indexed)_\n").unwrap();
@@ -67,7 +106,6 @@ pub fn markdown(input: &RenderInput) -> String {
         writeln!(out).unwrap();
     }
 
-    // Architecture
     writeln!(out, "## Architecture (top communities)\n").unwrap();
     if input.top_communities.is_empty() {
         writeln!(out, "_(no communities detected)_\n").unwrap();
@@ -94,15 +132,13 @@ pub fn markdown(input: &RenderInput) -> String {
         writeln!(out).unwrap();
     }
 
-    // Per-file detail (limited to the same top_files)
     writeln!(out, "## Per-file detail\n").unwrap();
     let total_files = input.by_file.len();
     let shown = input.top_files.len();
     for fs in input.top_files.iter() {
         let path = file_path(g, fs.file_idx);
-        let nodes = input.by_file.get(&fs.file_idx).cloned().unwrap_or_default();
-        // pick community of dominant node
-        let comm_id = nodes
+        let file_nodes = nodes_in_file(input, fs.file_idx);
+        let comm_id = file_nodes
             .first()
             .map(|&i| g.nodes[i].community_id.to_native())
             .unwrap_or(0);
@@ -113,30 +149,25 @@ pub fn markdown(input: &RenderInput) -> String {
         };
         writeln!(out, "### `{path}`{comm_tag}").unwrap();
 
-        let picked = super::ranking::top_symbols_in_file(
-            &nodes,
-            input.stats,
-            input.top_symbols_per_file,
-            input.exclude_orphans,
-        );
-        if picked.is_empty() {
+        let symbols = resolve_symbols(input, fs.file_idx);
+        if symbols.is_empty() {
             writeln!(out, "_(no non-orphan symbols)_\n").unwrap();
             continue;
         }
-        for &i in &picked {
-            let name = node_name(g, i);
-            let kind = kind_to_str(&g.nodes[i].kind);
-            let in_deg = input.stats.in_deg[i];
-            let shadowed = input
-                .name_collisions
-                .get(name)
-                .map(|v| v.len())
-                .filter(|&n| n > 1)
-                .map(|n| format!(" ← shadowed by {} same-name", n - 1))
-                .unwrap_or_default();
-            writeln!(out, "- {kind} `{name}` (in_deg={in_deg}){shadowed}").unwrap();
+        for s in &symbols {
+            let shadowed = if s.shadowed_by > 0 {
+                format!(" ← shadowed by {} same-name", s.shadowed_by)
+            } else {
+                String::new()
+            };
+            writeln!(
+                out,
+                "- {} `{}` (in_deg={}){}",
+                s.kind, s.name, s.in_deg, shadowed
+            )
+            .unwrap();
         }
-        let extra = nodes.len().saturating_sub(picked.len());
+        let extra = file_nodes.len().saturating_sub(symbols.len());
         if extra > 0 {
             writeln!(out, "- _… +{extra} more_").unwrap();
         }
@@ -160,27 +191,14 @@ pub fn json(input: &RenderInput) -> serde_json::Value {
         .top_files
         .iter()
         .map(|fs| {
-            let nodes = input.by_file.get(&fs.file_idx).cloned().unwrap_or_default();
-            let picked = super::ranking::top_symbols_in_file(
-                &nodes,
-                input.stats,
-                input.top_symbols_per_file,
-                input.exclude_orphans,
-            );
-            let symbols: Vec<_> = picked
-                .iter()
-                .map(|&i| {
-                    let name = node_name(g, i).to_string();
-                    let shadowed = input
-                        .name_collisions
-                        .get(&name)
-                        .map(|v| v.len())
-                        .unwrap_or(1);
+            let symbols: Vec<_> = resolve_symbols(input, fs.file_idx)
+                .into_iter()
+                .map(|s| {
                     serde_json::json!({
-                        "name": name,
-                        "kind": kind_to_str(&g.nodes[i].kind),
-                        "in_deg": input.stats.in_deg[i],
-                        "shadowed_by": shadowed.saturating_sub(1),
+                        "name": s.name,
+                        "kind": s.kind,
+                        "in_deg": s.in_deg,
+                        "shadowed_by": s.shadowed_by,
                     })
                 })
                 .collect();

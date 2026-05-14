@@ -47,13 +47,21 @@ pub fn by_community(g: &ArchivedZeroCopyGraph) -> BTreeMap<u16, Vec<usize>> {
 }
 
 /// Names that occur on ≥2 distinct nodes. Used to flag shadowed symbols.
+///
+/// 兩段式：先用借用 &str 計數（不 allocate），第二段才為碰撞 name allocate
+/// String + Vec。大型 repo 中 unique name 比例高（>90%）時可省 ~95% String alloc。
 pub fn name_collisions(g: &ArchivedZeroCopyGraph) -> HashMap<String, Vec<usize>> {
+    let mut counts: HashMap<&str, usize> = HashMap::with_capacity(g.nodes.len());
+    for n in g.nodes.iter() {
+        *counts.entry(n.name.resolve(&g.string_pool)).or_default() += 1;
+    }
     let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, n) in g.nodes.iter().enumerate() {
-        let name = n.name.resolve(&g.string_pool).to_string();
-        by_name.entry(name).or_default().push(i);
+        let name = n.name.resolve(&g.string_pool);
+        if counts.get(name).copied().unwrap_or(0) >= 2 {
+            by_name.entry(name.to_string()).or_default().push(i);
+        }
     }
-    by_name.retain(|_, v| v.len() >= 2);
     by_name
 }
 

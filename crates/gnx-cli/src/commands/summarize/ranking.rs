@@ -13,6 +13,9 @@ pub struct FileSummary {
 }
 
 /// Top-N files ordered by aggregated in_deg (descending), then by symbol_count.
+///
+/// 用 `select_nth_unstable_by` 做 partial-sort (O(n) + O(k log k))，避免對全
+/// 集合 sort_by(O(n log n))。對大型 repo 收斂 K << N 時差異顯著。
 pub fn top_files(
     by_file: &BTreeMap<u32, Vec<usize>>,
     stats: &DegreeStats,
@@ -29,13 +32,20 @@ pub fn top_files(
             }
         })
         .collect();
-    summaries.sort_by(|a, b| {
+    if top_n == 0 {
+        return Vec::new();
+    }
+    let cmp = |a: &FileSummary, b: &FileSummary| {
         b.total_in_deg
             .cmp(&a.total_in_deg)
             .then_with(|| b.symbol_count.cmp(&a.symbol_count))
             .then_with(|| a.file_idx.cmp(&b.file_idx))
-    });
-    summaries.truncate(top_n);
+    };
+    if top_n < summaries.len() {
+        summaries.select_nth_unstable_by(top_n - 1, cmp);
+        summaries.truncate(top_n);
+    }
+    summaries.sort_by(cmp);
     summaries
 }
 
@@ -73,13 +83,20 @@ pub fn top_communities(
             }
         })
         .collect();
-    summaries.sort_by(|a, b| {
+    if top_n == 0 {
+        return Vec::new();
+    }
+    let cmp = |a: &CommunitySummary, b: &CommunitySummary| {
         b.symbol_count
             .cmp(&a.symbol_count)
             .then_with(|| b.file_count.cmp(&a.file_count))
             .then_with(|| a.community_id.cmp(&b.community_id))
-    });
-    summaries.truncate(top_n);
+    };
+    if top_n < summaries.len() {
+        summaries.select_nth_unstable_by(top_n - 1, cmp);
+        summaries.truncate(top_n);
+    }
+    summaries.sort_by(cmp);
     summaries
 }
 
@@ -100,12 +117,19 @@ pub fn top_symbols_in_file(
     } else {
         nodes.to_vec()
     };
-    candidates.sort_by(|&a, &b| {
+    if top_k == 0 {
+        return Vec::new();
+    }
+    let cmp = |&a: &usize, &b: &usize| {
         stats.in_deg[b]
             .cmp(&stats.in_deg[a])
             .then_with(|| a.cmp(&b))
-    });
-    candidates.truncate(top_k);
+    };
+    if top_k < candidates.len() {
+        candidates.select_nth_unstable_by(top_k - 1, cmp);
+        candidates.truncate(top_k);
+    }
+    candidates.sort_by(cmp);
     candidates
 }
 
@@ -115,6 +139,46 @@ mod tests {
 
     fn fake_stats(in_deg: Vec<u32>, out_deg: Vec<u32>) -> DegreeStats {
         DegreeStats { in_deg, out_deg }
+    }
+
+    #[test]
+    fn top_files_orders_by_aggregated_in_deg_then_symbol_count() {
+        // file 0: 2 nodes with in_deg [10, 5] → total 15
+        // file 1: 1 node with in_deg [20] → total 20
+        // file 2: 3 nodes with in_deg [5, 5, 5] → total 15 (ties file 0, but more symbols)
+        let stats = fake_stats(vec![10, 5, 20, 5, 5, 5], vec![0, 0, 0, 0, 0, 0]);
+        let mut by_file: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        by_file.insert(0, vec![0, 1]);
+        by_file.insert(1, vec![2]);
+        by_file.insert(2, vec![3, 4, 5]);
+        let result = top_files(&by_file, &stats, 10);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].file_idx, 1); // total=20 wins
+        assert_eq!(result[1].file_idx, 2); // total=15, 3 symbols > file 0's 2
+        assert_eq!(result[2].file_idx, 0);
+    }
+
+    #[test]
+    fn top_files_partial_sort_returns_correct_top_k() {
+        // 6 檔，in_deg 分別 [60,50,40,30,20,10]，top_n=3 應拿前 3 大且 sorted。
+        let stats = fake_stats(vec![60, 50, 40, 30, 20, 10], vec![0; 6]);
+        let mut by_file: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for i in 0..6 {
+            by_file.insert(i as u32, vec![i]);
+        }
+        let result = top_files(&by_file, &stats, 3);
+        let totals: Vec<u32> = result.iter().map(|f| f.total_in_deg).collect();
+        assert_eq!(totals, vec![60, 50, 40]);
+    }
+
+    #[test]
+    fn top_files_top_n_zero_returns_empty() {
+        // 對應 spec：--top-files=0 視為「不輸出此 section」，回傳空 Vec。
+        let stats = fake_stats(vec![5, 5], vec![0, 0]);
+        let mut by_file: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        by_file.insert(0, vec![0]);
+        by_file.insert(1, vec![1]);
+        assert!(top_files(&by_file, &stats, 0).is_empty());
     }
 
     #[test]

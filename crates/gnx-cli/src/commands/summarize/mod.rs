@@ -9,8 +9,14 @@ pub mod ranking;
 pub mod render;
 
 use crate::engine::Engine;
-use clap::Args;
+use clap::{Args, ValueEnum};
 use gnx_core::GnxError;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum SummarizeFormat {
+    Md,
+    Json,
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct SummarizeArgs {
@@ -31,8 +37,8 @@ pub struct SummarizeArgs {
     pub top_symbols: usize,
 
     /// Output format: md (default) or json.
-    #[arg(long, default_value = "md")]
-    pub format: String,
+    #[arg(long, value_enum, default_value_t = SummarizeFormat::Md)]
+    pub format: SummarizeFormat,
 
     /// Write to file instead of stdout.
     #[arg(long)]
@@ -66,21 +72,14 @@ pub fn run(args: SummarizeArgs, engine: &Engine) -> Result<(), GnxError> {
         exclude_orphans: !args.include_orphans,
     };
 
-    let text = match args.format.as_str() {
-        "md" | "markdown" => render::markdown(&input),
-        "json" => serde_json::to_string_pretty(&render::json(&input))
-            .map_err(|e| GnxError::Rkyv(format!("json serialize: {e}")))?,
-        other => {
-            return Err(GnxError::Rkyv(format!(
-                "unsupported --format '{other}' (expected: md, json)"
-            )));
-        }
+    let text = match args.format {
+        SummarizeFormat::Md => render::markdown(&input),
+        SummarizeFormat::Json => serde_json::to_string_pretty(&render::json(&input))
+            .map_err(|e| GnxError::Serialization(format!("json serialize: {e}")))?,
     };
 
     match args.output.as_deref() {
-        Some(path) => {
-            std::fs::write(path, &text).map_err(|e| GnxError::Rkyv(format!("write {path}: {e}")))?
-        }
+        Some(path) => std::fs::write(path, &text)?,
         None => print!("{text}"),
     }
     Ok(())
