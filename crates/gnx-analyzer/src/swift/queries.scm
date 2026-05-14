@@ -1,5 +1,6 @@
 ;; Declarations
 (class_declaration
+  (attribute)* @decorator
   (modifiers (visibility_modifier) @export)?
   name: [
     (type_identifier)
@@ -10,6 +11,7 @@
 
 ;; Functions
 (function_declaration
+  (attribute)* @decorator
   (modifiers (visibility_modifier) @export)?
   name: (simple_identifier) @name.function
   result: (type_identifier) @type ?) @function

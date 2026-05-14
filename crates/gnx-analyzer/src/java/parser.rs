@@ -52,6 +52,7 @@ impl LanguageProvider for JavaProvider {
         let idx_export = self.query.capture_index_for_name("export");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
+        let idx_decorator = self.query.capture_index_for_name("decorator");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -60,6 +61,7 @@ impl LanguageProvider for JavaProvider {
             let mut is_exported = false;
             let mut heritage = Vec::new();
             let mut type_annotation = None;
+            let mut decorators = Vec::new();
 
             let mut import_name = None;
             let mut import_src = None;
@@ -80,7 +82,9 @@ impl LanguageProvider for JavaProvider {
                 } else if cap_idx == idx_import_source {
                     import_src = Some(cap.node);
                 } else if cap_idx == idx_class || cap_idx == idx_interface || cap_idx == idx_method {
-                    root_span_node = Some(cap.node);
+                    if root_span_node.is_none() {
+                        root_span_node = Some(cap.node);
+                    }
                 } else if cap_idx == idx_export {
                     is_exported = true;
                 } else if cap_idx == idx_heritage {
@@ -90,6 +94,10 @@ impl LanguageProvider for JavaProvider {
                 } else if cap_idx == idx_type {
                     if let Ok(t_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
                         type_annotation = Some(t_str.to_string());
+                    }
+                } else if cap_idx == idx_decorator {
+                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        decorators.push(d_str.to_string());
                     }
                 }
             }
@@ -102,7 +110,7 @@ impl LanguageProvider for JavaProvider {
                     let node_id = root.id();
                     
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
-            decorators: vec![],
+                        decorators: vec![],
                         is_exported,
                         heritage: Vec::new(),
                         type_annotation: type_annotation.clone(),
@@ -119,6 +127,11 @@ impl LanguageProvider for JavaProvider {
                     for h in heritage {
                         if !entry.heritage.contains(&h) {
                             entry.heritage.push(h);
+                        }
+                    }
+                    for d in decorators {
+                        if !entry.decorators.contains(&d) {
+                            entry.decorators.push(d);
                         }
                     }
                     if is_exported {

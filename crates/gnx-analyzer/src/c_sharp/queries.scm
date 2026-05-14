@@ -1,5 +1,6 @@
 ;; Classes
 (class_declaration
+  (attribute_list)* @decorator
   (modifier)* @export
   name: (identifier) @name.class
   (base_list (_)* @heritage)?
@@ -7,6 +8,7 @@
 
 ;; Structs
 (struct_declaration
+  (attribute_list)* @decorator
   (modifier)* @export
   name: (identifier) @name.class
   (base_list (_)* @heritage)?
@@ -14,6 +16,7 @@
 
 ;; Interfaces
 (interface_declaration
+  (attribute_list)* @decorator
   (modifier)* @export
   name: (identifier) @name.interface
   (base_list (_)* @heritage)?
@@ -21,6 +24,7 @@
 
 ;; Enums
 (enum_declaration
+  (attribute_list)* @decorator
   (modifier)* @export
   name: (identifier) @name.class
   (base_list (_)* @heritage)?
@@ -28,6 +32,7 @@
 
 ;; Records
 (record_declaration
+  (attribute_list)* @decorator
   (modifier)* @export
   name: (identifier) @name.class
   (base_list (_)* @heritage)?
@@ -35,6 +40,7 @@
 
 ;; Methods
 (method_declaration
+  (attribute_list)* @decorator
   (modifier)* @export
   returns: (_) @type
   name: (identifier) @name.method
@@ -42,12 +48,14 @@
 
 ;; Constructors
 (constructor_declaration
+  (attribute_list)* @decorator
   (modifier)* @export
   name: (identifier) @name.method
 ) @method
 
 ;; Local Functions
 (local_function_statement
+  (attribute_list)* @decorator
   (modifier)* @export
   returns: (_) @type
   name: (identifier) @name.function

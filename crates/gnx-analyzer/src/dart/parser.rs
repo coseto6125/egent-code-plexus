@@ -46,6 +46,7 @@ impl LanguageProvider for DartProvider {
         let idx_type = self.query.capture_index_for_name("type");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
+        let idx_decorator = self.query.capture_index_for_name("decorator");
 
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
@@ -59,6 +60,7 @@ impl LanguageProvider for DartProvider {
             let mut root_span_node = None;
             let mut heritage = Vec::new();
             let mut type_annotation = None;
+            let mut decorators = Vec::new();
 
             let mut import_source = None;
             let mut import_alias = None;
@@ -89,6 +91,10 @@ impl LanguageProvider for DartProvider {
                     import_source = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_alias {
                     import_alias = Some(cap.node);
+                } else if Some(cap_idx) == idx_decorator {
+                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        decorators.push(d_str.to_string());
+                    }
                 }
 
                 if Some(cap_idx) == idx_function
@@ -109,7 +115,7 @@ impl LanguageProvider for DartProvider {
                     let end = root.end_position();
                     
                     nodes.push(RawNode {
-            decorators: vec![],
+                        decorators,
                         is_exported,
                         heritage: heritage.clone(),
                         type_annotation: type_annotation.clone(),

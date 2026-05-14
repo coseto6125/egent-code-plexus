@@ -1,20 +1,24 @@
 ;; Structs
 (struct_item
+  (attribute_item)* @decorator
   (visibility_modifier)? @export
   name: (type_identifier) @struct_item.name) @class
 
 ;; Enums
 (enum_item
+  (attribute_item)* @decorator
   (visibility_modifier)? @export
   name: (type_identifier) @enum_item.name) @class
 
 ;; Traits
 (trait_item
+  (attribute_item)* @decorator
   (visibility_modifier)? @export
   name: (type_identifier) @trait_item.name) @interface
 
 ;; Functions
 (function_item
+  (attribute_item)* @decorator
   (visibility_modifier)? @export
   name: (identifier) @function_item.name
   return_type: (_) @type) @function
@@ -27,6 +31,7 @@
   ] @heritage
   body: (declaration_list
     (function_item
+      (attribute_item)* @decorator
       (visibility_modifier)? @export
       name: (identifier) @function_item.name
       return_type: (_) @type) @method))
@@ -35,6 +40,7 @@
 (trait_item
   body: (declaration_list
     (function_signature_item
+      (attribute_item)* @decorator
       (visibility_modifier)? @export
       name: (identifier) @function_item.name
       return_type: (_) @type) @method))

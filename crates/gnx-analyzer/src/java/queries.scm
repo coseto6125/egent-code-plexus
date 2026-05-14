@@ -46,3 +46,32 @@
     (identifier) @import.name @import.source
   ]
 ) @import
+
+;; Decorators
+(class_declaration
+  (modifiers [
+    (annotation) @decorator
+    (marker_annotation) @decorator
+  ])
+) @class
+
+(interface_declaration
+  (modifiers [
+    (annotation) @decorator
+    (marker_annotation) @decorator
+  ])
+) @interface
+
+(method_declaration
+  (modifiers [
+    (annotation) @decorator
+    (marker_annotation) @decorator
+  ])
+) @method
+
+(constructor_declaration
+  (modifiers [
+    (annotation) @decorator
+    (marker_annotation) @decorator
+  ])
+) @method

@@ -53,6 +53,7 @@ impl LanguageProvider for SwiftProvider {
         let idx_export = self.query.capture_index_for_name("export");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
+        let idx_decorator = self.query.capture_index_for_name("decorator");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -65,6 +66,7 @@ impl LanguageProvider for SwiftProvider {
             let mut is_exported = false;
             let mut heritage = Vec::new();
             let mut type_annotation = None;
+            let mut decorators = Vec::new();
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -104,6 +106,10 @@ impl LanguageProvider for SwiftProvider {
                     if let Ok(type_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
                         type_annotation = Some(type_str.to_string());
                     }
+                } else if Some(cap_idx) == idx_decorator {
+                    if let Ok(d_str) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        decorators.push(d_str.to_string());
+                    }
                 }
             }
 
@@ -112,7 +118,7 @@ impl LanguageProvider for SwiftProvider {
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {
-            decorators: vec![],
+                        decorators,
                         is_exported,
                         heritage,
                         type_annotation,

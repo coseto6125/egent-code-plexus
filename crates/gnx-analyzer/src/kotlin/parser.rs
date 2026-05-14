@@ -35,7 +35,8 @@ impl LanguageProvider for KotlinProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes = Vec::new();
+        use std::collections::HashMap;
+        let mut node_map: HashMap<usize, RawNode> = HashMap::new();
         let mut imports = Vec::new();
 
         let idx_class_name = self.query.capture_index_for_name("class.name");
@@ -45,6 +46,7 @@ impl LanguageProvider for KotlinProvider {
         let idx_type = self.query.capture_index_for_name("type");
         let idx_alias = self.query.capture_index_for_name("alias");
         let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_decorator = self.query.capture_index_for_name("decorator");
 
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
@@ -56,6 +58,7 @@ impl LanguageProvider for KotlinProvider {
             let mut is_exported = true;
             let mut heritage = Vec::new();
             let mut type_annotation = None;
+            let mut decorators = Vec::new();
 
             let mut import_src = None;
             let mut import_alias = None;
@@ -82,12 +85,18 @@ impl LanguageProvider for KotlinProvider {
                     if let Ok(t) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
                         type_annotation = Some(t.to_string());
                     }
+                } else if Some(cap_idx) == idx_decorator {
+                    if let Ok(d) = std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]) {
+                        decorators.push(d.to_string());
+                    }
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_alias {
                     import_alias = Some(cap.node);
                 } else if Some(cap_idx) == idx_class || Some(cap_idx) == idx_function {
-                    root_span_node = Some(cap.node);
+                    if root_span_node.is_none() {
+                        root_span_node = Some(cap.node);
+                    }
                 }
             }
 
@@ -95,11 +104,13 @@ impl LanguageProvider for KotlinProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    nodes.push(RawNode {
-            decorators: vec![],
+                    
+                    let node_id = root.id();
+                    let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
+                        decorators: vec![],
                         is_exported,
-                        heritage,
-                        type_annotation,
+                        heritage: Vec::new(),
+                        type_annotation: type_annotation.clone(),
                         name: name_str.to_string(),
                         kind: k,
                         span: (
@@ -109,6 +120,23 @@ impl LanguageProvider for KotlinProvider {
                             end.column as u32,
                         ),
                     });
+                    
+                    if !is_exported {
+                        entry.is_exported = false;
+                    }
+                    if type_annotation.is_some() {
+                        entry.type_annotation = type_annotation;
+                    }
+                    for h in heritage {
+                        if !entry.heritage.contains(&h) {
+                            entry.heritage.push(h);
+                        }
+                    }
+                    for d in decorators {
+                        if !entry.decorators.contains(&d) {
+                            entry.decorators.push(d);
+                        }
+                    }
                 }
             }
 
@@ -128,6 +156,8 @@ impl LanguageProvider for KotlinProvider {
                 }
             }
         }
+
+        let nodes = node_map.into_values().collect();
 
         Ok(LocalGraph {
             routes: vec![],

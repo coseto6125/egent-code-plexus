@@ -5,7 +5,9 @@
 
 ; Classes
 (class_declaration
-  (modifiers)? @export
+  (modifiers
+    (annotation)* @decorator
+  )? @export
   (type_identifier) @class.name
   (delegation_specifier
       [
@@ -17,7 +19,9 @@
 
 ; Objects
 (object_declaration
-  (modifiers)? @export
+  (modifiers
+    (annotation)* @decorator
+  )? @export
   (type_identifier) @class.name
   (delegation_specifier
       [
@@ -29,6 +33,8 @@
 
 ; Functions
 (function_declaration
-  (modifiers)? @export
+  (modifiers
+    (annotation)* @decorator
+  )? @export
   (simple_identifier) @function.name
   (user_type)? @type) @function
