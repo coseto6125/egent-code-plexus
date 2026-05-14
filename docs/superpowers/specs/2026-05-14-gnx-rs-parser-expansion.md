@@ -1,8 +1,8 @@
 # gnx-rs Parser Expansion — Fill gaps + add new languages
 
-**Goal:** Close the 22 missing-feature cells in the current 14-language parity matrix and add 6+ new languages (starting with Lua), using parallel Sonnet subagents under an Opus-defined contract.
+**Goal:** Close the 20 missing-feature cells in the current 14-language parity matrix and add 6+ new languages (starting with Lua), using parallel Sonnet subagents.
 
-**Approach:** Decompose the work into three layers — (1) a small set of cross-cutting design decisions done once by Opus, (2) a Sonnet worker template for per-language pattern-fill tasks fanned out in parallel, (3) batched serial work for the parts that touch shared code (`calls.rs`).
+**Approach:** Decompose the work into three layers — (1) a small Phase 0 setup (worker brief + Swift capture-name fix + verification harness), (2) a Sonnet worker template for per-language pattern-fill tasks fanned out in parallel, (3) a shared config-file detection module that several languages plug into.
 
 **Date:** 2026-05-14
 
@@ -29,9 +29,9 @@ All language support in `gnx-rs` is implemented via `tree-sitter` + a `queries.s
 | C | 24 | 4 |
 | Swift | 22 | 2 |
 
-Total: 22 missing cells across 9 languages. The Rust scaffolding around each parser is stable and uniform; expanding coverage = writing more tree-sitter queries and (for the `Constructor Inference` axis) extending the shared call resolver in `crates/gnx-analyzer/src/calls.rs`.
+Total: 20 missing cells across 11 languages. The Rust scaffolding around each parser is stable and uniform; expanding coverage = writing more tree-sitter queries plus a small shared `config_detector` module for the Config axis. Constructor Inference, Frameworks, and Entry Points are already ✓ across all 14 languages and need no per-language work — they're either inherited from the shared `extract_calls` infrastructure or already captured by every parser's existing queries.
 
-## 2. Gap matrix (the 22 cells)
+## 2. Gap matrix (the 20 cells)
 
 Cells marked `—` in the parity table, mapped to concrete work items:
 
@@ -54,20 +54,13 @@ Cells marked `—` in the parity table, mapped to concrete work items:
 | C | Config | Register `Makefile` / `CMakeLists.txt` (shared) |
 | C++ | Imports | `#include` + `using namespace` + `using X = Y` — three separate forms |
 | C++ | Named Bindings | `using std::vector` form |
-| C++ | Constructor Inference | Touches `calls.rs` — see §5 |
+| C++ | Config | Register `Makefile` / `CMakeLists.txt` (shared with C) |
 | Dart | Named Bindings | `import 'x.dart' show A, B` / `hide` — `show_combinator` / `hide_combinator` captures |
 | Dart | Config | Register `pubspec.yaml` (shared) |
-| Java | Constructor Inference | Touches `calls.rs` |
-| Kotlin | Constructor Inference | Touches `calls.rs` |
-| Rust | Constructor Inference | Touches `calls.rs` |
-| Ruby | Constructor Inference | Touches `calls.rs` |
-| C | Constructor Inference | Touches `calls.rs` |
-| C++ | Constructor Inference | Touches `calls.rs` (overlaps with above) |
-| Dart | Constructor Inference | Touches `calls.rs` |
 
 Two classes:
--   **Query-only** (~16 items): pure `queries.scm` edits, no Rust changes. Trivially parallelizable.
--   **Shared-code** (Config: 6 langs, Constructor Inference: 7 langs): touches `calls.rs` or new shared `config_detector` — must be serialized or contract-first refactored.
+-   **Query-only** (13 items): pure `queries.scm` edits, no Rust changes. Trivially parallelizable. (Note: 3 of these are rationale-only — Ruby Named Bindings / Ruby Type Annot / C Named Bindings / C Heritage — where the language genuinely lacks the feature and the "fix" is documenting why.)
+-   **Shared-code Config** (7 items): all funnel into a single `config_detector` module with per-language file-pattern entries. Build the module once, then add 7 rows.
 
 ## 3. Parallelization strategy
 
@@ -78,35 +71,35 @@ Two classes:
 | Input $/M | $3 | $15 |
 | Output $/M | $15 | $75 |
 | Est. cost per language task | ~$0.17 | ~$0.83 |
-| 28 tasks total (22 gaps + Lua + 5 new) | **~$5** | **~$23** |
+| 26 tasks total (20 gaps + Lua + 5 new) | **~$4** | **~$22** |
 
-Tree-sitter query writing is high-template, low-novel-reasoning work: Sonnet is the right default. Reserve Opus for the cross-cutting design pass that comes before the fan-out.
+Tree-sitter query writing is high-template, low-novel-reasoning work: Sonnet is the right default. Reserve Opus only for Phase 0 (small) and final parity validation if results look suspicious.
 
 ### 3.2 Subagent isolation considerations
 
-Each subagent is a fresh context — it must re-read sample parsers, `queries.scm` templates, and the target grammar's `node-types.json`. To avoid 28× duplicated reads:
+Each subagent is a fresh context — it must re-read sample parsers, `queries.scm` templates, and the target grammar's `node-types.json`. To avoid 26× duplicated reads:
 
 -   **Shared brief**: write a single `docs/superpowers/plans/parser-worker-brief.md` containing (a) the parser template anatomy, (b) capture naming conventions, (c) verification commands. Each subagent's prompt opens with "read this brief, then [task-specific instructions]" — the brief's content becomes a prompt-cache hit if subagents fire within the 5-minute window.
--   **No shared mutable state during fan-out**: each subagent works on one `crates/gnx-analyzer/src/<lang>/queries.scm` and nothing else.
+-   **No shared mutable state during fan-out**: each subagent works on one `crates/gnx-analyzer/src/<lang>/queries.scm` and nothing else. The Config wirings are batched in a separate serial phase (§3.3 Phase 2) so they all touch `config_detector` cleanly.
 
 ### 3.3 Batch table
 
 | Phase | Tasks | Model | Concurrency | Duration |
 |---|---|---|---|---|
-| **0. Contract design** | Define (a) `config_detector` trait, (b) `calls.rs` ConstructorCall variant, (c) worker brief, (d) verification harness | Opus 1× | serial | ~2 hr |
-| **1. Query-only gaps** | 16 cells across 9 langs | Sonnet | 8 in parallel × 2 waves | ~1 day |
-| **2. Config detector wiring** | Register `Cargo.toml` / `pom.xml` / `build.gradle*` / `Gemfile` / `Makefile` / `pubspec.yaml` — 6 entries, one shared module | Sonnet 1× | serial | ~1 hr |
+| **0. Setup** | (a) worker brief, (b) Swift capture-name fix (see §4), (c) confirm verification harness runs, (d) trial run on one cell end-to-end | Opus or Sonnet 1× | serial | ~2 hr |
+| **1. Query-only gaps** | 13 cells across 9 langs (mix of substantive + rationale-only) | Sonnet | 8 in parallel × 2 waves | ~1 day |
+| **2. Config detector** | Build `config_detector` module + register 7 file-pattern entries (Cargo.toml, pom.xml + build.gradle, build.gradle.kts, Gemfile + .gemspec, Makefile + CMakeLists.txt, pubspec.yaml) | Sonnet 1× | serial | ~2 hr |
 | **3. New language: Lua** | New crate dir + queries.scm + fixture | Sonnet 1× | independent of phase 1 | ~half day |
 | **4. New languages: Bash / SQL / HCL / Scala / Elixir** | Same template, 5 langs | Sonnet | 5 in parallel | ~1 day |
-| **5. Constructor Inference** | 7 langs, all writing to refactored `calls.rs` extension point | Sonnet | serial or 2-batch (after §5 refactor) | ~1.5 day |
-| **6. Parity validation** | Run parity harness, file-by-file diff against upstream gitnexus output | Sonnet 1× | serial | ~half day |
+| **5. Parity validation** | Run parity harness, file-by-file diff against upstream gitnexus output | Sonnet 1× | serial | ~half day |
 
-Total wall-clock: **~4 days** with parallelization vs ~10 days serial. Total est. cost: **$5–$8**.
+Total wall-clock: **~2.5 days** with parallelization vs ~6 days serial. Total est. cost: **$3–$5**.
 
 ## 4. Worker brief contents
 
 The shared `docs/superpowers/plans/parser-worker-brief.md` (to be written in Phase 0) must include:
 
+0.  **Phase 0 hard prerequisite — Swift capture-name alignment**: `crates/gnx-analyzer/src/swift/queries.scm` currently uses `@name.class` / `@name.function`, but `swift/parser.rs` calls `capture_index_for_name("class.name")` etc. (the standard convention used by the other 13 langs). The mismatch means Swift currently produces empty parse output silently — no error, no symbols. **Fix this before any Swift gap-fill worker runs**, otherwise the workers will spin on queries that look correct but resolve to empty captures. Standardize on `@class.name` / `@function.name` to match the other parsers.
 1.  **Anatomy of a parser**: walk through `c/parser.rs` (smallest reference, 127 lines) — `Provider::new` loads grammar + query, `parse_file` runs query, captures iterated, `RawNode` / `RawImport` emitted into `LocalGraph`.
 2.  **Anatomy of `queries.scm`**: capture naming convention (`@function.name`, `@function`, `@import.source`, `@import`, `@const.name`, `@struct.name`, `@struct`, `@export`, `@heritage`, `@type`, `@decorator`). Reference: TS as the gold standard.
 3.  **Adding a new capture name**: corresponding handler in `parser.rs` `capture_index_for_name(...)` block + `RawNode` field mapping.
@@ -117,50 +110,19 @@ The shared `docs/superpowers/plans/parser-worker-brief.md` (to be written in Pha
     gnx analyze --repo tests/parity/fixtures/<lang>/sample_project
     gnx context --repo tests/parity/fixtures/<lang>/sample_project --name <known_symbol>
     ```
-5.  **Failure mode catalogue**: wrong node name (`class_declaration` vs `class_definition`), capture index `None` returned (capture present in `.scm` but not in match — usually optional `?` issue), tree-sitter version mismatch (some grammars on `0.20` API).
+5.  **Failure mode catalogue**: wrong node name (`class_declaration` vs `class_definition`), capture index `None` returned (capture present in `.scm` but not in match — usually optional `?` issue), tree-sitter version mismatch (some grammars on `0.20` API), capture-name vs `capture_index_for_name` mismatch (the Swift bug above generalised).
 6.  **Hard constraint**: the worker MUST run `cargo build` and at least one query against a fixture, and report stdout, before declaring done. No "looks correct" claims.
 
-## 5. The `calls.rs` refactor (Phase 0 deliverable)
+## 5. Lua addition — concrete spec
 
-Current shape: every parser calls `extract_calls(tree, source)` which returns generic call edges. Constructor calls (`new Foo()`, `Foo()` returning instance, `make<Foo>` etc.) are not distinguished.
-
-Proposed refactor:
-
-```rust
-// crates/gnx-analyzer/src/calls.rs
-pub enum CallKind {
-    Plain,
-    Constructor,
-    MethodOverride,
-}
-
-pub struct RawCall {
-    pub caller_name: String,
-    pub callee_name: String,
-    pub kind: CallKind,
-    pub line: u32,
-}
-
-// Per-language extractor signature
-pub trait CallExtractor {
-    fn extract(&self, tree: &Tree, source: &[u8]) -> Vec<RawCall>;
-}
-```
-
-After the refactor, the 7 Constructor Inference workers each write a per-language `CallExtractor` impl with `CallKind::Constructor` detection, in isolation. No more conflicts on `calls.rs`.
-
-The refactor itself (Phase 0) should be done once by a single agent (Opus or careful Sonnet) — touches all 14 existing parsers' call sites but in a uniform way.
-
-## 6. Lua addition — concrete spec
-
-### 6.1 Dependencies
+### 5.1 Dependencies
 
 ```toml
 # crates/gnx-analyzer/Cargo.toml
 tree-sitter-lua = "0.4"  # pin once selected
 ```
 
-### 6.2 Files to create
+### 5.2 Files to create
 
 ```
 crates/gnx-analyzer/src/lua/
@@ -169,7 +131,7 @@ crates/gnx-analyzer/src/lua/
 └── queries.scm      # ~70 lines, draft below
 ```
 
-### 6.3 `queries.scm` draft
+### 5.3 `queries.scm` draft
 
 ```scheme
 ;; Functions — top-level
@@ -215,7 +177,7 @@ crates/gnx-analyzer/src/lua/
   (#eq? @_fn "require")) @import
 ```
 
-### 6.4 Parser registration
+### 5.4 Parser registration
 
 Two sites in `crates/gnx-cli/src/commands/analyze.rs` must be updated together:
 
@@ -236,7 +198,7 @@ Both edits live in the same file; do them together to avoid the common pitfall o
 
 Also: `crates/gnx-analyzer/src/lib.rs` needs `pub mod lua;`.
 
-### 6.5 Fixture
+### 5.5 Fixture
 
 ```
 tests/parity/fixtures/lua/sample_project/
@@ -247,23 +209,23 @@ tests/parity/fixtures/lua/sample_project/
 
 Path convention matches the existing `tests/parity/fixtures/basic/` (TypeScript). Each new language gets a sibling directory under `tests/parity/fixtures/`.
 
-### 6.6 Expected coverage
+### 5.6 Expected coverage
 
 | Cell | Status | Notes |
 |---|---|---|
 | Imports | ✓ | `require("mod")` |
-| Named Bindings | — | Lua's `require` returns the table; named binding is `local X = require("...")` — could capture |
+| Named Bindings | — | Lua's `require` returns the table; named binding is `local X = require("...")` — could capture, future work |
 | Exports | — | Module-level `return { ... }` is the convention; non-trivial heuristic |
 | Heritage | — | `setmetatable(Child, { __index = Parent })` — pattern-detectable, future work |
 | Type Annotations | — | Vanilla Lua untyped; Luau has annotations (future) |
-| Constructor Inference | ~ | `setmetatable({}, Class)` pattern — punted to Phase 5 |
-| Config | ✓ | `.luarc.json`, `init.lua` as entry |
+| Constructor Inference | ✓ | Inherited from shared `extract_calls` — no per-language work needed |
+| Config | ✓ | `.luarc.json`, `init.lua` as entry (wire into `config_detector`) |
 | Frameworks | ~ | LÖVE (`love.load`/`love.update`), Neovim plugin (`require('plenary')`) — future |
 | Entry Points | ✓ | Top-level `function main` or returned module |
 
-Expected initial parity: **5/9 columns**, comparable to Ruby's coverage.
+Expected initial parity: **6/9 columns**, comparable to Ruby's coverage.
 
-## 7. Additional languages (Phase 4)
+## 6. Additional languages (Phase 4)
 
 | Language | tree-sitter crate | Initial scope | Effort |
 |---|---|---|---|
@@ -275,52 +237,50 @@ Expected initial parity: **5/9 columns**, comparable to Ruby's coverage.
 
 Each goes through the same template as Lua. Bash + SQL + HCL group is particularly valuable because **they're often cross-file targets from existing languages** (Python calling shell, application code embedding SQL strings, Terraform consumed by CI/CD scripts) — adding them creates new edges in repos that already have multiple languages indexed.
 
-## 8. Build sequence
+## 7. Build sequence
 
 ```
-Day 1 (Opus, serial)
-  └─ Phase 0: contract design
+Day 1 (Opus or Sonnet, serial)
+  └─ Phase 0: setup
      ├─ docs/superpowers/plans/parser-worker-brief.md
-     ├─ calls.rs refactor (CallKind, RawCall, CallExtractor trait)
-     ├─ config_detector trait + initial registry
-     └─ verification harness command
+     ├─ Swift capture-name alignment fix (queries.scm ↔ parser.rs)
+     ├─ Verification harness sanity check (tests/parity/run_parity.py)
+     └─ One trial cell run end-to-end (e.g. JS Type Annotation)
 
-Day 2 (Sonnet, parallel × 8)
-  └─ Phase 1: 16 query-only cells, wave 1 (8 tasks)
-Day 2 PM (Sonnet, parallel × 8)
-  └─ Phase 1: 16 query-only cells, wave 2 (8 tasks)
+Day 2 AM (Sonnet, parallel × 8)
+  └─ Phase 1 wave 1: 8 query-only cells
+Day 2 PM (Sonnet, parallel × 5)
+  └─ Phase 1 wave 2: 5 query-only cells
 Day 2 PM (Sonnet, serial)
-  └─ Phase 2: config detector wirings (6 entries)
+  └─ Phase 2: config_detector module + 7 file-pattern entries
 
 Day 3 (Sonnet, parallel × 6)
   └─ Phase 3+4: Lua + Bash + SQL + HCL + Scala + Elixir
 
-Day 4 (Sonnet, serial or 2-batch)
-  └─ Phase 5: Constructor Inference per-lang implementations
-Day 4 PM (Sonnet, serial)
-  └─ Phase 6: parity validation + cleanup
+Day 3 PM (Sonnet, serial)
+  └─ Phase 5: parity validation + cleanup
 ```
 
-## 9. Dispatch checklist
+## 8. Dispatch checklist
 
 Before Phase 1 fan-out, verify:
 
 -   [ ] Worker brief written and validated against one trial task
--   [ ] `calls.rs` refactor merged
--   [ ] `config_detector` trait + registry merged
+-   [ ] Swift capture-name alignment merged (`queries.scm` ↔ `parser.rs` consistent)
+-   [ ] `config_detector` module structure scaffolded (so Phase 2 has a clear target)
 -   [ ] One trial subagent run completed successfully (e.g. JS Type Annotation → confirm flow works end-to-end including `cargo build` + fixture query)
 -   [ ] Verification harness command works (no false negatives)
 -   [ ] At-most-N concurrent agents decided (recommend 6–8 to stay under rate limits)
 
-## 10. Non-goals
+## 9. Non-goals
 
 -   **Framework-specific extraction** (React component graph, Spring beans, Rails routes) — separate spec; can layer on once base parsers are solid.
 -   **Type inference across files** — keep type captures local; full type resolution is `resolution/` crate's concern, not the per-language parser's.
 -   **Refactoring tools per language** — `rename`-style operations stay generic for now.
 -   **LSP integration** — out of scope; gnx-rs is an indexer, not a language server.
+-   **Per-language Constructor Inference refactor** — Constructor calls are currently handled uniformly by `extract_calls` and all 14 languages are ✓ on this axis. If future work needs distinct graph-edge types for `new Foo()` vs plain `foo()`, that's a separate spec; not in this scope.
 
-## 11. Open questions
+## 10. Open questions
 
--   **Constructor Inference scope**: for languages where construction is ambiguous (Python `Foo()` could be a function or a class call), do we require resolving the call target first, or emit a `CallKind::ConstructorMaybe` and let the resolution pass decide? Recommendation: latter, keep parsers local.
 -   **Embedding vector storage for new langs**: Lua / Bash chunks may produce many short symbols. Should embedder skip < N tokens? Already a concern for existing langs, treat uniformly.
--   **Parity harness ground truth**: do we have upstream gitnexus indexing the same fixtures for diff comparison? If not, Phase 6 reduces to internal consistency checks.
+-   **Parity harness ground truth**: do we have upstream gitnexus indexing the same fixtures for diff comparison? `tests/parity/run_parity.py` depends on a locally-installed `gnx` CLI; the multi-language extension `all_languages_parity.py` expects `.sample_repo/<Lang>/` dirs that aren't in the repo. Phase 5 may reduce to internal consistency checks unless we wire up upstream fixtures.
