@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{collect_receiver_methods, extract_c_calls};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -117,8 +117,13 @@ impl LanguageProvider for CProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
+        // Extract call sites with C-convention receiver binding: functions
+        // taking a `(struct T *self, ...)`-shaped first param are treated
+        // as methods on `T`, so call sites rewrite to `T.fn` for the
+        // resolver's Tier 2.5 qualifier-scoped lookup. Convention-driven,
+        // not language-mandated — see `RECEIVER_NAMES` for the gate.
+        let methods = collect_receiver_methods(tree.root_node(), source);
+        extract_c_calls(tree.root_node(), source, &mut nodes, &methods);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{collect_bindings, extract_swift_calls};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -162,8 +162,12 @@ impl LanguageProvider for SwiftProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
+        // Extract call sites with receiver-type binding: `self.method()` →
+        // `Class.method`, `super.method()` → `Super.method`, typed-var
+        // `obj.method()` → `Type.method` (P0 of Constructor Inference, mirrors
+        // Python's `4e4fb1b` for the resolver's Tier 2.5 qualifier lookup).
+        let bindings = collect_bindings(tree.root_node(), source);
+        extract_swift_calls(tree.root_node(), source, &mut nodes, &bindings);
 
         Ok(LocalGraph {
             content_hash: [0; 32],
