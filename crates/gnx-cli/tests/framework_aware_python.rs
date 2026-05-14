@@ -1,6 +1,9 @@
-//! Integration test: Python FastAPI framework refs (T2).
+//! Integration test: Python FastAPI framework refs (T2) and CLI
+//! `--high-trust-only` filter behaviour (T5).
 use gnx_analyzer::python::PythonProvider;
 use gnx_core::analyzer::provider::LanguageProvider;
+use std::path::Path;
+use std::process::Command;
 
 #[test]
 fn fastapi_depends_creates_low_confidence_framework_refs() {
@@ -49,4 +52,142 @@ fn fastapi_depends_creates_low_confidence_framework_refs() {
             r.confidence
         );
     }
+}
+
+fn gnx_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_gnx")
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git failed to spawn");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn setup_fastapi_repo(repo: &Path, home: &Path) {
+    std::fs::create_dir(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/main.py"),
+        include_str!("fixtures/fastapi_depends.py"),
+    )
+    .unwrap();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    run_git(
+        repo,
+        &["remote", "add", "origin", "git@github.com:E-NoR/fw-test.git"],
+    );
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    let out = Command::new(gnx_bin())
+        .args(["analyze", "--repo", "."])
+        .current_dir(repo)
+        .env("HOME", home)
+        .output()
+        .expect("analyze failed to spawn");
+    assert!(
+        out.status.success(),
+        "analyze failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn high_trust_only_filters_framework_edges_in_impact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_fastapi_repo(repo, home_tmp.path());
+
+    // The only edges reaching get_db come from FastAPI `Depends(get_db)` —
+    // emitted as framework refs with confidence 0.6 ("fastapi-depends").
+    //
+    //   read_user --(Depends, 0.6)--> get_current_user --(Depends, 0.6)--> get_db
+    //
+    // Default impact upstream from get_db must include at least one caller
+    // (get_current_user) reached via the low-confidence edge.
+    let target_uid = "Function:src/main.py:get_db";
+    let default_out = Command::new(gnx_bin())
+        .args([
+            "impact",
+            "--repo",
+            ".",
+            "--target",
+            target_uid,
+            "--direction",
+            "upstream",
+            "--format",
+            "json",
+        ])
+        .current_dir(repo)
+        .env("HOME", home_tmp.path())
+        .output()
+        .expect("impact failed to spawn");
+    assert!(
+        default_out.status.success(),
+        "default impact failed: {}",
+        String::from_utf8_lossy(&default_out.stderr)
+    );
+    let default_json: serde_json::Value = serde_json::from_slice(&default_out.stdout).unwrap();
+    let default_count = default_json["impact"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    assert!(
+        default_count > 1,
+        "default upstream from get_db must traverse Depends edges (got count={default_count}): {default_json}"
+    );
+
+    // --high-trust-only: framework edges (confidence 0.6) filtered → only
+    // the target node itself remains in the BFS result.
+    let strict_out = Command::new(gnx_bin())
+        .args([
+            "impact",
+            "--repo",
+            ".",
+            "--target",
+            target_uid,
+            "--direction",
+            "upstream",
+            "--format",
+            "json",
+            "--high-trust-only",
+        ])
+        .current_dir(repo)
+        .env("HOME", home_tmp.path())
+        .output()
+        .expect("strict impact failed to spawn");
+    assert!(
+        strict_out.status.success(),
+        "strict impact failed: {}",
+        String::from_utf8_lossy(&strict_out.stderr)
+    );
+    let strict_json: serde_json::Value = serde_json::from_slice(&strict_out.stdout).unwrap();
+    let strict_count = strict_json["impact"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    assert!(
+        strict_count < default_count,
+        "--high-trust-only must produce a smaller affected set (got strict={strict_count}, default={default_count}): default={default_json} strict={strict_json}"
+    );
 }

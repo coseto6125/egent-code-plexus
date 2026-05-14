@@ -55,6 +55,12 @@ pub struct DetectChangesArgs {
     /// Include test-file hunks (default: false — test files dropped).
     #[arg(long, default_value_t = false)]
     pub include_tests: bool,
+
+    /// Drop affected processes whose execution trace traverses any edge with
+    /// confidence < 0.8 (e.g. framework-aware refs from FastAPI `Depends()`,
+    /// Axum/Express route handlers). Default off.
+    #[arg(long, default_value_t = false)]
+    pub high_trust_only: bool,
 }
 
 pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
@@ -257,6 +263,29 @@ pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
                 step,
             ));
         }
+    }
+
+    // --high-trust-only: drop processes whose trace traverses any low-confidence
+    // edge (framework-aware refs emit confidence < 1.0).
+    if args.high_trust_only {
+        affected.retain(|&proc_idx, _| {
+            let k = (proc_idx - process_start) as usize;
+            let off_s = graph.traces_offsets[k].to_native() as usize;
+            let off_e = graph.traces_offsets[k + 1].to_native() as usize;
+            let trace = &graph.traces_data[off_s..off_e];
+            for pair in trace.windows(2) {
+                let a = pair[0].to_native() as usize;
+                let b = pair[1].to_native();
+                let out_s = graph.out_offsets[a].to_native() as usize;
+                let out_e = graph.out_offsets[a + 1].to_native() as usize;
+                for edge in &graph.edges[out_s..out_e] {
+                    if edge.target.to_native() == b && edge.confidence.to_native() < 0.8 {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
     }
 
     let process_count = affected.len();
