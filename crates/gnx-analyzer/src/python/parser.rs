@@ -64,9 +64,16 @@ impl LanguageProvider for PythonProvider {
         let idx_fastapi_depends_target =
             self.query.capture_index_for_name("fastapi.depends.target");
 
+        let idx_fastapi_route_app = self.query.capture_index_for_name("fastapi.route.app");
+        let idx_fastapi_route_method = self.query.capture_index_for_name("fastapi.route.method");
+        let idx_fastapi_route_handler = self.query.capture_index_for_name("fastapi.route.handler");
+
         // Collect (target_name, span) for FastAPI Depends() refs; resolve
         // the enclosing function via span containment after nodes are built.
         let mut pending_depends: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
+
+        // Directly emitted route decorator refs (no span resolution needed).
+        let mut route_refs: Vec<RawFrameworkRef> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -84,6 +91,10 @@ impl LanguageProvider for PythonProvider {
             let mut route_method = None;
             let mut route_path = None;
             let mut is_route = false;
+
+            let mut fa_route_app_node = None;
+            let mut fa_route_method_node = None;
+            let mut fa_route_handler_node = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -140,6 +151,37 @@ impl LanguageProvider for PythonProvider {
                             ),
                         ));
                     }
+                } else if cap_idx == idx_fastapi_route_app {
+                    fa_route_app_node = Some(cap.node);
+                } else if cap_idx == idx_fastapi_route_method {
+                    fa_route_method_node = Some(cap.node);
+                } else if cap_idx == idx_fastapi_route_handler {
+                    fa_route_handler_node = Some(cap.node);
+                }
+            }
+
+            if let (Some(app_n), Some(method_n), Some(handler_n)) =
+                (fa_route_app_node, fa_route_method_node, fa_route_handler_node)
+            {
+                if let (Ok(app_str), Ok(method_str), Ok(handler_str)) = (
+                    std::str::from_utf8(&source[app_n.start_byte()..app_n.end_byte()]),
+                    std::str::from_utf8(&source[method_n.start_byte()..method_n.end_byte()]),
+                    std::str::from_utf8(&source[handler_n.start_byte()..handler_n.end_byte()]),
+                ) {
+                    let start = handler_n.start_position();
+                    let end = handler_n.end_position();
+                    route_refs.push(RawFrameworkRef {
+                        source_name: app_str.to_string(),
+                        target_name: handler_str.to_string(),
+                        confidence: 0.9,
+                        reason: format!("fastapi-route-{}", method_str),
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                    });
                 }
             }
 
@@ -248,7 +290,7 @@ impl LanguageProvider for PythonProvider {
 
         // Resolve FastAPI Depends() refs: find the innermost enclosing
         // Function/Method node whose span contains the capture span.
-        let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
+        let mut framework_refs: Vec<RawFrameworkRef> = route_refs;
         for (target_name, span) in pending_depends {
             let enclosing = nodes
                 .iter()

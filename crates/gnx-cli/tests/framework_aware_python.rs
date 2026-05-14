@@ -191,3 +191,54 @@ fn high_trust_only_filters_framework_edges_in_impact() {
         "--high-trust-only must produce a smaller affected set (got strict={strict_count}, default={default_count}): default={default_json} strict={strict_json}"
     );
 }
+
+#[test]
+fn fastapi_route_decorators_create_framework_refs() {
+    let src = include_str!("fixtures/fastapi_routes.py");
+    let provider = PythonProvider::new().unwrap();
+    let local = provider
+        .parse_file("test.py".as_ref(), src.as_bytes())
+        .unwrap();
+
+    // Expect 4 fastapi-route-* refs:
+    //   app    --fastapi-route-get-->     read_user
+    //   app    --fastapi-route-post-->    create_item
+    //   router --fastapi-route-delete--> delete_item
+    //   router --fastapi-route-patch-->  patch_item
+    let route_refs: Vec<_> = local
+        .framework_refs
+        .iter()
+        .filter(|r| r.reason.starts_with("fastapi-route-"))
+        .collect();
+    assert_eq!(
+        route_refs.len(),
+        4,
+        "expected 4 fastapi-route-* refs, got {}: {:?}",
+        route_refs.len(),
+        local.framework_refs
+    );
+
+    let triples: Vec<(&str, &str, &str)> = route_refs
+        .iter()
+        .map(|r| (r.source_name.as_str(), r.target_name.as_str(), r.reason.as_str()))
+        .collect();
+    for expected in [
+        ("app", "read_user", "fastapi-route-get"),
+        ("app", "create_item", "fastapi-route-post"),
+        ("router", "delete_item", "fastapi-route-delete"),
+        ("router", "patch_item", "fastapi-route-patch"),
+    ] {
+        assert!(triples.contains(&expected), "missing {:?} in {:?}", expected, triples);
+    }
+
+    // Negative: @app.middleware MUST NOT match (not an HTTP verb).
+    assert!(
+        !triples.iter().any(|(_, t, _)| *t == "middleware_fn"),
+        "middleware_fn should not be captured: {:?}",
+        triples
+    );
+
+    for r in &route_refs {
+        assert!(r.confidence > 0.0 && r.confidence <= 1.0);
+    }
+}
