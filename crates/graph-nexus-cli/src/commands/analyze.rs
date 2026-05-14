@@ -39,6 +39,14 @@ pub struct AnalyzeArgs {
     /// Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
     #[arg(long)]
     pub dump_resolver: Option<std::path::PathBuf>,
+
+    /// Bypass the incremental parse cache and force a full re-parse of
+    /// every file. Also honored via `GNX_NO_CACHE=1`. Use when you suspect
+    /// the cache has gone stale in a way the binary fingerprint didn't
+    /// catch (e.g. external grammar update from outside the build) or
+    /// for benchmark baselines.
+    #[arg(long, default_value_t = false)]
+    pub no_cache: bool,
 }
 
 pub fn run(args: AnalyzeArgs) -> Result<(), String> {
@@ -181,9 +189,38 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     pipeline.register_provider(Box::new(ZigProvider::new().unwrap()));
     pipeline.register_provider(Box::new(DockerComposeProvider::new().unwrap()));
 
-    // Step 3: Analyze and load cache concurrently
+    // Step 3a: Try to load the incremental parse cache. Best-effort —
+    // a missing/corrupt/version-mismatched cache silently falls back to
+    // a full re-parse. The cache file lives next to graph.bin under
+    // `.gitnexus-rs/` so it inherits the same per-branch isolation.
+    let cache_path = layout.index_dir.join("incremental_cache.bin");
+    let cache_disabled =
+        args.no_cache || std::env::var("GNX_NO_CACHE").is_ok_and(|v| !v.is_empty() && v != "0");
+    let cache_index = if cache_disabled {
+        None
+    } else {
+        crate::incremental_cache::load_cache(&cache_path)
+    };
+    let cache_count_pre = cache_index.as_ref().map(|c| c.len()).unwrap_or(0);
+    // Tracks the exact number of files that hit the cache (vs the
+    // misleading "min(pre, post)" upper bound). `AtomicUsize` because
+    // the closure is called concurrently across rayon worker threads.
+    let cache_hits_counter = std::sync::atomic::AtomicUsize::new(0);
+
+    // Step 3b: Analyze and load embeddings cache concurrently. The parse
+    // cache is consulted per-file inside `analyze_with_cache`; the
+    // embeddings cache (separate concept) still pre-loads serially here
+    // when `--embeddings` is on.
     let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(
-        || pipeline.analyze(files_to_analyze),
+        || {
+            let cache_ref = cache_index.as_ref();
+            let hits = &cache_hits_counter;
+            pipeline.analyze_with_cache(files_to_analyze, |rel_path, content_hash| {
+                cache_ref.and_then(|c| c.get(rel_path, content_hash)).inspect(|_| {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                })
+            })
+        },
         || {
             let mut hashes = std::collections::HashMap::new();
             let mut embs = std::collections::HashMap::new();
@@ -215,6 +252,29 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     );
     let analyze_duration = analyze_start.elapsed();
 
+    let cache_count_post = local_graphs.len();
+    let cache_hits = cache_hits_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Snapshot every `LocalGraph` into a Vec<CachedEntry> *before* the
+    // for-loop below consumes `local_graphs`. One unavoidable clone per
+    // file — both `builder.add_graph` and `save_cache` need owned
+    // `LocalGraph` instances. Skip the snapshot entirely when cache is
+    // disabled to avoid the ~per-file clone cost.
+    let cache_entries: Option<Vec<crate::incremental_cache::CachedEntry>> = if cache_disabled {
+        None
+    } else {
+        Some(
+            local_graphs
+                .iter()
+                .map(|lg| crate::incremental_cache::CachedEntry {
+                    file_path: lg.file_path.clone(),
+                    content_hash: lg.content_hash,
+                    local_graph: lg.clone(),
+                })
+                .collect(),
+        )
+    };
+
     // Step 4: Build global graph
     let build_start = Instant::now();
     let aliases = crate::config_parser::parse_configs(&repo_path);
@@ -228,6 +288,14 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     }
     let global_graph = builder.build();
     let build_duration = build_start.elapsed();
+
+    // Step 4.5: Persist the incremental cache (best-effort; errors logged
+    // but never propagated). Runs after build but before save graph.bin
+    // so a cache-write failure can't masquerade as a graph-write failure
+    // in user-visible logs.
+    if let Some(entries) = cache_entries {
+        crate::incremental_cache::save_cache(&cache_path, entries);
+    }
 
     // Step 5: Save graph
     let save_start = Instant::now();
@@ -346,6 +414,20 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     println!("  Save time:    {:?}", save_duration);
     println!("  Index time:   {:?}", index_duration);
     println!("  Total time:   {:?}", total_duration);
+    if cache_disabled {
+        println!("  Cache:        disabled ({} files re-parsed)", cache_count_post);
+    } else if cache_count_pre == 0 {
+        println!(
+            "  Cache:        first-run, building cache from {} files",
+            cache_count_post
+        );
+    } else {
+        let reparsed = cache_count_post.saturating_sub(cache_hits);
+        println!(
+            "  Cache:        {} reused / {} re-parsed (cache had {} entries)",
+            cache_hits, reparsed, cache_count_pre
+        );
+    }
     println!("Graph saved to {:?}", bin_path);
 
     Ok(())

@@ -215,7 +215,30 @@ impl AnalyzerPipeline {
 
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture
     pub fn analyze(&self, files: Vec<(PathBuf, PathBuf)>) -> Vec<LocalGraph> {
+        // No-cache fast path — the closure short-circuits in the inner
+        // hot loop so callers without a cache pay zero overhead vs the
+        // pre-cache implementation.
+        self.analyze_with_cache(files, |_, _| None)
+    }
+
+    /// Same as [`analyze`] but each file's `(rel_path, content_hash)` is
+    /// first offered to `cache_lookup`; on `Some(local_graph)` the
+    /// tree-sitter parse is skipped entirely and the cached result is
+    /// emitted verbatim.
+    ///
+    /// `cache_lookup` runs on every rayon worker thread, so it must be
+    /// `Send + Sync`. A typical implementation captures a
+    /// `&CacheIndex` (`FxHashMap` lookup) by reference.
+    pub fn analyze_with_cache<F>(
+        &self,
+        files: Vec<(PathBuf, PathBuf)>,
+        cache_lookup: F,
+    ) -> Vec<LocalGraph>
+    where
+        F: Fn(&std::path::Path, &[u8; 32]) -> Option<LocalGraph> + Send + Sync,
+    {
         let (tx, rx) = crossbeam_channel::unbounded::<LocalGraph>();
+        let cache_lookup = &cache_lookup;
 
         // Producer (A): parse files concurrently
         rayon::scope(|s| {
@@ -223,17 +246,39 @@ impl AnalyzerPipeline {
                 files
                     .into_par_iter()
                     .for_each_with(tx, |sender, (abs_path, rel_path)| {
-                        if let Some(provider) = self.find_provider(&rel_path) {
-                            if let Ok(source) = std::fs::read(&abs_path) {
-                                if let Ok(mut local_graph) = provider.parse_file(&rel_path, &source)
-                                {
-                                    use sha2::{Digest, Sha256};
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(&source);
-                                    local_graph.content_hash = hasher.finalize().into();
-                                    let _ = sender.send(local_graph);
-                                }
-                            }
+                        if self.find_provider(&rel_path).is_none() {
+                            return;
+                        }
+                        let source = match std::fs::read(&abs_path) {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(&source);
+                        let content_hash: [u8; 32] = hasher.finalize().into();
+
+                        // Cache fast-path: skip parse if a hit comes back
+                        // with the exact same content hash. Path is the
+                        // rel_path (matches what gets stored on save).
+                        if let Some(cached) = cache_lookup(&rel_path, &content_hash) {
+                            let _ = sender.send(cached);
+                            return;
+                        }
+
+                        // Cache miss / no cache: regular parse path. The
+                        // provider lookup ran already and returned Some,
+                        // so unwrap is safe; re-run it to keep the borrow
+                        // checker happy without restructuring the outer
+                        // control flow.
+                        let provider = match self.find_provider(&rel_path) {
+                            Some(p) => p,
+                            None => return,
+                        };
+                        if let Ok(mut local_graph) = provider.parse_file(&rel_path, &source) {
+                            local_graph.content_hash = content_hash;
+                            let _ = sender.send(local_graph);
                         }
                     });
             });
