@@ -1,4 +1,4 @@
-use crate::commands::format::kind_to_str;
+use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
@@ -38,16 +38,48 @@ pub struct ImpactArgs {
     /// Skip edges with confidence < 0.8 (e.g. framework-aware refs like
     /// FastAPI `Depends()`, Axum/Express route handler bindings). Default
     /// off — all edges traversed.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, alias = "high_trust_only", default_value_t = false)]
     pub high_trust_only: bool,
 
     /// Minimum confidence threshold (0.0 to 1.0) for edges to traverse. Overrides --high-trust-only if provided.
-    #[arg(long)]
+    #[arg(long, alias = "min_confidence")]
     pub min_confidence: Option<f32>,
 
     /// If false (default), nodes located in typical test files/directories are omitted from the output.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, aliases = ["include_tests", "includeTests"], default_value_t = false)]
     pub include_tests: bool,
+
+    /// Comma-separated node kinds to keep in the output (lowercase match
+    /// against `kind_to_str`, e.g. `function,method`). Filter is applied at
+    /// emission only — non-matching nodes still act as stepping stones so a
+    /// matched descendant downstream remains reachable.
+    #[arg(long)]
+    pub kind: Option<String>,
+
+    /// Substring filter on result entries by file path. Same emission-only
+    /// semantics as `--kind` (non-matching nodes are still traversed).
+    /// Snake-case is the documented form (CLAUDE.md GitNexus workflow); the
+    /// kebab alias is accepted too.
+    #[arg(long = "file_path", alias = "file-path")]
+    pub file_path: Option<String>,
+
+    /// Comma-separated relation types to follow during traversal (e.g.
+    /// `calls,extends`). Edges of other rel types are skipped entirely,
+    /// shrinking the BFS frontier rather than just filtering output.
+    /// Snake-case is the documented form; kebab alias is accepted.
+    #[arg(long = "relation_types", alias = "relation-types")]
+    pub relation_types: Option<String>,
+}
+
+/// Split a comma-separated flag value into a normalized lowercase Vec.
+/// Empty / whitespace-only parts are dropped so `--kind ,function,` works.
+fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
+    s.map(|raw| {
+        raw.split(',')
+            .map(|p| p.trim().to_ascii_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect()
+    })
 }
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
@@ -106,6 +138,11 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     });
     let mut test_path_cache = std::collections::HashMap::new();
 
+    // Pre-parse filters once so the inner BFS loop stays a tight comparison.
+    let kind_filter = parse_csv_lower(args.kind.as_deref());
+    let rel_filter = parse_csv_lower(args.relation_types.as_deref());
+    let file_path_filter = args.file_path.as_deref();
+
     while let Some((curr_idx, curr_depth, via)) = queue.pop_front() {
         let curr_node = &graph.nodes[curr_idx];
         let file_idx = curr_node.file_idx.to_native() as usize;
@@ -129,16 +166,28 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
             .map(|(r, c)| (r.as_str(), *c))
             .unwrap_or(("", 1.0));
 
-        results.push(serde_json::json!({
-            "uid": curr_node.uid.resolve(&graph.string_pool),
-            "name": curr_node.name.resolve(&graph.string_pool),
-            "kind": kind_to_str(&curr_node.kind),
-            "filePath": file_path,
-            "line": curr_node.span.0.to_native(),
-            "depth": curr_depth,
-            "viaReason": via_reason,
-            "viaConfidence": via_confidence,
-        }));
+        // --kind / --file_path are emission-only filters. A non-matching node
+        // can still be a stepping stone whose descendants match, so we keep
+        // walking past it but suppress the result entry. The start node is
+        // exempt so callers always see the target in the output.
+        let kind_str_lower = kind_to_str(&curr_node.kind).to_ascii_lowercase();
+        let kind_ok = kind_filter
+            .as_ref()
+            .is_none_or(|k| k.iter().any(|w| w == &kind_str_lower));
+        let path_ok = file_path_filter.is_none_or(|needle| file_path.contains(needle));
+
+        if curr_idx == start_idx || (kind_ok && path_ok) {
+            results.push(serde_json::json!({
+                "uid": curr_node.uid.resolve(&graph.string_pool),
+                "name": curr_node.name.resolve(&graph.string_pool),
+                "kind": kind_to_str(&curr_node.kind),
+                "filePath": file_path,
+                "line": curr_node.span.0.to_native(),
+                "depth": curr_depth,
+                "viaReason": via_reason,
+                "viaConfidence": via_confidence,
+            }));
+        }
 
         if curr_depth >= args.depth {
             continue;
@@ -154,6 +203,14 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
                         continue;
+                    }
+                    // --relation_types narrows the BFS frontier itself, so an
+                    // unmatched rel type prevents traversal (not just emission).
+                    if let Some(rels) = rel_filter.as_ref() {
+                        let rel_str = rel_to_str(&edge.rel_type);
+                        if !rels.iter().any(|r| r == rel_str) {
+                            continue;
+                        }
                     }
                     let next_idx = edge.source.to_native() as usize;
                     if !visited.contains(&next_idx) {
@@ -171,6 +228,12 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
                         continue;
+                    }
+                    if let Some(rels) = rel_filter.as_ref() {
+                        let rel_str = rel_to_str(&edge.rel_type);
+                        if !rels.iter().any(|r| r == rel_str) {
+                            continue;
+                        }
                     }
                     let next_idx = edge.target.to_native() as usize;
                     if !visited.contains(&next_idx) {

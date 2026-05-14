@@ -37,7 +37,7 @@ pub struct DetectChangesArgs {
     pub scope: String,
 
     /// Required when `--scope compare`: the ref to diff against (e.g. `HEAD~1`).
-    #[arg(long)]
+    #[arg(long, alias = "base_ref")]
     pub base_ref: Option<String>,
 
     /// Path to the repo root (defaults to current directory).
@@ -54,13 +54,13 @@ pub struct DetectChangesArgs {
     pub kind: Option<String>,
 
     /// Include test-file hunks (default: false — test files dropped).
-    #[arg(long, default_value_t = false)]
+    #[arg(long, aliases = ["include_tests", "includeTests"], default_value_t = false)]
     pub include_tests: bool,
 
     /// Drop affected processes whose execution trace traverses any edge with
     /// confidence < 0.8 (e.g. framework-aware refs from FastAPI `Depends()`,
     /// Axum/Express route handlers). Default off.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, alias = "high_trust_only", default_value_t = false)]
     pub high_trust_only: bool,
 }
 

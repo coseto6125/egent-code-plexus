@@ -39,8 +39,10 @@ enum Commands {
     /// Analyze repository (Mock for parity harness)
     Analyze(commands::analyze::AnalyzeArgs),
     /// List all API routes
+    #[command(alias = "route_map")]
     RouteMap(commands::route_map::RouteMapArgs),
     /// Detect changed symbols & affected execution flows from git diff
+    #[command(alias = "detect_changes")]
     DetectChanges(commands::detect_changes::DetectChangesArgs),
     /// Install reference-transaction hook for branch tracking
     Init(commands::init::InitArgs),
@@ -53,6 +55,7 @@ enum Commands {
     /// Remove orphan index dir + registry branch entry for the given branch
     Prune(commands::prune::PruneArgs),
     /// Rename a branch's index dir + registry entry
+    #[command(alias = "rename_branch")]
     RenameBranch(commands::rename_branch::RenameBranchArgs),
     /// AST-powered multi-file symbol rename (Python, MVP)
     Rename(commands::rename::RenameArgs),
@@ -61,6 +64,7 @@ enum Commands {
     /// LLM-friendly project overview (markdown / json) from graph.bin
     Summarize(commands::summarize::SummarizeArgs),
     /// Diff a resolver dump against a language oracle (TS / Python / Rust)
+    #[command(alias = "verify_resolver")]
     VerifyResolver(commands::verify_resolver::VerifyResolverArgs),
     /// Print framework coverage + blind-spot catalog + graph status (LLM contract)
     Doctor(commands::doctor::DoctorArgs),

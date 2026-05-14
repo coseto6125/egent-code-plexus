@@ -30,11 +30,11 @@ use std::path::{Path, PathBuf};
 #[derive(Args, Debug, Clone)]
 pub struct RenameArgs {
     /// The symbol name to rename (e.g. `old_name`).
-    #[arg(long)]
+    #[arg(long, alias = "symbol_name")]
     pub symbol: String,
 
     /// The new name to apply.
-    #[arg(long = "new-name")]
+    #[arg(long = "new-name", alias = "new_name")]
     pub new_name: String,
 
     /// Repository root. Defaults to current dir.
@@ -43,7 +43,7 @@ pub struct RenameArgs {
 
     /// Plan + verify only — do not mutate any file. Prints the diff
     /// summary to stdout.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, alias = "dry_run", default_value_t = false)]
     pub dry_run: bool,
 }
 
