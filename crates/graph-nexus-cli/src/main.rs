@@ -94,6 +94,9 @@ enum Commands {
     /// Enumerate calls to known HTTP / DB / Redis / queue clients
     #[command(alias = "tool_map")]
     ToolMap(commands::tool_map::ToolMapArgs),
+    /// Cross-repo concurrent symbol search across registered repos.
+    #[command(alias = "multi_query")]
+    MultiQuery(commands::multi_query::MultiQueryArgs),
 }
 
 fn main() {
@@ -237,6 +240,16 @@ fn main() {
         return;
     }
 
+    // MultiQuery owns its own per-repo graph loading; no pre-loaded
+    // Engine needed.
+    if let Commands::MultiQuery(args) = &cli.command {
+        if let Err(e) = commands::multi_query::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -265,7 +278,8 @@ fn main() {
         | Commands::VerifyResolver(_)
         | Commands::Doctor(_)
         | Commands::Index(_)
-        | Commands::Remove(_) => None,
+        | Commands::Remove(_)
+        | Commands::MultiQuery(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -309,7 +323,8 @@ fn main() {
         | Commands::Status(_)
         | Commands::Config(_)
         | Commands::Index(_)
-        | Commands::Remove(_) => Ok(()), // Handled above
+        | Commands::Remove(_)
+        | Commands::MultiQuery(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
