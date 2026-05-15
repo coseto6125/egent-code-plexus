@@ -59,6 +59,7 @@ fn make_graph_with_names(names: &[&str]) -> ZeroCopyGraph {
         traces_offsets: vec![],
         traces_data: vec![],
         blind_spots: vec![],
+        route_shapes: vec![],
     }
 }
 
