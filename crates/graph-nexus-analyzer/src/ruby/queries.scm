@@ -50,3 +50,18 @@
     (string
       (string_content) @route.path))
 ) @route
+
+;; attr_reader / attr_writer / attr_accessor metaprogramming
+;; Each symbol argument declares an instance property.
+(call
+  method: (identifier) @attr_kind
+  (#match? @attr_kind "^attr_(reader|writer|accessor)$")
+  arguments: (argument_list) @attr_args)
+
+;; Mixins: include / extend ModuleName inside a class body
+;; The mixin module constant gets appended to the enclosing class's heritage.
+(call
+  method: (identifier) @include_kind
+  (#match? @include_kind "^(include|extend)$")
+  arguments: (argument_list
+    [ (constant) (scope_resolution) ] @mixin_module))
