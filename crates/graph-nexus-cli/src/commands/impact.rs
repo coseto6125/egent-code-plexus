@@ -179,19 +179,31 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     }
 
     // Empty callers hint for upstream direction.
-    let first_start = matches[0];
     let impact_without_start: Vec<&Value> = all_results
         .iter()
         .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
         .collect();
     let emit_empty_hint = impact_without_start.is_empty() && args.direction == Direction::Up;
 
-    let target_file_idx = graph.nodes[first_start].file_idx.to_native() as usize;
-    let target_file_path = graph.files[target_file_idx]
-        .path
-        .resolve(&graph.string_pool)
-        .to_string();
-    let blind_spot_kinds = collect_blind_spots(graph, &target_file_path);
+    // Collect unique file paths across ALL matches so the blind-spot warning
+    // is accurate when --file / --kind still leaves >1 match.
+    let mut seen_files = HashSet::new();
+    let target_file_paths: Vec<String> = matches
+        .iter()
+        .map(|&idx| {
+            let file_idx = graph.nodes[idx].file_idx.to_native() as usize;
+            graph.files[file_idx]
+                .path
+                .resolve(&graph.string_pool)
+                .to_string()
+        })
+        .filter(|p| seen_files.insert(p.clone()))
+        .collect();
+
+    let mut all_blind_spot_kinds: Vec<String> = Vec::new();
+    for fp in &target_file_paths {
+        all_blind_spot_kinds.extend(collect_blind_spots(graph, fp));
+    }
 
     let mut result_obj = json!({
         "status": "success",
@@ -200,14 +212,19 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
         "impact": all_results,
     });
 
-    if !blind_spot_kinds.is_empty() {
+    if !all_blind_spot_kinds.is_empty() {
         let mut by_kind = std::collections::BTreeMap::<String, u32>::new();
-        for k in &blind_spot_kinds {
+        for k in &all_blind_spot_kinds {
             *by_kind.entry(k.clone()).or_insert(0) += 1;
         }
+        let files_field: serde_json::Value = if target_file_paths.len() == 1 {
+            json!(target_file_paths[0])
+        } else {
+            json!(target_file_paths)
+        };
         result_obj["blind_spot_warning"] = json!({
-            "file": target_file_path,
-            "total": blind_spot_kinds.len(),
+            "file": files_field,
+            "total": all_blind_spot_kinds.len(),
             "by_kind": by_kind,
             "note": "traversal may be incomplete — see `gnx doctor` blind spots catalog",
         });
