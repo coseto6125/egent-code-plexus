@@ -38,13 +38,21 @@
   name: (identifier) @method.name
 ) @method
 
-;; Imports
+;; Imports — regular named import
 (import_declaration
   [
     (scoped_identifier
       name: (identifier) @import.name) @import.source
     (identifier) @import.name @import.source
   ]
+  .
+  ";"
+) @import
+
+;; Imports — wildcard / on-demand import (com.foo.Bar.*)
+(import_declaration
+  (scoped_identifier) @import.source
+  (asterisk) @import.wildcard
 ) @import
 
 ;; Decorators

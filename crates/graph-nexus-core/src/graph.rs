@@ -32,6 +32,7 @@ impl std::str::FromStr for NodeKind {
             "process" => Ok(NodeKind::Process),
             "document" => Ok(NodeKind::Document),
             "section" => Ok(NodeKind::Section),
+            "entrypoint" | "entry_point" | "entry point" => Ok(NodeKind::EntryPoint),
             _ => Err(()),
         }
     }
@@ -77,6 +78,12 @@ pub enum NodeKind {
     Process,
     Document,
     Section,
+    /// Scored entry-point marker — emitted by the cross-language scorer in
+    /// `graph_nexus_analyzer::entry_points`. References the underlying
+    /// handler (`Function` / `Method` / `Route`) via a `References` edge;
+    /// the edge's `reason` carries the scoring provenance (e.g. `main:0.9`,
+    /// `route:1.0`, `framework_ref:0.8`).
+    EntryPoint,
 }
 
 impl NodeKind {

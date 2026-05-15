@@ -353,6 +353,74 @@ impl GraphBuilder {
             }
         }
 
+        // Pass 1.7: Entry-point scoring (cross-language).
+        //
+        // Pure consumer of `RawRoute` + `RawFrameworkRef` + `main()`
+        // detection — see `crate::entry_points` for the scoring matrix.
+        // Closes the ⚠️ Entry column for Java / Kotlin / C# / Go / Rust /
+        // Swift / C / C++ / Dart in the README Language Matrix.
+        //
+        // Emits one `NodeKind::EntryPoint` marker node per scored entry
+        // point and a `References` edge from the marker to the underlying
+        // handler (looked up by name in the same file's SymbolTable). The
+        // edge's `reason` carries the scoring provenance so downstream
+        // LLM tooling can render "this is an HTTP route handler at
+        // confidence 1.0" without re-running the scorer.
+        let mut entry_edges: Vec<Edge> = Vec::new();
+        for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
+            let file_idx = file_idx as u32;
+            let path_str = local_graph.file_path.to_string_lossy().to_string();
+            let entries = crate::entry_points::score_entry_points(
+                &local_graph.routes,
+                &local_graph.framework_refs,
+                &local_graph.nodes,
+            );
+            for ep in entries {
+                let handler_idx = symbol_table.lookup_in_file(&path_str, &ep.uid);
+                let Some(handler_idx) = handler_idx else {
+                    // Handler not found in this file — happens when a
+                    // RawRoute's handler name is a string literal that
+                    // doesn't match any parsed symbol (e.g. an external
+                    // reference). Skip silently; the EntryPoint without
+                    // a target would be a dangling marker.
+                    continue;
+                };
+                let entry_uid =
+                    format!("EntryPoint:{}:{}:{}", path_str, ep.kind.tag(), ep.uid);
+                let entry_name = format!("{}@{}", ep.kind.tag(), ep.uid);
+                let entry_idx = nodes.len() as u32;
+                nodes.push(Node {
+                    uid: string_pool.add(&entry_uid),
+                    name: string_pool.add(&entry_name),
+                    file_idx,
+                    kind: NodeKind::EntryPoint,
+                    span: (0, 0, 0, 0),
+                    community_id: 0,
+                });
+
+                if self.generate_embeddings {
+                    // EntryPoint markers are synthetic; skip embedding
+                    // and preserve the embeddings[i] ↔ nodes[i] alignment
+                    // by pushing a sentinel zero-vec slot. `should_embed`
+                    // already handles structurally-noisy kinds the same
+                    // way (Variable/Const/Import).
+                    final_embeddings.push(Some(vec![0.0; 1024]));
+                }
+
+                // Encode score in the edge reason: "{tag}:{score}:{reason}".
+                // Downstream parsing is trivial (split on first ':') and
+                // the reason text is preserved as-is for LLM rendering.
+                let edge_reason = format!("{}:{:.2}:{}", ep.kind.tag(), ep.score, ep.reason);
+                entry_edges.push(Edge {
+                    source: entry_idx,
+                    target: handler_idx,
+                    rel_type: RelType::References,
+                    confidence: ep.score,
+                    reason: string_pool.add(&edge_reason),
+                });
+            }
+        }
+
         // Pass 2: Resolve imports and build edges
         //
         // Pass 2 strategy: dump-disabled path (production hot path) runs in
@@ -489,6 +557,7 @@ impl GraphBuilder {
         let resolver_dump_drain = resolver_for_dump.as_mut();
 
         edges.extend(route_edges);
+        edges.extend(entry_edges);
 
         // Pass: blind spots — pure metadata passthrough, no edges created.
         // Each local_graph's blind_spots are interned and stored in the graph's

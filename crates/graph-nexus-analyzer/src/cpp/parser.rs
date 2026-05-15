@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{collect_bindings, extract_cpp_calls};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -180,8 +180,12 @@ impl LanguageProvider for CppProvider {
             a.imported_name == b.imported_name && a.source == b.source && a.alias == b.alias
         });
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
+        // Extract call sites with receiver-type binding: `this->method()` /
+        // `this.method()` → `Class.method`, `Base::method()` → `Base.method`,
+        // and typed-var `obj.method()` / `obj->method()` → `Type.method`.
+        // Feeds the resolver's Tier 2.5 qualifier-scoped lookup.
+        let bindings = collect_bindings(tree.root_node(), source);
+        extract_cpp_calls(tree.root_node(), source, &mut nodes, &bindings);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

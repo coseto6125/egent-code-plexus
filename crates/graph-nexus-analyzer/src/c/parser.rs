@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{collect_receiver_methods, extract_c_calls};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -14,6 +14,20 @@ thread_local! {
         parser
     });
 }
+/// Returns true if `node` (a `function_definition`) has a `static` storage class specifier
+/// among its direct children.
+fn has_static_specifier(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    let result = node.children(&mut cursor).any(|child| {
+        child.kind() == "storage_class_specifier"
+            && source
+                .get(child.start_byte()..child.end_byte())
+                .and_then(|b| std::str::from_utf8(b).ok())
+                == Some("static")
+    });
+    result
+}
+
 pub struct CProvider {
     query: Query,
 }
@@ -86,9 +100,12 @@ impl LanguageProvider for CProvider {
                             .map(|s| s.to_string())
                     });
 
+                    // A function with `static` storage class is translation-unit private.
+                    let is_exported = !has_static_specifier(root, source);
+
                     nodes.push(RawNode {
                         decorators: vec![],
-                        is_exported: true,
+                        is_exported,
                         heritage: vec![],
                         type_annotation,
                         name: name_str.to_string(),
@@ -117,8 +134,13 @@ impl LanguageProvider for CProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
+        // Extract call sites with C-convention receiver binding: functions
+        // taking a `(struct T *self, ...)`-shaped first param are treated
+        // as methods on `T`, so call sites rewrite to `T.fn` for the
+        // resolver's Tier 2.5 qualifier-scoped lookup. Convention-driven,
+        // not language-mandated — see `RECEIVER_NAMES` for the gate.
+        let methods = collect_receiver_methods(tree.root_node(), source);
+        extract_c_calls(tree.root_node(), source, &mut nodes, &methods);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

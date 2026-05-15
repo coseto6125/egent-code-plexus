@@ -22,7 +22,7 @@
 (method_declaration
   (attribute_list)* @decorator
   (visibility_modifier)? @export
-  name: (name) @method.name
+  name: (name) @name.method
   return_type: (_) @type.method ?) @method
 
 ;; Namespaces

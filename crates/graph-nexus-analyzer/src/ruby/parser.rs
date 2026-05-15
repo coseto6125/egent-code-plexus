@@ -1,10 +1,11 @@
-use crate::calls::extract_calls;
+use super::receiver_types::extract_ruby_calls;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
 use graph_nexus_core::graph::NodeKind;
+use std::collections::HashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, QueryCursor};
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -14,6 +15,56 @@ thread_local! {
         parser
     });
 }
+/// Walks a `body_statement` (or any block node) and builds a map of
+/// `start_row → is_exported` for every `method` / `singleton_method` child.
+///
+/// Ruby visibility rules: methods are `public` by default.  A bare call to
+/// `private`, `protected`, or `public` (an `identifier` node in tree-sitter)
+/// changes the visibility for every method that follows it within the same
+/// `body_statement`, until the next visibility marker or end-of-scope.
+fn build_visibility_map(node: Node<'_>, source: &[u8]) -> HashMap<u32, bool> {
+    let mut map = HashMap::new();
+    let mut is_public = true;
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                if let Ok(text) =
+                    std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                {
+                    match text {
+                        "private" | "protected" => is_public = false,
+                        "public" => is_public = true,
+                        _ => {}
+                    }
+                }
+            }
+            "method" | "singleton_method" => {
+                map.insert(child.start_position().row as u32, is_public);
+                // Recurse into nested body_statements (nested classes/modules).
+                let mut c2 = child.walk();
+                for sub in child.children(&mut c2) {
+                    if sub.kind() == "body_statement" {
+                        map.extend(build_visibility_map(sub, source));
+                    }
+                }
+            }
+            "class" | "module" => {
+                // Recurse into nested class/module body.
+                let mut c2 = child.walk();
+                for sub in child.children(&mut c2) {
+                    if sub.kind() == "body_statement" {
+                        map.extend(build_visibility_map(sub, source));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
 pub struct RubyProvider {
     query: Query,
 }
@@ -36,6 +87,9 @@ impl LanguageProvider for RubyProvider {
         let tree = PARSER
             .with(|p| p.borrow_mut().parse(source, None))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+
+        // Build method-row → is_exported map from visibility markers in class bodies.
+        let visibility_map = build_visibility_map(tree.root_node(), source);
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
@@ -109,9 +163,17 @@ impl LanguageProvider for RubyProvider {
                 {
                     let start = root.start_position();
                     let end = root.end_position();
+                    // Methods: respect visibility markers. Classes/modules are always exported.
+                    let is_exported = if k == NodeKind::Method {
+                        *visibility_map
+                            .get(&(start.row as u32))
+                            .unwrap_or(&true)
+                    } else {
+                        true
+                    };
                     nodes.push(RawNode {
                         decorators: decorators.clone(),
-                        is_exported: true,
+                        is_exported,
                         heritage,
                         type_annotation: None,
                         name: name_str.to_string(),
@@ -163,13 +225,9 @@ impl LanguageProvider for RubyProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["call", "method_call"],
-        );
+        // Extract call sites with receiver-type binding.
+        // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
+        extract_ruby_calls(tree.root_node(), source, &mut nodes);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

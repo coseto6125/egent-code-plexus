@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::{collect_bindings, extract_dart_calls};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -173,13 +173,12 @@ impl LanguageProvider for DartProvider {
         // Deduplicate simple identical node extractions
         nodes.dedup_by(|a, b| a.name == b.name && a.span == b.span && a.kind == b.kind);
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["call_expression", "method_invocation"],
-        );
+        // Extract call sites with receiver-type binding: `this.method()` →
+        // `Class.method`, `super.method()` → `Super.method`, typed-var
+        // `obj.method()` → `Type.method`. Feeds the resolver's Tier 2.5
+        // qualifier-scoped lookup.
+        let bindings = collect_bindings(tree.root_node(), source);
+        extract_dart_calls(tree.root_node(), source, &mut nodes, &bindings);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

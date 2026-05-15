@@ -1,4 +1,4 @@
-use crate::calls::extract_calls;
+use super::receiver_types::extract_java_calls;
 use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
@@ -28,6 +28,8 @@ struct JavaCaptureIndices {
     method_name: Option<u32>,
     import_name: Option<u32>,
     import_source: Option<u32>,
+    /// Captured `asterisk` node present when the import is a wildcard (`.*`).
+    import_wildcard: Option<u32>,
     class: Option<u32>,
     interface: Option<u32>,
     method: Option<u32>,
@@ -58,6 +60,7 @@ impl JavaProvider {
             method_name: query.capture_index_for_name("method.name"),
             import_name: query.capture_index_for_name("import.name"),
             import_source: query.capture_index_for_name("import.source"),
+            import_wildcard: query.capture_index_for_name("import.wildcard"),
             class: query.capture_index_for_name("class"),
             interface: query.capture_index_for_name("interface"),
             method: query.capture_index_for_name("method"),
@@ -72,6 +75,17 @@ impl JavaProvider {
         };
         Ok(Self { query, indices })
     }
+}
+
+/// Returns true if the bytes of the `import_declaration` node contain the
+/// anonymous keyword `static` — used to distinguish `import static X.y` from
+/// plain `import X.y` without adding a named capture for every anonymous node.
+fn import_decl_is_static(source: &[u8], node: tree_sitter::Node) -> bool {
+    let slice = &source[node.start_byte()..node.end_byte()];
+    // The layout is always:  `import` WS (`static` WS)? ...
+    // We check the first ~20 bytes so we never scan the whole file.
+    let window = &slice[..slice.len().min(20)];
+    window.windows(6).any(|w| w == b"static")
 }
 
 impl LanguageProvider for JavaProvider {
@@ -105,6 +119,10 @@ impl LanguageProvider for JavaProvider {
 
             let mut import_name = None;
             let mut import_src = None;
+            let mut import_wildcard_node: Option<tree_sitter::Node> = None;
+            // Track the enclosing `import_declaration` node so we can inspect
+            // the raw source text for the anonymous `static` keyword.
+            let mut import_decl_node: Option<tree_sitter::Node> = None;
 
             // Spring @Autowired captures.
             let mut autowired_class_node: Option<tree_sitter::Node> = None;
@@ -128,6 +146,8 @@ impl LanguageProvider for JavaProvider {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx.import_source {
                     import_src = Some(cap.node);
+                } else if cap_idx == idx.import_wildcard {
+                    import_wildcard_node = Some(cap.node);
                 } else if cap_idx == idx.class || cap_idx == idx.interface || cap_idx == idx.method
                 {
                     if root_span_node.is_none() {
@@ -161,6 +181,15 @@ impl LanguageProvider for JavaProvider {
                     route_class_node = Some(cap.node);
                 } else if cap_idx == idx.spring_route_handler {
                     route_handler_node = Some(cap.node);
+                }
+
+                // Track the `@import` pattern node (the import_declaration itself).
+                // The `@import` capture uses the same index in both query patterns,
+                // so whichever fires populates import_decl_node.
+                if let Some(import_idx) = query_capture_index_named(&self.query, "import") {
+                    if cap.index == import_idx {
+                        import_decl_node = Some(cap.node);
+                    }
                 }
             }
 
@@ -206,18 +235,66 @@ impl LanguageProvider for JavaProvider {
                 }
             }
 
+            // --- Named import (regular or static) ---
             if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
                 if let (Ok(name_str), Ok(src_str)) = (
                     std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
                     std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
                 ) {
+                    // `alias` carries the short binding name for static imports
+                    // (the identifier that call sites use without a qualifier).
+                    // For `import static com.foo.Bar.method`, alias = Some("method").
+                    // For regular `import com.foo.Bar`,       alias = None.
+                    let is_static = import_decl_node
+                        .map(|n| import_decl_is_static(source, n))
+                        .unwrap_or(false);
+                    let alias = if is_static {
+                        Some(name_str.to_string())
+                    } else {
+                        None
+                    };
+
                     let exists = imports
                         .iter()
                         .any(|i: &RawImport| i.imported_name == name_str && i.source == src_str);
                     if !exists {
                         imports.push(RawImport {
-                            alias: None,
+                            alias,
                             imported_name: name_str.to_string(),
+                            source: src_str.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // --- Wildcard import (import X.* or import static X.*) ---
+            if let (Some(wildcard_node), Some(i_src)) = (import_wildcard_node, import_src) {
+                let _ = wildcard_node; // asterisk node itself has no text we need
+                if let Ok(src_str) =
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                {
+                    let is_static = import_decl_node
+                        .map(|n| import_decl_is_static(source, n))
+                        .unwrap_or(false);
+
+                    // imported_name = "*" marks an on-demand / wildcard import.
+                    // alias = Some("*") for non-static wildcard,
+                    //         Some("static:*") for static wildcard — lets
+                    //         downstream tools distinguish the two without a
+                    //         separate field.
+                    let alias = if is_static {
+                        Some("static:*".to_string())
+                    } else {
+                        Some("*".to_string())
+                    };
+
+                    let exists = imports
+                        .iter()
+                        .any(|i: &RawImport| i.imported_name == "*" && i.source == src_str);
+                    if !exists {
+                        imports.push(RawImport {
+                            alias,
+                            imported_name: "*".to_string(),
                             source: src_str.to_string(),
                         });
                     }
@@ -268,13 +345,9 @@ impl LanguageProvider for JavaProvider {
 
         let mut nodes: Vec<RawNode> = node_map.into_values().collect();
 
-        // Extract call sites and attach to enclosing function/method nodes.
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["method_invocation", "object_creation_expression"],
-        );
+        // Extract call sites with receiver-type binding for `this.foo()`,
+        // `super.foo()`, and typed-variable `obj.foo()` patterns.
+        extract_java_calls(tree.root_node(), source, &mut nodes);
 
         Ok(LocalGraph {
             content_hash: [0; 32],
@@ -287,5 +360,99 @@ impl LanguageProvider for JavaProvider {
             fanout_refs: vec![],
             blind_spots: vec![],
         })
+    }
+}
+
+/// Helper to look up a capture index by name from the compiled query.
+/// Returns `None` if the name does not appear in the query.
+#[inline]
+fn query_capture_index_named(query: &Query, name: &str) -> Option<u32> {
+    query.capture_index_for_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn parse(source: &str) -> LocalGraph {
+        let provider = JavaProvider::new().expect("JavaProvider::new failed");
+        provider
+            .parse_file(&PathBuf::from("Test.java"), source.as_bytes())
+            .expect("parse_file failed")
+    }
+
+    // ── Task G: Java Named Bindings ──────────────────────────────────────────
+
+    #[test]
+    fn java_static_import_sets_alias() {
+        let graph = parse(
+            r#"
+import static com.example.MathUtils.square;
+
+public class App {
+    public void run() {
+        int x = square(5);
+    }
+}
+"#,
+        );
+        let imp = graph
+            .imports
+            .iter()
+            .find(|i| i.imported_name == "square")
+            .expect("static import of `square` not found");
+        assert_eq!(
+            imp.source, "com.example.MathUtils.square",
+            "source should be the full qualified path"
+        );
+        assert_eq!(
+            imp.alias,
+            Some("square".to_string()),
+            "alias must carry the short binding name for static imports"
+        );
+    }
+
+    #[test]
+    fn java_wildcard_import_alias_star() {
+        let graph = parse("import com.example.utils.*;\n");
+        let imp = graph
+            .imports
+            .iter()
+            .find(|i| i.imported_name == "*")
+            .expect("wildcard import not found");
+        assert_eq!(imp.source, "com.example.utils");
+        assert_eq!(
+            imp.alias,
+            Some("*".to_string()),
+            "non-static wildcard alias must be `*`"
+        );
+    }
+
+    #[test]
+    fn java_static_wildcard_import_alias() {
+        let graph = parse("import static com.example.Constants.*;\n");
+        let imp = graph
+            .imports
+            .iter()
+            .find(|i| i.imported_name == "*")
+            .expect("static wildcard import not found");
+        assert_eq!(imp.source, "com.example.Constants");
+        assert_eq!(
+            imp.alias,
+            Some("static:*".to_string()),
+            "static wildcard alias must be `static:*`"
+        );
+    }
+
+    #[test]
+    fn java_regular_import_no_alias() {
+        let graph = parse("import com.example.Foo;\n");
+        let imp = graph
+            .imports
+            .iter()
+            .find(|i| i.imported_name == "Foo")
+            .expect("regular import not found");
+        assert_eq!(imp.alias, None, "regular imports must have no alias");
     }
 }
