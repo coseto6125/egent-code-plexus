@@ -34,18 +34,19 @@ impl ContentCache {
     }
 
     fn body_for_file(&mut self, graph: &ArchivedZeroCopyGraph, file_idx: u32) -> Option<&str> {
-        if !self.files.contains_key(&file_idx) {
-            let body = if (file_idx as usize) < graph.files.len() {
-                let rel = graph.files[file_idx as usize]
-                    .path
-                    .resolve(&graph.string_pool);
-                std::fs::read_to_string(self.repo_root.join(rel)).ok()
-            } else {
-                None
-            };
-            self.files.insert(file_idx, body);
-        }
-        self.files.get(&file_idx).and_then(|o| o.as_deref())
+        self.files
+            .entry(file_idx)
+            .or_insert_with(|| {
+                if (file_idx as usize) < graph.files.len() {
+                    let rel = graph.files[file_idx as usize]
+                        .path
+                        .resolve(&graph.string_pool);
+                    std::fs::read_to_string(self.repo_root.join(rel)).ok()
+                } else {
+                    None
+                }
+            })
+            .as_deref()
     }
 }
 
@@ -63,43 +64,38 @@ fn execute_inner(
     graph: &ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
 ) -> Result<QueryResult, CypherError> {
-    // Phase 1: produce bindings from MATCH clauses.
+    // Produce bindings from MATCH clauses.
     let mut bindings: Vec<Binding> = vec![Binding::default()];
     for mc in &query.matches {
         bindings = exec_match_clause(mc, &bindings, graph)?;
     }
 
-    // Phase 2: apply WHERE.
+    // Apply WHERE filter.
     if let Some(w) = &query.where_ {
         // Collect retain mask separately to avoid simultaneous &mut borrows.
         let mask: Vec<bool> = bindings
             .iter()
             .map(|b| {
                 eval_expr(w, b, graph, cache)
-                    .map(value_truthy)
+                    .map(|v| value_truthy(&v))
                     .unwrap_or(false)
             })
             .collect();
-        let mut i = 0;
-        bindings.retain(|_| {
-            let keep = mask[i];
-            i += 1;
-            keep
-        });
+        let mut mask_iter = mask.into_iter();
+        bindings.retain(|_| mask_iter.next().unwrap_or(false));
     }
 
-    // Phase 3: WITH clause (optional).
+    // WITH clause rebinds / aggregates into a new binding set.
     if let Some(wc) = &query.with {
         bindings = exec_with(wc, bindings, graph, cache)?;
     }
 
-    // Phase 4: C9 — pre-expand bare var RETURN items into concrete prop columns.
-    // Walk bindings to determine whether each Var is node-bound, edge-bound, or computed.
-    // We use the first binding that binds the var; if no bindings, fall back to unbound.
+    // Pre-expand bare Var RETURN items into concrete prop columns.
+    // We use the first binding to infer whether each var is node/edge/computed-bound.
     let expanded_items: Vec<(String, ReturnExpr)> =
         expand_return_items(&query.return_.items, bindings.first())?;
 
-    // Phase 5: RETURN projection — detect aggregation in expanded items.
+    // RETURN projection — detect aggregation in expanded items.
     let has_agg = expanded_items
         .iter()
         .any(|(_, e)| matches!(e, ReturnExpr::FunCall { .. }));
@@ -113,11 +109,6 @@ fn execute_inner(
             .iter()
             .filter(|(_, e)| !matches!(e, ReturnExpr::FunCall { .. }))
             .collect();
-        let agg_items: Vec<&(String, ReturnExpr)> = expanded_items
-            .iter()
-            .filter(|(_, e)| matches!(e, ReturnExpr::FunCall { .. }))
-            .collect();
-
         // Build column names.
         for (col, _) in &expanded_items {
             columns.push(col.clone());
@@ -154,7 +145,6 @@ fn execute_inner(
         for (key_vals, group) in &groups {
             let mut row = Vec::new();
             let mut key_iter = key_vals.iter();
-            let mut agg_iter = agg_items.iter();
             for (_, expr) in &expanded_items {
                 if let ReturnExpr::FunCall {
                     name,
@@ -162,7 +152,6 @@ fn execute_inner(
                     args,
                 } = expr
                 {
-                    let _ai = agg_iter.next().unwrap();
                     let v = apply_aggregate(name, *distinct, args, group, graph, cache)?;
                     row.push(v);
                 } else {
@@ -183,7 +172,7 @@ fn execute_inner(
         }
     }
 
-    // Phase 6: ORDER BY.
+    // ORDER BY.
     if !query.order_by.is_empty() {
         // Pre-build column index once rather than scanning per comparison.
         let col_index: HashMap<String, usize> = columns
@@ -212,13 +201,12 @@ fn execute_inner(
         });
     }
 
-    // Phase 7: C10 — DISTINCT dedup.
+    // DISTINCT dedup.
     if query.return_.distinct {
-        let mut seen: HashSet<String> = HashSet::new();
-        rows.retain(|row| seen.insert(format!("{row:?}")));
+        dedup_rows(&mut rows);
     }
 
-    // Phase 8: C10 — SKIP + LIMIT.
+    // SKIP + LIMIT.
     let skip = query.skip.unwrap_or(0) as usize;
     if skip > 0 {
         rows = rows.into_iter().skip(skip).collect();
@@ -227,7 +215,7 @@ fn execute_inner(
         rows.truncate(lim as usize);
     }
 
-    // Phase 9: C11 — UNION / UNION ALL.
+    // UNION / UNION ALL.
     if let Some(union_query) = &query.union {
         let right = execute_inner(union_query, graph, cache)?;
         if right.columns.len() != columns.len() {
@@ -237,13 +225,16 @@ fn execute_inner(
         }
         rows.extend(right.rows);
         if !query.union_all {
-            // Dedupe: use format!("{:?}") key (same as DISTINCT).
-            let mut seen: HashSet<String> = HashSet::new();
-            rows.retain(|row| seen.insert(format!("{row:?}")));
+            dedup_rows(&mut rows);
         }
     }
 
     Ok(QueryResult { columns, rows })
+}
+
+fn dedup_rows(rows: &mut Vec<Vec<Value>>) {
+    let mut seen = HashSet::new();
+    rows.retain(|row| seen.insert(format!("{row:?}")));
 }
 
 /// Compare two optional row cell values for ORDER BY sorting.
@@ -279,9 +270,9 @@ fn cmp_value_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-/// C9: Expand RETURN items, replacing bare `Var(name)` with 3 concrete prop items
-/// when `name` is node-bound or 3 edge props when edge-bound.
-/// For computed/unbound vars, keep as single column.
+/// Expand RETURN items: replace bare `Var(name)` with 3 concrete prop columns
+/// when `name` is node-bound (name/kind/filePath) or edge-bound (rel_type/confidence/reason).
+/// Computed and unbound vars are kept as a single column.
 fn expand_return_items(
     items: &[ReturnItem],
     first_binding: Option<&Binding>,
@@ -302,9 +293,8 @@ fn expand_return_items(
                     .unwrap_or(false);
 
                 // If aliased with AS, treat as single column regardless of binding type.
-                if item.alias.is_some() {
-                    let col = item.alias.clone().unwrap();
-                    out.push((col, item.expr.clone()));
+                if let Some(col) = &item.alias {
+                    out.push((col.clone(), item.expr.clone()));
                 } else if is_computed {
                     // Single computed column.
                     out.push((name.clone(), item.expr.clone()));
@@ -558,16 +548,12 @@ fn exec_with(
             .iter()
             .map(|b| {
                 eval_expr(w, b, graph, cache)
-                    .map(value_truthy)
+                    .map(|v| value_truthy(&v))
                     .unwrap_or(false)
             })
             .collect();
-        let mut i = 0;
-        out.retain(|_| {
-            let keep = mask[i];
-            i += 1;
-            keep
-        });
+        let mut mask_iter = mask.into_iter();
+        out.retain(|_| mask_iter.next().unwrap_or(false));
     }
 
     Ok(out)
@@ -881,12 +867,11 @@ fn node_matches(
     np: &NodePat,
     graph: &ArchivedZeroCopyGraph,
 ) -> bool {
-    if !np.kinds.is_empty() {
-        let kind: NodeKind =
-            rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&node.kind).unwrap();
-        if !np.kinds.contains(&kind) {
-            return false;
-        }
+    // Deserialize once; reused by both label filter and `kind` prop filter below.
+    let kind: NodeKind =
+        rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&node.kind).unwrap();
+    if !np.kinds.is_empty() && !np.kinds.contains(&kind) {
+        return false;
     }
     for (key, lit) in &np.props {
         match key.as_str() {
@@ -901,8 +886,6 @@ fn node_matches(
                 }
             }
             "kind" => {
-                let kind: NodeKind =
-                    rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&node.kind).unwrap();
                 if let Literal::Str(s) = lit {
                     if format!("{kind:?}") != *s {
                         return false;
@@ -987,7 +970,7 @@ fn eval_expr(
         }
         UnaryOp(_op, inner) => {
             let v = eval_expr(inner, b, graph, cache)?;
-            Ok(Value::Bool(!value_truthy(v)))
+            Ok(Value::Bool(!value_truthy(&v)))
         }
         In(lhs, lits) => {
             let v = eval_expr(lhs, b, graph, cache)?;
@@ -1091,7 +1074,7 @@ fn prop_value(
             // If the computed value is a NodeRef, resolve the property from the graph.
             Value::NodeRef { idx, .. } => {
                 let n = &graph.nodes[*idx as usize];
-                node_prop_value(n, prop, *idx, graph, cache)
+                node_prop_value(n, prop, graph, cache)
             }
             // EdgeRef: resolve edge properties.
             Value::EdgeRef {
@@ -1118,7 +1101,7 @@ fn prop_value(
     }
     if let Some(&idx) = b.node_vars.get(var) {
         let n = &graph.nodes[idx as usize];
-        return node_prop_value(n, prop, idx, graph, cache);
+        return node_prop_value(n, prop, graph, cache);
     }
     if let Some(&edge_idx) = b.edge_vars.get(var) {
         let e = &graph.edges[edge_idx as usize];
@@ -1141,7 +1124,6 @@ fn prop_value(
 fn node_prop_value(
     n: &crate::graph::ArchivedNode,
     prop: &str,
-    idx: u32,
     graph: &ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
 ) -> Value {
@@ -1162,7 +1144,7 @@ fn node_prop_value(
             })
         }
         "content" => {
-            // C12: lazy file read + span slice.
+            // Lazy file read + span slice.
             let file_idx = n.file_idx.to_native();
             let span = (
                 n.span.0.to_native(),
@@ -1174,8 +1156,6 @@ fn node_prop_value(
                 .body_for_file(graph, file_idx)
                 .map(|body| slice_by_span(body, span))
                 .unwrap_or_default();
-            // Suppress dead-code warning on idx in non-content paths.
-            let _ = idx;
             Value::Str(slice)
         }
         _ => Value::Null,
@@ -1187,8 +1167,8 @@ fn eval_binop(op: Op, l: &Value, r: &Value) -> bool {
     match op {
         Eq => values_eq(l, r),
         Ne => !values_eq(l, r),
-        And => value_truthy(l.clone()) && value_truthy(r.clone()),
-        Or => value_truthy(l.clone()) || value_truthy(r.clone()),
+        And => value_truthy(l) && value_truthy(r),
+        Or => value_truthy(l) || value_truthy(r),
         Lt | Le | Gt | Ge => match (l, r) {
             (Value::Int(a), Value::Int(b)) => match op {
                 Lt => a < b,
@@ -1248,10 +1228,10 @@ fn values_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn value_truthy(v: Value) -> bool {
+fn value_truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
-        Value::Bool(b) => b,
+        Value::Bool(b) => *b,
         _ => true,
     }
 }
@@ -1515,17 +1495,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C1 – scaffolding compile check
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn scaffolding_compiles() {
-        let _c = ContentCache::new(PathBuf::from("."));
-        let _b = Binding::default();
-    }
-
-    // -----------------------------------------------------------------------
-    // C2 – single-hop MATCH
+    // Single-hop MATCH
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1568,7 +1538,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C3 — multi-hop chain (3 nodes)
+    // Multi-hop chain (3 nodes)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1587,7 +1557,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C4 – variable-length BFS (*min..max)
+    // Variable-length BFS (*min..max)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1631,7 +1601,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C5 – bidirectional and reverse arrows
+    // Bidirectional and reverse arrows
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1659,7 +1629,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C6 – full WHERE (edge props, IN, regex, CONTAINS)
+    // WHERE with edge props, IN, regex, CONTAINS
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1735,7 +1705,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C7 – OPTIONAL MATCH left-join
+    // OPTIONAL MATCH left-join
     // -----------------------------------------------------------------------
 
     /// Single isolated node with no outgoing edges.
@@ -1806,7 +1776,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C8 – aggregation fixture: fan(0)->leaf_a(1), fan(0)->leaf_b(2)
+    // Aggregation fixture: fan(0)->leaf_a(1), fan(0)->leaf_b(2)
     // fan calls leaf_a (conf=0.8) and leaf_b (conf=0.6).
     // -----------------------------------------------------------------------
 
@@ -1899,7 +1869,7 @@ mod tests {
         f(archived);
     }
 
-    // C8 tests
+    // Aggregation tests
 
     #[test]
     fn exec_count_star() {
@@ -2044,7 +2014,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C9 – RETURN auto-expand bare node/edge vars
+    // RETURN auto-expand bare node/edge vars
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2078,7 +2048,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C10 – DISTINCT + ORDER BY + SKIP + LIMIT
+    // DISTINCT + ORDER BY + SKIP + LIMIT
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2151,7 +2121,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C11 – UNION / UNION ALL
+    // UNION / UNION ALL
     // -----------------------------------------------------------------------
 
     /// Build a graph with one Function node and one Method node.
@@ -2270,7 +2240,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C12 – .content projection via lazy file read
+    // .content projection via lazy file read
     // -----------------------------------------------------------------------
 
     #[test]
