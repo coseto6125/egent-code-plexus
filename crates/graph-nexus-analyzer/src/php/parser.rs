@@ -1,10 +1,76 @@
 use super::receiver_types::extract_php_calls;
+use crate::framework_confidence;
+use crate::framework_helpers::{enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
+
+/// Laravel route detection import gate. Ported from upstream
+/// `gitnexus/src/core/group/extractors/http-patterns/php.ts:34-42`.
+/// `use Illuminate\...` is required — bare `Route::` in a non-Laravel
+/// codebase shouldn't surface as a Laravel route.
+const LARAVEL_REQUIRED: &[&str] = &["Illuminate"];
+
+/// Walk an `array_creation_expression` of shape `[Controller::class, 'action']`
+/// and produce `"Controller@action"` matching Laravel's `@`-routing syntax.
+/// Returns `None` for any array that doesn't match this exact shape.
+fn extract_controller_action(arr_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut controller: Option<String> = None;
+    let mut action: Option<String> = None;
+    let mut cursor = arr_node.walk();
+    for child in arr_node.children(&mut cursor) {
+        if child.kind() != "array_element_initializer" {
+            continue;
+        }
+        let mut inner_cursor = child.walk();
+        for sub in child.children(&mut inner_cursor) {
+            match sub.kind() {
+                // `Controller::class` — first array element.
+                "class_constant_access_expression" => {
+                    let name_node = sub.child_by_field_name("class").or_else(|| {
+                        let mut sc = sub.walk();
+                        let first =
+                            sub.children(&mut sc).find(|c| c.kind() == "name");
+                        first
+                    });
+                    if let Some(n) = name_node {
+                        if let Ok(text) =
+                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                        {
+                            controller = Some(text.to_string());
+                        }
+                    }
+                }
+                // `'action'` — second array element (a quoted string).
+                "string" | "encapsed_string" => {
+                    let mut sc = sub.walk();
+                    let content_node = sub.children(&mut sc).find(|c| {
+                        c.kind() == "string_content" || c.kind() == "string_value"
+                    });
+                    let text = match content_node {
+                        Some(c) => std::str::from_utf8(&source[c.start_byte()..c.end_byte()])
+                            .ok()
+                            .map(str::to_string),
+                        None => std::str::from_utf8(&source[sub.start_byte()..sub.end_byte()])
+                            .ok()
+                            .map(|s| s.trim_matches(|c| c == '\'' || c == '"').to_string()),
+                    };
+                    if action.is_none() {
+                        action = text;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    match (controller, action) {
+        (Some(c), Some(a)) => Some(format!("{c}@{a}")),
+        _ => None,
+    }
+}
 
 pub struct PhpProvider {
     query: Query,
@@ -65,6 +131,16 @@ impl LanguageProvider for PhpProvider {
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
 
+        // Laravel `Route::method('/path', <handler>)`. The outer call
+        // anchors the match; the parser walks the `arguments` node to
+        // extract path + handler shape.
+        let idx_laravel_call = self.query.capture_index_for_name("laravel.route.call");
+        let idx_laravel_args = self.query.capture_index_for_name("laravel.route.args");
+
+        // Pending Laravel framework refs; emitted after the loop if the
+        // `Illuminate` import gate matches.
+        let mut pending_laravel: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -81,6 +157,12 @@ impl LanguageProvider for PhpProvider {
             let mut route_method = None;
             let mut route_path = None;
             let mut route_span_node = None;
+
+            // Per-match Laravel route captures. `laravel_call_span` is
+            // the whole `Route::method(...)` expression; `laravel_args_node`
+            // is the `arguments` node — we walk it to find the 2nd arg.
+            let mut laravel_call_span: Option<(u32, u32, u32, u32)> = None;
+            let mut laravel_args_node: Option<tree_sitter::Node> = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -151,6 +233,44 @@ impl LanguageProvider for PhpProvider {
                     }
                 } else if Some(cap_idx) == idx_route_call {
                     route_span_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_laravel_call {
+                    laravel_call_span = Some(node_span(&cap.node));
+                } else if Some(cap_idx) == idx_laravel_args {
+                    laravel_args_node = Some(cap.node);
+                }
+            }
+
+            // Stage Laravel framework_ref. Walk the `arguments` node:
+            //   1st `argument` (the path) is ignored here — already in routes.
+            //   2nd `argument` content drives target_name:
+            //     array_creation_expression → "Controller@action"
+            //     anonymous_function / arrow_function → "<anonymous>"
+            //     anything else → skip.
+            if let (Some(span), Some(args)) = (laravel_call_span, laravel_args_node) {
+                let mut cur = args.walk();
+                let mut arg_count = 0;
+                let mut target_name: Option<String> = None;
+                for child in args.children(&mut cur) {
+                    if child.kind() != "argument" {
+                        continue;
+                    }
+                    arg_count += 1;
+                    if arg_count == 2 {
+                        let inner = child.child(0).unwrap_or(child);
+                        target_name = match inner.kind() {
+                            "array_creation_expression" => {
+                                extract_controller_action(inner, source)
+                            }
+                            "anonymous_function" | "arrow_function" => {
+                                Some("<anonymous>".to_string())
+                            }
+                            _ => None,
+                        };
+                        break;
+                    }
+                }
+                if let Some(t) = target_name {
+                    pending_laravel.push((t, span));
                 }
             }
 
@@ -282,6 +402,23 @@ impl LanguageProvider for PhpProvider {
         );
         extract_php_calls(tree.root_node(), source, &mut nodes);
 
+        // Gate Laravel framework_refs by the `Illuminate` import — without
+        // that, bare `Route::` is just an unrelated class name.
+        let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
+        if has_import_from(&imports, LARAVEL_REQUIRED) {
+            for (target_name, span) in &pending_laravel {
+                let source_name = enclosing_function_name(&nodes, *span)
+                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
+                framework_refs.push(RawFrameworkRef {
+                    source_name,
+                    target_name: target_name.clone(),
+                    confidence: framework_confidence::LARAVEL_ROUTE,
+                    reason: "laravel-route".to_string(),
+                    span: *span,
+                });
+            }
+        }
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
@@ -289,7 +426,7 @@ impl LanguageProvider for PhpProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })
