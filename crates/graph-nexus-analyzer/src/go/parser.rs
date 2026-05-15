@@ -65,6 +65,15 @@ impl LanguageProvider for GoProvider {
         let idx_route_path = self.query.capture_index_for_name("route.path");
 
         let idx_field_name = self.query.capture_index_for_name("field.name");
+        let idx_field_type = self.query.capture_index_for_name("field.type");
+
+        let idx_param = self.query.capture_index_for_name("param");
+        let idx_param_name = self.query.capture_index_for_name("param.name");
+        let idx_param_type = self.query.capture_index_for_name("param.type");
+
+        let idx_var = self.query.capture_index_for_name("var");
+        let idx_var_name = self.query.capture_index_for_name("var.name");
+        let idx_var_type = self.query.capture_index_for_name("var.type");
 
         let mut routes = Vec::new();
 
@@ -83,6 +92,23 @@ impl LanguageProvider for GoProvider {
             let mut route_method_node = None;
             let mut route_path_node = None;
             let mut route_span_node = None;
+
+            // Buffers for per-name struct-field emission. `X, Y int` produces
+            // multiple `@field.name` captures + one `@field.type`; we collect
+            // both then emit one Property per name sharing the type text.
+            let mut field_name_nodes: Vec<tree_sitter::Node> = Vec::new();
+            let mut field_type_text: Option<String> = None;
+
+            // Per-match buffers for parameter / var declarations.
+            let mut is_param = false;
+            let mut param_name_node = None;
+            let mut param_type_text: Option<String> = None;
+            let mut param_root_node = None;
+
+            let mut is_var = false;
+            let mut var_name_node = None;
+            let mut var_type_text: Option<String> = None;
+            let mut var_root_node = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -136,24 +162,113 @@ impl LanguageProvider for GoProvider {
                     route_path_node = Some(cap.node);
                 } else if cap_idx == idx_field_name {
                     // One `field_declaration` can declare multiple names
-                    // (`X, Y int`), so emit a Property per `@field.name`
-                    // capture rather than funneling through `name_node`.
-                    // Span is the name token itself, which keeps each
-                    // Property distinct when names share a declaration.
-                    if let Ok(name_str) =
+                    // (`X, Y int`), so buffer name nodes here and emit one
+                    // Property per name after the loop — that way every
+                    // name picks up the shared `@field.type` text.
+                    field_name_nodes.push(cap.node);
+                } else if cap_idx == idx_field_type {
+                    if let Ok(t_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        field_type_text = Some(t_str.to_string());
+                    }
+                } else if cap_idx == idx_param {
+                    is_param = true;
+                    param_root_node = Some(cap.node);
+                } else if cap_idx == idx_param_name {
+                    param_name_node = Some(cap.node);
+                } else if cap_idx == idx_param_type {
+                    if let Ok(t_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        param_type_text = Some(t_str.to_string());
+                    }
+                } else if cap_idx == idx_var {
+                    is_var = true;
+                    var_root_node = Some(cap.node);
+                } else if cap_idx == idx_var_name {
+                    var_name_node = Some(cap.node);
+                } else if cap_idx == idx_var_type {
+                    if let Ok(t_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        var_type_text = Some(t_str.to_string());
+                    }
+                }
+            }
+
+            // Emit one Property per struct-field name, sharing the field's
+            // type text. Span is the name token (keeps multi-name decls
+            // distinct).
+            for name_node in &field_name_nodes {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                {
+                    let name = name_str.to_string();
+                    let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
+                    let start = name_node.start_position();
+                    let end = name_node.end_position();
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        name,
+                        kind: NodeKind::Property,
+                        is_exported,
+                        heritage: vec![],
+                        type_annotation: field_type_text.clone(),
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+
+            // Parameter declaration → emit one Variable per param name.
+            // Params are always package-private (locals), so `is_exported=false`.
+            if is_param {
+                if let (Some(n), Some(root)) = (param_name_node, param_root_node) {
+                    if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                    {
+                        let start = root.start_position();
+                        let end = root.end_position();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            name: name_str.to_string(),
+                            kind: NodeKind::Variable,
+                            is_exported: false,
+                            heritage: vec![],
+                            type_annotation: param_type_text.clone(),
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                    }
+                }
+            }
+
+            // Top-level `var n int = ...` → emit a Variable node with type.
+            if is_var {
+                if let (Some(n), Some(root)) = (var_name_node, var_root_node) {
+                    if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
                     {
                         let name = name_str.to_string();
                         let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
-                        let start = cap.node.start_position();
-                        let end = cap.node.end_position();
+                        let start = root.start_position();
+                        let end = root.end_position();
                         nodes.push(RawNode {
                             decorators: vec![],
                             name,
-                            kind: NodeKind::Property,
+                            kind: NodeKind::Variable,
                             is_exported,
                             heritage: vec![],
-                            type_annotation: None,
+                            type_annotation: var_type_text.clone(),
                             span: (
                                 start.row as u32,
                                 start.column as u32,

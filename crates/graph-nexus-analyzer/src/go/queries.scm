@@ -68,9 +68,28 @@
 
 ;; Struct fields — per-name capture so `X, Y int` emits two Property nodes.
 ;; Matches at any depth, so fields of nested anonymous structs are also captured.
+;; `@field.type` captures the textual type once per field_declaration; all names
+;; in `X, Y int` share that type.
 (field_declaration
   name: (field_identifier) @field.name
+  type: _ @field.type
 ) @field
+
+;; Parameter declarations — emit a Variable node per param name with the
+;; textual type. Covers `func`, `method`, and named returns (named-return
+;; entries also use `parameter_declaration` inside `result: (parameter_list)`).
+(parameter_declaration
+  name: (identifier) @param.name
+  type: _ @param.type
+) @param
+
+;; Top-level `var n int = ...` — only when explicit `type:` is present.
+;; `n := 1` (short_var_declaration) has no type field and is intentionally
+;; skipped so inferred-type vars get `type_annotation=None`.
+(var_spec
+  name: (identifier) @var.name
+  type: _ @var.type
+) @var
 
 ;; Routes
 (call_expression
