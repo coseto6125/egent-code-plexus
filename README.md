@@ -133,6 +133,15 @@ crates/
 
 The analyzer streams parsed nodes through an MPSC channel into a single builder thread that assembles the graph, applies Route & Document extraction rules, and writes a zero-copy `.gitnexus-rs/graph.bin`. Read operations (like `context` and `query`) memory-map this file directly for zero-latency lookups.
 
+## ⚙️ Tuning
+
+| Env var | Default | Effect |
+|---|---|---|
+| `GNX_MAX_FILE_BYTES` | `16777216` (16 MiB) | Skip source files larger than this during ingest. Caps worst-case worker RAM at `num_threads × MAX`. Raise for legitimate generated/compiled-output indexing; lower on memory-constrained machines. |
+| `GNX_EMBED_BATCH` | `32` | fastembed inference batch size. Lower to reduce peak resident during embedding (16 ≈ 200 MiB / 32 ≈ 300 MiB on BGE-M3 INT8). |
+| `GNX_CSPROJ_MAX_DEPTH` | `4` | Directory recursion depth for `*.csproj` discovery. Raise for deeply-nested .NET monorepos. |
+| `GNX_MODEL_CACHE` | `$HF_HUB_CACHE` ⤳ `$HF_HOME/hub` ⤳ `~/.cache/huggingface/hub` | Override the BGE-M3 model cache directory. |
+
 ## 📄 License
 
 Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). Personal use, research,
