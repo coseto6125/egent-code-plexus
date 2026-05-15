@@ -117,28 +117,29 @@ def main() -> None:
     print(f"Running parity tests for fixture: {fixture_path} on symbol: {symbol}")
 
     print("\n[Analyze Phase]")
-    gnx_analyze_cmd = ["gnx", "analyze", "--repo", str(fixture_path)]
+    gnx_analyze_cmd = ["gnx", "admin", "index", "--repo", str(fixture_path)]
     gnx_rs_analyze_cmd = [
         "cargo",
         "run",
         "--bin",
         "graph-nexus",
         "--",
-        "analyze",
+        "admin",
+        "index",
         "--repo",
         str(fixture_path),
     ]
 
-    print("Running original gnx analyze...")
+    print("Running original gnx admin index...")
     subprocess.run(gnx_analyze_cmd, cwd=workspace_root, capture_output=True, check=False)
 
-    print("Running new graph-nexus analyze...")
+    print("Running new graph-nexus admin index...")
     subprocess.run(gnx_rs_analyze_cmd, cwd=workspace_root, capture_output=True, check=False)
 
-    print(f"\n[Context Phase: {symbol}]")
+    print(f"\n[Inspect Phase: {symbol}]")
     gnx_context_cmd = [
         "gnx",
-        "context",
+        "inspect",
         "--name",
         symbol,
         "--repo",
@@ -152,7 +153,7 @@ def main() -> None:
         "--bin",
         "graph-nexus",
         "--",
-        "context",
+        "inspect",
         "--name",
         symbol,
         "--repo",
@@ -161,10 +162,10 @@ def main() -> None:
         "json",
     ]
 
-    print("Running original gnx context...")
+    print("Running original gnx inspect...")
     gnx_output = run_command(gnx_context_cmd, cwd=workspace_root)
 
-    print("Running new graph-nexus context...")
+    print("Running new graph-nexus inspect...")
     gnx_rs_output = run_command(gnx_rs_context_cmd, cwd=workspace_root)
 
     normalized_gnx = normalize_json(gnx_output)

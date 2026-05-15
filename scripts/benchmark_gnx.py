@@ -255,7 +255,7 @@ def main() -> int:
         shutil.rmtree(idx)
     label = "analyze (cold)" if not args.skip_cold else "analyze (baseline)"
     print(f"→ {label}")
-    s = _bench(label, [str(args.binary), "analyze", "--repo", str(args.repo)],
+    s = _bench(label, [str(args.binary), "admin", "index", "--repo", str(args.repo)],
                cwd=args.repo, runs=1)
     samples.append(s)
     if s.err:
@@ -267,7 +267,7 @@ def main() -> int:
     # Phase 2: analyze (incremental, hash-cache hot)
     print("→ analyze (incremental)")
     s = _bench("analyze (incremental)",
-               [str(args.binary), "analyze", "--repo", str(args.repo)],
+               [str(args.binary), "admin", "index", "--repo", str(args.repo)],
                cwd=args.repo, runs=1)
     samples.append(s)
     print(f"  {s.median_s:.3f}s" if s.runs else f"  FAIL: {s.err}")
@@ -299,26 +299,26 @@ def main() -> int:
           f"WHERE a.name='{sym.get('method_name', 'main')}' RETURN a,b",
           "--repo", str(args.repo)],
          args.repo),
-        ("route-map",
-         [str(args.binary), "route-map", "--repo", str(args.repo)],
+        ("routes",
+         [str(args.binary), "routes", "--repo", str(args.repo)],
          args.repo),
-        ("doctor",
-         [str(args.binary), "doctor"],
+        ("coverage",
+         [str(args.binary), "coverage"],
          args.repo),
-        ("summarize (md)",
-         [str(args.binary), "summarize", "--repo", str(args.repo)],
+        ("coverage --detailed",
+         [str(args.binary), "coverage", "--detailed", "--repo", str(args.repo)],
          args.repo),
     ]
     if name := sym.get("class_name"):
         queries.append((
-            "context (Class)",
-            [str(args.binary), "context", "--name", name, "--repo", str(args.repo)],
+            "inspect (Class)",
+            [str(args.binary), "inspect", "--name", name, "--repo", str(args.repo)],
             args.repo,
         ))
     if name := sym.get("method_name"):
         queries.append((
-            "query (lexical)",
-            [str(args.binary), "query", "--query", name, "--repo", str(args.repo)],
+            "search (lexical)",
+            [str(args.binary), "search", "--query", name, "--repo", str(args.repo)],
             args.repo,
         ))
     if uid := sym.get("class_uid"):
@@ -338,9 +338,9 @@ def main() -> int:
 
     if args.git_repo.is_dir() and (args.git_repo / ".git").exists():
         queries.append((
-            "detect-changes",
-            [str(args.binary), "detect-changes",
-             "--scope", "all", "--repo", str(args.git_repo)],
+            "impact --since HEAD~1",
+            [str(args.binary), "impact", "--since", "HEAD~1",
+             "--repo", str(args.git_repo)],
             args.git_repo,
         ))
 
@@ -362,10 +362,10 @@ def main() -> int:
         print(f"→ rm -rf {idx}  (rebuild with embeddings)")
         if idx.exists():
             shutil.rmtree(idx)
-        print("→ analyze --embeddings (cold)")
+        print("→ admin index --embeddings (cold)")
         s = _bench(
-            "analyze --embeddings (cold)",
-            [str(args.binary), "analyze", "--repo", str(args.repo), "--embeddings"],
+            "admin index --embeddings (cold)",
+            [str(args.binary), "admin", "index", "--repo", str(args.repo), "--embeddings"],
             cwd=args.repo, runs=1,
         )
         samples.append(s)
@@ -374,10 +374,10 @@ def main() -> int:
         else:
             print(f"  FAIL: {s.err}")
 
-        print("→ analyze --embeddings (incremental, embed cache hot)")
+        print("→ admin index --embeddings (incremental, embed cache hot)")
         s = _bench(
-            "analyze --embeddings (incremental)",
-            [str(args.binary), "analyze", "--repo", str(args.repo), "--embeddings"],
+            "admin index --embeddings (incremental)",
+            [str(args.binary), "admin", "index", "--repo", str(args.repo), "--embeddings"],
             cwd=args.repo, runs=1,
         )
         samples.append(s)
@@ -387,15 +387,15 @@ def main() -> int:
             print(f"  FAIL: {s.err}")
 
         emb_queries: list[tuple[str, list[str], Path]] = [
-            ("query (hybrid, w/ emb)",
-             [str(args.binary), "query", "--query",
+            ("search (hybrid, w/ emb)",
+             [str(args.binary), "search", "--query",
               sym.get("method_name", "main"), "--repo", str(args.repo)],
              args.repo),
         ]
         if name := sym.get("class_name"):
             emb_queries.append((
-                "context (w/ emb graph)",
-                [str(args.binary), "context", "--name", name, "--repo", str(args.repo)],
+                "inspect (w/ emb graph)",
+                [str(args.binary), "inspect", "--name", name, "--repo", str(args.repo)],
                 args.repo,
             ))
         for name, cmd, cwd in emb_queries:
