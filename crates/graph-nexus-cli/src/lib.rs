@@ -7,4 +7,5 @@ pub mod graph_path;
 pub mod incremental_cache;
 pub mod output;
 pub mod reanalyze;
+pub mod repo_selector;
 pub mod search;

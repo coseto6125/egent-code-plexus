@@ -373,7 +373,7 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
             worktree_path: state.worktree_path.to_string_lossy().into(),
             index_dir_root: home_gnx.join(&state.repo_name).to_string_lossy().into(),
             branches,
-            group: None,
+            groups: vec![],
         };
         registry
             .upsert_repo(repo_entry)

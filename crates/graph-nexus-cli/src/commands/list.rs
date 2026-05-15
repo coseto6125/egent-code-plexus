@@ -59,11 +59,11 @@ fn text_lines(reg: &RegistryFile, registry_path: &str) -> Vec<String> {
     let mut total_branches = 0usize;
     for r in &reg.repos {
         total_branches += r.branches.len();
-        let group = r
-            .group
-            .as_deref()
-            .map(|g| format!("(group: {g})"))
-            .unwrap_or_default();
+        let group = if r.groups.is_empty() {
+            String::new()
+        } else {
+            format!("(groups: {})", r.groups.join(", "))
+        };
         let last = latest_indexed_at(r).unwrap_or("-");
         let count = r.branches.len();
         let unit = if count == 1 { "branch" } else { "branches" };

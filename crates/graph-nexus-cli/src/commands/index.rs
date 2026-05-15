@@ -88,7 +88,7 @@ pub fn run(args: IndexArgs) -> Result<(), graph_nexus_core::GnxError> {
         worktree_path: worktree_path.clone(),
         index_dir_root,
         branches,
-        group: None,
+        groups: vec![],
     };
     registry.upsert_repo(entry).map_err(|e| {
         graph_nexus_core::GnxError::InvalidArgument(format!("registry upsert: {e}"))
