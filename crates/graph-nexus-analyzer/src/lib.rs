@@ -33,7 +33,6 @@ pub mod move_lang;
 pub mod nim;
 pub mod php;
 pub mod python;
-pub mod receiver_types;
 pub mod resolution;
 pub mod route_detector;
 pub mod ruby;

@@ -44,18 +44,12 @@ pub fn span_area(s: Span) -> u64 {
     dr * 10_000 + dc
 }
 
-/// Find the innermost `Function`/`Method`/`Constructor` `RawNode` that contains
-/// `inner_span`. Returns the node's `name` clone, or `None` if no enclosing fn
-/// (module-level).
+/// Find the innermost `Function`/`Method` `RawNode` that contains `inner_span`.
+/// Returns the node's `name` clone, or `None` if no enclosing fn (module-level).
 pub fn enclosing_function_name(nodes: &[RawNode], inner_span: Span) -> Option<String> {
     nodes
         .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            )
-        })
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
         .filter(|n| span_contains(n.span, inner_span))
         .min_by_key(|n| span_area(n.span))
         .map(|n| n.name.clone())
@@ -73,14 +67,12 @@ pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, S
         .map(|n| (n.name.clone(), n.span))
 }
 
-/// Enumerate `Function`/`Method`/`Constructor` `RawNode` whose span lies inside
-/// `class_span`, skipping dunder methods (`__init__`, `__repr__`, ...) and
-/// `exclude_name` (the caller — prevents self-fan-out).
+/// Enumerate `Function`/`Method` `RawNode` whose span lies inside `class_span`,
+/// skipping dunder methods (`__init__`, `__repr__`, ...) and `exclude_name`
+/// (the caller — prevents self-fan-out).
 ///
-/// Python class-bound `def`s land as `NodeKind::Function` except `__init__`
-/// which is `NodeKind::Constructor`; accepting all three keeps reflection
-/// fan-out enumeration grammar-agnostic. The dunder name filter still
-/// excludes `__init__` regardless of kind.
+/// Python parser currently emits class-bound `def`s as `NodeKind::Function`, so
+/// we accept both kinds to stay grammar-agnostic.
 pub fn enumerate_class_methods(
     nodes: &[RawNode],
     class_span: Span,
@@ -88,12 +80,7 @@ pub fn enumerate_class_methods(
 ) -> Vec<String> {
     nodes
         .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            )
-        })
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
         .filter(|n| span_contains(class_span, n.span))
         .filter(|n| !(n.name.starts_with("__") && n.name.ends_with("__")))
         .filter(|n| n.name != exclude_name)

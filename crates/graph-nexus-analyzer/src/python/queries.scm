@@ -6,14 +6,6 @@
 (function_definition
   name: (identifier) @function.name) @function
 
-;; Constructor (__init__ in a class body — matched before the generic
-;; function pattern below so the parser can upgrade kind on the same span)
-(class_definition
-  body: (block
-    (function_definition
-      name: (identifier) @constructor.name
-      (#eq? @constructor.name "__init__")) @constructor))
-
 ;; Classes
 (class_definition
   name: (identifier) @class.name

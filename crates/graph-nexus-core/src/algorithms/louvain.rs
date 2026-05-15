@@ -45,11 +45,7 @@ impl Default for LouvainConfig {
 fn is_symbol(kind: NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Function
-            | NodeKind::Class
-            | NodeKind::Method
-            | NodeKind::Constructor
-            | NodeKind::Interface
+        NodeKind::Function | NodeKind::Class | NodeKind::Method | NodeKind::Interface
     )
 }
 

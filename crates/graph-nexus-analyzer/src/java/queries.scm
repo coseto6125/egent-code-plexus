@@ -35,8 +35,8 @@
     "public"
     "protected"
   ])? @export
-  name: (identifier) @constructor.name
-) @constructor
+  name: (identifier) @method.name
+) @method
 
 ;; Imports
 (import_declaration
@@ -74,4 +74,4 @@
     (annotation) @decorator
     (marker_annotation) @decorator
   ])
-) @constructor
+) @method

@@ -90,8 +90,6 @@ pub struct PythonProvider {
 struct PythonCaptureIndices {
     function_name: Option<u32>,
     class_name: Option<u32>,
-    constructor_name: Option<u32>,
-    constructor: Option<u32>,
     type_ann: Option<u32>,
     heritage: Option<u32>,
     export: Option<u32>,
@@ -135,8 +133,6 @@ impl PythonProvider {
         let indices = PythonCaptureIndices {
             function_name: query.capture_index_for_name("function.name"),
             class_name: query.capture_index_for_name("class.name"),
-            constructor_name: query.capture_index_for_name("constructor.name"),
-            constructor: query.capture_index_for_name("constructor"),
             type_ann: query.capture_index_for_name("type"),
             heritage: query.capture_index_for_name("heritage"),
             export: query.capture_index_for_name("export"),
@@ -286,9 +282,6 @@ impl LanguageProvider for PythonProvider {
                 if cap_idx == idx.function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if cap_idx == idx.constructor_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Constructor);
                 } else if cap_idx == idx.class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
@@ -320,10 +313,7 @@ impl LanguageProvider for PythonProvider {
                 } else if cap_idx == idx.route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
-                } else if cap_idx == idx.function
-                    || cap_idx == idx.class
-                    || cap_idx == idx.constructor
-                {
+                } else if cap_idx == idx.function || cap_idx == idx.class {
                     root_span_node = Some(cap.node);
                 } else if cap_idx == idx.fastapi_depends_target {
                     if !has_fastapi {
@@ -481,15 +471,6 @@ impl LanguageProvider for PythonProvider {
                     });
 
                     if let Some(existing) = nodes.iter_mut().find(|node| node.span == span) {
-                        // Upgrade a previously-classified Function entry to
-                        // Constructor when the ctor pattern fires for the same
-                        // span — tree-sitter match order between patterns is
-                        // not specified, so handle both arrival orders here.
-                        if matches!(k, NodeKind::Constructor)
-                            && matches!(existing.kind, NodeKind::Function)
-                        {
-                            existing.kind = NodeKind::Constructor;
-                        }
                         for h in heritage {
                             if !existing.heritage.contains(&h) {
                                 existing.heritage.push(h);
