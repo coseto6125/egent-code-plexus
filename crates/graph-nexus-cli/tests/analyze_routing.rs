@@ -1,4 +1,5 @@
-//! Tests `gnx analyze` writes to ~/.gnx/<repo>/<branch>/ and updates registry.
+//! Tests `gnx admin index` writes to ~/.gnx/<repo>/<branch>/ and updates registry.
+//! (replaces the old `gnx analyze` top-level command, folded into admin)
 
 use std::path::Path;
 use std::process::Command;
@@ -53,14 +54,19 @@ fn analyze_writes_to_registry_resolved_path() {
     init_repo(repo_tmp.path());
 
     let out = Command::new(gnx_bin())
-        .args(["analyze", "--repo", repo_tmp.path().to_str().unwrap()])
+        .args([
+            "admin",
+            "index",
+            "--repo",
+            repo_tmp.path().to_str().unwrap(),
+        ])
         .env("HOME", home_tmp.path())
         .output()
         .expect("gnx spawn failed");
 
     assert!(
         out.status.success(),
-        "analyze failed: stderr={}",
+        "admin index failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 

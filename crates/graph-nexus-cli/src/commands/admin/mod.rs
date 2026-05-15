@@ -40,8 +40,6 @@ pub fn run(cmd: AdminCommands) -> Result<(), graph_nexus_core::GnxError> {
         AdminCommands::RenameBranch(args) => rename_branch::run(args),
         AdminCommands::Config(args) => config::run(args),
         AdminCommands::Group { command } => group::run(command),
-        AdminCommands::Index(args) => {
-            index::run(args).map_err(graph_nexus_core::GnxError::Output)
-        }
+        AdminCommands::Index(args) => index::run(args).map_err(graph_nexus_core::GnxError::Output),
     }
 }

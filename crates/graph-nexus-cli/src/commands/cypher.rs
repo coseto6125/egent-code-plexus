@@ -186,19 +186,15 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
     // Multi-repo gate: cypher is single-repo only (graph identity is per-repo).
     if let Some(repo_sel) = args.repo.as_deref() {
         let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
-        let registry = RegistryFile::read_or_empty(&home_gnx.join("registry.json"))
-            .map_err(|e| {
+        let registry =
+            RegistryFile::read_or_empty(&home_gnx.join("registry.json")).map_err(|e| {
                 graph_nexus_core::GnxError::InvalidArgument(format!("registry read: {e}"))
             })?;
         let selector = repo_selector::parse(repo_sel).map_err(|e| {
             graph_nexus_core::GnxError::InvalidArgument(format!("--repo selector: {e}"))
         })?;
         let cwd = std::env::current_dir().unwrap_or_default();
-        let resolved = repo_selector::resolve(
-            &selector,
-            &registry,
-            cwd.to_str().unwrap_or("."),
-        );
+        let resolved = repo_selector::resolve(&selector, &registry, cwd.to_str().unwrap_or("."));
         if let Ok(repos) = resolved {
             if repos.len() > 1 {
                 return Err(graph_nexus_core::GnxError::InvalidArgument(format!(

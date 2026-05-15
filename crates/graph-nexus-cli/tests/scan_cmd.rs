@@ -81,10 +81,19 @@ fn scan_clean_file_reports_ok() {
 
     // Write a file that only calls the valid symbol.
     let clean = root.join("clean.py");
-    std::fs::write(&clean, "from main import validate_user\nvalidate_user('x')\n").unwrap();
+    std::fs::write(
+        &clean,
+        "from main import validate_user\nvalidate_user('x')\n",
+    )
+    .unwrap();
 
     let out = Command::new(gnx_bin())
-        .args(["scan", clean.to_str().unwrap(), "--repo", root.to_str().unwrap()])
+        .args([
+            "scan",
+            clean.to_str().unwrap(),
+            "--repo",
+            root.to_str().unwrap(),
+        ])
         .env("HOME", &home)
         .current_dir(root)
         .output()
@@ -104,7 +113,12 @@ fn scan_invalid_ref_lists_with_suggestion() {
     let root = repo.path();
 
     let out = Command::new(gnx_bin())
-        .args(["scan", root.join("main.py").to_str().unwrap(), "--repo", root.to_str().unwrap()])
+        .args([
+            "scan",
+            root.join("main.py").to_str().unwrap(),
+            "--repo",
+            root.to_str().unwrap(),
+        ])
         .env("HOME", &home)
         .current_dir(root)
         .output()
@@ -132,7 +146,12 @@ fn scan_unknown_language_errors() {
     std::fs::write(&weird, "some content").unwrap();
 
     let out = Command::new(gnx_bin())
-        .args(["scan", weird.to_str().unwrap(), "--repo", root.to_str().unwrap()])
+        .args([
+            "scan",
+            weird.to_str().unwrap(),
+            "--repo",
+            root.to_str().unwrap(),
+        ])
         .env("HOME", &home)
         .current_dir(root)
         .output()

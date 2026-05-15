@@ -271,7 +271,10 @@ fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
                         }
                         let h = hash_node_lines(&lines, raw.span.0, raw.span.2);
                         let kind_str = node_kind_to_str(&raw.kind).to_string();
-                        new_map.insert((kind_str, rel_path.clone(), raw.name.clone()), (h, raw.span.0));
+                        new_map.insert(
+                            (kind_str, rel_path.clone(), raw.name.clone()),
+                            (h, raw.span.0),
+                        );
                     }
                 }
             }

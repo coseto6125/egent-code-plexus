@@ -146,10 +146,7 @@ fn routes_no_path_lists_all() {
     assert_eq!(json["status"], "success", "unexpected status: {json}");
 
     let results = json["results"].as_array().expect("results array missing");
-    assert!(
-        !results.is_empty(),
-        "expected ≥1 route in listing: {json}"
-    );
+    assert!(!results.is_empty(), "expected ≥1 route in listing: {json}");
 
     // Every entry must have a path and method.
     for r in results {
@@ -243,10 +240,7 @@ fn routes_with_path_finds_handler_and_callers() {
     );
 
     let callers = json["callers"].as_array().expect("callers array missing");
-    assert!(
-        !callers.is_empty(),
-        "expected ≥1 upstream caller: {json}"
-    );
+    assert!(!callers.is_empty(), "expected ≥1 upstream caller: {json}");
     let caller_names: Vec<&str> = callers
         .iter()
         .map(|c| c["name"].as_str().unwrap_or(""))
@@ -266,7 +260,11 @@ fn routes_with_path_method_filter_disambiguates() {
     setup_repo(repo.path(), home.path());
 
     // --method POST: only create_user handler.
-    let post_json = run_routes_json(repo.path(), home.path(), &["/api/users", "--method", "POST"]);
+    let post_json = run_routes_json(
+        repo.path(),
+        home.path(),
+        &["/api/users", "--method", "POST"],
+    );
     assert_eq!(post_json["status"], "found");
     let post_handlers: Vec<&str> = post_json["handlers"]
         .as_array()

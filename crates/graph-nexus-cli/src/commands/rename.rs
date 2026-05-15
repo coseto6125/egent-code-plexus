@@ -68,11 +68,19 @@ struct Occurrence {
 
 fn classify_context(path: &Path) -> String {
     let s = path.to_string_lossy();
-    if s.contains("/test/") || s.contains("/tests/") || s.ends_with("_test.go") || s.ends_with("_test.rs") {
+    if s.contains("/test/")
+        || s.contains("/tests/")
+        || s.ends_with("_test.go")
+        || s.ends_with("_test.rs")
+    {
         "test".into()
     } else if s.ends_with(".md") || s.ends_with(".rst") || s.ends_with(".markdown") {
         "markdown".into()
-    } else if s.ends_with(".json") || s.ends_with(".toml") || s.ends_with(".yaml") || s.ends_with(".yml") {
+    } else if s.ends_with(".json")
+        || s.ends_with(".toml")
+        || s.ends_with(".yaml")
+        || s.ends_with(".yml")
+    {
         "data".into()
     } else {
         "code".into()
@@ -280,11 +288,7 @@ pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
 
     // --- Stage 3a: dry-run — print summary + diff preview, then verification. ---
     if args.dry_run {
-        println!(
-            "risk safe; files {}; usages {}",
-            hits.len(),
-            total_ast_hits
-        );
+        println!("risk safe; files {}; usages {}", hits.len(), total_ast_hits);
         println!();
         for (path, ranges) in &hits {
             let bytes = std::fs::read(path).map_err(GnxError::Io)?;
@@ -293,8 +297,7 @@ pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
 
         // Markdown pass preview.
         if args.markdown {
-            let md_changed =
-                apply_markdown_rename(&repo_root, &args.symbol, &args.new_name, true);
+            let md_changed = apply_markdown_rename(&repo_root, &args.symbol, &args.new_name, true);
             if !md_changed.is_empty() {
                 println!("[markdown] would update {} doc file(s):", md_changed.len());
                 for (p, c) in &md_changed {

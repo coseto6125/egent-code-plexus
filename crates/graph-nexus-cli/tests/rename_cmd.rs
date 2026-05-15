@@ -295,7 +295,14 @@ fn rename_with_markdown_flag_touches_md() {
     let root = repo.path();
     run_rename_stdout(
         root,
-        &["rename", "--symbol", "foo", "--new-name", "bar", "--markdown"],
+        &[
+            "rename",
+            "--symbol",
+            "foo",
+            "--new-name",
+            "bar",
+            "--markdown",
+        ],
     );
     let md_content = std::fs::read_to_string(root.join("docs/api.md")).unwrap();
     assert!(
@@ -308,10 +315,7 @@ fn rename_with_markdown_flag_touches_md() {
 fn rename_default_does_not_touch_md() {
     let repo = setup_repo_with_markdown("foo");
     let root = repo.path();
-    run_rename_stdout(
-        root,
-        &["rename", "--symbol", "foo", "--new-name", "bar"],
-    );
+    run_rename_stdout(root, &["rename", "--symbol", "foo", "--new-name", "bar"]);
     let md_content = std::fs::read_to_string(root.join("docs/api.md")).unwrap();
     assert!(
         md_content.contains("foo"),
@@ -332,7 +336,9 @@ fn rename_output_includes_residual_section() {
         &["rename", "--symbol", "old_name", "--new-name", "fresh_name"],
     );
     assert!(
-        stdout.contains("residual") || stdout.contains("still present") || stdout.contains("remaining"),
+        stdout.contains("residual")
+            || stdout.contains("still present")
+            || stdout.contains("remaining"),
         "missing residual section in output:\n{stdout}"
     );
 }
@@ -346,7 +352,9 @@ fn rename_output_includes_new_name_distribution() {
         &["rename", "--symbol", "old_name", "--new-name", "fresh_name"],
     );
     assert!(
-        stdout.contains("new_distribution") || stdout.contains("distribution") || stdout.contains("fresh_name"),
+        stdout.contains("new_distribution")
+            || stdout.contains("distribution")
+            || stdout.contains("fresh_name"),
         "missing new-name distribution in output:\n{stdout}"
     );
 }
@@ -361,7 +369,14 @@ fn rename_collision_detected_in_dry_run() {
     let root = repo.path();
     let (stdout, stderr) = run_rename_both(
         root,
-        &["rename", "--symbol", "foo", "--new-name", "bar", "--dry-run"],
+        &[
+            "rename",
+            "--symbol",
+            "foo",
+            "--new-name",
+            "bar",
+            "--dry-run",
+        ],
     );
     let combined = format!("{stdout}\n{stderr}");
     assert!(
@@ -398,7 +413,9 @@ fn rename_zero_occurrences_explicit_message() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let combined = format!("{stdout}\n{stderr}");
     assert!(
-        combined.contains("No occurrences") || combined.contains("0 occurrences") || combined.contains("not found"),
+        combined.contains("No occurrences")
+            || combined.contains("0 occurrences")
+            || combined.contains("not found"),
         "missing explicit no-occurrences message:\n{combined}"
     );
 }

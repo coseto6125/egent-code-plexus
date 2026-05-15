@@ -204,7 +204,10 @@ def caller():
         f_count < unf_count,
         "kind filter should drop the Class target: unfiltered={unf_count}, filtered={f_count}"
     );
-    assert!(f_count >= 1, "should still keep function targets: {filtered}");
+    assert!(
+        f_count >= 1,
+        "should still keep function targets: {filtered}"
+    );
 
     // Every remaining target must be a function (check via kind field, not uid).
     for entries in f_outgoing.values() {
@@ -437,7 +440,13 @@ fn inspect_output_does_not_contain_uid_field() {
 
     let stdout = run_stdout(
         repo,
-        &["inspect", "--name", "unique_symbol_for_uid_test", "--format", "toon"],
+        &[
+            "inspect",
+            "--name",
+            "unique_symbol_for_uid_test",
+            "--format",
+            "toon",
+        ],
     );
     assert!(
         !stdout.contains("\"uid\""),
@@ -449,7 +458,13 @@ fn inspect_output_does_not_contain_uid_field() {
     // JSON output format instead of raw toon.
     let json = run_json(
         repo,
-        &["inspect", "--name", "unique_symbol_for_uid_test", "--format", "json"],
+        &[
+            "inspect",
+            "--name",
+            "unique_symbol_for_uid_test",
+            "--format",
+            "json",
+        ],
     );
     assert!(
         json["symbol"]["uid"].is_null(),
@@ -476,8 +491,14 @@ fn inspect_ambiguous_returns_full_matches() {
     );
     init_and_analyze(repo);
 
-    let result = run_json(repo, &["inspect", "--name", "shared_name", "--format", "json"]);
-    assert_eq!(result["status"], "ambiguous", "expected ambiguous: {result}");
+    let result = run_json(
+        repo,
+        &["inspect", "--name", "shared_name", "--format", "json"],
+    );
+    assert_eq!(
+        result["status"], "ambiguous",
+        "expected ambiguous: {result}"
+    );
 
     // Must have "matches" key (full blocks), not "candidates" (uid list).
     let matches = result["matches"]
@@ -532,11 +553,7 @@ export function prod_caller() {
 
     let upstream = result["impact_upstream_1hop"]
         .as_array()
-        .unwrap_or_else(|| {
-            panic!(
-                "missing or non-array 'impact_upstream_1hop' in:\n{result}"
-            )
-        });
+        .unwrap_or_else(|| panic!("missing or non-array 'impact_upstream_1hop' in:\n{result}"));
     assert!(
         !upstream.is_empty(),
         "impact_upstream_1hop should contain ≥1 caller (prod_caller), got empty:\n{result}"

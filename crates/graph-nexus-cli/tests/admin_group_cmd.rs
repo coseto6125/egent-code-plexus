@@ -62,7 +62,10 @@ fn group_help_works() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("add") || stdout.contains("Add"), "missing add in help");
+    assert!(
+        stdout.contains("add") || stdout.contains("Add"),
+        "missing add in help"
+    );
     assert!(
         stdout.contains("remove") || stdout.contains("Remove"),
         "missing remove in help"
@@ -132,9 +135,19 @@ fn group_add_idempotent() {
 
     let reg = read_registry(home.path());
     let repo = reg.repos.iter().find(|r| r.name == "alpha").unwrap();
-    assert_eq!(repo.groups.len(), 1, "expected 1 group entry, got {:?}", repo.groups);
+    assert_eq!(
+        repo.groups.len(),
+        1,
+        "expected 1 group entry, got {:?}",
+        repo.groups
+    );
     let group = reg.groups.iter().find(|g| g.name == "backend").unwrap();
-    assert_eq!(group.members.len(), 1, "expected 1 member, got {:?}", group.members);
+    assert_eq!(
+        group.members.len(),
+        1,
+        "expected 1 member, got {:?}",
+        group.members
+    );
 }
 
 #[test]
@@ -175,7 +188,10 @@ fn group_remove_auto_deletes_empty_group() {
         reg.groups
     );
     let repo = reg.repos.iter().find(|r| r.name == "alpha").unwrap();
-    assert!(repo.groups.is_empty(), "repo.groups should be empty after remove");
+    assert!(
+        repo.groups.is_empty(),
+        "repo.groups should be empty after remove"
+    );
 }
 
 #[test]
@@ -201,13 +217,24 @@ fn group_remove_preserves_non_empty_group() {
     );
 
     let reg = read_registry(home.path());
-    assert_eq!(reg.groups.len(), 1, "group should still exist with 1 member");
+    assert_eq!(
+        reg.groups.len(),
+        1,
+        "group should still exist with 1 member"
+    );
     let group = reg.groups.iter().find(|g| g.name == "backend").unwrap();
     assert_eq!(group.members, vec!["beta"]);
     let alpha = reg.repos.iter().find(|r| r.name == "alpha").unwrap();
-    assert!(alpha.groups.is_empty(), "alpha.groups should be empty after remove");
+    assert!(
+        alpha.groups.is_empty(),
+        "alpha.groups should be empty after remove"
+    );
     let beta = reg.repos.iter().find(|r| r.name == "beta").unwrap();
-    assert_eq!(beta.groups, vec!["backend"], "beta.groups should still have backend");
+    assert_eq!(
+        beta.groups,
+        vec!["backend"],
+        "beta.groups should still have backend"
+    );
 }
 
 #[test]

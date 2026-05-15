@@ -141,9 +141,7 @@ pub fn resolve(
 }
 
 fn find_by_path<'a>(registry: &'a RegistryFile, p: &str) -> Option<&'a RepoEntry> {
-    let target = Path::new(p)
-        .canonicalize()
-        .unwrap_or_else(|_| p.into());
+    let target = Path::new(p).canonicalize().unwrap_or_else(|_| p.into());
     registry.repos.iter().find(|r| {
         Path::new(&r.worktree_path)
             .canonicalize()

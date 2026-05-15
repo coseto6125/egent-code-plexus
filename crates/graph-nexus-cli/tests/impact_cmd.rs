@@ -117,6 +117,7 @@ fn run_impact(repo: &Path, extra: &[&str]) -> Value {
         .unwrap_or_else(|err| panic!("{args:?} did not return JSON: {err}\nstdout={stdout}"))
 }
 
+#[allow(dead_code)]
 fn run_impact_stderr(repo: &Path, extra: &[&str]) -> String {
     let mut args = vec!["impact", "--repo", ".", "--format", "json"];
     args.extend_from_slice(extra);
@@ -178,7 +179,9 @@ fn impact_rejects_old_target_flag() {
         "--target should be rejected but process succeeded"
     );
     assert!(
-        stderr.contains("unexpected argument") || stderr.contains("--target") || stderr.contains("error"),
+        stderr.contains("unexpected argument")
+            || stderr.contains("--target")
+            || stderr.contains("error"),
         "expected clap error about --target:\nstderr={stderr}\nstdout={stdout}"
     );
 }
@@ -198,7 +201,9 @@ fn impact_high_trust_only_default_true() {
     );
     // The description explicitly states "Default ON" to signal the default is true.
     assert!(
-        help.contains("Default ON") || help.contains("default: true") || help.contains("high-trust-only=false"),
+        help.contains("Default ON")
+            || help.contains("default: true")
+            || help.contains("high-trust-only=false"),
         "--high-trust-only description should indicate it defaults to on:\n{help}"
     );
 }
@@ -221,15 +226,23 @@ fn impact_since_ref_runs_diff_mode() {
         .unwrap();
     let _ = Command::new("git")
         .args([
-            "-c", "user.email=t@t", "-c", "user.name=t",
-            "commit", "-q", "-m", "tweak",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "tweak",
         ])
         .current_dir(tmp.path())
         .output()
         .unwrap();
 
     let out = Command::new(gnx_bin())
-        .args(["impact", "--since", "HEAD~1", "--repo", ".", "--format", "json"])
+        .args([
+            "impact", "--since", "HEAD~1", "--repo", ".", "--format", "json",
+        ])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
@@ -262,7 +275,9 @@ fn impact_name_and_since_mutually_exclusive() {
         "foo + --since should be rejected but process succeeded"
     );
     assert!(
-        stderr.contains("conflict") || stderr.contains("cannot be used") || stderr.contains("error"),
+        stderr.contains("conflict")
+            || stderr.contains("cannot be used")
+            || stderr.contains("error"),
         "expected conflict error:\nstderr={stderr}"
     );
 }
@@ -276,10 +291,14 @@ fn impact_empty_callers_includes_explanation() {
     // no callers — it's a leaf. Use it to trigger the empty-upstream hint.
     let out = Command::new(gnx_bin())
         .args([
-            "impact", "extraHelper",
-            "--direction", "up",
-            "--repo", ".",
-            "--format", "json",
+            "impact",
+            "extraHelper",
+            "--direction",
+            "up",
+            "--repo",
+            ".",
+            "--format",
+            "json",
             "--high-trust-only=false",
         ])
         .current_dir(tmp.path())
@@ -301,7 +320,11 @@ fn impact_empty_callers_includes_explanation() {
         let json: Value = serde_json::from_str(&stdout[pos..]).unwrap_or(Value::Null);
         let impact_arr = json["impact"].as_array();
         let non_start = impact_arr
-            .map(|arr| arr.iter().filter(|e| e["depth"].as_u64().unwrap_or(0) > 0).count())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
+                    .count()
+            })
             .unwrap_or(0);
         if non_start == 0 {
             assert!(

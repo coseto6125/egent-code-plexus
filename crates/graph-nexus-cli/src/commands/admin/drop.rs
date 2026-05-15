@@ -23,7 +23,7 @@ pub struct DropArgs {
 
 pub fn run(args: DropArgs) -> Result<(), graph_nexus_core::GnxError> {
     let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
-    let mut registry = graph_nexus_core::registry::Registry::open(&home_gnx)
+    let registry = graph_nexus_core::registry::Registry::open(&home_gnx)
         .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("registry: {e}")))?;
 
     if args.all {
@@ -73,7 +73,10 @@ pub fn run(args: DropArgs) -> Result<(), graph_nexus_core::GnxError> {
 
 /// Re-read registry.json under exclusive flock, remove the named repo (or all
 /// repos when `repo_name` is None), and atomically write back.
-fn rewrite_without(home_gnx: &Path, repo_name: Option<&str>) -> Result<(), graph_nexus_core::GnxError> {
+fn rewrite_without(
+    home_gnx: &Path,
+    repo_name: Option<&str>,
+) -> Result<(), graph_nexus_core::GnxError> {
     let lock_path = home_gnx.join("registry.json.lock");
     let _lock = graph_nexus_core::registry::FileLock::acquire_exclusive(&lock_path)
         .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("flock: {e}")))?;

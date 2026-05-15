@@ -56,31 +56,54 @@ pub fn find_all_identifier_names(path: &str, source: &[u8]) -> Option<Vec<(Strin
         "ts" => find_all_by_kinds(
             source,
             &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            &["identifier", "type_identifier", "property_identifier",
-              "shorthand_property_identifier", "shorthand_property_identifier_pattern"],
+            &[
+                "identifier",
+                "type_identifier",
+                "property_identifier",
+                "shorthand_property_identifier",
+                "shorthand_property_identifier_pattern",
+            ],
         ),
         "tsx" => find_all_by_kinds(
             source,
             &tree_sitter_typescript::LANGUAGE_TSX.into(),
-            &["identifier", "type_identifier", "property_identifier",
-              "shorthand_property_identifier", "shorthand_property_identifier_pattern"],
+            &[
+                "identifier",
+                "type_identifier",
+                "property_identifier",
+                "shorthand_property_identifier",
+                "shorthand_property_identifier_pattern",
+            ],
         ),
         "js" | "jsx" | "mjs" | "cjs" => find_all_by_kinds(
             source,
             &tree_sitter_javascript::LANGUAGE.into(),
-            &["identifier", "property_identifier",
-              "shorthand_property_identifier", "shorthand_property_identifier_pattern"],
+            &[
+                "identifier",
+                "property_identifier",
+                "shorthand_property_identifier",
+                "shorthand_property_identifier_pattern",
+            ],
         ),
         "rs" => find_all_by_kinds(
             source,
             &tree_sitter_rust::LANGUAGE.into(),
-            &["identifier", "type_identifier", "field_identifier",
-              "shorthand_field_identifier"],
+            &[
+                "identifier",
+                "type_identifier",
+                "field_identifier",
+                "shorthand_field_identifier",
+            ],
         ),
         "go" => find_all_by_kinds(
             source,
             &tree_sitter_go::LANGUAGE.into(),
-            &["identifier", "type_identifier", "field_identifier", "package_identifier"],
+            &[
+                "identifier",
+                "type_identifier",
+                "field_identifier",
+                "package_identifier",
+            ],
         ),
         "java" => find_all_by_kinds(
             source,
@@ -115,18 +138,19 @@ pub fn find_all_identifier_names(path: &str, source: &[u8]) -> Option<Vec<(Strin
         "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => find_all_by_kinds(
             source,
             &tree_sitter_cpp::LANGUAGE.into(),
-            &["identifier", "type_identifier", "field_identifier", "namespace_identifier"],
+            &[
+                "identifier",
+                "type_identifier",
+                "field_identifier",
+                "namespace_identifier",
+            ],
         ),
         "dart" => find_all_by_kinds(
             source,
             &tree_sitter_dart::LANGUAGE.into(),
             &["identifier", "type_identifier"],
         ),
-        "php" => find_all_by_kinds(
-            source,
-            &tree_sitter_php::LANGUAGE_PHP.into(),
-            &["name"],
-        ),
+        "php" => find_all_by_kinds(source, &tree_sitter_php::LANGUAGE_PHP.into(), &["name"]),
         _ => return None,
     };
     Some(result)

@@ -58,6 +58,7 @@ fn rename_branch_moves_index_dir() {
 
     let out = Command::new(gnx_bin())
         .args([
+            "admin",
             "rename-branch",
             "--from=old-name",
             "--to=new-name",
@@ -68,7 +69,7 @@ fn rename_branch_moves_index_dir() {
         .unwrap();
     assert!(
         out.status.success(),
-        "rename-branch failed: stderr={}",
+        "admin rename-branch failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 
@@ -90,6 +91,7 @@ fn rename_branch_no_op_when_from_dir_missing() {
     // No from_dir — should succeed without error
     let out = Command::new(gnx_bin())
         .args([
+            "admin",
             "rename-branch",
             "--from=ghost",
             "--to=new-name",
@@ -100,7 +102,7 @@ fn rename_branch_no_op_when_from_dir_missing() {
         .unwrap();
     assert!(
         out.status.success(),
-        "rename-branch (no-op) failed: stderr={}",
+        "admin rename-branch (no-op) failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }

@@ -194,10 +194,7 @@ fn build_inspect_block(
 
 /// Collect direct callers/importers of `node_idx` (depth=1 upstream).
 /// Returns a compact list of `{name, kind, file}` records.
-fn bfs_upstream_1hop(
-    graph: &ArchivedZeroCopyGraph,
-    node_idx: usize,
-) -> Vec<serde_json::Value> {
+fn bfs_upstream_1hop(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> Vec<serde_json::Value> {
     let mut visited = HashSet::new();
     visited.insert(node_idx);
 
@@ -233,8 +230,7 @@ pub fn run(args: InspectArgs, engine: &Engine, graph_path: &Path) -> Result<(), 
     let format = OutputFormat::parse(args.format.as_deref());
 
     // Freshness warning: emit to stderr when index is stale.
-    let worktree_root = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let worktree_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if let Ok(EnsureResult::Stale { age_seconds }) = ensure_index(graph_path, &worktree_root) {
         let age = if age_seconds > 3600 {
             format!("{}h", age_seconds / 3600)
@@ -276,7 +272,7 @@ pub fn run(args: InspectArgs, engine: &Engine, graph_path: &Path) -> Result<(), 
     if matching_nodes.len() == 1 {
         let (node_idx, _) = matching_nodes[0];
         let block = build_inspect_block(
-            &graph,
+            graph,
             node_idx,
             &kind_filter,
             &rel_filter,
@@ -300,7 +296,7 @@ pub fn run(args: InspectArgs, engine: &Engine, graph_path: &Path) -> Result<(), 
         .iter()
         .map(|(node_idx, _)| {
             build_inspect_block(
-                &graph,
+                graph,
                 *node_idx,
                 &kind_filter,
                 &rel_filter,

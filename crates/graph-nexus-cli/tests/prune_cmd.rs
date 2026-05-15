@@ -53,6 +53,7 @@ fn prune_removes_index_dir_and_registry_branch() {
 
     let out = Command::new(gnx_bin())
         .args([
+            "admin",
             "prune",
             "--branch=feat-x",
             &format!("--repo={}", repo_tmp.path().display()),
@@ -62,7 +63,7 @@ fn prune_removes_index_dir_and_registry_branch() {
         .unwrap();
     assert!(
         out.status.success(),
-        "prune failed: stderr={}",
+        "admin prune failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 

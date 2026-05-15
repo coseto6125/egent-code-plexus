@@ -20,8 +20,15 @@ fn gnx_admin_help() -> String {
 fn top_level_lists_nine_agent_commands() {
     let help = gnx_help();
     for cmd in [
-        "inspect", "search", "impact", "rename", "cypher",
-        "coverage", "routes", "scan", "contracts",
+        "inspect",
+        "search",
+        "impact",
+        "rename",
+        "cypher",
+        "coverage",
+        "routes",
+        "scan",
+        "contracts",
     ] {
         assert!(help.contains(cmd), "missing {cmd} in --help:\n{help}");
     }
@@ -44,7 +51,13 @@ fn top_level_hides_admin() {
 fn admin_help_lists_seven_entries() {
     let help = gnx_admin_help();
     for cmd in [
-        "install-hook", "drop", "prune", "rename-branch", "config", "group", "index",
+        "install-hook",
+        "drop",
+        "prune",
+        "rename-branch",
+        "config",
+        "group",
+        "index",
     ] {
         assert!(help.contains(cmd), "missing {cmd} in admin --help:\n{help}");
     }
@@ -54,16 +67,34 @@ fn admin_help_lists_seven_entries() {
 fn no_old_top_level_commands() {
     let help = gnx_help();
     for old in [
-        "analyze", "context", "query", "doctor", "status", "list",
-        "summarize", "detect-changes", "route-map", "api-impact",
-        "tool-map", "cluster", "process", "multi-query", "multi_query",
-        "clean", "remove", "init", "shape-check", "shape_check",
-        "analyze-here", "analyze_here",
+        "analyze",
+        "context",
+        "query",
+        "doctor",
+        "status",
+        "list",
+        "summarize",
+        "detect-changes",
+        "route-map",
+        "api-impact",
+        "tool-map",
+        "cluster",
+        "process",
+        "multi-query",
+        "multi_query",
+        "clean",
+        "remove",
+        "init",
+        "shape-check",
+        "shape_check",
+        "analyze-here",
+        "analyze_here",
     ] {
         for line in help.lines() {
             let trimmed = line.trim_start();
             assert!(
-                !trimmed.starts_with(&format!("{old} ")) && !trimmed.starts_with(&format!("{old}\t")),
+                !trimmed.starts_with(&format!("{old} "))
+                    && !trimmed.starts_with(&format!("{old}\t")),
                 "old command {old} still visible in --help"
             );
         }

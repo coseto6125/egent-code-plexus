@@ -87,9 +87,9 @@ fn any_source_newer_than(
         .filter_map(Result::ok)
         .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
     {
-        let skip = graph_canonical.as_deref().map_or(false, |gc| {
-            fs::canonicalize(entry.path()).ok().as_deref() == Some(gc)
-        });
+        let skip = graph_canonical
+            .as_deref()
+            .is_some_and(|gc| fs::canonicalize(entry.path()).ok().as_deref() == Some(gc));
         if skip {
             continue;
         }

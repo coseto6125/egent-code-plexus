@@ -6,15 +6,9 @@ use std::path::PathBuf;
 #[derive(Subcommand, Debug)]
 pub enum GroupCommands {
     /// Add a repo to a group (auto-creates group)
-    Add {
-        repo: String,
-        group: String,
-    },
+    Add { repo: String, group: String },
     /// Remove a repo from a group (auto-deletes empty group)
-    Remove {
-        repo: String,
-        group: String,
-    },
+    Remove { repo: String, group: String },
 }
 
 pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
@@ -94,9 +88,7 @@ fn remove(repo: &str, group: &str) -> Result<(), GnxError> {
             reg.groups[pos].members.retain(|m| m != repo);
             if reg.groups[pos].members.is_empty() {
                 reg.groups.remove(pos);
-                println!(
-                    "✓ Removed \"{repo}\" from \"{group}\" (group auto-deleted, was empty)"
-                );
+                println!("✓ Removed \"{repo}\" from \"{group}\" (group auto-deleted, was empty)");
             } else {
                 println!("✓ Removed \"{repo}\" from \"{group}\"");
             }

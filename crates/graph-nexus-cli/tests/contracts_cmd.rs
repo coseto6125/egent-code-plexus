@@ -15,10 +15,7 @@ fn gnx() -> Command {
 /// should fail with a helpful message mentioning the cross-repo requirement.
 #[test]
 fn contracts_single_repo_errors() {
-    let output = gnx()
-        .args(["contracts", "--repo", "."])
-        .output()
-        .unwrap();
+    let output = gnx().args(["contracts", "--repo", "."]).output().unwrap();
 
     // Must exit non-zero.
     assert!(
@@ -49,7 +46,10 @@ fn contracts_single_repo_errors() {
 #[test]
 fn contracts_help_includes_kind_flag() {
     let output = gnx().args(["contracts", "--help"]).output().unwrap();
-    assert!(output.status.success(), "gnx contracts --help exited non-zero");
+    assert!(
+        output.status.success(),
+        "gnx contracts --help exited non-zero"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("--kind"),
@@ -60,7 +60,10 @@ fn contracts_help_includes_kind_flag() {
 #[test]
 fn contracts_help_includes_repo_flag() {
     let output = gnx().args(["contracts", "--help"]).output().unwrap();
-    assert!(output.status.success(), "gnx contracts --help exited non-zero");
+    assert!(
+        output.status.success(),
+        "gnx contracts --help exited non-zero"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("--repo"),
@@ -71,7 +74,10 @@ fn contracts_help_includes_repo_flag() {
 #[test]
 fn contracts_help_includes_unmatched_only_flag() {
     let output = gnx().args(["contracts", "--help"]).output().unwrap();
-    assert!(output.status.success(), "gnx contracts --help exited non-zero");
+    assert!(
+        output.status.success(),
+        "gnx contracts --help exited non-zero"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("--unmatched-only") || stdout.contains("--unmatched_only"),
@@ -82,7 +88,10 @@ fn contracts_help_includes_unmatched_only_flag() {
 #[test]
 fn contracts_help_includes_format_flag() {
     let output = gnx().args(["contracts", "--help"]).output().unwrap();
-    assert!(output.status.success(), "gnx contracts --help exited non-zero");
+    assert!(
+        output.status.success(),
+        "gnx contracts --help exited non-zero"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("--format"),
