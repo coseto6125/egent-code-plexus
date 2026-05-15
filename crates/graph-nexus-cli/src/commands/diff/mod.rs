@@ -10,6 +10,7 @@ use graph_nexus_core::GnxError;
 pub mod baseline;
 pub mod bindings;
 pub mod git_guard;
+pub mod routes;
 
 /// Section of the graph to diff. `All` = bindings + routes + contracts.
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +60,11 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         .iter()
         .any(|s| matches!(s, DiffSection::Bindings | DiffSection::All));
 
+    let want_routes = args
+        .section
+        .iter()
+        .any(|s| matches!(s, DiffSection::Routes | DiffSection::All));
+
     // Fast-path: identical SHAs → nothing could have changed.
     if baseline_sha == current_sha {
         let mut sections = serde_json::Map::new();
@@ -67,6 +73,13 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
                 "bindings".into(),
                 serde_json::to_value(bindings::BindingsDiff::default())
                     .map_err(|e| GnxError::Output(format!("bindings to_value: {e}")))?,
+            );
+        }
+        if want_routes {
+            sections.insert(
+                "routes".into(),
+                serde_json::to_value(routes::RoutesDiff::default())
+                    .map_err(|e| GnxError::Output(format!("routes to_value: {e}")))?,
             );
         }
         let envelope = serde_json::json!({
@@ -87,7 +100,12 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
     }
 
     let mut bindings_diff: Option<bindings::BindingsDiff> = None;
+    let mut routes_diff: Option<routes::RoutesDiff> = None;
 
+    // Perf note: when both bindings and routes are requested, we call
+    // `gnx admin index` twice per state (current + baseline) because bindings
+    // uses a temp JSONL dump while routes needs graph.bin directly. A future
+    // optimization could share the single index run across sections.
     if want_bindings {
         let baseline_jsonl = std::env::temp_dir()
             .join(format!("gnx-diff-bindings-baseline-{baseline_sha}.jsonl"));
@@ -111,12 +129,67 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         let _ = std::fs::remove_file(&current_jsonl);
     }
 
+    if want_routes {
+        // `bindings::dump` invokes `gnx admin index --repo <dir>` which writes
+        // graph.bin as a side effect. We reuse that invocation pattern here via
+        // a throwaway JSONL path so we can resolve graph.bin from the registry.
+        //
+        // Performance concern (surfaced per CLAUDE.md §perf):
+        // This re-runs admin index twice (baseline + current), each of which is
+        // a full re-analyze. When `want_bindings` is also true that means 4 total
+        // admin index runs. A future shared-index refactor would halve this cost.
+        let scratch_current = std::env::temp_dir().join(format!(
+            "gnx-diff-routes-scratch-current-{}.jsonl",
+            std::process::id()
+        ));
+        // Build current graph.bin via admin index; ignore the JSONL output.
+        bindings::dump(&repo_dir, &scratch_current)?;
+        let _ = std::fs::remove_file(&scratch_current);
+
+        // Resolve graph.bin path from registry after indexing current state.
+        let legacy_default = std::path::Path::new(".gnx/graph.bin");
+        let current_graph = crate::graph_path::resolve(legacy_default, &repo_dir);
+
+        let baseline_graph_tmp = std::env::temp_dir()
+            .join(format!("gnx-diff-routes-baseline-{baseline_sha}.bin"));
+
+        {
+            let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
+            let scratch_baseline = std::env::temp_dir().join(format!(
+                "gnx-diff-routes-scratch-baseline-{baseline_sha}.jsonl"
+            ));
+            bindings::dump(&repo_dir, &scratch_baseline)?;
+            let _ = std::fs::remove_file(&scratch_baseline);
+
+            let baseline_graph = crate::graph_path::resolve(legacy_default, &repo_dir);
+            std::fs::copy(&baseline_graph, &baseline_graph_tmp).map_err(|e| {
+                GnxError::Output(format!(
+                    "copy baseline graph {}: {e}",
+                    baseline_graph.display()
+                ))
+            })?;
+        } // _guard dropped — restores branch + stash
+
+        let current_routes = routes::extract(&current_graph)?;
+        let baseline_routes = routes::extract(&baseline_graph_tmp)?;
+        routes_diff = Some(routes::diff(&baseline_routes, &current_routes));
+
+        let _ = std::fs::remove_file(&baseline_graph_tmp);
+    }
+
     let mut sections = serde_json::Map::new();
     if let Some(bd) = &bindings_diff {
         sections.insert(
             "bindings".into(),
             serde_json::to_value(bd)
                 .map_err(|e| GnxError::Output(format!("bindings to_value: {e}")))?,
+        );
+    }
+    if let Some(rd) = &routes_diff {
+        sections.insert(
+            "routes".into(),
+            serde_json::to_value(rd)
+                .map_err(|e| GnxError::Output(format!("routes to_value: {e}")))?,
         );
     }
     let envelope = serde_json::json!({
