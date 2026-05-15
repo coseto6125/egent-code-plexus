@@ -58,7 +58,7 @@ enum Commands {
     /// Rename a branch's index dir + registry entry
     #[command(alias = "rename_branch")]
     RenameBranch(commands::rename_branch::RenameBranchArgs),
-    /// AST-powered multi-file symbol rename (Python, MVP)
+    /// AST-powered multi-file symbol rename across 14 languages
     Rename(commands::rename::RenameArgs),
     /// List all repos in the registry (compact | json | toon)
     List(commands::list::ListArgs),

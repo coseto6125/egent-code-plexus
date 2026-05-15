@@ -6,7 +6,8 @@
 //!    with `error: ambiguous` if multiple nodes share the name.
 //! 2. **Verify (AST)**: tree-sitter parse each affected file,
 //!    find every `identifier` byte-range whose text matches the
-//!    target.
+//!    target. Supported languages: Python, TypeScript/TSX, JavaScript,
+//!    Rust, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart.
 //! 3. **Execute / Dry-run**: dry-run prints the count + a unified diff
 //!    preview to stdout and exits. Execute writes each file atomically
 //!    (tmp + fsync + rename) by descending byte offset to avoid shift.
