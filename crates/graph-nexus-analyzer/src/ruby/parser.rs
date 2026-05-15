@@ -92,6 +92,22 @@ fn build_visibility_map(node: Node<'_>, source: &[u8]) -> HashMap<u32, bool> {
     map
 }
 
+/// Append a Ruby named binding (`alias` keyword, `alias_method`, or constant
+/// alias) as a `RawImport` with `alias = Some(new_name)`. De-duplicates on
+/// (imported_name, source) to keep repeated parses idempotent.
+fn push_alias_binding(imports: &mut Vec<RawImport>, new_name: &str, source: &str) {
+    let exists = imports
+        .iter()
+        .any(|i| i.imported_name == new_name && i.source == source);
+    if !exists {
+        imports.push(RawImport {
+            alias: Some(new_name.to_string()),
+            imported_name: new_name.to_string(),
+            source: source.to_string(),
+        });
+    }
+}
+
 pub struct RubyProvider {
     query: Query,
 }
@@ -142,6 +158,11 @@ impl LanguageProvider for RubyProvider {
         let idx_route = self.query.capture_index_for_name("route");
         let idx_attr_args = self.query.capture_index_for_name("attr_args");
         let idx_mixin_module = self.query.capture_index_for_name("mixin_module");
+        let idx_alias_new = self.query.capture_index_for_name("alias.new");
+        let idx_alias_old = self.query.capture_index_for_name("alias.old");
+        let idx_alias_method_args = self.query.capture_index_for_name("alias_method.args");
+        let idx_const_alias_new = self.query.capture_index_for_name("const_alias.new");
+        let idx_const_alias_source = self.query.capture_index_for_name("const_alias.source");
 
         while let Some(m) = matches.next() {
             let mut node_name = None;
@@ -157,6 +178,11 @@ impl LanguageProvider for RubyProvider {
 
             let mut attr_args_node: Option<tree_sitter::Node<'_>> = None;
             let mut mixin_module_node: Option<tree_sitter::Node<'_>> = None;
+            let mut alias_new_node: Option<tree_sitter::Node<'_>> = None;
+            let mut alias_old_node: Option<tree_sitter::Node<'_>> = None;
+            let mut alias_method_args: Option<tree_sitter::Node<'_>> = None;
+            let mut const_alias_new_node: Option<tree_sitter::Node<'_>> = None;
+            let mut const_alias_source_node: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -195,6 +221,16 @@ impl LanguageProvider for RubyProvider {
                     attr_args_node = Some(cap.node);
                 } else if cap_idx == idx_mixin_module {
                     mixin_module_node = Some(cap.node);
+                } else if cap_idx == idx_alias_new {
+                    alias_new_node = Some(cap.node);
+                } else if cap_idx == idx_alias_old {
+                    alias_old_node = Some(cap.node);
+                } else if cap_idx == idx_alias_method_args {
+                    alias_method_args = Some(cap.node);
+                } else if cap_idx == idx_const_alias_new {
+                    const_alias_new_node = Some(cap.node);
+                } else if cap_idx == idx_const_alias_source {
+                    const_alias_source_node = Some(cap.node);
                 }
             }
 
@@ -309,6 +345,45 @@ impl LanguageProvider for RubyProvider {
                 if let Ok(mm_str) = std::str::from_utf8(&source[mm.start_byte()..mm.end_byte()]) {
                     let line = mm.start_position().row as u32;
                     pending_mixins.push((mm_str.to_string(), line));
+                }
+            }
+
+            // `alias new old` keyword → named binding.
+            if let (Some(n), Some(o)) = (alias_new_node, alias_old_node) {
+                if let (Ok(new_name), Ok(old_name)) = (
+                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()]),
+                    std::str::from_utf8(&source[o.start_byte()..o.end_byte()]),
+                ) {
+                    push_alias_binding(&mut imports, new_name, old_name);
+                }
+            }
+
+            // `alias_method :new, :old` metaprogramming → named binding.
+            // Walk the argument_list and grab the first two simple_symbols.
+            if let Some(args) = alias_method_args {
+                let mut walker = args.walk();
+                let symbols: Vec<&str> = args
+                    .named_children(&mut walker)
+                    .filter(|c| c.kind() == "simple_symbol")
+                    .filter_map(|c| std::str::from_utf8(&source[c.start_byte()..c.end_byte()]).ok())
+                    .map(|s| s.strip_prefix(':').unwrap_or(s))
+                    .filter(|s| !s.is_empty())
+                    .take(2)
+                    .collect();
+                if let [new_name, old_name] = symbols.as_slice() {
+                    push_alias_binding(&mut imports, new_name, old_name);
+                }
+            }
+
+            // `MyConst = OtherModule::Const` → named binding.
+            // lhs is guaranteed `(constant)` by the query, so the assignment
+            // is a constant alias (not a local variable assignment).
+            if let (Some(lhs), Some(rhs)) = (const_alias_new_node, const_alias_source_node) {
+                if let (Ok(new_name), Ok(source_path)) = (
+                    std::str::from_utf8(&source[lhs.start_byte()..lhs.end_byte()]),
+                    std::str::from_utf8(&source[rhs.start_byte()..rhs.end_byte()]),
+                ) {
+                    push_alias_binding(&mut imports, new_name, source_path);
                 }
             }
         }

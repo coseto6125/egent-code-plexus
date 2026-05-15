@@ -65,3 +65,24 @@
   (#match? @include_kind "^(include|extend)$")
   arguments: (argument_list
     [ (constant) (scope_resolution) ] @mixin_module))
+
+;; `alias new_name old_name` keyword — emits a named binding.
+;; tree-sitter-ruby labels the NEW name as field `name` and the original as `alias`.
+(alias
+  name: (identifier) @alias.new
+  alias: (identifier) @alias.old)
+
+;; `alias_method :new_name, :old_name` metaprogramming — same shape as the
+;; keyword form, but parsed as a regular `call`. The two `simple_symbol`
+;; positional args carry the new and old names respectively.
+(call
+  method: (identifier) @_alias_method_call
+  (#match? @_alias_method_call "^alias_method$")
+  arguments: (argument_list) @alias_method.args)
+
+;; Constant alias: `MyConst = OtherModule::Const` (or `MyConst = OtherConst`).
+;; The lhs constraint to `(constant)` filters out `local_var = …` because
+;; lowercase identifiers parse as `identifier`, not `constant`.
+(assignment
+  left: (constant) @const_alias.new
+  right: [ (constant) (scope_resolution) ] @const_alias.source)
