@@ -97,30 +97,66 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 - ⚠️ &nbsp;**upstream claims it, graph-nexus is missing or partial** (where we lag)
 - — &nbsp;neither claims it
 
-| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ⚠️ | ✓ |
-| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ |
-| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ⚠️ | ✓ |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ |
-| Go | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✓ | ⚠️ | ✓ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ |
-| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✓ |
-| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✅ | ⚠️ | ✓ |
-| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✓ |
-| C | ✅ | — | ✓ | ✅ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
-| C++ | ✅ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
-| Dart | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
+| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
+| Go | ✓ | ✅ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
+| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
+| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✅ | ⚠️ | ✓ | ✓ |
+| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
+| C | ✅ | — | ✓ | ✅ | ✓ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
+| C++ | ✅ | ✅ | ✓ | ✓ | ✓ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
+| Dart | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
 
 **Where graph-nexus goes beyond upstream** (15 ✅ cells): C/C++ get Imports & Heritage that upstream doesn't claim; Java/Kotlin/Rust/Ruby/Dart get Config parsing for toolchains upstream doesn't cover; PHP gets Heritage; Go/C++/Dart get Named Bindings; Swift/C/C++ get basic Imports.
 
-**Wave 1 closed 28 cells** (Constructor Inference rolled out to all 14 languages mirroring Python's `4e4fb1b` receiver-type binding prototype; Java static-import named bindings; C# `csproj`/`global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators). **Remaining ⚠️ (17 cells, Wave 2 targets)**: Frameworks across 10 langs (JS, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart); Types for Go / Swift / Dart / C / C++; Config for PHP and Swift.
+**Wave 1 closed 28 cells** (Constructor Inference rolled out to all 14 languages mirroring Python's `4e4fb1b` receiver-type binding prototype; Java static-import named bindings; C# `csproj`/`global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators).
+
+**Wave 2 partial (PR #2)** closes 7 more cells: Types for Go / C / C++ (declared types on params, returns, struct fields, vars); Config for PHP (`composer.json`) and Swift (`Package.swift`); Frameworks for JS (Express + Hapi) and Kotlin (Ktor). **Remaining ⚠️ (10 cells, next wave)**: Frameworks for C# / Go / PHP / Ruby / Swift / C / C++ / Dart; Types for Swift / Dart.
 
 **Matrix-opt batch (HEAD `86e65a7`)** deepened existing ✓ cells: Go gained per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + `include`/`extend` mixin tracking, TS/JS re-export alias preservation. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
-Beyond these 14, the Rust providers also cover **17 additional languages** (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig) at the structural level. The matrix-opt batch added concrete dimensions to three of these: Bash now records `source`/`.` imports, Lua tracks `local M = require()` aliases + metatable inheritance + table-assigned methods, Solidity classifies state-variable visibility.
+### Extra languages (no upstream baseline)
+
+Beyond the 14 main languages, the Rust providers also cover **17 additional languages**. Most are config / DSL / hardware — only structural extraction applies. Below is what each one actually carries today (✓ has dedicated capture, — not applicable, ⚠️ partial / heuristic):
+
+| Language | Imports | Functions | Classes | Heritage | Calls | Routes | Config | Frameworks |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Bash | ✓ (`source`/`.`) | ✓ | — | — | ✓ | — | — | — |
+| Lua | ✓ (`require` + alias) | ✓ | ⚠️ (metatable heuristic) | ✓ (metatable `__index`) | ✓ | — | — | — |
+| Solidity | ✓ | ✓ (incl. modifiers) | ✓ (contracts) | ✓ | ✓ | — | — | — |
+| Crystal | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | — |
+| Nim | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | — |
+| Cairo | ✓ | ✓ | ✓ | — | ✓ | — | — | — |
+| Move | ✓ | ✓ | ✓ (structs) | — | ✓ | — | — | — |
+| Zig | ✓ | ✓ | ✓ (structs/unions) | — | ✓ | — | — | — |
+| HCL | ✓ | ✓ (blocks) | — | — | ✓ | — | — | — |
+| SQL | — | ✓ (procs/funcs) | ✓ (tables/views) | ⚠️ (FK refs) | ✓ | — | — | — |
+| Verilog | ✓ | ✓ (modules) | — | — | ✓ | — | — | — |
+| Vyper | ✓ | ✓ | ✓ (contracts) | — | ✓ | — | — | — |
+| Markdown | — | — | — | — | — | — | — | — |
+| GitHub Actions (`.yaml`) | ⚠️ (`uses:`) | ✓ (jobs/steps) | — | — | — | — | ✓ | — |
+| Docker Compose | — | ✓ (services) | — | — | — | — | ✓ | — |
+| Dockerfile | ✓ (`FROM` base) | — | — | — | — | — | ✓ | — |
+| YAML (generic) | — | — | — | — | — | — | ✓ | — |
+
+The matrix-opt batch added concrete dimensions to three of the extras: Bash `source`/`.` imports, Lua `local M = require()` aliases + metatable inheritance + table-assigned methods, Solidity state-variable visibility.
+
+### Call detection design
+
+Call detection is centralised in `crates/graph-nexus-analyzer/src/calls.rs`. The hot helper is `extract_calls(root, source, nodes, call_kinds)`:
+
+- Each language parser passes the tree-sitter node kinds that represent a call in its grammar — e.g., `["call_expression"]` for JS/TS, `["function_call"]` for Lua, `["call"]` for Python.
+- The walker is grammar-agnostic: descends the AST once, collects every call site, extracts the callee text via `callee_name_from(node, source)`, and attaches each call to its enclosing `Function` / `Method` via `attach_to_enclosing(line, callee, nodes)` (smallest-span containment).
+- OO languages additionally bind a **receiver type** (`obj.method` → know what `obj` is). Each lang has its own receiver-type module (`<lang>/receiver_types.rs`) tracking local variable annotations and class-scope `this`/`self`. The receiver type is stored on the RawCall so downstream resolution can pick the correct overload when method names collide.
+- Reflection / dynamic dispatch (`getattr(self, name)()`, JS dynamic `obj[k]()`, etc.) is **not** speculatively resolved; it lands as a `BlindSpot` record (per the project's "honest unknown beats fabricated edge" principle).
+- Call edges (`RelType::Calls`) are the largest single edge type in the graph; the saturating-conversion helper `safe_row` in calls.rs guards against rows exceeding `u32::MAX` corrupting call-to-function attribution.
 
 ## 🏗️ Architecture
 
