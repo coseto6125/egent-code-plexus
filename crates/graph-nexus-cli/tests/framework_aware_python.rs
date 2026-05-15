@@ -103,14 +103,14 @@ fn setup_fastapi_repo(repo: &Path, home: &Path) {
         ],
     );
     let out = Command::new(gnx_bin())
-        .args(["analyze", "--repo", "."])
+        .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", home)
         .output()
-        .expect("analyze failed to spawn");
+        .expect("admin index failed to spawn");
     assert!(
         out.status.success(),
-        "analyze failed: {}",
+        "admin index failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -129,16 +129,16 @@ fn high_trust_only_filters_framework_edges_in_impact() {
     //
     // Default impact upstream from get_db must include at least one caller
     // (get_current_user) reached via the low-confidence edge.
-    let target_uid = "Function:src/main.py:get_db";
+    let target_name = "get_db";
     let default_out = Command::new(gnx_bin())
         .args([
             "impact",
+            target_name,
             "--repo",
             ".",
-            "--target",
-            target_uid,
             "--direction",
-            "upstream",
+            "up",
+            "--high-trust-only=false",
             "--format",
             "json",
         ])
@@ -161,20 +161,19 @@ fn high_trust_only_filters_framework_edges_in_impact() {
         "default upstream from get_db must traverse Depends edges (got count={default_count}): {default_json}"
     );
 
-    // --high-trust-only: framework edges (confidence 0.6) filtered → only
+    // --high-trust-only=true: framework edges (confidence 0.6) filtered → only
     // the target node itself remains in the BFS result.
     let strict_out = Command::new(gnx_bin())
         .args([
             "impact",
+            target_name,
             "--repo",
             ".",
-            "--target",
-            target_uid,
             "--direction",
-            "upstream",
+            "up",
+            "--high-trust-only=true",
             "--format",
             "json",
-            "--high-trust-only",
         ])
         .current_dir(repo)
         .env("HOME", home_tmp.path())

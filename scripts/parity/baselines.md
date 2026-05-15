@@ -2,7 +2,7 @@
 
 Captured: 2026-05-14  
 gnx binary: `target/debug/gnx` (dev profile)  
-Command: `gnx analyze --repo .sample_repo/<lang>`
+Command: `gnx admin index --repo .sample_repo/<lang>`
 
 ## Baseline Results
 
@@ -20,12 +20,12 @@ Command: `gnx analyze --repo .sample_repo/<lang>`
 
 ### zig — PARTIAL (0 nodes)
 
-The `.zig` extension is not registered in `analyze.rs`'s file-extension match arm.
+The `.zig` extension is not registered in `index.rs`'s file-extension match arm.
 Only `readme.md` from the http.zig repo was scanned (1 file, 0 Zig-specific nodes).
-The `analyze` command exited 0, but no Zig symbols were extracted.
+The `admin index` command exited 0, but no Zig symbols were extracted.
 
 **Fix required:** Add `"zig"` to the extension match in
-`crates/graph-nexus-cli/src/commands/analyze.rs` and implement a `ZigProvider` in
+`crates/graph-nexus-cli/src/commands/admin/index.rs` and implement a `ZigProvider` in
 `crates/graph-nexus-analyzer/src/zig/`.
 
 ### move — sparse checkout

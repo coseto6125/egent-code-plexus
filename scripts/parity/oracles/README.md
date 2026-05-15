@@ -3,7 +3,7 @@
 Per-language module-resolution oracles for the resolver verification harness.
 Each oracle emits the JSONL contract defined in
 `docs/specs/2026-05-15-resolver-oracle-harness.md` so that
-`gnx verify-resolver` can diff our resolver's decisions against an
+internal resolver verification can diff our resolver's decisions against an
 authoritative source.
 
 ## `ts_oracle.mjs`

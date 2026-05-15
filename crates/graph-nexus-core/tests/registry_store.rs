@@ -21,7 +21,7 @@ fn round_trip_serialize_deserialize() {
                 delta_size: 0,
                 embedding_status: "complete".into(),
             }],
-            group: None,
+            groups: vec![],
         }],
         groups: vec![],
     };
@@ -65,7 +65,7 @@ fn atomic_write_creates_bak_on_overwrite() {
             worktree_path: "".into(),
             index_dir_root: "".into(),
             branches: vec![],
-            group: None,
+            groups: vec![],
         }],
         groups: vec![],
     };

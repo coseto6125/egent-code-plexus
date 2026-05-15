@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Public API consumed by host-integration generator (test was removed pending MCP re-wiring).
+
 //! Codex CLI native fork integration.
 //!
 //! Generates install artifacts that the user applies to their `openai/codex`

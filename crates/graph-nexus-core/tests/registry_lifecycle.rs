@@ -23,7 +23,7 @@ fn lifecycle_create_upsert_reopen() {
             delta_size: 0,
             embedding_status: "skipped".into(),
         }],
-        group: None,
+        groups: vec![],
     })
     .unwrap();
 

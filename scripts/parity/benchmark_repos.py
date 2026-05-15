@@ -37,16 +37,16 @@ def benchmark_analyze(repo_path: Path):
     workspace = Path.cwd()
 
     # Run original gnx
-    print("  \u251c\u2500 Running original gnx analyze...")
+    print("  \u251c\u2500 Running original gnx admin index...")
     start_time = time.time()
-    subprocess.run(["gnx", "analyze", "--repo", str(repo_path)], cwd=workspace, capture_output=True)
+    subprocess.run(["gnx", "admin", "index", "--repo", str(repo_path)], cwd=workspace, capture_output=True)
     gnx_time = time.time() - start_time
 
     # Run new graph-nexus
-    print("  \u2514\u2500 Running graph-nexus analyze...")
+    print("  \u2514\u2500 Running graph-nexus admin index...")
     start_time = time.time()
     subprocess.run(
-        ["cargo", "run", "--release", "--bin", "graph-nexus", "--", "analyze", "--repo", str(repo_path)],
+        ["cargo", "run", "--release", "--bin", "graph-nexus", "--", "admin", "index", "--repo", str(repo_path)],
         cwd=workspace,
         capture_output=True,
     )
@@ -84,7 +84,7 @@ def main():
 
             speedup = gnx_time / gnx_rs_time if gnx_rs_time > 0 else float("inf")
             print(
-                f"    \u2714 gnx: {gnx_time:.2f}s | graph-nexus: {gnx_rs_time:.2f}s | Speedup: {speedup:.1f}x\n"
+                f"    \u2713 gnx: {gnx_time:.2f}s | graph-nexus: {gnx_rs_time:.2f}s | Speedup: {speedup:.1f}x\n"
             )
 
             results.append((lang, gnx_time, gnx_rs_time, speedup))

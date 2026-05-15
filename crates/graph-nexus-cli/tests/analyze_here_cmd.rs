@@ -1,4 +1,5 @@
-//! Tests `gnx analyze-here` indexes the current working directory.
+//! Tests `gnx admin index --repo .` indexes the current working directory.
+//! (replaces the old `gnx analyze-here` top-level command, folded into admin)
 
 use std::path::Path;
 use std::process::Command;
@@ -52,7 +53,7 @@ fn analyze_here_indexes_cwd() {
     init_repo(repo_tmp.path());
 
     let out = Command::new(gnx_bin())
-        .arg("analyze-here")
+        .args(["admin", "index", "--repo", "."])
         .current_dir(repo_tmp.path())
         .env("HOME", home_tmp.path())
         .output()
@@ -60,7 +61,7 @@ fn analyze_here_indexes_cwd() {
 
     assert!(
         out.status.success(),
-        "analyze-here failed: stderr={}",
+        "admin index failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 

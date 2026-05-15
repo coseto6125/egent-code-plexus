@@ -169,16 +169,16 @@ app.post('/api/gdpr/export', function exportGdpr(req, res) {
     git_commit(repo.path());
 
     // ── Analyze + shape_check ──
-    let analyze = run(&["analyze", "--repo", "."], repo.path(), home.path());
+    let analyze = run(&["admin", "index", "--repo", "."], repo.path(), home.path());
     assert!(
         analyze.status.success(),
-        "analyze failed: stdout={} stderr={}",
+        "admin index failed: stdout={} stderr={}",
         String::from_utf8_lossy(&analyze.stdout),
         String::from_utf8_lossy(&analyze.stderr),
     );
 
     let shape = run(
-        &["shape_check", "--repo", ".", "--format", "json"],
+        &["shape-check", "--repo", ".", "--format", "json"],
         repo.path(),
         home.path(),
     );

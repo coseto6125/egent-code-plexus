@@ -1,7 +1,6 @@
-//! Integration tests for `gnx inspect` flag surface (UID resolution,
-//! kind / file_path / relation_types / include_tests filtering). The flags
-//! exist so the global CLAUDE.md GitNexus Workflow examples actually run.
-//! (renamed from `gnx context` in the CLI redesign)
+//! Integration tests for `gnx inspect` flag surface (kind / file_path /
+//! relation_types / include_tests filtering, ambiguous-match full blocks,
+//! upstream impact summary, no UID in output).
 
 use serde_json::Value;
 use std::path::Path;
@@ -80,11 +79,28 @@ fn run_json(repo: &Path, args: &[&str]) -> Value {
         .unwrap_or_else(|err| panic!("{args:?} did not return JSON: {err}\nstdout={stdout}"))
 }
 
+/// Run `gnx inspect` and return raw stdout string (for UID/keyword checks).
+fn run_stdout(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new(gnx_bin())
+        .args(args)
+        .current_dir(repo)
+        .env("HOME", repo)
+        .output()
+        .expect("command failed to spawn");
+    assert!(
+        out.status.success(),
+        "{args:?} failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+// ── Existing filter tests (updated: `context` → `inspect`, UID refs removed) ──
+
 #[test]
-fn context_ambiguous_name_returns_matches_array() {
-    // Two functions named `handler` in different files — `--name handler`
-    // is ambiguous; the response must include a `matches` array with both.
-    // Use `--file_path` to disambiguate (replaces old `--uid` flow).
+fn inspect_ambiguous_name_disambiguated_by_file_path() {
+    // Two functions named `handler` in different files — `--name handler` is
+    // ambiguous; `--file_path src/auth/` must narrow it to the auth handler.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -99,23 +115,11 @@ fn context_ambiguous_name_returns_matches_array() {
     );
     init_and_analyze(repo);
 
+    // Without filter: ambiguous
     let ambig = run_json(repo, &["inspect", "--name", "handler", "--format", "json"]);
     assert_eq!(ambig["status"], "ambiguous", "expected ambiguous: {ambig}");
 
-    // New API: ambiguous response carries `matches`, each a full inspect block.
-    let matches = ambig["matches"]
-        .as_array()
-        .unwrap_or_else(|| panic!("expected matches array in ambiguous response: {ambig}"));
-    assert_eq!(matches.len(), 2, "expected 2 matches: {ambig}");
-    let has_auth = matches.iter().any(|m| {
-        m["symbol"]["filePath"]
-            .as_str()
-            .unwrap_or("")
-            .contains("src/auth/login.ts")
-    });
-    assert!(has_auth, "auth handler not found in matches: {ambig}");
-
-    // Disambiguate with --file_path — should resolve to a single found result.
+    // With --file_path narrowing: single match
     let exact = run_json(
         repo,
         &[
@@ -123,11 +127,13 @@ fn context_ambiguous_name_returns_matches_array() {
             "--name",
             "handler",
             "--file_path",
-            "src/auth/login.ts",
+            "src/auth/",
             "--format",
             "json",
         ],
     );
+    // May return "found" (single match after filter applied to nodes) or
+    // "ambiguous" with one match; either way the auth file must appear.
     let status = exact["status"].as_str().unwrap_or("");
     assert!(
         status == "found" || status == "ambiguous",
@@ -139,17 +145,15 @@ fn context_ambiguous_name_returns_matches_array() {
                 .as_str()
                 .unwrap_or("")
                 .contains("src/auth/login.ts"),
-            "wrong file resolved: {exact}"
+            "wrong file: {exact}"
         );
     }
 }
 
 #[test]
-fn context_kind_filter_drops_non_matching_edges() {
-    // `caller()` does three things: constructs `Helper` (resolves to Class
-    // kind), calls `Helper().assist()` (Function kind), and calls
-    // `target_fn` (Function kind). `--kind function` must keep only the two
-    // function targets and drop the Class target.
+fn inspect_kind_filter_drops_non_matching_edges() {
+    // `caller()` calls `Helper` (Class), `Helper().assist()` (Function), and
+    // `target_fn` (Function). `--kind function` must drop the Class target.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -205,7 +209,7 @@ def caller():
         "should still keep function targets: {filtered}"
     );
 
-    // Every remaining target must resolve to a Function kind.
+    // Every remaining target must be a function (check via kind field, not uid).
     for entries in f_outgoing.values() {
         for entry in entries.as_array().unwrap() {
             let kind = entry["kind"].as_str().unwrap_or("").to_ascii_lowercase();
@@ -218,7 +222,7 @@ def caller():
 }
 
 #[test]
-fn context_file_path_filter_keeps_substring_matches() {
+fn inspect_file_path_filter_keeps_substring_matches() {
     // `caller` calls into both `src/auth/util.ts` and `src/billing/util.ts`.
     // `--file_path src/auth/` must keep only the auth edges.
     let tmp = tempfile::tempdir().unwrap();
@@ -277,10 +281,9 @@ export function caller() {
 }
 
 #[test]
-fn context_relation_types_filter_keeps_only_listed() {
+fn inspect_relation_types_filter_keeps_only_listed() {
     // `MyClass(BaseClass)` produces an `extends` outgoing edge. Filtering by
-    // `--relation_types calls` must drop it (different rel); filtering by
-    // `--relation_types extends` must keep it.
+    // `--relation_types calls` must drop it; `--relation_types extends` keeps it.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(repo, "src/helper.py", "class BaseClass:\n    pass\n");
@@ -351,7 +354,7 @@ class MyClass(BaseClass):
 }
 
 #[test]
-fn context_include_tests_default_drops_test_callers() {
+fn inspect_include_tests_default_drops_test_callers() {
     // `target_fn` is called from `src/lib.ts` AND `tests/lib.test.ts`.
     // Default behavior drops the test caller; `--include_tests` keeps it.
     let tmp = tempfile::tempdir().unwrap();
@@ -418,4 +421,157 @@ export function test_caller() {
         default_incoming_calls.len(),
         with_tests_calls.len()
     );
+}
+
+// ── New tests for Task 2.1 composition requirements ──
+
+#[test]
+fn inspect_output_does_not_contain_uid_field() {
+    // Single-match symbol: output must NOT contain a `uid:` key or the
+    // colon-delimited UID format (Kind:filePath:name) anywhere.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(
+        repo,
+        "src/lib.ts",
+        "export function unique_symbol_for_uid_test() { return 42; }\n",
+    );
+    init_and_analyze(repo);
+
+    let stdout = run_stdout(
+        repo,
+        &[
+            "inspect",
+            "--name",
+            "unique_symbol_for_uid_test",
+            "--format",
+            "toon",
+        ],
+    );
+    assert!(
+        !stdout.contains("\"uid\""),
+        "inspect output leaked uid field:\n{stdout}"
+    );
+    // UID format is `Kind:filePath:name` — a colon-separated triple. The
+    // symbol name itself doesn't have colons, so a colon in output signals UID.
+    // Exclude the stale-warning line (which uses ":" in its text) by checking
+    // JSON output format instead of raw toon.
+    let json = run_json(
+        repo,
+        &[
+            "inspect",
+            "--name",
+            "unique_symbol_for_uid_test",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        json["symbol"]["uid"].is_null(),
+        "inspect JSON payload contains uid field: {}",
+        json["symbol"]
+    );
+}
+
+#[test]
+fn inspect_ambiguous_returns_full_matches() {
+    // Two functions sharing a name → response must contain full inspect
+    // blocks per match (each with a `kind` field), not a candidates list.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(
+        repo,
+        "src/alpha.ts",
+        "export function shared_name() { return 'alpha'; }\n",
+    );
+    write(
+        repo,
+        "src/beta.ts",
+        "export function shared_name() { return 'beta'; }\n",
+    );
+    init_and_analyze(repo);
+
+    let result = run_json(
+        repo,
+        &["inspect", "--name", "shared_name", "--format", "json"],
+    );
+    assert_eq!(
+        result["status"], "ambiguous",
+        "expected ambiguous: {result}"
+    );
+
+    // Must have "matches" key (full blocks), not "candidates" (uid list).
+    let matches = result["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing 'matches' array in ambiguous response: {result}"));
+    assert!(
+        matches.len() >= 2,
+        "expected ≥2 full match blocks, got {}:\n{result}",
+        matches.len()
+    );
+
+    // Each block must have a symbol.kind field (full inspect block, not just a uid).
+    for m in matches {
+        let kind = m["symbol"]["kind"].as_str();
+        assert!(
+            kind.is_some() && !kind.unwrap().is_empty(),
+            "match block missing symbol.kind: {m}"
+        );
+    }
+
+    // Must NOT have a "candidates" key (old UID-list style).
+    assert!(
+        result["candidates"].is_null(),
+        "ambiguous response still exposes old 'candidates' key: {result}"
+    );
+}
+
+#[test]
+fn inspect_payload_includes_upstream_impact_summary() {
+    // `target_fn` has a caller (`prod_caller`). The inspect output must
+    // include a non-null `impact_upstream_1hop` array with ≥1 entry.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(
+        repo,
+        "src/lib.ts",
+        r#"
+export function target_fn() { return 1; }
+
+export function prod_caller() {
+    return target_fn();
+}
+"#,
+    );
+    init_and_analyze(repo);
+
+    let result = run_json(
+        repo,
+        &["inspect", "--name", "target_fn", "--format", "json"],
+    );
+    assert_eq!(result["status"], "found", "{result}");
+
+    let upstream = result["impact_upstream_1hop"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing or non-array 'impact_upstream_1hop' in:\n{result}"));
+    assert!(
+        !upstream.is_empty(),
+        "impact_upstream_1hop should contain ≥1 caller (prod_caller), got empty:\n{result}"
+    );
+
+    // Each entry in the upstream summary must have name, kind, file.
+    for entry in upstream {
+        assert!(
+            entry["name"].is_string(),
+            "upstream entry missing 'name': {entry}"
+        );
+        assert!(
+            entry["kind"].is_string(),
+            "upstream entry missing 'kind': {entry}"
+        );
+        assert!(
+            entry["file"].is_string(),
+            "upstream entry missing 'file': {entry}"
+        );
+    }
 }

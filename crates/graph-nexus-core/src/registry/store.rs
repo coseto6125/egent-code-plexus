@@ -17,14 +17,53 @@ pub struct RegistryFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RepoEntryRaw")]
 pub struct RepoEntry {
     pub name: String,
     pub remote_url: String,
     pub worktree_path: String,
     pub index_dir_root: String,
     pub branches: Vec<BranchEntry>,
+    /// Group memberships. Legacy `group: Option<String>` auto-migrates
+    /// to a one-element Vec via `RepoEntryRaw`.
+    pub groups: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RepoEntryRaw {
+    name: String,
+    remote_url: String,
+    worktree_path: String,
+    index_dir_root: String,
     #[serde(default)]
-    pub group: Option<String>,
+    branches: Vec<BranchEntry>,
+    #[serde(default, alias = "group")]
+    groups: Option<GroupsField>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GroupsField {
+    Vec(Vec<String>),
+    Single(String),
+}
+
+impl From<RepoEntryRaw> for RepoEntry {
+    fn from(raw: RepoEntryRaw) -> Self {
+        let groups = match raw.groups {
+            None => vec![],
+            Some(GroupsField::Vec(v)) => v,
+            Some(GroupsField::Single(s)) => vec![s],
+        };
+        RepoEntry {
+            name: raw.name,
+            remote_url: raw.remote_url,
+            worktree_path: raw.worktree_path,
+            index_dir_root: raw.index_dir_root,
+            branches: raw.branches,
+            groups,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +201,7 @@ impl RegistryFile {
                     worktree_path,
                     index_dir_root: home_gnx.join(&name).to_string_lossy().into(),
                     branches,
-                    group: None,
+                    groups: vec![],
                 },
             )
             .collect();
@@ -206,5 +245,61 @@ pub fn strip_credentials(url: &str) -> String {
             u.to_string()
         }
         Err(_) => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migrate_single_group_to_vec() {
+        let old_json = serde_json::json!({
+            "version": 1,
+            "repos": [{
+                "name": "alpha",
+                "remote_url": "https://example.com/alpha.git",
+                "worktree_path": "/tmp/alpha",
+                "index_dir_root": "/tmp/idx/alpha",
+                "branches": [],
+                "group": "backend"
+            }],
+            "groups": []
+        });
+        let parsed: RegistryFile = serde_json::from_value(old_json).unwrap();
+        assert_eq!(parsed.repos[0].groups, vec!["backend".to_string()]);
+    }
+
+    #[test]
+    fn migrate_null_group_to_empty_vec() {
+        let old_json = serde_json::json!({
+            "version": 1,
+            "repos": [{
+                "name": "alpha",
+                "remote_url": "x",
+                "worktree_path": "/tmp/a",
+                "index_dir_root": "/tmp/i",
+                "branches": [],
+                "group": null
+            }],
+            "groups": []
+        });
+        let parsed: RegistryFile = serde_json::from_value(old_json).unwrap();
+        assert!(parsed.repos[0].groups.is_empty());
+    }
+
+    #[test]
+    fn new_format_round_trips() {
+        let entry = RepoEntry {
+            name: "x".into(),
+            remote_url: "x".into(),
+            worktree_path: "x".into(),
+            index_dir_root: "x".into(),
+            branches: vec![],
+            groups: vec!["a".into(), "b".into()],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: RepoEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.groups, vec!["a", "b"]);
     }
 }

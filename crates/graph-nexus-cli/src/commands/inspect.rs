@@ -1,32 +1,25 @@
+use crate::auto_ensure::{ensure_index, EnsureResult};
 use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_core::algorithms::process_trace::is_test_path;
+use graph_nexus_core::graph::ArchivedZeroCopyGraph;
 use graph_nexus_core::GnxError;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 
-/// Query the call-graph context of a single symbol — returns its incoming and
-/// outgoing edges, file metadata, and any blind spots detected in the same
-/// source file.
-#[derive(Args, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ContextArgs {
-    /// Name of the symbol to query. Mutually exclusive with --uid.
+#[derive(Args, Debug)]
+pub struct InspectArgs {
+    /// Name of the symbol to inspect.
     #[arg(long)]
     pub name: Option<String>,
-
-    /// UID of the symbol to query (format `Kind:filePath:name`). When set,
-    /// disambiguates a collision that `--name` alone cannot resolve.
-    #[arg(long)]
-    pub uid: Option<String>,
 
     /// Repository path
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format (e.g. `toon`, `json`). Defaults to `toon`.
+    /// Output format
     #[arg(long, default_value = "toon")]
     pub format: Option<String>,
 
@@ -70,80 +63,22 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     }
 }
 
-pub fn run_inner(
-    args: ContextArgs,
-    engine: &dyn graph_nexus_mcp::registry::EngineRef,
-) -> Result<serde_json::Value, GnxError> {
-    let engine = crate::engine::cast_engine(engine)?;
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
-
-    // Resolve the symbol. --uid wins over --name when both are supplied so
-    // CLAUDE.md's "Use UID from candidates" disambiguation step always
-    // selects exactly that node.
-    let uid_query = args.uid.as_deref().filter(|s| !s.is_empty());
-    let name_query = args.name.as_deref().filter(|s| !s.is_empty());
-
-    if uid_query.is_none() && name_query.is_none() {
-        return Err(GnxError::InvalidArgument(
-            "either --name or --uid is required".to_string(),
-        ));
-    }
-
-    let mut matching_nodes = Vec::new();
-    if let Some(uid) = uid_query {
-        for (i, node) in graph.nodes.iter().enumerate() {
-            if node.uid.resolve(&graph.string_pool) == uid {
-                matching_nodes.push((i, node));
-                break;
-            }
-        }
-    } else if let Some(name) = name_query {
-        for (i, node) in graph.nodes.iter().enumerate() {
-            if node.name.resolve(&graph.string_pool) == name {
-                matching_nodes.push((i, node));
-            }
-        }
-    }
-
-    if matching_nodes.is_empty() {
-        let needle = uid_query.unwrap_or_else(|| name_query.unwrap_or(""));
-        return Ok(serde_json::json!({
-            "status": "error",
-            "message": format!("Symbol '{}' not found.", needle)
-        }));
-    }
-
-    if matching_nodes.len() > 1 {
-        let mut candidates = Vec::new();
-        let display_name = name_query.unwrap_or("");
-        for (_, node) in matching_nodes {
-            let file_node = &graph.files[node.file_idx.to_native() as usize];
-            candidates.push(serde_json::json!({
-                "uid": node.uid.resolve(&graph.string_pool),
-                "name": node.name.resolve(&graph.string_pool),
-                "kind": kind_to_str(&node.kind),
-                "filePath": file_node.path.resolve(&graph.string_pool),
-                "line": node.span.0.to_native(),
-                "score": 1.0,
-            }));
-        }
-        return Ok(serde_json::json!({
-            "status": "ambiguous",
-            "message": format!("Found {} symbols matching '{}'. Use uid, file_path, or kind to disambiguate.", candidates.len(), display_name),
-            "candidates": candidates
-        }));
-    }
-
-    let (node_idx, node) = matching_nodes[0];
+/// Build the full inspect payload for a single node index.
+///
+/// Returns a JSON object with: symbol (no uid), incoming, outgoing,
+/// blind_spots, and impact_upstream_1hop.
+fn build_inspect_block(
+    graph: &ArchivedZeroCopyGraph,
+    node_idx: usize,
+    kind_filter: &Option<Vec<String>>,
+    rel_filter: &Option<Vec<String>>,
+    file_substr: Option<&str>,
+    include_tests: bool,
+) -> serde_json::Value {
+    let node = &graph.nodes[node_idx];
     let file_node = &graph.files[node.file_idx.to_native() as usize];
     let file_path_str = file_node.path.resolve(&graph.string_pool);
 
-    // Pre-parse filters once so the edge loop only does cheap comparisons.
-    let kind_filter = parse_csv_lower(args.kind.as_deref());
-    let rel_filter = parse_csv_lower(args.relation_types.as_deref());
-    let file_substr = args.file_path.as_deref().filter(|s| !s.is_empty());
-
-    // Returns true when the edge entry should be kept.
     let edge_keeps = |target_kind_str: &str, target_file_path: &str, rel_str: &str| -> bool {
         if let Some(ref kinds) = kind_filter {
             if !kinds
@@ -163,7 +98,7 @@ pub fn run_inner(
                 return false;
             }
         }
-        if !args.include_tests && is_test_path(target_file_path) {
+        if !include_tests && is_test_path(target_file_path) {
             return false;
         }
         true
@@ -188,8 +123,8 @@ pub fn run_inner(
         }
 
         let entry = serde_json::json!({
-            "uid": target_node.uid.resolve(&graph.string_pool),
             "name": target_node.name.resolve(&graph.string_pool),
+            "kind": target_kind,
             "filePath": target_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
             "confidence": edge.confidence.to_native(),
@@ -210,16 +145,14 @@ pub fn run_inner(
         let rel_str = rel_to_str(&edge.rel_type).to_string();
 
         // For incoming edges the "target" we filter against is the OTHER end —
-        // i.e. the caller / importer. CLAUDE.md's --kind / --file_path /
-        // --include_tests are about "show me only edges whose other side
-        // matches", regardless of direction.
+        // i.e. the caller / importer.
         if !edge_keeps(source_kind, source_file_path, &rel_str) {
             continue;
         }
 
         let entry = serde_json::json!({
-            "uid": source_node.uid.resolve(&graph.string_pool),
             "name": source_node.name.resolve(&graph.string_pool),
+            "kind": source_kind,
             "filePath": source_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
             "confidence": edge.confidence.to_native(),
@@ -227,9 +160,7 @@ pub fn run_inner(
         incoming.entry(rel_str).or_default().push(entry);
     }
 
-    // Blind spots are file-level metadata; surface only sites in the same
-    // file as the queried symbol so the LLM sees unresolvable patterns it
-    // should manually inspect when reading this symbol's context.
+    // Blind spots: only from the same file.
     let blind_spots: Vec<serde_json::Value> = graph
         .blind_spots
         .iter()
@@ -243,10 +174,11 @@ pub fn run_inner(
         })
         .collect();
 
-    Ok(serde_json::json!({
-        "status": "found",
+    // 1-hop upstream impact: direct callers/importers.
+    let upstream_1hop = bfs_upstream_1hop(graph, node_idx);
+
+    serde_json::json!({
         "symbol": {
-            "uid": node.uid.resolve(&graph.string_pool),
             "name": node.name.resolve(&graph.string_pool),
             "kind": kind_to_str(&node.kind),
             "filePath": file_path_str,
@@ -255,34 +187,133 @@ pub fn run_inner(
         },
         "incoming": incoming,
         "outgoing": outgoing,
-        "processes": [],
         "blind_spots": blind_spots,
-    }))
+        "impact_upstream_1hop": upstream_1hop,
+    })
 }
 
-pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
-    let format = OutputFormat::parse(args.format.as_deref());
-    let value = run_inner(args, engine)?;
-    emit(&value, format)
-}
+/// Collect direct callers/importers of `node_idx` (depth=1 upstream).
+/// Returns a compact list of `{name, kind, file}` records.
+fn bfs_upstream_1hop(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> Vec<serde_json::Value> {
+    let mut visited = HashSet::new();
+    visited.insert(node_idx);
 
-#[cfg(test)]
-mod inner_tests {
-    use super::*;
+    let in_start = graph.in_offsets[node_idx].to_native() as usize;
+    let in_end = graph.in_offsets[node_idx + 1].to_native() as usize;
 
-    #[test]
-    fn run_inner_returns_structured_value_not_unit() {
-        // Compile-only signature check. Behaviour is verified by the
-        // command's existing integration tests when called via run().
-        fn _accepts(
-            _f: fn(
-                ContextArgs,
-                &dyn graph_nexus_mcp::registry::EngineRef,
-            ) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
-        ) {
+    let mut queue = VecDeque::new();
+    for i in in_start..in_end {
+        let edge_idx = graph.in_edge_idx[i].to_native() as usize;
+        let edge = &graph.edges[edge_idx];
+        let src_idx = edge.source.to_native() as usize;
+        if visited.insert(src_idx) {
+            queue.push_back(src_idx);
         }
-        _accepts(run_inner);
     }
+
+    let mut results = Vec::new();
+    while let Some(idx) = queue.pop_front() {
+        let n = &graph.nodes[idx];
+        let file = &graph.files[n.file_idx.to_native() as usize];
+        results.push(serde_json::json!({
+            "name": n.name.resolve(&graph.string_pool),
+            "kind": kind_to_str(&n.kind),
+            "file": file.path.resolve(&graph.string_pool),
+        }));
+    }
+
+    results
 }
 
-graph_nexus_mcp::gnx_register_mcp_tool!(ContextArgs, run_inner);
+pub fn run(args: InspectArgs, engine: &Engine, graph_path: &Path) -> Result<(), GnxError> {
+    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+    let format = OutputFormat::parse(args.format.as_deref());
+
+    // Freshness warning: emit to stderr when index is stale.
+    let worktree_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Ok(EnsureResult::Stale { age_seconds }) = ensure_index(graph_path, &worktree_root) {
+        let age = if age_seconds > 3600 {
+            format!("{}h", age_seconds / 3600)
+        } else if age_seconds > 60 {
+            format!("{}m", age_seconds / 60)
+        } else {
+            format!("{}s", age_seconds)
+        };
+        eprintln!("{}", crate::hint::stale_warning("current", &age));
+    }
+
+    let name_query = args.name.as_deref().filter(|s| !s.is_empty());
+
+    if name_query.is_none() {
+        return Err(GnxError::InvalidArgument("--name is required".to_string()));
+    }
+
+    let name = name_query.unwrap();
+    let matching_nodes: Vec<(usize, _)> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.name.resolve(&graph.string_pool) == name)
+        .collect();
+
+    if matching_nodes.is_empty() {
+        let result = serde_json::json!({
+            "status": "error",
+            "message": format!("Symbol '{}' not found.", name)
+        });
+        return emit(&result, format);
+    }
+
+    // Pre-parse filters once.
+    let kind_filter = parse_csv_lower(args.kind.as_deref());
+    let rel_filter = parse_csv_lower(args.relation_types.as_deref());
+    let file_substr = args.file_path.as_deref().filter(|s| !s.is_empty());
+
+    if matching_nodes.len() == 1 {
+        let (node_idx, _) = matching_nodes[0];
+        let block = build_inspect_block(
+            graph,
+            node_idx,
+            &kind_filter,
+            &rel_filter,
+            file_substr,
+            args.include_tests,
+        );
+        let result = serde_json::json!({
+            "status": "found",
+            "symbol": block["symbol"],
+            "incoming": block["incoming"],
+            "outgoing": block["outgoing"],
+            "processes": [],
+            "blind_spots": block["blind_spots"],
+            "impact_upstream_1hop": block["impact_upstream_1hop"],
+        });
+        return emit(&result, format);
+    }
+
+    // Ambiguous: return ALL matches as full inspect blocks (not a candidates list).
+    let blocks: Vec<serde_json::Value> = matching_nodes
+        .iter()
+        .map(|(node_idx, _)| {
+            build_inspect_block(
+                graph,
+                *node_idx,
+                &kind_filter,
+                &rel_filter,
+                file_substr,
+                args.include_tests,
+            )
+        })
+        .collect();
+
+    let result = serde_json::json!({
+        "status": "ambiguous",
+        "message": format!(
+            "Found {} symbols matching '{}'. Use --file_path or --kind to disambiguate.",
+            blocks.len(),
+            name
+        ),
+        "matches": blocks,
+    });
+    emit(&result, format)
+}
