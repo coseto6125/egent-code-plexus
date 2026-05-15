@@ -62,8 +62,8 @@ cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx --locked
 
 | 平台 | 指令 | 備註 |
 | :--- | :--- | :--- |
-| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.sh \| sh` | 先試預編 Release；沒 Release 時自動 fallback 到 `cargo install --git`。設 `GNX_FORCE_CARGO=1` 可跳過 Release 偵測。 |
-| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.ps1 -UseBasicParsing \| iex` | 同樣 Release 優先 / cargo fallback。設 `$env:GNX_FORCE_CARGO='1'` 強制 cargo。 |
+| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/graph-nexus/main/install.sh \| sh` | 先試預編 Release；沒 Release 時自動 fallback 到 `cargo install --git`。預設裝到 `~/.local/bin/gnx`，自訂用 `GNX_INSTALL_DIR=~/bin curl ... \| sh`。`GNX_FORCE_CARGO=1` 跳過 Release 偵測。 |
+| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/graph-nexus/main/install.ps1 -UseBasicParsing \| iex` | 同樣 Release 優先 / cargo fallback。預設裝到 `%LOCALAPPDATA%\Programs\gnx\gnx.exe`，自訂用 `$env:GNX_INSTALL_DIR='...'`。`$env:GNX_FORCE_CARGO='1'` 強制 cargo。 |
 | **macOS Homebrew** | `brew tap coseto6125/tap && brew install graph-nexus` | 首個 Release 帶出 tap formula 後可用。 |
 | **手動下載** | [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | 挑選對應 target 的 archive 並驗證 `.sha256`。 |
 

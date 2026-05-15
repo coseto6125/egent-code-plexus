@@ -20,6 +20,15 @@ BIN="gnx"
 GNX_VERSION="${GNX_VERSION:-latest}"
 GNX_FORCE_CARGO="${GNX_FORCE_CARGO:-0}"
 
+# ---- 安裝目錄 ---- (resolved up-front so cargo fallback respects it too)
+if [ -z "${GNX_INSTALL_DIR:-}" ]; then
+  if [ "$(id -u)" -eq 0 ]; then
+    GNX_INSTALL_DIR="/usr/local/bin"
+  else
+    GNX_INSTALL_DIR="$HOME/.local/bin"
+  fi
+fi
+
 cargo_fallback() {
   reason="$1"
   if ! command -v cargo >/dev/null 2>&1; then
@@ -30,27 +39,29 @@ cargo_fallback() {
   fi
   echo "==> $reason"
   echo "==> Falling back to \`cargo install --git\` (source build, may take a few minutes)"
+
+  # Build into a private --root then move the binary to GNX_INSTALL_DIR.
+  # `cargo install --git <url> <package>` requires the workspace package
+  # name now that the workspace has multiple binaries; `--root <dir>`
+  # places the binary at <dir>/bin/<bin> regardless of GNX_INSTALL_DIR
+  # shape (`~/bin`, `~/.local/bin`, `/usr/local/bin` all work).
+  build_root="$(mktemp -d 2>/dev/null || mktemp -d -t gnx-build)"
+  trap 'rm -rf "$build_root"' EXIT
   if [ "${GNX_VERSION}" = "latest" ]; then
-    cargo install --git "https://github.com/$REPO" --bin "$BIN" --locked
+    cargo install --root "$build_root" --git "https://github.com/$REPO" graph-nexus --bin "$BIN" --locked
   else
-    cargo install --git "https://github.com/$REPO" --tag "v${GNX_VERSION#v}" --bin "$BIN" --locked
+    cargo install --root "$build_root" --git "https://github.com/$REPO" graph-nexus --tag "v${GNX_VERSION#v}" --bin "$BIN" --locked
   fi
+  mkdir -p "$GNX_INSTALL_DIR"
+  install -m 0755 "$build_root/bin/$BIN" "$GNX_INSTALL_DIR/$BIN"
+
   echo
-  echo "✓ Installed $BIN via cargo (binary at \$CARGO_HOME/bin/$BIN, usually ~/.cargo/bin/$BIN)"
+  echo "✓ Installed $BIN via cargo → $GNX_INSTALL_DIR/$BIN"
   exit 0
 }
 
 if [ "${GNX_FORCE_CARGO}" = "1" ]; then
   cargo_fallback "GNX_FORCE_CARGO=1 set"
-fi
-
-# ---- 安裝目錄 ----
-if [ -z "${GNX_INSTALL_DIR:-}" ]; then
-  if [ "$(id -u)" -eq 0 ]; then
-    GNX_INSTALL_DIR="/usr/local/bin"
-  else
-    GNX_INSTALL_DIR="$HOME/.local/bin"
-  fi
 fi
 
 # ---- 偵測 OS / ARCH → target triple ----

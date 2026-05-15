@@ -135,8 +135,8 @@ jobs:
 
       - name: Stage install scripts into dist
         run: |
-          cp scripts/install.sh  dist/install.sh
-          cp scripts/install.ps1 dist/install.ps1
+          cp install.sh  dist/install.sh
+          cp install.ps1 dist/install.ps1
           ls -la dist/
 
       - name: Create GitHub Release

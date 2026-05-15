@@ -72,8 +72,8 @@ RUSTFLAGS="-C target-cpu=native" \
 
 | Platform | Command | Notes |
 | :--- | :--- | :--- |
-| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.sh \| sh` | Tries prebuilt Release first; auto-falls back to `cargo install --git` when no Release is published yet. Set `GNX_FORCE_CARGO=1` to skip Release lookup. |
-| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.ps1 -UseBasicParsing \| iex` | Same Release-first / cargo-fallback logic. Set `$env:GNX_FORCE_CARGO='1'` to force cargo. |
+| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/graph-nexus/main/install.sh \| sh` | Tries prebuilt Release first; auto-falls back to `cargo install --git` when no Release is published yet. Defaults to `~/.local/bin/gnx`; override with `GNX_INSTALL_DIR=~/bin curl ... \| sh` to land anywhere you control. `GNX_FORCE_CARGO=1` skips the Release lookup. |
+| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/graph-nexus/main/install.ps1 -UseBasicParsing \| iex` | Same Release-first / cargo-fallback logic. Defaults to `%LOCALAPPDATA%\Programs\gnx\gnx.exe`; override with `$env:GNX_INSTALL_DIR=...` before piping to `iex`. `$env:GNX_FORCE_CARGO='1'` forces cargo. |
 | **macOS Homebrew** | `brew tap coseto6125/tap && brew install graph-nexus` | Available *after* the tap formula is published with the first Release. |
 | **Manual** | Download from [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | Pick the archive for your target and verify `.sha256`. |
 
