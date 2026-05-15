@@ -1,4 +1,4 @@
-//! Verifies that `gnx context` and `gnx cypher` surface per-edge metadata
+//! Verifies that `gnx inspect` and `gnx cypher` surface per-edge metadata
 //! (`reason`, `confidence`) so an LLM can distinguish direct AST calls from
 //! lower-trust resolutions (reflection fanout, framework heuristics, etc.).
 
@@ -52,14 +52,14 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
         .unwrap();
 
     let out = Command::new(gnx_bin())
-        .args(["analyze", "--repo", "."])
+        .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("analyze failed to spawn");
+        .expect("admin index failed to spawn");
     assert!(
         out.status.success(),
-        "analyze failed: stderr={}",
+        "admin index failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -117,7 +117,7 @@ fn context_outgoing_and_incoming_edges_expose_reason_and_confidence() {
     // `caller` should have an outgoing `calls` edge to `callee`.
     let out = run_json(
         tmp.path(),
-        &["context", "--name", "caller", "--format", "json"],
+        &["inspect", "--name", "caller", "--format", "json"],
     );
     assert_eq!(out["status"], "found");
 
@@ -129,13 +129,13 @@ fn context_outgoing_and_incoming_edges_expose_reason_and_confidence() {
         "caller should have at least one outgoing call edge: {out}"
     );
     for entry in outgoing_calls {
-        assert_edge_metadata(entry, "context outgoing call");
+        assert_edge_metadata(entry, "inspect outgoing call");
     }
 
     // `callee` should have an incoming `calls` edge from `caller`.
     let in_out = run_json(
         tmp.path(),
-        &["context", "--name", "callee", "--format", "json"],
+        &["inspect", "--name", "callee", "--format", "json"],
     );
     assert_eq!(in_out["status"], "found");
     let incoming_calls = in_out["incoming"]["calls"]
@@ -146,7 +146,7 @@ fn context_outgoing_and_incoming_edges_expose_reason_and_confidence() {
         "callee should have at least one incoming call edge: {in_out}"
     );
     for entry in incoming_calls {
-        assert_edge_metadata(entry, "context incoming call");
+        assert_edge_metadata(entry, "inspect incoming call");
     }
 }
 

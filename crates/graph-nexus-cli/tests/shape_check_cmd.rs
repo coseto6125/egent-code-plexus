@@ -163,7 +163,7 @@ fn run_shape_check(graph_path: &Path, format: &str) -> (String, String, bool) {
         .args([
             "--graph",
             graph_path.to_str().unwrap(),
-            "shape_check",
+            "shape-check",
             "--format",
             format,
         ])

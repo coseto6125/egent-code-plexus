@@ -72,10 +72,7 @@ fn run_coverage_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempD
         "coverage exited non-zero: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        home_tmp,
-    )
+    (String::from_utf8_lossy(&out.stdout).into_owned(), home_tmp)
 }
 
 fn init_git_repo(repo: &Path) {
@@ -149,7 +146,10 @@ fn coverage_with_repo_includes_health_sections() {
     let per_repo = v["coverage"]["per_repo"]
         .as_array()
         .expect("per_repo must be an array");
-    assert!(!per_repo.is_empty(), "per_repo should have at least one entry");
+    assert!(
+        !per_repo.is_empty(),
+        "per_repo should have at least one entry"
+    );
 
     let entry = &per_repo[0];
     assert!(

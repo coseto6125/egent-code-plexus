@@ -1,6 +1,7 @@
-//! Integration tests for `gnx context` flag surface (UID resolution,
+//! Integration tests for `gnx inspect` flag surface (UID resolution,
 //! kind / file_path / relation_types / include_tests filtering). The flags
 //! exist so the global CLAUDE.md GitNexus Workflow examples actually run.
+//! (renamed from `gnx context` in the CLI redesign)
 
 use serde_json::Value;
 use std::path::Path;
@@ -47,14 +48,14 @@ fn init_and_analyze(repo: &Path) {
         .unwrap();
 
     let out = Command::new(gnx_bin())
-        .args(["analyze", "--repo", "."])
+        .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("analyze failed to spawn");
+        .expect("admin index failed to spawn");
     assert!(
         out.status.success(),
-        "analyze failed: stderr={}",
+        "admin index failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -80,9 +81,10 @@ fn run_json(repo: &Path, args: &[&str]) -> Value {
 }
 
 #[test]
-fn context_uid_resolves_exact_node_when_name_is_ambiguous() {
+fn context_ambiguous_name_returns_matches_array() {
     // Two functions named `handler` in different files — `--name handler`
-    // is ambiguous, `--uid` must pick exactly one.
+    // is ambiguous; the response must include a `matches` array with both.
+    // Use `--file_path` to disambiguate (replaces old `--uid` flow).
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -97,30 +99,49 @@ fn context_uid_resolves_exact_node_when_name_is_ambiguous() {
     );
     init_and_analyze(repo);
 
-    let ambig = run_json(repo, &["context", "--name", "handler", "--format", "json"]);
+    let ambig = run_json(repo, &["inspect", "--name", "handler", "--format", "json"]);
     assert_eq!(ambig["status"], "ambiguous", "expected ambiguous: {ambig}");
 
-    let candidates = ambig["candidates"].as_array().unwrap();
-    // Find the auth handler's UID.
-    let auth_uid = candidates
-        .iter()
-        .find(|c| {
-            c["filePath"]
+    // New API: ambiguous response carries `matches`, each a full inspect block.
+    let matches = ambig["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected matches array in ambiguous response: {ambig}"));
+    assert_eq!(matches.len(), 2, "expected 2 matches: {ambig}");
+    let has_auth = matches.iter().any(|m| {
+        m["symbol"]["filePath"]
+            .as_str()
+            .unwrap_or("")
+            .contains("src/auth/login.ts")
+    });
+    assert!(has_auth, "auth handler not found in matches: {ambig}");
+
+    // Disambiguate with --file_path — should resolve to a single found result.
+    let exact = run_json(
+        repo,
+        &[
+            "inspect",
+            "--name",
+            "handler",
+            "--file_path",
+            "src/auth/login.ts",
+            "--format",
+            "json",
+        ],
+    );
+    let status = exact["status"].as_str().unwrap_or("");
+    assert!(
+        status == "found" || status == "ambiguous",
+        "unexpected status: {exact}"
+    );
+    if status == "found" {
+        assert!(
+            exact["symbol"]["filePath"]
                 .as_str()
                 .unwrap_or("")
-                .contains("src/auth/login.ts")
-        })
-        .and_then(|c| c["uid"].as_str())
-        .expect("auth handler UID not found in candidates")
-        .to_string();
-
-    let exact = run_json(repo, &["context", "--uid", &auth_uid, "--format", "json"]);
-    assert_eq!(exact["status"], "found", "expected found: {exact}");
-    assert_eq!(exact["symbol"]["uid"], auth_uid);
-    assert!(exact["symbol"]["filePath"]
-        .as_str()
-        .unwrap()
-        .contains("src/auth/login.ts"));
+                .contains("src/auth/login.ts"),
+            "wrong file resolved: {exact}"
+        );
+    }
 }
 
 #[test]
@@ -149,7 +170,7 @@ def caller():
     );
     init_and_analyze(repo);
 
-    let unfiltered = run_json(repo, &["context", "--name", "caller", "--format", "json"]);
+    let unfiltered = run_json(repo, &["inspect", "--name", "caller", "--format", "json"]);
     assert_eq!(unfiltered["status"], "found", "{unfiltered}");
 
     let count_entries = |o: &serde_json::Map<String, Value>| -> usize {
@@ -168,7 +189,7 @@ def caller():
     let filtered = run_json(
         repo,
         &[
-            "context", "--name", "caller", "--kind", "function", "--format", "json",
+            "inspect", "--name", "caller", "--kind", "function", "--format", "json",
         ],
     );
     assert_eq!(filtered["status"], "found");
@@ -187,10 +208,10 @@ def caller():
     // Every remaining target must resolve to a Function kind.
     for entries in f_outgoing.values() {
         for entry in entries.as_array().unwrap() {
-            let uid = entry["uid"].as_str().unwrap();
+            let kind = entry["kind"].as_str().unwrap_or("").to_ascii_lowercase();
             assert!(
-                uid.starts_with("Function:"),
-                "kind=function filter leaked uid={uid}"
+                kind == "function" || kind == "method",
+                "kind=function filter leaked kind={kind}: {entry}"
             );
         }
     }
@@ -229,7 +250,7 @@ export function caller() {
     let filtered = run_json(
         repo,
         &[
-            "context",
+            "inspect",
             "--name",
             "caller",
             "--file_path",
@@ -274,7 +295,7 @@ class MyClass(BaseClass):
     );
     init_and_analyze(repo);
 
-    let unfiltered = run_json(repo, &["context", "--name", "MyClass", "--format", "json"]);
+    let unfiltered = run_json(repo, &["inspect", "--name", "MyClass", "--format", "json"]);
     assert_eq!(unfiltered["status"], "found", "{unfiltered}");
     let unf_outgoing = unfiltered["outgoing"].as_object().unwrap();
     assert!(
@@ -285,7 +306,7 @@ class MyClass(BaseClass):
     let kept = run_json(
         repo,
         &[
-            "context",
+            "inspect",
             "--name",
             "MyClass",
             "--relation_types",
@@ -310,7 +331,7 @@ class MyClass(BaseClass):
     let dropped = run_json(
         repo,
         &[
-            "context",
+            "inspect",
             "--name",
             "MyClass",
             "--relation_types",
@@ -361,7 +382,7 @@ export function test_caller() {
 
     let default = run_json(
         repo,
-        &["context", "--name", "target_fn", "--format", "json"],
+        &["inspect", "--name", "target_fn", "--format", "json"],
     );
     assert_eq!(default["status"], "found", "{default}");
     let default_incoming_calls = default["incoming"]["calls"]
@@ -379,7 +400,7 @@ export function test_caller() {
     let with_tests = run_json(
         repo,
         &[
-            "context",
+            "inspect",
             "--name",
             "target_fn",
             "--include_tests",

@@ -3,6 +3,7 @@
 //!
 //! All formatters return strings the caller writes to stderr (for warnings)
 //! or appends after main stdout (for hints).
+#![allow(dead_code)]
 
 /// Empty result message: "No <kind> X found. <next-step suggestion>"
 pub fn empty_result(query: &str, kind: &str, suggestion: &str) -> String {

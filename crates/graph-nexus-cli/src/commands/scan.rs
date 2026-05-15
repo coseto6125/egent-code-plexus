@@ -29,18 +29,17 @@ pub fn run(args: ScanArgs, engine: &Engine) -> Result<(), GnxError> {
     let source = std::fs::read_to_string(&args.file).map_err(GnxError::Io)?;
 
     // Extract all unique identifier names from the file via tree-sitter.
-    let refs =
-        graph_nexus_analyzer::identifier_finder::find_all_identifier_names(
-            &args.file,
-            source.as_bytes(),
-        )
-        .ok_or_else(|| {
-            GnxError::Output(crate::hint::error_with_cause(
-                &format!("scan failed: unknown language for \"{}\"", args.file),
-                "extension not in supported language list",
-                "run `gnx coverage --detailed` to see supported languages",
-            ))
-        })?;
+    let refs = graph_nexus_analyzer::identifier_finder::find_all_identifier_names(
+        &args.file,
+        source.as_bytes(),
+    )
+    .ok_or_else(|| {
+        GnxError::Output(crate::hint::error_with_cause(
+            &format!("scan failed: unknown language for \"{}\"", args.file),
+            "extension not in supported language list",
+            "run `gnx coverage --detailed` to see supported languages",
+        ))
+    })?;
 
     // Collect all symbol names from the graph into a vec for fuzzy lookup.
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
@@ -53,7 +52,7 @@ pub fn run(args: ScanArgs, engine: &Engine) -> Result<(), GnxError> {
 
     let mut unresolved: Vec<Value> = vec![];
     for (name, line) in &refs {
-        if !name_strs.iter().any(|n| *n == name.as_str()) {
+        if !name_strs.contains(&name.as_str()) {
             let suggestions = fuzzy_top_k(&name_strs, name, 3);
             unresolved.push(json!({
                 "name": name,

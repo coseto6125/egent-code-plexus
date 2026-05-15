@@ -13,7 +13,11 @@ fn ensure_returns_ready_when_graph_exists_and_no_newer_source() {
     fs::write(&graph_path, vec![0u8; 16]).unwrap();
 
     let result = ensure_index(&graph_path, tmp.path()).unwrap();
-    assert!(matches!(result, EnsureResult::Ready), "expected Ready, got {:?}", result);
+    assert!(
+        matches!(result, EnsureResult::Ready),
+        "expected Ready, got {:?}",
+        result
+    );
 }
 
 #[test]
@@ -34,5 +38,9 @@ fn ensure_reports_stale_when_source_newer() {
     fs::write(tmp.path().join("src.rs"), "fn foo() {}").unwrap();
 
     let result = ensure_index(&graph_path, tmp.path()).unwrap();
-    assert!(matches!(result, EnsureResult::Stale { .. }), "expected Stale, got {:?}", result);
+    assert!(
+        matches!(result, EnsureResult::Stale { .. }),
+        "expected Stale, got {:?}",
+        result
+    );
 }

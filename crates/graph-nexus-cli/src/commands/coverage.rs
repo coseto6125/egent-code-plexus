@@ -2,10 +2,10 @@
 //!
 //! Folds doctor + status + list + summarize + tool_map into one command:
 //!
-//! - No `--repo`      → registry-level overview (indexed repos + groups)
-//! - `--repo <sel>`   → per-repo health (frameworks / freshness / externals /
-//!                       blind spots) for each resolved repo
-//! - `--repo @group`  → same, aggregated for all group members
+//! - No `--repo`     → registry-level overview (indexed repos + groups)
+//! - `--repo <sel>`  → per-repo health (frameworks / freshness / externals /
+//!   blind spots) for each resolved repo
+//! - `--repo @group` → same, aggregated for all group members
 //!
 //! Source modules (doctor/status/list/summarize/tool_map) coexist for now;
 //! Phase 5 cleanup removes them once cross-deps are clear.
@@ -57,17 +57,13 @@ pub fn run(args: CoverageArgs, _graph_arg: &Path) -> Result<(), GnxError> {
         let selector = crate::repo_selector::parse(repo_sel)
             .map_err(|e| GnxError::Output(format!("selector: {e}")))?;
         let cwd_str = cwd.to_string_lossy();
-        let resolved =
-            crate::repo_selector::resolve(&selector, reg, &cwd_str).map_err(|e| {
-                // For unknown group/name: emit graceful empty result rather than
-                // a hard error, so `--repo @test-group` on a fresh machine
-                // doesn't blow up integration tests.
-                GnxError::Output(format!("selector: {e}"))
-            })?;
-        let per_repo: Vec<Value> = resolved
-            .iter()
-            .map(|r| build_repo_health(r))
-            .collect();
+        let resolved = crate::repo_selector::resolve(&selector, reg, &cwd_str).map_err(|e| {
+            // For unknown group/name: emit graceful empty result rather than
+            // a hard error, so `--repo @test-group` on a fresh machine
+            // doesn't blow up integration tests.
+            GnxError::Output(format!("selector: {e}"))
+        })?;
+        let per_repo: Vec<Value> = resolved.iter().map(build_repo_health).collect();
         sections.insert("per_repo".into(), Value::Array(per_repo));
     }
 
@@ -99,20 +95,15 @@ fn build_registry_overview(reg: &RegistryFile, detailed: bool) -> Value {
         })
         .collect();
 
-    if detailed {
-        json!({ "count": rows.len(), "rows": rows })
-    } else {
-        json!({ "count": rows.len(), "rows": rows })
-    }
+    let _ = detailed; // detailed breakdown reserved for a future pass
+    json!({ "count": rows.len(), "rows": rows })
 }
 
 fn build_groups_overview(reg: &RegistryFile) -> Value {
     let rows: Vec<Value> = reg
         .groups
         .iter()
-        .map(|g| {
-            json!({ "name": g.name, "members": g.members.len() })
-        })
+        .map(|g| json!({ "name": g.name, "members": g.members.len() }))
         .collect();
     json!({ "count": rows.len(), "rows": rows })
 }
@@ -135,9 +126,7 @@ fn build_repo_health(r: &crate::repo_selector::ResolvedRepo) -> Value {
 fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo) -> Value {
     // Try the default "main" branch path, then fall back to the index_dir_root
     // directly in case the repo uses a different primary branch name.
-    let main_path = Path::new(&r.index_dir_root)
-        .join("main")
-        .join("graph.bin");
+    let main_path = Path::new(&r.index_dir_root).join("main").join("graph.bin");
     let worktree = Path::new(&r.worktree_path);
 
     match ensure_index(&main_path, worktree) {
@@ -160,39 +149,38 @@ fn fetch_frameworks(_r: &crate::repo_selector::ResolvedRepo) -> Value {
 
     // Mirrors FRAMEWORK_COVERAGE from commands/doctor.rs (static catalog).
     let patterns: &[(&str, &str)] = &[
-        ("Python/FastAPI",   "fastapi-depends"),
-        ("Python/FastAPI",   "fastapi-route-<method>"),
-        ("Python/Django",    "django-url-path"),
-        ("Python/Django",    "django-signal-receiver"),
-        ("Python/Django",    "django-signal-connect"),
-        ("Python/Celery",    "celery-task"),
-        ("Python/reflection","reflection-getattr-fanout"),
-        ("Rust/Axum",        "axum-route-handler"),
-        ("Rust/Actix",       "actix-route-<method>"),
-        ("TypeScript/Express",  "express-route-handler"),
-        ("TypeScript/NestJS",   "nestjs-route-handler"),
-        ("Java/Spring",      "spring-autowired"),
-        ("Java/Spring",      "spring-route-handler"),
+        ("Python/FastAPI", "fastapi-depends"),
+        ("Python/FastAPI", "fastapi-route-<method>"),
+        ("Python/Django", "django-url-path"),
+        ("Python/Django", "django-signal-receiver"),
+        ("Python/Django", "django-signal-connect"),
+        ("Python/Celery", "celery-task"),
+        ("Python/reflection", "reflection-getattr-fanout"),
+        ("Rust/Axum", "axum-route-handler"),
+        ("Rust/Actix", "actix-route-<method>"),
+        ("TypeScript/Express", "express-route-handler"),
+        ("TypeScript/NestJS", "nestjs-route-handler"),
+        ("Java/Spring", "spring-autowired"),
+        ("Java/Spring", "spring-route-handler"),
     ];
 
     // Each pattern maps to a confidence value; use a helper closure so the
     // match is co-located and easy to extend.
     let confidence_for = |tag: &str| -> f32 {
         match tag {
-            "fastapi-depends"            => fc::FASTAPI_DEPENDS,
-            "fastapi-route-<method>"     => fc::FASTAPI_ROUTE,
-            "django-url-path"            => fc::DJANGO_URL,
-            "django-signal-receiver"
-            | "django-signal-connect"    => fc::DJANGO_SIGNAL,
-            "celery-task"                => fc::CELERY_TASK,
-            "reflection-getattr-fanout"  => fc::FANOUT_BASE,
-            "axum-route-handler"         => fc::AXUM_ROUTE,
-            "actix-route-<method>"       => fc::ACTIX_ROUTE,
-            "express-route-handler"      => fc::EXPRESS_ROUTE,
-            "nestjs-route-handler"       => fc::NESTJS_ROUTE,
-            "spring-autowired"           => fc::SPRING_AUTOWIRED,
-            "spring-route-handler"       => fc::SPRING_ROUTE,
-            _                            => 0.0,
+            "fastapi-depends" => fc::FASTAPI_DEPENDS,
+            "fastapi-route-<method>" => fc::FASTAPI_ROUTE,
+            "django-url-path" => fc::DJANGO_URL,
+            "django-signal-receiver" | "django-signal-connect" => fc::DJANGO_SIGNAL,
+            "celery-task" => fc::CELERY_TASK,
+            "reflection-getattr-fanout" => fc::FANOUT_BASE,
+            "axum-route-handler" => fc::AXUM_ROUTE,
+            "actix-route-<method>" => fc::ACTIX_ROUTE,
+            "express-route-handler" => fc::EXPRESS_ROUTE,
+            "nestjs-route-handler" => fc::NESTJS_ROUTE,
+            "spring-autowired" => fc::SPRING_AUTOWIRED,
+            "spring-route-handler" => fc::SPRING_ROUTE,
+            _ => 0.0,
         }
     };
 

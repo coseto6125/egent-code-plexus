@@ -15,13 +15,13 @@ fn init_writes_hook_with_absolute_gnx_path() {
         .unwrap();
 
     let out = Command::new(gnx_bin())
-        .args(["init"])
+        .args(["admin", "install-hook"])
         .current_dir(repo)
         .output()
         .unwrap();
     assert!(
         out.status.success(),
-        "init failed: stderr={}",
+        "admin install-hook failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 

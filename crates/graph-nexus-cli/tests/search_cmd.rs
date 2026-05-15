@@ -185,10 +185,15 @@ fn search_positional_pattern_finds_match() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout.find('{').unwrap_or_else(|| panic!("no JSON in: {stdout}"));
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON in: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
     let results = json["results"].as_array().cloned().unwrap_or_default();
-    assert!(!results.is_empty(), "expected hits for 'fetch': {results:?}");
+    assert!(
+        !results.is_empty(),
+        "expected hits for 'fetch': {results:?}"
+    );
 }
 
 #[test]
@@ -199,7 +204,11 @@ fn search_accepts_mode_bm25() {
         &f.alpha_graph,
         &["fetch_user", "--mode", "bm25", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!String::from_utf8_lossy(&out.stderr).contains("error: "));
 }
 
@@ -211,7 +220,11 @@ fn search_accepts_mode_vector_stub() {
         &f.alpha_graph,
         &["fetch_user", "--mode", "vector", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!String::from_utf8_lossy(&out.stderr).contains("error: "));
 }
 
@@ -223,7 +236,11 @@ fn search_accepts_mode_hybrid_stub() {
         &f.alpha_graph,
         &["fetch_user", "--mode", "hybrid", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!String::from_utf8_lossy(&out.stderr).contains("error: "));
 }
 
@@ -235,7 +252,11 @@ fn search_accepts_mode_auto() {
         &f.alpha_graph,
         &["fetch_user", "--mode", "auto", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -280,7 +301,11 @@ fn search_empty_result_includes_hint() {
         &f.alpha_graph,
         &["zzzz_nonexistent_xyz", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("No matches") || stdout.contains("hint"),
@@ -327,13 +352,12 @@ fn search_multi_repo_at_group_both_repos() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout.find('{').unwrap_or_else(|| panic!("no JSON: {stdout}"));
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
     let results = json["results"].as_array().cloned().unwrap_or_default();
-    let repos: Vec<&str> = results
-        .iter()
-        .filter_map(|r| r["repo"].as_str())
-        .collect();
+    let repos: Vec<&str> = results.iter().filter_map(|r| r["repo"].as_str()).collect();
     assert!(repos.contains(&"alpha"), "alpha missing: {repos:?}");
     assert!(repos.contains(&"beta"), "beta missing: {repos:?}");
 }
@@ -341,14 +365,20 @@ fn search_multi_repo_at_group_both_repos() {
 #[test]
 fn search_multi_repo_at_all() {
     let f = two_repo_fixture();
-    let out = run_search_multi(&f.home_path, &["fetch", "--repo", "@all", "--format", "json"]);
+    let out = run_search_multi(
+        &f.home_path,
+        &["fetch", "--repo", "@all", "--format", "json"],
+    );
     assert!(
         out.status.success(),
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("fetch"), "expected 'fetch' in results: {stdout}");
+    assert!(
+        stdout.contains("fetch"),
+        "expected 'fetch' in results: {stdout}"
+    );
 }
 
 #[test]
@@ -364,10 +394,15 @@ fn search_multi_repo_csv_single() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout.find('{').unwrap_or_else(|| panic!("no JSON: {stdout}"));
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
     let results = json["results"].as_array().cloned().unwrap_or_default();
-    assert!(!results.is_empty(), "alpha has fetch_user/save_user: {results:?}");
+    assert!(
+        !results.is_empty(),
+        "alpha has fetch_user/save_user: {results:?}"
+    );
     for r in &results {
         assert_eq!(r["repo"].as_str(), Some("alpha"), "unexpected repo: {r}");
     }
@@ -407,9 +442,14 @@ fn search_multi_repo_missing_graph_degrades_gracefully() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout.find('{').unwrap_or_else(|| panic!("no JSON: {stdout}"));
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
     // Alpha still has fetch_user — expect ≥1 result.
     let results = json["results"].as_array().cloned().unwrap_or_default();
-    assert!(!results.is_empty(), "alpha should still produce hits: {results:?}");
+    assert!(
+        !results.is_empty(),
+        "alpha should still produce hits: {results:?}"
+    );
 }

@@ -6,10 +6,10 @@
 //! ## Mode routing
 //! - `bm25`   — pure lexical (substring scoring against graph node names)
 //! - `vector` — semantic cosine similarity (stub; falls back to bm25 until
-//!              full embedding wiring is complete — TODO: wire to real embed path)
+//!   full embedding wiring is complete — TODO: wire to real embed path)
 //! - `hybrid` — bm25 + vector folded (stub: falls back to bm25 without embeddings)
 //! - `auto`   — detect: slug-like input → bm25; else → hybrid if embeddings
-//!              present, else bm25 with a stderr hint
+//!   present, else bm25 with a stderr hint
 //!
 //! ## Cross-repo fan-out
 //! When `--repo` resolves to multiple repos, workers run in parallel via
@@ -74,7 +74,7 @@ pub fn run(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
         run_single(args.pattern, args.mode, args.kind, format, engine, None)
     } else if targets.len() == 1 {
         let (repo_name, graph_path) = targets.into_iter().next().unwrap();
-        let local_engine = Engine::load(&std::path::PathBuf::from(&graph_path))
+        let local_engine = Engine::load(std::path::PathBuf::from(&graph_path))
             .map_err(|e| GnxError::Rkyv(format!("{repo_name}: load: {e}")))?;
         run_single(
             args.pattern,
@@ -92,10 +92,8 @@ pub fn run(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
 // ── Mode detection ───────────────────────────────────────────────────────────
 
 fn detect_mode(input: &str, embeddings_available: bool) -> SearchMode {
-    let slug_like = !input.is_empty()
-        && input
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let slug_like =
+        !input.is_empty() && input.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if slug_like {
         return SearchMode::Bm25;
     }
@@ -173,7 +171,7 @@ fn run_single(
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     let effective_mode = match mode {
-        SearchMode::Auto => detect_mode(&pattern, embeddings_available_for(&graph)),
+        SearchMode::Auto => detect_mode(&pattern, embeddings_available_for(graph)),
         m => m,
     };
 
@@ -183,22 +181,26 @@ fn run_single(
 
     let mut hits = match effective_mode {
         SearchMode::Bm25 | SearchMode::Auto => {
-            bm25_hits_from_graph(&graph, &pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, &pattern, &kind_set, &repo_label)
         }
         SearchMode::Vector => {
             // TODO: wire to real cosine path (graph_nexus_analyzer::embeddings)
             eprintln!("→ vector mode not yet wired — falling back to bm25");
-            bm25_hits_from_graph(&graph, &pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, &pattern, &kind_set, &repo_label)
         }
         SearchMode::Hybrid => {
             // TODO: fold bm25 + cosine scores when embeddings are wired
             eprintln!("→ hybrid: embeddings not wired — using bm25");
-            bm25_hits_from_graph(&graph, &pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, &pattern, &kind_set, &repo_label)
         }
     };
 
     // Sort by score descending, trim to TOP_K.
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(TOP_K);
 
     emit_hits(&hits, format, None)
@@ -346,14 +348,14 @@ fn scan_repo(
     kind_set: &Option<Vec<String>>,
     mode: &SearchMode,
 ) -> Result<Vec<Hit>, String> {
-    let engine = Engine::load(&std::path::PathBuf::from(graph_path))
+    let engine = Engine::load(std::path::PathBuf::from(graph_path))
         .map_err(|e| format!("{repo_name}: load {graph_path}: {e}"))?;
     let graph = engine
         .graph()
         .map_err(|e| format!("{repo_name}: access: {e}"))?;
 
     let effective_mode = match mode {
-        SearchMode::Auto => detect_mode(pattern, embeddings_available_for(&graph)),
+        SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
         m => m.clone(),
     };
 
@@ -361,7 +363,7 @@ fn scan_repo(
     // TODO: wire vector/hybrid to graph_nexus_analyzer::embeddings.
     let _ = effective_mode;
     Ok(bm25_hits_from_graph(
-        &graph,
+        graph,
         pattern,
         kind_set,
         &Some(repo_name.to_string()),
@@ -438,11 +440,7 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
 
 // ── Emission ──────────────────────────────────────────────────────────────────
 
-fn emit_hits(
-    hits: &[Hit],
-    format: OutputFormat,
-    summary: Option<String>,
-) -> Result<(), GnxError> {
+fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Result<(), GnxError> {
     if hits.is_empty() {
         return emit(
             &serde_json::json!({

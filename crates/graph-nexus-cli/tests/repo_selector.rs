@@ -99,8 +99,14 @@ fn make_registry() -> RegistryFile {
             },
         ],
         groups: vec![
-            GroupEntry { name: "backend".into(), members: vec!["alpha".into(), "beta".into()] },
-            GroupEntry { name: "auth".into(), members: vec!["beta".into()] },
+            GroupEntry {
+                name: "backend".into(),
+                members: vec!["alpha".into(), "beta".into()],
+            },
+            GroupEntry {
+                name: "auth".into(),
+                members: vec!["beta".into()],
+            },
         ],
     }
 }
