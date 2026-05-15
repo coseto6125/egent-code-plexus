@@ -191,6 +191,46 @@ fn tool_map_category_filter_drops_others() {
     }
 }
 
+// New coverage for the package-import rewrite: catches calls the
+// callee-name catalog used to miss.
+const FIXTURE_ALIAS_AND_ANY_METHOD: &str = r#"
+import req from "axios";
+import { get as gg } from "got";
+
+export async function listSomething() {
+    const a = await req.head("/probe");           // alias + method not in old catalog
+    const b = await req.options("/opts");          // alias + method not in old catalog
+    const c = await gg("/items");                  // named import alias bare call
+    return [a, b, c];
+}
+"#;
+
+#[test]
+fn tool_map_tracks_alias_and_any_method() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_repo(
+        repo.path(),
+        home.path(),
+        FIXTURE_ALIAS_AND_ANY_METHOD,
+        "git@github.com:E-NoR/tool-map-alias-test.git",
+    );
+    let json = run_tool_map(repo.path(), home.path(), &[]);
+    let callees = callee_names(&json["calls"]["http"]);
+    assert!(
+        callees.contains(&"req.head"),
+        "expected `req.head` (aliased default import + method): {callees:?}"
+    );
+    assert!(
+        callees.contains(&"req.options"),
+        "expected `req.options` (aliased default + method not in old catalog): {callees:?}"
+    );
+    assert!(
+        callees.contains(&"gg"),
+        "expected `gg` (named-import alias, bare call): {callees:?}"
+    );
+}
+
 #[test]
 fn tool_map_empty_when_no_clients_used() {
     let repo = tempfile::tempdir().unwrap();
