@@ -6,7 +6,12 @@ use graph_nexus_core::analyzer::types::IdentifierRange;
 const KINDS: &[&str] = &["identifier"];
 
 pub fn find_identifier_occurrences(source: &[u8], target_name: &str) -> Vec<IdentifierRange> {
-    find_by_kinds(source, target_name, &tree_sitter_zig::LANGUAGE.into(), KINDS)
+    find_by_kinds(
+        source,
+        target_name,
+        &tree_sitter_zig::LANGUAGE.into(),
+        KINDS,
+    )
 }
 
 #[cfg(test)]

@@ -30,7 +30,13 @@ const DART_FRAMEWORKS: &[FrameworkPatternSpec] = &[
         framework: "riverpod",
         reason: "riverpod-pattern",
         confidence: framework_confidence::RIVERPOD_HINT,
-        patterns: &["@riverpod", "ref.watch", "ref.read", "AsyncNotifier", "Notifier"],
+        patterns: &[
+            "@riverpod",
+            "ref.watch",
+            "ref.read",
+            "AsyncNotifier",
+            "Notifier",
+        ],
     },
 ];
 

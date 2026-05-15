@@ -30,7 +30,10 @@ fn flutter_stateless_widget_emits_ref() {
     "#;
     let refs = parse(src);
     assert!(has_framework(&refs, "flutter"));
-    assert_eq!(refs.iter().filter(|r| r.target_name == "flutter").count(), 1);
+    assert_eq!(
+        refs.iter().filter(|r| r.target_name == "flutter").count(),
+        1
+    );
 }
 
 #[test]
