@@ -116,6 +116,14 @@ fn main() {
         }
         return;
     }
+    // Contracts walks the registry + multi-repo gate; no graph load needed.
+    if let Commands::Contracts(args) = &cli.command {
+        if let Err(e) = commands::contracts::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Agent commands + ShapeCheck (hidden internal) — need graph
     let repo_opt = match &cli.command {
@@ -124,12 +132,12 @@ fn main() {
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::Rename(args) => args.repo.as_deref(),
         Commands::Cypher(args) => args.repo.as_deref(),
-        Commands::Coverage(_) => None,
         Commands::Routes(args) => args.repo.as_deref(),
         Commands::Scan(args) => args.repo.as_deref(),
-        Commands::Contracts(args) => args.repo.as_deref(),
         Commands::ShapeCheck(args) => args.repo.as_deref(),
-        Commands::Admin { .. }
+        Commands::Coverage(_)
+        | Commands::Contracts(_)
+        | Commands::Admin { .. }
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
         | Commands::VerifyResolver(_) => None,
@@ -156,9 +164,9 @@ fn main() {
         Commands::Cypher(args) => commands::cypher::run(args, &engine),
         Commands::Routes(args) => commands::routes::run(args, &engine),
         Commands::Scan(args) => commands::scan::run(args, &engine),
-        Commands::Contracts(args) => commands::contracts::run(args, &engine),
         Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
         Commands::Coverage(_)
+        | Commands::Contracts(_)
         | Commands::Admin { .. }
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
