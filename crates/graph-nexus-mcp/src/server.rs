@@ -1,128 +1,60 @@
-//! Stdio JSON-RPC MCP server scaffold. Wraps `rmcp::ServiceExt` and
-//! dispatches tool calls via either spawn or daemon mode.
-//!
-//! The `serve_stdio` function wires `GnxMcpServer` to rmcp's stdio
-//! transport using the `ServerHandler` trait. Both spawn and daemon
-//! dispatch modes are supported; daemon wiring for the Engine handle
-//! reload lands with subproject C.
+//! Stdio JSON-RPC MCP server. Spawn-mode only; tools are derived at
+//! startup from the gnx CLI's `clap::Command` tree (see `schema.rs`).
 
-use crate::registry::{EngineRef, GnxMcpTool};
+use crate::schema::{enumerate_tools, DerivedTool};
 use anyhow::{Context, Result};
+use clap::Command;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy)]
-pub enum DispatchMode {
-    /// Default: spawn `gnx <subcommand>` per call.
-    Spawn,
-    /// Opt-in: keep Engine mmap'd; mtime-remap before each call.
-    Daemon,
-}
-
-/// Owned state held by the server in daemon mode. Holds the loaded
-/// Engine (via `EngineRef`) + the mtime at load time (used by
-/// `crate::daemon::needs_remap`).
-pub struct DaemonState {
-    pub loaded_at: std::time::SystemTime,
-    /// The actual Engine handle, wrapped so this crate doesn't depend
-    /// on graph-nexus-cli's concrete Engine type. CLI side (Task 16)
-    /// will provide a real impl.
-    pub engine: Box<dyn EngineRef>,
-}
-
-impl EngineRef for DaemonState {
-    fn graph_path(&self) -> &std::path::Path {
-        self.engine.graph_path()
-    }
-
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        // Defer to the wrapped engine — DaemonState itself is the
-        // wrapper, downcasters want the inner Engine.
-        self.engine.as_any()
-    }
-}
-
 pub struct GnxMcpServer {
-    mode: DispatchMode,
-    daemon_state: Option<Arc<std::sync::Mutex<DaemonState>>>,
-    /// Path to the current gnx binary (used by spawn mode).
+    /// Path to the current gnx binary; used to spawn subprocesses.
     pub self_exe: PathBuf,
+    /// Tools derived from the clap tree at construction time.
+    tools: Vec<DerivedTool>,
+    /// Pre-built rmcp tool models; reused across every `tools/list` request.
+    /// `rmcp::model::Tool` is internally `Arc`-backed, so `.to_vec()` over
+    /// this slice is a cheap refcount bump per entry.
+    rmcp_tools: Vec<rmcp::model::Tool>,
 }
 
 impl GnxMcpServer {
-    pub fn new(mode: DispatchMode) -> Result<Self> {
+    /// Build a server whose tool set mirrors `root`'s visible subcommands.
+    /// Self-binary is detected via `current_exe()`.
+    pub fn new(root: &Command) -> Result<Self> {
         let self_exe =
             std::env::current_exe().context("locating current_exe for spawn dispatch")?;
+        let tools = enumerate_tools(root);
+        let rmcp_tools = build_rmcp_tools(&tools);
         Ok(Self {
-            mode,
-            daemon_state: None,
             self_exe,
+            tools,
+            rmcp_tools,
         })
     }
 
-    pub fn with_daemon_state(mut self, state: DaemonState) -> Self {
-        self.daemon_state = Some(Arc::new(std::sync::Mutex::new(state)));
-        self
+    pub fn list_tools(&self) -> &[DerivedTool] {
+        &self.tools
     }
 
-    pub fn mode(&self) -> DispatchMode {
-        self.mode
-    }
-
-    /// Enumerate all tools registered via inventory at link time.
-    pub fn list_tools(&self) -> Vec<&'static GnxMcpTool> {
-        inventory::iter::<GnxMcpTool>().collect()
-    }
-
-    /// Dispatch a single tool call. Called from the rmcp `ServerHandler`
-    /// impl for each `tools/call` JSON-RPC frame.
+    /// Dispatch one MCP `tools/call`: spawn `gnx <subcommand>` with argv
+    /// derived from the JSON args and return stdout.
     pub async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<String> {
         let tool = self
-            .list_tools()
-            .into_iter()
-            .find(|t| (t.name)() == name)
-            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
-        match self.mode {
-            DispatchMode::Spawn => {
-                let binary = self.self_exe.clone();
-                let subcommand = (tool.subcommand)().to_string();
-                tokio::task::spawn_blocking(move || {
-                    crate::spawn::run_spawn(&binary, &subcommand, &args)
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("spawn task: {e}"))?
-            }
-            DispatchMode::Daemon => {
-                let state_arc = self
-                    .daemon_state
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("daemon mode requires DaemonState"))?;
-                // Recover from poison — a panicked handler shouldn't kill the server permanently.
-                let mut state = state_arc
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                // mtime-remap probe (cheap stat). On Err we leave the
-                // existing engine in place rather than aborting — the
-                // caller will get whatever the (possibly stale) engine
-                // returns, which is safer than 503-ing the whole tool.
-                if let Ok(Some(new_mtime)) =
-                    crate::daemon::needs_remap(state.engine.graph_path(), state.loaded_at)
-                {
-                    state.loaded_at = new_mtime;
-                }
-                let value = (tool.handler)(args, &*state)
-                    .map_err(|e| anyhow::anyhow!("tool handler: {e}"))?;
-                Ok(serde_json::to_string(&value)?)
-            }
-        }
+            .tools
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?
+            .clone();
+        let binary = self.self_exe.clone();
+        tokio::task::spawn_blocking(move || crate::spawn::run_spawn(&binary, &tool, &args))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn task: {e}"))?
     }
 }
 
 // ─── rmcp ServerHandler adapter ──────────────────────────────────────────────
 
-/// Thin wrapper that implements `rmcp::ServerHandler` around `GnxMcpServer`.
-/// Kept in this module so `commands/mcp.rs` can call `serve_stdio` without
-/// depending on rmcp directly.
 struct RmcpHandler(Arc<GnxMcpServer>);
 
 impl rmcp::ServerHandler for RmcpHandler {
@@ -140,7 +72,7 @@ impl rmcp::ServerHandler for RmcpHandler {
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
            + rmcp::service::MaybeSendFuture
            + '_ {
-        let tools = build_rmcp_tools(&self.0);
+        let tools = self.0.rmcp_tools.to_vec();
         std::future::ready(Ok(rmcp::model::ListToolsResult::with_all_items(tools)))
     }
 
@@ -169,37 +101,23 @@ impl rmcp::ServerHandler for RmcpHandler {
     }
 }
 
-/// Convert inventory-registered `GnxMcpTool`s to `rmcp::model::Tool`s.
-///
-/// `schemars::Schema` (1.x) serialises cleanly to a JSON object via
-/// `serde_json::to_value`, which is what `Arc<JsonObject>` expects.
-fn build_rmcp_tools(server: &GnxMcpServer) -> Vec<rmcp::model::Tool> {
-    server
-        .list_tools()
-        .into_iter()
+fn build_rmcp_tools(tools: &[DerivedTool]) -> Vec<rmcp::model::Tool> {
+    tools
+        .iter()
         .map(|t| {
-            let schema_val = serde_json::to_value((t.schema)())
-                .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
-            let input_schema: Arc<rmcp::model::JsonObject> = Arc::new(match schema_val {
-                serde_json::Value::Object(map) => map,
-                other => {
-                    let mut m = serde_json::Map::new();
-                    m.insert("description".into(), other);
-                    m
-                }
-            });
-            rmcp::model::Tool::new((t.name)(), (t.description)(), input_schema)
+            // `schema` is always built by `derive_tool` as `json!({type:"object", ...})`,
+            // so `as_object()` is guaranteed to be `Some`. Using `.expect()` makes that
+            // invariant explicit rather than carrying a dead fallback branch.
+            let map = t
+                .schema
+                .as_object()
+                .expect("DerivedTool::schema is always Value::Object")
+                .clone();
+            rmcp::model::Tool::new(t.name.clone(), t.description.clone(), Arc::new(map))
         })
         .collect()
 }
 
-/// Stdio JSON-RPC MCP server loop using rmcp 1.7.
-///
-/// Reads JSON-RPC frames from stdin, writes responses to stdout.
-/// Blocks until the host disconnects (EOF on stdin).
-///
-/// Transport: `rmcp::transport::stdio()` → `(tokio::io::Stdin, tokio::io::Stdout)`.
-/// Protocol: `rmcp::serve_server(handler, transport).await?.waiting().await`.
 pub async fn serve_stdio(server: GnxMcpServer) -> anyhow::Result<()> {
     let handler = RmcpHandler(Arc::new(server));
     let transport = rmcp::transport::stdio();

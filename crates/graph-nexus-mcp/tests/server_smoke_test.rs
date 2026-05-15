@@ -1,16 +1,53 @@
-//! Smoke: build a server, list-tools, expect the inventory contents.
+//! Smoke: build a server from a synthetic clap tree, list tools.
+//!
+//! The fixture mirrors the gnx CLI's surface in miniature — two visible
+//! subcommands, one hidden — so we can assert visibility filtering
+//! without linking the full CLI binary.
 
-use graph_nexus_mcp::server::{DispatchMode, GnxMcpServer};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use graph_nexus_mcp::server::GnxMcpServer;
+
+#[derive(Parser)]
+#[command(name = "gnx")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmds,
+}
+
+#[derive(Subcommand)]
+enum Cmds {
+    /// Visible inspect surrogate.
+    Inspect(InspectArgs),
+    /// Visible search surrogate.
+    Search(SearchArgs),
+    /// Hidden subcommand — must NOT appear in the tools list.
+    #[command(hide = true)]
+    HookHandle,
+}
+
+#[derive(Args)]
+struct InspectArgs {
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Args)]
+struct SearchArgs {
+    pattern: String,
+}
 
 #[tokio::test(flavor = "current_thread")]
-async fn list_tools_returns_registered_inventory() {
-    let server = GnxMcpServer::new(DispatchMode::Spawn).expect("init");
-    let tools = server.list_tools();
-    let names: Vec<&str> = tools.iter().map(|t| (t.name)()).collect();
-    // From this test crate's perspective, the CLI commands aren't
-    // linked in; only fixtures/macros submitted by graph-nexus-mcp's
-    // own tests register. The smoke test only asserts the API works
-    // — empty registry is acceptable here. End-to-end with CLI tools
-    // is exercised by the integration test in Task 17.
-    let _ = names; // shape compile-check only
+async fn list_tools_filters_hidden_subcommands() {
+    let server = GnxMcpServer::new(&Cli::command()).expect("init");
+    let names: Vec<&str> = server
+        .list_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    assert!(names.contains(&"gnx_inspect"));
+    assert!(names.contains(&"gnx_search"));
+    assert!(
+        !names.iter().any(|n| n.contains("hook")),
+        "hidden subcommand leaked into tool list: {names:?}"
+    );
 }

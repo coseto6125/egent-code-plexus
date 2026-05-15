@@ -2,9 +2,12 @@
 //! echoes its arguments back, then verifies dispatch wrapped it
 //! correctly. Avoids depending on a built gnx binary for this layer.
 
+use graph_nexus_mcp::schema::DerivedTool;
 use graph_nexus_mcp::spawn::run_spawn;
 use serde_json::json;
+use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 fn write_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
@@ -16,12 +19,24 @@ fn write_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
     stub
 }
 
+fn dummy_tool(subcommand: &str) -> DerivedTool {
+    DerivedTool {
+        name: format!("gnx_{subcommand}"),
+        subcommand: subcommand.into(),
+        description: String::new(),
+        schema: Arc::new(json!({})),
+        flag_args: HashSet::new(),
+        positional_args: Vec::new(),
+    }
+}
+
 #[test]
 fn spawn_invokes_subcommand_and_captures_stdout() {
     let dir = TempDir::new().unwrap();
     let stub = write_stub(dir.path(), "#!/bin/sh\necho \"sub=$1 arg1=$2 arg2=$3\"\n");
-    let out = run_spawn(&stub, "context", &json!({"name": "foo"})).unwrap();
-    assert!(out.contains("sub=context"));
+    let tool = dummy_tool("inspect");
+    let out = run_spawn(&stub, &tool, &json!({"name": "foo"})).unwrap();
+    assert!(out.contains("sub=inspect"));
     assert!(out.contains("arg1=--name"));
     assert!(out.contains("arg2=foo"));
 }
@@ -30,6 +45,7 @@ fn spawn_invokes_subcommand_and_captures_stdout() {
 fn spawn_subprocess_failure_returns_err_with_stderr() {
     let dir = TempDir::new().unwrap();
     let stub = write_stub(dir.path(), "#!/bin/sh\necho 'boom' >&2\nexit 1\n");
-    let err = run_spawn(&stub, "context", &json!({})).unwrap_err();
+    let tool = dummy_tool("inspect");
+    let err = run_spawn(&stub, &tool, &json!({})).unwrap_err();
     assert!(err.to_string().contains("boom"));
 }

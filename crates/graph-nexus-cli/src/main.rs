@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 mod admin;
@@ -119,7 +119,9 @@ fn main() {
             run_no_graph!(commands::coverage::run(args.clone(), &cli.graph))
         }
         Commands::Contracts(args) => run_no_graph!(commands::contracts::run(args.clone())),
-        Commands::Mcp(args) => run_no_graph!(commands::mcp::run(args.clone())),
+        Commands::Mcp(args) => {
+            run_no_graph!(commands::mcp::run(args.clone(), Cli::command()))
+        }
         _ => {} // fall through to graph-loading path
     }
 

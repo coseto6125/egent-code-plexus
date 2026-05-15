@@ -16,7 +16,6 @@
 //!         └── (8 hosts) → install / uninstall / status
 //! ```
 
-pub mod codex_native;
 pub mod host_integration;
 pub mod menu;
 pub mod status;
