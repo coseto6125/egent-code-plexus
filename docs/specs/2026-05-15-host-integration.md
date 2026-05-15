@@ -49,10 +49,16 @@ command.
    │       ├── Cursor              ← supports MCP
    │       ├── Windsurf            ← supports MCP
    │       ├── Cline / Roo Code    ← supports MCP
+   │       ├── Codex CLI           ← MCP route, no fork needed
+   │       ├── Gemini CLI          ← MCP route, no fork needed
    │       └── (any other MCP-capable host) — generic registration writer
    ├── (future) Diagnostics
    └── (future) Index maintenance
   ```
+- **Codex / Gemini show up in both branches** — Native is the
+  zero-IPC path that requires a fork; MCP is the no-fork side-car
+  path. Same `gnx` binary serves both. Pick whichever trade-off you
+  prefer per host.
 - Each leaf provides three actions: install / uninstall / status.
 - Status detection: probes whether the install is present (file exists
   / config entry present / workspace dep declared) and reports
@@ -492,7 +498,17 @@ registration entry lives:
 | Cursor | `~/.cursor/mcp.json` or `.cursor/mcp.json` (project) | JSON `mcpServers` object (same shape) |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON |
 | Cline / Roo Code | VS Code settings: `cline.mcpServers` | JSON inside `settings.json` |
+| Codex CLI (MCP variant) | `~/.codex/mcp.json` (or `.codex/mcp.json` per project) | JSON `mcpServers` object |
+| Gemini CLI (MCP variant) | `~/.gemini/settings.json` → `mcpServers` field | JSON inside settings |
 | Other / unknown | TUI prints the JSON snippet + instructs user to paste into their host's config | Manual |
+
+**Codex and Gemini appear in both branches** — the Native menu offers
+the fork-patch route for users who want zero-IPC integration; the MCP
+menu offers the side-car route for users who don't want to maintain a
+fork. Same gnx binary serves both. The two routes are not mutually
+exclusive on a per-host basis, but the TUI's status probe will note
+both as installed if a user does both (which is harmless — the model
+will see the tools once via whichever path the host loaded first).
 
 The TUI's MCP branch dispatches on host pick → writes to the right
 file with the right schema variant. The side-car binary itself is
@@ -710,7 +726,7 @@ spec. Its subcommands stay inside the TUI — never exposed as
 | Native install automation | Manual (TUI prints patch + steps) | Too easy to corrupt user's git tree. Auto-`git apply` rejected. |
 | MCP install automation | Fully automated (atomic JSON write) | All MCP host config files are well-known JSON; safe to auto-write with read-modify-write atomicity. TUI just asks "which host?" then writes the entry. |
 | Native scope | Codex + Gemini only | User-clarified 2026-05-15: every other host is either closed source (Cursor/Copilot/Windsurf/Claude Code) or open source with too-small user base to justify per-fork maintenance (Cline/Roo/Aider/Continue). MCP catches all of those. |
-| MCP host coverage | Claude Code, Cursor, Windsurf, Cline/Roo, Copilot Extensions, generic paste-it | Each gets a TUI leaf with the right config-file writer. Side-car binary identical across all. |
+| MCP host coverage | Claude Code, Cursor, Windsurf, Cline/Roo, **Codex CLI, Gemini CLI**, Copilot Extensions, generic paste-it | User-clarified 2026-05-15 (correction): Codex and Gemini also appear under the MCP branch — both support MCP as a no-fork alternative. The two branches are not mutually exclusive per host. Each MCP leaf gets a TUI handler with the right config-file writer; the `gnx mcp serve` invocation is identical across hosts. |
 | Auto-patch user forks | No | Too easy to corrupt user's git tree. TUI writes patch file + prints manual steps. |
 | Claude Code integration route | MCP only | Closed source — no other route exists. |
 | Codex CLI integration route | Workspace dep (in-process) | Same language; zero IPC overhead; mmap'd graph shared. |
