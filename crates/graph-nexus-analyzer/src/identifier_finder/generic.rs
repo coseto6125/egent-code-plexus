@@ -7,6 +7,7 @@
 //! walk logic itself is identical across grammars.
 
 use graph_nexus_core::analyzer::types::IdentifierRange;
+use std::collections::HashSet;
 use tree_sitter::{Node, Parser};
 
 /// Parse `source` with `language`, walk every node, and emit a byte-range
@@ -80,5 +81,47 @@ fn walk(
     let mut c = node.walk();
     for child in node.children(&mut c) {
         walk(child, source, target, id_kinds, skip_subtree_kinds, out);
+    }
+}
+
+/// Walk every AST node and collect the unique UTF-8 texts of nodes whose
+/// `kind()` is in `id_kinds`. Used by `gnx scan` to enumerate all identifier
+/// references in a file without needing a target name.
+pub fn find_all_by_kinds(
+    source: &[u8],
+    language: &tree_sitter::Language,
+    id_kinds: &[&str],
+) -> Vec<(String, usize)> {
+    let mut parser = Parser::new();
+    if parser.set_language(language).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<(String, usize)> = Vec::new();
+    walk_all(tree.root_node(), source, id_kinds, &mut seen, &mut out);
+    out
+}
+
+fn walk_all(
+    node: Node<'_>,
+    source: &[u8],
+    id_kinds: &[&str],
+    seen: &mut HashSet<String>,
+    out: &mut Vec<(String, usize)>,
+) {
+    if id_kinds.contains(&node.kind()) {
+        if let Ok(text) = node.utf8_text(source) {
+            let name = text.to_string();
+            if seen.insert(name.clone()) {
+                out.push((name, node.start_position().row + 1));
+            }
+        }
+    }
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        walk_all(child, source, id_kinds, seen, out);
     }
 }
