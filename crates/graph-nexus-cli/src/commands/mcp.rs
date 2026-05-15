@@ -18,10 +18,6 @@ pub enum McpAction {
         /// each call). Default is spawn mode.
         #[arg(long, default_value_t = false)]
         daemon: bool,
-        /// Optional path to graph.bin (daemon mode only; defaults to
-        /// the same resolution gnx commands use).
-        #[arg(long)]
-        graph: Option<std::path::PathBuf>,
     },
     /// List tools that would be exposed by `serve`. Useful for debug
     /// and for the test invariant.
@@ -38,7 +34,7 @@ pub fn run(args: McpArgs) -> Result<(), GnxError> {
             }
             Ok(())
         }
-        McpAction::Serve { daemon, graph: _ } => {
+        McpAction::Serve { daemon } => {
             let mode = if daemon {
                 DispatchMode::Daemon
             } else {
@@ -52,9 +48,7 @@ pub fn run(args: McpArgs) -> Result<(), GnxError> {
                 // to subproject C (TUI install handler). For now,
                 // daemon mode returns a friendly error.
                 return Err(GnxError::InvalidArgument(
-                    "daemon mode wiring lands with subproject C; \
-                     use spawn mode (omit --daemon) for now"
-                        .into(),
+                    "daemon mode is not yet available; use spawn mode (omit --daemon)".into(),
                 ));
             }
             // Spawn-mode stdio loop via rmcp.
