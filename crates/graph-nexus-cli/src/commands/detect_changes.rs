@@ -16,7 +16,6 @@
 //!      to power the existing affected-process BFS.
 
 use crate::commands::format::kind_to_str;
-use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::output::{emit, OutputFormat};
 use crate::reanalyze::make_pipeline;
@@ -26,11 +25,15 @@ use graph_nexus_core::graph::{ArchivedNodeKind, NodeKind};
 use graph_nexus_core::graph_query::processes_containing;
 use graph_nexus_core::GnxError;
 use graph_nexus_core::HIGH_TRUST_CONFIDENCE;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-#[derive(Args, Debug, Clone)]
+/// Identify which symbols changed in the working tree (or between refs) and
+/// assess their blast radius via affected Process execution-flows.
+#[derive(Args, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DetectChangesArgs {
     /// Diff scope: `unstaged` (default), `staged`, `all`, or `compare`.
     #[arg(long, default_value = "unstaged")]
@@ -64,10 +67,13 @@ pub struct DetectChangesArgs {
     pub high_trust_only: bool,
 }
 
-pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run_inner(
+    args: DetectChangesArgs,
+    engine: &dyn graph_nexus_mcp::registry::EngineRef,
+) -> Result<serde_json::Value, GnxError> {
+    let engine = crate::engine::cast_engine(engine)?;
     let repo_path = PathBuf::from(args.repo.as_deref().unwrap_or("."));
     let scope = DiffScope::parse(Some(&args.scope), args.base_ref.as_deref())?;
-    let format = OutputFormat::parse(args.format.as_deref());
 
     let provider = ShellGitProvider;
     let file_diffs = provider.diff(&repo_path, &scope)?;
@@ -83,7 +89,7 @@ pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
             "changed_symbols": [],
             "affected_processes": [],
         });
-        return emit(&result, format);
+        return Ok(result);
     }
 
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
@@ -350,14 +356,40 @@ pub fn run(args: DetectChangesArgs, engine: &Engine) -> Result<(), GnxError> {
         });
     }
 
+    Ok(result)
+}
+
+pub fn run(
+    args: DetectChangesArgs,
+    engine: &crate::engine::Engine,
+) -> Result<(), graph_nexus_core::GnxError> {
+    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let value = run_inner(args, engine)?;
     if format == OutputFormat::Toon {
-        let compact = compact_output(&result);
+        let compact = compact_output(&value);
         println!("{}", compact);
         return Ok(());
     }
-
-    emit(&result, format)
+    emit(&value, format)
 }
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        fn _accepts(
+            _f: fn(
+                DetectChangesArgs,
+                &dyn graph_nexus_mcp::registry::EngineRef,
+            ) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
+        ) {
+        }
+        _accepts(run_inner);
+    }
+}
+
+graph_nexus_mcp::gnx_register_mcp_tool!(DetectChangesArgs, run_inner);
 
 struct AffectedProcess {
     id: String,

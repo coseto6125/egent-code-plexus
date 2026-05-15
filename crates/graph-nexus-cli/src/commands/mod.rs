@@ -15,6 +15,7 @@ pub mod impact;
 pub mod index;
 pub mod init;
 pub mod list;
+pub mod mcp;
 pub mod multi_query;
 pub mod process;
 pub mod prune;

@@ -1,16 +1,19 @@
 use crate::commands::format::kind_to_str;
-use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+/// Search for symbols by semantic similarity or BM25 full-text and return
+/// ranked results across the indexed graph.
+#[derive(Args, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryArgs {
     /// Query string to match against symbol names
     #[arg(long)]
     pub query: String,
 
+    /// Repository root path (defaults to current directory).
     #[arg(long)]
     pub repo: Option<String>,
 
@@ -19,9 +22,12 @@ pub struct QueryArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run_inner(
+    args: QueryArgs,
+    engine: &dyn graph_nexus_mcp::registry::EngineRef,
+) -> Result<serde_json::Value, GnxError> {
+    let engine = crate::engine::cast_engine(engine)?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
 
     let mut results = Vec::new();
     let mut used_semantic = false;
@@ -111,5 +117,32 @@ pub fn run(args: QueryArgs, engine: &Engine) -> Result<(), GnxError> {
         "results": results,
     });
 
-    emit(&result, format)
+    Ok(result)
 }
+
+pub fn run(
+    args: QueryArgs,
+    engine: &crate::engine::Engine,
+) -> Result<(), graph_nexus_core::GnxError> {
+    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let value = run_inner(args, engine)?;
+    crate::output::emit(&value, format)
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        fn _accepts(
+            _f: fn(
+                QueryArgs,
+                &dyn graph_nexus_mcp::registry::EngineRef,
+            ) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
+        ) {
+        }
+        _accepts(run_inner);
+    }
+}
+
+graph_nexus_mcp::gnx_register_mcp_tool!(QueryArgs, run_inner);

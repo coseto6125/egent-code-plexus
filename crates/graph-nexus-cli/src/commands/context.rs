@@ -4,9 +4,14 @@ use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_core::algorithms::process_trace::is_test_path;
 use graph_nexus_core::GnxError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Args, Debug)]
+/// Query the call-graph context of a single symbol — returns its incoming and
+/// outgoing edges, file metadata, and any blind spots detected in the same
+/// source file.
+#[derive(Args, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ContextArgs {
     /// Name of the symbol to query. Mutually exclusive with --uid.
     #[arg(long)]
@@ -21,7 +26,7 @@ pub struct ContextArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format
+    /// Output format (e.g. `toon`, `json`). Defaults to `toon`.
     #[arg(long, default_value = "toon")]
     pub format: Option<String>,
 
@@ -65,9 +70,12 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     }
 }
 
-pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run_inner(
+    args: ContextArgs,
+    engine: &dyn graph_nexus_mcp::registry::EngineRef,
+) -> Result<serde_json::Value, GnxError> {
+    let engine = crate::engine::cast_engine(engine)?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
 
     // Resolve the symbol. --uid wins over --name when both are supplied so
     // CLAUDE.md's "Use UID from candidates" disambiguation step always
@@ -99,11 +107,10 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
 
     if matching_nodes.is_empty() {
         let needle = uid_query.unwrap_or_else(|| name_query.unwrap_or(""));
-        let result = serde_json::json!({
+        return Ok(serde_json::json!({
             "status": "error",
             "message": format!("Symbol '{}' not found.", needle)
-        });
-        return emit(&result, format);
+        }));
     }
 
     if matching_nodes.len() > 1 {
@@ -120,12 +127,11 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
                 "score": 1.0,
             }));
         }
-        let result = serde_json::json!({
+        return Ok(serde_json::json!({
             "status": "ambiguous",
             "message": format!("Found {} symbols matching '{}'. Use uid, file_path, or kind to disambiguate.", candidates.len(), display_name),
             "candidates": candidates
-        });
-        return emit(&result, format);
+        }));
     }
 
     let (node_idx, node) = matching_nodes[0];
@@ -237,7 +243,7 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
         })
         .collect();
 
-    let result = serde_json::json!({
+    Ok(serde_json::json!({
         "status": "found",
         "symbol": {
             "uid": node.uid.resolve(&graph.string_pool),
@@ -251,7 +257,32 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
         "outgoing": outgoing,
         "processes": [],
         "blind_spots": blind_spots,
-    });
-
-    emit(&result, format)
+    }))
 }
+
+pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
+    let format = OutputFormat::parse(args.format.as_deref());
+    let value = run_inner(args, engine)?;
+    emit(&value, format)
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        // Compile-only signature check. Behaviour is verified by the
+        // command's existing integration tests when called via run().
+        fn _accepts(
+            _f: fn(
+                ContextArgs,
+                &dyn graph_nexus_mcp::registry::EngineRef,
+            ) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
+        ) {
+        }
+        _accepts(run_inner);
+    }
+}
+
+graph_nexus_mcp::gnx_register_mcp_tool!(ContextArgs, run_inner);
