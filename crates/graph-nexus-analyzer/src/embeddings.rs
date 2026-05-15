@@ -93,6 +93,16 @@ impl Embedder {
         let special_tokens_map_file = tok_repo.get("special_tokens_map.json")?;
         let tokenizer_config_file = tok_repo.get("tokenizer_config.json")?;
 
+        // Init RAM note: fs::read materialises the full ~1.2 GiB ONNX blob
+        // into a `Vec<u8>` and hands it to fastembed; ORT then makes its own
+        // internal copy inside `commit_from_memory`. Peak resident during
+        // init = ~2x model size; post-init = ~1x (the Vec is dropped when
+        // `try_new_from_user_defined` returns). We've evaluated avoiding
+        // this transient via ort's `commit_from_file(path)`, but fastembed's
+        // `UserDefinedEmbeddingModel::new` takes `Vec<u8>` by value and never
+        // exposes a path-based init — bypassing fastembed entirely would
+        // re-implement tokenisation + pooling + quantization wiring for no
+        // measurable steady-state win, so we accept the transient spike.
         let model_def = UserDefinedEmbeddingModel::new(
             std::fs::read(model_file)?,
             TokenizerFiles {
@@ -159,10 +169,16 @@ impl Embedder {
         let unique_embeddings = if unique_texts.is_empty() {
             Vec::new()
         } else {
-            let mut model = self
-                .model
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            // Recover from poisoning so a panic in a prior embed call (e.g.
+            // an ONNX runtime hiccup) doesn't permanently disable the
+            // embedder. `TextEmbedding::embed` only borrows the model &mut
+            // for the duration of inference — it doesn't mutate state in a
+            // way that would leave it logically inconsistent after an
+            // interrupted call.
+            let mut model = match self.model.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             model.embed(unique_texts, Some(resolve_embed_batch()))?
         };
 
