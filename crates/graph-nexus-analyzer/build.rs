@@ -50,8 +50,8 @@ fn main() {
         hasher.update(rel_str.as_bytes());
         hasher.update([0u8]);
 
-        let bytes = fs::read(path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let bytes =
+            fs::read(path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
         hasher.update(&bytes);
         hasher.update([0u8]);
 
@@ -100,8 +100,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
         let in_lang_subdir = path.parent() != Some(root);
         let is_lang_source = in_lang_subdir && name.ends_with(".rs");
         let is_queries = name == "queries.scm";
-        let is_top_level_helper =
-            path.parent() == Some(root) && TOP_LEVEL_FILES.contains(&name);
+        let is_top_level_helper = path.parent() == Some(root) && TOP_LEVEL_FILES.contains(&name);
 
         if is_lang_source || is_queries || is_top_level_helper {
             out.push(path);

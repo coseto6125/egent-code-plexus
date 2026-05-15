@@ -125,12 +125,7 @@ fn non_start_kinds(json: &Value) -> Vec<String> {
         .unwrap()
         .iter()
         .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
-        .map(|e| {
-            e["kind"]
-                .as_str()
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-        })
+        .map(|e| e["kind"].as_str().unwrap_or_default().to_ascii_lowercase())
         .collect()
 }
 

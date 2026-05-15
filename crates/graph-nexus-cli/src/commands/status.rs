@@ -19,7 +19,8 @@ pub fn run(args: StatusArgs) -> Result<(), GnxError> {
     let git_state = crate::git_state::resolve(&cwd)
         .map_err(|e| GnxError::InvalidArgument(format!("Git error: {e}")))?;
 
-    let graph_path = crate::graph_path::resolve(std::path::Path::new(".gitnexus-rs/graph.bin"), &cwd);
+    let graph_path =
+        crate::graph_path::resolve(std::path::Path::new(".gitnexus-rs/graph.bin"), &cwd);
 
     let mut graph_mtime = 0;
     let mut graph_exists = false;

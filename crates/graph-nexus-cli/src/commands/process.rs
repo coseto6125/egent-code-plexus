@@ -74,7 +74,7 @@ pub fn run(args: ProcessArgs, engine: &Engine) -> Result<(), GnxError> {
         let step_node_idx = graph.traces_data[i].to_native() as usize;
         let step_node = &graph.nodes[step_node_idx];
         let step_file = &graph.files[step_node.file_idx.to_native() as usize];
-        
+
         steps.push(serde_json::json!({
             "uid": step_node.uid.resolve(&graph.string_pool),
             "name": step_node.name.resolve(&graph.string_pool),

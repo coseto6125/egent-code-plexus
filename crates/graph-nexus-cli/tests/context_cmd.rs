@@ -168,13 +168,7 @@ def caller():
     let filtered = run_json(
         repo,
         &[
-            "context",
-            "--name",
-            "caller",
-            "--kind",
-            "function",
-            "--format",
-            "json",
+            "context", "--name", "caller", "--kind", "function", "--format", "json",
         ],
     );
     assert_eq!(filtered["status"], "found");
@@ -185,7 +179,10 @@ def caller():
         f_count < unf_count,
         "kind filter should drop the Class target: unfiltered={unf_count}, filtered={f_count}"
     );
-    assert!(f_count >= 1, "should still keep function targets: {filtered}");
+    assert!(
+        f_count >= 1,
+        "should still keep function targets: {filtered}"
+    );
 
     // Every remaining target must resolve to a Function kind.
     for entries in f_outgoing.values() {
@@ -265,11 +262,7 @@ fn context_relation_types_filter_keeps_only_listed() {
     // `--relation_types extends` must keep it.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
-    write(
-        repo,
-        "src/helper.py",
-        "class BaseClass:\n    pass\n",
-    );
+    write(repo, "src/helper.py", "class BaseClass:\n    pass\n");
     write(
         repo,
         "src/main.py",
@@ -332,10 +325,7 @@ class MyClass(BaseClass):
         "relation_types=calls should drop the extends edge: {dropped}"
     );
     for key in dropped_outgoing.keys() {
-        assert_eq!(
-            key, "calls",
-            "relation_types=calls leaked rel='{key}'"
-        );
+        assert_eq!(key, "calls", "relation_types=calls leaked rel='{key}'");
     }
 }
 

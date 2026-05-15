@@ -140,7 +140,10 @@ pub fn run(args: ContextArgs, engine: &Engine) -> Result<(), GnxError> {
     // Returns true when the edge entry should be kept.
     let edge_keeps = |target_kind_str: &str, target_file_path: &str, rel_str: &str| -> bool {
         if let Some(ref kinds) = kind_filter {
-            if !kinds.iter().any(|k| k == &target_kind_str.to_ascii_lowercase()) {
+            if !kinds
+                .iter()
+                .any(|k| k == &target_kind_str.to_ascii_lowercase())
+            {
                 return false;
             }
         }

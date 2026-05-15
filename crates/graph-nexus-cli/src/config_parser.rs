@@ -7,7 +7,10 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
     // 1. tsconfig.json
     if let Ok(content) = std::fs::read_to_string(repo_path.join("tsconfig.json")) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(paths) = json.pointer("/compilerOptions/paths").and_then(|v| v.as_object()) {
+            if let Some(paths) = json
+                .pointer("/compilerOptions/paths")
+                .and_then(|v| v.as_object())
+            {
                 for (pattern, targets) in paths {
                     if let Some(target_arr) = targets.as_array() {
                         let mut replacements = Vec::new();
@@ -69,7 +72,10 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
                     let name = parts[1].trim().trim_matches('"').trim_matches('\'').trim();
                     let pattern = format!("{}/*", name);
                     aliases.add(&pattern, vec!["src/*".to_string()]);
-                    aliases.add(name, vec!["src/lib.rs".to_string(), "src/main.rs".to_string()]);
+                    aliases.add(
+                        name,
+                        vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+                    );
                 }
             }
         }
@@ -84,7 +90,10 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
                 if parts.len() >= 2 {
                     let name = parts[1].trim().trim_matches('"').trim_matches('\'').trim();
                     let pattern = format!("{}/*", name);
-                    aliases.add(&pattern, vec![format!("src/{}/*", name), format!("{}/*", name)]);
+                    aliases.add(
+                        &pattern,
+                        vec![format!("src/{}/*", name), format!("{}/*", name)],
+                    );
                 }
             }
         }

@@ -216,9 +216,11 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
             let cache_ref = cache_index.as_ref();
             let hits = &cache_hits_counter;
             pipeline.analyze_with_cache(files_to_analyze, |rel_path, content_hash| {
-                cache_ref.and_then(|c| c.get(rel_path, content_hash)).inspect(|_| {
-                    hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                })
+                cache_ref
+                    .and_then(|c| c.get(rel_path, content_hash))
+                    .inspect(|_| {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    })
             })
         },
         || {
@@ -232,7 +234,8 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
                             hashes.insert(path.to_string(), file.content_hash);
                         }
                         if embeddings_flag && !args.drop_embeddings {
-                            if let rkyv::option::ArchivedOption::Some(old_embs) = &old_graph.embeddings
+                            if let rkyv::option::ArchivedOption::Some(old_embs) =
+                                &old_graph.embeddings
                             {
                                 for (idx, node) in old_graph.nodes.iter().enumerate() {
                                     if let Some(emb) = old_embs.get(idx) {
@@ -415,7 +418,10 @@ pub fn run(args: AnalyzeArgs) -> Result<(), String> {
     println!("  Index time:   {:?}", index_duration);
     println!("  Total time:   {:?}", total_duration);
     if cache_disabled {
-        println!("  Cache:        disabled ({} files re-parsed)", cache_count_post);
+        println!(
+            "  Cache:        disabled ({} files re-parsed)",
+            cache_count_post
+        );
     } else if cache_count_pre == 0 {
         println!(
             "  Cache:        first-run, building cache from {} files",
