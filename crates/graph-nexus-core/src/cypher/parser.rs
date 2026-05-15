@@ -202,6 +202,65 @@ fn parse_rel_type(c: &mut Cursor) -> Result<RelType, CypherError> {
         .map_err(|_| CypherError::Semantic { msg: format!("unknown RelType '{name}'") })
 }
 
+pub fn parse_return_clause(c: &mut Cursor) -> Result<ReturnClause, CypherError> {
+    c.expect(&Token::Return)?;
+    let distinct = c.eat(&Token::Distinct);
+    let mut items = Vec::new();
+    loop {
+        items.push(parse_return_item(c)?);
+        if !c.eat(&Token::Comma) { break; }
+    }
+    Ok(ReturnClause { distinct, items })
+}
+
+fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
+    let expr = if c.eat(&Token::Star) {
+        ReturnExpr::Star
+    } else if let Some(Token::Ident(name)) = c.peek().cloned() {
+        c.advance();
+        if c.eat(&Token::Dot) {
+            let prop = match c.advance() {
+                Some(Token::Ident(s)) => s.clone(),
+                _ => return Err(c.err("property name after .")),
+            };
+            ReturnExpr::Prop(name, prop)
+        } else if c.eat(&Token::LParen) {
+            let distinct = c.eat(&Token::Distinct);
+            if c.eat(&Token::Star) {
+                c.expect(&Token::RParen)?;
+                ReturnExpr::FunCall {
+                    name: name.to_ascii_uppercase(),
+                    distinct: false,
+                    args: vec![Expr::Lit(Literal::Null)],
+                }
+            } else {
+                let mut args = Vec::new();
+                if !c.check(&Token::RParen) {
+                    loop {
+                        args.push(parse_expr(c)?);
+                        if !c.eat(&Token::Comma) { break; }
+                    }
+                }
+                c.expect(&Token::RParen)?;
+                ReturnExpr::FunCall { name: name.to_ascii_uppercase(), distinct, args }
+            }
+        } else {
+            ReturnExpr::Var(name)
+        }
+    } else {
+        return Err(c.err("return item"));
+    };
+
+    let alias = if c.eat(&Token::As) {
+        match c.advance() {
+            Some(Token::Ident(s)) => Some(s.clone()),
+            _ => return Err(c.err("alias after AS")),
+        }
+    } else { None };
+
+    Ok(ReturnItem { expr, alias })
+}
+
 pub fn parse_where(c: &mut Cursor) -> Result<Expr, CypherError> {
     c.expect(&Token::Where)?;
     parse_expr(c)
@@ -514,6 +573,41 @@ mod tests {
         let mut c = Cursor::new(&toks);
         let e = parse_where(&mut c).unwrap();
         assert!(matches!(e, Expr::BinOp(Op::Eq, ..)));
+    }
+
+    fn rt(s: &str) -> ReturnClause {
+        let toks = tokenize(s).unwrap();
+        let mut c = Cursor::new(&toks);
+        parse_return_clause(&mut c).unwrap()
+    }
+
+    #[test]
+    fn return_vars() {
+        let r = rt("RETURN a, b");
+        assert!(!r.distinct);
+        assert_eq!(r.items.len(), 2);
+        assert!(matches!(r.items[0].expr, ReturnExpr::Var(ref v) if v == "a"));
+    }
+
+    #[test]
+    fn return_distinct_with_property() {
+        let r = rt("RETURN DISTINCT a.name");
+        assert!(r.distinct);
+        assert!(matches!(r.items[0].expr, ReturnExpr::Prop(ref v, ref p) if v == "a" && p == "name"));
+    }
+
+    #[test]
+    fn return_count_alias() {
+        let r = rt("RETURN COUNT(*) AS n");
+        let item = &r.items[0];
+        assert_eq!(item.alias.as_deref(), Some("n"));
+        assert!(matches!(item.expr, ReturnExpr::FunCall { ref name, .. } if name == "COUNT"));
+    }
+
+    #[test]
+    fn return_star() {
+        let r = rt("RETURN *");
+        assert!(matches!(r.items[0].expr, ReturnExpr::Star));
     }
 
     fn ex(s: &str) -> Expr {
