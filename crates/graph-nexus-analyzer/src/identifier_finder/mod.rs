@@ -40,6 +40,98 @@ pub mod zig;
 
 use graph_nexus_core::analyzer::types::IdentifierRange;
 
+/// Dispatch a "find all unique identifier names" scan to the matching
+/// per-language tree-sitter module. Returns `(name, first_line)` pairs
+/// (1-indexed) for every distinct identifier found in `source`.
+/// Returns `None` for unsupported extensions — callers emit an error.
+pub fn find_all_identifier_names(path: &str, source: &[u8]) -> Option<Vec<(String, usize)>> {
+    use generic::find_all_by_kinds;
+    let ext = ext_of(path);
+    let result = match ext.as_str() {
+        "py" | "pyi" => find_all_by_kinds(
+            source,
+            &tree_sitter_python::LANGUAGE.into(),
+            &["identifier"],
+        ),
+        "ts" => find_all_by_kinds(
+            source,
+            &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            &["identifier", "type_identifier", "property_identifier",
+              "shorthand_property_identifier", "shorthand_property_identifier_pattern"],
+        ),
+        "tsx" => find_all_by_kinds(
+            source,
+            &tree_sitter_typescript::LANGUAGE_TSX.into(),
+            &["identifier", "type_identifier", "property_identifier",
+              "shorthand_property_identifier", "shorthand_property_identifier_pattern"],
+        ),
+        "js" | "jsx" | "mjs" | "cjs" => find_all_by_kinds(
+            source,
+            &tree_sitter_javascript::LANGUAGE.into(),
+            &["identifier", "property_identifier",
+              "shorthand_property_identifier", "shorthand_property_identifier_pattern"],
+        ),
+        "rs" => find_all_by_kinds(
+            source,
+            &tree_sitter_rust::LANGUAGE.into(),
+            &["identifier", "type_identifier", "field_identifier",
+              "shorthand_field_identifier"],
+        ),
+        "go" => find_all_by_kinds(
+            source,
+            &tree_sitter_go::LANGUAGE.into(),
+            &["identifier", "type_identifier", "field_identifier", "package_identifier"],
+        ),
+        "java" => find_all_by_kinds(
+            source,
+            &tree_sitter_java::LANGUAGE.into(),
+            &["identifier", "type_identifier"],
+        ),
+        "kt" | "kts" => find_all_by_kinds(
+            source,
+            &tree_sitter_kotlin::LANGUAGE.into(),
+            &["simple_identifier", "type_identifier"],
+        ),
+        "cs" => find_all_by_kinds(
+            source,
+            &tree_sitter_c_sharp::LANGUAGE.into(),
+            &["identifier"],
+        ),
+        "rb" => find_all_by_kinds(
+            source,
+            &tree_sitter_ruby::LANGUAGE.into(),
+            &["identifier", "constant"],
+        ),
+        "swift" => find_all_by_kinds(
+            source,
+            &tree_sitter_swift::LANGUAGE.into(),
+            &["simple_identifier", "type_identifier"],
+        ),
+        "c" | "h" => find_all_by_kinds(
+            source,
+            &tree_sitter_c::LANGUAGE.into(),
+            &["identifier", "type_identifier", "field_identifier"],
+        ),
+        "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => find_all_by_kinds(
+            source,
+            &tree_sitter_cpp::LANGUAGE.into(),
+            &["identifier", "type_identifier", "field_identifier", "namespace_identifier"],
+        ),
+        "dart" => find_all_by_kinds(
+            source,
+            &tree_sitter_dart::LANGUAGE.into(),
+            &["identifier", "type_identifier"],
+        ),
+        "php" => find_all_by_kinds(
+            source,
+            &tree_sitter_php::LANGUAGE_PHP.into(),
+            &["name"],
+        ),
+        _ => return None,
+    };
+    Some(result)
+}
+
 /// Dispatch identifier-occurrence scan to the matching per-language
 /// implementation based on `path`'s file extension. Returns an empty
 /// vec for unsupported languages — callers treat that as "skip file".
