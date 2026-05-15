@@ -1,9 +1,10 @@
 //! SessionStart handler: render rules template (in repo or
 //! `~/.claude/hooks/gnx/rules.md`), substitute placeholders from
-//! `.gitnexus-rs/meta.json`, surface a worktree-needs-index hint when
-//! `cwd` is a git worktree without an index.
+//! `<index_dir>/meta.json` (registry-resolved), surface a worktree-
+//! needs-index hint when `cwd` is a git worktree without a registered
+//! index.
 
-use super::common::{emit_additional_context, gitnexus_dir, HookInput};
+use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::git::safe_exec;
 use graph_nexus_core::GnxError;
 use std::fs;
@@ -13,7 +14,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     if input.cwd.is_empty() {
         return Ok(());
     }
-    let gnx_dir = match gitnexus_dir(&input.cwd) {
+    let index_dir = match lookup_index_dir(&input.cwd) {
         Some(d) => d,
         None => {
             if let Some(hint) = detect_worktree_needing_index(Path::new(&input.cwd)) {
@@ -23,19 +24,19 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
         }
     };
 
-    let rendered = render_rules(Path::new(&input.cwd), &gnx_dir);
+    let rendered = render_rules(Path::new(&input.cwd), &index_dir);
     if !rendered.trim().is_empty() {
         emit_additional_context("SessionStart", &rendered);
     }
     Ok(())
 }
 
-fn render_rules(repo_root: &Path, gnx_dir: &Path) -> String {
+fn render_rules(repo_root: &Path, index_dir: &Path) -> String {
     let template = match load_template(repo_root) {
         Some(t) => t,
         None => return String::new(),
     };
-    let (nodes, edges, head) = read_stats(gnx_dir, repo_root);
+    let (nodes, edges, head) = read_stats(index_dir, repo_root);
     let has_graphify = repo_root.join("graphify-out").exists();
     let has_wiki = has_graphify
         && repo_root
@@ -76,10 +77,10 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn read_stats(gnx_dir: &Path, repo_root: &Path) -> (String, String, String) {
+fn read_stats(index_dir: &Path, repo_root: &Path) -> (String, String, String) {
     let mut nodes = "?".to_string();
     let mut edges = "?".to_string();
-    if let Ok(raw) = fs::read_to_string(gnx_dir.join("meta.json")) {
+    if let Ok(raw) = fs::read_to_string(index_dir.join("meta.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(n) = v.get("node_count").and_then(|x| x.as_u64()) {
                 nodes = n.to_string();
@@ -133,7 +134,10 @@ fn detect_worktree_needing_index(cwd: &Path) -> Option<String> {
     if !git_path.is_file() {
         return None;
     }
-    if Path::new(&toplevel).join(".gitnexus-rs").exists() {
+    // If the toplevel maps to a registered index, no hint needed —
+    // the agent already has search context. Only nag when the registry
+    // has never seen this worktree.
+    if lookup_index_dir(toplevel.as_str()).is_some() {
         return None;
     }
     let branch =

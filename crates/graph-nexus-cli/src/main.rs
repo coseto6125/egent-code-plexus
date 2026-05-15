@@ -29,7 +29,7 @@ struct Cli {
     command: Commands,
 
     /// Path to the graph.bin file
-    #[arg(long, default_value = ".gitnexus-rs/graph.bin", global = true)]
+    #[arg(long, default_value = ".gnx/graph.bin", global = true)]
     graph: PathBuf,
 }
 

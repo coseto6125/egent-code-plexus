@@ -21,8 +21,19 @@ fn gnx_bin() -> &'static str {
 }
 
 fn run(envelope: &str) -> std::process::Output {
-    let mut child = Command::new(gnx_bin())
-        .args(["hook", "pre-tool-use", "--claude-code"])
+    run_with_home(envelope, None)
+}
+
+/// Run the hook with an optional HOME override so a fake registry can
+/// be planted at `<home>/.gnx/registry.json`. Each subprocess inherits
+/// the env we set on the child only — parent's env is untouched.
+fn run_with_home(envelope: &str, home: Option<&std::path::Path>) -> std::process::Output {
+    let mut cmd = Command::new(gnx_bin());
+    cmd.args(["hook", "pre-tool-use", "--claude-code"]);
+    if let Some(h) = home {
+        cmd.env("HOME", h);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -46,7 +57,7 @@ fn short_pattern_no_op() {
 #[test]
 fn missing_graph_no_op() {
     let out = run(r#"{"cwd":"/tmp","tool_name":"Grep","tool_input":{"pattern":"validateUser"}}"#);
-    assert!(out.stdout.is_empty(), "no .gitnexus-rs/ in /tmp → no-op");
+    assert!(out.stdout.is_empty(), "no registry entry for /tmp → no-op");
 }
 
 #[test]
@@ -151,23 +162,55 @@ fn make_graph() -> ZeroCopyGraph {
 
 #[test]
 fn with_index_emits_legacy_block_via_subprocess() {
+    // The hook resolves cwd → index_dir via `~/.gnx/registry.json`.
+    // We plant both the registry and the per-branch index dir under a
+    // tempdir, then point HOME at it for the subprocess.
     let tmp = tempdir().unwrap();
-    let repo = tmp.path();
+    let fake_home = tmp.path().join("home");
+    let home_gnx = fake_home.join(".gnx");
+    let repo = tmp.path().join("repo");
+    let index_dir = home_gnx.join("alpha").join("main");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&index_dir).unwrap();
+
     let graph = make_graph();
-    let gnx_dir = repo.join(".gitnexus-rs");
-    fs::create_dir_all(&gnx_dir).unwrap();
     fs::write(
-        gnx_dir.join("graph.bin"),
+        index_dir.join("graph.bin"),
         rkyv::to_bytes::<Error>(&graph).unwrap().as_slice(),
     )
     .unwrap();
-    TantivyEngine::build_index(repo, &graph).expect("tantivy build");
+    TantivyEngine::build_index(&index_dir, &graph).expect("tantivy build");
+
+    let registry = serde_json::json!({
+        "version": 1,
+        "repos": [{
+            "name": "alpha",
+            "remote_url": "",
+            "worktree_path": repo.to_string_lossy(),
+            "index_dir_root": home_gnx.join("alpha").to_string_lossy(),
+            "branches": [{
+                "name": "main",
+                "index_dir": index_dir.to_string_lossy(),
+                "indexed_at": "2026-05-16T00:00:00Z",
+                "node_count": 3u32,
+                "delta_size": 0u64,
+                "embedding_status": "none"
+            }],
+            "groups": []
+        }],
+        "groups": []
+    });
+    fs::write(
+        home_gnx.join("registry.json"),
+        serde_json::to_string(&registry).unwrap(),
+    )
+    .unwrap();
 
     let envelope = format!(
         r#"{{"cwd":"{}","tool_name":"Grep","tool_input":{{"pattern":"parseConfig"}}}}"#,
         repo.display()
     );
-    let out = run(&envelope);
+    let out = run_with_home(&envelope, Some(&fake_home));
     assert!(
         out.status.success(),
         "hook must not error: {}",

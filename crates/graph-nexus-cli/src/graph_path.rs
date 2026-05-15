@@ -5,7 +5,7 @@
 use crate::git_state;
 use std::path::{Path, PathBuf};
 
-const LEGACY_DEFAULT: &str = ".gitnexus-rs/graph.bin";
+const LEGACY_DEFAULT: &str = ".gnx/graph.bin";
 
 /// If `graph` matches the legacy default, replace with the registry-resolved
 /// `~/.gnx/<repo>/<branch>/graph.bin` based on `cwd` (the repo root).
@@ -17,12 +17,26 @@ pub fn resolve(graph: &Path, cwd: &Path) -> PathBuf {
         return graph.to_path_buf();
     }
 
+    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    let registry_path = home_gnx.join("registry.json");
+
+    // Fast path: registry already lists this worktree → use the stored
+    // index_dir directly. This is the common case after the first
+    // `gnx admin index` and avoids recomputing the disambiguator-hash
+    // layout, which can drift if the user moved the worktree.
+    if let Ok(reg) = graph_nexus_core::registry::RegistryFile::read_or_empty(&registry_path) {
+        if let Some((_repo, branch)) = reg.find_by_cwd(cwd, None) {
+            return std::path::PathBuf::from(&branch.index_dir).join("graph.bin");
+        }
+    }
+
+    // Cold path: first-run before indexing has populated the registry.
+    // Compute the expected layout deterministically from git_state so the
+    // CLI can write into the right place when `gnx admin index` runs.
     let state = match git_state::resolve(cwd) {
         Ok(s) => s,
         Err(_) => return graph.to_path_buf(),
     };
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
-
     let existing_repos: Vec<(String, String)> = {
         let reg = match graph_nexus_core::registry::Registry::open(&home_gnx) {
             Ok(r) => r,

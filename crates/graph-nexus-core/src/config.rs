@@ -1,4 +1,4 @@
-//! User-facing configuration loaded from `<repo>/.gitnexus-rs/config.toml`.
+//! User-facing configuration loaded from `<repo>/.gnx/config.toml`.
 //!
 //! Each field is documented with its **wiring status**:
 //! - `effective` — the rest of the codebase reads this and respects it
@@ -105,13 +105,14 @@ fn default_high_trust_threshold() -> f32 {
     crate::HIGH_TRUST_CONFIDENCE
 }
 
-/// Repo-relative config path. `.gitnexus-rs/config.toml` sits alongside
-/// `graph.bin` so all per-repo state lives in one directory.
+/// Repo-relative config path. `.gnx/config.toml` is hook-local state
+/// scoped to the worktree (not shared with `~/.gnx/<repo>/<branch>/`,
+/// which holds the resolved index artifacts).
 pub fn config_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".gitnexus-rs").join("config.toml")
+    repo_root.join(".gnx").join("config.toml")
 }
 
-/// Load the config from `<repo>/.gitnexus-rs/config.toml`. Returns
+/// Load the config from `<repo>/.gnx/config.toml`. Returns
 /// `Config::default()` if the file is absent (first-run case) so callers
 /// can `unwrap_or_default()` without branching on the missing file.
 pub fn load(repo_root: &Path) -> Result<Config, String> {
@@ -124,7 +125,7 @@ pub fn load(repo_root: &Path) -> Result<Config, String> {
     toml::from_str::<Config>(text).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
-/// Atomic write to `<repo>/.gitnexus-rs/config.toml` (tmp + fsync +
+/// Atomic write to `<repo>/.gnx/config.toml` (tmp + fsync +
 /// rename — same pattern as the registry / graph.bin writes).
 pub fn save(repo_root: &Path, cfg: &Config) -> Result<(), String> {
     let path = config_path(repo_root);

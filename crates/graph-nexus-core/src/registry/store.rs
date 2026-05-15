@@ -84,6 +84,71 @@ pub struct GroupEntry {
 }
 
 impl RegistryFile {
+    /// Locate the `(repo, branch)` pair whose `worktree_path` is the
+    /// longest prefix of `cwd`. Used by hooks to translate the agent's
+    /// current working directory into the on-disk index location
+    /// (`<branch>.index_dir`) without re-running `gnx admin index`.
+    ///
+    /// When `branch_hint` is `Some`, prefer that branch within the
+    /// matched repo entry; fall back to the most recently indexed
+    /// branch if the hint doesn't match (so a freshly switched branch
+    /// that hasn't been indexed yet still resolves to *some* index
+    /// rather than failing the hook entirely).
+    ///
+    /// Returns `None` when no repo's `worktree_path` matches, when the
+    /// repo has zero branches recorded, or when path comparison fails.
+    pub fn find_by_cwd(
+        &self,
+        cwd: &std::path::Path,
+        branch_hint: Option<&str>,
+    ) -> Option<(&RepoEntry, &BranchEntry)> {
+        // Canonicalize cwd once so symlinked work trees match the path
+        // stored at index time (which came from `git rev-parse
+        // --show-toplevel`, already canonicalized).
+        let cwd_buf = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let cwd_str = cwd_buf.to_string_lossy();
+        let cwd_bytes = cwd_str.as_bytes();
+        let sep = std::path::MAIN_SEPARATOR as u8;
+
+        let repo = self
+            .repos
+            .iter()
+            .filter(|r| {
+                // Normalize a trailing separator on the registered path
+                // before prefix-matching (`/work/alpha/` vs `/work/alpha`
+                // both registered legitimately by different callers).
+                let wp = r.worktree_path.trim_end_matches(std::path::MAIN_SEPARATOR);
+                let wp_bytes = wp.as_bytes();
+                if cwd_bytes == wp_bytes {
+                    return true;
+                }
+                // cwd is strictly under wp: `wp_bytes` must be a prefix
+                // *and* the next char must be the path separator. Pure
+                // byte comparison — no per-call String allocation.
+                cwd_bytes.len() > wp_bytes.len()
+                    && cwd_bytes.starts_with(wp_bytes)
+                    && cwd_bytes[wp_bytes.len()] == sep
+            })
+            .max_by_key(|r| r.worktree_path.len())?;
+        // Most-recently-indexed fallback for both arms: the hint may
+        // not match (freshly switched branch never indexed), and `None`
+        // means caller had no git context at all.
+        let most_recent = || {
+            repo.branches
+                .iter()
+                .max_by(|a, b| a.indexed_at.cmp(&b.indexed_at))
+        };
+        let branch = match branch_hint {
+            Some(h) => repo
+                .branches
+                .iter()
+                .find(|b| b.name == h)
+                .or_else(most_recent),
+            None => most_recent(),
+        }?;
+        Some((repo, branch))
+    }
+
     pub fn empty() -> Self {
         Self {
             version: 1,
@@ -301,5 +366,146 @@ mod migration_tests {
         let json = serde_json::to_string(&entry).unwrap();
         let back: RepoEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.groups, vec!["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod find_by_cwd_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn br(name: &str, indexed_at: &str) -> BranchEntry {
+        BranchEntry {
+            name: name.into(),
+            index_dir: format!("/home/.gnx/repo/{name}"),
+            indexed_at: indexed_at.into(),
+            node_count: 0,
+            delta_size: 0,
+            embedding_status: "none".into(),
+        }
+    }
+
+    fn rg(reg: RegistryFile, repo: &str, wt: &str, branches: Vec<BranchEntry>) -> RegistryFile {
+        let mut r = reg;
+        r.repos.push(RepoEntry {
+            name: repo.into(),
+            remote_url: String::new(),
+            worktree_path: wt.into(),
+            index_dir_root: String::new(),
+            branches,
+            groups: vec![],
+        });
+        r
+    }
+
+    #[test]
+    fn exact_worktree_match_resolves() {
+        let reg = rg(
+            RegistryFile::empty(),
+            "alpha",
+            "/work/alpha",
+            vec![br("main", "2026-05-01")],
+        );
+        let (r, b) = reg.find_by_cwd(Path::new("/work/alpha"), None).unwrap();
+        assert_eq!(r.name, "alpha");
+        assert_eq!(b.name, "main");
+    }
+
+    #[test]
+    fn subpath_under_worktree_resolves() {
+        let reg = rg(
+            RegistryFile::empty(),
+            "alpha",
+            "/work/alpha",
+            vec![br("main", "2026-05-01")],
+        );
+        let (r, _) = reg
+            .find_by_cwd(Path::new("/work/alpha/src/x.rs"), None)
+            .unwrap();
+        assert_eq!(r.name, "alpha");
+    }
+
+    #[test]
+    fn longest_prefix_wins_when_nested_repos() {
+        // /work/alpha registered, /work/alpha/sub also registered.
+        // A file under /work/alpha/sub must map to the inner repo.
+        let mut reg = rg(
+            RegistryFile::empty(),
+            "alpha",
+            "/work/alpha",
+            vec![br("main", "2026-05-01")],
+        );
+        reg = rg(
+            reg,
+            "alpha-sub",
+            "/work/alpha/sub",
+            vec![br("main", "2026-05-01")],
+        );
+        let (r, _) = reg
+            .find_by_cwd(Path::new("/work/alpha/sub/x.rs"), None)
+            .unwrap();
+        assert_eq!(r.name, "alpha-sub");
+    }
+
+    #[test]
+    fn branch_hint_picks_named_branch() {
+        let reg = rg(
+            RegistryFile::empty(),
+            "alpha",
+            "/work/alpha",
+            vec![br("main", "2026-05-01"), br("feat/x", "2026-04-01")],
+        );
+        // Even though feat/x is older, branch_hint should select it.
+        let (_, b) = reg
+            .find_by_cwd(Path::new("/work/alpha"), Some("feat/x"))
+            .unwrap();
+        assert_eq!(b.name, "feat/x");
+    }
+
+    #[test]
+    fn missing_branch_hint_falls_back_to_most_recent() {
+        let reg = rg(
+            RegistryFile::empty(),
+            "alpha",
+            "/work/alpha",
+            vec![br("main", "2026-05-01"), br("feat/x", "2026-04-01")],
+        );
+        // Branch the cwd is currently on hasn't been indexed yet.
+        let (_, b) = reg
+            .find_by_cwd(Path::new("/work/alpha"), Some("never-indexed"))
+            .unwrap();
+        assert_eq!(b.name, "main", "newest indexed branch wins as fallback");
+    }
+
+    #[test]
+    fn cwd_outside_any_worktree_yields_none() {
+        let reg = rg(
+            RegistryFile::empty(),
+            "alpha",
+            "/work/alpha",
+            vec![br("main", "2026-05-01")],
+        );
+        assert!(reg.find_by_cwd(Path::new("/tmp/elsewhere"), None).is_none());
+    }
+
+    #[test]
+    fn prefix_collision_at_non_separator_boundary_rejected() {
+        // /work/alpha must NOT match cwd /work/alphabeta (no separator
+        // between the suffix and the rest).
+        let reg = rg(
+            RegistryFile::empty(),
+            "alpha",
+            "/work/alpha",
+            vec![br("main", "2026-05-01")],
+        );
+        assert!(reg
+            .find_by_cwd(Path::new("/work/alphabeta"), None)
+            .is_none());
+    }
+
+    #[test]
+    fn no_branches_yields_none_even_when_path_matches() {
+        let reg = rg(RegistryFile::empty(), "alpha", "/work/alpha", vec![]);
+        assert!(reg.find_by_cwd(Path::new("/work/alpha"), None).is_none());
     }
 }

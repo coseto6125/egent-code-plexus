@@ -8,42 +8,59 @@ fn gnx_bin() -> &'static str {
     env!("CARGO_BIN_EXE_gnx")
 }
 
-#[test]
-fn no_index_present_yields_empty_output() {
-    let tmp = TempDir::new().unwrap();
-    let mut child = Command::new(gnx_bin())
-        .args(["hook", "session-start", "--claude-code"])
+/// Run hook with optional HOME override so the subprocess resolves
+/// `~/.gnx/registry.json` against a fake home.
+fn run_session_start(envelope: &str, home: Option<&std::path::Path>) -> std::process::Output {
+    let mut cmd = Command::new(gnx_bin());
+    cmd.args(["hook", "session-start", "--claude-code"]);
+    if let Some(h) = home {
+        cmd.env("HOME", h);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let envelope = format!(r#"{{"cwd": "{}"}}"#, tmp.path().display());
     child
         .stdin
         .as_mut()
         .unwrap()
         .write_all(envelope.as_bytes())
         .unwrap();
-    let out = child.wait_with_output().unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn no_index_present_yields_empty_output() {
+    let tmp = TempDir::new().unwrap();
+    // Empty HOME → no registry → cwd has no entry → no-op.
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    let envelope = format!(r#"{{"cwd": "{}"}}"#, tmp.path().display());
+    let out = run_session_start(&envelope, Some(&fake_home));
     assert!(out.status.success());
     assert!(
         out.stdout.is_empty(),
-        "no .gitnexus-rs/ and not a worktree → no-op expected"
+        "no registry entry and not a worktree → no-op expected"
     );
 }
 
 #[test]
 fn template_placeholders_get_rendered_when_meta_present() {
     let tmp = TempDir::new().unwrap();
-    let gnx_dir = tmp.path().join(".gitnexus-rs");
-    std::fs::create_dir_all(&gnx_dir).unwrap();
+    let fake_home = tmp.path().join("home");
+    let home_gnx = fake_home.join(".gnx");
+    let repo = tmp.path().join("repo");
+    let index_dir = home_gnx.join("alpha").join("main");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&index_dir).unwrap();
     std::fs::write(
-        gnx_dir.join("meta.json"),
+        index_dir.join("meta.json"),
         r#"{"indexed_at":"2026-05-16T00:00:00Z","node_count":1234,"worktree_path":"/x","remote_url":"","schema_version":1}"#,
     )
     .unwrap();
-    let claude_dir = tmp.path().join(".claude");
+    let claude_dir = repo.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
         claude_dir.join("gnx-rules.md"),
@@ -51,20 +68,33 @@ fn template_placeholders_get_rendered_when_meta_present() {
     )
     .unwrap();
 
-    let mut child = Command::new(gnx_bin())
-        .args(["hook", "session-start", "--claude-code"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let envelope = format!(r#"{{"cwd": "{}"}}"#, tmp.path().display());
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(envelope.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    let registry = serde_json::json!({
+        "version": 1,
+        "repos": [{
+            "name": "alpha",
+            "remote_url": "",
+            "worktree_path": repo.to_string_lossy(),
+            "index_dir_root": home_gnx.join("alpha").to_string_lossy(),
+            "branches": [{
+                "name": "main",
+                "index_dir": index_dir.to_string_lossy(),
+                "indexed_at": "2026-05-16T00:00:00Z",
+                "node_count": 1234u32,
+                "delta_size": 0u64,
+                "embedding_status": "none"
+            }],
+            "groups": []
+        }],
+        "groups": []
+    });
+    std::fs::write(
+        home_gnx.join("registry.json"),
+        serde_json::to_string(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let envelope = format!(r#"{{"cwd": "{}"}}"#, repo.display());
+    let out = run_session_start(&envelope, Some(&fake_home));
     let body = String::from_utf8_lossy(&out.stdout);
     assert!(
         body.contains("1234 symbols"),

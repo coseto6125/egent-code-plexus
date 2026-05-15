@@ -121,22 +121,24 @@ fn make_config_graph() -> ZeroCopyGraph {
     }
 }
 
-fn persist_graph(repo: &std::path::Path, graph: &ZeroCopyGraph) {
-    let gnx_dir = repo.join(".gitnexus-rs");
-    fs::create_dir_all(&gnx_dir).unwrap();
+/// Persist graph.bin into `<index_dir>/graph.bin`. The tempdir itself
+/// stands in for `~/.gnx/<repo>/<branch>/` — tantivy and meta.json sit
+/// alongside it in the same dir.
+fn persist_graph(index_dir: &std::path::Path, graph: &ZeroCopyGraph) {
+    fs::create_dir_all(index_dir).unwrap();
     let bytes = rkyv::to_bytes::<Error>(graph).expect("rkyv serialize");
-    fs::write(gnx_dir.join("graph.bin"), bytes.as_slice()).expect("write graph.bin");
+    fs::write(index_dir.join("graph.bin"), bytes.as_slice()).expect("write graph.bin");
 }
 
 #[test]
 fn compute_hits_uses_tantivy_not_substring_scoring() {
     let dir = tempdir().unwrap();
-    let repo = dir.path();
+    let index_dir = dir.path();
     let graph = make_config_graph();
-    persist_graph(repo, &graph);
-    TantivyEngine::build_index(repo, &graph).expect("tantivy build");
+    persist_graph(index_dir, &graph);
+    TantivyEngine::build_index(index_dir, &graph).expect("tantivy build");
 
-    let engine = Engine::load(repo.join(".gitnexus-rs").join("graph.bin")).expect("engine load");
+    let engine = Engine::load(index_dir.join("graph.bin")).expect("engine load");
 
     let args = SearchArgs {
         pattern: "config".to_string(),
@@ -182,11 +184,11 @@ fn compute_hits_uses_tantivy_not_substring_scoring() {
 #[test]
 fn compute_hits_populates_one_hop_callers_and_callees() {
     let dir = tempdir().unwrap();
-    let repo = dir.path();
+    let index_dir = dir.path();
     let graph = make_config_graph();
-    persist_graph(repo, &graph);
-    TantivyEngine::build_index(repo, &graph).expect("tantivy build");
-    let engine = Engine::load(repo.join(".gitnexus-rs").join("graph.bin")).expect("engine load");
+    persist_graph(index_dir, &graph);
+    TantivyEngine::build_index(index_dir, &graph).expect("tantivy build");
+    let engine = Engine::load(index_dir.join("graph.bin")).expect("engine load");
 
     let args = SearchArgs {
         pattern: "parseConfig".to_string(),

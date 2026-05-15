@@ -264,7 +264,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     // Step 3a: Try to load the incremental parse cache. Best-effort —
     // a missing/corrupt/version-mismatched cache silently falls back to
     // a full re-parse. The cache file lives next to graph.bin under
-    // `.gitnexus-rs/` so it inherits the same per-branch isolation.
+    // the resolved `<index_dir>` so it inherits the same per-branch isolation.
     let cache_path = layout.index_dir.join("incremental_cache.bin");
     let cache_disabled =
         args.no_cache || std::env::var("GNX_NO_CACHE").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -467,7 +467,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     // if the writer lock is held by a zombie or the prior commit is
     // corrupt, and self-heals on the next analyze run).
     let index_start = Instant::now();
-    if let Err(e) = crate::search::TantivyEngine::build_index(&repo_path, &global_graph) {
+    if let Err(e) = crate::search::TantivyEngine::build_index(&layout.index_dir, &global_graph) {
         if !args.quiet {
             eprintln!(
                 "warning: full-text index build failed ({e}); exact-name queries still work — rerun `gnx analyze` to retry"

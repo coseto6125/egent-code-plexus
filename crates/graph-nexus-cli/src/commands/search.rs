@@ -198,7 +198,7 @@ fn compute_single(
     repo_label: Option<String>,
 ) -> Result<Vec<Hit>, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
-    let repo_root = engine.repo_root();
+    let index_dir = engine.index_dir();
 
     let effective_mode = match mode {
         SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
@@ -210,17 +210,17 @@ fn compute_single(
 
     let mut hits = match effective_mode {
         SearchMode::Bm25 | SearchMode::Auto => {
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
         }
         SearchMode::Vector => {
             // TODO: wire to real cosine path (graph_nexus_analyzer::embeddings)
             eprintln!("→ vector mode not yet wired — falling back to bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
         }
         SearchMode::Hybrid => {
             // TODO: fold bm25 + cosine scores when embeddings are wired
             eprintln!("→ hybrid: embeddings not wired — using bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
         }
     };
 
@@ -237,18 +237,18 @@ fn compute_single(
 
 /// Primary BM25 path: queries the persisted Tantivy index when present,
 /// falling back to a per-name substring scan (exact 1.0 / prefix 0.7 /
-/// substring 0.4) when `<repo>/.gitnexus-rs/tantivy/` is missing — which
-/// happens on a freshly-cloned repo before `gnx admin index` has run.
+/// substring 0.4) when `<index_dir>/tantivy/` is missing — which happens
+/// on a freshly-cloned repo before `gnx admin index` has run.
 fn bm25_hits_from_graph(
     graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
-    repo_root: Option<&std::path::Path>,
+    index_dir: Option<&std::path::Path>,
 ) -> Vec<Hit> {
-    if let Some(root) = repo_root {
-        if root.join(".gitnexus-rs").join("tantivy").exists() {
-            return tantivy_hits(graph, pattern, kind_set, repo_label, root);
+    if let Some(dir) = index_dir {
+        if dir.join("tantivy").exists() {
+            return tantivy_hits(graph, pattern, kind_set, repo_label, dir);
         }
     }
     substring_hits(graph, pattern, kind_set, repo_label)
@@ -264,9 +264,9 @@ fn tantivy_hits(
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
-    repo_root: &std::path::Path,
+    index_dir: &std::path::Path,
 ) -> Vec<Hit> {
-    let scored = match crate::search::TantivyEngine::search(repo_root, pattern) {
+    let scored = match crate::search::TantivyEngine::search(index_dir, pattern) {
         Some(s) => s,
         // Index unavailable / corrupt / parse error — fall through so
         // hook context isn't silently empty.
@@ -524,7 +524,7 @@ fn scan_repo(
     let graph = engine
         .graph()
         .map_err(|e| format!("{repo_name}: access: {e}"))?;
-    let repo_root = engine.repo_root();
+    let index_dir = engine.index_dir();
 
     let effective_mode = match mode {
         SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
@@ -539,7 +539,7 @@ fn scan_repo(
         pattern,
         kind_set,
         &Some(repo_name.to_string()),
-        repo_root,
+        index_dir,
     ))
 }
 

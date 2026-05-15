@@ -2,7 +2,7 @@
 //! files, then unlink them so each event fires only once. Failure takes
 //! priority over success because it is more actionable.
 
-use super::common::{emit_additional_context, gitnexus_dir, HookInput};
+use super::common::{emit_additional_context, gnx_state_dir, lookup_index_dir, HookInput};
 use graph_nexus_core::GnxError;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,13 +14,14 @@ use std::path::Path;
 const LOG_TAIL_WINDOW: u64 = 4096;
 
 pub fn handle(input: &HookInput) -> Result<(), GnxError> {
-    let gnx_dir = match gitnexus_dir(&input.cwd) {
+    // Markers and logs are hook-local — read from `<cwd>/.gnx/`.
+    let state_dir = match gnx_state_dir(&input.cwd) {
         Some(d) => d,
         None => return Ok(()),
     };
-    let complete = gnx_dir.join(".rebuild-complete");
-    let failed = gnx_dir.join(".rebuild-failed");
-    let log = gnx_dir.join("last-rebuild.log");
+    let complete = state_dir.join(".rebuild-complete");
+    let failed = state_dir.join(".rebuild-failed");
+    let log = state_dir.join("last-rebuild.log");
 
     if failed.exists() {
         let tail = read_log_tail(&log, 3);
@@ -38,7 +39,13 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     }
 
     if complete.exists() {
-        let stats = read_stats(&gnx_dir);
+        // Stats come from the registered index dir (which holds
+        // `meta.json` after `gnx admin index` finished), not the local
+        // state dir. If the registry doesn't know about this cwd yet,
+        // we still acknowledge the rebuild but skip the count line.
+        let stats = lookup_index_dir(&input.cwd)
+            .map(|d| read_stats(&d))
+            .unwrap_or_else(|| "?".into());
         let _ = fs::remove_file(&complete);
         let msg = format!("gnx index rebuild complete ({stats}). gnx tools now return fresh data.");
         emit_additional_context("UserPromptSubmit", &msg);
@@ -71,8 +78,8 @@ fn read_log_tail(log: &Path, lines: usize) -> String {
     collected.join(" | ")
 }
 
-fn read_stats(gnx_dir: &Path) -> String {
-    let raw = match fs::read_to_string(gnx_dir.join("meta.json")) {
+fn read_stats(index_dir: &Path) -> String {
+    let raw = match fs::read_to_string(index_dir.join("meta.json")) {
         Ok(s) => s,
         Err(_) => return "?".into(),
     };

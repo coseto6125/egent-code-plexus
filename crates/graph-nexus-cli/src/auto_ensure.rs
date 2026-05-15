@@ -80,7 +80,7 @@ const SKIP_DIRS: &[&str] = &[
     ".git",
     "target",
     "node_modules",
-    ".gitnexus-rs",
+    ".gnx",
     "__pycache__",
     ".venv",
     "venv",

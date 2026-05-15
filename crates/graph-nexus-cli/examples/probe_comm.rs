@@ -3,7 +3,7 @@ use memmap2::Mmap;
 use std::fs::File;
 
 fn main() {
-    let path = "/tmp/gnx_ts_test/.gitnexus-rs/graph.bin";
+    let path = "/tmp/gnx_ts_test/.gnx/graph.bin";
     let f = File::open(path).unwrap();
     let mmap = unsafe { Mmap::map(&f).unwrap() };
     let g = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&mmap).unwrap();

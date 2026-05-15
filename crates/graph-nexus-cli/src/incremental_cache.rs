@@ -21,7 +21,7 @@
 //!
 //! ## File layout
 //!
-//! `<.gitnexus-rs>/incremental_cache.bin` — a single rkyv-serialized
+//! `<index_dir>/incremental_cache.bin` — a single rkyv-serialized
 //! [`CacheFile`] struct containing a `schema_version`, a snapshot of the
 //! `parser_fingerprint` at write time, and the per-file payload. rkyv
 //! structural validation on load doubles as a corruption check; if a

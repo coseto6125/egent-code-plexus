@@ -73,14 +73,16 @@ fn tokenize_identifier(name: &str) -> String {
 }
 
 impl TantivyEngine {
-    /// Build the Tantivy full-text index from the graph. Returns
-    /// `Err` instead of panicking so the caller can degrade gracefully
-    /// — `graph.bin` is the primary artifact; if BM25 fails to build
-    /// (writer lock held by zombie, prior commit corrupt, FS full)
-    /// exact-name resolution still works and the next `gnx analyze`
+    /// Build the tantivy index into `<index_dir>/tantivy/`. `index_dir`
+    /// is the resolved per-(repo, branch) directory under `~/.gnx/...`
+    /// (or a tempdir in tests); the `tantivy` subdir is created on demand.
+    /// Returns `Err` instead of panicking so the caller can degrade
+    /// gracefully — `graph.bin` is the primary artifact and exact-name
+    /// resolution still works when BM25 build fails (writer lock held
+    /// by zombie, prior commit corrupt, FS full). The next `gnx analyze`
     /// rebuilds from scratch via the `remove_dir_all` step below.
-    pub fn build_index(repo_path: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
-        let index_dir = repo_path.join(".gitnexus-rs").join("tantivy");
+    pub fn build_index(index_dir: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
+        let index_dir = index_dir.join("tantivy");
         if index_dir.exists() {
             // Best-effort wipe: clears any stale `.tantivy-writer.lock`
             // or half-committed segments left by a killed prior run.
@@ -133,9 +135,9 @@ impl TantivyEngine {
         Ok(())
     }
 
-    /// Query the on-disk tantivy index. The return type distinguishes
-    /// two failure modes that callers (especially `bm25_hits_from_graph`)
-    /// need to handle differently:
+    /// Query the tantivy index at `<index_dir>/tantivy/`. The return
+    /// type distinguishes two failure modes that callers (especially
+    /// `bm25_hits_from_graph`) need to handle differently:
     ///
     /// - `None` — index unavailable (missing dir, open failed, reader
     ///   build failed, query parse error). Caller should fall back to
@@ -145,8 +147,8 @@ impl TantivyEngine {
     ///   substring scan would produce noisy 0.4 hits that the trusted
     ///   index already ruled out.
     /// - `Some(vec)` — ranked uids + scores.
-    pub fn search(repo_path: &Path, query_str: &str) -> Option<Vec<(f32, String)>> {
-        let index_dir = repo_path.join(".gitnexus-rs").join("tantivy");
+    pub fn search(index_dir: &Path, query_str: &str) -> Option<Vec<(f32, String)>> {
+        let index_dir = index_dir.join("tantivy");
         if !index_dir.exists() {
             return None;
         }

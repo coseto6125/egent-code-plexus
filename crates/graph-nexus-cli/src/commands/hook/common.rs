@@ -1,12 +1,14 @@
 //! Shared utilities for Claude Code hook event handlers:
-//! stdin JSON envelope parsing, hookSpecificOutput emission, marker
-//! file paths under `.gitnexus-rs/`, and shell-quote stripping shared
-//! between PreToolUse (pattern extraction) and PostToolUse (git
-//! mutation detection).
+//! stdin JSON envelope parsing, hookSpecificOutput emission, registry-
+//! aware index dir resolution, hook-local `.gnx/` state dir creation,
+//! and shell-quote stripping shared between PreToolUse (pattern
+//! extraction) and PostToolUse (git mutation detection).
 
+use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile};
 use graph_nexus_core::GnxError;
 use serde::Deserialize;
 use serde_json::Value;
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -60,16 +62,103 @@ pub fn emit_additional_context(event: &str, context: &str) {
     println!("{}", payload);
 }
 
-/// Resolve `<cwd>/.gitnexus-rs/` if cwd is absolute and the dir exists.
-/// Hooks must not block tool execution on missing indexes — callers
-/// translate `None` into a silent no-op.
-pub fn gitnexus_dir(cwd: &str) -> Option<PathBuf> {
+/// Hook-local state dir at `<cwd>/.gnx/`. Used only for marker files
+/// (`.rebuild-complete`, `.rebuild-failed`), the rebuild log, and the
+/// `.analyze.lock` — things tied to *this* worktree, not the shared
+/// index in `~/.gnx/<repo>/<branch>/`.
+///
+/// Read-side: returns `Some` iff cwd is absolute AND `<cwd>/.gnx/`
+/// already exists. Hooks must not block tool execution on missing
+/// dirs — callers translate `None` into a silent no-op.
+pub fn gnx_state_dir(cwd: &str) -> Option<PathBuf> {
     let path = Path::new(cwd);
     if !path.is_absolute() {
         return None;
     }
-    let candidate = path.join(".gitnexus-rs");
+    let candidate = path.join(".gnx");
     candidate.exists().then_some(candidate)
+}
+
+/// Write-side variant: returns `Some(<cwd>/.gnx/)` and creates the
+/// directory if absent. Used by PostToolUse (which needs to drop a
+/// `.rebuild-complete` / `.rebuild-failed` marker even on the very
+/// first run, before any other tool has touched the dir).
+pub fn gnx_state_dir_ensure(cwd: &str) -> Option<PathBuf> {
+    let path = Path::new(cwd);
+    if !path.is_absolute() {
+        return None;
+    }
+    let candidate = path.join(".gnx");
+    fs::create_dir_all(&candidate).ok()?;
+    Some(candidate)
+}
+
+/// Registry-aware index dir resolution. Reads `~/.gnx/registry.json`,
+/// finds the `RepoEntry` whose `worktree_path` is the longest prefix
+/// of `cwd`, and returns the resolved `<index_dir>` for the current
+/// git branch at that cwd (falling back to the most recently indexed
+/// branch when the current one hasn't been indexed yet).
+///
+/// Returns `None` when:
+///   - cwd is not absolute (defensive: shell envs occasionally arrive empty)
+///   - the registry file doesn't exist or can't be parsed
+///   - no `RepoEntry` covers cwd (worktree never registered)
+///   - the matched repo has zero branches
+pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
+    let path = Path::new(cwd);
+    if !path.is_absolute() {
+        return None;
+    }
+    let home_gnx = resolve_home_gnx();
+    let registry_path = home_gnx.join("registry.json");
+    let registry = RegistryFile::read_or_empty(&registry_path).ok()?;
+    let branch_hint = current_git_branch(path);
+    let (_repo, branch) = registry.find_by_cwd(path, branch_hint.as_deref())?;
+    Some(PathBuf::from(&branch.index_dir))
+}
+
+/// Resolve the current branch by reading `.git/HEAD` directly instead
+/// of spawning `git rev-parse`. Hooks fire on every Claude Code event;
+/// a fork+exec per event adds a few ms on local FS and visibly stalls
+/// on NFS / WSL2 paths. Reading the HEAD ref file is a single open+read
+/// on any FS, with no subprocess overhead.
+///
+/// Handles three layouts:
+///   - regular repo: `<cwd>/.git` is a directory; read `<cwd>/.git/HEAD`
+///   - worktree: `<cwd>/.git` is a file containing `gitdir: <abs path>`
+///   - cwd is a subdir: walk parents until `.git` is found
+///
+/// Returns `None` when not in a git work tree, on detached HEAD, or on
+/// any read error — callers fall back to "most recent indexed".
+fn current_git_branch(cwd: &Path) -> Option<String> {
+    let toplevel = find_git_toplevel(cwd)?;
+    let head_path = resolve_head_path(&toplevel)?;
+    let content = fs::read_to_string(head_path).ok()?;
+    let line = content.lines().next()?;
+    line.strip_prefix("ref: refs/heads/").map(str::to_string)
+}
+
+fn find_git_toplevel(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        current = current.parent()?.to_path_buf();
+    }
+}
+
+fn resolve_head_path(toplevel: &Path) -> Option<PathBuf> {
+    let dotgit = toplevel.join(".git");
+    let meta = fs::metadata(&dotgit).ok()?;
+    if meta.is_dir() {
+        return Some(dotgit.join("HEAD"));
+    }
+    // `.git` is a file (worktree layout):
+    //   `gitdir: /path/to/main-repo/.git/worktrees/<name>`
+    let content = fs::read_to_string(&dotgit).ok()?;
+    let gitdir = content.lines().next()?.strip_prefix("gitdir: ")?;
+    Some(PathBuf::from(gitdir).join("HEAD"))
 }
 
 /// Remove the contents of single- and double-quoted segments from a

@@ -73,13 +73,13 @@ fn assert_graph_round_trips(g: &ZeroCopyGraph) {
 #[test]
 fn build_index_happy_path_returns_ok_and_is_queryable() {
     let dir = tempdir().unwrap();
-    let repo = dir.path();
+    let index_dir = dir.path();
     let graph = make_graph_with_names(&["resolve_symbol", "lookup_global", "register_node"]);
     assert_graph_round_trips(&graph);
 
-    TantivyEngine::build_index(repo, &graph).expect("happy path must succeed");
+    TantivyEngine::build_index(index_dir, &graph).expect("happy path must succeed");
 
-    let hits = TantivyEngine::search(repo, "resolve_symbol").expect("index must be queryable");
+    let hits = TantivyEngine::search(index_dir, "resolve_symbol").expect("index must be queryable");
     assert!(
         hits.iter().any(|(_, uid)| uid.contains("resolve_symbol")),
         "expected resolve_symbol in BM25 hits, got: {hits:?}"
@@ -93,25 +93,26 @@ fn build_index_wipes_stale_directory_left_by_prior_abort() {
     // to reuse. Without the wipe step, every subsequent analyze would
     // panic at the same place.
     let dir = tempdir().unwrap();
-    let repo = dir.path();
-    let index_dir = repo.join(".gitnexus-rs").join("tantivy");
-    fs::create_dir_all(&index_dir).unwrap();
-    fs::write(index_dir.join("meta.json"), "{ corrupt").unwrap();
-    fs::write(index_dir.join(".tantivy-writer.lock"), "zombie").unwrap();
-    fs::write(index_dir.join("segment.idx"), &[0u8; 256][..]).unwrap();
+    let index_dir_root = dir.path();
+    let tantivy_dir = index_dir_root.join("tantivy");
+    fs::create_dir_all(&tantivy_dir).unwrap();
+    fs::write(tantivy_dir.join("meta.json"), "{ corrupt").unwrap();
+    fs::write(tantivy_dir.join(".tantivy-writer.lock"), "zombie").unwrap();
+    fs::write(tantivy_dir.join("segment.idx"), &[0u8; 256][..]).unwrap();
 
     let graph = make_graph_with_names(&["fresh_symbol"]);
-    TantivyEngine::build_index(repo, &graph).expect("stale dir must self-heal");
+    TantivyEngine::build_index(index_dir_root, &graph).expect("stale dir must self-heal");
 
-    let hits = TantivyEngine::search(repo, "fresh_symbol").expect("index must be queryable");
+    let hits =
+        TantivyEngine::search(index_dir_root, "fresh_symbol").expect("index must be queryable");
     assert!(
         hits.iter().any(|(_, uid)| uid.contains("fresh_symbol")),
         "rebuilt index must be queryable: {hits:?}"
     );
     // The garbage files must have been removed by the wipe step.
     assert!(
-        !index_dir.join(".tantivy-writer.lock").exists()
-            || index_dir
+        !tantivy_dir.join(".tantivy-writer.lock").exists()
+            || tantivy_dir
                 .join(".tantivy-writer.lock")
                 .metadata()
                 .unwrap()
@@ -127,8 +128,8 @@ fn build_index_succeeds_with_empty_graph() {
     // unwrap on `commit()` was particularly fragile here in earlier
     // Tantivy versions when no documents were added.
     let dir = tempdir().unwrap();
-    let repo = dir.path();
+    let index_dir = dir.path();
     let graph = make_graph_with_names(&[]);
-    TantivyEngine::build_index(repo, &graph).expect("empty graph must build");
-    assert!(repo.join(".gitnexus-rs").join("tantivy").exists());
+    TantivyEngine::build_index(index_dir, &graph).expect("empty graph must build");
+    assert!(index_dir.join("tantivy").exists());
 }

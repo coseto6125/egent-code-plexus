@@ -3,7 +3,7 @@
 //! hits into the conversation as `additionalContext`. Capped at 5 hits
 //! or ~2 KB serialized to keep the token cost bounded.
 
-use super::common::{emit_additional_context, gitnexus_dir, strip_shell_quotes, HookInput};
+use super::common::{emit_additional_context, lookup_index_dir, strip_shell_quotes, HookInput};
 use crate::commands::search::{compute_hits, Hit, SearchArgs, SearchMode};
 use crate::engine::Engine;
 use graph_nexus_core::GnxError;
@@ -25,11 +25,11 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
         Some(p) if p.len() >= 3 => p,
         _ => return Ok(()),
     };
-    let gnx_dir = match gitnexus_dir(&input.cwd) {
+    let index_dir = match lookup_index_dir(&input.cwd) {
         Some(d) => d,
         None => return Ok(()),
     };
-    let graph_path = gnx_dir.join("graph.bin");
+    let graph_path = index_dir.join("graph.bin");
     let engine = match Engine::load(&graph_path) {
         Ok(e) => e,
         Err(_) => return Ok(()),

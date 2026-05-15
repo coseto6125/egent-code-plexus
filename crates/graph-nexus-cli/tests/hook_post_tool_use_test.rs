@@ -57,7 +57,7 @@ fn git_commit_in_dir_without_index_no_op() {
         tmp.path().display()
     );
     let out = run_with(&envelope);
-    assert!(out.stdout.is_empty(), "no .gitnexus-rs/ → no-op");
+    assert!(out.stdout.is_empty(), "no registry entry → no-op");
 }
 
 #[test]
