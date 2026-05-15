@@ -18,7 +18,6 @@
 //! 6. **Pre-flight collision detection**: warn if new name already exists in
 //!    the graph before the rename runs (especially in dry-run).
 
-use crate::engine::Engine;
 use clap::Args;
 use graph_nexus_analyzer::identifier_finder::find_identifier_occurrences;
 use graph_nexus_core::analyzer::types::IdentifierRange;
@@ -30,7 +29,9 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-#[derive(Args, Debug, Clone)]
+/// AST-powered multi-language rename: locates all identifier occurrences
+/// via tree-sitter and rewrites them atomically, with optional dry-run preview.
+#[derive(Args, Debug, Clone, Serialize)]
 pub struct RenameArgs {
     /// The symbol name to rename (e.g. `old_name`).
     #[arg(long, alias = "symbol_name")]
@@ -201,7 +202,7 @@ fn apply_markdown_rename(
 // Main entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let repo_root = args
         .repo
@@ -217,6 +218,9 @@ pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
             crate::hint::collision_warning(&args.new_name, &collisions)
         );
     }
+
+    // Output buffer for dry-run diff preview + execute-mode rename log.
+    let mut lines: Vec<String> = Vec::new();
 
     // Stage 1: locate target node + collect affected files.
     let target_indices: Vec<usize> = graph
@@ -292,7 +296,14 @@ pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
         println!();
         for (path, ranges) in &hits {
             let bytes = std::fs::read(path).map_err(GnxError::Io)?;
-            print_diff(&bytes, ranges, &args.symbol, &args.new_name, path);
+            collect_diff(
+                &bytes,
+                ranges,
+                &args.symbol,
+                &args.new_name,
+                path,
+                &mut lines,
+            );
         }
 
         // Markdown pass preview.
@@ -318,6 +329,7 @@ pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
 
     // --- Stage 3b: execute — atomic per-file replace by descending offset. ---
     for (path, ranges) in hits {
+        lines.push(format!("renamed: {}", path.display()));
         apply_rename(&path, &ranges, args.new_name.as_bytes()).map_err(GnxError::Io)?;
     }
 
@@ -377,11 +389,18 @@ fn apply_rename(path: &Path, ranges: &[IdentifierRange], new_bytes: &[u8]) -> st
     atomic_write_bytes(path, &bytes)
 }
 
-/// Print a minimal unified-diff-ish preview: for each hit, one `-`
-/// line (current) and one `+` line (after substitution). Multiple hits
-/// on the same line collapse into a single replacement line.
-fn print_diff(bytes: &[u8], ranges: &[IdentifierRange], old: &str, new: &str, path: &Path) {
-    println!("{}", path.display());
+/// Collect a minimal unified-diff-ish preview into `out`: for each hit,
+/// one `-` line (current) and one `+` line (after substitution). Multiple
+/// hits on the same source line collapse into a single replacement entry.
+fn collect_diff(
+    bytes: &[u8],
+    ranges: &[IdentifierRange],
+    old: &str,
+    new: &str,
+    path: &Path,
+    out: &mut Vec<String>,
+) {
+    out.push(path.display().to_string());
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().collect();
     let mut shown: HashSet<usize> = HashSet::new();
@@ -390,9 +409,9 @@ fn print_diff(bytes: &[u8], ranges: &[IdentifierRange], old: &str, new: &str, pa
             continue;
         }
         if let Some(line) = lines.get(r.row) {
-            println!("- {line}");
-            println!("+ {}", line.replace(old, new));
+            out.push(format!("- {line}"));
+            out.push(format!("+ {}", line.replace(old, new)));
         }
     }
-    println!();
+    out.push(String::new());
 }

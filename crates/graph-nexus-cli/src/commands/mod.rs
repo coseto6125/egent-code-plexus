@@ -7,6 +7,7 @@ pub mod hook_handle;
 pub mod hook_watcher;
 pub mod impact;
 pub mod inspect;
+pub mod mcp;
 pub mod rename;
 pub mod routes;
 pub mod scan;

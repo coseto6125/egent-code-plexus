@@ -73,6 +73,9 @@ enum Commands {
     /// (will fold into `contracts` in a future task)
     #[command(hide = true)]
     ShapeCheck(commands::shape_check::ShapeCheckArgs),
+    /// Internal: MCP transport (serve | tools) — for external agents talking to gnx.
+    #[command(hide = true)]
+    Mcp(commands::mcp::McpArgs),
 }
 
 fn main() {
@@ -109,6 +112,7 @@ fn main() {
             run_no_graph!(commands::coverage::run(args.clone(), &cli.graph))
         }
         Commands::Contracts(args) => run_no_graph!(commands::contracts::run(args.clone())),
+        Commands::Mcp(args) => run_no_graph!(commands::mcp::run(args.clone())),
         _ => {} // fall through to graph-loading path
     }
 
@@ -127,7 +131,8 @@ fn main() {
         | Commands::Admin { .. }
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
-        | Commands::VerifyResolver(_) => None,
+        | Commands::VerifyResolver(_)
+        | Commands::Mcp(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -157,7 +162,8 @@ fn main() {
         | Commands::Admin { .. }
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
-        | Commands::VerifyResolver(_) => {
+        | Commands::VerifyResolver(_)
+        | Commands::Mcp(_) => {
             unreachable!("handled before graph load")
         }
     };
