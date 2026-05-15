@@ -1,20 +1,24 @@
 use crate::commands::format::{kind_to_str, rel_to_str};
-use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
 use graph_nexus_core::algorithms::process_trace::is_test_path;
 use graph_nexus_core::config;
 use graph_nexus_core::{GnxError, HIGH_TRUST_CONFIDENCE};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[derive(
+    ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum Direction {
     Upstream,
     Downstream,
 }
 
-#[derive(Args, Debug)]
+/// Traverse the call-graph from a target symbol and return every upstream
+/// caller or downstream callee up to a configurable depth.
+#[derive(Args, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ImpactArgs {
     /// Target symbol UID
     #[arg(long)]
@@ -28,6 +32,7 @@ pub struct ImpactArgs {
     #[arg(long, default_value = "5")]
     pub depth: usize,
 
+    /// Repository root path (defaults to current directory).
     #[arg(long)]
     pub repo: Option<String>,
 
@@ -82,9 +87,12 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     })
 }
 
-pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run_inner(
+    args: ImpactArgs,
+    engine: &dyn graph_nexus_mcp::registry::EngineRef,
+) -> Result<serde_json::Value, GnxError> {
+    let engine = crate::engine::cast_engine(engine)?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
 
     // Find the target node index by UID
     let mut start_idx = None;
@@ -101,7 +109,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
             let result = serde_json::json!({
                 "error": format!("Symbol UID '{}' not found", args.target)
             });
-            return emit(&result, format);
+            return Ok(result);
         }
     };
 
@@ -285,5 +293,32 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
         });
     }
 
-    emit(&result_obj, format)
+    Ok(result_obj)
 }
+
+pub fn run(
+    args: ImpactArgs,
+    engine: &crate::engine::Engine,
+) -> Result<(), graph_nexus_core::GnxError> {
+    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let value = run_inner(args, engine)?;
+    crate::output::emit(&value, format)
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        fn _accepts(
+            _f: fn(
+                ImpactArgs,
+                &dyn graph_nexus_mcp::registry::EngineRef,
+            ) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
+        ) {
+        }
+        _accepts(run_inner);
+    }
+}
+
+graph_nexus_mcp::gnx_register_mcp_tool!(ImpactArgs, run_inner);

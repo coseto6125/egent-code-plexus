@@ -21,10 +21,14 @@ use clap::Args;
 use graph_nexus_core::registry::{IndexLayout, Registry};
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-#[derive(Args, Debug, Clone)]
+/// Search for symbols across multiple registered repos concurrently and
+/// return a merged top-K ranked result set.
+#[derive(Args, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MultiQueryArgs {
     /// Search term matched against symbol names (case-insensitive substring).
     #[arg(long)]
@@ -93,8 +97,22 @@ impl OrderedHit {
     }
 }
 
-pub fn run(args: MultiQueryArgs) -> Result<(), GnxError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+/// Zero-sized dummy engine for multi_query (ignores the engine param).
+struct NoopEngine;
+impl graph_nexus_mcp::registry::EngineRef for NoopEngine {
+    fn graph_path(&self) -> &std::path::Path {
+        std::path::Path::new("")
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+}
+
+pub fn run_inner(
+    args: MultiQueryArgs,
+    _engine: &dyn graph_nexus_mcp::registry::EngineRef,
+) -> Result<serde_json::Value, GnxError> {
     let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
     let registry = Registry::open(&home_gnx)
         .map_err(|e| GnxError::InvalidArgument(format!("open registry: {e}")))?;
@@ -130,7 +148,7 @@ pub fn run(args: MultiQueryArgs) -> Result<(), GnxError> {
             "summary": "0 repos targeted",
             "results": serde_json::Value::Array(Vec::new()),
         });
-        return emit(&result, format);
+        return Ok(result);
     }
 
     // ── Per-repo concurrent search via rayon. Each worker loads the
@@ -198,29 +216,57 @@ pub fn run(args: MultiQueryArgs) -> Result<(), GnxError> {
         ordered.len()
     );
 
-    match format {
+    Ok(serde_json::json!({
+        "status": "success",
+        "summary": summary,
+        "results": results,
+    }))
+}
+
+pub fn run(args: MultiQueryArgs) -> Result<(), graph_nexus_core::GnxError> {
+    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let value = run_inner(args, &NoopEngine)?;
+    let emit_value = match format {
         OutputFormat::Text => {
-            // Text output — one repo-prefixed line per hit; LLM-agent friendly.
-            let mut lines = vec![serde_json::Value::String(summary)];
-            for h in &ordered {
-                let score = f32::from_bits(h.score_bits);
-                lines.push(serde_json::Value::String(format!(
-                    "[{}] @{} {}:{} ({}) [score:{:.4}]",
-                    h.kind, h.repo, h.file, h.line, h.name, score
-                )));
+            let summary = value["summary"].as_str().unwrap_or("").to_string();
+            let mut lines: Vec<serde_json::Value> = vec![serde_json::Value::String(summary)];
+            if let Some(results) = value["results"].as_array() {
+                for r in results {
+                    let kind = r["kind"].as_str().unwrap_or("");
+                    let repo = r["repo"].as_str().unwrap_or("");
+                    let file = r["file"].as_str().unwrap_or("");
+                    let line = r["line"].as_u64().unwrap_or(0);
+                    let name = r["name"].as_str().unwrap_or("");
+                    let score = r["score"].as_f64().unwrap_or(0.0);
+                    lines.push(serde_json::Value::String(format!(
+                        "[{kind}] @{repo} {file}:{line} ({name}) [score:{score:.4}]"
+                    )));
+                }
             }
-            emit(&serde_json::json!({ "results": lines }), format)
+            serde_json::json!({ "results": lines })
         }
-        OutputFormat::Json | OutputFormat::Toon => emit(
-            &serde_json::json!({
-                "status": "success",
-                "summary": summary,
-                "results": results,
-            }),
-            format,
-        ),
+        OutputFormat::Json | OutputFormat::Toon => value,
+    };
+    emit(&emit_value, format)
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        fn _accepts(
+            _f: fn(
+                MultiQueryArgs,
+                &dyn graph_nexus_mcp::registry::EngineRef,
+            ) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
+        ) {
+        }
+        _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(MultiQueryArgs, run_inner);
 
 /// Resolve a registered repo's graph path and scan it for nodes whose
 /// name (case-insensitively) contains `query_lower`. Score = 1.0 for

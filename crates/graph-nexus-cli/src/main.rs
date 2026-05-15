@@ -100,6 +100,8 @@ enum Commands {
     /// Compare HTTP consumer accessed keys against Route response shape
     #[command(alias = "shape_check")]
     ShapeCheck(commands::shape_check::ShapeCheckArgs),
+    /// MCP server / tool inspection
+    Mcp(commands::mcp::McpArgs),
 }
 
 fn main() {
@@ -253,6 +255,16 @@ fn main() {
         return;
     }
 
+    // Mcp subcommands (serve / tools) own their own transport setup;
+    // no Engine pre-load needed.
+    if let Commands::Mcp(args) = &cli.command {
+        if let Err(e) = commands::mcp::run(args.clone()) {
+            eprintln!("Command failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Determine the repo root to use for registry resolution: prefer --repo arg, fall back to cwd.
     let repo_opt = match &cli.command {
         Commands::Context(args) => args.repo.as_deref(),
@@ -283,7 +295,8 @@ fn main() {
         | Commands::Doctor(_)
         | Commands::Index(_)
         | Commands::Remove(_)
-        | Commands::MultiQuery(_) => None,
+        | Commands::MultiQuery(_)
+        | Commands::Mcp(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -329,7 +342,8 @@ fn main() {
         | Commands::Config(_)
         | Commands::Index(_)
         | Commands::Remove(_)
-        | Commands::MultiQuery(_) => Ok(()), // Handled above
+        | Commands::MultiQuery(_)
+        | Commands::Mcp(_) => Ok(()), // Handled above
     };
 
     if let Err(e) = result {
