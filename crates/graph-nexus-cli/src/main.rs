@@ -12,6 +12,7 @@ mod hint;
 mod incremental_cache;
 mod output;
 pub mod reanalyze;
+mod repo_selector;
 pub mod search;
 
 use engine::Engine;
@@ -44,7 +45,7 @@ enum Commands {
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),
     /// Registry + repo health (indexed repos, freshness, frameworks, externals, blind spots)
-    Coverage(commands::doctor::DoctorArgs),
+    Coverage(commands::coverage::CoverageArgs),
     /// List HTTP routes; with path, show handler + caller chain
     Routes(commands::route_map::RouteMapArgs),
     /// Verify a file's symbol references exist in the graph
@@ -109,7 +110,7 @@ fn main() {
     }
     // Coverage doesn't need to load the graph (it walks the registry).
     if let Commands::Coverage(args) = &cli.command {
-        if let Err(e) = commands::doctor::run(args.clone(), &cli.graph) {
+        if let Err(e) = commands::coverage::run(args.clone(), &cli.graph) {
             eprintln!("Command failed: {e}");
             std::process::exit(1);
         }

@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod analyze;
+pub mod coverage;
 pub mod analyze_here;
 pub mod api_impact;
 pub mod clean;
@@ -7,7 +8,6 @@ pub mod cluster;
 pub mod config;
 pub mod inspect;
 pub mod cypher;
-pub mod detect_changes;
 pub mod doctor;
 pub mod format;
 pub mod hook_handle;
