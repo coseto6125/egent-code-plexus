@@ -241,6 +241,7 @@ impl LanguageProvider for DockerComposeProvider {
                                     alias: Some(svc_name.clone()),
                                     imported_name: img.to_string(),
                                     source: img.to_string(),
+                                    binding_kind: None,
                                 });
                             }
                         }
@@ -250,6 +251,7 @@ impl LanguageProvider for DockerComposeProvider {
                                     alias: Some(svc_name.clone()),
                                     imported_name: build_path.to_string(),
                                     source: build_path.to_string(),
+                                    binding_kind: None,
                                 });
                             }
                         }

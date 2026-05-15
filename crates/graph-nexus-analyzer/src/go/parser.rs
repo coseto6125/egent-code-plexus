@@ -415,6 +415,7 @@ impl LanguageProvider for GoProvider {
                             source: source_path,
                             alias,
                             imported_name,
+                            binding_kind: None,
                         });
                     }
                 }

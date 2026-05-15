@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 /// silently misinterprets fields whose offsets shifted. A
 /// schema-version mismatch is the only signal that catches "fields
 /// added since last build" before it corrupts query results.
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// Compile-time fingerprint over every parser.rs / queries.scm / shared
 /// helper file in `graph-nexus-analyzer`. Re-exported from the analyzer

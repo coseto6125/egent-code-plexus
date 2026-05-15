@@ -226,6 +226,7 @@ impl LanguageProvider for CSharpProvider {
                         alias: import_alias,
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
+                        binding_kind: None,
                     });
                 }
             }

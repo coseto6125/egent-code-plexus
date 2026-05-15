@@ -208,6 +208,7 @@ impl LanguageProvider for LuaProvider {
                         alias: Some(alias_str.to_string()),
                         imported_name: "*".to_string(),
                         source: src_str.to_string(),
+                        binding_kind: None,
                     });
                     if let Some(span) = import_inner_span {
                         require_inner_spans.insert(span);
@@ -232,6 +233,7 @@ impl LanguageProvider for LuaProvider {
                             alias: None,
                             imported_name: "*".to_string(),
                             source: src_str.to_string(),
+                            binding_kind: None,
                         });
                     }
                 }

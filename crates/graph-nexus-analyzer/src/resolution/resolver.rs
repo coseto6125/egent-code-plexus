@@ -1076,6 +1076,7 @@ mod tests {
             source: "./x".to_string(),
             imported_name: "MyClass".to_string(),
             alias: None,
+            binding_kind: None,
         }];
         let out = r.resolve_symbol(
             &PathBuf::from("src/caller.ts"),

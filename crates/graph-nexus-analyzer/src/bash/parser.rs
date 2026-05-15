@@ -111,6 +111,7 @@ impl LanguageProvider for BashProvider {
                         alias: None,
                         imported_name: "*".to_string(),
                         source: cleaned.to_string(),
+                        binding_kind: None,
                     });
                 }
             }

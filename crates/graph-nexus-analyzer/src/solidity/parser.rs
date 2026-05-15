@@ -181,6 +181,7 @@ impl LanguageProvider for SolidityProvider {
                         alias: None,
                         imported_name: "*".to_string(),
                         source: trimmed.to_string(),
+                        binding_kind: None,
                     });
                 }
             }

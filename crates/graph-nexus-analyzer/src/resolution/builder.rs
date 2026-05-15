@@ -1296,6 +1296,7 @@ mod tests {
                 source: "./b".into(),
                 imported_name: "thing".into(),
                 alias: None,
+                binding_kind: None,
             }],
             routes: vec![],
             framework_refs: vec![],

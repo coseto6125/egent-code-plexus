@@ -107,6 +107,7 @@ impl LanguageProvider for DockerfileProvider {
                         alias: None,
                         imported_name: full_image.clone(),
                         source: full_image.clone(),
+                        binding_kind: None,
                     });
 
                     // Also emit the image name as a queryable Const node so users can

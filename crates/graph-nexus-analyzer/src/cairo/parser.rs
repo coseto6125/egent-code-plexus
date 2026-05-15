@@ -131,6 +131,7 @@ impl LanguageProvider for CairoProvider {
                         alias: None,
                         imported_name: "*".to_string(),
                         source: src_str.to_string(),
+                        binding_kind: None,
                     });
                 }
             }

@@ -231,6 +231,7 @@ impl LanguageProvider for KotlinProvider {
                         alias,
                         imported_name: src_str.to_string(),
                         source: src_str.to_string(),
+                        binding_kind: None,
                     });
                 }
             }

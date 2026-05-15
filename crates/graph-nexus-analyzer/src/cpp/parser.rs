@@ -316,6 +316,7 @@ impl LanguageProvider for CppProvider {
                             alias,
                             imported_name,
                             source: src_s,
+                            binding_kind: None,
                         });
                     }
                 }

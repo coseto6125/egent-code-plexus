@@ -126,6 +126,7 @@ impl LanguageProvider for MoveProvider {
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
                         alias: None,
+                        binding_kind: None,
                     });
                 }
             }

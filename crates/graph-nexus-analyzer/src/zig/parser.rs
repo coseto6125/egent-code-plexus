@@ -191,6 +191,7 @@ impl LanguageProvider for ZigProvider {
                 alias: None,
                 imported_name: "*".to_string(),
                 source: i.source,
+                binding_kind: None,
             })
             .collect();
 

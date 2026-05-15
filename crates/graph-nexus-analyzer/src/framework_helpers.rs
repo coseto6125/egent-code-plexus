@@ -235,11 +235,13 @@ mod tests {
                 source: "django.urls".into(),
                 imported_name: "path".into(),
                 alias: None,
+                binding_kind: None,
             },
             RawImport {
                 source: "os".into(),
                 imported_name: "path".into(),
                 alias: None,
+                binding_kind: None,
             },
         ];
         assert!(has_import_from(&imps, &["django.urls"]));
@@ -254,6 +256,7 @@ mod tests {
             source: "@nestjs/common".into(),
             imported_name: "Controller".into(),
             alias: None,
+            binding_kind: None,
         }];
         assert!(has_import_from(&imps, &["@nestjs/common"]));
         assert!(has_import_from(&imps, &["@nestjs"])); // scoped prefix
@@ -266,6 +269,7 @@ mod tests {
             source: "".into(),
             imported_name: "fastapi".into(),
             alias: None,
+            binding_kind: None,
         }];
         assert!(has_import_from(&imps, &["fastapi"]));
     }

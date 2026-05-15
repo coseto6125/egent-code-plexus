@@ -234,6 +234,7 @@ impl LanguageProvider for JavaScriptProvider {
                         alias,
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
+                        binding_kind: None,
                     });
                 }
             }
@@ -250,6 +251,7 @@ impl LanguageProvider for JavaScriptProvider {
                             alias: Some(alias_str.to_string()),
                             imported_name: "*".to_string(),
                             source: src_str.to_string(),
+                            binding_kind: None,
                         });
                     }
                 }

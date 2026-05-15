@@ -224,6 +224,7 @@ impl LanguageProvider for PythonProvider {
                             alias,
                             imported_name: name_str.to_string(),
                             source: src_str,
+                            binding_kind: None,
                         });
                     }
                 }

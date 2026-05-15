@@ -299,6 +299,7 @@ impl LanguageProvider for DartProvider {
                         alias: alias_str,
                         imported_name: clean_src.clone(),
                         source: clean_src,
+                        binding_kind: None,
                     });
                 }
             }

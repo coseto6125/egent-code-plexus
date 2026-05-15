@@ -26,12 +26,28 @@ pub struct RawNode {
     pub calls: Vec<String>,
 }
 
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum BindingKind {
+    /// Symbol → symbol (typedef, identifier-bodied `#define`, extern decls).
+    Alias,
+    /// Symbol → literal value (`#define MAX 4096`, `#define VER "v1"`).
+    Constant,
+    /// Symbol → expression (function-like `#define ADD(a,b)`, parenthesized expressions).
+    Macro,
+    /// Empty body, non-guard (`#define DEBUG`, `#define ENABLE_FOO`).
+    Flag,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawImport {
     pub source: String,
     pub imported_name: String,
     pub alias: Option<String>,
+    /// `None` for ordinary import statements; `Some(_)` for C named bindings
+    /// (`typedef`, `#define`, `extern`) classified by body shape.
+    pub binding_kind: Option<BindingKind>,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]

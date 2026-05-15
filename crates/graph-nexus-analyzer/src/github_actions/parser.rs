@@ -278,6 +278,7 @@ impl LanguageProvider for GitHubActionsProvider {
                                 source: uses_text.to_string(),
                                 imported_name: action_name(uses_text),
                                 alias: None,
+                                binding_kind: None,
                             });
                         }
                     }
@@ -386,6 +387,7 @@ fn walk_steps(
                 source: uses.to_string(),
                 imported_name: action_name(uses),
                 alias: None,
+                binding_kind: None,
             });
         }
 

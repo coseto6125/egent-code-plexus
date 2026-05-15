@@ -381,6 +381,7 @@ impl LanguageProvider for PhpProvider {
                         alias,
                         imported_name,
                         source: full_src,
+                        binding_kind: None,
                     });
                 }
             }

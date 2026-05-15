@@ -123,6 +123,7 @@ impl LanguageProvider for NimProvider {
                                     alias: None,
                                     imported_name: module.to_string(),
                                     source: module.to_string(),
+                                    binding_kind: None,
                                 });
                             }
                         }
@@ -139,6 +140,7 @@ impl LanguageProvider for NimProvider {
                         alias: None,
                         imported_name: "*".to_string(),
                         source: src_str.to_string(),
+                        binding_kind: None,
                     });
                 }
             }

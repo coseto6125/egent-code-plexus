@@ -262,6 +262,7 @@ impl LanguageProvider for JavaProvider {
                             alias,
                             imported_name: name_str.to_string(),
                             source: src_str.to_string(),
+                            binding_kind: None,
                         });
                     }
                 }
@@ -296,6 +297,7 @@ impl LanguageProvider for JavaProvider {
                             alias,
                             imported_name: "*".to_string(),
                             source: src_str.to_string(),
+                            binding_kind: None,
                         });
                     }
                 }
