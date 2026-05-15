@@ -1,4 +1,4 @@
-//! `gnx init`: install reference-transaction hook in cwd's git common dir.
+//! `gnx admin install-hook`: install reference-transaction hook in cwd's git common dir.
 
 use crate::git::safe_exec;
 use clap::Args;
@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
-pub struct InitArgs {
+pub struct InstallHookArgs {
     /// Force overwrite if a non-gnx hook already exists.
     #[arg(long, default_value_t = false)]
     pub force: bool,
@@ -16,7 +16,7 @@ pub struct InitArgs {
     pub no_chain: bool,
 }
 
-pub fn run(args: InitArgs) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(args: InstallHookArgs) -> Result<(), graph_nexus_core::GnxError> {
     let out = safe_exec::git()
         .args(["rev-parse", "--git-common-dir"])
         .output()
