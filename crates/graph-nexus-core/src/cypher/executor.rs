@@ -168,25 +168,84 @@ fn exec_pattern(
         let mut next_frontier: Vec<(Binding, u32)> = Vec::new();
 
         for (b, cur_idx) in &frontier {
-            for (tgt_idx, edge_idx) in walk_rel(*cur_idx, rel, graph) {
-                let tgt_node = &graph.nodes[tgt_idx as usize];
-                if !node_matches(tgt_node, next_np, graph) {
-                    continue;
+            match rel.range {
+                // Variable-length BFS (*min..max)
+                Some((min, max)) => {
+                    let reached = bfs_var_len(*cur_idx, rel, graph, min, max);
+                    for (tgt_idx, edge_idx_opt) in reached {
+                        let tgt_node = &graph.nodes[tgt_idx as usize];
+                        if !node_matches(tgt_node, next_np, graph) {
+                            continue;
+                        }
+                        let mut nb = b.clone();
+                        if let Some(var) = &next_np.var {
+                            nb.node_vars.insert(var.clone(), tgt_idx);
+                        }
+                        if let Some(var) = &rel.var {
+                            if let Some(ei) = edge_idx_opt {
+                                nb.edge_vars.insert(var.clone(), ei);
+                            }
+                        }
+                        next_frontier.push((nb, tgt_idx));
+                    }
                 }
-                let mut nb = b.clone();
-                if let Some(var) = &next_np.var {
-                    nb.node_vars.insert(var.clone(), tgt_idx);
+                // Single-hop
+                None => {
+                    for (tgt_idx, edge_idx) in walk_rel(*cur_idx, rel, graph) {
+                        let tgt_node = &graph.nodes[tgt_idx as usize];
+                        if !node_matches(tgt_node, next_np, graph) {
+                            continue;
+                        }
+                        let mut nb = b.clone();
+                        if let Some(var) = &next_np.var {
+                            nb.node_vars.insert(var.clone(), tgt_idx);
+                        }
+                        if let Some(var) = &rel.var {
+                            nb.edge_vars.insert(var.clone(), edge_idx);
+                        }
+                        next_frontier.push((nb, tgt_idx));
+                    }
                 }
-                if let Some(var) = &rel.var {
-                    nb.edge_vars.insert(var.clone(), edge_idx);
-                }
-                next_frontier.push((nb, tgt_idx));
             }
         }
         frontier = next_frontier;
     }
 
     Ok(frontier.into_iter().map(|(b, _)| b).collect())
+}
+
+/// BFS for variable-length relationships `*min..max`.
+/// Returns `(target_node_idx, last_edge_idx_option)` pairs reachable within depth range.
+fn bfs_var_len(
+    start: u32,
+    rel: &RelPat,
+    graph: &ArchivedZeroCopyGraph,
+    min: u32,
+    max: u32,
+) -> Vec<(u32, Option<u32>)> {
+    use std::collections::VecDeque;
+    let mut visited = std::collections::HashSet::new();
+    // queue: (node_idx, depth, last_edge_idx)
+    let mut queue: VecDeque<(u32, u32, Option<u32>)> = VecDeque::new();
+    queue.push_back((start, 0, None));
+    visited.insert(start);
+
+    let mut out = Vec::new();
+
+    while let Some((idx, depth, last_edge)) = queue.pop_front() {
+        if depth >= min {
+            out.push((idx, last_edge));
+        }
+        if depth >= max {
+            continue;
+        }
+        for (tgt, edge_idx) in walk_rel(idx, rel, graph) {
+            if visited.insert(tgt) {
+                queue.push_back((tgt, depth + 1, Some(edge_idx)));
+            }
+        }
+    }
+    out
 }
 
 fn node_matches(
@@ -627,6 +686,63 @@ mod tests {
         f(archived);
     }
 
+    /// Four-node chain: a(0)->b(1)->c(2)->d(3) all :Calls
+    fn build_four_chain() -> Vec<u8> {
+        let mut pool = StringPool::new();
+        let names = ["a", "b", "c", "d"];
+        let nrefs: Vec<_> = names.iter().map(|n| pool.add(n)).collect();
+        let fp = pool.add("src/x.ts");
+        let reasons: Vec<_> = (0..3).map(|i| pool.add(&format!("r{i}"))).collect();
+        let urefs: Vec<_> = names.iter().map(|n| pool.add(&format!("0:{n}"))).collect();
+
+        let g = ZeroCopyGraph {
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
+            fingerprint: [0; 32],
+            string_pool: pool.bytes,
+            files: vec![File {
+                path: fp,
+                mtime: 0,
+                content_hash: [0u8; 32],
+                category: FileCategory::Source,
+            }],
+            nodes: (0..4u32)
+                .map(|i| Node {
+                    uid: urefs[i as usize],
+                    name: nrefs[i as usize],
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (i * 2, 0, i * 2 + 1, 0),
+                    community_id: 0,
+                })
+                .collect(),
+            edges: vec![
+                Edge { source: 0, target: 1, rel_type: RelType::Calls, confidence: 1.0, reason: reasons[0] },
+                Edge { source: 1, target: 2, rel_type: RelType::Calls, confidence: 1.0, reason: reasons[1] },
+                Edge { source: 2, target: 3, rel_type: RelType::Calls, confidence: 1.0, reason: reasons[2] },
+            ],
+            out_offsets: vec![0, 1, 2, 3, 3],
+            in_offsets: vec![0, 0, 1, 2, 3],
+            in_edge_idx: vec![0, 1, 2],
+            name_index: vec![],
+            embeddings: None,
+            process_start: 4,
+            traces_offsets: vec![],
+            traces_data: vec![],
+            blind_spots: vec![],
+            route_shapes: vec![],
+        };
+        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+    }
+
+    fn with_four<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
+        let bytes = build_four_chain();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        f(archived);
+    }
+
     // -----------------------------------------------------------------------
     // C1 – scaffolding compile check
     // -----------------------------------------------------------------------
@@ -681,7 +797,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C3 – multi-hop chain (3 nodes)
+    // C3 — multi-hop chain (3 nodes)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -696,6 +812,42 @@ mod tests {
             assert_eq!(r.rows[0][0], Value::Str("a".into()));
             assert_eq!(r.rows[0][1], Value::Str("b".into()));
             assert_eq!(r.rows[0][2], Value::Str("c".into()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // C4 – variable-length BFS (*min..max)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exec_var_len_bfs_one_to_three() {
+        // Chain: a->b->c->d. `*1..3` from a should reach b, c, d.
+        with_four(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[:Calls*1..3]->(b:Function) WHERE a.name = 'a' RETURN b.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 3, "expected 3 rows, got {:?}", r.rows);
+            let names: Vec<&str> = r.rows.iter().map(|row| {
+                if let Value::Str(s) = &row[0] { s.as_str() } else { "" }
+            }).collect();
+            assert!(names.contains(&"b"), "missing b");
+            assert!(names.contains(&"c"), "missing c");
+            assert!(names.contains(&"d"), "missing d");
+        });
+    }
+
+    #[test]
+    fn exec_var_len_min_two_skips_direct_neighbour() {
+        // `*2..3` from a should skip b, reach c and d.
+        with_four(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[:Calls*2..3]->(b:Function) WHERE a.name = 'a' RETURN b.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2, "expected c and d, got {:?}", r.rows);
         });
     }
 }
