@@ -1,5 +1,7 @@
 //! `gnx admin install-hook`: install reference-transaction hook in cwd's git common dir.
+//! With `--claude-code`, instead installs entries into Claude Code's settings.json.
 
+use crate::commands::admin::claude_code;
 use crate::git::safe_exec;
 use clap::Args;
 use std::io::Write;
@@ -14,9 +16,28 @@ pub struct InstallHookArgs {
     /// Skip hook chaining (don't preserve existing non-gnx hook).
     #[arg(long, default_value_t = false)]
     pub no_chain: bool,
+
+    /// Install Claude Code settings.json hook entries instead of a git hook.
+    #[arg(long, default_value_t = false)]
+    pub claude_code: bool,
+
+    /// CSV of events when --claude-code is set (session-start, user-prompt-submit,
+    /// pre-tool-use, post-tool-use). Omit for an interactive multi-select.
+    #[arg(long)]
+    pub events: Option<String>,
+
+    /// Override Claude Code settings.json path (default `~/.claude/settings.json`).
+    #[arg(long, hide = true)]
+    pub settings_path: Option<PathBuf>,
 }
 
 pub fn run(args: InstallHookArgs) -> Result<(), graph_nexus_core::GnxError> {
+    if args.claude_code {
+        return claude_code::run_install_claude_code(
+            args.events.as_deref(),
+            args.settings_path.as_deref(),
+        );
+    }
     let out = safe_exec::git()
         .args(["rev-parse", "--git-common-dir"])
         .output()

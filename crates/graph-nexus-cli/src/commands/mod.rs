@@ -3,6 +3,7 @@ pub mod contracts;
 pub mod coverage;
 pub mod cypher;
 pub mod format;
+pub mod hook;
 pub mod hook_handle;
 pub mod hook_watcher;
 pub mod impact;

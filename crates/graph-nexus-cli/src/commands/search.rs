@@ -117,15 +117,15 @@ fn embeddings_available_for(graph: &graph_nexus_core::graph::ArchivedZeroCopyGra
 
 /// One result row — owned strings so rayon workers can return across threads.
 #[derive(Debug, Clone)]
-struct Hit {
-    repo: Option<String>,
-    score: f32,
-    kind: String,
-    file: String,
-    line: u32,
-    name: String,
-    signature: String,
-    caller_count: usize,
+pub struct Hit {
+    pub repo: Option<String>,
+    pub score: f32,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub name: String,
+    pub signature: String,
+    pub caller_count: usize,
 }
 
 /// `BinaryHeap` key that is `Ord`.  f32 isn't `Ord`; use `score_bits` as a
@@ -168,30 +168,41 @@ fn run_single(
     engine: &Engine,
     repo_label: Option<String>,
 ) -> Result<(), GnxError> {
+    let hits = compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
+    emit_hits(&hits, format, None)
+}
+
+/// Pure compute path for single-repo search: returns owned Hit rows top-K trimmed.
+fn compute_single(
+    pattern: &str,
+    mode: &SearchMode,
+    kind_filter: Option<&str>,
+    engine: &Engine,
+    repo_label: Option<String>,
+) -> Result<Vec<Hit>, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     let effective_mode = match mode {
-        SearchMode::Auto => detect_mode(&pattern, embeddings_available_for(graph)),
-        m => m,
+        SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
+        m => m.clone(),
     };
 
-    let kind_set: Option<Vec<String>> = kind_filter
-        .as_deref()
-        .map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
+    let kind_set: Option<Vec<String>> =
+        kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     let mut hits = match effective_mode {
         SearchMode::Bm25 | SearchMode::Auto => {
-            bm25_hits_from_graph(graph, &pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
         }
         SearchMode::Vector => {
             // TODO: wire to real cosine path (graph_nexus_analyzer::embeddings)
             eprintln!("→ vector mode not yet wired — falling back to bm25");
-            bm25_hits_from_graph(graph, &pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
         }
         SearchMode::Hybrid => {
             // TODO: fold bm25 + cosine scores when embeddings are wired
             eprintln!("→ hybrid: embeddings not wired — using bm25");
-            bm25_hits_from_graph(graph, &pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
         }
     };
 
@@ -203,7 +214,7 @@ fn run_single(
     });
     hits.truncate(TOP_K);
 
-    emit_hits(&hits, format, None)
+    Ok(hits)
 }
 
 /// BM25 scan directly against the graph nodes: exact → 1.0, prefix → 0.7, substring → 0.4.
@@ -276,15 +287,25 @@ fn run_multi(
     format: OutputFormat,
     targets: Vec<(String, String)>, // (repo_name, graph_path_str)
 ) -> Result<(), GnxError> {
-    let kind_set: Option<Vec<String>> = kind_filter
-        .as_deref()
-        .map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
+    let (hits, summary) = compute_multi(&pattern, &mode, kind_filter.as_deref(), targets)?;
+    emit_hits(&hits, format, Some(summary))
+}
+
+/// Pure compute path for multi-repo fan-out. Returns merged top-K hits + summary string.
+fn compute_multi(
+    pattern: &str,
+    mode: &SearchMode,
+    kind_filter: Option<&str>,
+    targets: Vec<(String, String)>, // (repo_name, graph_path_str)
+) -> Result<(Vec<Hit>, String), GnxError> {
+    let kind_set: Option<Vec<String>> =
+        kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     // Fan out via rayon; workers return owned hit rows.
     let worker_results: Vec<(String, Result<Vec<Hit>, String>)> = targets
         .par_iter()
         .map(|(repo_name, graph_path)| {
-            let outcome = scan_repo(repo_name, graph_path, &pattern, &kind_set, &mode);
+            let outcome = scan_repo(repo_name, graph_path, pattern, &kind_set, mode);
             (repo_name.clone(), outcome)
         })
         .collect();
@@ -337,7 +358,37 @@ fn run_multi(
         hits.len()
     );
 
-    emit_hits(&hits, format, Some(summary))
+    Ok((hits, summary))
+}
+
+/// In-process search entry point for hooks and other internal consumers.
+/// Returns owned `Hit` rows without going through stdout / OutputFormat.
+/// Top-K trimmed identically to `run`.
+pub fn compute_hits(args: SearchArgs, engine: &Engine) -> Result<Vec<Hit>, GnxError> {
+    let targets = resolve_targets(args.repo.as_deref())?;
+    if targets.is_empty() {
+        compute_single(
+            &args.pattern,
+            &args.mode,
+            args.kind.as_deref(),
+            engine,
+            None,
+        )
+    } else if targets.len() == 1 {
+        let (repo_name, graph_path) = targets.into_iter().next().unwrap();
+        let local_engine = Engine::load(std::path::PathBuf::from(&graph_path))
+            .map_err(|e| GnxError::Rkyv(format!("{repo_name}: load: {e}")))?;
+        compute_single(
+            &args.pattern,
+            &args.mode,
+            args.kind.as_deref(),
+            &local_engine,
+            Some(repo_name),
+        )
+    } else {
+        compute_multi(&args.pattern, &args.mode, args.kind.as_deref(), targets)
+            .map(|(hits, _summary)| hits)
+    }
 }
 
 /// Load one repo's graph and scan it (used by rayon workers).
@@ -554,5 +605,11 @@ mod tests {
             .collect();
         got.sort_by(|a, b| b.partial_cmp(a).unwrap());
         assert_eq!(got, vec![0.9, 0.8, 0.7]);
+    }
+
+    #[test]
+    fn compute_hits_signature_check() {
+        fn _check(_: fn(SearchArgs, &Engine) -> Result<Vec<Hit>, GnxError>) {}
+        _check(compute_hits);
     }
 }

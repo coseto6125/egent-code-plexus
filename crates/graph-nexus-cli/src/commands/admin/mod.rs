@@ -3,6 +3,7 @@
 
 use clap::Subcommand;
 
+pub mod claude_code;
 pub mod config;
 pub mod drop;
 pub mod group;
@@ -13,8 +14,12 @@ pub mod rename_branch;
 
 #[derive(Subcommand, Debug)]
 pub enum AdminCommands {
-    /// Install git ref-transaction hook for branch tracking
+    /// Install git ref-transaction hook for branch tracking (or Claude Code hooks with --claude-code)
     InstallHook(install_hook::InstallHookArgs),
+    /// Remove Claude Code hook entries from settings.json
+    UninstallHook(claude_code::UninstallHookArgs),
+    /// Show Claude Code hook install status
+    Status(claude_code::StatusArgs),
     /// Delete a repo's index data + registry entry
     Drop(drop::DropArgs),
     /// Remove orphan index dirs not in registry
@@ -35,6 +40,8 @@ pub enum AdminCommands {
 pub fn run(cmd: AdminCommands) -> Result<(), graph_nexus_core::GnxError> {
     match cmd {
         AdminCommands::InstallHook(args) => install_hook::run(args),
+        AdminCommands::UninstallHook(args) => claude_code::run_uninstall(args),
+        AdminCommands::Status(args) => claude_code::run_status(args),
         AdminCommands::Drop(args) => drop::run(args),
         AdminCommands::Prune(args) => prune::run(args),
         AdminCommands::RenameBranch(args) => rename_branch::run(args),
