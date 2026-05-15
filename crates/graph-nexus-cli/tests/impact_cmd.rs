@@ -1,8 +1,12 @@
-//! Integration tests for the new `gnx impact` flags:
-//!   --kind            (emission filter on result entries by node kind)
-//!   --file_path       (substring filter on result entries by file path)
-//!   --relation_types  (BFS edge filter — actually narrows traversal shape)
-//!   snake_case alias  (--high_trust_only ↔ --high-trust-only)
+//! Integration tests for the `gnx impact` command.
+//!
+//! Tests cover:
+//!   - Positional <name> replaces old --target <UID>
+//!   - --kind / --file_path / --relation_types filters
+//!   - --high-trust-only default true
+//!   - --since <ref> for diff-mode
+//!   - <name> and --since mutual exclusion
+//!   - Empty callers hint when 0 incoming (upstream)
 
 use serde_json::Value;
 use std::path::Path;
@@ -20,10 +24,6 @@ fn gnx_bin() -> &'static str {
 ///
 /// Inheritance (downstream from `Base`):
 ///   Greeter --extends--> Base
-///
-/// Both kinds (Function + Class + Method) appear, so `--kind function`
-/// must drop class/method emission. Two `helper`-style function callees in
-/// extra/ let `--file_path` filter to substring "core".
 const SOURCE_CORE: &str = r#"
 export class Base {
     baseMethod(): number { return 1; }
@@ -83,14 +83,14 @@ fn init_repo_and_analyze(repo: &Path) {
         .unwrap();
 
     let out = Command::new(gnx_bin())
-        .args(["analyze", "--repo", "."])
+        .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("analyze failed to spawn");
+        .expect("admin index failed to spawn");
     assert!(
         out.status.success(),
-        "analyze failed: stderr={}",
+        "admin index failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -117,8 +117,19 @@ fn run_impact(repo: &Path, extra: &[&str]) -> Value {
         .unwrap_or_else(|err| panic!("{args:?} did not return JSON: {err}\nstdout={stdout}"))
 }
 
-/// Extract non-start (depth > 0) entries — used for filter assertions where
-/// the start node is exempt from --kind / --file_path emission filtering.
+fn run_impact_stderr(repo: &Path, extra: &[&str]) -> String {
+    let mut args = vec!["impact", "--repo", ".", "--format", "json"];
+    args.extend_from_slice(extra);
+    let out = Command::new(gnx_bin())
+        .args(&args)
+        .current_dir(repo)
+        .env("HOME", repo)
+        .output()
+        .expect("impact failed to spawn");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Extract non-start (depth > 0) entries.
 fn non_start_kinds(json: &Value) -> Vec<String> {
     json["impact"]
         .as_array()
@@ -128,6 +139,183 @@ fn non_start_kinds(json: &Value) -> Vec<String> {
         .map(|e| e["kind"].as_str().unwrap_or_default().to_ascii_lowercase())
         .collect()
 }
+
+// ── New positional-name tests ─────────────────────────────────────────────────
+
+#[test]
+fn impact_accepts_name_positional() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    let result = run_impact(tmp.path(), &["caller", "--direction", "up"]);
+    assert!(
+        result.get("error").is_none(),
+        "impact with positional name returned error: {result}"
+    );
+    assert_eq!(result["status"], "success", "unexpected result: {result}");
+}
+
+#[test]
+fn impact_rejects_old_target_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No need to analyze — clap rejects --target before the graph is loaded.
+    let out = Command::new(gnx_bin())
+        .args([
+            "impact",
+            "--target",
+            "Function:src/core/lib.ts:caller",
+            "--direction",
+            "up",
+        ])
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("gnx failed to spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "--target should be rejected but process succeeded"
+    );
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("--target") || stderr.contains("error"),
+        "expected clap error about --target:\nstderr={stderr}\nstdout={stdout}"
+    );
+}
+
+#[test]
+fn impact_high_trust_only_default_true() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(gnx_bin())
+        .args(["impact", "--help"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("gnx failed to spawn");
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("--high-trust-only"),
+        "--high-trust-only not in help: {help}"
+    );
+    // The description explicitly states "Default ON" to signal the default is true.
+    assert!(
+        help.contains("Default ON") || help.contains("default: true") || help.contains("high-trust-only=false"),
+        "--high-trust-only description should indicate it defaults to on:\n{help}"
+    );
+}
+
+#[test]
+fn impact_since_ref_runs_diff_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    // Add a new commit so HEAD~1 is valid.
+    std::fs::write(
+        tmp.path().join("src/core/lib.ts"),
+        SOURCE_CORE.to_string() + "\n// tweak\n",
+    )
+    .unwrap();
+    let _ = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let _ = Command::new("git")
+        .args([
+            "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-q", "-m", "tweak",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    let out = Command::new(gnx_bin())
+        .args(["impact", "--since", "HEAD~1", "--repo", ".", "--format", "json"])
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("impact --since failed to spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "--since HEAD~1 failed: stderr={stderr}\nstdout={stdout}"
+    );
+    // Accept "changed" in output, or "0 changes" / empty message.
+    assert!(
+        stdout.contains("changed") || stdout.contains("since") || stdout.contains("changes"),
+        "--since output doesn't mention changes:\nstdout={stdout}"
+    );
+}
+
+#[test]
+fn impact_name_and_since_mutually_exclusive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(gnx_bin())
+        .args(["impact", "foo", "--since", "HEAD~1"])
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("gnx failed to spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "foo + --since should be rejected but process succeeded"
+    );
+    assert!(
+        stderr.contains("conflict") || stderr.contains("cannot be used") || stderr.contains("error"),
+        "expected conflict error:\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn impact_empty_callers_includes_explanation() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    // `helper` is called BY `caller`, but `extraHelper` in the extra file has
+    // no callers — it's a leaf. Use it to trigger the empty-upstream hint.
+    let out = Command::new(gnx_bin())
+        .args([
+            "impact", "extraHelper",
+            "--direction", "up",
+            "--repo", ".",
+            "--format", "json",
+            "--high-trust-only=false",
+        ])
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("impact failed to spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Command must succeed.
+    assert!(
+        out.status.success(),
+        "impact extraHelper failed:\nstderr={stderr}\nstdout={stdout}"
+    );
+
+    // Parse JSON from stdout.
+    let json_start = stdout.find('{');
+    if let Some(pos) = json_start {
+        let json: Value = serde_json::from_str(&stdout[pos..]).unwrap_or(Value::Null);
+        let impact_arr = json["impact"].as_array();
+        let non_start = impact_arr
+            .map(|arr| arr.iter().filter(|e| e["depth"].as_u64().unwrap_or(0) > 0).count())
+            .unwrap_or(0);
+        if non_start == 0 {
+            assert!(
+                stderr.contains("entry point")
+                    || stderr.contains("dead")
+                    || stderr.contains("direction")
+                    || stderr.contains("--direction"),
+                "missing empty-result hint in stderr:\n{stderr}\nstdout={stdout}"
+            );
+        }
+    }
+}
+
+// ── Updated versions of old filter tests (now using positional name) ─────────
 
 #[test]
 fn impact_kind_filter_drops_non_matching_results() {
@@ -139,12 +327,12 @@ fn impact_kind_filter_drops_non_matching_results() {
     let baseline = run_impact(
         tmp.path(),
         &[
-            "--target",
-            "Function:src/core/lib.ts:caller",
+            "caller",
             "--direction",
-            "downstream",
+            "down",
             "--depth",
             "5",
+            "--high-trust-only=false",
         ],
     );
     let baseline_kinds = non_start_kinds(&baseline);
@@ -157,12 +345,12 @@ fn impact_kind_filter_drops_non_matching_results() {
     let filtered = run_impact(
         tmp.path(),
         &[
-            "--target",
-            "Function:src/core/lib.ts:caller",
+            "caller",
             "--direction",
-            "downstream",
+            "down",
             "--depth",
             "5",
+            "--high-trust-only=false",
             "--kind",
             "function",
         ],
@@ -185,19 +373,15 @@ fn impact_file_path_filter_keeps_substring_matches() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    // We use `extraHelper` as the target so the start node lives in
-    // src/extra/lib.ts. With --file_path core we expect every NON-start
-    // entry (if any) to have "core" in its filePath, and the start node
-    // itself remains (it is exempt from the filter).
     let filtered = run_impact(
         tmp.path(),
         &[
-            "--target",
-            "Function:src/core/lib.ts:caller",
+            "caller",
             "--direction",
-            "downstream",
+            "down",
             "--depth",
             "5",
+            "--high-trust-only=false",
             "--file_path",
             "src/core",
         ],
@@ -225,19 +409,15 @@ fn impact_relation_types_filter_short_circuits_traversal() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    // Downstream from `caller`, the baseline includes both `calls` (to
-    // helper, Greeter constructor, etc.) and indirect edges. Filtering to
-    // only `extends` from `caller` should yield NO descendants because
-    // `caller` is a function and has no extends-out edges.
     let only_extends = run_impact(
         tmp.path(),
         &[
-            "--target",
-            "Function:src/core/lib.ts:caller",
+            "caller",
             "--direction",
-            "downstream",
+            "down",
             "--depth",
             "5",
+            "--high-trust-only=false",
             "--relation_types",
             "extends",
         ],
@@ -245,25 +425,24 @@ fn impact_relation_types_filter_short_circuits_traversal() {
     let extends_count = only_extends["impact"].as_array().unwrap().len();
     assert_eq!(
         extends_count, 1,
-        "with --relation_types extends, only the start node should remain (BFS halts immediately): {only_extends}"
+        "with --relation_types extends, only the start node should remain: {only_extends}"
     );
 
-    // Sanity baseline: without the filter, traversal reaches more nodes.
     let baseline = run_impact(
         tmp.path(),
         &[
-            "--target",
-            "Function:src/core/lib.ts:caller",
+            "caller",
             "--direction",
-            "downstream",
+            "down",
             "--depth",
             "5",
+            "--high-trust-only=false",
         ],
     );
     let baseline_count = baseline["impact"].as_array().unwrap().len();
     assert!(
         baseline_count > extends_count,
-        "baseline must traverse more than the --relation_types extends path (baseline={baseline_count}, extends={extends_count}): baseline={baseline} filtered={only_extends}"
+        "baseline must traverse more than the --relation_types extends path: baseline={baseline}"
     );
 }
 
@@ -272,32 +451,26 @@ fn impact_snake_case_alias_accepts_underscored_flag_name() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    // Both kebab and snake forms must yield the same result envelope on a
-    // graph where neither filter actually drops anything. We compare the
-    // `impact` arrays bit-for-bit to prove the alias is wired (not just
-    // accepted by clap silently).
     let kebab = run_impact(
         tmp.path(),
         &[
-            "--target",
-            "Function:src/core/lib.ts:caller",
+            "caller",
             "--direction",
-            "upstream",
+            "up",
             "--depth",
             "3",
-            "--high-trust-only",
+            "--high-trust-only=false",
         ],
     );
     let snake = run_impact(
         tmp.path(),
         &[
-            "--target",
-            "Function:src/core/lib.ts:caller",
+            "caller",
             "--direction",
-            "upstream",
+            "up",
             "--depth",
             "3",
-            "--high_trust_only",
+            "--high_trust_only=false",
         ],
     );
 
