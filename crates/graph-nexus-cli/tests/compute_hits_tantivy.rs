@@ -2,7 +2,8 @@
 //! `TantivyEngine` index, not the hardcoded 1.0 / 0.7 / 0.4 substring
 //! scoring in `bm25_hits_from_graph`. Drives B+ step 1 (tantivy wireup).
 
-use graph_nexus_cli::commands::search::{compute_hits, SearchArgs, SearchMode};
+use graph_nexus_cli::commands::hook::pre_tool_use::format_hits;
+use graph_nexus_cli::commands::search::{compute_hits, Hit, SearchArgs, SearchMode};
 use graph_nexus_cli::engine::Engine;
 use graph_nexus_cli::search::TantivyEngine;
 use graph_nexus_core::graph::{
@@ -176,4 +177,92 @@ fn compute_hits_uses_tantivy_not_substring_scoring() {
         names.contains(&"parse_config_file"),
         "missing parse_config_file in {names:?}"
     );
+}
+
+#[test]
+fn compute_hits_populates_one_hop_callers_and_callees() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    let graph = make_config_graph();
+    persist_graph(repo, &graph);
+    TantivyEngine::build_index(repo, &graph).expect("tantivy build");
+    let engine = Engine::load(repo.join(".gitnexus-rs").join("graph.bin")).expect("engine load");
+
+    let args = SearchArgs {
+        pattern: "parseConfig".to_string(),
+        mode: SearchMode::Bm25,
+        kind: None,
+        repo: None,
+        format: None,
+    };
+    let hits = compute_hits(args, &engine).expect("compute_hits");
+
+    let parse_config = hits
+        .iter()
+        .find(|h| h.name == "parseConfig")
+        .expect("parseConfig hit must surface");
+
+    // Fixture wires loadSettings → parseConfig and initApp → parseConfig.
+    let mut callers = parse_config.callers.clone();
+    callers.sort();
+    assert_eq!(
+        callers,
+        vec!["initApp".to_string(), "loadSettings".to_string()],
+        "callers should be drawn from in_edges via CSR"
+    );
+
+    // Fixture wires parseConfig → tokenize.
+    assert_eq!(
+        parse_config.callees,
+        vec!["tokenize".to_string()],
+        "callees should be drawn from out_edges via CSR"
+    );
+}
+
+#[test]
+fn format_hits_emits_legacy_style_called_by_and_calls_block() {
+    // Build a Hit by hand — no graph plumbing needed for the formatter.
+    let hit = Hit {
+        repo: None,
+        score: 1.23,
+        kind: "Function".to_string(),
+        file: "src/config.rs".to_string(),
+        line: 42,
+        name: "parseConfig".to_string(),
+        signature: "Function parseConfig".to_string(),
+        caller_count: 2,
+        callers: vec!["loadSettings".to_string(), "initApp".to_string()],
+        callees: vec!["tokenize".to_string()],
+    };
+    let out = format_hits(&[hit]);
+    assert!(out.contains("parseConfig (src/config.rs:42)"), "got: {out}");
+    assert!(out.contains("[Function]"), "kind tag missing: {out}");
+    assert!(
+        out.contains("Called by: loadSettings, initApp"),
+        "callers line missing: {out}"
+    );
+    assert!(
+        out.contains("Calls: tokenize"),
+        "callees line missing: {out}"
+    );
+}
+
+#[test]
+fn format_hits_skips_empty_caller_callee_lines() {
+    let hit = Hit {
+        repo: None,
+        score: 0.5,
+        kind: "Function".to_string(),
+        file: "src/main.rs".to_string(),
+        line: 1,
+        name: "orphan".to_string(),
+        signature: "Function orphan".to_string(),
+        caller_count: 0,
+        callers: vec![],
+        callees: vec![],
+    };
+    let out = format_hits(&[hit]);
+    assert!(out.contains("orphan (src/main.rs:1)"));
+    assert!(!out.contains("Called by:"), "empty callers must be skipped");
+    assert!(!out.contains("Calls:"), "empty callees must be skipped");
 }

@@ -126,7 +126,20 @@ pub struct Hit {
     pub name: String,
     pub signature: String,
     pub caller_count: usize,
+    /// Up to `HOP_EXPANSION_LIMIT` 1-hop incoming-edge source names.
+    /// Populated from `in_offsets` / `in_edge_idx` / `edges`. Empty when
+    /// the node has no callers or all edges have been truncated.
+    pub callers: Vec<String>,
+    /// Up to `HOP_EXPANSION_LIMIT` 1-hop outgoing-edge target names.
+    /// Populated from `out_offsets` / `edges`.
+    pub callees: Vec<String>,
 }
+
+/// Cap per-direction. Matches the legacy gitnexus augmentation engine,
+/// which sliced top 3 to keep hook context dense without blowing token
+/// budget — empirically the 4th+ caller/callee adds little signal once
+/// the LLM already has the symbol's file:line and kind.
+const HOP_EXPANSION_LIMIT: usize = 3;
 
 /// `BinaryHeap` key that is `Ord`.  f32 isn't `Ord`; use `score_bits` as a
 /// monotonic surrogate (positive floats compare correctly as bit patterns in
@@ -141,6 +154,8 @@ struct OrderedHit {
     kind: String,
     signature: String,
     caller_count: usize,
+    callers: Vec<String>,
+    callees: Vec<String>,
 }
 
 impl OrderedHit {
@@ -154,6 +169,8 @@ impl OrderedHit {
             kind: h.kind,
             signature: h.signature,
             caller_count: h.caller_count,
+            callers: h.callers,
+            callees: h.callees,
         }
     }
 }
@@ -330,11 +347,35 @@ fn build_hit(
     let line = node.span.0.to_native() + 1;
     let kind_str = kind_to_str(&node.kind).to_string();
     let signature = format!("{kind_str} {name}");
-    let caller_count = {
-        let start = graph.in_offsets[idx].to_native() as usize;
-        let end = graph.in_offsets[idx + 1].to_native() as usize;
-        end.saturating_sub(start)
-    };
+
+    let in_start = graph.in_offsets[idx].to_native() as usize;
+    let in_end = graph.in_offsets[idx + 1].to_native() as usize;
+    let caller_count = in_end.saturating_sub(in_start);
+    let callers: Vec<String> = graph.in_edge_idx[in_start..in_end]
+        .iter()
+        .take(HOP_EXPANSION_LIMIT)
+        .map(|eidx| {
+            let e = &graph.edges[eidx.to_native() as usize];
+            graph.nodes[e.source.to_native() as usize]
+                .name
+                .resolve(&graph.string_pool)
+                .to_string()
+        })
+        .collect();
+
+    let out_start = graph.out_offsets[idx].to_native() as usize;
+    let out_end = graph.out_offsets[idx + 1].to_native() as usize;
+    let callees: Vec<String> = graph.edges[out_start..out_end]
+        .iter()
+        .take(HOP_EXPANSION_LIMIT)
+        .map(|e| {
+            graph.nodes[e.target.to_native() as usize]
+                .name
+                .resolve(&graph.string_pool)
+                .to_string()
+        })
+        .collect();
+
     Some(Hit {
         repo: repo_label.clone(),
         score,
@@ -344,6 +385,8 @@ fn build_hit(
         name: name.to_string(),
         signature,
         caller_count,
+        callers,
+        callees,
     })
 }
 
@@ -416,6 +459,8 @@ fn compute_multi(
             name: o.name,
             signature: o.signature,
             caller_count: o.caller_count,
+            callers: o.callers,
+            callees: o.callees,
         })
         .collect();
 
@@ -676,6 +721,8 @@ mod tests {
                 kind: "Function".into(),
                 signature: "fn n".into(),
                 caller_count: 0,
+                callers: vec![],
+                callees: vec![],
             };
             heap.push(Reverse(h));
             if heap.len() > k {

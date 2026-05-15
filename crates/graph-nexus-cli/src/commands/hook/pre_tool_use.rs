@@ -56,17 +56,26 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     Ok(())
 }
 
-fn format_hits(hits: &[Hit]) -> String {
+/// Render hits as a legacy-style multi-line block. Each symbol gets a
+/// header `name (file:line) [kind]` followed by optional `Called by:`
+/// and `Calls:` lines drawn from the in-process 1-hop CSR expansion in
+/// `compute_hits`. Empty caller / callee lists are skipped to keep the
+/// per-hit footprint tight; the LLM reads the absence as "no callers
+/// found within 1 hop" rather than asking gnx for a deeper trace.
+pub fn format_hits(hits: &[Hit]) -> String {
     let mut out = String::from(HITS_HEADER);
     for h in hits.iter().take(MAX_HITS) {
-        let line = format!(
-            "  [{}] {}:{} {} (callers:{}) score:{:.3}\n",
-            h.kind, h.file, h.line, h.name, h.caller_count, h.score
-        );
-        if out.len() + line.len() > MAX_BYTES {
+        let mut block = format!("  {} ({}:{}) [{}]\n", h.name, h.file, h.line, h.kind);
+        if !h.callers.is_empty() {
+            block.push_str(&format!("    Called by: {}\n", h.callers.join(", ")));
+        }
+        if !h.callees.is_empty() {
+            block.push_str(&format!("    Calls: {}\n", h.callees.join(", ")));
+        }
+        if out.len() + block.len() > MAX_BYTES {
             break;
         }
-        out.push_str(&line);
+        out.push_str(&block);
     }
     // If no row was appended, the buffer still equals the header — caller
     // treats an empty return as "no hits".
