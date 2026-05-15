@@ -522,8 +522,10 @@ impl GraphBuilder {
                 // fetch_count = how many distinct route paths this consumer
                 // matches (upstream definition). Compute by intersecting
                 // `urls` with `route_by_path` keys.
-                let matched_paths: Vec<&String> =
-                    urls.iter().filter(|u| route_by_path.contains_key(*u)).collect();
+                let matched_paths: Vec<&String> = urls
+                    .iter()
+                    .filter(|u| route_by_path.contains_key(*u))
+                    .collect();
                 if matched_paths.is_empty() {
                     continue;
                 }
@@ -1987,11 +1989,8 @@ mod tests {
         let route_node = &graph.nodes[shape.node_idx as usize];
         assert_eq!(route_node.kind, NodeKind::Route);
 
-        let response_keys: Vec<String> = shape
-            .response_keys
-            .iter()
-            .map(|r| s(&graph, *r))
-            .collect();
+        let response_keys: Vec<String> =
+            shape.response_keys.iter().map(|r| s(&graph, *r)).collect();
         assert_eq!(response_keys, vec!["id".to_string(), "name".to_string()]);
         assert!(
             shape.error_keys.is_empty(),
@@ -2081,11 +2080,8 @@ mod tests {
             graph.route_shapes.len()
         );
         let shape = &graph.route_shapes[0];
-        let response_keys: Vec<String> = shape
-            .response_keys
-            .iter()
-            .map(|r| s(&graph, *r))
-            .collect();
+        let response_keys: Vec<String> =
+            shape.response_keys.iter().map(|r| s(&graph, *r)).collect();
         assert_eq!(response_keys, vec!["id".to_string()]);
     }
 }

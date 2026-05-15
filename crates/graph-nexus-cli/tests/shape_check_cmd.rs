@@ -218,7 +218,9 @@ fn shape_check_flags_unknown_consumer_key() {
     assert!(ok, "command failed: stderr={stderr}");
     let json: Value = {
         let s = stdout.trim();
-        let start = s.find('{').unwrap_or_else(|| panic!("non-JSON stdout: {s}"));
+        let start = s
+            .find('{')
+            .unwrap_or_else(|| panic!("non-JSON stdout: {s}"));
         serde_json::from_str(&s[start..])
             .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nstdout={s}"))
     };
