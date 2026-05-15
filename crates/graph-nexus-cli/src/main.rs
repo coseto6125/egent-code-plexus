@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod admin;
 mod auto_ensure;
 mod commands;
 mod config_parser;
@@ -53,11 +54,13 @@ enum Commands {
     /// Cross-repo API contracts inventory (routes / queue / RPC)
     Contracts(commands::contracts::ContractsArgs),
 
-    /// Administrative operations (registry, hooks, destructive ops)
+    /// Administrative operations. With no subcommand: launches the interactive
+    /// TUI for host-integration management. With a subcommand: runs that
+    /// admin operation (registry / hooks / destructive ops — hidden namespace).
     #[command(hide = true)]
     Admin {
         #[command(subcommand)]
-        command: commands::admin::AdminCommands,
+        command: Option<commands::admin::AdminCommands>,
     },
 
     /// Internal: process reference-transaction events (called by git hook)
@@ -76,17 +79,19 @@ enum Commands {
     /// Internal: MCP transport (serve | tools) — for external agents talking to gnx.
     #[command(hide = true)]
     Mcp(commands::mcp::McpArgs),
-    /// Interactive TUI for host-integration management (bind gnx to a code agent)
-    Admin(admin::AdminArgs),
 }
 
 fn main() {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    // Admin is consumed by-value (AdminCommands doesn't implement Clone).
+    // Admin: subcommand → run the admin operation; no subcommand → launch TUI.
     if let Commands::Admin { command } = cli.command {
-        if let Err(e) = commands::admin::run(command) {
+        let err = match command {
+            Some(cmd) => commands::admin::run(cmd),
+            None => admin::run(admin::AdminArgs {}),
+        };
+        if let Err(e) = err {
             eprintln!("Command failed: {e}");
             std::process::exit(1);
         }
