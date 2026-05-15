@@ -46,8 +46,8 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
 /// a one-line "Index refreshed" notice to stderr, and returns. Ready returns
 /// immediately with no output. Errors from the rebuild surface verbatim.
 pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), String> {
-    let state = ensure_index(graph_path, worktree_root)
-        .map_err(|e| format!("ensure_index probe: {e}"))?;
+    let state =
+        ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
     let reason = match state {
         EnsureResult::Ready => return Ok(()),
         EnsureResult::Missing => "missing",

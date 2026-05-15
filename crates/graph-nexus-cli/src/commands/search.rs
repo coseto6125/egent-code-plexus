@@ -23,7 +23,7 @@ use graph_nexus_core::registry::{IndexLayout, Registry};
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 const TOP_K: usize = 20;
 
@@ -181,6 +181,7 @@ fn compute_single(
     repo_label: Option<String>,
 ) -> Result<Vec<Hit>, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+    let repo_root = engine.repo_root();
 
     let effective_mode = match mode {
         SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
@@ -192,17 +193,17 @@ fn compute_single(
 
     let mut hits = match effective_mode {
         SearchMode::Bm25 | SearchMode::Auto => {
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
         }
         SearchMode::Vector => {
             // TODO: wire to real cosine path (graph_nexus_analyzer::embeddings)
             eprintln!("→ vector mode not yet wired — falling back to bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
         }
         SearchMode::Hybrid => {
             // TODO: fold bm25 + cosine scores when embeddings are wired
             eprintln!("→ hybrid: embeddings not wired — using bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
         }
     };
 
@@ -217,8 +218,68 @@ fn compute_single(
     Ok(hits)
 }
 
-/// BM25 scan directly against the graph nodes: exact → 1.0, prefix → 0.7, substring → 0.4.
+/// Primary BM25 path: queries the persisted Tantivy index when present,
+/// falling back to a per-name substring scan (exact 1.0 / prefix 0.7 /
+/// substring 0.4) when `<repo>/.gitnexus-rs/tantivy/` is missing — which
+/// happens on a freshly-cloned repo before `gnx admin index` has run.
 fn bm25_hits_from_graph(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+    repo_root: Option<&std::path::Path>,
+) -> Vec<Hit> {
+    if let Some(root) = repo_root {
+        if root.join(".gitnexus-rs").join("tantivy").exists() {
+            return tantivy_hits(graph, pattern, kind_set, repo_label, root);
+        }
+    }
+    substring_hits(graph, pattern, kind_set, repo_label)
+}
+
+/// Query the on-disk Tantivy BM25 index, map uids back to graph nodes,
+/// and materialise `Hit` rows. Returns an empty vec when the index opens
+/// but yields no matches; falls through to substring scan if the query
+/// fails outright (e.g. corrupt segment), preserving the contract that
+/// hooks never error out on search.
+fn tantivy_hits(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+    repo_root: &std::path::Path,
+) -> Vec<Hit> {
+    let scored = crate::search::TantivyEngine::search(repo_root, pattern);
+    if scored.is_empty() {
+        // Tantivy returns `vec![]` on either zero matches or open failure.
+        // Fall through so a stale/corrupt index doesn't silently produce
+        // empty hook context.
+        return substring_hits(graph, pattern, kind_set, repo_label);
+    }
+
+    // uid → node_idx lookup. Built lazily and only once per call.
+    let mut uid_to_idx: HashMap<&str, usize> = HashMap::with_capacity(scored.len());
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        uid_to_idx.insert(node.uid.resolve(&graph.string_pool), idx);
+    }
+
+    let mut hits = Vec::with_capacity(scored.len());
+    for (score, uid) in scored {
+        let Some(&idx) = uid_to_idx.get(uid.as_str()) else {
+            continue;
+        };
+        if let Some(hit) = build_hit(graph, idx, score, kind_set, repo_label) {
+            hits.push(hit);
+        }
+    }
+    hits
+}
+
+/// Fallback BM25-shaped scan when no tantivy index is on disk.
+/// Preserves the legacy 1.0 / 0.7 / 0.4 scoring so hook output stays
+/// shaped the same before the first `gnx admin index` has produced an
+/// index.
+fn substring_hits(
     graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
@@ -226,10 +287,8 @@ fn bm25_hits_from_graph(
 ) -> Vec<Hit> {
     let pattern_lower = pattern.to_lowercase();
     let mut hits = Vec::new();
-
     for (idx, node) in graph.nodes.iter().enumerate() {
-        let name = node.name.resolve(&graph.string_pool);
-        let name_lower = name.to_lowercase();
+        let name_lower = node.name.resolve(&graph.string_pool).to_lowercase();
         let score: f32 = if name_lower == pattern_lower {
             1.0
         } else if name_lower.starts_with(&pattern_lower) {
@@ -239,43 +298,53 @@ fn bm25_hits_from_graph(
         } else {
             continue;
         };
-
-        // Apply --kind filter.
-        if let Some(ks) = kind_set {
-            let node_kind_str = format!("{:?}", node.kind).to_lowercase();
-            if !ks.iter().any(|k| k == &node_kind_str) {
-                continue;
-            }
+        if let Some(hit) = build_hit(graph, idx, score, kind_set, repo_label) {
+            hits.push(hit);
         }
-
-        let file = graph.files[node.file_idx.to_native() as usize]
-            .path
-            .resolve(&graph.string_pool)
-            .to_string();
-        let line = node.span.0.to_native() + 1;
-        let kind_str = kind_to_str(&node.kind).to_string();
-        let signature = format!("{kind_str} {name}");
-
-        // 1-hop caller count: in-edge CSR slice length for this node.
-        let caller_count = {
-            let start = graph.in_offsets[idx].to_native() as usize;
-            let end = graph.in_offsets[idx + 1].to_native() as usize;
-            end.saturating_sub(start)
-        };
-
-        hits.push(Hit {
-            repo: repo_label.clone(),
-            score,
-            kind: kind_str,
-            file,
-            line,
-            name: name.to_string(),
-            signature,
-            caller_count,
-        });
     }
-
     hits
+}
+
+/// Shared per-node Hit constructor. Applies kind filter and reads
+/// file/line/kind/caller_count from the archived graph. Returns `None`
+/// when the node's kind doesn't match the filter.
+fn build_hit(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    idx: usize,
+    score: f32,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+) -> Option<Hit> {
+    let node = &graph.nodes[idx];
+    if let Some(ks) = kind_set {
+        let node_kind_str = format!("{:?}", node.kind).to_lowercase();
+        if !ks.iter().any(|k| k == &node_kind_str) {
+            return None;
+        }
+    }
+    let name = node.name.resolve(&graph.string_pool);
+    let file = graph.files[node.file_idx.to_native() as usize]
+        .path
+        .resolve(&graph.string_pool)
+        .to_string();
+    let line = node.span.0.to_native() + 1;
+    let kind_str = kind_to_str(&node.kind).to_string();
+    let signature = format!("{kind_str} {name}");
+    let caller_count = {
+        let start = graph.in_offsets[idx].to_native() as usize;
+        let end = graph.in_offsets[idx + 1].to_native() as usize;
+        end.saturating_sub(start)
+    };
+    Some(Hit {
+        repo: repo_label.clone(),
+        score,
+        kind: kind_str,
+        file,
+        line,
+        name: name.to_string(),
+        signature,
+        caller_count,
+    })
 }
 
 // ── Multi-repo fan-out ────────────────────────────────────────────────────────
@@ -404,6 +473,7 @@ fn scan_repo(
     let graph = engine
         .graph()
         .map_err(|e| format!("{repo_name}: access: {e}"))?;
+    let repo_root = engine.repo_root();
 
     let effective_mode = match mode {
         SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
@@ -418,6 +488,7 @@ fn scan_repo(
         pattern,
         kind_set,
         &Some(repo_name.to_string()),
+        repo_root,
     ))
 }
 
@@ -497,7 +568,8 @@ fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Res
         // renders as a blank line on stdout, which agents can't tell apart
         // from "command crashed silently". Surface the same hint json/toon
         // already include.
-        let hint = "No matches found. Try a shorter pattern or `gnx search --mode bm25 <fragment>`.";
+        let hint =
+            "No matches found. Try a shorter pattern or `gnx search --mode bm25 <fragment>`.";
         if matches!(format, OutputFormat::Text) {
             return emit(
                 &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),

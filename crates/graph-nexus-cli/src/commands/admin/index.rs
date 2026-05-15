@@ -575,9 +575,9 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
             .is_some_and(|e| matches!(e, "yml" | "yaml"))
             && {
                 let components: Vec<_> = path.components().collect();
-                components.windows(2).any(|w| {
-                    w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows"
-                })
+                components
+                    .windows(2)
+                    .any(|w| w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows")
             };
         if is_gha {
             n.github_actions = true;

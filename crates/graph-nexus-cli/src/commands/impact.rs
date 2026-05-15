@@ -103,7 +103,8 @@ pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
         (Some(_), None) => impact_by_name(args, engine),
         (None, Some(_)) => impact_since(args, engine),
         (None, None) => Err(GnxError::InvalidArgument(
-            "impact requires a symbol (positional <name> or --target <name>) or --since <ref>".into(),
+            "impact requires a symbol (positional <name> or --target <name>) or --since <ref>"
+                .into(),
         )),
         (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
     }

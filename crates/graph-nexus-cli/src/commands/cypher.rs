@@ -23,7 +23,11 @@ pub struct CypherArgs {
     pub query_positional: Option<String>,
 
     /// Named alias for the positional QUERY argument.
-    #[arg(long = "query", value_name = "QUERY", conflicts_with = "query_positional")]
+    #[arg(
+        long = "query",
+        value_name = "QUERY",
+        conflicts_with = "query_positional"
+    )]
     pub query: Option<String>,
 
     /// Repository to query. Cypher operates on a single graph (single-repo only).
