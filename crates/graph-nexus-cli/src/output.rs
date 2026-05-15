@@ -21,39 +21,70 @@ impl OutputFormat {
     }
 }
 
-/// Print `value` to stdout in the requested format. For `Text`, callers must
-/// have already produced human-readable lines and packed them as JSON strings
-/// inside `value["results"]` (or `value` itself if a string array). This keeps
-/// commands free of inline branching while preserving their custom text output.
-pub fn emit(value: &Value, format: OutputFormat) -> Result<(), GnxError> {
+/// Format `value` per `format` and return the rendered string. Does NOT
+/// write to stdout — callers decide. Used by CLI `emit()` (which prints)
+/// and by MCP daemon-mode dispatch (which wraps the string in
+/// `ToolResult::text`).
+pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, GnxError> {
     match format {
         OutputFormat::Toon => {
             let bytes = serde_json::to_vec(value)
                 .map_err(|e| GnxError::Output(format!("json serialize: {e}")))?;
-            let output = _etoon::toon::encode(&bytes)
-                .map_err(|e| GnxError::Output(format!("toon encode: {e}")))?;
-            println!("{}", output);
+            _etoon::toon::encode(&bytes)
+                .map_err(|e| GnxError::Output(format!("toon encode: {e}")))
         }
-        OutputFormat::Json => {
-            let s = serde_json::to_string(value)
-                .map_err(|e| GnxError::Output(format!("json serialize: {e}")))?;
-            println!("{}", s);
-        }
+        OutputFormat::Json => serde_json::to_string(value)
+            .map_err(|e| GnxError::Output(format!("json serialize: {e}"))),
         OutputFormat::Text => {
-            // If the value has a "results" array of strings, print each line.
-            // Otherwise fall back to pretty JSON.
             if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
-                for r in results {
-                    if let Some(s) = r.as_str() {
-                        println!("{}", s);
-                    }
-                }
+                Ok(results
+                    .iter()
+                    .filter_map(|r| r.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"))
             } else {
-                let s = serde_json::to_string_pretty(value)
-                    .map_err(|e| GnxError::Output(format!("json pretty: {e}")))?;
-                println!("{}", s);
+                serde_json::to_string_pretty(value)
+                    .map_err(|e| GnxError::Output(format!("json pretty: {e}")))
             }
         }
     }
+}
+
+/// Print `value` to stdout in the requested format. Thin wrapper over
+/// [`emit_to_string`].
+pub fn emit(value: &Value, format: OutputFormat) -> Result<(), GnxError> {
+    println!("{}", emit_to_string(value, format)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn emit_to_string_json_returns_serialized_value() {
+        let value = json!({"status": "success", "results": []});
+        let out = emit_to_string(&value, OutputFormat::Json).expect("ok");
+        assert!(out.contains("\"status\":\"success\""));
+        assert!(out.contains("\"results\":[]"));
+        // No trailing newline — caller is responsible for println! if they want stdout.
+        assert!(!out.ends_with('\n'));
+    }
+
+    #[test]
+    fn emit_to_string_text_extracts_results_array_lines() {
+        let value = json!({"results": ["line one", "line two"]});
+        let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
+        assert_eq!(out, "line one\nline two");
+    }
+
+    #[test]
+    fn emit_to_string_toon_produces_encoded_output() {
+        let value = json!({"k": "v"});
+        let out = emit_to_string(&value, OutputFormat::Toon).expect("ok");
+        // TOON output is non-empty and not raw JSON.
+        assert!(!out.is_empty());
+        assert!(!out.starts_with('{'));
+    }
 }
