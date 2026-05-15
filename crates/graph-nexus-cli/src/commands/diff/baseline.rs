@@ -69,7 +69,7 @@ fn resolve_pr(pr_num: &str, repo_dir: &Path) -> Result<String, GnxError> {
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if sha.is_empty() {
         return Err(GnxError::Output(format!(
-            "gh pr view PR/{pr_num} returned empty baseRefOid"
+            "gh pr view {pr_num} returned empty baseRefOid (PR/{pr_num})"
         )));
     }
     Ok(sha)

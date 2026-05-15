@@ -43,15 +43,11 @@ pub struct DiffArgs {
 }
 
 pub fn run(args: DiffArgs) -> Result<(), GnxError> {
-    let repo_dir = args
-        .repo
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .map_err(|e| GnxError::Output(format!("cwd: {e}")))
-                .unwrap()
-        });
+    let repo_dir = match args.repo.as_deref() {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir()
+            .map_err(|e| GnxError::Output(format!("cwd: {e}")))?,
+    };
 
     let baseline_sha = baseline::resolve(&args.baseline, &repo_dir)?;
 
