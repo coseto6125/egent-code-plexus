@@ -83,10 +83,10 @@ impl LanguageProvider for SwiftProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_name_function = self.query.capture_index_for_name("name.function");
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
-        let idx_name_interface = self.query.capture_index_for_name("name.interface");
+        let idx_name_function = self.query.capture_index_for_name("function.name");
+        let idx_name_class = self.query.capture_index_for_name("class.name");
+        let idx_name_method = self.query.capture_index_for_name("method.name");
+        let idx_name_interface = self.query.capture_index_for_name("interface.name");
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
@@ -94,6 +94,7 @@ impl LanguageProvider for SwiftProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
+        let idx_typealias = self.query.capture_index_for_name("typealias");
 
         let idx_export = self.query.capture_index_for_name("export");
         let idx_heritage = self.query.capture_index_for_name("heritage");
@@ -126,6 +127,7 @@ impl LanguageProvider for SwiftProvider {
             let mut property_root: Option<tree_sitter::Node<'_>> = None;
             let mut property_name: Option<tree_sitter::Node<'_>> = None;
             let mut property_type: Option<tree_sitter::Node<'_>> = None;
+            let mut typealias_node: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -189,6 +191,22 @@ impl LanguageProvider for SwiftProvider {
                     property_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_property_type {
                     property_type = Some(cap.node);
+                } else if Some(cap_idx) == idx_typealias {
+                    typealias_node = Some(cap.node);
+                }
+            }
+
+            // Swift `typealias MyInt = Int` / `typealias R<T> = Swift.Result<T, Error>`.
+            // Emit a RawImport with alias = Some(lhs) so the binding surfaces
+            // through the same downstream path as Java static-import aliases.
+            // rhs text covers the full type expression (including generics).
+            if let Some(ta_node) = typealias_node {
+                if let Some((lhs, rhs)) = extract_typealias_parts(ta_node, source) {
+                    imports.push(RawImport {
+                        alias: Some(lhs.clone()),
+                        imported_name: lhs,
+                        source: rhs,
+                    });
                 }
             }
 
@@ -261,6 +279,22 @@ impl LanguageProvider for SwiftProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
+                    // `@objc(extName)` exposes a Swift symbol under an
+                    // Obj-C-visible alias. Emit an alias-only RawImport so the
+                    // rename binding shows up in the named-binding dimension
+                    // alongside Java static-import aliases. The attribute node
+                    // is nested under `(modifiers)` (not a direct
+                    // `function_declaration` child), so walk the subtree
+                    // rather than relying on the @decorator capture.
+                    if k == NodeKind::Function {
+                        if let Some(ext) = find_objc_rename_attribute(root, source) {
+                            imports.push(RawImport {
+                                alias: Some(ext.clone()),
+                                imported_name: ext,
+                                source: name_str.to_string(),
+                            });
+                        }
+                    }
                     nodes.push(RawNode {
                         decorators,
                         is_exported,
@@ -314,5 +348,91 @@ impl LanguageProvider for SwiftProvider {
             fanout_refs: vec![],
             blind_spots: vec![],
         })
+    }
+}
+
+/// Pull (lhs name, rhs type text) from a `typealias_declaration` node.
+/// rhs is the full byte range from after `=` to the end of the typealias —
+/// preserving any generic parameters or qualified paths verbatim.
+fn extract_typealias_parts(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<(String, String)> {
+    let mut cur = node.walk();
+    let mut lhs: Option<String> = None;
+    let mut eq_end: Option<usize> = None;
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "type_identifier" if lhs.is_none() => {
+                lhs = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                    .ok()
+                    .map(str::to_string);
+            }
+            "=" => {
+                eq_end = Some(child.end_byte());
+            }
+            _ => {}
+        }
+    }
+    let lhs = lhs?;
+    let eq_end = eq_end?;
+    let rhs_start = source[eq_end..node.end_byte()]
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .map(|off| eq_end + off)
+        .unwrap_or(eq_end);
+    let rhs = std::str::from_utf8(&source[rhs_start..node.end_byte()])
+        .ok()?
+        .trim_end()
+        .to_string();
+    Some((lhs, rhs))
+}
+
+/// Walk a function_declaration's `(modifiers (attribute ...))` subtree for an
+/// `@objc(externalName)` and return `externalName`. Plain `@objc` (no parens)
+/// returns None — there is no rename binding to emit.
+fn find_objc_rename_attribute(func_node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cur = func_node.walk();
+    for child in func_node.children(&mut cur) {
+        if child.kind() != "modifiers" {
+            continue;
+        }
+        let mut mcur = child.walk();
+        for attr in child.children(&mut mcur) {
+            if attr.kind() != "attribute" {
+                continue;
+            }
+            if let Some(name) = attribute_objc_external_name(attr, source) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// For an `(attribute @ user_type(type_identifier=objc) ( <name> ))` node,
+/// return `<name>` if the leading user_type is `objc` and a single
+/// simple_identifier argument is present.
+fn attribute_objc_external_name(attr: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cur = attr.walk();
+    let mut is_objc = false;
+    let mut external: Option<String> = None;
+    for child in attr.children(&mut cur) {
+        match child.kind() {
+            "user_type" => {
+                let txt = std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok()?;
+                if txt == "objc" {
+                    is_objc = true;
+                }
+            }
+            "simple_identifier" if external.is_none() => {
+                external = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                    .ok()
+                    .map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    if is_objc {
+        external
+    } else {
+        None
     }
 }

@@ -5,7 +5,7 @@
   name: [
     (type_identifier)
     (user_type (type_identifier))
-  ] @name.class
+  ] @class.name
   (inheritance_specifier inherits_from: (user_type (type_identifier) @heritage))?
 ) @class
 
@@ -16,7 +16,7 @@
 (function_declaration
   (attribute)* @decorator
   (modifiers (visibility_modifier) @export)?
-  name: (simple_identifier) @name.function) @function
+  name: (simple_identifier) @function.name) @function
 
 ;; Function parameters — `name: Type`. tree-sitter-swift names BOTH children
 ;; `name:` (the simple_identifier is the parameter name, the user_type is the
@@ -38,3 +38,9 @@
 (import_declaration
   (identifier) @import.source
 ) @import
+
+;; Typealias declarations — `typealias MyInt = Int` or generic
+;; `typealias R<T> = Swift.Result<T, Error>`. Captured at the top level so the
+;; parser can read lhs name + full rhs text (including generics) from the
+;; @typealias node's byte range.
+(typealias_declaration) @typealias
