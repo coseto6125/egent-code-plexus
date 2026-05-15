@@ -70,7 +70,10 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
+        # release-dist profile (LTO fat + codegen-units = 1) optimizes the
+        # distributed binary for runtime — build time goes 45s → ~3-4min
+        # per target, only paid once per tag.
+        run: cargo build --profile release-dist --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
@@ -78,7 +81,7 @@ jobs:
         run: |
           name="${BIN_NAME}-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
-          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${name}/"
+          cp "target/${{ matrix.target }}/release-dist/${BIN_NAME}" "dist/${name}/"
           cp README.md LICENSE NOTICE "dist/${name}/" 2>/dev/null || true
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
@@ -90,7 +93,7 @@ jobs:
           $name = "${env:BIN_NAME}-${env:GITHUB_REF_NAME}-${{ matrix.target }}"
           if (-not $env:GITHUB_REF_NAME) { $name = "${env:BIN_NAME}-dev-${{ matrix.target }}" }
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release-dist/${env:BIN_NAME}.exe" "dist/$name/"
           foreach ($f in @('README.md','LICENSE','NOTICE')) {
             if (Test-Path $f) { Copy-Item $f "dist/$name/" }
           }
