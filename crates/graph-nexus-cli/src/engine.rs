@@ -3,12 +3,10 @@ use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct Engine {
     mmap: Mmap,
-    #[allow(dead_code)]
-    graph_path: PathBuf,
 }
 
 impl Engine {
@@ -16,10 +14,7 @@ impl Engine {
         let file = File::open(path.as_ref())?;
         let mmap = unsafe { Mmap::map(&file)? };
         validate_header(&mmap)?;
-        Ok(Self {
-            mmap,
-            graph_path: path.as_ref().to_path_buf(),
-        })
+        Ok(Self { mmap })
     }
 
     pub fn graph(&self) -> Result<&ArchivedZeroCopyGraph, Error> {

@@ -14,6 +14,7 @@
 use clap::{Arg, ArgAction, Command};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct DerivedTool {
@@ -23,8 +24,11 @@ pub struct DerivedTool {
     pub subcommand: String,
     /// Human-readable description from clap `about`.
     pub description: String,
-    /// JSON-schema object: `{type, properties, required}`.
-    pub schema: Value,
+    /// JSON-schema object: `{type, properties, required}`. `Arc`'d so the
+    /// dispatch path (`call_tool` → `spawn_blocking`) can hold a cheap
+    /// owned handle without deep-cloning a nested `Value` tree on every
+    /// MCP request.
+    pub schema: Arc<Value>,
     /// Arg IDs whose CLI action is `SetTrue`/`SetFalse` — emitted as a bare
     /// flag (`--foo`) with no following value.
     pub flag_args: HashSet<String>,
@@ -74,12 +78,12 @@ fn derive_tool(cmd: &Command) -> DerivedTool {
         }
     }
 
-    let schema = json!({
+    let schema = Arc::new(json!({
         "type": "object",
         "properties": Value::Object(properties),
         "required": Value::Array(required),
         "additionalProperties": false,
-    });
+    }));
 
     DerivedTool {
         name,

@@ -7,6 +7,7 @@ use graph_nexus_mcp::spawn::run_spawn;
 use serde_json::json;
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 fn write_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
@@ -23,7 +24,7 @@ fn dummy_tool(subcommand: &str) -> DerivedTool {
         name: format!("gnx_{subcommand}"),
         subcommand: subcommand.into(),
         description: String::new(),
-        schema: json!({}),
+        schema: Arc::new(json!({})),
         flag_args: HashSet::new(),
         positional_args: Vec::new(),
     }

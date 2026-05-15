@@ -44,7 +44,6 @@ pub fn json_to_argv(
     let Value::Object(map) = args else {
         bail!("expected JSON object at args root, got {}", type_name(args));
     };
-    let positional_set: HashSet<&str> = positional_args.iter().map(|s| s.as_str()).collect();
     let mut out = Vec::with_capacity(map.len() * 2);
 
     // Positional first, in declared order.
@@ -56,7 +55,7 @@ pub fn json_to_argv(
     }
 
     for (k, v) in map {
-        if positional_set.contains(k.as_str()) {
+        if positional_args.iter().any(|p| p == k) {
             continue;
         }
         let flag = format!("--{}", to_kebab(k));

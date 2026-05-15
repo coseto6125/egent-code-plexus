@@ -12,6 +12,10 @@ pub struct GnxMcpServer {
     pub self_exe: PathBuf,
     /// Tools derived from the clap tree at construction time.
     tools: Vec<DerivedTool>,
+    /// Pre-built rmcp tool models; reused across every `tools/list` request.
+    /// `rmcp::model::Tool` is internally `Arc`-backed, so `.to_vec()` over
+    /// this slice is a cheap refcount bump per entry.
+    rmcp_tools: Vec<rmcp::model::Tool>,
 }
 
 impl GnxMcpServer {
@@ -20,9 +24,12 @@ impl GnxMcpServer {
     pub fn new(root: &Command) -> Result<Self> {
         let self_exe =
             std::env::current_exe().context("locating current_exe for spawn dispatch")?;
+        let tools = enumerate_tools(root);
+        let rmcp_tools = build_rmcp_tools(&tools);
         Ok(Self {
             self_exe,
-            tools: enumerate_tools(root),
+            tools,
+            rmcp_tools,
         })
     }
 
@@ -65,7 +72,7 @@ impl rmcp::ServerHandler for RmcpHandler {
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
            + rmcp::service::MaybeSendFuture
            + '_ {
-        let tools = build_rmcp_tools(&self.0);
+        let tools = self.0.rmcp_tools.to_vec();
         std::future::ready(Ok(rmcp::model::ListToolsResult::with_all_items(tools)))
     }
 
@@ -94,20 +101,19 @@ impl rmcp::ServerHandler for RmcpHandler {
     }
 }
 
-fn build_rmcp_tools(server: &GnxMcpServer) -> Vec<rmcp::model::Tool> {
-    server
-        .list_tools()
+fn build_rmcp_tools(tools: &[DerivedTool]) -> Vec<rmcp::model::Tool> {
+    tools
         .iter()
         .map(|t| {
-            let input_schema: Arc<rmcp::model::JsonObject> = Arc::new(match &t.schema {
-                serde_json::Value::Object(map) => map.clone(),
-                other => {
-                    let mut m = serde_json::Map::new();
-                    m.insert("description".into(), other.clone());
-                    m
-                }
-            });
-            rmcp::model::Tool::new(t.name.clone(), t.description.clone(), input_schema)
+            // `schema` is always built by `derive_tool` as `json!({type:"object", ...})`,
+            // so `as_object()` is guaranteed to be `Some`. Using `.expect()` makes that
+            // invariant explicit rather than carrying a dead fallback branch.
+            let map = t
+                .schema
+                .as_object()
+                .expect("DerivedTool::schema is always Value::Object")
+                .clone();
+            rmcp::model::Tool::new(t.name.clone(), t.description.clone(), Arc::new(map))
         })
         .collect()
 }
