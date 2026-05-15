@@ -34,9 +34,7 @@ fn short_pattern_no_op() {
 
 #[test]
 fn missing_graph_no_op() {
-    let out = run(
-        r#"{"cwd":"/tmp","tool_name":"Grep","tool_input":{"pattern":"validateUser"}}"#,
-    );
+    let out = run(r#"{"cwd":"/tmp","tool_name":"Grep","tool_input":{"pattern":"validateUser"}}"#);
     assert!(out.stdout.is_empty(), "no .gitnexus-rs/ in /tmp → no-op");
 }
 
@@ -45,7 +43,10 @@ fn bash_grep_no_index_no_op() {
     let out = run(
         r#"{"cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"rg -n 'validateUser' src/"}}"#,
     );
-    assert!(out.stdout.is_empty(), "no index → no-op even with valid pattern");
+    assert!(
+        out.stdout.is_empty(),
+        "no index → no-op even with valid pattern"
+    );
     assert!(out.status.success(), "hook must never fail on no-op");
 }
 
