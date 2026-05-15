@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 pub enum Direction {
+    #[value(alias = "upstream")]
     Up,
+    #[value(alias = "downstream")]
     Down,
     Both,
 }
@@ -23,8 +25,14 @@ pub enum Direction {
 /// caller or downstream callee up to a configurable depth.
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
-    /// Target symbol name (mutually exclusive with --since).
+    /// Target symbol name (mutually exclusive with --since). Equivalent to
+    /// the `--target` named form below.
     pub name: Option<String>,
+
+    /// Named alias for the positional NAME argument — kept for parity with
+    /// old MCP / wrapper habits.
+    #[arg(long = "target", value_name = "TARGET", conflicts_with_all = ["name", "since"])]
+    pub target: Option<String>,
 
     /// Git ref — compute blast radius across all symbols changed since this
     /// ref. Mutually exclusive with positional <name>.
@@ -85,12 +93,17 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     })
 }
 
-pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
+    // `--target X` is a habit-form alias for the positional <name>. Fold
+    // it into `name` so downstream paths only check one field.
+    if args.name.is_none() && args.target.is_some() {
+        args.name = args.target.take();
+    }
     match (args.name.as_ref(), args.since.as_ref()) {
         (Some(_), None) => impact_by_name(args, engine),
         (None, Some(_)) => impact_since(args, engine),
         (None, None) => Err(GnxError::InvalidArgument(
-            "impact requires either <name> positional or --since <ref>".into(),
+            "impact requires a symbol (positional <name> or --target <name>) or --since <ref>".into(),
         )),
         (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
     }

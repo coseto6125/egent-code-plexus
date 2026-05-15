@@ -1,5 +1,5 @@
 use graph_nexus_cli::hint::{
-    collision_warning, empty_result, error_with_cause, fuzzy_suggestions, stale_warning,
+    collision_warning, empty_result, error_with_cause, fuzzy_suggestions,
 };
 
 #[test]
@@ -38,15 +38,6 @@ fn error_with_cause_three_lines() {
     assert!(lines[0].starts_with("✗"));
     assert!(lines[1].contains("cause:"));
     assert!(lines[2].contains("next:"));
-}
-
-#[test]
-fn stale_warning_one_line() {
-    let msg = stale_warning("alpha", "2h");
-    assert!(msg.starts_with("⚠"));
-    assert!(msg.contains("alpha"));
-    assert!(msg.contains("2h"));
-    assert_eq!(msg.lines().count(), 1);
 }
 
 #[test]

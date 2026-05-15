@@ -45,14 +45,9 @@ pub fn run(args: CoverageArgs, _graph_arg: &Path) -> Result<(), GnxError> {
 
     let mut sections: serde_json::Map<String, Value> = serde_json::Map::new();
 
-    // Section 1: registry overview (always present)
-    sections.insert(
-        "indexed_repos".into(),
-        build_registry_overview(reg, args.detailed),
-    );
-    sections.insert("groups".into(), build_groups_overview(reg));
-
-    // Section 2: per-repo health (only when --repo provided)
+    // `--repo` acts as filter: drop the registry-wide overview to keep
+    // single-repo output focused (the per_repo section already contains
+    // the relevant entries). Without `--repo`, fall back to registry view.
     if let Some(repo_sel) = args.repo.as_deref() {
         let selector = crate::repo_selector::parse(repo_sel)
             .map_err(|e| GnxError::Output(format!("selector: {e}")))?;
@@ -65,6 +60,12 @@ pub fn run(args: CoverageArgs, _graph_arg: &Path) -> Result<(), GnxError> {
         })?;
         let per_repo: Vec<Value> = resolved.iter().map(build_repo_health).collect();
         sections.insert("per_repo".into(), Value::Array(per_repo));
+    } else {
+        sections.insert(
+            "indexed_repos".into(),
+            build_registry_overview(reg, args.detailed),
+        );
+        sections.insert("groups".into(), build_groups_overview(reg));
     }
 
     let value = json!({ "coverage": Value::Object(sections) });

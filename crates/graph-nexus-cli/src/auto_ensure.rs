@@ -1,21 +1,17 @@
 //! Auto-ensure index for agent CLI commands.
 //!
-//! Protocol (see spec §5):
-//!   1. If graph.bin missing → caller should trigger `admin index` synchronously
-//!      and retry. Returned as `EnsureResult::Missing`.
-//!   2. If graph.bin present but mtime < newest source file → emit stale warning
-//!      to stderr (caller continues). Returned as `EnsureResult::Stale { age_seconds }`.
-//!   3. Otherwise → `EnsureResult::Ready`.
-//!
-//! This module checks status; it does NOT invoke the index build (callers
-//! decide whether to auto-build or surface the missing state — `cypher` may
-//! prefer to fail, `inspect` will auto-build).
+//! `ensure_index` reports state (Ready / Stale / Missing). `ensure_fresh`
+//! is the actionable wrapper: if state is Stale or Missing it invokes
+//! `admin index` synchronously, prints a one-line stderr notice once the
+//! rebuild succeeds, then returns. Agent commands call `ensure_fresh`
+//! before loading the graph so the user never sees a "stale" warning or
+//! a "graph.bin not found" failure for a tracked worktree.
 
 use ignore::WalkBuilder;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureResult {
@@ -43,6 +39,38 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
         return Ok(EnsureResult::Stale { age_seconds: age });
     }
     Ok(EnsureResult::Ready)
+}
+
+/// Ensure the graph exists and is fresher than the working tree. On Missing
+/// or Stale, invokes `admin index` synchronously for `worktree_root`, prints
+/// a one-line "Index refreshed" notice to stderr, and returns. Ready returns
+/// immediately with no output. Errors from the rebuild surface verbatim.
+pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), String> {
+    let state = ensure_index(graph_path, worktree_root)
+        .map_err(|e| format!("ensure_index probe: {e}"))?;
+    let reason = match state {
+        EnsureResult::Ready => return Ok(()),
+        EnsureResult::Missing => "missing",
+        EnsureResult::Stale { .. } => "stale",
+    };
+
+    let start = Instant::now();
+    let args = crate::commands::admin::index::IndexArgs {
+        repo: worktree_root.to_string_lossy().into_owned(),
+        embeddings: false,
+        drop_embeddings: false,
+        force: false,
+        dump_resolver: None,
+        no_cache: false,
+        quiet: true,
+    };
+    crate::commands::admin::index::run(args)?;
+    eprintln!(
+        "✓ Index refreshed ({} → fresh in {:.1}s)",
+        reason,
+        start.elapsed().as_secs_f32(),
+    );
+    Ok(())
 }
 
 /// Build artifacts, vendor dirs, and language-specific caches: walking

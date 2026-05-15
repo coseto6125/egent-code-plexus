@@ -16,8 +16,15 @@ static CYPHER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 #[derive(Args, Debug, Clone)]
 pub struct CypherArgs {
-    /// The Cypher query string
-    pub query: String,
+    /// The Cypher query string. Accepts the positional form
+    /// (`gnx cypher "MATCH ..."`) — the `--query` named form below
+    /// stays as an alias for parity with old MCP / wrapper habits.
+    #[arg(value_name = "QUERY")]
+    pub query_positional: Option<String>,
+
+    /// Named alias for the positional QUERY argument.
+    #[arg(long = "query", value_name = "QUERY", conflicts_with = "query_positional")]
+    pub query: Option<String>,
 
     /// Repository to query. Cypher operates on a single graph (single-repo only).
     /// If --repo resolves to multiple repos, an error is returned.
@@ -26,6 +33,22 @@ pub struct CypherArgs {
 
     #[arg(long, default_value = "json")]
     pub format: String,
+}
+
+impl CypherArgs {
+    /// Resolve query from either positional or `--query` form. Returns an
+    /// `InvalidArgument` error if neither was supplied — mirrors the prior
+    /// behaviour where clap rejected a missing positional outright.
+    fn resolved_query(&self) -> Result<&str, graph_nexus_core::GnxError> {
+        self.query
+            .as_deref()
+            .or(self.query_positional.as_deref())
+            .ok_or_else(|| {
+                graph_nexus_core::GnxError::InvalidArgument(
+                    "cypher requires a query — pass it positionally (gnx cypher \"MATCH ...\") or via --query".into(),
+                )
+            })
+    }
 }
 
 /// Lazily read + cache file bodies during a single cypher query. We may emit
@@ -208,7 +231,8 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
         .graph()
         .map_err(|e| graph_nexus_core::GnxError::Rkyv(e.to_string()))?;
 
-    let caps = match CYPHER_REGEX.captures(&args.query) {
+    let query_str = args.resolved_query()?;
+    let caps = match CYPHER_REGEX.captures(query_str) {
         Some(c) => c,
         None => {
             return Err(graph_nexus_core::GnxError::InvalidArgument(

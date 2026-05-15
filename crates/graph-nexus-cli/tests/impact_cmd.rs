@@ -157,9 +157,12 @@ fn impact_accepts_name_positional() {
 }
 
 #[test]
-fn impact_rejects_old_target_flag() {
+fn impact_accepts_target_flag_as_alias_for_positional() {
+    // `--target` is the named alias for the positional <name>. The graph
+    // is empty so the symbol won't resolve, but clap must parse the flag
+    // (i.e. the failure should come from "symbol not found", not from
+    // "unexpected argument"). This pins the alias against regressions.
     let tmp = tempfile::tempdir().unwrap();
-    // No need to analyze — clap rejects --target before the graph is loaded.
     let out = Command::new(gnx_bin())
         .args([
             "impact",
@@ -173,16 +176,9 @@ fn impact_rejects_old_target_flag() {
         .output()
         .expect("gnx failed to spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !out.status.success(),
-        "--target should be rejected but process succeeded"
-    );
-    assert!(
-        stderr.contains("unexpected argument")
-            || stderr.contains("--target")
-            || stderr.contains("error"),
-        "expected clap error about --target:\nstderr={stderr}\nstdout={stdout}"
+        !stderr.contains("unexpected argument"),
+        "--target must be accepted (alias for positional); got: {stderr}"
     );
 }
 

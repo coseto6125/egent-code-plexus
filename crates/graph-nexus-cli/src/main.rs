@@ -82,7 +82,14 @@ enum Commands {
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    // Default to WARN so tantivy / parser INFO chatter doesn't reach agents'
+    // stderr. RUST_LOG=info / debug overrides for human debugging.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
     let cli = Cli::parse();
 
     // Admin: subcommand → run the admin operation; no subcommand → launch TUI.
@@ -148,6 +155,11 @@ fn main() {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let graph_path = graph_path::resolve(&cli.graph, &cwd);
+
+    if let Err(err) = auto_ensure::ensure_fresh(&graph_path, &cwd) {
+        eprintln!("Error preparing index for {}: {err}", cwd.display());
+        std::process::exit(1);
+    }
 
     let engine = match Engine::load(&graph_path) {
         Ok(e) => e,

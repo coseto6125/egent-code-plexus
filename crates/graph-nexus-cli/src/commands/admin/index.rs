@@ -47,6 +47,13 @@ pub struct IndexArgs {
     /// for benchmark baselines.
     #[arg(long, default_value_t = false)]
     pub no_cache: bool,
+
+    /// Suppress progress output (timings, "Graph saved", etc.). Used by
+    /// auto_ensure when an agent command transparently rebuilds; the
+    /// agent's stdout must stay clean and the user sees only the single
+    /// "Index refreshed" notice from the wrapper.
+    #[arg(skip)]
+    pub quiet: bool,
 }
 
 pub fn run(args: IndexArgs) -> Result<(), String> {
@@ -396,46 +403,50 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     // corrupt, and self-heals on the next analyze run).
     let index_start = Instant::now();
     if let Err(e) = crate::search::TantivyEngine::build_index(&repo_path, &global_graph) {
-        eprintln!(
-            "warning: full-text index build failed ({e}); exact-name queries still work — rerun `gnx analyze` to retry"
-        );
+        if !args.quiet {
+            eprintln!(
+                "warning: full-text index build failed ({e}); exact-name queries still work — rerun `gnx analyze` to retry"
+            );
+        }
     }
     let index_duration = index_start.elapsed();
 
     let total_duration = start_time.elapsed();
 
-    if skipped_large_files > 0 {
+    if skipped_large_files > 0 && !args.quiet {
         eprintln!(
             "Skipped: {} files > 512KB (preventing memory exhaustion).",
             skipped_large_files
         );
     }
 
-    println!("Graph analysis complete.");
-    println!("  Scan time:    {:?}", scan_duration);
-    println!("  Analyze time: {:?}", analyze_duration);
-    println!("  Build time:   {:?}", build_duration);
-    println!("  Save time:    {:?}", save_duration);
-    println!("  Index time:   {:?}", index_duration);
-    println!("  Total time:   {:?}", total_duration);
-    if cache_disabled {
-        println!(
-            "  Cache:        disabled ({} files re-parsed)",
-            cache_count_post
-        );
-    } else if cache_count_pre == 0 {
-        println!(
-            "  Cache:        first-run, building cache from {} files",
-            cache_count_post
-        );
-    } else {
-        let reparsed = cache_count_post.saturating_sub(cache_hits);
-        println!(
-            "  Cache:        {} reused / {} re-parsed (cache had {} entries)",
-            cache_hits, reparsed, cache_count_pre
-        );
+    if !args.quiet {
+        println!("Graph analysis complete.");
+        println!("  Scan time:    {:?}", scan_duration);
+        println!("  Analyze time: {:?}", analyze_duration);
+        println!("  Build time:   {:?}", build_duration);
+        println!("  Save time:    {:?}", save_duration);
+        println!("  Index time:   {:?}", index_duration);
+        println!("  Total time:   {:?}", total_duration);
+        if cache_disabled {
+            println!(
+                "  Cache:        disabled ({} files re-parsed)",
+                cache_count_post
+            );
+        } else if cache_count_pre == 0 {
+            println!(
+                "  Cache:        first-run, building cache from {} files",
+                cache_count_post
+            );
+        } else {
+            let reparsed = cache_count_post.saturating_sub(cache_hits);
+            println!(
+                "  Cache:        {} reused / {} re-parsed (cache had {} entries)",
+                cache_hits, reparsed, cache_count_pre
+            );
+        }
+        println!("Graph saved to {:?}", bin_path);
     }
-    println!("Graph saved to {:?}", bin_path);
 
     Ok(())
 }
