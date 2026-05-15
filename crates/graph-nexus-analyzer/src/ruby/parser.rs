@@ -97,6 +97,11 @@ impl LanguageProvider for RubyProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
+        // Mixin module additions, applied after primary node emission. Each
+        // entry is (module_name, call_line) — we attach to the smallest
+        // enclosing class node by span containment. Document-order traversal
+        // of tree-sitter matches preserves source ordering (M1 before M2).
+        let mut pending_mixins: Vec<(String, u32)> = Vec::new();
 
         let idx_name = self.query.capture_index_for_name("name");
         let idx_heritage = self.query.capture_index_for_name("heritage");
@@ -108,6 +113,8 @@ impl LanguageProvider for RubyProvider {
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
         let idx_route = self.query.capture_index_for_name("route");
+        let idx_attr_args = self.query.capture_index_for_name("attr_args");
+        let idx_mixin_module = self.query.capture_index_for_name("mixin_module");
 
         while let Some(m) = matches.next() {
             let mut node_name = None;
@@ -120,6 +127,9 @@ impl LanguageProvider for RubyProvider {
             let mut route_method = None;
             let mut route_path = None;
             let mut route_root = None;
+
+            let mut attr_args_node: Option<tree_sitter::Node<'_>> = None;
+            let mut mixin_module_node: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -154,6 +164,10 @@ impl LanguageProvider for RubyProvider {
                     route_path = Some(cap.node);
                 } else if cap_idx == idx_route {
                     route_root = Some(cap.node);
+                } else if cap_idx == idx_attr_args {
+                    attr_args_node = Some(cap.node);
+                } else if cap_idx == idx_mixin_module {
+                    mixin_module_node = Some(cap.node);
                 }
             }
 
@@ -222,6 +236,79 @@ impl LanguageProvider for RubyProvider {
                         ),
                     });
                 }
+            }
+
+            // attr_reader / attr_writer / attr_accessor → emit one Property per symbol.
+            // is_exported=true unconditionally; private-block detection is punted for MVP
+            // because tree-sitter parses `private` as just another bareword call without
+            // a structural block — distinguishing "below a private call" from "above"
+            // requires a stateful AST sweep that's out of scope for this pass.
+            if let Some(args) = attr_args_node {
+                let mut walker = args.walk();
+                for child in args.named_children(&mut walker) {
+                    if child.kind() != "simple_symbol" {
+                        continue;
+                    }
+                    let Ok(sym_text) =
+                        std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                    else {
+                        continue;
+                    };
+                    let prop_name = sym_text.strip_prefix(':').unwrap_or(sym_text);
+                    if prop_name.is_empty() {
+                        continue;
+                    }
+                    let start = child.start_position();
+                    let end = child.end_position();
+                    nodes.push(RawNode {
+                        name: prop_name.to_string(),
+                        kind: NodeKind::Property,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        is_exported: true,
+                        heritage: Vec::new(),
+                        type_annotation: None,
+                        decorators: Vec::new(),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+
+            // include / extend → queue the module name for attachment to the
+            // enclosing class's heritage after all class nodes are emitted.
+            if let Some(mm) = mixin_module_node {
+                if let Ok(mm_str) = std::str::from_utf8(&source[mm.start_byte()..mm.end_byte()]) {
+                    let line = mm.start_position().row as u32;
+                    pending_mixins.push((mm_str.to_string(), line));
+                }
+            }
+        }
+
+        // Apply mixins: for each (module, line), find the smallest enclosing
+        // class RawNode by span containment and append the module to its
+        // heritage. Mixins outside any class are dropped (matches Ruby
+        // semantics — bare top-level `include` is rare and out of scope).
+        for (module_name, line) in pending_mixins {
+            let mut best: Option<usize> = None;
+            let mut best_span: u32 = u32::MAX;
+            for (i, n) in nodes.iter().enumerate() {
+                if n.kind != NodeKind::Class {
+                    continue;
+                }
+                if n.span.0 <= line && n.span.2 >= line {
+                    let width = n.span.2 - n.span.0;
+                    if width < best_span {
+                        best_span = width;
+                        best = Some(i);
+                    }
+                }
+            }
+            if let Some(i) = best {
+                nodes[i].heritage.push(module_name);
             }
         }
 
