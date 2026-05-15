@@ -8,6 +8,7 @@ use graph_nexus_core::algorithms::process_trace::is_test_path;
 use graph_nexus_core::config;
 use graph_nexus_core::graph::NodeKind;
 use graph_nexus_core::{GnxError, HIGH_TRUST_CONFIDENCE};
+use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -184,19 +185,28 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     let min_conf = resolve_min_conf(&args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
 
+    // Fan BFS out across matches. `run_bfs` is read-only on the archived
+    // graph; `par_iter().collect()` preserves input order so JSON output
+    // stays deterministic.
+    let bfs_outputs: Vec<(Vec<Value>, u64)> = matches
+        .par_iter()
+        .map(|&start_idx| {
+            run_bfs(
+                graph,
+                start_idx,
+                &args.direction,
+                args.depth,
+                min_conf,
+                args.include_tests,
+                &rel_filter,
+            )
+        })
+        .collect();
+
     let mut all_results: Vec<Value> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
-    for start_idx in &matches {
-        let (bfs_result, hidden) = run_bfs(
-            graph,
-            *start_idx,
-            &args.direction,
-            args.depth,
-            min_conf,
-            args.include_tests,
-            &rel_filter,
-        );
-        all_results.extend(bfs_result);
+    for (rows, hidden) in bfs_outputs {
+        all_results.extend(rows);
         hidden_edges_total += hidden;
     }
 
@@ -405,30 +415,42 @@ fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     let min_conf = resolve_min_conf(&args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
 
-    // Run BFS from each changed symbol.
-    let mut impact_by_symbol: Vec<Value> = Vec::new();
+    // Run BFS from each changed symbol in parallel. `par_iter().collect()`
+    // preserves input order so `impact_by_symbol` matches the sequential
+    // ordering callers (and snapshot tests) expect.
+    let bfs_outputs: Vec<(Value, u64)> = changed_node_indices
+        .par_iter()
+        .map(|&start_idx| {
+            let node = &graph.nodes[start_idx];
+            let sym_name = node.name.resolve(&graph.string_pool).to_string();
+            let sym_file = graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(&graph.string_pool)
+                .to_string();
+            let (bfs_result, hidden) = run_bfs(
+                graph,
+                start_idx,
+                &args.direction,
+                args.depth,
+                min_conf,
+                args.include_tests,
+                &rel_filter,
+            );
+            (
+                json!({
+                    "symbol": sym_name,
+                    "filePath": sym_file,
+                    "impact": bfs_result,
+                }),
+                hidden,
+            )
+        })
+        .collect();
+
+    let mut impact_by_symbol: Vec<Value> = Vec::with_capacity(bfs_outputs.len());
     let mut hidden_edges_total: u64 = 0;
-    for &start_idx in &changed_node_indices {
-        let node = &graph.nodes[start_idx];
-        let sym_name = node.name.resolve(&graph.string_pool).to_string();
-        let sym_file = graph.files[node.file_idx.to_native() as usize]
-            .path
-            .resolve(&graph.string_pool)
-            .to_string();
-        let (bfs_result, hidden) = run_bfs(
-            graph,
-            start_idx,
-            &args.direction,
-            args.depth,
-            min_conf,
-            args.include_tests,
-            &rel_filter,
-        );
-        impact_by_symbol.push(json!({
-            "symbol": sym_name,
-            "filePath": sym_file,
-            "impact": bfs_result,
-        }));
+    for (entry, hidden) in bfs_outputs {
+        impact_by_symbol.push(entry);
         hidden_edges_total += hidden;
     }
 
