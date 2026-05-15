@@ -3,6 +3,20 @@ use super::types::LocalGraph;
 use rayon::prelude::*;
 use std::path::PathBuf;
 
+/// Skip source files larger than this cap. A 100 MiB minified JS bundle or a
+/// pathological generated source can otherwise materialise straight into
+/// memory via `std::fs::read` and OOM the process. 16 MiB is well above any
+/// hand-written source we've seen while still bounding worst-case RAM at
+/// `num_threads * 16 MiB`. Override at runtime via `GNX_MAX_FILE_BYTES`.
+const MAX_FILE_BYTES_DEFAULT: u64 = 16 * 1024 * 1024;
+
+fn resolve_max_file_bytes() -> u64 {
+    std::env::var("GNX_MAX_FILE_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(MAX_FILE_BYTES_DEFAULT)
+}
+
 #[derive(Default)]
 pub struct AnalyzerPipeline {
     providers: Vec<Box<dyn LanguageProvider>>,
@@ -239,6 +253,7 @@ impl AnalyzerPipeline {
     {
         let (tx, rx) = crossbeam_channel::unbounded::<LocalGraph>();
         let cache_lookup = &cache_lookup;
+        let max_file_bytes = resolve_max_file_bytes();
 
         // Producer (A): parse files concurrently
         rayon::scope(|s| {
@@ -248,6 +263,14 @@ impl AnalyzerPipeline {
                     .for_each_with(tx, |sender, (abs_path, rel_path)| {
                         if self.find_provider(&rel_path).is_none() {
                             return;
+                        }
+                        // Skip oversized files before `fs::read` to keep the
+                        // worker thread from materialising a multi-GiB blob
+                        // into memory. metadata() is one fstat — cheap.
+                        if let Ok(meta) = std::fs::metadata(&abs_path) {
+                            if meta.len() > max_file_bytes {
+                                return;
+                            }
                         }
                         let source = match std::fs::read(&abs_path) {
                             Ok(s) => s,
@@ -331,5 +354,48 @@ mod tests {
             .collect();
         assert!(paths.contains(&"a.ts"));
         assert!(paths.contains(&"b.ts"));
+    }
+
+    /// Files exceeding `GNX_MAX_FILE_BYTES` must be skipped silently so a
+    /// rogue multi-GiB source can't OOM the process. Verify with a tiny
+    /// cap (10 bytes) that an 11-byte file is excluded from results.
+    #[test]
+    fn oversize_file_is_skipped() {
+        // SAFETY: set_var is `unsafe` in 2024 ed. The pipeline reads the env
+        // var once before spawning rayon workers, so racing with other tests
+        // (which don't touch this var) is not a concern here.
+        unsafe { std::env::set_var("GNX_MAX_FILE_BYTES", "10") };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let big = tmp.path().join("big.ts");
+        let small = tmp.path().join("small.ts");
+        std::fs::write(&big, b"AAAAAAAAAAAAAAAAA").unwrap(); // 17 bytes > 10
+        std::fs::write(&small, b"x").unwrap(); // 1 byte ≤ 10
+
+        let mut pipeline = AnalyzerPipeline::new();
+        pipeline.register_provider(Box::new(TypeScriptProvider));
+
+        let files = vec![
+            (big.clone(), PathBuf::from("big.ts")),
+            (small.clone(), PathBuf::from("small.ts")),
+        ];
+        let results = pipeline.analyze(files);
+
+        let paths: Vec<_> = results
+            .iter()
+            .map(|g| g.file_path.to_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p == "big.ts"),
+            "17-byte file must be skipped under 10-byte cap; got {:?}",
+            paths
+        );
+        assert!(
+            paths.iter().any(|p| p == "small.ts"),
+            "1-byte file must still pass through; got {:?}",
+            paths
+        );
+
+        unsafe { std::env::remove_var("GNX_MAX_FILE_BYTES") };
     }
 }
