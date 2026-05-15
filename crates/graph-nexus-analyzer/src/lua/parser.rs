@@ -167,7 +167,7 @@ impl LanguageProvider for LuaProvider {
                         let new_has_priority = matches!(k, NodeKind::Class | NodeKind::Function)
                             && matches!(existing_kind, NodeKind::Const);
                         if new_has_priority {
-                            nodes[existing_idx].kind = k.clone();
+                            nodes[existing_idx].kind = k;
                             if matches!(k, NodeKind::Class) {
                                 class_name_to_idx.insert(name_str.to_string(), existing_idx);
                             }
