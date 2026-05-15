@@ -79,8 +79,8 @@ fn run_json(repo: &std::path::Path, args: &[&str]) -> Value {
         .unwrap_or_else(|err| panic!("{args:?} did not return JSON: {err}\nstdout={stdout}"))
 }
 
-/// `RETURN m.content, t.name` → caller's `source.content` should hold the
-/// caller's function body text sliced out of the file on disk.
+/// `RETURN m.content, t.name` → the content column should hold the caller's
+/// function body text sliced out of the file on disk.
 #[test]
 fn cypher_returns_node_content_when_requested() {
     let tmp = tempfile::tempdir().unwrap();
@@ -96,33 +96,51 @@ fn cypher_returns_node_content_when_requested() {
         ],
     );
 
-    let results = out["results"]
+    let columns = out["columns"]
         .as_array()
-        .unwrap_or_else(|| panic!("expected results array, got {out}"));
-    assert!(
-        !results.is_empty(),
-        "cypher should return at least one row: {out}"
-    );
+        .unwrap_or_else(|| panic!("expected columns array, got {out}"));
+    let rows = out["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected rows array, got {out}"));
+    assert!(!rows.is_empty(), "cypher should return at least one row: {out}");
 
-    let row = &results[0];
-    let content = row["source"]["content"]
+    // Locate the column indices.
+    let col_names: Vec<&str> = columns.iter().map(|c| c.as_str().unwrap()).collect();
+    let m_content_col = col_names
+        .iter()
+        .position(|&c| c == "m.content")
+        .unwrap_or_else(|| panic!("expected column m.content in {col_names:?}"));
+    let t_name_col = col_names
+        .iter()
+        .position(|&c| c == "t.name")
+        .unwrap_or_else(|| panic!("expected column t.name in {col_names:?}"));
+
+    let row = &rows[0];
+    let content = row[m_content_col]
         .as_str()
-        .unwrap_or_else(|| panic!("source.content missing or not a string: {row}"));
+        .unwrap_or_else(|| panic!("m.content cell missing or not a string: {row}"));
     // The body text must include the call site `callee()` from the caller fn.
     assert!(
         content.contains("callee()"),
-        "source.content should include the function body, got {content:?}"
+        "m.content should include the function body, got {content:?}"
     );
-    // The target side asked for `.name` only — no `.content` requested there,
-    // so the target object must not carry a content field.
+
+    // t.name column should exist and be a non-empty string.
     assert!(
-        row["target"].get("content").is_none(),
-        "target should not have a content field when not requested: {row}"
+        rows[0][t_name_col].is_string(),
+        "t.name should be a string: {row}"
+    );
+
+    // No m.content column requested for t — verify no "t.content" column.
+    assert!(
+        !col_names.contains(&"t.content"),
+        "t.content should not be in columns when not requested: {col_names:?}"
     );
 }
 
-/// `RETURN m, t` (no `.content`) preserves the legacy shape so unrelated
-/// callers don't see a behavior change.
+/// `RETURN m, t` (bare vars) — Phase C9 expands each into 3 columns:
+/// `<var>.name, <var>.kind, <var>.filePath`. Verify NO `m.content` or
+/// `t.content` column appears (content is only present when explicitly asked).
 #[test]
 fn cypher_without_content_returns_only_name() {
     let tmp = tempfile::tempdir().unwrap();
@@ -138,27 +156,30 @@ fn cypher_without_content_returns_only_name() {
         ],
     );
 
-    let results = out["results"]
+    let columns = out["columns"]
         .as_array()
-        .unwrap_or_else(|| panic!("expected results array, got {out}"));
-    assert!(!results.is_empty(), "cypher should return rows: {out}");
+        .unwrap_or_else(|| panic!("expected columns array, got {out}"));
+    let rows = out["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected rows array, got {out}"));
+    assert!(!rows.is_empty(), "cypher should return rows: {out}");
 
-    for row in results {
-        assert!(
-            row["source"].get("content").is_none(),
-            "source should not carry content without `.content` in RETURN: {row}"
-        );
-        assert!(
-            row["target"].get("content").is_none(),
-            "target should not carry content without `.content` in RETURN: {row}"
-        );
-    }
+    let col_names: Vec<&str> = columns.iter().map(|c| c.as_str().unwrap()).collect();
+
+    // Bare `m` expands to m.name, m.kind, m.filePath — never m.content.
+    assert!(
+        !col_names.contains(&"m.content"),
+        "m.content should not be in columns without `.content` in RETURN: {col_names:?}"
+    );
+    assert!(
+        !col_names.contains(&"t.content"),
+        "t.content should not be in columns without `.content` in RETURN: {col_names:?}"
+    );
 }
 
-/// File deleted after analyze → cypher must not panic and `content` falls
-/// back to an empty string. The graph may legitimately reference a file the
-/// user has since edited or removed; we should report a stale entry, not
-/// crash.
+/// File deleted after analyze → cypher must not panic and `.content` columns
+/// fall back to empty string. The graph may legitimately reference a file the
+/// user has since edited or removed; we should report a stale entry, not crash.
 #[test]
 fn cypher_content_handles_missing_file_gracefully() {
     let tmp = tempfile::tempdir().unwrap();
@@ -191,25 +212,33 @@ fn cypher_content_handles_missing_file_gracefully() {
     let json: Value = serde_json::from_str(&stdout[json_start..])
         .unwrap_or_else(|err| panic!("cypher did not return JSON: {err}\nstdout={stdout}"));
 
-    let results = json["results"]
+    let columns = json["columns"]
         .as_array()
-        .unwrap_or_else(|| panic!("expected results array, got {json}"));
-    for row in results {
-        // We accept either an empty string or no key — both communicate
-        // "we couldn't read the body". We forbid a non-empty string here
-        // because the file is gone, so any text would be a bug.
-        if let Some(content) = row["source"].get("content") {
+        .unwrap_or_else(|| panic!("expected columns array, got {json}"));
+    let rows = json["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected rows array, got {json}"));
+
+    let col_names: Vec<&str> = columns.iter().map(|c| c.as_str().unwrap()).collect();
+    let m_content_col = col_names.iter().position(|&c| c == "m.content");
+    let t_content_col = col_names.iter().position(|&c| c == "t.content");
+
+    for row in rows {
+        // When file is missing, content must be empty string — not a non-empty body.
+        if let Some(idx) = m_content_col {
+            let cell = &row[idx];
             assert_eq!(
-                content.as_str(),
+                cell.as_str(),
                 Some(""),
-                "source.content should be empty when file is missing: {row}"
+                "m.content should be empty when file is missing: {row}"
             );
         }
-        if let Some(content) = row["target"].get("content") {
+        if let Some(idx) = t_content_col {
+            let cell = &row[idx];
             assert_eq!(
-                content.as_str(),
+                cell.as_str(),
                 Some(""),
-                "target.content should be empty when file is missing: {row}"
+                "t.content should be empty when file is missing: {row}"
             );
         }
     }
