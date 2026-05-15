@@ -1,11 +1,15 @@
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_core::graph::ArchivedNodeKind;
 use graph_nexus_core::GnxError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+/// List every Route node in the graph — maps HTTP endpoints to their
+/// source locations for downstream handler and consumer lookups.
+#[derive(Args, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RouteMapArgs {
+    /// Repository root path (defaults to current directory).
     #[arg(long)]
     pub repo: Option<String>,
 
@@ -14,9 +18,8 @@ pub struct RouteMapArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: RouteMapArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run_inner(args: RouteMapArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
 
     let mut results = Vec::new();
 
@@ -39,5 +42,26 @@ pub fn run(args: RouteMapArgs, engine: &Engine) -> Result<(), GnxError> {
         "results": results,
     });
 
-    emit(&result, format)
+    Ok(result)
+}
+
+pub fn run(args: RouteMapArgs, engine: &crate::engine::Engine)
+    -> Result<(), graph_nexus_core::GnxError>
+{
+    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let value = run_inner(args, engine)?;
+    crate::output::emit(&value, format)
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        fn _accepts(
+            _f: fn(RouteMapArgs, &crate::engine::Engine)
+                -> Result<serde_json::Value, graph_nexus_core::GnxError>
+        ) {}
+        _accepts(run_inner);
+    }
 }
