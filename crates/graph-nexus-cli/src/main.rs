@@ -1,12 +1,14 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod auto_ensure;
 mod commands;
 mod config_parser;
 mod engine;
 mod git;
 mod git_state;
 mod graph_path;
+mod hint;
 mod incremental_cache;
 mod output;
 pub mod reanalyze;
@@ -32,7 +34,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Show symbol's full context: signature, body, edges, callers, overrides, and 1-hop upstream impact
-    Inspect(commands::context::ContextArgs),
+    Inspect(commands::inspect::InspectArgs),
     /// Find symbols by name or concept (auto bm25 / hybrid / vector)
     Search(commands::query::QueryArgs),
     /// Blast radius — from <name> or git diff via --since <ref>
@@ -146,7 +148,7 @@ fn main() {
     };
 
     let result: Result<(), graph_nexus_core::GnxError> = match cli.command {
-        Commands::Inspect(args) => commands::context::run(args, &engine),
+        Commands::Inspect(args) => commands::inspect::run(args, &engine, &graph_path),
         Commands::Search(args) => commands::query::run(args, &engine),
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::Rename(args) => commands::rename::run(args, &engine),

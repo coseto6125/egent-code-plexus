@@ -5,7 +5,7 @@ pub mod api_impact;
 pub mod clean;
 pub mod cluster;
 pub mod config;
-pub mod context;
+pub mod inspect;
 pub mod cypher;
 pub mod detect_changes;
 pub mod doctor;
