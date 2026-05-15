@@ -3,26 +3,40 @@
 //! language module that walks the tree-sitter AST and emits byte-ranges
 //! for every identifier whose text matches the target symbol.
 //!
-//! Supported languages mirror the 14×9 matrix coverage: Python,
-//! TypeScript/TSX, JavaScript, Rust, Java, Kotlin, C#, Go, PHP, Ruby,
-//! Swift, C, C++, Dart. Files outside the supported set return an empty
-//! vec and the caller treats that as "skip this file".
+//! Supported languages cover the 14-row main matrix (Python, TypeScript/
+//! TSX, JavaScript, Rust, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++,
+//! Dart) plus 12 extras with renameable identifiers (Bash, Lua, Solidity,
+//! Crystal, Nim, Cairo, Move, Zig, HCL, SQL, Verilog, Vyper). Files
+//! outside the supported set (markup / configs / Dockerfile) return an
+//! empty vec and the caller treats that as "skip this file".
 
+pub mod bash;
 pub mod c;
 pub mod c_sharp;
+pub mod cairo;
 pub mod cpp;
+pub mod crystal;
 pub mod dart;
 mod generic;
 pub mod go;
+pub mod hcl;
 pub mod java;
 pub mod javascript;
 pub mod kotlin;
+pub mod lua;
+pub mod move_lang;
+pub mod nim;
 pub mod php;
 pub mod python;
 pub mod ruby;
 pub mod rust;
+pub mod solidity;
+pub mod sql;
 pub mod swift;
 pub mod typescript;
+pub mod verilog;
+pub mod vyper;
+pub mod zig;
 
 use graph_nexus_core::analyzer::types::IdentifierRange;
 
@@ -53,6 +67,19 @@ pub fn find_identifier_occurrences(
             cpp::find_identifier_occurrences(source, target_name)
         }
         "dart" => dart::find_identifier_occurrences(source, target_name),
+        // ── Extras with renameable identifiers ──
+        "sh" | "bash" => bash::find_identifier_occurrences(source, target_name),
+        "lua" => lua::find_identifier_occurrences(source, target_name),
+        "sol" => solidity::find_identifier_occurrences(source, target_name),
+        "cr" => crystal::find_identifier_occurrences(source, target_name),
+        "nim" | "nims" => nim::find_identifier_occurrences(source, target_name),
+        "cairo" => cairo::find_identifier_occurrences(source, target_name),
+        "move" => move_lang::find_identifier_occurrences(source, target_name),
+        "zig" | "zon" => zig::find_identifier_occurrences(source, target_name),
+        "hcl" | "tf" | "tfvars" => hcl::find_identifier_occurrences(source, target_name),
+        "sql" => sql::find_identifier_occurrences(source, target_name),
+        "v" | "sv" | "vh" | "svh" => verilog::find_identifier_occurrences(source, target_name),
+        "vy" => vyper::find_identifier_occurrences(source, target_name),
         _ => Vec::new(),
     }
 }

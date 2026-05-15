@@ -267,6 +267,22 @@ impl LanguageProvider for GitHubActionsProvider {
                     }
                 }
 
+                // Job-level `uses:` → RawImport (reusable workflow call).
+                // Two forms:
+                //   uses: ./.github/workflows/build.yml          (local file)
+                //   uses: org/repo/.github/workflows/build.yml@main  (cross-repo)
+                if let Some(jm) = job_val_mapping {
+                    if let Some(uses_node) = mapping_value(jm, "uses", source) {
+                        if let Some(uses_text) = scalar_text(uses_node, source) {
+                            imports.push(RawImport {
+                                source: uses_text.to_string(),
+                                imported_name: action_name(uses_text),
+                                alias: None,
+                            });
+                        }
+                    }
+                }
+
                 // Each job → Class node
                 nodes.push(RawNode {
                     name: job_key.to_string(),
@@ -299,7 +315,7 @@ impl LanguageProvider for GitHubActionsProvider {
             file_path: path.to_path_buf(),
             nodes,
             documents: vec![],
-            imports: vec![],
+            imports,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
@@ -362,11 +378,13 @@ fn walk_steps(
         }
 
         // `uses:` → RawImport (action dependency)
+        // `source` keeps the full `owner/name@ref` (or local path) string so
+        // downstream consumers can recover the pinned version; `imported_name`
+        // drops the `@ref` so impact analysis can match across version bumps.
         if let Some(uses) = uses_val {
-            let action = action_name(uses);
             imports.push(RawImport {
-                source: action.clone(),
-                imported_name: action,
+                source: uses.to_string(),
+                imported_name: action_name(uses),
                 alias: None,
             });
         }

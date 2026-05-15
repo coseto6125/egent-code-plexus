@@ -189,7 +189,7 @@ This matrix is *not* a parity scorecard against any other tool. We took design i
 - ☐ &nbsp;**feasible, not implemented yet** — the language has this concept; we could add it. Treat as a roadmap marker.
 - — &nbsp;**not applicable** — the language doesn't have this concept (e.g. Dockerfile has no `Frameworks`).
 
-> Below the divider, `—` currently covers both *not applicable* and *not implemented* — those 17 rows haven't been per-cell audited yet. The Rename column is the exception: all 17 are `☐` because every language has identifiers we could rename. A focused audit to split the rest into `☐`/`—` is queued as a follow-up.
+> Below the divider, `—` means *not applicable* (markup/config formats without that concept, e.g. Dockerfile has no `Frameworks`, YAML has no renameable identifiers). The matrix is fully resolved — no `☐` (feasible-but-not-implemented) cells remain anywhere.
 
 | Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call | Rename |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -207,29 +207,29 @@ This matrix is *not* a parity scorecard against any other tool. We took design i
 | C | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
 | C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| ─── *structural-only rows below — per-cell audit pending* ─── | | | | | | | | | | | |
-| Bash | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
-| Lua | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
-| Solidity | ✓ | — | ✓ | ✓ | — | — | — | — | — | ✓ | ☐ |
-| Crystal | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
-| Nim | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
-| Cairo | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
-| Move | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
-| Zig | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
-| HCL | ✓ | — | — | — | — | — | ✓ | — | — | ✓ | ☐ |
-| SQL | — | — | — | ☐ | — | — | — | — | — | ✓ | ☐ |
-| Verilog | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
-| Vyper | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
-| Markdown | — | — | — | — | — | — | — | — | — | — | ☐ |
-| GitHub Actions | ☐ | — | — | — | — | — | ✓ | — | — | — | ☐ |
-| Docker Compose | — | — | — | — | — | — | ✓ | — | — | — | ☐ |
-| Dockerfile | ✓ | — | — | — | — | — | ✓ | — | — | — | ☐ |
-| YAML | — | — | — | — | — | — | ✓ | — | — | — | ☐ |
+| ─── *structural-only rows below* ─── | | | | | | | | | | | |
+| Bash | ✓ | — | — | — | — | — | — | — | — | ✓ | ✓ |
+| Lua | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ✓ |
+| Solidity | ✓ | — | ✓ | ✓ | — | — | — | — | — | ✓ | ✓ |
+| Crystal | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ✓ |
+| Nim | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ✓ |
+| Cairo | ✓ | — | — | — | — | — | — | — | — | ✓ | ✓ |
+| Move | ✓ | — | — | — | — | — | — | — | — | ✓ | ✓ |
+| Zig | ✓ | — | — | — | — | — | — | — | — | ✓ | ✓ |
+| HCL | ✓ | — | — | — | — | — | ✓ | — | — | ✓ | ✓ |
+| SQL | — | — | — | ✓ | — | — | — | — | — | ✓ | ✓ |
+| Verilog | ✓ | — | — | — | — | — | — | — | — | ✓ | ✓ |
+| Vyper | ✓ | — | — | — | — | — | — | — | — | ✓ | ✓ |
+| Markdown | — | — | — | — | — | — | — | — | — | — | — |
+| GitHub Actions | ✓ | — | — | — | — | — | ✓ | — | — | — | — |
+| Docker Compose | — | — | — | — | — | — | ✓ | — | — | — | — |
+| Dockerfile | ✓ | — | — | — | — | — | ✓ | — | — | — | — |
+| YAML | — | — | — | — | — | — | ✓ | — | — | — | — |
 
 **Per-cell notes** (where the cell shape needs context):
-Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Solidity Heritage = `is X, Y, Z`; SQL Heritage ☐ = foreign-key references planned, not implemented; GitHub Actions Imports ☐ = `uses:` (workflow → action) edges planned; Dockerfile Imports = `FROM <base>`.
+Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Solidity Heritage = `is X, Y, Z`; SQL Heritage = FK `REFERENCES` clauses (inline, table-level, and named-constraint forms); GitHub Actions Imports = `uses:` directives (public tag/SHA refs, local composites, reusable workflows, cross-repo workflows); Dockerfile Imports = `FROM <base>`. Rename `—` on the 5 markup/config rows (Markdown, GitHub Actions, Docker Compose, Dockerfile, YAML) reflects that these formats carry keys/literal strings rather than re-bindable code identifiers — `gnx rename` would have nothing to rewrite.
 
-**Roadmap (☐ cells)** — the remaining "feasible, not done" cells live under the divider (per-cell audit still pending for the 17 structural-only languages), plus the universal `☐` for Rename across all 17 extras. The 14 main-language rows are now fully `✓`/`—`.
+**Roadmap** — the matrix is now fully resolved to `✓`/`—`. No `☐` (feasible-but-not-implemented) cells remain.
 
 **Recently shipped** (history, for context):
 - Cross-language Constructor Inference (14 langs) with Python's `4e4fb1b` receiver-type binding as the reference prototype.
@@ -239,6 +239,10 @@ Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage =
   - **Frameworks** via `astFrameworkPatterns` substring scans (`languages/{csharp,ruby,swift,c-cpp,dart}.ts`): C# (aspnet / signalr / blazor / efcore), Ruby (rails / sinatra), Swift (uikit / swiftui / vapor), C++ (qt), Dart (flutter / riverpod). The shared `framework_helpers::detect_ast_framework_patterns` walks each language's `FrameworkPatternSpec` table and emits one `RawFrameworkRef` per detected framework at module level. C Frameworks lands as `—` because upstream's `cProvider` defines no `astFrameworkPatterns` (qt is C++-only on `cppProvider`).
   - **Types** for Swift / Dart — declared types on parameters, properties, and top-level vars. Swift uses postfix `name: Type` syntax and reads the `type_annotation` node text directly; Dart uses prefix `Type name` with an unfielded `(type ...)` sibling captured positionally.
 - Matrix-opt batch (HEAD `86e65a7`): Go per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + mixin tracking, TS/JS re-export alias preservation; in the extras section, Bash `source`/`.` imports, Lua `require` aliases + metatable inheritance + table-assigned methods, Solidity state-variable visibility. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
+- Wave 4 (this commit) closes the last `☐` cells under the divider:
+  - **Rename** for 12 code-extras (Bash, Lua, Solidity, Crystal, Nim, Cairo, Move, Zig, HCL, SQL, Verilog, Vyper) via per-language `identifier_finder/<lang>.rs` modules — each is a thin wrapper around the shared `find_by_kinds` walker keyed on the language's identifier node kinds. The five markup/config rows (Markdown, GitHub Actions, Docker Compose, Dockerfile, YAML) are now `—` because they carry keys / literal strings, not re-bindable code identifiers.
+  - **SQL Heritage** via FK `REFERENCES` clauses — inline column-level, table-level, and named-constraint forms all push the referenced table name into the source table's `heritage`.
+  - **GitHub Actions Imports** via `uses:` directives — public tag/SHA refs, local composites, reusable workflow files, and cross-repo reusable workflows all emit `RawImport` entries (also fixed 3 pre-existing parser bugs that were dropping imports silently).
 
 ### Call detection design
 

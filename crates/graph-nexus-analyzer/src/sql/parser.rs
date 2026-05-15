@@ -9,6 +9,7 @@ use crate::calls::extract_calls;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
+use std::collections::HashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
@@ -49,6 +50,10 @@ impl LanguageProvider for SqlProvider {
 
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
+        // Side-map: referencing-table-name -> referenced-table-names.
+        // Populated by the foreign-key patterns in `queries.scm` and merged
+        // into each table's `RawNode.heritage` after the main loop.
+        let mut fk_heritage: HashMap<String, Vec<String>> = HashMap::new();
 
         let idx_class_name = self.query.capture_index_for_name("class.name");
         let idx_class = self.query.capture_index_for_name("class");
@@ -57,12 +62,16 @@ impl LanguageProvider for SqlProvider {
         let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_heritage_table = self.query.capture_index_for_name("heritage.table");
+        let idx_heritage_target = self.query.capture_index_for_name("heritage.target");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
             let mut import_src = None;
+            let mut fk_table_node = None;
+            let mut fk_target_node = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -77,6 +86,10 @@ impl LanguageProvider for SqlProvider {
                     kind = Some(NodeKind::Const);
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
+                } else if Some(cap_idx) == idx_heritage_table {
+                    fk_table_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_heritage_target {
+                    fk_target_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_const
@@ -116,6 +129,39 @@ impl LanguageProvider for SqlProvider {
                         imported_name: "*".to_string(),
                         source: src_str.to_string(),
                     });
+                }
+            }
+
+            // Foreign-key pair: referencing table -> referenced table.
+            if let (Some(t), Some(tgt)) = (fk_table_node, fk_target_node) {
+                if let (Ok(table_str), Ok(target_str)) = (
+                    std::str::from_utf8(&source[t.start_byte()..t.end_byte()]),
+                    std::str::from_utf8(&source[tgt.start_byte()..tgt.end_byte()]),
+                ) {
+                    let entry = fk_heritage.entry(table_str.to_string()).or_default();
+                    let target_owned = target_str.to_string();
+                    if !entry.contains(&target_owned) {
+                        entry.push(target_owned);
+                    }
+                }
+            }
+        }
+
+        // Merge collected FK targets into the matching table's heritage list.
+        // Tables are emitted as `NodeKind::Class` by the `class` query patterns
+        // above (see CREATE TABLE / CREATE VIEW). We only attach heritage to
+        // class-kind nodes to avoid colliding with same-named columns/funcs.
+        if !fk_heritage.is_empty() {
+            for n in nodes.iter_mut() {
+                if !matches!(n.kind, NodeKind::Class) {
+                    continue;
+                }
+                if let Some(targets) = fk_heritage.get(&n.name) {
+                    for tgt in targets {
+                        if !n.heritage.contains(tgt) {
+                            n.heritage.push(tgt.clone());
+                        }
+                    }
                 }
             }
         }
