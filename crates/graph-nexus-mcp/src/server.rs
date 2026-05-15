@@ -20,10 +20,9 @@ pub enum DispatchMode {
 }
 
 /// Owned state held by the server in daemon mode. Holds the loaded
-/// Engine (via `EngineRef`) + the path it was loaded from + the mtime
-/// at load time (used by `crate::daemon::needs_remap`).
+/// Engine (via `EngineRef`) + the mtime at load time (used by
+/// `crate::daemon::needs_remap`).
 pub struct DaemonState {
-    pub engine_path: PathBuf,
     pub loaded_at: std::time::SystemTime,
     /// The actual Engine handle, wrapped so this crate doesn't depend
     /// on graph-nexus-cli's concrete Engine type. CLI side (Task 16)
@@ -33,7 +32,7 @@ pub struct DaemonState {
 
 impl EngineRef for DaemonState {
     fn graph_path(&self) -> &std::path::Path {
-        &self.engine_path
+        self.engine.graph_path()
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -105,7 +104,7 @@ impl GnxMcpServer {
                 // caller will get whatever the (possibly stale) engine
                 // returns, which is safer than 503-ing the whole tool.
                 if let Ok(Some(new_mtime)) =
-                    crate::daemon::needs_remap(&state.engine_path, state.loaded_at)
+                    crate::daemon::needs_remap(state.engine.graph_path(), state.loaded_at)
                 {
                     state.loaded_at = new_mtime;
                 }
