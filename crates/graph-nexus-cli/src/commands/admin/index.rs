@@ -19,7 +19,7 @@ use ignore::WalkBuilder;
 use std::time::Instant;
 
 #[derive(Args, Debug, Clone)]
-pub struct AnalyzeArgs {
+pub struct IndexArgs {
     #[arg(long)]
     pub repo: String,
 
@@ -49,7 +49,7 @@ pub struct AnalyzeArgs {
     pub no_cache: bool,
 }
 
-pub fn run(args: AnalyzeArgs) -> Result<(), String> {
+pub fn run(args: IndexArgs) -> Result<(), String> {
     let start_time = Instant::now();
     let repo_path = std::path::PathBuf::from(&args.repo);
 

@@ -3,39 +3,45 @@
 
 use clap::Subcommand;
 
+pub mod config;
+pub mod drop;
 pub mod group;
+pub mod index;
+pub mod install_hook;
+pub mod prune;
+pub mod rename_branch;
 
 #[derive(Subcommand, Debug)]
 pub enum AdminCommands {
     /// Install git ref-transaction hook for branch tracking
-    InstallHook(super::init::InitArgs),
+    InstallHook(install_hook::InstallHookArgs),
     /// Delete a repo's index data + registry entry
-    Drop(super::clean::CleanArgs),
+    Drop(drop::DropArgs),
     /// Remove orphan index dirs not in registry
-    Prune(super::prune::PruneArgs),
+    Prune(prune::PruneArgs),
     /// Rename a branch's index dir
-    RenameBranch(super::rename_branch::RenameBranchArgs),
+    RenameBranch(rename_branch::RenameBranchArgs),
     /// Interactive TOML config editor
-    Config(super::config::ConfigArgs),
+    Config(config::ConfigArgs),
     /// Manage repo group membership
     Group {
         #[command(subcommand)]
         command: group::GroupCommands,
     },
     /// Build or refresh the graph (explicit / bulk / embeddings)
-    Index(super::analyze::AnalyzeArgs),
+    Index(index::IndexArgs),
 }
 
 pub fn run(cmd: AdminCommands) -> Result<(), graph_nexus_core::GnxError> {
     match cmd {
-        AdminCommands::InstallHook(args) => super::init::run(args),
-        AdminCommands::Drop(args) => super::clean::run(args),
-        AdminCommands::Prune(args) => super::prune::run(args),
-        AdminCommands::RenameBranch(args) => super::rename_branch::run(args),
-        AdminCommands::Config(args) => super::config::run(args),
+        AdminCommands::InstallHook(args) => install_hook::run(args),
+        AdminCommands::Drop(args) => drop::run(args),
+        AdminCommands::Prune(args) => prune::run(args),
+        AdminCommands::RenameBranch(args) => rename_branch::run(args),
+        AdminCommands::Config(args) => config::run(args),
         AdminCommands::Group { command } => group::run(command),
         AdminCommands::Index(args) => {
-            super::analyze::run(args).map_err(graph_nexus_core::GnxError::Output)
+            index::run(args).map_err(graph_nexus_core::GnxError::Output)
         }
     }
 }
