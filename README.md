@@ -107,7 +107,7 @@ Every read-side command accepts `--format text|json|toon`. The default is the to
 | Architecture / hottest files / top symbols | `gnx summarize` |
 | Coverage report (frameworks parsed, blind spots) | `gnx doctor` |
 | What changed in this commit and what it ripples to | `gnx detect-changes --scope compare --base-ref HEAD~1` |
-| Rename a symbol across files (currently Python MVP) | `gnx rename --symbol old --new-name new --dry-run` then drop `--dry-run` |
+| Rename a symbol across files (14 languages — see matrix `Rename` column) | `gnx rename --symbol old --new-name new --dry-run` then drop `--dry-run` |
 | List repos this machine has indexed | `gnx list` |
 | Re-register a `.gitnexus-rs/` folder after moving the repo | `gnx index <path>` |
 | Drop an index entirely | `gnx clean --repo <path>` |
@@ -168,7 +168,7 @@ All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--gra
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `rename --symbol <old> --new-name <new>` | AST-powered multi-file rename (Python MVP). Always run `--dry-run` first. | `--dry-run` |
+| `rename --symbol <old> --new-name <new>` | AST-powered multi-file rename across 14 languages (Python, TS/TSX, JS, Rust, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart). Always run `--dry-run` first. | `--dry-run` |
 
 #### Diagnostics
 
@@ -180,64 +180,64 @@ All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--gra
 
 ## Language Matrix
 
-One row per language across all 31 supported. The first 14 share dimensions with upstream GitNexus and the cells encode a per-cell delta vs upstream's claim. The remaining 17 (below the divider) have no upstream baseline — for those rows, a ✓ marks what we ship; `—` means we don't extract that dimension and upstream comparison doesn't apply.
+graph-nexus's own per-language capability inventory across 31 supported languages. Each cell answers a single question: **for this language, do we extract this dimension yet?**
 
-**Legend** (rows above the divider):
-- ✓ &nbsp;both upstream and graph-nexus support this
-- ✅ &nbsp;**upstream doesn't claim it, graph-nexus does** (we go beyond upstream)
-- ⚠️ &nbsp;**upstream claims it, graph-nexus is missing or partial** (we lag)
-- — &nbsp;neither claims it
+This matrix is *not* a parity scorecard against any other tool. We took design inspiration from GitNexus's 9-dimension breakdown (credit in the section above), but every cell describes the state of *our* implementation, scored against our roadmap — not against an external claim.
 
-Rows below the divider use only ✓ / `—` (and rare ⚠️ for partial). The 17 extras are structural-only by design — Classes/Heritage are recorded where the language has the concept; Types / Ctor / Frameworks / Entry are uniformly `—` because they require semantic models the source format doesn't carry.
+**Legend**:
+- ✓ &nbsp;**implemented** — we extract this for this language today
+- ☐ &nbsp;**feasible, not implemented yet** — the language has this concept; we could add it. Treat as a roadmap marker.
+- — &nbsp;**not applicable** — the language doesn't have this concept (e.g. Dockerfile has no `Frameworks`).
 
-| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
-| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
-| Go | ✓ | ✅ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
-| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✅ | ⚠️ | ✓ | ✓ |
-| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
-| C | ✅ | — | ✓ | ✅ | ✓ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
-| C++ | ✅ | ✅ | ✓ | ✓ | ✓ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
-| Dart | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
-| ─── *no upstream baseline below* ─── | | | | | | | | | | |
-| Bash | ✓ | — | — | — | — | — | — | — | — | ✓ |
-| Lua | ✓ | — | — | ✓ | — | — | — | — | — | ✓ |
-| Solidity | ✓ | — | ✓ | ✓ | — | — | — | — | — | ✓ |
-| Crystal | ✓ | — | — | ✓ | — | — | — | — | — | ✓ |
-| Nim | ✓ | — | — | ✓ | — | — | — | — | — | ✓ |
-| Cairo | ✓ | — | — | — | — | — | — | — | — | ✓ |
-| Move | ✓ | — | — | — | — | — | — | — | — | ✓ |
-| Zig | ✓ | — | — | — | — | — | — | — | — | ✓ |
-| HCL | ✓ | — | — | — | — | — | ✓ | — | — | ✓ |
-| SQL | — | — | — | ⚠️ | — | — | — | — | — | ✓ |
-| Verilog | ✓ | — | — | — | — | — | — | — | — | ✓ |
-| Vyper | ✓ | — | — | — | — | — | — | — | — | ✓ |
-| Markdown | — | — | — | — | — | — | — | — | — | — |
-| GitHub Actions | ⚠️ | — | — | — | — | — | ✓ | — | — | — |
-| Docker Compose | — | — | — | — | — | — | ✓ | — | — | — |
-| Dockerfile | ✓ | — | — | — | — | — | ✓ | — | — | — |
-| YAML | — | — | — | — | — | — | ✓ | — | — | — |
+> Below the divider, `—` currently covers both *not applicable* and *not implemented* — those 17 rows haven't been per-cell audited yet. The Rename column is the exception: all 17 are `☐` because every language has identifiers we could rename. A focused audit to split the rest into `☐`/`—` is queued as a follow-up.
 
-**Per-cell notes for the extra rows** (where the cell shape needs context):
-Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Solidity Heritage = `is X, Y, Z`; SQL Heritage ⚠️ = foreign-key references only; GitHub Actions Imports ⚠️ = `uses:` (workflow → action) edges; Dockerfile Imports = `FROM <base>`.
+| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call | Rename |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| Go | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| PHP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| Swift | ✓ | — | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| C | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| Dart | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| ─── *structural-only rows below — per-cell audit pending* ─── | | | | | | | | | | | |
+| Bash | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Lua | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Solidity | ✓ | — | ✓ | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Crystal | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Nim | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Cairo | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Move | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Zig | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| HCL | ✓ | — | — | — | — | — | ✓ | — | — | ✓ | ☐ |
+| SQL | — | — | — | ☐ | — | — | — | — | — | ✓ | ☐ |
+| Verilog | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Vyper | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Markdown | — | — | — | — | — | — | — | — | — | — | ☐ |
+| GitHub Actions | ☐ | — | — | — | — | — | ✓ | — | — | — | ☐ |
+| Docker Compose | — | — | — | — | — | — | ✓ | — | — | — | ☐ |
+| Dockerfile | ✓ | — | — | — | — | — | ✓ | — | — | — | ☐ |
+| YAML | — | — | — | — | — | — | ✓ | — | — | — | ☐ |
 
-**Where graph-nexus goes beyond upstream** (15 ✅ cells in the top section): C/C++ get Imports & Heritage that upstream doesn't claim; Java/Kotlin/Rust/Ruby/Dart get Config parsing for toolchains upstream doesn't cover; PHP gets Heritage; Go/C++/Dart get Named Bindings; Swift/C/C++ get basic Imports.
+**Per-cell notes** (where the cell shape needs context):
+Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Solidity Heritage = `is X, Y, Z`; SQL Heritage ☐ = foreign-key references planned, not implemented; GitHub Actions Imports ☐ = `uses:` (workflow → action) edges planned; Dockerfile Imports = `FROM <base>`.
 
-**Wave 1 closed 28 cells** (Constructor Inference rolled out to all 14 languages mirroring Python's `4e4fb1b` receiver-type binding prototype; Java static-import named bindings; C# `csproj`/`global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators).
+**Roadmap (☐ cells)** — these are the explicit "feasible, not done" cells:
+- **Frameworks** for 6 languages (C# / Ruby / Swift / C / C++ / Dart) — net-new work, no reference implementation we copied from.
+- **Types** for Swift / Dart — grammar shape varies enough that the dispatch logic we used for Go/C/C++ didn't converge; queued for a focused follow-up.
 
-**Wave 2 (PR [#2](https://github.com/coseto6125/graph-nexus/pull/2))** closes 9 cells:
-- **Types**: Go / C / C++ — declared types on params, returns, struct fields, vars.
-- **Config**: PHP (`composer.json`) + Swift (`Package.swift`).
-- **Frameworks**: JS (Express + Hapi), Kotlin (Ktor), Go (gin + echo), PHP (Laravel). Ported from upstream `gitnexus/src/core/group/extractors/http-patterns/` where the equivalent plugins exist.
-
-**Remaining ⚠️ (8 cells)**: Frameworks for C# / Ruby / Swift / C / C++ / Dart — **upstream gitnexus has no plugin for any of these**, so the parity baseline is `—` rather than `⚠️`; what we add here is net-new beyond upstream. Types for Swift / Dart deferred — grammar shape varies enough that the SA dispatch in this wave didn't converge; queued for a focused follow-up.
+**Recently shipped** (history, for context):
+- Cross-language Constructor Inference (14 langs) with Python's `4e4fb1b` receiver-type binding as the reference prototype.
+- Java static-import named bindings; C# `csproj` / `global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators.
+- Wave 2 (PR [#2](https://github.com/coseto6125/graph-nexus/pull/2)): Types for Go/C/C++ (declared types on params/returns/fields/vars); Config for PHP (`composer.json`) + Swift (`Package.swift`); Frameworks for JS (Express + Hapi) / Kotlin (Ktor) / Go (gin + echo) / PHP (Laravel).
+- Matrix-opt batch (HEAD `86e65a7`): Go per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + mixin tracking, TS/JS re-export alias preservation; in the extras section, Bash `source`/`.` imports, Lua `require` aliases + metatable inheritance + table-assigned methods, Solidity state-variable visibility. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
 **Matrix-opt batch (HEAD `86e65a7`)** deepened existing ✓ cells: Go gained per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + `include`/`extend` mixin tracking, TS/JS re-export alias preservation; in the extras section, Bash gained `source`/`.` imports, Lua `local M = require()` aliases + metatable inheritance + table-assigned methods, and Solidity state-variable visibility. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
