@@ -129,6 +129,24 @@
   source: (string (string_fragment) @import.source)
 ) @import
 
+;; Re-exports — `export { X as Y } from 'lib'` (and `export { X } from 'lib'`).
+;; Captured separately from regular imports so the alias is preserved on the
+;; emitted RawImport (parser sets `imported_name = X`, `alias = Some(Y)`).
+(export_statement
+  (export_clause
+    (export_specifier
+      name: (identifier) @import.name
+      alias: (identifier)? @import.alias))
+  source: (string (string_fragment) @import.source)) @import
+
+;; Namespace re-export — `export * as ns from 'lib'`. The local namespace
+;; binding `ns` is captured as the alias; `imported_name` is "*" (sentinel
+;; matching the namespace import convention).
+(export_statement
+  (namespace_export
+    (identifier) @import.alias)
+  source: (string (string_fragment) @import.source)) @import.namespace
+
 ;; Routes — `app.METHOD(path, handler)` form.
 ;; `route.handler` captures the named handler argument when present so the
 ;; builder can emit a `HandlesRoute` edge from the handler function back

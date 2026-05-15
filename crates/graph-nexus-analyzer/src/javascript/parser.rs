@@ -54,6 +54,7 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
+        let idx_import_namespace = self.query.capture_index_for_name("import.namespace");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
@@ -74,6 +75,7 @@ impl LanguageProvider for JavaScriptProvider {
             let mut import_name = None;
             let mut import_src = None;
             let mut import_alias = None;
+            let mut is_import_namespace = false;
 
             let mut route_method = None;
             let mut route_path = None;
@@ -110,6 +112,8 @@ impl LanguageProvider for JavaScriptProvider {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_alias {
                     import_alias = Some(cap.node);
+                } else if Some(cap_idx) == idx_import_namespace {
+                    is_import_namespace = true;
                 } else if Some(cap_idx) == idx_route_method {
                     route_method = Some(cap.node);
                 } else if Some(cap_idx) == idx_route_path {
@@ -192,6 +196,23 @@ impl LanguageProvider for JavaScriptProvider {
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
                     });
+                }
+            }
+
+            // Namespace re-export `export * as ns from 'lib'` — no `name`
+            // identifier exists; emit with "*" sentinel as imported_name.
+            if is_import_namespace {
+                if let (Some(a), Some(i_src)) = (import_alias, import_src) {
+                    if let (Ok(alias_str), Ok(src_str)) = (
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]),
+                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                    ) {
+                        imports.push(RawImport {
+                            alias: Some(alias_str.to_string()),
+                            imported_name: "*".to_string(),
+                            source: src_str.to_string(),
+                        });
+                    }
                 }
             }
 

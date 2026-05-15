@@ -46,6 +46,21 @@
     (identifier) @import.name)
   source: (string (string_fragment) @import.source)) @import
 
+;; Re-exports — `export { X as Y } from 'lib'` (alias preserved on RawImport).
+(export_statement
+  (export_clause
+    (export_specifier
+      name: (identifier) @import.name
+      alias: (identifier)? @import.alias))
+  source: (string (string_fragment) @import.source)) @import
+
+;; Namespace re-export — `export * as ns from 'lib'`.
+;; `imported_name` is the "*" sentinel; `alias` holds the namespace binding.
+(export_statement
+  (namespace_export
+    (identifier) @import.alias)
+  source: (string (string_fragment) @import.source)) @import.namespace
+
 ;; Routes
 (call_expression
   function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))

@@ -34,6 +34,9 @@ struct TypeScriptCaptureIndices {
     import_alias: Option<u32>,
     import_source: Option<u32>,
     import: Option<u32>,
+    /// `export * as ns from 'lib'` — captured separately because there's no
+    /// `name` identifier; `imported_name` is set to the "*" sentinel.
+    import_namespace: Option<u32>,
     route_method: Option<u32>,
     route_path: Option<u32>,
     route_call: Option<u32>,
@@ -72,6 +75,7 @@ impl TypeScriptProvider {
             import_alias: query.capture_index_for_name("import.alias"),
             import_source: query.capture_index_for_name("import.source"),
             import: query.capture_index_for_name("import"),
+            import_namespace: query.capture_index_for_name("import.namespace"),
             route_method: query.capture_index_for_name("route.method"),
             route_path: query.capture_index_for_name("route.path"),
             route_call: query.capture_index_for_name("route.call"),
@@ -126,6 +130,7 @@ impl LanguageProvider for TypeScriptProvider {
             let mut import_alias = None;
             let mut import_src = None;
             let mut is_import = false;
+            let mut is_import_namespace = false;
 
             let mut route_method = None;
             let mut route_path = None;
@@ -178,6 +183,8 @@ impl LanguageProvider for TypeScriptProvider {
                     import_src = Some(cap.node);
                 } else if cap_idx == idx.import {
                     is_import = true;
+                } else if cap_idx == idx.import_namespace {
+                    is_import_namespace = true;
                 } else if cap_idx == idx.route_method {
                     route_method = Some(cap.node);
                 } else if cap_idx == idx.route_path {
@@ -271,6 +278,24 @@ impl LanguageProvider for TypeScriptProvider {
                         imports.push(RawImport {
                             alias: alias_str,
                             imported_name: name_str.to_string(),
+                            source: src_str.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Process namespace re-export `export * as ns from 'lib'`.
+            // No `name` identifier exists; emit with "*" sentinel as imported_name
+            // and the local namespace binding as the alias.
+            if is_import_namespace {
+                if let (Some(a), Some(i_src)) = (import_alias, import_src) {
+                    if let (Ok(alias_str), Ok(src_str)) = (
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]),
+                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                    ) {
+                        imports.push(RawImport {
+                            alias: Some(alias_str.to_string()),
+                            imported_name: "*".to_string(),
                             source: src_str.to_string(),
                         });
                     }
