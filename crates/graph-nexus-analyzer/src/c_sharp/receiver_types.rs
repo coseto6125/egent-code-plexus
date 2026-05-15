@@ -294,7 +294,7 @@ fn enclosing_base_name(nodes: &[RawNode], line: u32) -> Option<String> {
             }
         }
     }
-    result.or_else(|| Some("base".to_string()))
+    result
 }
 
 #[cfg(test)]
@@ -379,6 +379,35 @@ class App {
             start.calls.iter().any(|c| c == "MyService.Run"),
             "expected 'MyService.Run' in calls, got {:?}",
             start.calls
+        );
+    }
+
+    /// Regression: `base.Foo()` in a class WITHOUT base must emit bare `"Foo"`,
+    /// not a synthetic `"base.Foo"` that pollutes the graph.
+    #[test]
+    fn csharp_base_no_base_emits_bare_method() {
+        let src = r#"
+class Standalone {
+    void DoWork() {
+        base.Foo();
+    }
+}
+"#;
+        let graph = parse(src);
+        let do_work = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "DoWork")
+            .expect("DoWork method not found");
+        assert!(
+            do_work.calls.iter().any(|c| c == "Foo"),
+            "expected bare 'Foo' in calls, got {:?}",
+            do_work.calls
+        );
+        assert!(
+            !do_work.calls.iter().any(|c| c == "base.Foo"),
+            "must NOT contain synthetic 'base.Foo', got {:?}",
+            do_work.calls
         );
     }
 }

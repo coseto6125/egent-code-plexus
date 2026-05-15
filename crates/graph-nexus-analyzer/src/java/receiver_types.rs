@@ -281,7 +281,7 @@ fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
             }
         }
     }
-    result.or_else(|| Some("super".to_string()))
+    result
 }
 
 #[cfg(test)]
@@ -367,6 +367,36 @@ class App {
             start.calls.iter().any(|c| c == "MyService.run"),
             "expected 'MyService.run' in calls, got {:?}",
             start.calls
+        );
+    }
+
+    /// Regression: `super.foo()` in a class WITHOUT `extends` must emit bare
+    /// `"foo"`, not a synthetic `"super.foo"` that pollutes the graph with a
+    /// node that never resolves.
+    #[test]
+    fn java_super_no_extends_emits_bare_method() {
+        let src = r#"
+class Standalone {
+    void doWork() {
+        super.foo();
+    }
+}
+"#;
+        let graph = parse(src);
+        let do_work = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "doWork")
+            .expect("doWork method not found");
+        assert!(
+            do_work.calls.iter().any(|c| c == "foo"),
+            "expected bare 'foo' in calls, got {:?}",
+            do_work.calls
+        );
+        assert!(
+            !do_work.calls.iter().any(|c| c == "super.foo"),
+            "must NOT contain synthetic 'super.foo', got {:?}",
+            do_work.calls
         );
     }
 
