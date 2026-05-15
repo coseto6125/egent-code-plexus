@@ -19,14 +19,14 @@ pub fn find_by_kinds(
     language: &tree_sitter::Language,
     id_kinds: &[&str],
 ) -> Vec<IdentifierRange> {
-    find_by_kinds_skipping(source, target, language, id_kinds, &[])
+    find_in_tree(source, target, language, id_kinds, &[])
 }
 
 /// As [`find_by_kinds`], but never recurses into nodes whose `kind()` is
 /// in `skip_subtree_kinds`. Used by languages where a wrapper node
 /// (e.g. PHP `variable_name` around `$foo`'s inner `name`) would
 /// otherwise produce false matches.
-pub fn find_by_kinds_skipping(
+pub fn find_in_tree(
     source: &[u8],
     target: &str,
     language: &tree_sitter::Language,

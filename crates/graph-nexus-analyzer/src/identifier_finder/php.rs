@@ -8,7 +8,7 @@
 //! PHP rename limitation: variables (`$foo`) are not renamed by this
 //! pass. Symbols at function / class / method / namespace level work.
 
-use super::generic::find_by_kinds_skipping;
+use super::generic::find_in_tree;
 use graph_nexus_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &["name"];
@@ -19,7 +19,7 @@ const KINDS: &[&str] = &["name"];
 const SKIP: &[&str] = &["variable_name"];
 
 pub fn find_identifier_occurrences(source: &[u8], target_name: &str) -> Vec<IdentifierRange> {
-    find_by_kinds_skipping(
+    find_in_tree(
         source,
         target_name,
         &tree_sitter_php::LANGUAGE_PHP.into(),
