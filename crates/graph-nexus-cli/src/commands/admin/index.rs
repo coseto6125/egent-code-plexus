@@ -47,6 +47,13 @@ pub struct IndexArgs {
     /// for benchmark baselines.
     #[arg(long, default_value_t = false)]
     pub no_cache: bool,
+
+    /// Suppress progress output (timings, "Graph saved", etc.). Used by
+    /// auto_ensure when an agent command transparently rebuilds; the
+    /// agent's stdout must stay clean and the user sees only the single
+    /// "Index refreshed" notice from the wrapper.
+    #[arg(skip)]
+    pub quiet: bool,
 }
 
 pub fn run(args: IndexArgs) -> Result<(), String> {
@@ -155,39 +162,104 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     let meta_path = layout.index_dir.join("meta.json");
     let embeddings_flag = args.embeddings;
 
-    // Step 2: Initialize pipeline and register providers
+    // Step 2: Initialize pipeline and register only the providers needed for
+    // files we actually scanned. tree-sitter language load + query compile is
+    // ~10–20ms per provider × 30 providers ≈ 0.5s of per-invocation overhead;
+    // small fixtures (single-language tests, snippet repos) end up registering
+    // 1–3 providers instead of all 30.
+    let needed = detect_needed_providers(&files_to_analyze);
     let analyze_start = Instant::now();
     let mut pipeline = AnalyzerPipeline::new();
-    pipeline.register_provider(Box::new(TypeScriptProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(PythonProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(GoProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(RustProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(JavaProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(JavaScriptProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(PhpProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(RubyProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(KotlinProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(CSharpProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(CProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(CppProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(DartProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(MarkdownProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(YamlProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(GitHubActionsProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(BashProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(LuaProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(CrystalProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(MoveProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(SolidityProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(DockerfileProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(NimProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(HclProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(SqlProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(VyperProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(VerilogProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(CairoProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(ZigProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(DockerComposeProvider::new().unwrap()));
+    if needed.typescript {
+        pipeline.register_provider(Box::new(TypeScriptProvider::new().unwrap()));
+    }
+    if needed.python {
+        pipeline.register_provider(Box::new(PythonProvider::new().unwrap()));
+    }
+    if needed.go {
+        pipeline.register_provider(Box::new(GoProvider::new().unwrap()));
+    }
+    if needed.rust {
+        pipeline.register_provider(Box::new(RustProvider::new().unwrap()));
+    }
+    if needed.java {
+        pipeline.register_provider(Box::new(JavaProvider::new().unwrap()));
+    }
+    if needed.javascript {
+        pipeline.register_provider(Box::new(JavaScriptProvider::new().unwrap()));
+    }
+    if needed.php {
+        pipeline.register_provider(Box::new(PhpProvider::new().unwrap()));
+    }
+    if needed.ruby {
+        pipeline.register_provider(Box::new(RubyProvider::new().unwrap()));
+    }
+    if needed.kotlin {
+        pipeline.register_provider(Box::new(KotlinProvider::new().unwrap()));
+    }
+    if needed.csharp {
+        pipeline.register_provider(Box::new(CSharpProvider::new().unwrap()));
+    }
+    if needed.c {
+        pipeline.register_provider(Box::new(CProvider::new().unwrap()));
+    }
+    if needed.cpp {
+        pipeline.register_provider(Box::new(CppProvider::new().unwrap()));
+    }
+    if needed.dart {
+        pipeline.register_provider(Box::new(DartProvider::new().unwrap()));
+    }
+    if needed.markdown {
+        pipeline.register_provider(Box::new(MarkdownProvider::new().unwrap()));
+    }
+    if needed.yaml {
+        pipeline.register_provider(Box::new(YamlProvider::new().unwrap()));
+    }
+    if needed.github_actions {
+        pipeline.register_provider(Box::new(GitHubActionsProvider::new().unwrap()));
+    }
+    if needed.bash {
+        pipeline.register_provider(Box::new(BashProvider::new().unwrap()));
+    }
+    if needed.lua {
+        pipeline.register_provider(Box::new(LuaProvider::new().unwrap()));
+    }
+    if needed.crystal {
+        pipeline.register_provider(Box::new(CrystalProvider::new().unwrap()));
+    }
+    if needed.move_lang {
+        pipeline.register_provider(Box::new(MoveProvider::new().unwrap()));
+    }
+    if needed.solidity {
+        pipeline.register_provider(Box::new(SolidityProvider::new().unwrap()));
+    }
+    if needed.dockerfile {
+        pipeline.register_provider(Box::new(DockerfileProvider::new().unwrap()));
+    }
+    if needed.nim {
+        pipeline.register_provider(Box::new(NimProvider::new().unwrap()));
+    }
+    if needed.hcl {
+        pipeline.register_provider(Box::new(HclProvider::new().unwrap()));
+    }
+    if needed.sql {
+        pipeline.register_provider(Box::new(SqlProvider::new().unwrap()));
+    }
+    if needed.vyper {
+        pipeline.register_provider(Box::new(VyperProvider::new().unwrap()));
+    }
+    if needed.verilog {
+        pipeline.register_provider(Box::new(VerilogProvider::new().unwrap()));
+    }
+    if needed.cairo {
+        pipeline.register_provider(Box::new(CairoProvider::new().unwrap()));
+    }
+    if needed.zig {
+        pipeline.register_provider(Box::new(ZigProvider::new().unwrap()));
+    }
+    if needed.docker_compose {
+        pipeline.register_provider(Box::new(DockerComposeProvider::new().unwrap()));
+    }
 
     // Step 3a: Try to load the incremental parse cache. Best-effort —
     // a missing/corrupt/version-mismatched cache silently falls back to
@@ -396,46 +468,152 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     // corrupt, and self-heals on the next analyze run).
     let index_start = Instant::now();
     if let Err(e) = crate::search::TantivyEngine::build_index(&repo_path, &global_graph) {
-        eprintln!(
-            "warning: full-text index build failed ({e}); exact-name queries still work — rerun `gnx analyze` to retry"
-        );
+        if !args.quiet {
+            eprintln!(
+                "warning: full-text index build failed ({e}); exact-name queries still work — rerun `gnx analyze` to retry"
+            );
+        }
     }
     let index_duration = index_start.elapsed();
 
     let total_duration = start_time.elapsed();
 
-    if skipped_large_files > 0 {
+    if skipped_large_files > 0 && !args.quiet {
         eprintln!(
             "Skipped: {} files > 512KB (preventing memory exhaustion).",
             skipped_large_files
         );
     }
 
-    println!("Graph analysis complete.");
-    println!("  Scan time:    {:?}", scan_duration);
-    println!("  Analyze time: {:?}", analyze_duration);
-    println!("  Build time:   {:?}", build_duration);
-    println!("  Save time:    {:?}", save_duration);
-    println!("  Index time:   {:?}", index_duration);
-    println!("  Total time:   {:?}", total_duration);
-    if cache_disabled {
-        println!(
-            "  Cache:        disabled ({} files re-parsed)",
-            cache_count_post
-        );
-    } else if cache_count_pre == 0 {
-        println!(
-            "  Cache:        first-run, building cache from {} files",
-            cache_count_post
-        );
-    } else {
-        let reparsed = cache_count_post.saturating_sub(cache_hits);
-        println!(
-            "  Cache:        {} reused / {} re-parsed (cache had {} entries)",
-            cache_hits, reparsed, cache_count_pre
-        );
+    if !args.quiet {
+        println!("Graph analysis complete.");
+        println!("  Scan time:    {:?}", scan_duration);
+        println!("  Analyze time: {:?}", analyze_duration);
+        println!("  Build time:   {:?}", build_duration);
+        println!("  Save time:    {:?}", save_duration);
+        println!("  Index time:   {:?}", index_duration);
+        println!("  Total time:   {:?}", total_duration);
+        if cache_disabled {
+            println!(
+                "  Cache:        disabled ({} files re-parsed)",
+                cache_count_post
+            );
+        } else if cache_count_pre == 0 {
+            println!(
+                "  Cache:        first-run, building cache from {} files",
+                cache_count_post
+            );
+        } else {
+            let reparsed = cache_count_post.saturating_sub(cache_hits);
+            println!(
+                "  Cache:        {} reused / {} re-parsed (cache had {} entries)",
+                cache_hits, reparsed, cache_count_pre
+            );
+        }
+        println!("Graph saved to {:?}", bin_path);
     }
-    println!("Graph saved to {:?}", bin_path);
 
     Ok(())
+}
+
+#[derive(Default)]
+struct NeededProviders {
+    typescript: bool,
+    python: bool,
+    go: bool,
+    rust: bool,
+    java: bool,
+    javascript: bool,
+    php: bool,
+    ruby: bool,
+    kotlin: bool,
+    csharp: bool,
+    c: bool,
+    cpp: bool,
+    dart: bool,
+    markdown: bool,
+    yaml: bool,
+    github_actions: bool,
+    bash: bool,
+    lua: bool,
+    crystal: bool,
+    move_lang: bool,
+    solidity: bool,
+    dockerfile: bool,
+    nim: bool,
+    hcl: bool,
+    sql: bool,
+    vyper: bool,
+    verilog: bool,
+    cairo: bool,
+    zig: bool,
+    docker_compose: bool,
+}
+
+/// Walk the scanned file list, set the flag for each language whose files we
+/// actually intend to parse. Returning a struct instead of a `HashSet<&str>`
+/// keeps the `if needed.X` call-sites obvious in the caller and avoids
+/// stringly-typed lookups at every register_provider step.
+fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -> NeededProviders {
+    let mut n = NeededProviders::default();
+    for (path, _) in files {
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if matches!(file_name, "Dockerfile" | "dockerfile") {
+            n.dockerfile = true;
+            continue;
+        }
+        if matches!(
+            file_name,
+            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+        ) {
+            n.docker_compose = true;
+            continue;
+        }
+        let is_gha = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e, "yml" | "yaml"))
+            && {
+                let components: Vec<_> = path.components().collect();
+                components.windows(2).any(|w| {
+                    w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows"
+                })
+            };
+        if is_gha {
+            n.github_actions = true;
+            continue;
+        }
+        match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+            "ts" | "tsx" => n.typescript = true,
+            "py" | "pyi" => n.python = true,
+            "go" => n.go = true,
+            "rs" => n.rust = true,
+            "java" => n.java = true,
+            "js" | "jsx" | "mjs" | "cjs" => n.javascript = true,
+            "php" => n.php = true,
+            "rb" => n.ruby = true,
+            "kt" | "kts" => n.kotlin = true,
+            "cs" => n.csharp = true,
+            "c" | "h" => n.c = true,
+            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => n.cpp = true,
+            "dart" => n.dart = true,
+            "md" | "txt" | "rst" => n.markdown = true,
+            "sh" | "bash" => n.bash = true,
+            "lua" | "luau" => n.lua = true,
+            "cr" => n.crystal = true,
+            "move" => n.move_lang = true,
+            "sol" => n.solidity = true,
+            "dockerfile" => n.dockerfile = true,
+            "nim" => n.nim = true,
+            "tf" | "tfvars" | "hcl" => n.hcl = true,
+            "sql" => n.sql = true,
+            "vy" => n.vyper = true,
+            "v" | "sv" | "vh" | "svh" => n.verilog = true,
+            "cairo" => n.cairo = true,
+            "zig" => n.zig = true,
+            "yml" | "yaml" => n.yaml = true,
+            _ => {}
+        }
+    }
+    n
 }

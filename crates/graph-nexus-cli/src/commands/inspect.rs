@@ -1,4 +1,3 @@
-use crate::auto_ensure::{ensure_index, EnsureResult};
 use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
@@ -225,22 +224,9 @@ fn bfs_upstream_1hop(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> Vec<serd
     results
 }
 
-pub fn run(args: InspectArgs, engine: &Engine, graph_path: &Path) -> Result<(), GnxError> {
+pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
-
-    // Freshness warning: emit to stderr when index is stale.
-    let worktree_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    if let Ok(EnsureResult::Stale { age_seconds }) = ensure_index(graph_path, &worktree_root) {
-        let age = if age_seconds > 3600 {
-            format!("{}h", age_seconds / 3600)
-        } else if age_seconds > 60 {
-            format!("{}m", age_seconds / 60)
-        } else {
-            format!("{}s", age_seconds)
-        };
-        eprintln!("{}", crate::hint::stale_warning("current", &age));
-    }
 
     let name_query = args.name.as_deref().filter(|s| !s.is_empty());
 

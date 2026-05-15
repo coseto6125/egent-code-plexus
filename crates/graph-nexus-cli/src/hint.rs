@@ -24,11 +24,6 @@ pub fn error_with_cause(what: &str, cause: &str, next: &str) -> String {
     format!("✗ {what}\n  cause: {cause}\n  next:  {next}")
 }
 
-/// One-line stale-index warning for stderr.
-pub fn stale_warning(repo_name: &str, age: &str) -> String {
-    format!("⚠ Index for \"{repo_name}\" is stale (last built {age} ago).")
-}
-
 /// Collision warning for rename pre-flight.
 pub fn collision_warning(new_name: &str, existing_locations: &[String]) -> String {
     let locs = existing_locations.join("\n  - ");
