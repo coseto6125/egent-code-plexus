@@ -41,16 +41,14 @@ impl graph_nexus_mcp::registry::EngineRef for Engine {
 /// (e.g. daemon mode passes `NoopEngine` for commands that don't need
 /// a graph). Used by `run_inner` functions whose body needs direct
 /// `Engine` access.
-pub fn cast_engine<'a>(
-    engine: &'a dyn graph_nexus_mcp::registry::EngineRef,
-) -> Result<&'a Engine, graph_nexus_core::GnxError> {
+pub fn cast_engine(
+    engine: &dyn graph_nexus_mcp::registry::EngineRef,
+) -> Result<&Engine, graph_nexus_core::GnxError> {
     engine
         .as_any()
         .and_then(|a| a.downcast_ref::<Engine>())
         .ok_or_else(|| {
-            graph_nexus_core::GnxError::InvalidArgument(
-                "engine not available".to_string(),
-            )
+            graph_nexus_core::GnxError::InvalidArgument("engine not available".to_string())
         })
 }
 

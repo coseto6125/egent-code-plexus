@@ -87,9 +87,11 @@ impl GnxMcpServer {
             DispatchMode::Spawn => {
                 let binary = self.self_exe.clone();
                 let subcommand = (tool.subcommand)().to_string();
-                tokio::task::spawn_blocking(move || crate::spawn::run_spawn(&binary, &subcommand, &args))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("spawn task: {e}"))?
+                tokio::task::spawn_blocking(move || {
+                    crate::spawn::run_spawn(&binary, &subcommand, &args)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("spawn task: {e}"))?
             }
             DispatchMode::Daemon => {
                 let state_arc = self
@@ -101,7 +103,9 @@ impl GnxMcpServer {
                 // existing engine in place rather than aborting — the
                 // caller will get whatever the (possibly stale) engine
                 // returns, which is safer than 503-ing the whole tool.
-                if let Ok(Some(new_mtime)) = crate::daemon::needs_remap(&state.engine_path, state.loaded_at) {
+                if let Ok(Some(new_mtime)) =
+                    crate::daemon::needs_remap(&state.engine_path, state.loaded_at)
+                {
                     state.loaded_at = new_mtime;
                 }
                 let value = (tool.handler)(args, &*state)
