@@ -1,10 +1,38 @@
 use super::receiver_types::{collect_bindings, extract_dart_calls};
+use crate::framework_confidence;
+use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+/// Per upstream `dart.ts:109-132` `astFrameworkPatterns`.
+const DART_FRAMEWORKS: &[FrameworkPatternSpec] = &[
+    FrameworkPatternSpec {
+        framework: "flutter",
+        reason: "flutter-widget",
+        confidence: framework_confidence::FLUTTER_HINT,
+        patterns: &[
+            "StatelessWidget",
+            "StatefulWidget",
+            "BuildContext",
+            "Widget build",
+            "ChangeNotifier",
+            "GetxController",
+            "Cubit<",
+            "Bloc<",
+            "ConsumerWidget",
+        ],
+    },
+    FrameworkPatternSpec {
+        framework: "riverpod",
+        reason: "riverpod-pattern",
+        confidence: framework_confidence::RIVERPOD_HINT,
+        patterns: &["@riverpod", "ref.watch", "ref.read", "AsyncNotifier", "Notifier"],
+    },
+];
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -61,6 +89,13 @@ impl LanguageProvider for DartProvider {
         let idx_property = self.query.capture_index_for_name("property");
         let idx_import = self.query.capture_index_for_name("import");
 
+        let idx_param = self.query.capture_index_for_name("param");
+        let idx_param_name = self.query.capture_index_for_name("param.name");
+        let idx_param_type = self.query.capture_index_for_name("param.type");
+        let idx_var = self.query.capture_index_for_name("var");
+        let idx_var_name = self.query.capture_index_for_name("var.name");
+        let idx_var_type = self.query.capture_index_for_name("var.type");
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -71,6 +106,13 @@ impl LanguageProvider for DartProvider {
 
             let mut import_source = None;
             let mut import_alias = None;
+
+            let mut param_root: Option<tree_sitter::Node<'_>> = None;
+            let mut param_name: Option<tree_sitter::Node<'_>> = None;
+            let mut param_type: Option<tree_sitter::Node<'_>> = None;
+            let mut var_root: Option<tree_sitter::Node<'_>> = None;
+            let mut var_name: Option<tree_sitter::Node<'_>> = None;
+            let mut var_type: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -111,6 +153,18 @@ impl LanguageProvider for DartProvider {
                     {
                         decorators.push(d_str.to_string());
                     }
+                } else if Some(cap_idx) == idx_param {
+                    param_root = Some(cap.node);
+                } else if Some(cap_idx) == idx_param_name {
+                    param_name = Some(cap.node);
+                } else if Some(cap_idx) == idx_param_type {
+                    param_type = Some(cap.node);
+                } else if Some(cap_idx) == idx_var {
+                    var_root = Some(cap.node);
+                } else if Some(cap_idx) == idx_var_name {
+                    var_name = Some(cap.node);
+                } else if Some(cap_idx) == idx_var_type {
+                    var_type = Some(cap.node);
                 }
 
                 if Some(cap_idx) == idx_function
@@ -121,6 +175,70 @@ impl LanguageProvider for DartProvider {
                     || Some(cap_idx) == idx_import
                 {
                     root_span_node = Some(cap.node);
+                }
+            }
+
+            // Dart formal parameter `String name` → Variable node carrying
+            // the declared type. Mirrors C/C++/Swift conventions: each
+            // declared name becomes a separately indexable RawNode.
+            if let (Some(p_root), Some(p_name)) = (param_root, param_name) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[p_name.start_byte()..p_name.end_byte()])
+                {
+                    let name_str = name_str.trim();
+                    let start = p_root.start_position();
+                    let end = p_root.end_position();
+                    let type_ann = param_type.and_then(|t| {
+                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                    });
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: !name_str.starts_with('_'),
+                        heritage: vec![],
+                        type_annotation: type_ann,
+                        name: name_str.to_string(),
+                        kind: NodeKind::Variable,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+
+            // Dart top-level variable `double pi = 3.14` → Variable node.
+            if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
+                {
+                    let name_str = name_str.trim();
+                    let start = v_root.start_position();
+                    let end = v_root.end_position();
+                    let type_ann = var_type.and_then(|t| {
+                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                    });
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: !name_str.starts_with('_'),
+                        heritage: vec![],
+                        type_annotation: type_ann,
+                        name: name_str.to_string(),
+                        kind: NodeKind::Variable,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
                 }
             }
 
@@ -190,6 +308,8 @@ impl LanguageProvider for DartProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         extract_dart_calls(tree.root_node(), source, &mut nodes, &bindings);
 
+        let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes: vec![],
@@ -197,7 +317,7 @@ impl LanguageProvider for DartProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })

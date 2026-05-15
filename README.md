@@ -198,15 +198,15 @@ This matrix is *not* a parity scorecard against any other tool. We took design i
 | Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Go | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | PHP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
-| Swift | ✓ | — | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
-| C | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
-| C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
-| Dart | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Swift | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| C | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
+| C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | ─── *structural-only rows below — per-cell audit pending* ─── | | | | | | | | | | | |
 | Bash | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
 | Lua | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
@@ -229,17 +229,16 @@ This matrix is *not* a parity scorecard against any other tool. We took design i
 **Per-cell notes** (where the cell shape needs context):
 Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Solidity Heritage = `is X, Y, Z`; SQL Heritage ☐ = foreign-key references planned, not implemented; GitHub Actions Imports ☐ = `uses:` (workflow → action) edges planned; Dockerfile Imports = `FROM <base>`.
 
-**Roadmap (☐ cells)** — these are the explicit "feasible, not done" cells:
-- **Frameworks** for 6 languages (C# / Ruby / Swift / C / C++ / Dart) — net-new work, no reference implementation we copied from.
-- **Types** for Swift / Dart — grammar shape varies enough that the dispatch logic we used for Go/C/C++ didn't converge; queued for a focused follow-up.
+**Roadmap (☐ cells)** — the remaining "feasible, not done" cells live under the divider (per-cell audit still pending for the 17 structural-only languages), plus the universal `☐` for Rename across all 17 extras. The 14 main-language rows are now fully `✓`/`—`.
 
 **Recently shipped** (history, for context):
 - Cross-language Constructor Inference (14 langs) with Python's `4e4fb1b` receiver-type binding as the reference prototype.
 - Java static-import named bindings; C# `csproj` / `global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators.
 - Wave 2 (PR [#2](https://github.com/coseto6125/graph-nexus/pull/2)): Types for Go/C/C++ (declared types on params/returns/fields/vars); Config for PHP (`composer.json`) + Swift (`Package.swift`); Frameworks for JS (Express + Hapi) / Kotlin (Ktor) / Go (gin + echo) / PHP (Laravel).
+- Wave 3 (this commit) ports the remaining 8 `☐` cells in the main table from upstream `_source_code/gitnexus`:
+  - **Frameworks** via `astFrameworkPatterns` substring scans (`languages/{csharp,ruby,swift,c-cpp,dart}.ts`): C# (aspnet / signalr / blazor / efcore), Ruby (rails / sinatra), Swift (uikit / swiftui / vapor), C++ (qt), Dart (flutter / riverpod). The shared `framework_helpers::detect_ast_framework_patterns` walks each language's `FrameworkPatternSpec` table and emits one `RawFrameworkRef` per detected framework at module level. C Frameworks lands as `—` because upstream's `cProvider` defines no `astFrameworkPatterns` (qt is C++-only on `cppProvider`).
+  - **Types** for Swift / Dart — declared types on parameters, properties, and top-level vars. Swift uses postfix `name: Type` syntax and reads the `type_annotation` node text directly; Dart uses prefix `Type name` with an unfielded `(type ...)` sibling captured positionally.
 - Matrix-opt batch (HEAD `86e65a7`): Go per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + mixin tracking, TS/JS re-export alias preservation; in the extras section, Bash `source`/`.` imports, Lua `require` aliases + metatable inheritance + table-assigned methods, Solidity state-variable visibility. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
-
-**Matrix-opt batch (HEAD `86e65a7`)** deepened existing ✓ cells: Go gained per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + `include`/`extend` mixin tracking, TS/JS re-export alias preservation; in the extras section, Bash gained `source`/`.` imports, Lua `local M = require()` aliases + metatable inheritance + table-assigned methods, and Solidity state-variable visibility. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
 ### Call detection design
 

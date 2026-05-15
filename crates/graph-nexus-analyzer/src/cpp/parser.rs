@@ -1,10 +1,32 @@
 use super::receiver_types::{collect_bindings, extract_cpp_calls};
+use crate::framework_confidence;
+use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+/// Per upstream `c-cpp.ts:414-431` `cppProvider.astFrameworkPatterns`.
+/// Note: upstream's `cProvider` has no `astFrameworkPatterns`, so this is
+/// C++-only.
+const CPP_FRAMEWORKS: &[FrameworkPatternSpec] = &[FrameworkPatternSpec {
+    framework: "qt",
+    reason: "qt-macro",
+    confidence: framework_confidence::QT_HINT,
+    patterns: &[
+        "Q_OBJECT",
+        "Q_INVOKABLE",
+        "Q_PROPERTY",
+        "Q_SIGNALS",
+        "Q_SLOTS",
+        "Q_SIGNAL",
+        "Q_SLOT",
+        "QWidget",
+        "QApplication",
+    ],
+}];
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -317,6 +339,8 @@ impl LanguageProvider for CppProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         extract_cpp_calls(tree.root_node(), source, &mut nodes, &bindings);
 
+        let framework_refs = detect_ast_framework_patterns(source, CPP_FRAMEWORKS);
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes: vec![],
@@ -324,7 +348,7 @@ impl LanguageProvider for CppProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })

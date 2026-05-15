@@ -8,10 +8,24 @@
 //! This module consolidates those helpers so each parser stays focused on its own
 //! grammar quirks, not span arithmetic.
 
-use graph_nexus_core::analyzer::types::{RawImport, RawNode};
+use graph_nexus_core::analyzer::types::{RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 
 pub type Span = (u32, u32, u32, u32);
+
+/// One framework's textual signature: a name, a confidence value, a reason
+/// tag, and the substrings that prove the framework is in use.
+///
+/// Mirrors upstream's `AstFrameworkPatternConfig` from
+/// `_source_code/gitnexus/src/core/ingestion/language-provider.ts`. The
+/// patterns are matched case-insensitively as substrings against the whole
+/// file source, per upstream `detectFrameworkFromAST` (`framework-detection.ts`).
+pub struct FrameworkPatternSpec {
+    pub framework: &'static str,
+    pub reason: &'static str,
+    pub confidence: f32,
+    pub patterns: &'static [&'static str],
+}
 
 /// Sentinel `source_name` for framework refs registered at module level
 /// (e.g. Actix `#[get]` attribute macros, top-level Express `app.get(...)`).
@@ -130,6 +144,84 @@ pub fn has_import_from(imports: &[RawImport], modules: &[&str]) -> bool {
             .iter()
             .any(|m| matches_module(&imp.source, m) || matches_module(&imp.imported_name, m))
     })
+}
+
+/// Scan a file's source for any framework whose signature patterns appear,
+/// emit one `RawFrameworkRef` per detected framework.
+///
+/// Mirrors upstream `detectFrameworkFromAST` (`framework-detection.ts:539`):
+/// case-insensitive substring match against the whole source. Each detected
+/// framework yields one ref with `source_name = MODULE_LEVEL_SOURCE` (the
+/// signal is file-level — patterns are scattered across decorators / class
+/// headers / call sites that we don't bind to a single enclosing function),
+/// `target_name = framework`, and `span` pointing at the first matching
+/// pattern's location for downstream attribution.
+///
+/// Each framework spec is emitted at most once per file (dedupe by framework
+/// name) to avoid an explosion when many patterns of the same framework
+/// appear in the same file.
+pub fn detect_ast_framework_patterns(
+    source: &[u8],
+    specs: &[FrameworkPatternSpec],
+) -> Vec<RawFrameworkRef> {
+    let Ok(text) = std::str::from_utf8(source) else {
+        return Vec::new();
+    };
+    let lowered = text.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    let mut out = Vec::new();
+    for spec in specs {
+        for pat in spec.patterns {
+            let needle = pat.to_ascii_lowercase();
+            if let Some(byte_pos) = find_subsequence(bytes, needle.as_bytes()) {
+                let span = byte_position_to_span(text, byte_pos, byte_pos + needle.len());
+                out.push(RawFrameworkRef {
+                    source_name: MODULE_LEVEL_SOURCE.to_string(),
+                    target_name: spec.framework.to_string(),
+                    confidence: spec.confidence,
+                    reason: spec.reason.to_string(),
+                    span,
+                });
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn byte_position_to_span(text: &str, start: usize, end: usize) -> Span {
+    let (start_row, start_col) = byte_to_row_col(text, start);
+    let (end_row, end_col) = byte_to_row_col(text, end.min(text.len()));
+    (
+        crate::calls::safe_row(start_row),
+        u32::try_from(start_col).unwrap_or(u32::MAX),
+        crate::calls::safe_row(end_row),
+        u32::try_from(end_col).unwrap_or(u32::MAX),
+    )
+}
+
+fn byte_to_row_col(text: &str, byte_pos: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for (i, b) in text.as_bytes().iter().enumerate() {
+        if i == byte_pos {
+            return (row, col);
+        }
+        if *b == b'\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (row, col)
 }
 
 #[cfg(test)]

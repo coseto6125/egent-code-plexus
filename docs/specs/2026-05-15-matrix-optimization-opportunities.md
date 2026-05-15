@@ -1,7 +1,7 @@
 # Language Matrix Optimization Opportunities
 
 **Date**: 2026-05-15
-**Status**: Partially landed — 7 of 12 items shipped in main HEAD `86e65a7` via parallel SA dispatch (PR [#1](https://github.com/coseto6125/graph-nexus/pull/1) — closed, FF-merged locally). Remainder still open.
+**Status**: Wave 1 + Wave 2 + Wave 3 landed — 8 ⚠️ cells in the main matrix closed. Wave 1 (7 items, HEAD `86e65a7`, PR [#1](https://github.com/coseto6125/graph-nexus/pull/1) — closed, FF-merged); Wave 2 (9 cells, PR [#2](https://github.com/coseto6125/graph-nexus/pull/2)); Wave 3 (this PR) ports the remaining 8 ⚠️ cells from upstream `astFrameworkPatterns` + Swift/Dart type-extractor grammars. Remaining infrastructure refactors (§C1–§C4) still open.
 **Related**:
 - README Language Matrix (lines 90-121)
 - `docs/specs/2026-05-15-language-coverage-gaps.md` (Waves 1-2 closure: ⚠️ → ✓ conversions)
@@ -46,18 +46,40 @@ Separately from the matrix-opt scope above, Wave 2 from `docs/specs/2026-05-15-l
 | B2 Kotlin Ktor | shipped | `kotlin_frameworks.rs` (3) |
 | B3 Go gin + echo | shipped (ported from upstream `http-patterns/go.ts`) | `go_frameworks.rs` (6) |
 | B3 PHP Laravel | shipped (ported from upstream `http-patterns/php.ts`, simplified) | `php_frameworks.rs` (5) |
-| D2 Swift / Dart types | deferred (SA failed to converge; not in upstream) | — |
-| B2 C# ASP.NET Core | deferred — **not in upstream baseline** | — |
-| B3 Ruby Rails | deferred — **not in upstream baseline** | — |
-| B4 Swift Vapor + C++ Crow + Dart shelf | deferred — **not in upstream baseline** | — |
+| D2 Swift types | shipped in Wave 3 | `swift_type_annotations.rs` (6) |
+| D2 Dart types | shipped in Wave 3 | `dart_type_annotations.rs` (7) |
+| B2 C# ASP.NET / SignalR / Blazor / EFCore | shipped in Wave 3 | `csharp_frameworks.rs` (8) |
+| B3 Ruby Rails / Sinatra | shipped in Wave 3 | `ruby_frameworks.rs` (5) |
+| B4 Swift UIKit / SwiftUI / Vapor | shipped in Wave 3 | `swift_frameworks.rs` (6) |
+| B4 C++ Qt | shipped in Wave 3 | `cpp_frameworks.rs` (4) |
+| B4 Dart Flutter / Riverpod | shipped in Wave 3 | `dart_frameworks.rs` (7) |
 
-**Upstream coverage note**: gitnexus' `http-patterns/` directory has plugins for **5 langs only**: Go, Java, Node (JS/TS), PHP, Python. The framework langs we've closed here mirror those plugins (Express/Hapi for JS, Ktor for Kotlin, gin/echo for Go, Laravel for PHP). Closing C# / Ruby / Swift / C++ / Dart frameworks would be **net-new beyond upstream parity** — outside the scope of "fork from upstream" and best treated as a separate roadmap item.
+**Upstream coverage note (revised)**: gitnexus' `http-patterns/` directory has plugins for 5 langs only (Go, Java, Node, PHP, Python), but each language's `languages/{lang}.ts` provider exposes an `astFrameworkPatterns` table — a substring-scan registry of framework signatures (CSS classes, decorators, base types). Wave 3 ports these tables directly. The C provider has no `astFrameworkPatterns` in upstream (Qt lives on `cppProvider` only), so the C Frameworks cell flips from ⚠️ to `—` rather than ✓ — honest "neither claims it".
 
-PR #2 review found 4 issues ≥80; all 4 fixed in this branch:
+PR #2 review found 4 issues ≥80; all 4 fixed in that branch:
 - Go multi-name param/var → emit one Variable per name (was: only last name)
 - JS Express handler now matches identifier / member_expression / arrow / function_expression
 - JS Express verb list drops `use` (middleware, not route)
 - Go inferred-decl test now asserts node absence explicitly (was vacuous)
+
+## Wave 3 — Frameworks + Swift/Dart Types
+
+| Wave 3 task | Status | Test file |
+|---|---|---|
+| C# `astFrameworkPatterns` (aspnet / signalr / blazor / efcore) | shipped | `csharp_frameworks.rs` (8) |
+| Ruby `astFrameworkPatterns` (rails / sinatra) | shipped | `ruby_frameworks.rs` (5) |
+| Swift `astFrameworkPatterns` (uikit / swiftui / vapor) | shipped | `swift_frameworks.rs` (6) |
+| C++ `astFrameworkPatterns` (qt) | shipped | `cpp_frameworks.rs` (4) |
+| Dart `astFrameworkPatterns` (flutter / riverpod) | shipped | `dart_frameworks.rs` (7) |
+| Swift type annotations (params, properties, top-level lets) | shipped | `swift_type_annotations.rs` (6) |
+| Dart type annotations (params, fields, top-level vars) | shipped | `dart_type_annotations.rs` (7) |
+| C Frameworks ⚠️→`—` (no upstream pattern table on cProvider) | matrix correction only | — |
+
+**Implementation**: A new shared helper `framework_helpers::detect_ast_framework_patterns(source, specs)` mirrors upstream `detectFrameworkFromAST` — case-insensitive substring scan against the whole file source. Each language parser declares a `const {LANG}_FRAMEWORKS: &[FrameworkPatternSpec]` table copied verbatim from upstream `languages/{lang}.ts`, and emits one `RawFrameworkRef` per detected framework at module level (`source_name = MODULE_LEVEL_SOURCE`, `target_name = framework`, span pointing at the first matching pattern).
+
+Confidence values (new in `framework_confidence`): `*_HINT` family (0.7–0.8) — lower than route-binding consts because these are file-level presence signals, not call-site bindings.
+
+Test totals: 8 ⚠️ cells closed across 53 new tests; `cargo test -p graph-nexus-analyzer` 353/353 with no regressions.
 
 ---
 

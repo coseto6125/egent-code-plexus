@@ -26,3 +26,19 @@ pub const LARAVEL_ROUTE: f32 = 0.9;
 pub const RAILS_ROUTE: f32 = 0.9;
 pub const GIN_ROUTE: f32 = 0.9;
 pub const ECHO_ROUTE: f32 = 0.9;
+
+// ── Wave 3: file-level AST-pattern framework hints (per upstream
+// `astFrameworkPatterns`). Lower than route-binding consts because these
+// are substring presence checks, not call-site bindings ──
+pub const ASPNET_HINT: f32 = 0.8;
+pub const SIGNALR_HINT: f32 = 0.8;
+pub const BLAZOR_HINT: f32 = 0.7;
+pub const EFCORE_HINT: f32 = 0.7;
+pub const RAILS_HINT: f32 = 0.8;
+pub const SINATRA_HINT: f32 = 0.8;
+pub const UIKIT_HINT: f32 = 0.8;
+pub const SWIFTUI_HINT: f32 = 0.8;
+pub const VAPOR_HINT: f32 = 0.8;
+pub const QT_HINT: f32 = 0.8;
+pub const FLUTTER_HINT: f32 = 0.8;
+pub const RIVERPOD_HINT: f32 = 0.8;

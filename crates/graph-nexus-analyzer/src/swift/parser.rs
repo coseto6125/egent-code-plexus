@@ -1,10 +1,50 @@
 use super::receiver_types::{collect_bindings, extract_swift_calls};
+use crate::framework_confidence;
+use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+/// Per upstream `swift.ts:281-316` `astFrameworkPatterns`.
+const SWIFT_FRAMEWORKS: &[FrameworkPatternSpec] = &[
+    FrameworkPatternSpec {
+        framework: "uikit",
+        reason: "uikit-lifecycle",
+        confidence: framework_confidence::UIKIT_HINT,
+        patterns: &[
+            "viewDidLoad",
+            "viewWillAppear",
+            "viewDidAppear",
+            "UIViewController",
+            "@IBOutlet",
+            "@IBAction",
+            "@objc",
+        ],
+    },
+    FrameworkPatternSpec {
+        framework: "swiftui",
+        reason: "swiftui-pattern",
+        confidence: framework_confidence::SWIFTUI_HINT,
+        patterns: &[
+            "@main",
+            "WindowGroup",
+            "ContentView",
+            "@StateObject",
+            "@ObservedObject",
+            "@EnvironmentObject",
+            "@Published",
+        ],
+    },
+    FrameworkPatternSpec {
+        framework: "vapor",
+        reason: "vapor-routing",
+        confidence: framework_confidence::VAPOR_HINT,
+        patterns: &["app.get", "app.post", "req.content.decode", "Vapor"],
+    },
+];
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -60,6 +100,13 @@ impl LanguageProvider for SwiftProvider {
         let idx_type = self.query.capture_index_for_name("type");
         let idx_decorator = self.query.capture_index_for_name("decorator");
 
+        let idx_param = self.query.capture_index_for_name("param");
+        let idx_param_name = self.query.capture_index_for_name("param.name");
+        let idx_param_type = self.query.capture_index_for_name("param.type");
+        let idx_property = self.query.capture_index_for_name("property");
+        let idx_property_name = self.query.capture_index_for_name("property.name");
+        let idx_property_type = self.query.capture_index_for_name("property.type");
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -72,6 +119,13 @@ impl LanguageProvider for SwiftProvider {
             let mut heritage = Vec::new();
             let mut type_annotation = None;
             let mut decorators = Vec::new();
+
+            let mut param_root: Option<tree_sitter::Node<'_>> = None;
+            let mut param_name: Option<tree_sitter::Node<'_>> = None;
+            let mut param_type: Option<tree_sitter::Node<'_>> = None;
+            let mut property_root: Option<tree_sitter::Node<'_>> = None;
+            let mut property_name: Option<tree_sitter::Node<'_>> = None;
+            let mut property_type: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -123,6 +177,83 @@ impl LanguageProvider for SwiftProvider {
                     {
                         decorators.push(d_str.to_string());
                     }
+                } else if Some(cap_idx) == idx_param {
+                    param_root = Some(cap.node);
+                } else if Some(cap_idx) == idx_param_name {
+                    param_name = Some(cap.node);
+                } else if Some(cap_idx) == idx_param_type {
+                    param_type = Some(cap.node);
+                } else if Some(cap_idx) == idx_property {
+                    property_root = Some(cap.node);
+                } else if Some(cap_idx) == idx_property_name {
+                    property_name = Some(cap.node);
+                } else if Some(cap_idx) == idx_property_type {
+                    property_type = Some(cap.node);
+                }
+            }
+
+            // Swift function parameter `name: Type` → Variable node with the
+            // type as `type_annotation`. Mirrors C/C++/Go convention from
+            // Wave 2: each declared name with a type becomes a separately
+            // indexable node.
+            if let (Some(p_root), Some(p_name)) = (param_root, param_name) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[p_name.start_byte()..p_name.end_byte()])
+                {
+                    let start = p_root.start_position();
+                    let end = p_root.end_position();
+                    let type_ann = param_type.and_then(|t| {
+                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
+                    });
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: false,
+                        heritage: vec![],
+                        type_annotation: type_ann,
+                        name: name_str.to_string(),
+                        kind: NodeKind::Variable,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+
+            // Swift property declaration `var x: Int` / `let y: String` →
+            // Property node. Captured separately from `(class ...)` body so
+            // both class properties and top-level lets land here.
+            if let (Some(pr_root), Some(pr_name)) = (property_root, property_name) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[pr_name.start_byte()..pr_name.end_byte()])
+                {
+                    let start = pr_root.start_position();
+                    let end = pr_root.end_position();
+                    let type_ann = property_type.and_then(|t| {
+                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
+                    });
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: true,
+                        heritage: vec![],
+                        type_annotation: type_ann,
+                        name: name_str.to_string(),
+                        kind: NodeKind::Property,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
                 }
             }
 
@@ -169,6 +300,8 @@ impl LanguageProvider for SwiftProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         extract_swift_calls(tree.root_node(), source, &mut nodes, &bindings);
 
+        let framework_refs = detect_ast_framework_patterns(source, SWIFT_FRAMEWORKS);
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes: vec![],
@@ -176,7 +309,7 @@ impl LanguageProvider for SwiftProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })

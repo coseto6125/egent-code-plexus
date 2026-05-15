@@ -1,4 +1,6 @@
 use super::receiver_types::extract_ruby_calls;
+use crate::framework_confidence;
+use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
 use graph_nexus_core::graph::NodeKind;
@@ -6,6 +8,32 @@ use std::collections::HashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
+
+/// Per upstream `ruby.ts:156-178` `astFrameworkPatterns`.
+const RUBY_FRAMEWORKS: &[FrameworkPatternSpec] = &[
+    FrameworkPatternSpec {
+        framework: "rails",
+        reason: "rails-pattern",
+        confidence: framework_confidence::RAILS_HINT,
+        patterns: &[
+            "ApplicationController",
+            "ApplicationRecord",
+            "ActiveRecord::Base",
+            "before_action",
+            "after_action",
+            "has_many",
+            "belongs_to",
+            "has_one",
+            "validates",
+        ],
+    },
+    FrameworkPatternSpec {
+        framework: "sinatra",
+        reason: "sinatra-pattern",
+        confidence: framework_confidence::SINATRA_HINT,
+        patterns: &["Sinatra::Base", "Sinatra::Application"],
+    },
+];
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -316,6 +344,8 @@ impl LanguageProvider for RubyProvider {
         // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
         extract_ruby_calls(tree.root_node(), source, &mut nodes);
 
+        let framework_refs = detect_ast_framework_patterns(source, RUBY_FRAMEWORKS);
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
@@ -323,7 +353,7 @@ impl LanguageProvider for RubyProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })

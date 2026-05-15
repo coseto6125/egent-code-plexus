@@ -1,10 +1,50 @@
 use super::receiver_types::extract_csharp_calls;
+use crate::framework_confidence;
+use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+/// Per upstream `csharp.ts:153-187` `astFrameworkPatterns`. Substring scan of
+/// the file source; emits one `RawFrameworkRef` per detected framework.
+const CSHARP_FRAMEWORKS: &[FrameworkPatternSpec] = &[
+    FrameworkPatternSpec {
+        framework: "aspnet",
+        reason: "aspnet-attribute",
+        confidence: framework_confidence::ASPNET_HINT,
+        patterns: &[
+            "[ApiController]",
+            "[HttpGet]",
+            "[HttpPost]",
+            "[HttpPut]",
+            "[HttpDelete]",
+            "[Route]",
+            "[Authorize]",
+            "[AllowAnonymous]",
+        ],
+    },
+    FrameworkPatternSpec {
+        framework: "signalr",
+        reason: "signalr-attribute",
+        confidence: framework_confidence::SIGNALR_HINT,
+        patterns: &["[HubMethodName]", ": Hub", ": Hub<"],
+    },
+    FrameworkPatternSpec {
+        framework: "blazor",
+        reason: "blazor-attribute",
+        confidence: framework_confidence::BLAZOR_HINT,
+        patterns: &["@page", "[Parameter]", "@inject"],
+    },
+    FrameworkPatternSpec {
+        framework: "efcore",
+        reason: "efcore-pattern",
+        confidence: framework_confidence::EFCORE_HINT,
+        patterns: &["DbContext", "DbSet<", "OnModelCreating"],
+    },
+];
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -197,6 +237,8 @@ impl LanguageProvider for CSharpProvider {
         // `base.Foo()`, and typed-variable `obj.Foo()` patterns.
         extract_csharp_calls(tree.root_node(), source, &mut nodes);
 
+        let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes: vec![],
@@ -204,7 +246,7 @@ impl LanguageProvider for CSharpProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })
