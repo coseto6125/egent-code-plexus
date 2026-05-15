@@ -2,7 +2,7 @@ use crate::cypher::ast::*;
 use crate::cypher::error::CypherError;
 use crate::cypher::value::{QueryResult, Value};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// One row of intermediate bindings during pattern matching.
@@ -17,8 +17,7 @@ struct Binding {
     computed: HashMap<String, Value>,
 }
 
-/// Reading file content for `.content` projection (used by C12+).
-#[allow(dead_code)]
+/// Reading file content for `.content` projection.
 struct ContentCache {
     repo_root: PathBuf,
     files: HashMap<u32, Option<String>>,
@@ -32,7 +31,6 @@ impl ContentCache {
         }
     }
 
-    #[allow(dead_code)]
     fn body_for_file(&mut self, graph: &ArchivedZeroCopyGraph, file_idx: u32) -> Option<&str> {
         if !self.files.contains_key(&file_idx) {
             let body = if (file_idx as usize) < graph.files.len() {
@@ -71,46 +69,56 @@ fn execute_inner(
 
     // Phase 2: apply WHERE.
     if let Some(w) = &query.where_ {
-        bindings.retain(|b| eval_expr(w, b, graph).map(value_truthy).unwrap_or(false));
+        // Collect retain mask separately to avoid simultaneous &mut borrows.
+        let mask: Vec<bool> = bindings
+            .iter()
+            .map(|b| {
+                eval_expr(w, b, graph, cache)
+                    .map(value_truthy)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let mut i = 0;
+        bindings.retain(|_| {
+            let keep = mask[i];
+            i += 1;
+            keep
+        });
     }
 
     // Phase 3: WITH clause (optional).
     if let Some(wc) = &query.with {
-        bindings = exec_with(wc, bindings, graph)?;
+        bindings = exec_with(wc, bindings, graph, cache)?;
     }
 
-    // Phase 4: RETURN projection — detect aggregation in RETURN items.
-    let has_agg = query
-        .return_
-        .items
+    // Phase 4: C9 — pre-expand bare var RETURN items into concrete prop columns.
+    // Walk bindings to determine whether each Var is node-bound, edge-bound, or computed.
+    // We use the first binding that binds the var; if no bindings, fall back to unbound.
+    let expanded_items: Vec<(String, ReturnExpr)> =
+        expand_return_items(&query.return_.items, bindings.first())?;
+
+    // Phase 5: RETURN projection — detect aggregation in expanded items.
+    let has_agg = expanded_items
         .iter()
-        .any(|i| matches!(i.expr, ReturnExpr::FunCall { .. }));
+        .any(|(_, e)| matches!(e, ReturnExpr::FunCall { .. }));
 
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<Value>> = Vec::new();
 
     if has_agg {
-        // Partition RETURN items into group-key items and aggregate items.
-        let group_items: Vec<&ReturnItem> = query
-            .return_
-            .items
+        // Partition expanded items into group-key items and aggregate items.
+        let group_items: Vec<&(String, ReturnExpr)> = expanded_items
             .iter()
-            .filter(|i| !matches!(i.expr, ReturnExpr::FunCall { .. }))
+            .filter(|(_, e)| !matches!(e, ReturnExpr::FunCall { .. }))
             .collect();
-        let agg_items: Vec<&ReturnItem> = query
-            .return_
-            .items
+        let agg_items: Vec<&(String, ReturnExpr)> = expanded_items
             .iter()
-            .filter(|i| matches!(i.expr, ReturnExpr::FunCall { .. }))
+            .filter(|(_, e)| matches!(e, ReturnExpr::FunCall { .. }))
             .collect();
 
         // Build column names.
-        for item in &query.return_.items {
-            columns.push(
-                item.alias
-                    .clone()
-                    .unwrap_or_else(|| return_item_default_col(item)),
-            );
+        for (col, _) in &expanded_items {
+            columns.push(col.clone());
         }
 
         // Group bindings by key values.
@@ -120,7 +128,7 @@ fn execute_inner(
         for b in &bindings {
             let key_vals: Result<Vec<Value>, CypherError> = group_items
                 .iter()
-                .map(|gi| project_item(gi, b, graph, cache).map(|(_, v)| v))
+                .map(|(_, e)| eval_return_expr(e, b, graph, cache))
                 .collect();
             let key_vals = key_vals?;
             let key_str: String = key_vals
@@ -145,18 +153,16 @@ fn execute_inner(
             let mut row = Vec::new();
             let mut key_iter = key_vals.iter();
             let mut agg_iter = agg_items.iter();
-            for item in &query.return_.items {
-                if matches!(item.expr, ReturnExpr::FunCall { .. }) {
-                    let ai = agg_iter.next().unwrap();
-                    if let ReturnExpr::FunCall {
-                        name,
-                        distinct,
-                        args,
-                    } = &ai.expr
-                    {
-                        let v = apply_aggregate(name, *distinct, args, group, graph)?;
-                        row.push(v);
-                    }
+            for (_, expr) in &expanded_items {
+                if let ReturnExpr::FunCall {
+                    name,
+                    distinct,
+                    args,
+                } = expr
+                {
+                    let _ai = agg_iter.next().unwrap();
+                    let v = apply_aggregate(name, *distinct, args, group, graph, cache)?;
+                    row.push(v);
                 } else {
                     row.push(key_iter.next().cloned().unwrap_or(Value::Null));
                 }
@@ -165,31 +171,212 @@ fn execute_inner(
         }
     } else {
         // No aggregation: simple row-by-row projection.
+        columns = expanded_items.iter().map(|(col, _)| col.clone()).collect();
         for b in &bindings {
             let mut row = Vec::new();
-            for item in &query.return_.items {
-                let (col_name, v) = project_item(item, b, graph, cache)?;
-                if rows.is_empty() {
-                    columns.push(col_name);
-                }
-                row.push(v);
+            for (_, expr) in &expanded_items {
+                row.push(eval_return_expr(expr, b, graph, cache)?);
             }
             rows.push(row);
         }
+    }
 
-        // Emit columns even when result set is empty.
-        if rows.is_empty() {
-            for item in &query.return_.items {
-                columns.push(
-                    item.alias
-                        .clone()
-                        .unwrap_or_else(|| return_item_default_col(item)),
-                );
+    // Phase 6: C10 — ORDER BY.
+    if !query.order_by.is_empty() {
+        rows.sort_by(|a, b| {
+            for oi in &query.order_by {
+                // Resolve order expression against columns list.
+                let col_name = match &oi.expr {
+                    ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
+                    ReturnExpr::Var(v) => v.clone(),
+                    ReturnExpr::Star => "*".into(),
+                    ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
+                };
+                let col_idx = columns.iter().position(|c| c == &col_name);
+                let av = col_idx.and_then(|i| a.get(i));
+                let bv = col_idx.and_then(|i| b.get(i));
+                let ord = cmp_values(av, bv);
+                let ord = if oi.desc { ord.reverse() } else { ord };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
             }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    // Phase 7: C10 — DISTINCT dedup.
+    if query.return_.distinct {
+        let mut seen: HashSet<String> = HashSet::new();
+        rows.retain(|row| seen.insert(format!("{row:?}")));
+    }
+
+    // Phase 8: C10 — SKIP + LIMIT.
+    let skip = query.skip.unwrap_or(0) as usize;
+    if skip > 0 {
+        rows = rows.into_iter().skip(skip).collect();
+    }
+    if let Some(lim) = query.limit {
+        rows.truncate(lim as usize);
+    }
+
+    // Phase 9: C11 — UNION / UNION ALL.
+    if let Some(union_query) = &query.union {
+        let right = execute_inner(union_query, graph, cache)?;
+        if right.columns.len() != columns.len() {
+            return Err(CypherError::Semantic {
+                msg: "UNION column count mismatch".into(),
+            });
+        }
+        rows.extend(right.rows);
+        if !query.union_all {
+            // Dedupe: use format!("{:?}") key (same as DISTINCT).
+            let mut seen: HashSet<String> = HashSet::new();
+            rows.retain(|row| seen.insert(format!("{row:?}")));
         }
     }
 
     Ok(QueryResult { columns, rows })
+}
+
+/// Compare two optional row cell values for ORDER BY sorting.
+fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
+    match (a, b) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(av), Some(bv)) => cmp_value_pair(av, bv),
+    }
+}
+
+fn cmp_value_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match (a, b) {
+        // Null sorts before everything.
+        (Value::Null, Value::Null) => Equal,
+        (Value::Null, _) => Less,
+        (_, Value::Null) => Greater,
+        // Bool: false < true.
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        // Int-Int.
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        // Float-Float.
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(Equal),
+        // Int-Float promotion.
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Equal),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Equal),
+        // Str lexicographic.
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        // Fallback: debug repr comparison.
+        _ => format!("{a:?}").cmp(&format!("{b:?}")),
+    }
+}
+
+/// C9: Expand RETURN items, replacing bare `Var(name)` with 3 concrete prop items
+/// when `name` is node-bound or 3 edge props when edge-bound.
+/// For computed/unbound vars, keep as single column.
+fn expand_return_items(
+    items: &[ReturnItem],
+    first_binding: Option<&Binding>,
+) -> Result<Vec<(String, ReturnExpr)>, CypherError> {
+    let mut out: Vec<(String, ReturnExpr)> = Vec::new();
+    for item in items {
+        match &item.expr {
+            ReturnExpr::Var(name) => {
+                // Check if it's a computed binding first.
+                let is_computed = first_binding
+                    .map(|b| b.computed.contains_key(name))
+                    .unwrap_or(false);
+                let is_node = first_binding
+                    .map(|b| b.node_vars.contains_key(name))
+                    .unwrap_or(false);
+                let is_edge = first_binding
+                    .map(|b| b.edge_vars.contains_key(name))
+                    .unwrap_or(false);
+
+                // If aliased with AS, treat as single column regardless of binding type.
+                if item.alias.is_some() {
+                    let col = item.alias.clone().unwrap();
+                    out.push((col, item.expr.clone()));
+                } else if is_computed {
+                    // Single computed column.
+                    out.push((name.clone(), item.expr.clone()));
+                } else if is_node {
+                    // Expand node var into 3 columns: .name, .kind, .filePath
+                    out.push((
+                        format!("{name}.name"),
+                        ReturnExpr::Prop(name.clone(), "name".into()),
+                    ));
+                    out.push((
+                        format!("{name}.kind"),
+                        ReturnExpr::Prop(name.clone(), "kind".into()),
+                    ));
+                    out.push((
+                        format!("{name}.filePath"),
+                        ReturnExpr::Prop(name.clone(), "filePath".into()),
+                    ));
+                } else if is_edge {
+                    // Expand edge var into 3 columns: .rel_type, .confidence, .reason
+                    out.push((
+                        format!("{name}.rel_type"),
+                        ReturnExpr::Prop(name.clone(), "rel_type".into()),
+                    ));
+                    out.push((
+                        format!("{name}.confidence"),
+                        ReturnExpr::Prop(name.clone(), "confidence".into()),
+                    ));
+                    out.push((
+                        format!("{name}.reason"),
+                        ReturnExpr::Prop(name.clone(), "reason".into()),
+                    ));
+                } else if first_binding.is_some() {
+                    // Bound binding exists but var is not in it — semantic error.
+                    return Err(CypherError::Semantic {
+                        msg: format!("unbound variable '{name}'"),
+                    });
+                } else {
+                    // No bindings at all (empty result set) — emit as-is.
+                    out.push((name.clone(), item.expr.clone()));
+                }
+            }
+            _ => {
+                let col = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| return_item_default_col(item));
+                out.push((col, item.expr.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Evaluate a ReturnExpr directly against a binding (used in the non-agg projection path).
+fn eval_return_expr(
+    expr: &ReturnExpr,
+    b: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+    cache: &mut ContentCache,
+) -> Result<Value, CypherError> {
+    match expr {
+        ReturnExpr::Prop(var, prop) => Ok(prop_value(var, prop, b, graph, cache)),
+        ReturnExpr::Var(var) => {
+            if let Some(v) = b.computed.get(var) {
+                Ok(v.clone())
+            } else if let Some(&idx) = b.node_vars.get(var) {
+                Ok(Value::Str(
+                    graph.nodes[idx as usize]
+                        .name
+                        .resolve(&graph.string_pool)
+                        .to_string(),
+                ))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        ReturnExpr::Star => Ok(Value::Null),
+        ReturnExpr::FunCall { .. } => Ok(Value::Null),
+    }
 }
 
 /// Stable string key for a Value (used as group-by key; avoids Hash on Value).
@@ -200,7 +387,12 @@ fn value_key(v: &Value) -> String {
 /// Evaluate a ReturnItem's expression into a Value, preserving NodeRef/EdgeRef
 /// for variables bound to graph nodes/edges. Used by WITH group-key computation
 /// so that `a.name` still resolves after aggregation clears node_vars.
-fn eval_return_item_rich(item: &ReturnItem, b: &Binding, graph: &ArchivedZeroCopyGraph) -> Value {
+fn eval_return_item_rich(
+    item: &ReturnItem,
+    b: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+    cache: &mut ContentCache,
+) -> Value {
     match &item.expr {
         ReturnExpr::Var(var) => {
             // Check computed first.
@@ -240,7 +432,7 @@ fn eval_return_item_rich(item: &ReturnItem, b: &Binding, graph: &ArchivedZeroCop
             }
             Value::Null
         }
-        ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph),
+        ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph, cache),
         ReturnExpr::Star => Value::Null,
         ReturnExpr::FunCall { .. } => Value::Null,
     }
@@ -251,6 +443,7 @@ fn exec_with(
     wc: &WithClause,
     bindings: Vec<Binding>,
     graph: &ArchivedZeroCopyGraph,
+    cache: &mut ContentCache,
 ) -> Result<Vec<Binding>, CypherError> {
     let has_agg = wc
         .items
@@ -283,7 +476,7 @@ fn exec_with(
                         .alias
                         .clone()
                         .unwrap_or_else(|| return_item_default_col(gi));
-                    let v = eval_return_item_rich(gi, b, graph);
+                    let v = eval_return_item_rich(gi, b, graph, cache);
                     (col, v)
                 })
                 .collect();
@@ -317,7 +510,7 @@ fn exec_with(
                     args,
                 } = &ai.expr
                 {
-                    let v = apply_aggregate(name, *distinct, args, group, graph)?;
+                    let v = apply_aggregate(name, *distinct, args, group, graph, cache)?;
                     computed.insert(col, v);
                 }
             }
@@ -340,7 +533,7 @@ fn exec_with(
                     .clone()
                     .unwrap_or_else(|| return_item_default_col(item));
                 // Use rich projection to preserve NodeRef/EdgeRef identity.
-                let v = eval_return_item_rich(item, b, graph);
+                let v = eval_return_item_rich(item, b, graph, cache);
                 computed.insert(col, v);
             }
             result.push(Binding {
@@ -354,7 +547,20 @@ fn exec_with(
 
     // Apply inner WHERE of WITH clause (filters post-aggregation output).
     if let Some(w) = &wc.where_ {
-        out.retain(|b| eval_expr(w, b, graph).map(value_truthy).unwrap_or(false));
+        let mask: Vec<bool> = out
+            .iter()
+            .map(|b| {
+                eval_expr(w, b, graph, cache)
+                    .map(value_truthy)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let mut i = 0;
+        out.retain(|_| {
+            let keep = mask[i];
+            i += 1;
+            keep
+        });
     }
 
     Ok(out)
@@ -367,6 +573,7 @@ fn apply_aggregate(
     args: &[Expr],
     group: &[Binding],
     graph: &ArchivedZeroCopyGraph,
+    cache: &mut ContentCache,
 ) -> Result<Value, CypherError> {
     // COUNT(*) sentinel: args = [Lit(Null)]
     let is_count_star = matches!(args, [Expr::Lit(Literal::Null)]);
@@ -381,7 +588,7 @@ fn apply_aggregate(
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let mut cnt = 0i64;
                 for b in group {
-                    let v = eval_expr(arg, b, graph)?;
+                    let v = eval_expr(arg, b, graph, cache)?;
                     if !matches!(v, Value::Null) {
                         let k = value_key(&v);
                         if seen.insert(k) {
@@ -393,7 +600,7 @@ fn apply_aggregate(
             } else {
                 let mut cnt = 0i64;
                 for b in group {
-                    let v = eval_expr(arg, b, graph)?;
+                    let v = eval_expr(arg, b, graph, cache)?;
                     if !matches!(v, Value::Null) {
                         cnt += 1;
                     }
@@ -407,7 +614,7 @@ fn apply_aggregate(
             let mut sum_f: f64 = 0.0;
             let mut has_float = false;
             for b in group {
-                match eval_expr(arg, b, graph)? {
+                match eval_expr(arg, b, graph, cache)? {
                     Value::Int(i) => sum_i += i,
                     Value::Float(f) => {
                         sum_f += f;
@@ -426,7 +633,7 @@ fn apply_aggregate(
             let arg = &args[0];
             let mut min: Option<Value> = None;
             for b in group {
-                let v = eval_expr(arg, b, graph)?;
+                let v = eval_expr(arg, b, graph, cache)?;
                 if matches!(v, Value::Null) {
                     continue;
                 }
@@ -447,7 +654,7 @@ fn apply_aggregate(
             let arg = &args[0];
             let mut max: Option<Value> = None;
             for b in group {
-                let v = eval_expr(arg, b, graph)?;
+                let v = eval_expr(arg, b, graph, cache)?;
                 if matches!(v, Value::Null) {
                     continue;
                 }
@@ -469,7 +676,7 @@ fn apply_aggregate(
             let mut sum: f64 = 0.0;
             let mut cnt: i64 = 0;
             for b in group {
-                match eval_expr(arg, b, graph)? {
+                match eval_expr(arg, b, graph, cache)? {
                     Value::Int(i) => {
                         sum += i as f64;
                         cnt += 1;
@@ -496,7 +703,7 @@ fn apply_aggregate(
                 None
             };
             for b in group {
-                let v = eval_expr(arg, b, graph)?;
+                let v = eval_expr(arg, b, graph, cache)?;
                 if matches!(v, Value::Null) {
                     continue;
                 }
@@ -740,7 +947,12 @@ fn walk_rel(from: u32, rel: &RelPat, graph: &ArchivedZeroCopyGraph) -> Vec<(u32,
     out
 }
 
-fn eval_expr(e: &Expr, b: &Binding, graph: &ArchivedZeroCopyGraph) -> Result<Value, CypherError> {
+fn eval_expr(
+    e: &Expr,
+    b: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+    cache: &mut ContentCache,
+) -> Result<Value, CypherError> {
     use Expr::*;
     match e {
         Lit(l) => Ok(lit_to_value(l)),
@@ -760,24 +972,24 @@ fn eval_expr(e: &Expr, b: &Binding, graph: &ArchivedZeroCopyGraph) -> Result<Val
                 Ok(Value::Null)
             }
         }
-        Prop(var, prop) => Ok(prop_value(var, prop, b, graph)),
+        Prop(var, prop) => Ok(prop_value(var, prop, b, graph, cache)),
         BinOp(op, lhs, rhs) => {
-            let lv = eval_expr(lhs, b, graph)?;
-            let rv = eval_expr(rhs, b, graph)?;
+            let lv = eval_expr(lhs, b, graph, cache)?;
+            let rv = eval_expr(rhs, b, graph, cache)?;
             Ok(Value::Bool(eval_binop(*op, &lv, &rv)))
         }
         UnaryOp(_op, inner) => {
-            let v = eval_expr(inner, b, graph)?;
+            let v = eval_expr(inner, b, graph, cache)?;
             Ok(Value::Bool(!value_truthy(v)))
         }
         In(lhs, lits) => {
-            let v = eval_expr(lhs, b, graph)?;
+            let v = eval_expr(lhs, b, graph, cache)?;
             Ok(Value::Bool(
                 lits.iter().any(|l| values_eq(&v, &lit_to_value(l))),
             ))
         }
         Regex(lhs, pat) => {
-            let v = eval_expr(lhs, b, graph)?;
+            let v = eval_expr(lhs, b, graph, cache)?;
             let re = regex::Regex::new(pat).map_err(|err| CypherError::Exec {
                 msg: format!("bad regex: {err}"),
             })?;
@@ -786,19 +998,19 @@ fn eval_expr(e: &Expr, b: &Binding, graph: &ArchivedZeroCopyGraph) -> Result<Val
             ))
         }
         StartsWith(lhs, p) => {
-            let v = eval_expr(lhs, b, graph)?;
+            let v = eval_expr(lhs, b, graph, cache)?;
             Ok(Value::Bool(
                 matches!(v, Value::Str(ref s) if s.starts_with(p.as_str())),
             ))
         }
         EndsWith(lhs, p) => {
-            let v = eval_expr(lhs, b, graph)?;
+            let v = eval_expr(lhs, b, graph, cache)?;
             Ok(Value::Bool(
                 matches!(v, Value::Str(ref s) if s.ends_with(p.as_str())),
             ))
         }
         Contains(lhs, p) => {
-            let v = eval_expr(lhs, b, graph)?;
+            let v = eval_expr(lhs, b, graph, cache)?;
             Ok(Value::Bool(
                 matches!(v, Value::Str(ref s) if s.contains(p.as_str())),
             ))
@@ -820,34 +1032,55 @@ fn lit_to_value(l: &Literal) -> Value {
     }
 }
 
-fn prop_value(var: &str, prop: &str, b: &Binding, graph: &ArchivedZeroCopyGraph) -> Value {
+/// Slice `source` by a tree-sitter style `(start_row, start_col, end_row, end_col)` span.
+/// Rows/cols are 0-indexed; columns count UTF-8 bytes. Returns empty string on out-of-range.
+fn slice_by_span(source: &str, span: (u32, u32, u32, u32)) -> String {
+    let (start_row, start_col, end_row, end_col) = (
+        span.0 as usize,
+        span.1 as usize,
+        span.2 as usize,
+        span.3 as usize,
+    );
+    let lines: Vec<&str> = source.split('\n').collect();
+    if start_row >= lines.len() || end_row >= lines.len() || start_row > end_row {
+        return String::new();
+    }
+    if start_row == end_row {
+        let line = lines[start_row].as_bytes();
+        if start_col > line.len() || end_col > line.len() || start_col > end_col {
+            return String::new();
+        }
+        return String::from_utf8_lossy(&line[start_col..end_col]).into_owned();
+    }
+    let mut out = String::new();
+    let first = lines[start_row].as_bytes();
+    let sc = start_col.min(first.len());
+    out.push_str(&String::from_utf8_lossy(&first[sc..]));
+    out.push('\n');
+    for line in &lines[start_row + 1..end_row] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    let last = lines[end_row].as_bytes();
+    let ec = end_col.min(last.len());
+    out.push_str(&String::from_utf8_lossy(&last[..ec]));
+    out
+}
+
+fn prop_value(
+    var: &str,
+    prop: &str,
+    b: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+    cache: &mut ContentCache,
+) -> Value {
     // Check computed values first (set by WITH clause).
     if let Some(computed_val) = b.computed.get(var) {
         return match computed_val {
             // If the computed value is a NodeRef, resolve the property from the graph.
             Value::NodeRef { idx, .. } => {
                 let n = &graph.nodes[*idx as usize];
-                match prop {
-                    "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
-                    "uid" => Value::Str(n.uid.resolve(&graph.string_pool).to_string()),
-                    "kind" => {
-                        let kind: crate::graph::NodeKind = rkyv::deserialize::<
-                            crate::graph::NodeKind,
-                            rkyv::rancor::Error,
-                        >(&n.kind)
-                        .unwrap();
-                        Value::Str(format!("{kind:?}"))
-                    }
-                    "filePath" => {
-                        let fi = n.file_idx.to_native() as usize;
-                        Value::Str(if fi < graph.files.len() {
-                            graph.files[fi].path.resolve(&graph.string_pool).to_string()
-                        } else {
-                            String::new()
-                        })
-                    }
-                    _ => Value::Null,
-                }
+                node_prop_value(n, prop, *idx, graph, cache)
             }
             // EdgeRef: resolve edge properties.
             Value::EdgeRef {
@@ -874,24 +1107,7 @@ fn prop_value(var: &str, prop: &str, b: &Binding, graph: &ArchivedZeroCopyGraph)
     }
     if let Some(&idx) = b.node_vars.get(var) {
         let n = &graph.nodes[idx as usize];
-        return match prop {
-            "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
-            "uid" => Value::Str(n.uid.resolve(&graph.string_pool).to_string()),
-            "kind" => {
-                let kind: NodeKind =
-                    rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&n.kind).unwrap();
-                Value::Str(format!("{kind:?}"))
-            }
-            "filePath" => {
-                let fi = n.file_idx.to_native() as usize;
-                Value::Str(if fi < graph.files.len() {
-                    graph.files[fi].path.resolve(&graph.string_pool).to_string()
-                } else {
-                    String::new()
-                })
-            }
-            _ => Value::Null,
-        };
+        return node_prop_value(n, prop, idx, graph, cache);
     }
     if let Some(&edge_idx) = b.edge_vars.get(var) {
         let e = &graph.edges[edge_idx as usize];
@@ -907,6 +1123,52 @@ fn prop_value(var: &str, prop: &str, b: &Binding, graph: &ArchivedZeroCopyGraph)
         };
     }
     Value::Null
+}
+
+/// Resolve a single property from an archived node.
+/// `cache` is used for the `content` property (C12).
+fn node_prop_value(
+    n: &crate::graph::ArchivedNode,
+    prop: &str,
+    idx: u32,
+    graph: &ArchivedZeroCopyGraph,
+    cache: &mut ContentCache,
+) -> Value {
+    match prop {
+        "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
+        "uid" => Value::Str(n.uid.resolve(&graph.string_pool).to_string()),
+        "kind" => {
+            let kind: NodeKind =
+                rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&n.kind).unwrap();
+            Value::Str(format!("{kind:?}"))
+        }
+        "filePath" => {
+            let fi = n.file_idx.to_native() as usize;
+            Value::Str(if fi < graph.files.len() {
+                graph.files[fi].path.resolve(&graph.string_pool).to_string()
+            } else {
+                String::new()
+            })
+        }
+        "content" => {
+            // C12: lazy file read + span slice.
+            let file_idx = n.file_idx.to_native();
+            let span = (
+                n.span.0.to_native(),
+                n.span.1.to_native(),
+                n.span.2.to_native(),
+                n.span.3.to_native(),
+            );
+            let slice = cache
+                .body_for_file(graph, file_idx)
+                .map(|body| slice_by_span(body, span))
+                .unwrap_or_default();
+            // Suppress dead-code warning on idx in non-content paths.
+            let _ = idx;
+            Value::Str(slice)
+        }
+        _ => Value::Null,
+    }
 }
 
 fn eval_binop(op: Op, l: &Value, r: &Value) -> bool {
@@ -981,40 +1243,6 @@ fn value_truthy(v: Value) -> bool {
         Value::Bool(b) => b,
         _ => true,
     }
-}
-
-fn project_item(
-    item: &ReturnItem,
-    b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
-    _cache: &mut ContentCache,
-) -> Result<(String, Value), CypherError> {
-    let col_name = item
-        .alias
-        .clone()
-        .unwrap_or_else(|| return_item_default_col(item));
-    let v = match &item.expr {
-        ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph),
-        ReturnExpr::Var(var) => {
-            // Check computed values from WITH clause first.
-            if let Some(v) = b.computed.get(var) {
-                v.clone()
-            } else if let Some(&idx) = b.node_vars.get(var) {
-                Value::Str(
-                    graph.nodes[idx as usize]
-                        .name
-                        .resolve(&graph.string_pool)
-                        .to_string(),
-                )
-            } else {
-                Value::Null
-            }
-        }
-        ReturnExpr::Star => Value::Null,
-        // FunCall is handled by execute_inner's aggregation path; should not reach here.
-        ReturnExpr::FunCall { .. } => Value::Null,
-    };
-    Ok((col_name, v))
 }
 
 fn return_item_default_col(item: &ReturnItem) -> String {
@@ -1802,5 +2030,307 @@ mod tests {
                 .unwrap();
             assert_eq!(callee_row[1], Value::Null);
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // C9 – RETURN auto-expand bare node/edge vars
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exec_return_auto_expand_node() {
+        // RETURN a for a node-bound var → 3 columns: a.name, a.kind, a.filePath
+        with_two(|g| {
+            let q = parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN a").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.columns, vec!["a.name", "a.kind", "a.filePath"]);
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0].len(), 3, "expected 3 values per row");
+            assert_eq!(r.rows[0][0], Value::Str("caller".into()));
+            assert_eq!(r.rows[0][1], Value::Str("Function".into()));
+            assert_eq!(r.rows[0][2], Value::Str("src/x.ts".into()));
+        });
+    }
+
+    #[test]
+    fn exec_return_auto_expand_edge() {
+        // RETURN r for an edge-bound var → 3 columns: r.rel_type, r.confidence, r.reason
+        with_two(|g| {
+            let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN r").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.columns, vec!["r.rel_type", "r.confidence", "r.reason"]);
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0].len(), 3);
+            assert_eq!(r.rows[0][0], Value::Str("Calls".into()));
+            assert!(matches!(r.rows[0][1], Value::Float(f) if (f - 1.0).abs() < 1e-6));
+            assert_eq!(r.rows[0][2], Value::Str("ast-call".into()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // C10 – DISTINCT + ORDER BY + SKIP + LIMIT
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exec_order_by_asc_desc() {
+        // fan graph: 3 nodes. Sort by name asc → a_leaf_a, fan, leaf_b order?
+        // Actually nodes are fan(0), leaf_a(1), leaf_b(2). Sort asc → fan < leaf_a < leaf_b
+        with_fan(|g| {
+            let q = parse("MATCH (a:Function) RETURN a.name ORDER BY a.name ASC").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 3);
+            let names: Vec<&str> = r
+                .rows
+                .iter()
+                .map(|row| {
+                    if let Value::Str(s) = &row[0] {
+                        s.as_str()
+                    } else {
+                        ""
+                    }
+                })
+                .collect();
+            // Lexicographic: fan < leaf_a < leaf_b
+            assert_eq!(names, vec!["fan", "leaf_a", "leaf_b"]);
+        });
+    }
+
+    #[test]
+    fn exec_order_by_desc() {
+        with_fan(|g| {
+            let q = parse("MATCH (a:Function) RETURN a.name ORDER BY a.name DESC").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            let names: Vec<&str> = r
+                .rows
+                .iter()
+                .map(|row| {
+                    if let Value::Str(s) = &row[0] {
+                        s.as_str()
+                    } else {
+                        ""
+                    }
+                })
+                .collect();
+            assert_eq!(names, vec!["leaf_b", "leaf_a", "fan"]);
+        });
+    }
+
+    #[test]
+    fn exec_distinct() {
+        // fan calls leaf_a and leaf_b; both hops have a.name="fan".
+        // RETURN DISTINCT a.name → 1 unique row.
+        with_fan(|g| {
+            let q =
+                parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN DISTINCT a.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "expected 1 distinct row, got {:?}", r.rows);
+            assert_eq!(r.rows[0][0], Value::Str("fan".into()));
+        });
+    }
+
+    #[test]
+    fn exec_skip_and_limit() {
+        // 3 nodes sorted by name asc: fan, leaf_a, leaf_b. SKIP 1 LIMIT 1 → leaf_a.
+        with_fan(|g| {
+            let q = parse("MATCH (a:Function) RETURN a.name ORDER BY a.name ASC SKIP 1 LIMIT 1")
+                .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "expected 1 row after skip+limit");
+            assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // C11 – UNION / UNION ALL
+    // -----------------------------------------------------------------------
+
+    /// Build a graph with one Function node and one Method node.
+    fn build_func_and_method() -> Vec<u8> {
+        let mut pool = StringPool::new();
+        let n_func = pool.add("my_func");
+        let n_meth = pool.add("my_method");
+        let fp = pool.add("src/x.ts");
+        let u1 = pool.add("0:my_func");
+        let u2 = pool.add("0:my_method");
+
+        let g = ZeroCopyGraph {
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
+            fingerprint: [0; 32],
+            string_pool: pool.bytes,
+            files: vec![File {
+                path: fp,
+                mtime: 0,
+                content_hash: [0u8; 32],
+                category: FileCategory::Source,
+            }],
+            nodes: vec![
+                Node {
+                    uid: u1,
+                    name: n_func,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (0, 0, 1, 0),
+                    community_id: 0,
+                },
+                Node {
+                    uid: u2,
+                    name: n_meth,
+                    file_idx: 0,
+                    kind: NodeKind::Method,
+                    span: (2, 0, 3, 0),
+                    community_id: 0,
+                },
+            ],
+            edges: vec![],
+            out_offsets: vec![0, 0, 0],
+            in_offsets: vec![0, 0, 0],
+            in_edge_idx: vec![],
+            name_index: vec![],
+            embeddings: None,
+            process_start: 2,
+            traces_offsets: vec![],
+            traces_data: vec![],
+            blind_spots: vec![],
+            route_shapes: vec![],
+        };
+        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+    }
+
+    fn with_func_and_method<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
+        let bytes = build_func_and_method();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        f(archived);
+    }
+
+    #[test]
+    fn exec_union_concat() {
+        // UNION concatenates results from two sub-queries.
+        with_func_and_method(|g| {
+            let q = parse("MATCH (a:Function) RETURN a.name UNION MATCH (b:Method) RETURN b.name")
+                .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            // 1 Function + 1 Method = 2 rows (distinct by default).
+            assert_eq!(r.columns, vec!["a.name"], "left-side column names kept");
+            let names: Vec<&str> = r
+                .rows
+                .iter()
+                .map(|row| {
+                    if let Value::Str(s) = &row[0] {
+                        s.as_str()
+                    } else {
+                        ""
+                    }
+                })
+                .collect();
+            assert!(names.contains(&"my_func"), "missing my_func");
+            assert!(names.contains(&"my_method"), "missing my_method");
+            assert_eq!(r.rows.len(), 2);
+        });
+    }
+
+    #[test]
+    fn exec_union_all_keeps_dupes() {
+        // UNION ALL keeps duplicates; matching all :Function nodes gives 1 from left, 1 from right.
+        // Actually in this fixture Function=my_func, Method=my_method.
+        // Use fan fixture where there are 3 Function nodes.
+        with_fan(|g| {
+            // Both sides match all Function nodes → 6 rows with UNION ALL.
+            let q = parse(
+                "MATCH (a:Function) RETURN a.name UNION ALL MATCH (b:Function) RETURN b.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 6, "UNION ALL keeps duplicates: 3+3");
+        });
+    }
+
+    #[test]
+    fn exec_union_dedupes_without_all() {
+        // UNION (no ALL) deduplicates.
+        with_fan(|g| {
+            let q =
+                parse("MATCH (a:Function) RETURN a.name UNION MATCH (b:Function) RETURN b.name")
+                    .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 3, "UNION deduplicates: 3 unique names");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // C12 – .content projection via lazy file read
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exec_content_projection() {
+        use std::io::Write;
+
+        // Write a temp source file.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_path = dir.path().join("hello.ts");
+        {
+            let mut f = std::fs::File::create(&src_path).unwrap();
+            // Line 0: "function hello() {"
+            // Line 1: "  return 42;"
+            // Line 2: "}"
+            write!(f, "function hello() {{\n  return 42;\n}}").unwrap();
+        }
+        let rel_path = "hello.ts";
+
+        let mut pool = StringPool::new();
+        let n_name = pool.add("hello");
+        let fp = pool.add(rel_path);
+        let uid = pool.add("0:hello");
+
+        let g = ZeroCopyGraph {
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
+            fingerprint: [0; 32],
+            string_pool: pool.bytes,
+            files: vec![File {
+                path: fp,
+                mtime: 0,
+                content_hash: [0u8; 32],
+                category: FileCategory::Source,
+            }],
+            nodes: vec![Node {
+                uid,
+                name: n_name,
+                file_idx: 0,
+                kind: NodeKind::Function,
+                // span: start_row=0, start_col=0, end_row=2, end_col=1
+                span: (0, 0, 2, 1),
+                community_id: 0,
+            }],
+            edges: vec![],
+            out_offsets: vec![0, 0],
+            in_offsets: vec![0, 0],
+            in_edge_idx: vec![],
+            name_index: vec![],
+            embeddings: None,
+            process_start: 1,
+            traces_offsets: vec![],
+            traces_data: vec![],
+            blind_spots: vec![],
+            route_shapes: vec![],
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+
+        let q = parse("MATCH (a:Function) RETURN a.content").unwrap();
+        let result = execute(&q, archived, dir.path()).unwrap();
+
+        assert_eq!(result.columns, vec!["a.content"]);
+        assert_eq!(result.rows.len(), 1);
+        let content = match &result.rows[0][0] {
+            Value::Str(s) => s.clone(),
+            other => panic!("expected Str, got {other:?}"),
+        };
+        // span (0,0,2,1) covers "function hello() {\n  return 42;\n}"
+        assert!(content.contains("function hello"), "content: {content:?}");
+        assert!(content.contains("return 42"), "content: {content:?}");
     }
 }
