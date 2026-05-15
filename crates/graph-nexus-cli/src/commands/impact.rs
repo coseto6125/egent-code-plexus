@@ -1,5 +1,4 @@
 use crate::commands::format::{kind_to_str, rel_to_str};
-use crate::engine::Engine;
 use clap::{Args, ValueEnum};
 use graph_nexus_core::algorithms::process_trace::is_test_path;
 use graph_nexus_core::config;
@@ -86,7 +85,11 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     })
 }
 
-pub fn run_inner(args: ImpactArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+pub fn run_inner(args: ImpactArgs, engine: &dyn graph_nexus_mcp::registry::EngineRef) -> Result<serde_json::Value, GnxError> {
+    let engine = engine
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
+        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Find the target node index by UID
@@ -305,9 +308,11 @@ mod inner_tests {
     #[test]
     fn run_inner_returns_structured_value_not_unit() {
         fn _accepts(
-            _f: fn(ImpactArgs, &crate::engine::Engine)
+            _f: fn(ImpactArgs, &dyn graph_nexus_mcp::registry::EngineRef)
                 -> Result<serde_json::Value, graph_nexus_core::GnxError>
         ) {}
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(ImpactArgs, run_inner);

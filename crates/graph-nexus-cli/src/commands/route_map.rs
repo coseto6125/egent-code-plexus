@@ -1,4 +1,3 @@
-use crate::engine::Engine;
 use clap::Args;
 use graph_nexus_core::graph::ArchivedNodeKind;
 use graph_nexus_core::GnxError;
@@ -18,7 +17,11 @@ pub struct RouteMapArgs {
     pub format: Option<String>,
 }
 
-pub fn run_inner(args: RouteMapArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+pub fn run_inner(_args: RouteMapArgs, engine: &dyn graph_nexus_mcp::registry::EngineRef) -> Result<serde_json::Value, GnxError> {
+    let engine = engine
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
+        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     let mut results = Vec::new();
@@ -59,9 +62,11 @@ mod inner_tests {
     #[test]
     fn run_inner_returns_structured_value_not_unit() {
         fn _accepts(
-            _f: fn(RouteMapArgs, &crate::engine::Engine)
+            _f: fn(RouteMapArgs, &dyn graph_nexus_mcp::registry::EngineRef)
                 -> Result<serde_json::Value, graph_nexus_core::GnxError>
         ) {}
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(RouteMapArgs, run_inner);

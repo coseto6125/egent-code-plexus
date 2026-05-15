@@ -97,7 +97,22 @@ impl OrderedHit {
     }
 }
 
-pub fn run_inner(args: MultiQueryArgs) -> Result<serde_json::Value, GnxError> {
+/// Zero-sized dummy engine for multi_query (ignores the engine param).
+struct NoopEngine;
+impl graph_nexus_mcp::registry::EngineRef for NoopEngine {
+    fn graph_path(&self) -> &std::path::Path {
+        std::path::Path::new("")
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+}
+
+pub fn run_inner(
+    args: MultiQueryArgs,
+    _engine: &dyn graph_nexus_mcp::registry::EngineRef,
+) -> Result<serde_json::Value, GnxError> {
     let format = OutputFormat::parse(args.format.as_deref());
     let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
     let registry = Registry::open(&home_gnx)
@@ -226,7 +241,7 @@ pub fn run_inner(args: MultiQueryArgs) -> Result<serde_json::Value, GnxError> {
 
 pub fn run(args: MultiQueryArgs) -> Result<(), graph_nexus_core::GnxError> {
     let format = crate::output::OutputFormat::parse(args.format.as_deref());
-    let value = run_inner(args)?;
+    let value = run_inner(args, &NoopEngine)?;
     emit(&value, format)
 }
 
@@ -236,11 +251,14 @@ mod inner_tests {
     #[test]
     fn run_inner_returns_structured_value_not_unit() {
         fn _accepts(
-            _f: fn(MultiQueryArgs) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
+            _f: fn(MultiQueryArgs, &dyn graph_nexus_mcp::registry::EngineRef)
+                -> Result<serde_json::Value, graph_nexus_core::GnxError>,
         ) {}
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(MultiQueryArgs, run_inner);
 
 /// Resolve a registered repo's graph path and scan it for nodes whose
 /// name (case-insensitively) contains `query_lower`. Score = 1.0 for

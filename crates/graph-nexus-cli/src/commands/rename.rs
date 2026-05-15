@@ -12,7 +12,6 @@
 //!    preview to stdout and exits. Execute writes each file atomically
 //!    (tmp + fsync + rename) by descending byte offset to avoid shift.
 
-use crate::engine::Engine;
 use clap::Args;
 use graph_nexus_analyzer::identifier_finder::find_identifier_occurrences;
 use graph_nexus_core::analyzer::types::IdentifierRange;
@@ -45,7 +44,11 @@ pub struct RenameArgs {
     pub dry_run: bool,
 }
 
-pub fn run_inner(args: RenameArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+pub fn run_inner(args: RenameArgs, engine: &dyn graph_nexus_mcp::registry::EngineRef) -> Result<serde_json::Value, GnxError> {
+    let engine = engine
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
+        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let repo_root = args
         .repo
@@ -129,12 +132,14 @@ mod inner_tests {
     #[test]
     fn run_inner_returns_structured_value_not_unit() {
         fn _accepts(
-            _f: fn(RenameArgs, &crate::engine::Engine)
+            _f: fn(RenameArgs, &dyn graph_nexus_mcp::registry::EngineRef)
                 -> Result<serde_json::Value, graph_nexus_core::GnxError>
         ) {}
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(RenameArgs, run_inner);
 
 fn apply_rename(path: &Path, ranges: &[IdentifierRange], new_bytes: &[u8]) -> std::io::Result<()> {
     let mut bytes = std::fs::read(path)?;

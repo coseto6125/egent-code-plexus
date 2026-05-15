@@ -70,7 +70,11 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     }
 }
 
-pub fn run_inner(args: ContextArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+pub fn run_inner(args: ContextArgs, engine: &dyn graph_nexus_mcp::registry::EngineRef) -> Result<serde_json::Value, GnxError> {
+    let engine = engine
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
+        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Resolve the symbol. --uid wins over --name when both are supplied so
@@ -271,10 +275,12 @@ mod inner_tests {
         // Compile-only signature check. Behaviour is verified by the
         // command's existing integration tests when called via run().
         fn _accepts(
-            _f: fn(ContextArgs, &crate::engine::Engine)
+            _f: fn(ContextArgs, &dyn graph_nexus_mcp::registry::EngineRef)
                 -> Result<serde_json::Value, graph_nexus_core::GnxError>,
         ) {
         }
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(ContextArgs, run_inner);

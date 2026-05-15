@@ -31,6 +31,12 @@ use serde_json::Value;
 pub trait EngineRef: Send + Sync {
     /// Path of the graph.bin currently loaded (for mtime-remap).
     fn graph_path(&self) -> &std::path::Path;
+
+    /// Downcast to concrete Engine type if available (daemon mode).
+    /// Returns None for tools called in spawn mode (no engine available).
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 pub struct GnxMcpTool {

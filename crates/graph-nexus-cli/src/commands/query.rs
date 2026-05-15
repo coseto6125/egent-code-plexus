@@ -1,5 +1,4 @@
 use crate::commands::format::kind_to_str;
-use crate::engine::Engine;
 use clap::Args;
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
@@ -23,7 +22,11 @@ pub struct QueryArgs {
     pub format: Option<String>,
 }
 
-pub fn run_inner(args: QueryArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+pub fn run_inner(args: QueryArgs, engine: &dyn graph_nexus_mcp::registry::EngineRef) -> Result<serde_json::Value, GnxError> {
+    let engine = engine
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
+        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     let mut results = Vec::new();
@@ -131,9 +134,11 @@ mod inner_tests {
     #[test]
     fn run_inner_returns_structured_value_not_unit() {
         fn _accepts(
-            _f: fn(QueryArgs, &crate::engine::Engine)
+            _f: fn(QueryArgs, &dyn graph_nexus_mcp::registry::EngineRef)
                 -> Result<serde_json::Value, graph_nexus_core::GnxError>
         ) {}
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(QueryArgs, run_inner);

@@ -20,7 +20,6 @@
 //! Output is human-readable text by default (this is a drift report
 //! agents read inline). JSON / TOON are for programmatic consumers.
 
-use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_analyzer::fetch_shape::parse_reason;
@@ -43,7 +42,11 @@ pub struct ShapeCheckArgs {
     pub format: Option<String>,
 }
 
-pub fn run_inner(args: ShapeCheckArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+pub fn run_inner(args: ShapeCheckArgs, engine: &dyn graph_nexus_mcp::registry::EngineRef) -> Result<serde_json::Value, GnxError> {
+    let engine = engine
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
+        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
 
@@ -181,9 +184,11 @@ mod inner_tests {
     #[test]
     fn run_inner_returns_structured_value_not_unit() {
         fn _accepts(
-            _f: fn(ShapeCheckArgs, &crate::engine::Engine)
+            _f: fn(ShapeCheckArgs, &dyn graph_nexus_mcp::registry::EngineRef)
                 -> Result<serde_json::Value, graph_nexus_core::GnxError>
         ) {}
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(ShapeCheckArgs, run_inner);

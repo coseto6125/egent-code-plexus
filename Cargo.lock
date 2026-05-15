@@ -1478,6 +1478,7 @@ dependencies = [
  "graph-nexus-core",
  "graph-nexus-mcp",
  "ignore",
+ "inventory",
  "memmap2",
  "ratatui",
  "rayon",

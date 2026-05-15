@@ -16,7 +16,6 @@
 //!      to power the existing affected-process BFS.
 
 use crate::commands::format::kind_to_str;
-use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::output::{emit, OutputFormat};
 use crate::reanalyze::make_pipeline;
@@ -68,7 +67,11 @@ pub struct DetectChangesArgs {
     pub high_trust_only: bool,
 }
 
-pub fn run_inner(args: DetectChangesArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+pub fn run_inner(args: DetectChangesArgs, engine: &dyn graph_nexus_mcp::registry::EngineRef) -> Result<serde_json::Value, GnxError> {
+    let engine = engine
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
+        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
     let repo_path = PathBuf::from(args.repo.as_deref().unwrap_or("."));
     let scope = DiffScope::parse(Some(&args.scope), args.base_ref.as_deref())?;
 
@@ -375,12 +378,14 @@ mod inner_tests {
     #[test]
     fn run_inner_returns_structured_value_not_unit() {
         fn _accepts(
-            _f: fn(DetectChangesArgs, &crate::engine::Engine)
+            _f: fn(DetectChangesArgs, &dyn graph_nexus_mcp::registry::EngineRef)
                 -> Result<serde_json::Value, graph_nexus_core::GnxError>
         ) {}
         _accepts(run_inner);
     }
 }
+
+graph_nexus_mcp::gnx_register_mcp_tool!(DetectChangesArgs, run_inner);
 
 struct AffectedProcess {
     id: String,
