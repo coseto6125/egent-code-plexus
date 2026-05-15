@@ -202,6 +202,143 @@ fn parse_rel_type(c: &mut Cursor) -> Result<RelType, CypherError> {
         .map_err(|_| CypherError::Semantic { msg: format!("unknown RelType '{name}'") })
 }
 
+pub fn parse_expr(c: &mut Cursor) -> Result<Expr, CypherError> {
+    parse_or(c)
+}
+
+fn parse_or(c: &mut Cursor) -> Result<Expr, CypherError> {
+    let mut lhs = parse_and(c)?;
+    while c.eat(&Token::Or) {
+        let rhs = parse_and(c)?;
+        lhs = Expr::BinOp(Op::Or, Box::new(lhs), Box::new(rhs));
+    }
+    Ok(lhs)
+}
+
+fn parse_and(c: &mut Cursor) -> Result<Expr, CypherError> {
+    let mut lhs = parse_not(c)?;
+    while c.eat(&Token::And) {
+        let rhs = parse_not(c)?;
+        lhs = Expr::BinOp(Op::And, Box::new(lhs), Box::new(rhs));
+    }
+    Ok(lhs)
+}
+
+fn parse_not(c: &mut Cursor) -> Result<Expr, CypherError> {
+    if c.eat(&Token::Not) {
+        let inner = parse_not(c)?;
+        Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(inner)))
+    } else {
+        parse_comparison(c)
+    }
+}
+
+fn parse_comparison(c: &mut Cursor) -> Result<Expr, CypherError> {
+    let lhs = parse_primary(c)?;
+
+    // Postfix-style operators
+    if c.eat(&Token::In) {
+        c.expect(&Token::LBracket)?;
+        let mut items = Vec::new();
+        if !c.check(&Token::RBracket) {
+            loop {
+                items.push(parse_literal(c)?);
+                if !c.eat(&Token::Comma) { break; }
+            }
+        }
+        c.expect(&Token::RBracket)?;
+        return Ok(Expr::In(Box::new(lhs), items));
+    }
+    if c.eat(&Token::RegexMatch) {
+        let pat = match c.advance() {
+            Some(Token::Str(s)) => s.clone(),
+            _ => return Err(c.err("regex string literal after =~")),
+        };
+        return Ok(Expr::Regex(Box::new(lhs), pat));
+    }
+    if c.eat(&Token::StartsWith) {
+        let s = match c.advance() {
+            Some(Token::Str(s)) => s.clone(),
+            _ => return Err(c.err("string after STARTS WITH")),
+        };
+        return Ok(Expr::StartsWith(Box::new(lhs), s));
+    }
+    if c.eat(&Token::EndsWith) {
+        let s = match c.advance() {
+            Some(Token::Str(s)) => s.clone(),
+            _ => return Err(c.err("string after ENDS WITH")),
+        };
+        return Ok(Expr::EndsWith(Box::new(lhs), s));
+    }
+    if c.eat(&Token::Contains) {
+        let s = match c.advance() {
+            Some(Token::Str(s)) => s.clone(),
+            _ => return Err(c.err("string after CONTAINS")),
+        };
+        return Ok(Expr::Contains(Box::new(lhs), s));
+    }
+
+    // Infix binary comparisons
+    let op = if c.eat(&Token::Eq)      { Some(Op::Eq) }
+        else if c.eat(&Token::Ne)      { Some(Op::Ne) }
+        else if c.eat(&Token::Lt)      { Some(Op::Lt) }
+        else if c.eat(&Token::Le)      { Some(Op::Le) }
+        else if c.eat(&Token::Gt)      { Some(Op::Gt) }
+        else if c.eat(&Token::Ge)      { Some(Op::Ge) }
+        else                           { None };
+
+    if let Some(op) = op {
+        let rhs = parse_primary(c)?;
+        Ok(Expr::BinOp(op, Box::new(lhs), Box::new(rhs)))
+    } else {
+        Ok(lhs)
+    }
+}
+
+fn parse_primary(c: &mut Cursor) -> Result<Expr, CypherError> {
+    if c.eat(&Token::LParen) {
+        let e = parse_expr(c)?;
+        c.expect(&Token::RParen)?;
+        return Ok(e);
+    }
+    // Property access `ident.ident` OR function call `IDENT(...)`.
+    if let Some(Token::Ident(name)) = c.peek().cloned() {
+        c.advance();
+        if c.eat(&Token::Dot) {
+            let prop = match c.advance() {
+                Some(Token::Ident(s)) => s.clone(),
+                _ => return Err(c.err("property name after .")),
+            };
+            return Ok(Expr::Prop(name, prop));
+        }
+        if c.eat(&Token::LParen) {
+            let distinct = c.eat(&Token::Distinct);
+            if c.eat(&Token::Star) {
+                // COUNT(*): zero args sentinel via Null literal.
+                c.expect(&Token::RParen)?;
+                return Ok(Expr::FunCall {
+                    name: name.to_ascii_uppercase(),
+                    distinct: false,
+                    args: vec![Expr::Lit(Literal::Null)],
+                });
+            }
+            let mut args = Vec::new();
+            if !c.check(&Token::RParen) {
+                loop {
+                    args.push(parse_expr(c)?);
+                    if !c.eat(&Token::Comma) { break; }
+                }
+            }
+            c.expect(&Token::RParen)?;
+            return Ok(Expr::FunCall { name: name.to_ascii_uppercase(), distinct, args });
+        }
+        return Err(c.err("`.<prop>` or `(...)` after identifier"));
+    }
+    // Literal
+    let lit = parse_literal(c)?;
+    Ok(Expr::Lit(lit))
+}
+
 /// Convert `HasMethod` → `HAS_METHOD` so Cypher CamelCase rel-types map to
 /// the RelType::FromStr matcher which uses UPPER_SNAKE_CASE strings.
 fn camel_to_upper_snake(s: &str) -> String {
@@ -364,5 +501,75 @@ mod tests {
     fn match_optional() {
         let m = mc("OPTIONAL MATCH (a)-[:Calls]->(b)");
         assert!(m.optional);
+    }
+
+    fn ex(s: &str) -> Expr {
+        let toks = tokenize(s).unwrap();
+        let mut c = Cursor::new(&toks);
+        parse_expr(&mut c).unwrap()
+    }
+
+    #[test]
+    fn expr_property_eq_string() {
+        match ex("a.name = 'foo'") {
+            Expr::BinOp(Op::Eq, lhs, rhs) => {
+                assert!(matches!(*lhs, Expr::Prop(ref v, ref p) if v == "a" && p == "name"));
+                assert!(matches!(*rhs, Expr::Lit(Literal::Str(ref s)) if s == "foo"));
+            }
+            other => panic!("expected BinOp(Eq, ...), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_and_or_precedence() {
+        // a=1 AND b=2 OR c=3  →  (a=1 AND b=2) OR c=3
+        match ex("a.x = 1 AND b.y = 2 OR c.z = 3") {
+            Expr::BinOp(Op::Or, lhs, _) => {
+                assert!(matches!(*lhs, Expr::BinOp(Op::And, ..)));
+            }
+            _ => panic!("expected Or as root"),
+        }
+    }
+
+    #[test]
+    fn expr_not_unary() {
+        match ex("NOT a.name = 'x'") {
+            Expr::UnaryOp(UnaryOp::Not, _) => {}
+            _ => panic!("expected Not"),
+        }
+    }
+
+    #[test]
+    fn expr_in_list() {
+        match ex("a.kind IN ['Function', 'Method']") {
+            Expr::In(_, lits) => assert_eq!(lits.len(), 2),
+            _ => panic!("expected In"),
+        }
+    }
+
+    #[test]
+    fn expr_starts_with() {
+        match ex("a.name STARTS WITH 'foo'") {
+            Expr::StartsWith(_, s) => assert_eq!(s, "foo"),
+            _ => panic!("expected StartsWith"),
+        }
+    }
+
+    #[test]
+    fn expr_regex_match() {
+        match ex("a.name =~ '.*Handler$'") {
+            Expr::Regex(_, s) => assert_eq!(s, ".*Handler$"),
+            _ => panic!("expected Regex"),
+        }
+    }
+
+    #[test]
+    fn expr_paren() {
+        match ex("(a.x = 1 OR b.y = 2) AND c.z = 3") {
+            Expr::BinOp(Op::And, lhs, _) => {
+                assert!(matches!(*lhs, Expr::BinOp(Op::Or, ..)));
+            }
+            _ => panic!("expected And as root"),
+        }
     }
 }
