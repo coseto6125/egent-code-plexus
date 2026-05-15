@@ -74,10 +74,7 @@ pub fn run_inner(
     args: ContextArgs,
     engine: &dyn graph_nexus_mcp::registry::EngineRef,
 ) -> Result<serde_json::Value, GnxError> {
-    let engine = engine
-        .as_any()
-        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
-        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
+    let engine = crate::engine::cast_engine(engine)?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Resolve the symbol. --uid wins over --name when both are supplied so

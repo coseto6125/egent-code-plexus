@@ -71,10 +71,7 @@ pub fn run_inner(
     args: DetectChangesArgs,
     engine: &dyn graph_nexus_mcp::registry::EngineRef,
 ) -> Result<serde_json::Value, GnxError> {
-    let engine = engine
-        .as_any()
-        .and_then(|a| a.downcast_ref::<crate::engine::Engine>())
-        .ok_or_else(|| GnxError::InvalidArgument("engine not available".to_string()))?;
+    let engine = crate::engine::cast_engine(engine)?;
     let repo_path = PathBuf::from(args.repo.as_deref().unwrap_or("."));
     let scope = DiffScope::parse(Some(&args.scope), args.base_ref.as_deref())?;
 
