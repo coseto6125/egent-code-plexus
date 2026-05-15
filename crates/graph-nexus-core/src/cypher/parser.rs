@@ -202,6 +202,37 @@ fn parse_rel_type(c: &mut Cursor) -> Result<RelType, CypherError> {
         .map_err(|_| CypherError::Semantic { msg: format!("unknown RelType '{name}'") })
 }
 
+pub fn parse_order_by(c: &mut Cursor) -> Result<Vec<OrderItem>, CypherError> {
+    c.expect(&Token::OrderBy)?;
+    let mut out = Vec::new();
+    loop {
+        let item = parse_return_item(c)?;
+        let expr = item.expr;
+        let desc = if c.eat(&Token::Desc)      { true }
+                   else if c.eat(&Token::Asc)  { false }
+                   else                        { false };
+        out.push(OrderItem { expr, desc });
+        if !c.eat(&Token::Comma) { break; }
+    }
+    Ok(out)
+}
+
+pub fn parse_skip(c: &mut Cursor) -> Result<Option<u64>, CypherError> {
+    if !c.eat(&Token::Skip) { return Ok(None); }
+    match c.advance() {
+        Some(Token::Int(n)) => Ok(Some(*n as u64)),
+        _ => Err(c.err("int after SKIP")),
+    }
+}
+
+pub fn parse_limit(c: &mut Cursor) -> Result<Option<u64>, CypherError> {
+    if !c.eat(&Token::Limit) { return Ok(None); }
+    match c.advance() {
+        Some(Token::Int(n)) => Ok(Some(*n as u64)),
+        _ => Err(c.err("int after LIMIT")),
+    }
+}
+
 pub fn parse_return_clause(c: &mut Cursor) -> Result<ReturnClause, CypherError> {
     c.expect(&Token::Return)?;
     let distinct = c.eat(&Token::Distinct);
@@ -573,6 +604,24 @@ mod tests {
         let mut c = Cursor::new(&toks);
         let e = parse_where(&mut c).unwrap();
         assert!(matches!(e, Expr::BinOp(Op::Eq, ..)));
+    }
+
+    #[test]
+    fn order_by_asc_desc() {
+        let toks = tokenize("ORDER BY a.name DESC, b.kind ASC").unwrap();
+        let mut c = Cursor::new(&toks);
+        let items = parse_order_by(&mut c).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].desc);
+        assert!(!items[1].desc);
+    }
+
+    #[test]
+    fn skip_and_limit_parse() {
+        let toks = tokenize("SKIP 5 LIMIT 10").unwrap();
+        let mut c = Cursor::new(&toks);
+        assert_eq!(parse_skip(&mut c).unwrap(), Some(5));
+        assert_eq!(parse_limit(&mut c).unwrap(), Some(10));
     }
 
     fn rt(s: &str) -> ReturnClause {
