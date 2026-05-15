@@ -14,7 +14,11 @@ pub struct CypherArgs {
     pub query_positional: Option<String>,
 
     /// Named alias for the positional QUERY argument.
-    #[arg(long = "query", value_name = "QUERY", conflicts_with = "query_positional")]
+    #[arg(
+        long = "query",
+        value_name = "QUERY",
+        conflicts_with = "query_positional"
+    )]
     pub query: Option<String>,
 
     /// Repository to query. Cypher operates on a single graph (single-repo only).
@@ -74,11 +78,14 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
         .map_err(|e| graph_nexus_core::GnxError::Rkyv(e.to_string()))?;
 
     let query_str = args.resolved_query()?;
-    let query = cypher::parse(query_str)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e)))?;
+    let query = cypher::parse(query_str).map_err(|e| {
+        graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e))
+    })?;
 
-    let result = cypher::execute(&query, graph, &resolve_repo_root(args.repo.as_deref()))
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e)))?;
+    let result =
+        cypher::execute(&query, graph, &resolve_repo_root(args.repo.as_deref())).map_err(|e| {
+            graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e))
+        })?;
 
     match args.format.as_str() {
         "toon" => println!("{}", serialize_toon(&result)),
@@ -88,8 +95,23 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
 }
 
 fn format_cypher_error(query: &str, e: &cypher::CypherError) -> String {
-    // Best-effort: print query then `^` indicator. Refined in D4.
-    format!("{e}\nquery: {query}")
+    use cypher::CypherError::*;
+    let offset = match e {
+        Lex { offset, .. } | Parse { offset, .. } => Some(*offset),
+        _ => None,
+    };
+    let mut out = String::new();
+    out.push_str(query);
+    out.push('\n');
+    if let Some(off) = offset {
+        // Token-index isn't the same as byte-index; use it as a soft hint
+        // and clamp to query length so we never go out of bounds.
+        let pad = off.min(query.len());
+        out.push_str(&" ".repeat(pad));
+        out.push_str("^\n");
+    }
+    out.push_str(&format!("{e}"));
+    out
 }
 
 fn serialize_json(r: &cypher::QueryResult) -> String {
@@ -111,10 +133,20 @@ fn value_to_json(v: &cypher::Value) -> serde_json::Value {
         Float(f) => serde_json::json!(f),
         Str(s) => serde_json::json!(s),
         List(xs) => serde_json::Value::Array(xs.iter().map(value_to_json).collect()),
-        NodeRef { name, kind, file_path, .. } => {
+        NodeRef {
+            name,
+            kind,
+            file_path,
+            ..
+        } => {
             serde_json::json!({"name": name, "kind": kind, "filePath": file_path})
         }
-        EdgeRef { rel_type, confidence, reason, .. } => {
+        EdgeRef {
+            rel_type,
+            confidence,
+            reason,
+            ..
+        } => {
             serde_json::json!({"rel_type": format!("{rel_type:?}"), "confidence": confidence, "reason": reason})
         }
     }
@@ -141,9 +173,16 @@ fn value_to_toon(v: &cypher::Value) -> String {
         Int(i) => i.to_string(),
         Float(f) => f.to_string(),
         Str(s) => s.clone(),
-        List(xs) => format!("[{}]", xs.iter().map(value_to_toon).collect::<Vec<_>>().join(",")),
+        List(xs) => format!(
+            "[{}]",
+            xs.iter().map(value_to_toon).collect::<Vec<_>>().join(",")
+        ),
         NodeRef { name, kind, .. } => format!("{name}:{kind}"),
-        EdgeRef { rel_type, confidence, .. } => format!("{rel_type:?}:{confidence}"),
+        EdgeRef {
+            rel_type,
+            confidence,
+            ..
+        } => format!("{rel_type:?}:{confidence}"),
     }
 }
 
