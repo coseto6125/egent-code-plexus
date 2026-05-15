@@ -102,21 +102,21 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 | TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ⚠️ | ✓ |
 | Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Java | ✓ | ⚠️ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ✓ |
-| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ⚠️ | ✓ |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ✓ |
-| Go | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✓ | ⚠️ | ✓ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✅ | ✓ | ✓ |
-| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ⚠️ | ⚠️ | ⚠️ | ✓ |
-| Ruby | ✓ | — | ⚠️ | ✓ | — | ⚠️ | ✅ | ⚠️ | ✓ |
-| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ✓ |
-| C | ✅ | — | ⚠️ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ✓ |
-| C++ | ✅ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✅ | ⚠️ | ✓ |
-| Dart | ✓ | ✅ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✅ | ⚠️ | ✓ |
+| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ⚠️ | ✓ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ |
+| Go | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✓ | ⚠️ | ✓ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ |
+| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✓ |
+| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✅ | ⚠️ | ✓ |
+| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✓ |
+| C | ✅ | — | ✓ | ✅ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
+| C++ | ✅ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
+| Dart | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
 
 **Where graph-nexus goes beyond upstream** (15 ✅ cells): C/C++ get Imports & Heritage that upstream doesn't claim; Java/Kotlin/Rust/Ruby/Dart get Config parsing for toolchains upstream doesn't cover; PHP gets Heritage; Go/C++/Dart get Named Bindings; Swift/C/C++ get basic Imports.
 
-**Where graph-nexus lags upstream** (most ⚠️ cells): **Constructor Inference** is the biggest gap — only Python has full receiver-type binding; the other 13 languages are partial. **Frameworks** for Kotlin / C# / Swift / C / C++ / Dart aren't wired (upstream claims it; we have parsers but no framework helpers registered). **Entry Points** are now covered for all 14 languages via the cross-language scorer (`main()` detection + HTTP routes + framework decorators ≥ 0.8 confidence).
+**Wave 1 closed 28 cells** (Constructor Inference rolled out to all 14 languages mirroring Python's `4e4fb1b` receiver-type binding prototype; Java static-import named bindings; C# `csproj`/`global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators). **Remaining ⚠️ (17 cells, Wave 2 targets)**: Frameworks across 10 langs (JS, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart); Types for Go / Swift / Dart / C / C++; Config for PHP and Swift.
 
 Beyond these 14, the Rust providers also cover **17 additional languages** (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig) at the structural level — no upstream baseline to compare against.
 
