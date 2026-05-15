@@ -112,7 +112,7 @@ fn build_payload(
         let route_uid = route_node.uid.resolve(&graph.string_pool);
         let route_name = route_node.name.resolve(&graph.string_pool);
 
-        let drift_owned: Vec<String> = drift.iter().map(|s| (*s).clone()).collect();
+        let drift_owned: Vec<String> = drift.iter().map(|&s| s.clone()).collect();
 
         report_entries.push(serde_json::json!({
             "consumer_uid": consumer_uid,

@@ -13,8 +13,22 @@
 
 use clap::{Arg, ArgAction, Command};
 use serde_json::{json, Map, Value};
+use std::any::TypeId;
 use std::collections::HashSet;
 use std::sync::Arc;
+
+// `TypeId::of` is `const fn` since Rust 1.85; we lean on that to keep
+// the integer / float type sets in static arrays addressable by
+// `.contains()` rather than a long `||` chain.
+const INT_TIDS: [TypeId; 6] = [
+    TypeId::of::<i64>(),
+    TypeId::of::<i32>(),
+    TypeId::of::<u64>(),
+    TypeId::of::<u32>(),
+    TypeId::of::<usize>(),
+    TypeId::of::<isize>(),
+];
+const FLOAT_TIDS: [TypeId; 2] = [TypeId::of::<f64>(), TypeId::of::<f32>()];
 
 #[derive(Debug, Clone)]
 pub struct DerivedTool {
@@ -122,8 +136,13 @@ fn infer_type_and_enum(arg: &Arg) -> (&'static str, Option<Vec<String>>) {
     if matches!(action, ArgAction::Count) {
         return ("integer", None);
     }
+    // `tid` is a `clap::builder::AnyValueId`, not a `std::any::TypeId` —
+    // it carries an internal `TypeId` and impls `PartialEq<TypeId>`, so the
+    // direct comparisons below resolve to that impl. We iterate
+    // `INT_TIDS` / `FLOAT_TIDS` rather than using `.contains(&tid)`
+    // because `<[TypeId]>::contains` would require an `&TypeId` argument.
     let tid = arg.get_value_parser().type_id();
-    if tid == std::any::TypeId::of::<bool>() {
+    if tid == TypeId::of::<bool>() {
         return ("boolean", None);
     }
 
@@ -136,15 +155,9 @@ fn infer_type_and_enum(arg: &Arg) -> (&'static str, Option<Vec<String>>) {
         return ("string", Some(pv));
     }
 
-    let type_str = if tid == std::any::TypeId::of::<i64>()
-        || tid == std::any::TypeId::of::<i32>()
-        || tid == std::any::TypeId::of::<u64>()
-        || tid == std::any::TypeId::of::<u32>()
-        || tid == std::any::TypeId::of::<usize>()
-        || tid == std::any::TypeId::of::<isize>()
-    {
+    let type_str = if INT_TIDS.iter().any(|t| tid == *t) {
         "integer"
-    } else if tid == std::any::TypeId::of::<f64>() || tid == std::any::TypeId::of::<f32>() {
+    } else if FLOAT_TIDS.iter().any(|t| tid == *t) {
         "number"
     } else {
         "string"
