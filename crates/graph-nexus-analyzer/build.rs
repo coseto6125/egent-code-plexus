@@ -62,8 +62,11 @@ fn main() {
     let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
 
     println!("cargo:rustc-env=GRAPH_NEXUS_PARSER_FINGERPRINT={hex}");
-    // Visible in `cargo build -vv` / when this script's stdout is shown.
-    println!("cargo:warning=graph-nexus-analyzer parser fingerprint: {hex}");
+    // The fingerprint is also re-exported at runtime via
+    // `graph_nexus_analyzer::PARSER_FINGERPRINT` for the incremental cache
+    // to consult. No need to emit a `cargo:warning=` diagnostic for every
+    // build — that was useful while debugging cache invalidation but is
+    // pure noise now that the wiring is settled.
 }
 
 /// Recursively collect files under `dir` whose names match the parser set.
