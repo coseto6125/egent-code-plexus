@@ -18,6 +18,13 @@ $repo = 'coseto6125/graph-nexus'
 $bin  = 'gnx'
 $version = if ($env:GNX_VERSION) { $env:GNX_VERSION } else { 'latest' }
 
+# ---- 安裝目錄 ---- (resolved up-front so cargo fallback respects it too)
+if (-not $env:GNX_INSTALL_DIR) {
+    $installDir = Join-Path $env:LOCALAPPDATA "Programs\gnx"
+} else {
+    $installDir = $env:GNX_INSTALL_DIR
+}
+
 function Invoke-CargoFallback([string]$reason) {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
         Write-Host "error: $reason" -ForegroundColor Red
@@ -27,14 +34,25 @@ function Invoke-CargoFallback([string]$reason) {
     }
     Write-Host "==> $reason"
     Write-Host "==> Falling back to ``cargo install --git`` (source build, may take a few minutes)"
-    $cargoArgs = @('install', '--git', "https://github.com/$repo", '--bin', $bin, '--locked')
-    if ($script:version -ne 'latest') {
-        $cargoArgs += @('--tag', "v$($script:version.TrimStart('v'))")
+
+    # Build into a private --root then move the .exe to $installDir so the
+    # cargo fallback honors GNX_INSTALL_DIR (the workspace package name is
+    # required now that more than one bin exists in the workspace).
+    $buildRoot = Join-Path $env:TEMP ([System.IO.Path]::GetRandomFileName())
+    try {
+        $cargoArgs = @('install', '--root', $buildRoot, '--git', "https://github.com/$repo", 'graph-nexus', '--bin', $bin, '--locked')
+        if ($script:version -ne 'latest') {
+            $cargoArgs += @('--tag', "v$($script:version.TrimStart('v'))")
+        }
+        & cargo @cargoArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        New-Item -ItemType Directory -Force -Path $script:installDir | Out-Null
+        Copy-Item "$buildRoot\bin\$bin.exe" "$script:installDir\$bin.exe" -Force
+    } finally {
+        if (Test-Path $buildRoot) { Remove-Item -Recurse -Force $buildRoot }
     }
-    & cargo @cargoArgs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host ""
-    Write-Host "✓ Installed $bin via cargo (binary at `$env:USERPROFILE\.cargo\bin\$bin.exe)"
+    Write-Host "✓ Installed $bin via cargo → $script:installDir\$bin.exe"
     exit 0
 }
 
@@ -75,12 +93,6 @@ if ($version -eq 'latest') {
 }
 $ver = $tag.TrimStart('v')
 
-# ---- 安裝目錄 ----
-if (-not $env:GNX_INSTALL_DIR) {
-    $installDir = Join-Path $env:LOCALAPPDATA "Programs\gnx"
-} else {
-    $installDir = $env:GNX_INSTALL_DIR
-}
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 # ---- 下載 ----
