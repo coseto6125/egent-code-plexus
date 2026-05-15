@@ -29,6 +29,22 @@
   )
 ) @function
 
+;; Free function declarations (no body) at translation-unit scope.
+;; Matches `int f();` and `std::map<X,Y> getAll();` so the return-type
+;; annotation lands on a Function node even when the .cpp/.h split puts
+;; the prototype in a header without a body.
+(translation_unit
+  (declaration
+    type: (_) @type
+    declarator: (function_declarator
+      declarator: [
+        (identifier) @name.function
+        (reference_declarator (identifier) @name.function)
+        (pointer_declarator (identifier) @name.function)
+      ]
+    )
+  ) @function)
+
 ;; Methods
 (function_definition
   type: (_)? @type
@@ -49,6 +65,20 @@
   )
 ) @method
 
+;; Member function declarations inside a class / struct body — `int sum();`.
+;; Distinct from `function_definition` (no body) so a separate match emits a
+;; Method node with the return-type capture.
+(field_declaration
+  type: (_) @type
+  declarator: (function_declarator
+    declarator: [
+      (field_identifier) @name.method
+      (pointer_declarator (field_identifier) @name.method)
+      (reference_declarator (field_identifier) @name.method)
+    ]
+  )
+) @method
+
 ;; Preprocessor Includes
 (preproc_include
   path: [
@@ -62,3 +92,43 @@
   name: (namespace_identifier) @alias
   (namespace_identifier) @import.source
 ) @import
+
+;; Function parameters — `int x` / `const std::string& s` / `std::vector<int> v`.
+;; Captures the outer `parameter_declaration` + the parameter's identifier.
+;; The parser slices the source between [decl.start, name.start) to preserve
+;; the full type text including templates, qualifiers, and `*` / `&` ops.
+(parameter_declaration
+  declarator: [
+    (identifier) @param.name
+    (pointer_declarator (identifier) @param.name)
+    (pointer_declarator (pointer_declarator (identifier) @param.name))
+    (reference_declarator (identifier) @param.name)
+    (array_declarator declarator: (identifier) @param.name)
+  ]) @param
+
+;; Class / struct data-member declarations — `int x;` / `std::string name;`.
+;; Restricted to declarators that end at a plain `field_identifier` so
+;; member-function declarations (whose declarator is `function_declarator`)
+;; don't match here — those are captured by the `@method` rule above.
+(field_declaration
+  declarator: [
+    (field_identifier) @field.name
+    (pointer_declarator (field_identifier) @field.name)
+    (pointer_declarator (pointer_declarator (field_identifier) @field.name))
+    (reference_declarator (field_identifier) @field.name)
+    (array_declarator declarator: (field_identifier) @field.name)
+  ]) @field
+
+;; Top-level variable / const declarations — `auto x = 5;` / `int N = 5;`.
+;; The parser slices [decl.start, name.start), so `auto x` yields `"auto"`
+;; (no deduced type — that requires semantic analysis the analyzer
+;; doesn't perform). Storage-class and qualifier words are preserved.
+(translation_unit
+  (declaration
+    declarator: [
+      (init_declarator declarator: (identifier) @var.name)
+      (init_declarator declarator: (pointer_declarator (identifier) @var.name))
+      (init_declarator declarator: (reference_declarator (identifier) @var.name))
+      (identifier) @var.name
+      (pointer_declarator (identifier) @var.name)
+    ]) @var)

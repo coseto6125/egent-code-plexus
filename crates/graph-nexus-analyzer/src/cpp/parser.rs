@@ -14,6 +14,34 @@ thread_local! {
         parser
     });
 }
+
+/// Slice the source between a declaration's start byte and its identifier
+/// name's start byte to recover the type-annotation text.
+///
+/// Convention (documented per task D3 for both C and C++):
+/// - **Pointer / reference spacing** is preserved as-written. `char* s`
+///   yields `"char*"`; `const std::string& s` yields `"const std::string&"`.
+///   Source is the source of truth.
+/// - **Qualifier inclusion** is YES — full prefix including storage class
+///   (`static`, `extern`) and cv-qualifiers (`const`, `volatile`).
+/// - **`auto`** is preserved literally; the analyzer doesn't do type
+///   deduction. `auto x = 5;` → `Some("auto")`.
+fn slice_type_before(
+    decl: tree_sitter::Node<'_>,
+    name: tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Option<String> {
+    let start = decl.start_byte();
+    let end = name.start_byte();
+    if end <= start {
+        return None;
+    }
+    std::str::from_utf8(source.get(start..end)?)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub struct CppProvider {
     query: Query,
 }
@@ -57,6 +85,13 @@ impl LanguageProvider for CppProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_import = self.query.capture_index_for_name("import");
 
+        let idx_param = self.query.capture_index_for_name("param");
+        let idx_param_name = self.query.capture_index_for_name("param.name");
+        let idx_field = self.query.capture_index_for_name("field");
+        let idx_field_name = self.query.capture_index_for_name("field.name");
+        let idx_var = self.query.capture_index_for_name("var");
+        let idx_var_name = self.query.capture_index_for_name("var.name");
+
         let is_header = path
             .extension()
             .map(|ext| ext == "h" || ext == "hpp" || ext == "hxx" || ext == "hh")
@@ -73,6 +108,14 @@ impl LanguageProvider for CppProvider {
             let mut import_src_node = None;
             let mut import_alias_node = None;
             let mut is_import = false;
+
+            // Buffers for param / field / var declarations (D3 type annotations).
+            let mut param_root: Option<tree_sitter::Node<'_>> = None;
+            let mut param_name: Option<tree_sitter::Node<'_>> = None;
+            let mut field_root: Option<tree_sitter::Node<'_>> = None;
+            let mut field_name: Option<tree_sitter::Node<'_>> = None;
+            let mut var_root: Option<tree_sitter::Node<'_>> = None;
+            let mut var_name: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -99,6 +142,18 @@ impl LanguageProvider for CppProvider {
                     root_span_node = Some(cap.node);
                 } else if cap_idx == idx_import {
                     is_import = true;
+                } else if cap_idx == idx_param {
+                    param_root = Some(cap.node);
+                } else if cap_idx == idx_param_name {
+                    param_name = Some(cap.node);
+                } else if cap_idx == idx_field {
+                    field_root = Some(cap.node);
+                } else if cap_idx == idx_field_name {
+                    field_name = Some(cap.node);
+                } else if cap_idx == idx_var {
+                    var_root = Some(cap.node);
+                } else if cap_idx == idx_var_name {
+                    var_name = Some(cap.node);
                 }
             }
 
@@ -129,6 +184,81 @@ impl LanguageProvider for CppProvider {
                         type_annotation,
                         name: name_str.to_string(),
                         kind: k,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+
+            // Parameter declaration → Variable node with type slice.
+            if let (Some(p_root), Some(p_name)) = (param_root, param_name) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[p_name.start_byte()..p_name.end_byte()])
+                {
+                    let start = p_root.start_position();
+                    let end = p_root.end_position();
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: false,
+                        heritage: vec![],
+                        type_annotation: slice_type_before(p_root, p_name, source),
+                        name: name_str.to_string(),
+                        kind: NodeKind::Variable,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+
+            // Class / struct data-member → Property node with type slice.
+            if let (Some(f_root), Some(f_name)) = (field_root, field_name) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[f_name.start_byte()..f_name.end_byte()])
+                {
+                    let start = f_root.start_position();
+                    let end = f_root.end_position();
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: is_header || is_exported_by_query,
+                        heritage: vec![],
+                        type_annotation: slice_type_before(f_root, f_name, source),
+                        name: name_str.to_string(),
+                        kind: NodeKind::Property,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+
+            // Top-level variable / `auto` declaration → Variable node.
+            if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
+                if let Ok(name_str) =
+                    std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
+                {
+                    let start = v_root.start_position();
+                    let end = v_root.end_position();
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: is_header || is_exported_by_query,
+                        heritage: vec![],
+                        type_annotation: slice_type_before(v_root, v_name, source),
+                        name: name_str.to_string(),
+                        kind: NodeKind::Variable,
                         span: (
                             start.row as u32,
                             start.column as u32,
