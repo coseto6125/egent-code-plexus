@@ -64,6 +64,8 @@ impl LanguageProvider for GoProvider {
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
 
+        let idx_field_name = self.query.capture_index_for_name("field.name");
+
         let mut routes = Vec::new();
 
         while let Some(m) = matches.next() {
@@ -132,6 +134,35 @@ impl LanguageProvider for GoProvider {
                     route_method_node = Some(cap.node);
                 } else if cap_idx == idx_route_path {
                     route_path_node = Some(cap.node);
+                } else if cap_idx == idx_field_name {
+                    // One `field_declaration` can declare multiple names
+                    // (`X, Y int`), so emit a Property per `@field.name`
+                    // capture rather than funneling through `name_node`.
+                    // Span is the name token itself, which keeps each
+                    // Property distinct when names share a declaration.
+                    if let Ok(name_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        let name = name_str.to_string();
+                        let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
+                        let start = cap.node.start_position();
+                        let end = cap.node.end_position();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            name,
+                            kind: NodeKind::Property,
+                            is_exported,
+                            heritage: vec![],
+                            type_annotation: None,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                    }
                 }
             }
 

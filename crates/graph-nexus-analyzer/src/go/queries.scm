@@ -66,6 +66,12 @@
 (import_spec
   path: [ (interpreted_string_literal) (raw_string_literal) ] @import.source) @import
 
+;; Struct fields — per-name capture so `X, Y int` emits two Property nodes.
+;; Matches at any depth, so fields of nested anonymous structs are also captured.
+(field_declaration
+  name: (field_identifier) @field.name
+) @field
+
 ;; Routes
 (call_expression
   function: (selector_expression
