@@ -73,7 +73,9 @@ fn self_does_not_bind_in_module_singleton_method() {
         calls,
     );
     assert!(
-        !calls.iter().any(|c| c.starts_with("Trainer.") || c.starts_with("Animal.")),
+        !calls
+            .iter()
+            .any(|c| c.starts_with("Trainer.") || c.starts_with("Animal.")),
         "untyped receiver must not produce a class-qualified call; got {:?}",
         calls,
     );

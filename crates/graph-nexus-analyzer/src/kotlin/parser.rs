@@ -91,7 +91,8 @@ impl LanguageProvider for KotlinProvider {
 
         // Pending Ktor route refs: (verb, path_string, capture_span).
         // Emitted only if the file imports `io.ktor.*` — gate applied after the loop.
-        let mut pending_ktor_refs: Vec<(&'static str, String, (u32, u32, u32, u32))> = Vec::new();
+        type KtorRef = (&'static str, String, (u32, u32, u32, u32));
+        let mut pending_ktor_refs: Vec<KtorRef> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;

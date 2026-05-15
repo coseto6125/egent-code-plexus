@@ -48,17 +48,28 @@ Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via
 
 ## 📦 Installation
 
-| Platform / user | Command | Notes |
+> **Pre-release status**: until the first GitHub Release lands, the prebuilt installer scripts will auto-fallback to `cargo install --git`. Every platform below has at least one working terminal install path right now.
+
+### Every platform (works today, no Release required)
+
+```bash
+cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx --locked
+```
+
+Needs a Rust toolchain ([rustup.rs](https://rustup.rs)). Source build — first compile takes a few minutes, cached afterwards.
+
+### Per-platform one-liners
+
+| Platform | Command | Notes |
 | :--- | :--- | :--- |
-| macOS Homebrew | `brew tap coseto6125/tap && brew install graph-nexus` | Use after the tap formula is published. Package: `graph-nexus`; binary: `gnx` |
-| Linux / macOS | `curl -sSfL https://github.com/coseto6125/graph-nexus/releases/latest/download/install.sh \| sh` | Installs the prebuilt GitHub Release binary |
-| Windows PowerShell | `irm https://github.com/coseto6125/graph-nexus/releases/latest/download/install.ps1 \| iex` | Installs the prebuilt GitHub Release binary |
-| Rust source build | `cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx` | Works before crates.io publishing |
-| Manual | Download from [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | Pick the archive for your target and verify `.sha256` |
+| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.sh \| sh` | Tries prebuilt Release first; auto-falls back to `cargo install --git` when no Release is published yet. Set `GNX_FORCE_CARGO=1` to skip Release lookup. |
+| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.ps1 -UseBasicParsing \| iex` | Same Release-first / cargo-fallback logic. Set `$env:GNX_FORCE_CARGO='1'` to force cargo. |
+| **macOS Homebrew** | `brew tap coseto6125/tap && brew install graph-nexus` | Available *after* the tap formula is published with the first Release. |
+| **Manual** | Download from [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | Pick the archive for your target and verify `.sha256`. |
 
-> `cargo install graph-nexus` is intentionally not listed yet: crates.io publish is blocked until all analyzer grammar dependencies are available as publishable crate dependencies.
+> After install, the binary is named `gnx` (the package on crates.io will be `graph-nexus` once published). `cargo install graph-nexus` from crates.io is intentionally not listed yet: publish is blocked until all analyzer grammar dependencies are available as publishable crate dependencies.
 
-After install, the binary is named `gnx` (the package on crates.io is `graph-nexus`).
+> Once a tagged Release exists, the installer scripts will be served from `…/releases/latest/download/install.{sh,ps1}` as well — both URLs work; the `raw.githubusercontent.com` form simply also works *before* the first Release.
 
 ## ⚡ Usage
 

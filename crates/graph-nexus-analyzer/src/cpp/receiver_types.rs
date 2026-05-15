@@ -72,8 +72,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
                         if let Ok(s) = std::str::from_utf8(
                             &source[name_node.start_byte()..name_node.end_byte()],
                         ) {
-                            let span =
-                                (n.start_position().row as u32, n.end_position().row as u32);
+                            let span = (n.start_position().row as u32, n.end_position().row as u32);
                             class_scopes.push((span, s.to_string()));
                         }
                     }
@@ -98,7 +97,10 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
         }
     }
 
-    CppBindings { fn_scopes, class_scopes }
+    CppBindings {
+        fn_scopes,
+        class_scopes,
+    }
 }
 
 /// Scan the function's declarator for `parameter_declaration` nodes.
@@ -125,8 +127,7 @@ fn collect_typed_cpp_params(fn_def: Node<'_>, source: &[u8], out: &mut HashMap<S
         if ty_node.kind() != "type_identifier" {
             continue;
         }
-        let Ok(ty) = std::str::from_utf8(&source[ty_node.start_byte()..ty_node.end_byte()])
-        else {
+        let Ok(ty) = std::str::from_utf8(&source[ty_node.start_byte()..ty_node.end_byte()]) else {
             continue;
         };
         let Some(param_decl) = p.child_by_field_name("declarator") else {
@@ -230,8 +231,7 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             .map(str::to_string),
         "field_expression" => {
             let field = function.child_by_field_name("field")?;
-            let method =
-                std::str::from_utf8(&source[field.start_byte()..field.end_byte()]).ok()?;
+            let method = std::str::from_utf8(&source[field.start_byte()..field.end_byte()]).ok()?;
             let arg = function.child_by_field_name("argument")?;
             // `this->method()` / `this.method()`
             if arg.kind() == "this" {

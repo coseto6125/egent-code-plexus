@@ -130,15 +130,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # actionlint 未發 crates.io，taiki-e/install-action 與 cargo-binstall fallback 都會
+      # 失敗。rhysd/actionlint 官方提供 download-actionlint.bash，會抓對應平台 prebuilt。
       - name: Install actionlint
-        uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+        id: install-actionlint
+        run: |
+          echo "::group::Download actionlint"
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          echo "::endgroup::"
 
       - name: Run actionlint
         run: |
           echo "::group::actionlint"
-          actionlint -color
+          ./actionlint -color
           echo "::endgroup::"
 
   # ==================== Python Lint (parity scripts) ====================

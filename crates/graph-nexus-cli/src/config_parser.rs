@@ -1,3 +1,8 @@
+// Task F1 (global.json / NuGet.config), F2 (composer.json), F3 (Package.swift)
+// 的 parser 已寫好但尚未串到 main pipeline；保留 forward-looking 結構以利之後
+// wave 串接。在 file 級先把 dead_code 改為 allow，等實際接上後再收掉。
+#![allow(dead_code)]
+
 use graph_nexus_analyzer::resolution::path_aliases::PathAliases;
 use std::path::Path;
 

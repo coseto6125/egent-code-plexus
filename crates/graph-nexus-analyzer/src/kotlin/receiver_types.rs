@@ -49,10 +49,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if n.kind() == "function_declaration" {
-            let scope = (
-                n.start_position().row as u32,
-                n.end_position().row as u32,
-            );
+            let scope = (n.start_position().row as u32, n.end_position().row as u32);
             let mut map: HashMap<String, String> = HashMap::new();
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_params(params, source, &mut map);
@@ -184,9 +181,7 @@ fn kotlin_callee(
     // First child of call_expression is either simple_identifier or navigation_expression.
     let callee = call.named_child(0)?;
     match callee.kind() {
-        "simple_identifier" => {
-            callee.utf8_text(source).ok().map(|s| s.to_string())
-        }
+        "simple_identifier" => callee.utf8_text(source).ok().map(|s| s.to_string()),
         "navigation_expression" => {
             // navigation_expression: receiver, then navigation_suffix(.method)
             let receiver = callee.named_child(0)?;
@@ -248,7 +243,7 @@ fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
         }
         if n.span.0 <= line && n.span.2 >= line {
             let w = n.span.2 - n.span.0;
-            if best.map_or(true, |(bw, _)| w < bw) {
+            if best.is_none_or(|(bw, _)| w < bw) {
                 best = Some((w, &n.name));
             }
         }
@@ -267,7 +262,7 @@ fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
             let w = n.span.2 - n.span.0;
             if w < best_w {
                 best_w = w;
-                result = n.heritage.first().map(|s| s.clone());
+                result = n.heritage.first().cloned();
             }
         }
     }

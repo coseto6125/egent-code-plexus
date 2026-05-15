@@ -53,7 +53,9 @@ pub fn find_identifier_occurrences(
         "py" | "pyi" => python::find_identifier_occurrences(source, target_name),
         "ts" => typescript::find_identifier_occurrences(source, target_name),
         "tsx" => typescript::find_identifier_occurrences_tsx(source, target_name),
-        "js" | "jsx" | "mjs" | "cjs" => javascript::find_identifier_occurrences(source, target_name),
+        "js" | "jsx" | "mjs" | "cjs" => {
+            javascript::find_identifier_occurrences(source, target_name)
+        }
         "rs" => rust::find_identifier_occurrences(source, target_name),
         "java" => java::find_identifier_occurrences(source, target_name),
         "kt" | "kts" => kotlin::find_identifier_occurrences(source, target_name),
@@ -119,11 +121,8 @@ mod tests {
 
     #[test]
     fn dispatch_rust_routes_to_rust_finder() {
-        let hits = find_identifier_occurrences(
-            "a.rs",
-            b"fn foo() {}\nfn main() { foo(); }\n",
-            "foo",
-        );
+        let hits =
+            find_identifier_occurrences("a.rs", b"fn foo() {}\nfn main() { foo(); }\n", "foo");
         assert_eq!(hits.len(), 2);
     }
 

@@ -83,7 +83,9 @@ fn free_function_stays_bare() {
         main_calls,
     );
     assert!(
-        !main_calls.iter().any(|c| c.contains('.') && c.ends_with(".add")),
+        !main_calls
+            .iter()
+            .any(|c| c.contains('.') && c.ends_with(".add")),
         "no qualifier without receiver shape; got {:?}",
         main_calls,
     );

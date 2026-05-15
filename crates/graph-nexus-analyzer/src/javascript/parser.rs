@@ -143,9 +143,7 @@ impl LanguageProvider for JavaScriptProvider {
                     // target — emit "<anonymous>" so shape_check etc.
                     // recognise the route exists but is unreferenceable.
                     let kind = cap.node.kind();
-                    let target_name = if kind == "arrow_function"
-                        || kind == "function_expression"
-                    {
+                    let target_name = if kind == "arrow_function" || kind == "function_expression" {
                         "<anonymous>".to_string()
                     } else if let Ok(text) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])

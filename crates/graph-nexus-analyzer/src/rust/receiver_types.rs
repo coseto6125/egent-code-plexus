@@ -183,22 +183,10 @@ fn collect_scopes<'a>(
 
             // Recurse into the function body (nested closures get their own scope).
             if let Some(body) = child.child_by_field_name("body") {
-                collect_scopes(
-                    body,
-                    source,
-                    impl_map,
-                    current_impl_type.as_deref(),
-                    out,
-                );
+                collect_scopes(body, source, impl_map, current_impl_type.as_deref(), out);
             }
         } else {
-            collect_scopes(
-                child,
-                source,
-                impl_map,
-                current_impl_type.as_deref(),
-                out,
-            );
+            collect_scopes(child, source, impl_map, current_impl_type.as_deref(), out);
         }
     }
 }
@@ -209,35 +197,33 @@ fn collect_scopes<'a>(
 fn collect_params(params: &Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
     let mut c = params.walk();
     for p in params.children(&mut c) {
-        match p.kind() {
-            "parameter" => {
-                let Some(pat) = p.child_by_field_name("pattern") else {
-                    continue;
-                };
-                let Some(ty_node) = p.child_by_field_name("type") else {
-                    continue;
-                };
-                let Some(ty) = bare_type_name(ty_node, source) else {
-                    continue;
-                };
-                // Pattern can be an identifier or a mut-identifier.
-                let var_name = if pat.kind() == "identifier" {
-                    node_text(pat, source)
-                } else if pat.kind() == "mut_pattern" {
-                    pat.named_child(0)
-                        .filter(|n| n.kind() == "identifier")
-                        .and_then(|n| node_text(n, source))
-                } else {
-                    None
-                };
-                if let Some(name) = var_name {
-                    out.insert(name, ty);
-                }
-            }
-            // `self` / `&self` / `&mut self` have their own node kinds;
-            // we don't need explicit bindings here — the `self_type` field
-            // on the Scope handles `self` resolution in `LocalTypes::lookup`.
-            _ => {}
+        // `self` / `&self` / `&mut self` have their own node kinds;
+        // we don't need explicit bindings here — the `self_type` field
+        // on the Scope handles `self` resolution in `LocalTypes::lookup`.
+        if p.kind() != "parameter" {
+            continue;
+        }
+        let Some(pat) = p.child_by_field_name("pattern") else {
+            continue;
+        };
+        let Some(ty_node) = p.child_by_field_name("type") else {
+            continue;
+        };
+        let Some(ty) = bare_type_name(ty_node, source) else {
+            continue;
+        };
+        // Pattern can be an identifier or a mut-identifier.
+        let var_name = if pat.kind() == "identifier" {
+            node_text(pat, source)
+        } else if pat.kind() == "mut_pattern" {
+            pat.named_child(0)
+                .filter(|n| n.kind() == "identifier")
+                .and_then(|n| node_text(n, source))
+        } else {
+            None
+        };
+        if let Some(name) = var_name {
+            out.insert(name, ty);
         }
     }
 }
@@ -348,24 +334,28 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
         }
 
         // Scoped path call: `Dog::new()` or `std::vec::Vec::new()`
-        "scoped_identifier" | "generic_function" => {
-            node_text(function, source)
-                .or_else(|| {
-                    function
-                        .child_by_field_name("name")
-                        .and_then(|n| node_text(n, source))
-                })
-        }
+        "scoped_identifier" | "generic_function" => node_text(function, source).or_else(|| {
+            function
+                .child_by_field_name("name")
+                .and_then(|n| node_text(n, source))
+        }),
 
         _ => {
             let text = node_text(function, source)?;
             let after_colon = text.rsplit_once("::").map(|(_, t)| t).unwrap_or(&text);
-            let after_dot = after_colon.rsplit_once('.').map(|(_, t)| t).unwrap_or(after_colon);
+            let after_dot = after_colon
+                .rsplit_once('.')
+                .map(|(_, t)| t)
+                .unwrap_or(after_colon);
             let id: String = after_dot
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
                 .collect();
-            if id.is_empty() { None } else { Some(id) }
+            if id.is_empty() {
+                None
+            } else {
+                Some(id)
+            }
         }
     }
 }
