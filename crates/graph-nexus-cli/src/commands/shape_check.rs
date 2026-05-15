@@ -25,13 +25,11 @@ use clap::Args;
 use graph_nexus_analyzer::fetch_shape::parse_reason;
 use graph_nexus_core::graph::ArchivedRelType;
 use graph_nexus_core::GnxError;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Detect drift between HTTP consumer access patterns and the Route shapes
 /// advertised by the server — surfaces stale or typo'd field accesses.
-#[derive(Args, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Args, Debug)]
 pub struct ShapeCheckArgs {
     /// Repository root path (defaults to current directory).
     #[arg(long)]
@@ -42,11 +40,10 @@ pub struct ShapeCheckArgs {
     pub format: Option<String>,
 }
 
-pub fn run_inner(
+fn build_payload(
     _args: ShapeCheckArgs,
-    engine: &dyn graph_nexus_mcp::registry::EngineRef,
+    engine: &crate::engine::Engine,
 ) -> Result<serde_json::Value, GnxError> {
-    let engine = crate::engine::cast_engine(engine)?;
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Lookup: route node_idx → (known_keys set, response_keys list, error_keys list).
@@ -143,7 +140,7 @@ pub fn run(
     engine: &crate::engine::Engine,
 ) -> Result<(), graph_nexus_core::GnxError> {
     let format = crate::output::OutputFormat::parse(args.format.as_deref());
-    let value = run_inner(args, engine)?;
+    let value = build_payload(args, engine)?;
     let emit_value = match format {
         OutputFormat::Text => {
             let total = value["total_fetches"].as_u64().unwrap_or(0);
@@ -185,21 +182,3 @@ pub fn run(
     };
     emit(&emit_value, format)
 }
-
-#[cfg(test)]
-mod inner_tests {
-    use super::*;
-    #[test]
-    fn run_inner_returns_structured_value_not_unit() {
-        fn _accepts(
-            _f: fn(
-                ShapeCheckArgs,
-                &dyn graph_nexus_mcp::registry::EngineRef,
-            ) -> Result<serde_json::Value, graph_nexus_core::GnxError>,
-        ) {
-        }
-        _accepts(run_inner);
-    }
-}
-
-graph_nexus_mcp::gnx_register_mcp_tool!(ShapeCheckArgs, run_inner);
