@@ -137,12 +137,24 @@ impl LanguageProvider for JavaScriptProvider {
                     is_route = true;
                     root_span_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_express_handler {
-                    if let Ok(handler_name) =
+                    // The handler can be an identifier, member access, or
+                    // an inline function/arrow expression (fixed: PR #2
+                    // review issue #2). Inline functions have no symbolic
+                    // target — emit "<anonymous>" so shape_check etc.
+                    // recognise the route exists but is unreferenceable.
+                    let kind = cap.node.kind();
+                    let target_name = if kind == "arrow_function"
+                        || kind == "function_expression"
+                    {
+                        "<anonymous>".to_string()
+                    } else if let Ok(text) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        pending_express_handlers
-                            .push((handler_name.to_string(), node_span(&cap.node)));
-                    }
+                        text.to_string()
+                    } else {
+                        continue;
+                    };
+                    pending_express_handlers.push((target_name, node_span(&cap.node)));
                 } else if Some(cap_idx) == idx_hapi_handler {
                     if let Ok(handler_name) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
