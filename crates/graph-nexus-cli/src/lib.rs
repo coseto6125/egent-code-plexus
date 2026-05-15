@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod auto_ensure;
 pub mod commands;
 pub mod config_parser;

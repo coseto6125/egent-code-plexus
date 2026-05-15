@@ -19,6 +19,8 @@ pub enum Direction {
     Both,
 }
 
+/// Traverse the call-graph from a target symbol and return every upstream
+/// caller or downstream callee up to a configurable depth.
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
     /// Target symbol name (mutually exclusive with --since).
@@ -96,8 +98,8 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
 
 fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     let name = args.name.as_deref().unwrap();
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
+    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Resolve name → matching node indices, with optional --file / --kind disambiguation.
     let file_needle = args.file.as_deref();

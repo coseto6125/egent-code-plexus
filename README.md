@@ -140,6 +140,37 @@ Every read-side command accepts `--format text|json|toon`. The default is the to
 | Check if the on-disk graph is stale | `gnx coverage` (freshness in output) |
 | List members of a graph community/cluster | `gnx cypher` (use Cypher query language) |
 
+### MCP server (for LLM hosts)
+
+`gnx` ships an MCP server exposing the 8 core commands as MCP tools.
+Hosts that speak MCP (Claude Code, Cursor, Windsurf, Cline, Codex CLI,
+Gemini CLI, etc.) can register `gnx` and call the tools autonomously.
+
+```bash
+# Inspect what tools will be exposed
+gnx mcp tools
+
+# Run the MCP server (default: spawn mode — fresh subprocess per call)
+gnx mcp serve
+
+# Or daemon mode — Engine mmap'd, mtime-remap on graph rebuild
+# (full wiring lands with `gnx admin` TUI; for now spawn mode only)
+gnx mcp serve --daemon
+```
+
+Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.json`):
+
+```json
+{
+  "mcpServers": {
+    "gnx": { "command": "gnx", "args": ["mcp", "serve"] }
+  }
+}
+```
+
+A `gnx admin` TUI for one-command installation across multiple hosts
+ships in a follow-up release.
+
 ### Command reference
 
 All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--graph <path>` is given. Read-only commands take `--repo <name-or-path>` to disambiguate when multiple repos are registered.
