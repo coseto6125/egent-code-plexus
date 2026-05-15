@@ -26,10 +26,15 @@ use clap::Args;
 use graph_nexus_analyzer::fetch_shape::parse_reason;
 use graph_nexus_core::graph::ArchivedRelType;
 use graph_nexus_core::GnxError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Args, Debug)]
+/// Detect drift between HTTP consumer access patterns and the Route shapes
+/// advertised by the server — surfaces stale or typo'd field accesses.
+#[derive(Args, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ShapeCheckArgs {
+    /// Repository root path (defaults to current directory).
     #[arg(long)]
     pub repo: Option<String>,
 
@@ -38,7 +43,7 @@ pub struct ShapeCheckArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: ShapeCheckArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run_inner(args: ShapeCheckArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
 
@@ -136,7 +141,7 @@ pub fn run(args: ShapeCheckArgs, engine: &Engine) -> Result<(), GnxError> {
         format!("shape_check: {total_fetches} Fetches edge(s), {drift_count} with drift")
     };
 
-    match format {
+    let value = match format {
         OutputFormat::Text => {
             // Build a results array of pre-rendered string lines; output::emit
             // prints each line when the array contains strings.
@@ -148,17 +153,37 @@ pub fn run(args: ShapeCheckArgs, engine: &Engine) -> Result<(), GnxError> {
                     lines.push(serde_json::Value::String(line.clone()));
                 }
             }
-            let result = serde_json::json!({ "results": lines });
-            emit(&result, format)
+            serde_json::json!({ "results": lines })
         }
         OutputFormat::Json | OutputFormat::Toon => {
-            let result = serde_json::json!({
+            serde_json::json!({
                 "status": "success",
                 "total_fetches": total_fetches,
                 "drift_count": drift_count,
                 "drift": report_entries,
-            });
-            emit(&result, format)
+            })
         }
+    };
+    Ok(value)
+}
+
+pub fn run(args: ShapeCheckArgs, engine: &crate::engine::Engine)
+    -> Result<(), graph_nexus_core::GnxError>
+{
+    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let value = run_inner(args, engine)?;
+    emit(&value, format)
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        fn _accepts(
+            _f: fn(ShapeCheckArgs, &crate::engine::Engine)
+                -> Result<serde_json::Value, graph_nexus_core::GnxError>
+        ) {}
+        _accepts(run_inner);
     }
 }
