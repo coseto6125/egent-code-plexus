@@ -180,13 +180,15 @@ All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--gra
 
 ## Language Matrix
 
-For the 14 languages graph-nexus shares with upstream, here's the per-cell delta from an evidence-based audit. Each cell compares upstream GitNexus's claimed support against our actual implementation in `crates/graph-nexus-analyzer/src/<lang>/`.
+One row per language across all 31 supported. The first 14 share dimensions with upstream GitNexus and the cells encode a per-cell delta vs upstream's claim. The remaining 17 (below the divider) have no upstream baseline — for those rows, a ✓ marks what we ship; `—` means we don't extract that dimension and upstream comparison doesn't apply.
 
-**Legend**:
+**Legend** (rows above the divider):
 - ✓ &nbsp;both upstream and graph-nexus support this
-- ✅ &nbsp;**upstream doesn't claim it, graph-nexus does** (where we go beyond upstream)
-- ⚠️ &nbsp;**upstream claims it, graph-nexus is missing or partial** (where we lag)
+- ✅ &nbsp;**upstream doesn't claim it, graph-nexus does** (we go beyond upstream)
+- ⚠️ &nbsp;**upstream claims it, graph-nexus is missing or partial** (we lag)
 - — &nbsp;neither claims it
+
+Rows below the divider use only ✓ / `—` (and rare ⚠️ for partial). The 17 extras are structural-only by design — Classes/Heritage are recorded where the language has the concept; Types / Ctor / Frameworks / Entry are uniformly `—` because they require semantic models the source format doesn't carry.
 
 | Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -204,8 +206,29 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 | C | ✅ | — | ✓ | ✅ | ✓ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
 | C++ | ✅ | ✅ | ✓ | ✓ | ✓ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
 | Dart | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
+| ─── *no upstream baseline below* ─── | | | | | | | | | | |
+| Bash | ✓ | — | — | — | — | — | — | — | — | ✓ |
+| Lua | ✓ | — | — | ✓ | — | — | — | — | — | ✓ |
+| Solidity | ✓ | — | ✓ | ✓ | — | — | — | — | — | ✓ |
+| Crystal | ✓ | — | — | ✓ | — | — | — | — | — | ✓ |
+| Nim | ✓ | — | — | ✓ | — | — | — | — | — | ✓ |
+| Cairo | ✓ | — | — | — | — | — | — | — | — | ✓ |
+| Move | ✓ | — | — | — | — | — | — | — | — | ✓ |
+| Zig | ✓ | — | — | — | — | — | — | — | — | ✓ |
+| HCL | ✓ | — | — | — | — | — | ✓ | — | — | ✓ |
+| SQL | — | — | — | ⚠️ | — | — | — | — | — | ✓ |
+| Verilog | ✓ | — | — | — | — | — | — | — | — | ✓ |
+| Vyper | ✓ | — | — | — | — | — | — | — | — | ✓ |
+| Markdown | — | — | — | — | — | — | — | — | — | — |
+| GitHub Actions | ⚠️ | — | — | — | — | — | ✓ | — | — | — |
+| Docker Compose | — | — | — | — | — | — | ✓ | — | — | — |
+| Dockerfile | ✓ | — | — | — | — | — | ✓ | — | — | — |
+| YAML | — | — | — | — | — | — | ✓ | — | — | — |
 
-**Where graph-nexus goes beyond upstream** (15 ✅ cells): C/C++ get Imports & Heritage that upstream doesn't claim; Java/Kotlin/Rust/Ruby/Dart get Config parsing for toolchains upstream doesn't cover; PHP gets Heritage; Go/C++/Dart get Named Bindings; Swift/C/C++ get basic Imports.
+**Per-cell notes for the extra rows** (where the cell shape needs context):
+Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Solidity Heritage = `is X, Y, Z`; SQL Heritage ⚠️ = foreign-key references only; GitHub Actions Imports ⚠️ = `uses:` (workflow → action) edges; Dockerfile Imports = `FROM <base>`.
+
+**Where graph-nexus goes beyond upstream** (15 ✅ cells in the top section): C/C++ get Imports & Heritage that upstream doesn't claim; Java/Kotlin/Rust/Ruby/Dart get Config parsing for toolchains upstream doesn't cover; PHP gets Heritage; Go/C++/Dart get Named Bindings; Swift/C/C++ get basic Imports.
 
 **Wave 1 closed 28 cells** (Constructor Inference rolled out to all 14 languages mirroring Python's `4e4fb1b` receiver-type binding prototype; Java static-import named bindings; C# `csproj`/`global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators).
 
@@ -216,33 +239,7 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 
 **Remaining ⚠️ (8 cells)**: Frameworks for C# / Ruby / Swift / C / C++ / Dart — **upstream gitnexus has no plugin for any of these**, so the parity baseline is `—` rather than `⚠️`; what we add here is net-new beyond upstream. Types for Swift / Dart deferred — grammar shape varies enough that the SA dispatch in this wave didn't converge; queued for a focused follow-up.
 
-**Matrix-opt batch (HEAD `86e65a7`)** deepened existing ✓ cells: Go gained per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + `include`/`extend` mixin tracking, TS/JS re-export alias preservation. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
-
-### Extra languages (no upstream baseline)
-
-Beyond the 14 main languages, the Rust providers also cover **17 additional languages**. Most are config / DSL / hardware — only structural extraction applies. Below is what each one actually carries today (✓ has dedicated capture, — not applicable, ⚠️ partial / heuristic):
-
-| Language | Imports | Functions | Classes | Heritage | Calls | Routes | Config | Frameworks |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Bash | ✓ (`source`/`.`) | ✓ | — | — | ✓ | — | — | — |
-| Lua | ✓ (`require` + alias) | ✓ | ⚠️ (metatable heuristic) | ✓ (metatable `__index`) | ✓ | — | — | — |
-| Solidity | ✓ | ✓ (incl. modifiers) | ✓ (contracts) | ✓ | ✓ | — | — | — |
-| Crystal | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | — |
-| Nim | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | — |
-| Cairo | ✓ | ✓ | ✓ | — | ✓ | — | — | — |
-| Move | ✓ | ✓ | ✓ (structs) | — | ✓ | — | — | — |
-| Zig | ✓ | ✓ | ✓ (structs/unions) | — | ✓ | — | — | — |
-| HCL | ✓ | ✓ (blocks) | — | — | ✓ | — | — | — |
-| SQL | — | ✓ (procs/funcs) | ✓ (tables/views) | ⚠️ (FK refs) | ✓ | — | — | — |
-| Verilog | ✓ | ✓ (modules) | — | — | ✓ | — | — | — |
-| Vyper | ✓ | ✓ | ✓ (contracts) | — | ✓ | — | — | — |
-| Markdown | — | — | — | — | — | — | — | — |
-| GitHub Actions (`.yaml`) | ⚠️ (`uses:`) | ✓ (jobs/steps) | — | — | — | — | ✓ | — |
-| Docker Compose | — | ✓ (services) | — | — | — | — | ✓ | — |
-| Dockerfile | ✓ (`FROM` base) | — | — | — | — | — | ✓ | — |
-| YAML (generic) | — | — | — | — | — | — | ✓ | — |
-
-The matrix-opt batch added concrete dimensions to three of the extras: Bash `source`/`.` imports, Lua `local M = require()` aliases + metatable inheritance + table-assigned methods, Solidity state-variable visibility.
+**Matrix-opt batch (HEAD `86e65a7`)** deepened existing ✓ cells: Go gained per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + `include`/`extend` mixin tracking, TS/JS re-export alias preservation; in the extras section, Bash gained `source`/`.` imports, Lua `local M = require()` aliases + metatable inheritance + table-assigned methods, and Solidity state-variable visibility. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
 ### Call detection design
 
