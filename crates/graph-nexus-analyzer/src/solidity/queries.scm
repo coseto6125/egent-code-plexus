@@ -42,7 +42,8 @@
 ;; State variable declarations
 (contract_body
   (state_variable_declaration
-    name: (identifier) @const.name) @const)
+    (visibility)? @state_var.visibility
+    name: (identifier) @state_var.name) @state_var)
 
 ;; Import directives: import "./IToken.sol"
 (import_directive
