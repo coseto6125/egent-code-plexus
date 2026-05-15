@@ -84,9 +84,9 @@ LLM-friendly 句型：
 
 ## 4. CLI 整合
 
-### 4.1 `gnx analyze` summary
+### 4.1 `gnx admin index` summary
 
-跑完 analyze 印出 footer：
+跑完 index 印出 footer：
 
 ```
 Graph analysis complete.
@@ -99,7 +99,7 @@ Blind spots detected: 7 across 3 files
   ...
 ```
 
-### 4.2 `gnx context --name X`
+### 4.2 `gnx inspect X`
 
 對 X 所在 file 的 blind_spots 加 `blind_spots[]` section in output：
 
@@ -111,11 +111,11 @@ blind_spots[2]{kind,line,hint}:
   python-dynamic-import,18,"importlib.import_module(...) — dynamic module loading"
 ```
 
-### 4.3 `gnx detect-changes`
+### 4.3 `gnx impact --since HEAD~1`
 
 加 `coverage.blind_spots_in_changed_files: N` 欄位，hint LLM「這些改動影響了 N 個 blind spot 站點，建議手動確認」。
 
-**Phase 5 範圍只做 4.1（analyze summary） + 4.2（context）。** 4.3 留下一輪。
+**Phase 5 範圍只做 4.1（index summary） + 4.2（inspect）。** 4.3 留下一輪。
 
 ---
 

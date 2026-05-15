@@ -76,7 +76,7 @@ graph TB
 - `https://github.com/coseto6125/graph-nexus.git` → `gitnexus-rs`
 - 無 remote → `<repo>=<working-tree basename>`
 - 多 remote → 用 `origin`，否則第一個 alphabetic
-- `user`/`org` 資訊保留在 registry 的 `remote_url` 欄位，`gnx list-repos` 顯示時即時解析 — 不放進 path
+- `user`/`org` 資訊保留在 registry 的 `remote_url` 欄位，`gnx coverage` 顯示時即時解析 — 不放進 path
 
 **撞名處理**：當新 `<repo>` 與 registry 已有 entry 同名但 `worktree_path` 不同：
 - 後者 dir 名改為 `<repo>-<8char-hash-of-canonical-worktree-path>`
@@ -114,7 +114,7 @@ fn sanitize_segment(s: &str) -> Result<String> {
 - **Endianness**：明確指定 `rkyv::rend::LittleEndian` 包裝 — 不依賴 native。Apple Silicon / x86_64 / ARM64 都是 LE，但格式上不能假設
 - **Alignment**：所有 archive struct 用 `#[archive(check_bytes)]` 並 `#[repr(C)]`；graph.bin 開頭預留 16 byte header（magic + version + reserved padding）保證後續資料 8-byte 對齊
 - **Magic byte**：`GNX-RS\0\0`（cosmetic + version sentinel）
-- **Version field**：u32 schema version — 不相容自動拒絕載入並提示 `gnx analyze --force`
+- **Version field**：u32 schema version — 不相容自動拒絕載入並提示 `gnx admin index --force`
 
 ```
 graph.bin layout:
@@ -137,7 +137,7 @@ graph.bin layout:
 - 對「`graph.bin ≤ 0.3× source bytes`」壓縮目標必要
 
 **反向索引保留**（`in_offsets` / `in_edge_idx`）：
-- `gnx context --name X` (who calls X) 是 LLM review 的 hot path — 一個 session 50-100 次
+- `gnx inspect X` (who calls X) 是 LLM review 的 hot path — 一個 session 50-100 次
 - on-demand 全 edges 掃描在 1M 邊規模每次 5-10ms，hot path 不可接受
 - 2× edge 空間在 50-100 MB 級 graph 可接受（disk 不是瓶頸）
 - Base+Delta 下：base 反向索引在 build 時固化，delta 反向在 patch 時就地小量建構，merge 對稱
@@ -163,7 +163,7 @@ struct ZeroCopyGraph {
 }
 ```
 
-- `file_node_offsets`：`gnx context --file_path src/auth.ts` → O(log N) file 找 idx + O(K) 取 K 個節點，避免遍歷全圖
+- `file_node_offsets`：`gnx inspect src/auth.ts` → O(log N) file 找 idx + O(K) 取 K 個節點，避免遍歷全圖
 - `kind_offsets` + `kind_data`：`gnx find --kind Method` → O(K) 直接拿 K 個 Method 節點
 - 增量成本：build 時 O(N) 排序，存儲開銷 ~8 byte/node（兩 u32 offset）
 
@@ -208,8 +208,8 @@ struct DeltaGraph {
 #### Patch 流程（每檔 ms 級）
 
 ```
-gnx detect-changes → 列出變更檔
-gnx analyze --patch <file>:
+gnx impact --since HEAD~1 → 列出變更檔
+gnx admin index（增量模式） <file>:
     1. base.file_node_offsets 找 file 在 base 對應 nodes → 寫 tombstone
     2. 若 delta 也有該 file 的 added_nodes → 從 delta 移除
     3. tree-sitter 重 parse 該檔 → 新 nodes/edges
@@ -225,8 +225,8 @@ gnx analyze --patch <file>:
 - `delta.bin` 體積 > base.bin × 30%
 - delta 累積變更檔 > 50（軟，建議）
 - delta 累積變更檔 > 500（硬，**強制** — 防 C10 OOM）
-- 單次 `analyze --patch` 接收 > 100 file → 拒絕該 batch，建議改全量 analyze
-- 使用者下 `gnx sync` / `gnx analyze`（手動）
+- 單次 `admin index` 增量模式接收 > 100 file → 拒絕該 batch，建議改全量 `admin index`
+- 使用者下 `gnx admin index`（手動）
 - 開 git commit hook 後（自動）
 
 執行：
@@ -310,9 +310,9 @@ impl GraphHandle {
 
 | Command | Peak RSS | Wall time |
 |---|---:|---:|
-| `gnx context --name main` | **28 MB** | < 10 ms |
-| `gnx query --query main`  | **29 MB** | < 10 ms |
-| `gnx impact --target main`| **12 MB** | < 10 ms |
+| `gnx inspect main` | **28 MB** | < 10 ms |
+| `gnx search --query main`  | **29 MB** | < 10 ms |
+| `gnx impact main`| **12 MB** | < 10 ms |
 
 → **驗證 §1.8 設計**：query path RSS 穩定在 ~30 MB working set，graph.bin 18 MB / 100 MB / 1 GB 都不會線性放大 RSS。
 
@@ -501,16 +501,16 @@ fn uid_path(absolute: &Path, repo_root: &Path) -> String {
 - parse 失敗自動嘗試 `.bak`，仍失敗則 rebuild from disk（walk `~/.gnx/*/*/meta.json`）。每個 `meta.json` 含 `worktree_path` / `remote_url` / `schema_version`，足以還原完整 registry entry（含 cross-repo / group 資訊另從 audit log 重建）
 
 **Layer 2 — graph.bin per branch**（local，每個 `<branch>/` 獨立）：
-- 同一 `<repo>/<branch>/` 下 `gnx analyze` 並發會撞 graph.bin
-- `flock(<branch>/graph.bin.lock)` exclusive，整個 analyze pipeline 期間持鎖
-- 已有 lock 持有者 → 後者 print `error: another analyze is running for this branch` 並退出
+- 同一 `<repo>/<branch>/` 下 `gnx admin index` 並發會撞 graph.bin
+- `flock(<branch>/graph.bin.lock)` exclusive，整個 index pipeline 期間持鎖
+- 已有 lock 持有者 → 後者 print `error: another index operation is running for this branch` 並退出
 - 加 `--wait` flag 可改為 block 等待
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#4A90E2','primaryTextColor':'#fff','primaryBorderColor':'#2E5C8A','lineColor':'#888'}}}%%
 sequenceDiagram
-    participant A as gnx analyze (worker A)
-    participant B as gnx rename-branch (worker B)
+    participant A as gnx admin index (worker A)
+    participant B as gnx admin rename-branch (worker B)
     participant L as registry.json.lock
     participant R as registry.json
     participant K as registry.json.bak
@@ -587,9 +587,9 @@ crates/
 
 ## 4. Hook 設計
 
-### 4.1 安裝（`gnx init`）
+### 4.1 安裝（`gnx admin install-hook`）
 
-`gnx init` 步驟：
+`gnx admin install-hook` 步驟：
 1. 解析 `git rev-parse --git-common-dir`
 2. `which gnx` 解析絕對路徑 P
 3. 寫 hook：
@@ -614,8 +614,8 @@ Rust 主流程：
      - `sleep(300ms)`（讓 reflog 落地）
      - `git for-each-ref refs/heads/` 列現存 branches
      - 對每個 current branch 跑 `git reflog show <current> -1`，找 `Branch: renamed refs/heads/<deleted> to refs/heads/<current>`
-     - 命中 → 呼 `gnx rename-branch --from=<deleted> --to=<current> --repo=<repo>`
-     - 未命中 → 呼 `gnx prune --branch=<deleted> --repo=<repo>`
+     - 命中 → 呼 `gnx admin rename-branch --from=<deleted> --to=<current> --repo=<repo>`
+     - 未命中 → 呼 `gnx admin prune --branch=<deleted> --repo=<repo>`
    - parent 立刻 return（不擋 git）
 5. 所有子 process 都 redirect stdin/out/err 到 /dev/null
 
@@ -640,8 +640,8 @@ flowchart TD
     FK --> W[child: sleep 300ms<br/>wait reflog settle]
     W --> SC[scan reflog of each branch:<br/>'Branch: renamed refs/heads/X to Y']
     SC --> M{match found?}
-    M -->|yes| REN[gnx rename-branch<br/>--from=X --to=Y]
-    M -->|no| PRU[gnx prune --branch=X]
+    M -->|yes| REN[gnx admin rename-branch<br/>--from=X --to=Y]
+    M -->|no| PRU[gnx admin prune --branch=X]
     REN --> AUD[audit.log:<br/>hook.fired type=rename]
     PRU --> AUD2[audit.log:<br/>hook.fired type=prune]
 
@@ -700,7 +700,7 @@ fn spawn_detached(args: &[&str]) -> Result<()> {
 
 #### Windows 注意事項
 
-1. **`gnx init` 偵測 Git 環境**：必須有 Git for Windows（內含 `sh.exe`）；無 → warn `please install Git for Windows ≥ 2.30 for hook support`
+1. **`gnx admin install-hook` 偵測 Git 環境**：必須有 Git for Windows（內含 `sh.exe`）；無 → warn `please install Git for Windows ≥ 2.30 for hook support`
 2. **絕對路徑 normalization**：hook shim 寫入時把 Windows path `C:\Users\...` 轉成 forward-slash form `/c/Users/...`（Git Bash 慣例）讓 sh.exe 能 exec
 3. **`CreateProcessW` 後 child 完全脫離 parent**：parent return 0 不等待，git 不被擋
 4. **child 內部一樣 `sleep(300ms)` + `git for-each-ref` + `git reflog`** — std crate cross-platform，無 OS-specific code
@@ -767,7 +767,7 @@ flowchart LR
 ### 5.1 Pipeline
 
 **Stage 1 — 規劃（in-memory，graph 查詢）**
-- target symbol 透過 `gnx context` 同款邏輯解析 UID
+- target symbol 透過 `gnx inspect` 同款邏輯解析 UID
 - 查詢走 `MergedView`（§1.7）— 自動跳過 tombstone、含 delta 新邊
 - 收集所有 inbound edges：CALLS / METHOD_OVERRIDES / EXTENDS / IMPORTS / ACCESSES
 - 每條 edge 的 source side 得 `(file_path, byte_offset, line, column)` 候選
@@ -1025,7 +1025,7 @@ append_line(&audit_path, json_line);
 | Audit log rotation | unit: 寫滿 5MB 觸發 rotate；舊 .2 被刪 |
 | Tree-sitter budget | unit: pathological input 觸發 timeout/OOM cap，process 不 crash |
 | rkyv bytecheck | unit: 餵 truncated / random-flipped / oversized graph.bin / delta.bin，`rkyv::access` 必須回 Err 不 panic |
-| Per-branch graph.bin lock | integration: 並發跑兩個 `gnx analyze` 同 branch，後者乾淨退出（無 corruption） |
+| Per-branch graph.bin lock | integration: 並發跑兩個 `gnx admin index` 同 branch，後者乾淨退出（無 corruption） |
 | UID 跨平台 | unit: Windows `\` path 與 macOS NFD 檔名 normalize 後 UID 一致 |
 | Secondary indices | unit: file_node_offsets / kind_offsets round-trip + O(1) 命中正確性；find --orphans 跑 10k node graph < 50ms |
 | graph.bin 格式 | unit: magic / version / 8-byte alignment 驗證；非 LE 機器讀檔模擬（測試用 BE 寫入後讀） |
@@ -1036,13 +1036,13 @@ append_line(&audit_path, json_line);
 | **StringPool watermark** | unit: 餵 synth 100MB / 250MB / 600MB 字串量 → 應分別「續跑」/「warn 續跑」/「拒絕並退出」 |
 | **Delta batch cutoff** | integration: `analyze --patch` 一次喂 150 file → 拒絕；累積 600 file delta → 強制 compaction kick in |
 | **Traversal budget** | unit: 構造 graph 含 path A→B→A 循環 + bytecheck-clean → traversal 在 10M edge visit 後 abort 不 loop |
-| **setrlimit graceful** | integration (Linux): `GNX_RAM_LIMIT_MB=64 gnx analyze` 大目錄 → 應 graceful exit 而非 abort/segfault；audit 記 `oom.aborted` |
-| **mmap query 免疫** | integration: 1GB graph.bin + `GNX_RAM_LIMIT_MB=128` 跑 `gnx context` → 成功（mmap demand-load 不算 RSS）|
+| **setrlimit graceful** | integration (Linux): `GNX_RAM_LIMIT_MB=64 gnx admin index` 大目錄 → 應 graceful exit 而非 abort/segfault；audit 記 `oom.aborted` |
+| **mmap query 免疫** | integration: 1GB graph.bin + `GNX_RAM_LIMIT_MB=128` 跑 `gnx inspect` → 成功（mmap demand-load 不算 RSS）|
 | **Concurrent hook rename** | integration: 並發兩 `git branch -m` 觸發兩個 reference-transaction → registry 最終一致、無 corruption、第二個 hook 被 flock block 或 retry 後成功 |
-| **Registry double-corrupt rebuild** | integration: 刪除 registry.json + .bak → `gnx list-repos` 從 meta.json 重建 → 列表正確含 worktree_path / remote_url |
+| **Registry double-corrupt rebuild** | integration: 刪除 registry.json + .bak → `gnx coverage` 從 meta.json 重建 → 列表正確含 worktree_path / remote_url |
 | **Delta schema drift** | unit: base schema_version=2, delta base_schema_version=1 → `MergedView::open` 自動降級為 base-only + warn |
-| **Hook chaining** | integration: 預先放一個 dummy reference-transaction hook → `gnx init` → 新 shim 應該先 exec 舊 hook 再 exec gnx hook-handle |
-| **Windows hook spawn_detached** | integration on `windows-latest`: `gnx init` → `git branch -m a b` → 等 500ms → registry 已更新；驗 child process 用 `DETACHED_PROCESS` flag 啟動且 parent 立即 return |
+| **Hook chaining** | integration: 預先放一個 dummy reference-transaction hook → `gnx admin install-hook` → 新 shim 應該先 exec 舊 hook 再 exec gnx hook-handle |
+| **Windows hook spawn_detached** | integration on `windows-latest`: `gnx admin install-hook` → `git branch -m a b` → 等 500ms → registry 已更新；驗 child process 用 `DETACHED_PROCESS` flag 啟動且 parent 立即 return |
 | **Path normalization (Windows)** | unit: `C:\Users\enor\repo` → hook shim 內寫成 `/c/Users/enor/repo` 形式 sh.exe 可解 |
 | **Group sync offline member** | integration: group 含 worktree_path 不存在的 member → `gnx group_sync` partial success，failed member 寫 audit，其他成員仍完成 |
 

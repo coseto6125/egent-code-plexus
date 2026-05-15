@@ -128,11 +128,11 @@ Common skeleton:
 
 | Upstream MCP | gnx-rs CLI | Parity |
 |---|---|---|
-| `query` | `gnx query --query "..."` | ✅ same intent |
-| `context` | `gnx context --name X` | ✅ |
-| `impact` | `gnx impact --target X --direction upstream --depth N --high-trust-only` | ✅ + `high-trust-only` is **ours** |
-| `detect_changes` | `gnx detect_changes --scope --base-ref --kind --include-tests --high-trust-only` | ✅ + scope variants are **ours** |
-| `list_repos` | `gnx list` | ✅ |
+| `query` | `gnx search --query "..."` | ✅ same intent |
+| `context` | `gnx inspect X` | ✅ |
+| `impact` | `gnx impact X --direction upstream --depth N --high-trust-only` | ✅ + `high-trust-only` is **ours** |
+| `detect_changes` | `gnx impact --since HEAD~1 --kind --include-tests --high-trust-only` | ✅ + scope variants are **ours** |
+| `list_repos` | `gnx coverage` | ✅ |
 | `rename` | `gnx rename --symbol X --new-name Y --repo P --dry-run` | ✅ **Python only (MVP, merged 2026-05-15)** — multi-lang remaining; see `commands/rename.rs` |
 | `cypher` | `gnx cypher "<query>" --repo P --format json` | ✅ **minimal subset (merged)** — supports `MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='Val'] RETURN a,b` |
 
@@ -140,21 +140,21 @@ Common skeleton:
 
 | Upstream `gitnexus://...` resource | gnx-rs alternative |
 |---|---|
-| `/context` (stats, staleness) | `gnx summarize` (md/json) — overlapping intent, richer output |
-| `/clusters` | partly in `gnx summarize` (`--top-communities`) |
+| `/context` (stats, staleness) | `gnx coverage` (md/json) — overlapping intent, richer output |
+| `/clusters` | partly in `gnx coverage` (`--top-communities`) |
 | `/cluster/{name}` | **MISSING** |
-| `/processes` | partly in `gnx summarize` |
+| `/processes` | partly in `gnx coverage` |
 | `/process/{name}` | **MISSING** (no step-by-step trace exposure) |
-| `/schema` | embedded in `gnx doctor` (relations + node kinds) |
+| `/schema` | embedded in `gnx coverage` (relations + node kinds) |
 
 ### 4.3 gnx-rs extras (no upstream peer)
 
 | gnx-rs | Why it matters for LLM |
 |---|---|
-| `gnx doctor` | Surfaces the **whole contract**: which frameworks are detected with what confidence, which patterns are blind spots, where to look. The single biggest hallucination-reducer we have. |
-| `gnx summarize --format md` | LLM project overview — meant to be the FIRST thing dropped into the LLM's context window |
-| `gnx route_map` | Stand-alone HTTP route inventory (upstream has it implicit in cypher) |
-| `gnx verify_resolver` | Tooling, not LLM-facing |
+| `gnx coverage` | Surfaces the **whole contract**: which frameworks are detected with what confidence, which patterns are blind spots, where to look. The single biggest hallucination-reducer we have. |
+| `gnx coverage --detailed` | LLM project overview — meant to be the FIRST thing dropped into the LLM's context window |
+| `gnx routes` | Stand-alone HTTP route inventory (upstream has it implicit in cypher) |
+| Internal resolver validation | Tooling, not LLM-facing |
 | Blind spots, receiver types, path aliases, fan-out, framework gates | (1.5) Surfaced via `doctor`; visible in graph as edges with `reason` tags + decayed confidence |
 
 ### 4.4 Graph schema delta
@@ -178,17 +178,17 @@ Common skeleton:
 | Upstream skill | Refactor verdict | Key edits |
 |---|---|---|
 | `gitnexus-guide` | **Rewrite** | New skill index table pointing at our 6 refactored skills. Replace MCP tool list with `gnx <cmd>` table. Drop resource URIs (we don't have MCP server). Update schema block (our node kinds + relations). Add a "blind spots awareness" callout. |
-| `gitnexus-cli` | **Rewrite + expand** | `gnx analyze` (replace `npx gitnexus analyze`). Add `gnx doctor`, `gnx summarize`, `gnx init`, `gnx prune`, `gnx rename-branch`. Drop `wiki` (we don't have it). |
-| `gitnexus-exploring` | **Adapt** | Replace `gitnexus_*` calls with `gnx <cmd>`. Replace process-resource reads with `gnx summarize --format md` snippet or `gnx detect_changes`. Add a "Start with `gnx doctor`" preamble so LLM knows what's reliable. |
+| `gitnexus-cli` | **Rewrite + expand** | `gnx admin index` (replace `npx gitnexus analyze`). Add `gnx coverage`, `gnx coverage --detailed`, `gnx admin install-hook`, `gnx admin prune`, `gnx admin rename-branch`. Drop `wiki` (we don't have it). |
+| `gitnexus-exploring` | **Adapt** | Replace `gitnexus_*` calls with `gnx <cmd>`. Replace process-resource reads with `gnx coverage --detailed` snippet or `gnx impact --since HEAD~1`. Add a "Start with `gnx coverage`" preamble so LLM knows what's reliable. |
 | `gitnexus-impact-analysis` | **Adapt** | Replace tool calls. Add `--high-trust-only` recommendation. Add receiver-type / blind-spot awareness ("if target is in a blind spot, `impact` may show **incomplete** upstream callers — surface that risk"). |
-| `gitnexus-debugging` | **Adapt** | Replace tool calls. Add blind-spot section: "if the suspect symbol is reached only via eval/exec/dynamic-import, `gnx doctor` will list it under blind spots — `gnx impact` won't find those callers." |
+| `gitnexus-debugging` | **Adapt** | Replace tool calls. Add blind-spot section: "if the suspect symbol is reached only via eval/exec/dynamic-import, `gnx coverage` will list it under blind spots — `gnx impact` won't find those callers." |
 | `gitnexus-refactoring` | **Adapt (Python-only)** | `gnx rename` **landed 2026-05-15 (Python MVP)** — see `commands/rename.rs`. Skill can be written against this for Python projects; other languages need `identifier_finder` peers (per-lang follow-up). |
-| `gitnexus-pr-review` | **Adapt** | Replace tool calls. Add `gnx doctor` step before the review (so LLM knows framework coverage). Add receiver-type / blind-spot awareness in the risk model. Multi-step workflow stays — it's universal. |
+| `gitnexus-pr-review` | **Adapt** | Replace tool calls. Add `gnx coverage` step before the review (so LLM knows framework coverage). Add receiver-type / blind-spot awareness in the risk model. Multi-step workflow stays — it's universal. |
 
 ### 5.1 New skill we should add (no upstream peer)
 
 **`gnx-onboarding`** (or merge into `gitnexus-guide`):
-> When first encountering an unfamiliar repo: 1) `gnx doctor` to see the contract, 2) `gnx summarize --format md` to get the project map, 3) only then drop into `gnx query` / `gnx context`. Three steps, predictable token cost.
+> When first encountering an unfamiliar repo: 1) `gnx coverage` to see the contract, 2) `gnx coverage --detailed` to get the project map, 3) only then drop into `gnx search` / `gnx inspect`. Three steps, predictable token cost.
 
 ---
 
@@ -212,11 +212,11 @@ a richer wrapper command surface. As of 2026-05-15 the gap is narrower than orig
 |---|---|
 | `gnx cypher` | ✅ landed (minimal MATCH subset) |
 | `gnx rename` | ✅ Python MVP landed; multi-lang remaining |
-| `gnx api_impact --route /x` | ❌ no subcommand (could derive via `gnx context` on the handler) |
+| `gnx routes /path` | ✅ landed (HTTP route inventory) |
 | `gnx shape_check` | ❌ no subcommand |
-| `gnx tool_map` | ❌ no subcommand |
-| `gnx group_list` | ❌ no subcommand (we have `gnx list` for repos) |
-| `gnx analyze-here` | ❌ no subcommand (full `gnx analyze --repo .` covers it) |
+| `gnx coverage --detailed` | ✅ landed (tool inventory) |
+| `gnx coverage` | ✅ landed (repo coverage) |
+| (removed old commands) | ✅ all consolidated into admin/impact/search/inspect/routes/coverage |
 
 The refactored skills should document the four MISSING items as "consider implementing"
 or "use workaround X", and treat the two LANDED items as documented surface.

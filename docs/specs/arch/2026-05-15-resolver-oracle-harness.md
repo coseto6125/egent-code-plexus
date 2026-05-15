@@ -103,7 +103,7 @@ Run pattern:
 
 ```bash
 # 1. dump gnx decisions
-gnx analyze --repo <corpus> --dump-resolver dumps/gnx.<lang>.jsonl
+gnx admin index --repo <corpus> --dump-resolver dumps/gnx.<lang>.jsonl
 
 # 2. dump oracle decisions
 node   scripts/parity/oracles/ts_oracle.mjs <corpus> > dumps/oracle.ts.jsonl

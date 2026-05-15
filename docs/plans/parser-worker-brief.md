@@ -229,8 +229,8 @@ If `cargo build` fails, fix it before continuing. Do not commit a build-broken s
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `cargo build` fails with "no `LANGUAGE` in tree_sitter_X" | The crate uses old `language()` fn API, not the `LANGUAGE` constant | Use `tree_sitter_xxx::language()` and call `.into()` on the result, or pin to a newer version |
-| `cargo build` succeeds but `analyze` produces empty graph for your fixture | queries.scm capture names don't match `capture_index_for_name` strings | Check both sides — they must be byte-identical (no underscore vs dot mixups) |
-| `gnx context --name X` returns "not found" | The fixture file's extension isn't in `match ext` arm OR the provider isn't in the register block | Re-check `analyze.rs` two-site edit |
+| `cargo build` succeeds but `admin index` produces empty graph for your fixture | queries.scm capture names don't match `capture_index_for_name` strings | Check both sides — they must be byte-identical (no underscore vs dot mixups) |
+| `gnx inspect X` returns "not found" | The fixture file's extension isn't in `match ext` arm OR the provider isn't in the register block | Re-check `index.rs` two-site edit |
 | Parser panics during `tree-sitter::Parser::set_language` | tree-sitter version mismatch (your grammar crate was built against 0.20, repo uses 0.25) | Find a fork or version on crates.io built against tree-sitter 0.25 |
 | `cursor.matches` returns nothing despite valid syntax | Top-level `(_)` wildcards in queries.scm can match invisibly; capture-name unmatched in target grammar's node names | Run `tree-sitter parse <file>` against the grammar to see actual node names |
 

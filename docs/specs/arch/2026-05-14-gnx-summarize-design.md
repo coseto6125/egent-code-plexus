@@ -1,4 +1,4 @@
-# `gnx summarize` — LLM-friendly Project Overview
+# `gnx coverage --detailed` — LLM-friendly Project Overview
 
 **Status**: design
 **Date**: 2026-05-14
@@ -6,14 +6,14 @@
 
 ## Goal
 
-加一個 `gnx summarize` subcommand，從已建好的 `graph.bin` 產出**LLM-friendly markdown 摘要**，供 coding agent 直接 paste 進 prompt 以快速理解專案結構。**不**重新做傳統 HTML wiki ── 對 token efficiency 與 LLM 閱讀路徑最佳化。
+加一個 `gnx coverage --detailed` 選項，從已建好的 `graph.bin` 產出**LLM-friendly markdown 摘要**，供 coding agent 直接 paste 進 prompt 以快速理解專案結構。**不**重新做傳統 HTML wiki ── 對 token efficiency 與 LLM 閱讀路徑最佳化。
 
 ## Non-Goals
 
-- 不重 analyze；要求 `graph.bin` 已存在
+- 不重新 `admin index`；要求 `graph.bin` 已存在
 - 不產生靜態網頁 / HTML
 - 不做交互式探索（CLI 一次性輸出）
-- 不取代 `gnx context` / `gnx query`（那些是針對單一 symbol 的精準查詢，這個是「整體鳥瞰」）
+- 不取代 `gnx inspect` / `gnx search`（那些是針對單一 symbol 的精準查詢，這個是「整體鳥瞰」）
 
 ## Output Strategy: D = 分層 + 去 noise + 同名消歧
 
@@ -71,7 +71,7 @@ _… (truncated; 349 more files)_
 ### CLI 介面
 
 ```
-gnx summarize [OPTIONS]
+gnx coverage --detailed [OPTIONS]
 
 Options:
   --repo <NAME>              多 repo 場景必填；單 repo 自動偵測
@@ -121,7 +121,7 @@ stdout / file
 
 ### 錯誤處理
 
-- `graph.bin` 不存在 → 提示先跑 `gnx analyze`
+- `graph.bin` 不存在 → 提示先跑 `gnx admin index`
 - 多 repo 缺 `--repo` → 列出可選 repo
 - `--top-*` 為 0 → 解釋成「不輸出該 section」
 - 空 graph (0 nodes) → 輸出最小骨架 + 警告
@@ -137,7 +137,7 @@ stdout / file
 
 ### Integration 測試
 
-- 對 `tests/fixtures/summarize_sample/` 中一個小 graph.bin 跑 `gnx summarize`，snapshot 比對輸出
+- 對 `tests/fixtures/summarize_sample/` 中一個小 graph.bin 跑 `gnx coverage --detailed`，snapshot 比對輸出
 - 確認 `--top-files 0` 行為
 - 確認 multi-repo 缺 `--repo` 提示符合 Issue #1542 期待
 
@@ -154,7 +154,7 @@ graph.bin mmap + 一次線性掃 nodes + edges 即可，O(N+E)。對 POC repo（
 
 ## Acceptance Criteria
 
-1. `gnx summarize` 對 359 檔 / 2792 symbols 的 Python repo 輸出 < 4K tokens（D 變體已 POC 驗）
+1. `gnx coverage --detailed` 對 359 檔 / 2792 symbols 的 Python repo 輸出 < 4K tokens（D 變體已 POC 驗）
 2. 多 repo 缺 `--repo` 時 error 訊息正確列出 available repo
 3. CI 全綠：fmt / clippy `-D warnings` / nextest 含 summarize 單元/整合測試
 4. README 加 install / usage 短例

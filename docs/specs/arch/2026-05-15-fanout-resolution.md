@@ -143,7 +143,7 @@ builder 處理時 resolve candidates → 對每個 resolved target emit Edge wit
 
 ### 3.6 LLM-visible 輸出
 
-`gnx context --name dispatch` 應該回：
+`gnx inspect dispatch` 應該回：
 
 ```yaml
 outgoing:
@@ -208,7 +208,7 @@ LLM 看到 3 條 0.29 conf 的 `reflection-getattr-fanout` 邊 →
 **Real-world test：clone 一個有 dispatcher pattern 的 OSS Python 專案**
 - e.g. `django/django` 內有不少 `getattr(self, "_meta_X")` 模式
 - 或 `home-assistant/core` 內有大量 service handler dispatch
-- 跑 `gnx analyze` 後 `gnx context` 看 dispatch method 是否出現 fan-out edges
+- 跑 `gnx admin index` 後 `gnx inspect` 看 dispatch method 是否出現 fan-out edges
 - 用 `--high-trust-only` 確認嚴格模式排除這些
 
 ---

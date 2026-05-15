@@ -5,7 +5,7 @@ Captured 2026-05-15 via the oracle harness in
 
 ## Methodology
 
-Per language, diff the dump from `gnx analyze --dump-resolver` against an
+Per language, diff the dump from `gnx admin index --dump-resolver` against an
 authoritative oracle (TS Compiler API / `importlib.util.find_spec` /
 workspace-aware Rust module walker) over a real-world corpus:
 
@@ -130,17 +130,17 @@ positives). The harness has now demonstrated three things:
 cargo build -p graph-nexus --release
 
 # TS
-(cd .sample_repo/TypeScript && gnx analyze --repo . --dump-resolver dumps/gnx.ts.jsonl)
+(cd .sample_repo/TypeScript && gnx admin index --repo . --dump-resolver dumps/gnx.ts.jsonl)
 node scripts/parity/oracles/ts_oracle.mjs .sample_repo/TypeScript > dumps/oracle.ts.jsonl
 gnx verify-resolver --lang ts --oracle dumps/oracle.ts.jsonl --gnx dumps/gnx.ts.jsonl --report report.ts.md
 
 # Py
-(cd .sample_repo/Python && gnx analyze --repo . --dump-resolver dumps/gnx.py.jsonl)
+(cd .sample_repo/Python && gnx admin index --repo . --dump-resolver dumps/gnx.py.jsonl)
 python3 scripts/parity/oracles/py_oracle.py .sample_repo/Python > dumps/oracle.py.jsonl
 gnx verify-resolver --lang py --oracle dumps/oracle.py.jsonl --gnx dumps/gnx.py.jsonl --report report.py.md
 
 # Rs
-(cd .sample_repo/Rust && gnx analyze --repo . --dump-resolver dumps/gnx.rs.jsonl)
+(cd .sample_repo/Rust && gnx admin index --repo . --dump-resolver dumps/gnx.rs.jsonl)
 python3 scripts/parity/oracles/rs_oracle.py .sample_repo/Rust > dumps/oracle.rs.jsonl
 gnx verify-resolver --lang rs --oracle dumps/oracle.rs.jsonl --gnx dumps/gnx.rs.jsonl --report report.rs.md
 ```

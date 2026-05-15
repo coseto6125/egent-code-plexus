@@ -1,6 +1,6 @@
 # Tier 1 框架感知 — 真實專案驗證報告
 
-> **驗證方法：** 在 `.sample_repo/` clone 各語言代表性 OSS 專案，用 `gnx analyze` + `gnx impact` 做 A/B 對比（default vs `--high-trust-only`），確認 framework_refs 在真實程式碼上實際 fire、`--high-trust-only` filter 行為正確。
+> **驗證方法：** 在 `.sample_repo/` clone 各語言代表性 OSS 專案，用 `gnx admin index` + `gnx impact` 做 A/B 對比（default vs `--high-trust-only`），確認 framework_refs 在真實程式碼上實際 fire、`--high-trust-only` filter 行為正確。
 
 ---
 
@@ -15,7 +15,7 @@
 **A/B 對比：**
 
 ```bash
-gnx impact --target "Function:app/api/dependencies/database.py:_get_db_pool" --direction upstream
+gnx impact app/api/dependencies/database.py:_get_db_pool --direction upstream
 ```
 
 | Mode | 結果 |

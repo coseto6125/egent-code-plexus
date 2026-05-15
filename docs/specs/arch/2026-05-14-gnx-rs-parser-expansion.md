@@ -107,8 +107,8 @@ The shared `docs/plans/parser-worker-brief.md` (to be written in Phase 0) must i
     ```bash
     cargo build -p graph-nexus-analyzer
     cargo test -p graph-nexus-analyzer --test ast_test   # or per-lang fixture
-    gnx analyze --repo tests/parity/fixtures/<lang>/sample_project
-    gnx context --repo tests/parity/fixtures/<lang>/sample_project --name <known_symbol>
+    gnx admin index --repo tests/parity/fixtures/<lang>/sample_project
+    gnx inspect tests/parity/fixtures/<lang>/sample_project:<known_symbol>
     ```
 5.  **Failure mode catalogue**: wrong node name (`class_declaration` vs `class_definition`), capture index `None` returned (capture present in `.scm` but not in match — usually optional `?` issue), tree-sitter version mismatch (some grammars on `0.20` API), capture-name vs `capture_index_for_name` mismatch (the Swift bug above generalised).
 6.  **Hard constraint**: the worker MUST run `cargo build` and at least one query against a fixture, and report stdout, before declaring done. No "looks correct" claims.

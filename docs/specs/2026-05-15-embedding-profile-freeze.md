@@ -12,7 +12,7 @@
 
 ## 1. Motivation
 
-`gnx analyze --embeddings` currently hard-wires `BAAI/bge-m3` (1024-dim, ~540 MB INT8). Three problems:
+`gnx admin index --embeddings` currently hard-wires `BAAI/bge-m3` (1024-dim, ~540 MB INT8). Three problems:
 
 1. **Memory pressure on smaller hosts**: peak 3.1 GB resident on 22k-symbol corpora. WSL2 / 8 GB laptops sit dangerously close to OOM (mitigated by `3c1123a` batch chunking, but model size is still the floor).
 2. **No way to opt out / down-shift**: users on constrained hardware have no way to pick a smaller model or skip embeddings entirely without editing source.
@@ -26,8 +26,8 @@ The fix is to make the **embedding model + batch a first-class profile**, frozen
 
 ### Goals
 
-- G1. User can choose embedding model on first `analyze --embeddings` via the existing `gnx config` wizard. RAM is probed to suggest a sensible default.
-- G2. Choice is **frozen** into `meta.json` (schema v2). Subsequent `analyze` / query operations on the same graph use the frozen profile; ignoring `config.toml` if the two disagree (config edits don't silently invalidate a graph).
+- G1. User can choose embedding model on first `admin index --embeddings` via the existing `gnx admin config` wizard. RAM is probed to suggest a sensible default.
+- G2. Choice is **frozen** into `meta.json` (schema v2). Subsequent `admin index` / query operations on the same graph use the frozen profile; ignoring `config.toml` if the two disagree (config edits don't silently invalidate a graph).
 - G3. Cross-machine load: if the frozen model isn't available on the loading host, fail-loud with a clear remediation hint (re-analyze with `--drop-embeddings`).
 - G4. Multi-model loader: at minimum `bge-m3-int8` (current) + `off` (no embeddings). `multilingual-e5-small` (118 MB, 384 dim) optional but recommended for memory-constrained users.
 - G5. Non-TTY environments (CI, Docker build, pipes) bypass the wizard and use the RAM-tier auto-default deterministically.
@@ -277,11 +277,11 @@ Total ~650 LOC across 9 commits. Each commit independently reviewable and revert
 - Migration §3.2: v1 meta + non-empty embeddings → rewrites meta with `BgeM3Int8` profile
 
 ### Integration
-- `analyze --embeddings --embed-model off` → graph has zero-vector placeholders, query falls back to BM25
-- `analyze --embeddings` (TTY) → wizard shown, selection persisted to both config.toml and meta.json
-- `analyze --embeddings` (non-TTY, no config.toml) → uses RAM-tier auto-default, writes meta, exits with status info
+- `admin index --embeddings --embed-model off` → graph has zero-vector placeholders, query falls back to BM25
+- `admin index --embeddings` (TTY) → wizard shown, selection persisted to both config.toml and meta.json
+- `admin index --embeddings` (non-TTY, no config.toml) → uses RAM-tier auto-default, writes meta, exits with status info
 - Two-machine simulation: indexing on host with `BgeM3Int8`, loading on host where only `E5SmallMultilingual` is registered → fail-loud with hint
-- `gnx config` edit model after analyze → meta still wins; user gets a one-liner warning that the change applies only to next `--drop-embeddings` re-analyze
+- `gnx admin config` edit model after index → meta still wins; user gets a one-liner warning that the change applies only to next `--drop-embeddings` re-index
 
 ### Manual
 - Wizard UX on actual TTY: select picker keyboard nav, RAM recommendation visible, `^S` persists
