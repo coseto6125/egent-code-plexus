@@ -23,6 +23,7 @@
 //! only a single route (the default fetch count).
 
 pub mod consumer_keys;
+pub mod fetch_urls;
 pub mod response_shapes;
 
 /// Base reason tag every Fetches edge carries. Downstream parsers

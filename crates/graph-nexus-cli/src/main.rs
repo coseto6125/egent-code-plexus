@@ -97,6 +97,9 @@ enum Commands {
     /// Cross-repo concurrent symbol search across registered repos.
     #[command(alias = "multi_query")]
     MultiQuery(commands::multi_query::MultiQueryArgs),
+    /// Compare HTTP consumer accessed keys against Route response shape
+    #[command(alias = "shape_check")]
+    ShapeCheck(commands::shape_check::ShapeCheckArgs),
 }
 
 fn main() {
@@ -267,6 +270,7 @@ fn main() {
         Commands::Config(args) => args.repo.as_deref(),
         Commands::ApiImpact(args) => args.repo.as_deref(),
         Commands::ToolMap(args) => args.repo.as_deref(),
+        Commands::ShapeCheck(args) => args.repo.as_deref(),
         Commands::Analyze(_)
         | Commands::AnalyzeHere(_)
         | Commands::Init(_)
@@ -309,6 +313,7 @@ fn main() {
         Commands::Cluster(args) => commands::cluster::run(args, &engine),
         Commands::ApiImpact(args) => commands::api_impact::run(args, &engine),
         Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
+        Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
         Commands::Analyze(_)
         | Commands::AnalyzeHere(_)
         | Commands::Init(_)

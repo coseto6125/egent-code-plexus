@@ -1,9 +1,10 @@
+use crate::fetch_shape::{consumer_keys, fetch_urls, format_reason, response_shapes};
 use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
 use graph_nexus_core::graph::{
-    BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph,
+    BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
 };
 use graph_nexus_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
@@ -116,6 +117,13 @@ pub struct GraphBuilder {
     /// Module-specifier aliases (TS `tsconfig.json` `compilerOptions.paths`,
     /// etc.) — forwarded to the resolver before Pass 2 starts.
     path_aliases: PathAliases,
+    /// Repo root used to resolve `LocalGraph.file_path` (relative) to an
+    /// absolute path when the fetch-shape pass needs to re-read the file
+    /// content. Optional: when `None`, fetch-shape extraction is skipped
+    /// (graph still builds; `route_shapes` is empty and no `Fetches`
+    /// edges are emitted). Production callers (the `analyze` command)
+    /// always pass this; in-process tests opt in via tempdirs.
+    repo_root: Option<std::path::PathBuf>,
 }
 
 impl Default for GraphBuilder {
@@ -133,11 +141,20 @@ impl GraphBuilder {
             old_embeddings_cache: HashMap::new(),
             resolver_dump_path: None,
             path_aliases: PathAliases::new(),
+            repo_root: None,
         }
     }
 
     pub fn with_path_aliases(mut self, aliases: PathAliases) -> Self {
         self.path_aliases = aliases;
+        self
+    }
+
+    /// Provide the repo root so the fetch-shape pass can resolve each
+    /// `LocalGraph.file_path` (relative) to an absolute path for re-read.
+    /// Without this, `route_shapes` / `Fetches` edges are skipped.
+    pub fn with_repo_root(mut self, root: std::path::PathBuf) -> Self {
+        self.repo_root = Some(root);
         self
     }
 
@@ -247,6 +264,8 @@ impl GraphBuilder {
         // Pass 1.5: Extract Routes
         let mut route_edges = Vec::new();
         let mut current_handler_idx = 0;
+        // (route_node_idx, file_idx, route_path) — drives Pass 1.6 below.
+        let mut emitted_routes: Vec<(u32, u32, String)> = Vec::new();
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
             let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -295,6 +314,8 @@ impl GraphBuilder {
                             confidence: 1.0,
                             reason: string_pool.add("decorator"),
                         });
+
+                        emitted_routes.push((route_idx, file_idx, detected.path.clone()));
                     }
                 }
                 current_handler_idx += 1;
@@ -348,6 +369,179 @@ impl GraphBuilder {
                                 rel_type: RelType::HandlesRoute,
                                 confidence: 1.0,
                                 reason: string_pool.add("call-arg"),
+                            });
+                        }
+                    }
+
+                    emitted_routes.push((route_idx, file_idx, detected.path.clone()));
+                }
+            }
+        }
+
+        // Pass 1.6: Fetch-shape extraction.
+        //
+        // Two sub-passes — both gated on `repo_root` being available (it
+        // is the only way to resolve `LocalGraph.file_path` back to an
+        // absolute path so we can re-read the source). Test harnesses that
+        // don't set a repo root simply opt out of fetch-shape data.
+        //
+        // 1.6a — for each Route node, run `response_shapes::extract` on
+        //        its handler file and stash a `RouteShape` if it produced
+        //        any keys (sparse — empty payloads do not appear).
+        // 1.6b — build a path→route_idx map, then for every non-handler
+        //        file in `local_graphs` scan for `fetch(url) /
+        //        axios.get(url)` literals and emit `RelType::Fetches`
+        //        edges (file_node → route_idx) with the
+        //        `format_reason(keys, fetch_count)` reason payload.
+        //
+        // Assumption (MVP): exact path match — `fetch('/users')` only
+        // hits a route whose path is exactly `/users`. Dynamic-segment
+        // normalisation (upstream `normalizeFetchURL` + `routeMatches`)
+        // is intentionally NOT ported here; it can land later without
+        // touching the wire format.
+        let mut route_shapes_out: Vec<RouteShape> = Vec::new();
+        let mut fetches_edges: Vec<Edge> = Vec::new();
+
+        if let Some(repo_root) = self.repo_root.as_ref() {
+            // Per-file content cache — multiple routes may share a handler file
+            // (Express-style `router.get('/a')`/`router.get('/b')` in one file),
+            // and consumer files re-read once even if they fetch many URLs.
+            let mut content_cache: FxHashMap<u32, Option<String>> = FxHashMap::default();
+            let read_content = |file_idx: u32,
+                                cache: &mut FxHashMap<u32, Option<String>>,
+                                local_graphs: &[LocalGraph]|
+             -> Option<String> {
+                if let Some(slot) = cache.get(&file_idx) {
+                    return slot.clone();
+                }
+                let lg = &local_graphs[file_idx as usize];
+                let abs = repo_root.join(&lg.file_path);
+                let content = std::fs::read_to_string(&abs).ok();
+                cache.insert(file_idx, content.clone());
+                content
+            };
+
+            // 1.6a — RouteShape per Route.
+            for (route_idx, file_idx, _route_path) in &emitted_routes {
+                let lg = &self.local_graphs[*file_idx as usize];
+                let Some(lang) = lang_for_path(&lg.file_path.to_string_lossy()) else {
+                    continue;
+                };
+                let Some(content) = read_content(*file_idx, &mut content_cache, &self.local_graphs)
+                else {
+                    continue;
+                };
+                let shape = response_shapes::extract(&content, lang);
+                if shape.response_keys.is_empty() && shape.error_keys.is_empty() {
+                    continue;
+                }
+                let response_keys: Vec<StrRef> = shape
+                    .response_keys
+                    .iter()
+                    .map(|k| string_pool.add(k))
+                    .collect();
+                let error_keys: Vec<StrRef> = shape
+                    .error_keys
+                    .iter()
+                    .map(|k| string_pool.add(k))
+                    .collect();
+                route_shapes_out.push(RouteShape {
+                    node_idx: *route_idx,
+                    response_keys,
+                    error_keys,
+                });
+            }
+
+            // 1.6b — Fetches edges. Build path→Vec<route_idx> first
+            // (multiple routes can share a path under different methods —
+            // we link to all of them; downstream tooling already filters
+            // by method when needed).
+            let mut route_by_path: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+            for (route_idx, _file_idx, route_path) in &emitted_routes {
+                route_by_path
+                    .entry(route_path.clone())
+                    .or_default()
+                    .push(*route_idx);
+            }
+
+            // File-node index lookup: the source of a Fetches edge is the
+            // *file* (per upstream `generateId('File', filePath)`), but
+            // graph-nexus-rs doesn't currently create File nodes. Use the
+            // first node in the file as a reasonable proxy (typically a
+            // top-level function/class) so the edge has a real `source`.
+            // When a file has no nodes we skip it — there's nothing to
+            // attach the edge to.
+            let file_first_node: Vec<Option<u32>> = {
+                let mut v = Vec::with_capacity(self.local_graphs.len());
+                let mut acc: u32 = 0;
+                for lg in &self.local_graphs {
+                    if lg.nodes.is_empty() {
+                        v.push(None);
+                    } else {
+                        v.push(Some(acc));
+                    }
+                    acc += lg.nodes.len() as u32;
+                }
+                v
+            };
+
+            // Files that themselves emit a Route are handlers, not
+            // consumers — skip them on the consumer pass to avoid
+            // self-loops where a file `fetch()`es its own route.
+            let handler_files: rustc_hash::FxHashSet<u32> =
+                emitted_routes.iter().map(|(_, fi, _)| *fi).collect();
+
+            for (file_idx, lg) in self.local_graphs.iter().enumerate() {
+                let file_idx = file_idx as u32;
+                if handler_files.contains(&file_idx) {
+                    continue;
+                }
+                let Some(source_node) = file_first_node[file_idx as usize] else {
+                    continue;
+                };
+                let path_str = lg.file_path.to_string_lossy();
+                // URL extraction is JS/TS-only (upstream parity) — skip
+                // other extensions cheaply by not loading them.
+                if lang_for_path(&path_str)
+                    .map(|l| matches!(l, response_shapes::Lang::Php))
+                    .unwrap_or(true)
+                {
+                    // None or Php — neither yields a useful consumer scan.
+                    continue;
+                }
+                let Some(content) = read_content(file_idx, &mut content_cache, &self.local_graphs)
+                else {
+                    continue;
+                };
+                let urls = fetch_urls::extract(&content);
+                if urls.is_empty() {
+                    continue;
+                }
+                let keys = consumer_keys::extract(&content);
+
+                // fetch_count = how many distinct route paths this consumer
+                // matches (upstream definition). Compute by intersecting
+                // `urls` with `route_by_path` keys.
+                let matched_paths: Vec<&String> = urls
+                    .iter()
+                    .filter(|u| route_by_path.contains_key(*u))
+                    .collect();
+                if matched_paths.is_empty() {
+                    continue;
+                }
+                let fetch_count = matched_paths.len() as u32;
+                let reason_str = format_reason(&keys, fetch_count);
+                let reason_ref = string_pool.add(&reason_str);
+
+                for url in &matched_paths {
+                    if let Some(targets) = route_by_path.get(*url) {
+                        for &route_idx in targets {
+                            fetches_edges.push(Edge {
+                                source: source_node,
+                                target: route_idx,
+                                rel_type: RelType::Fetches,
+                                confidence: 0.9,
+                                reason: reason_ref,
                             });
                         }
                     }
@@ -573,6 +767,7 @@ impl GraphBuilder {
 
         edges.extend(route_edges);
         edges.extend(entry_edges);
+        edges.extend(fetches_edges);
 
         // Pass: blind spots — pure metadata passthrough, no edges created.
         // Each local_graph's blind_spots are interned and stored in the graph's
@@ -820,8 +1015,23 @@ impl GraphBuilder {
             traces_data,
             files,
             blind_spots: all_blind_spots,
-            route_shapes: Vec::new(),
+            route_shapes: route_shapes_out,
         }
+    }
+}
+
+/// Map a file path's extension to the language hint accepted by
+/// `response_shapes::extract` / `consumer_keys::extract`. Returns `None`
+/// for extensions outside the supported set so callers can skip the
+/// fetch-shape pass for those files cheaply.
+fn lang_for_path(path: &str) -> Option<response_shapes::Lang> {
+    let dot = path.rfind('.')?;
+    let ext = &path[dot + 1..];
+    match ext {
+        "ts" | "tsx" => Some(response_shapes::Lang::TypeScript),
+        "js" | "jsx" | "mjs" | "cjs" => Some(response_shapes::Lang::JavaScript),
+        "php" => Some(response_shapes::Lang::Php),
+        _ => None,
     }
 }
 
@@ -1676,5 +1886,202 @@ mod tests {
             dump_path.exists(),
             "serial branch must have produced a resolver dump file",
         );
+    }
+
+    // ─── Pass 1.6: fetch-shape extraction ──────────────────────────────────
+
+    /// Helper: materialise a file under `repo` and return a `LocalGraph` whose
+    /// `file_path` is the relative form (matches the production
+    /// `analyze.rs` flow). The graph carries an imperative-style
+    /// `RawRoute` so Pass 1.5 emits a Route node we can attach a shape to.
+    fn route_local_graph(
+        rel_path: &str,
+        method: &str,
+        route_path: &str,
+        handler: &str,
+    ) -> LocalGraph {
+        LocalGraph {
+            file_path: rel_path.into(),
+            content_hash: [0; 32],
+            nodes: vec![RawNode {
+                name: handler.into(),
+                kind: NodeKind::Function,
+                span: (0, 0, 0, 0),
+                is_exported: false,
+                heritage: vec![],
+                type_annotation: None,
+                decorators: vec![],
+                calls: vec![],
+            }],
+            documents: vec![],
+            imports: vec![],
+            routes: vec![graph_nexus_core::analyzer::types::RawRoute {
+                method: method.into(),
+                path: route_path.into(),
+                handler: Some(handler.into()),
+                span: (0, 0, 0, 0),
+            }],
+            framework_refs: vec![],
+            fanout_refs: vec![],
+            blind_spots: vec![],
+        }
+    }
+
+    fn consumer_local_graph(rel_path: &str) -> LocalGraph {
+        LocalGraph {
+            file_path: rel_path.into(),
+            content_hash: [0; 32],
+            nodes: vec![RawNode {
+                name: "loadUsers".into(),
+                kind: NodeKind::Function,
+                span: (0, 0, 0, 0),
+                is_exported: false,
+                heritage: vec![],
+                type_annotation: None,
+                decorators: vec![],
+                calls: vec![],
+            }],
+            documents: vec![],
+            imports: vec![],
+            routes: vec![],
+            framework_refs: vec![],
+            fanout_refs: vec![],
+            blind_spots: vec![],
+        }
+    }
+
+    /// Resolve a `StrRef` against the graph's archived string pool to a
+    /// `String` so test assertions don't need to juggle byte offsets.
+    fn s(graph: &ZeroCopyGraph, sref: StrRef) -> String {
+        let start = sref.offset as usize;
+        let end = start + sref.len as usize;
+        std::str::from_utf8(&graph.string_pool[start..end])
+            .expect("utf-8 in pool")
+            .to_string()
+    }
+
+    /// TS route emitting `res.json({ id, name })` → RouteShape with
+    /// response_keys `["id", "name"]` (sorted). Locks in that Pass 1.6a
+    /// reads the source via `repo_root` and runs `response_shapes::extract`.
+    #[test]
+    fn ts_route_handler_emits_route_shape_response_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let route_file = "api/users.ts";
+        std::fs::create_dir_all(tmp.path().join("api")).unwrap();
+        std::fs::write(
+            tmp.path().join(route_file),
+            "function getUsers(req, res) { res.json({ id, name }); }",
+        )
+        .unwrap();
+
+        let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+        builder.add_graph(route_local_graph(route_file, "get", "/users", "getUsers"));
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.route_shapes.len(),
+            1,
+            "expected exactly one RouteShape; got {}",
+            graph.route_shapes.len()
+        );
+        let shape = &graph.route_shapes[0];
+        // The Route node must be the one this shape points at.
+        let route_node = &graph.nodes[shape.node_idx as usize];
+        assert_eq!(route_node.kind, NodeKind::Route);
+
+        let response_keys: Vec<String> =
+            shape.response_keys.iter().map(|r| s(&graph, *r)).collect();
+        assert_eq!(response_keys, vec!["id".to_string(), "name".to_string()]);
+        assert!(
+            shape.error_keys.is_empty(),
+            "no error keys on 2xx handler; got {:?}",
+            shape
+                .error_keys
+                .iter()
+                .map(|r| s(&graph, *r))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Consumer file with `fetch('/users')` + `data.id` access → a
+    /// `RelType::Fetches` edge whose reason is `fetch-url-match|keys:id`.
+    /// Covers the full 1.6b flow: URL extraction, route-table match,
+    /// consumer-key extraction, reason formatting.
+    #[test]
+    fn ts_consumer_emits_fetches_edge_with_keyed_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("api.ts"),
+            "function getUsers(req, res) { res.json({ id, name }); }",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("client.ts"),
+            "async function loadUsers() { const { id } = await fetch('/users').json(); }",
+        )
+        .unwrap();
+
+        let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+        builder.add_graph(route_local_graph("api.ts", "get", "/users", "getUsers"));
+        builder.add_graph(consumer_local_graph("client.ts"));
+        let graph = builder.build();
+
+        let fetches: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.rel_type == RelType::Fetches)
+            .collect();
+        assert_eq!(
+            fetches.len(),
+            1,
+            "expected exactly one Fetches edge; got {} (edges: {:?})",
+            fetches.len(),
+            graph
+                .edges
+                .iter()
+                .map(|e| (e.source, e.target, format!("{:?}", e.rel_type)))
+                .collect::<Vec<_>>()
+        );
+        let edge = fetches[0];
+        assert!(
+            (edge.confidence - 0.9).abs() < 1e-6,
+            "Fetches confidence must be 0.9 for exact-path matches; got {}",
+            edge.confidence
+        );
+        // Target must be the Route node.
+        assert_eq!(graph.nodes[edge.target as usize].kind, NodeKind::Route);
+
+        let reason = s(&graph, edge.reason);
+        assert_eq!(reason, "fetch-url-match|keys:id");
+    }
+
+    /// PHP route emitting `json_encode(['id' => $x])` → RouteShape
+    /// with response_keys `["id"]`. Covers the Lang::Php branch of
+    /// `response_shapes::extract` end-to-end through the builder.
+    #[test]
+    fn php_route_handler_emits_route_shape_response_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let route_file = "api/show.php";
+        std::fs::create_dir_all(tmp.path().join("api")).unwrap();
+        std::fs::write(
+            tmp.path().join(route_file),
+            "<?php $x = 1; echo json_encode(['id' => $x]); ?>",
+        )
+        .unwrap();
+
+        let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+        builder.add_graph(route_local_graph(route_file, "get", "/show", "showHandler"));
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.route_shapes.len(),
+            1,
+            "expected exactly one RouteShape; got {}",
+            graph.route_shapes.len()
+        );
+        let shape = &graph.route_shapes[0];
+        let response_keys: Vec<String> =
+            shape.response_keys.iter().map(|r| s(&graph, *r)).collect();
+        assert_eq!(response_keys, vec!["id".to_string()]);
     }
 }
