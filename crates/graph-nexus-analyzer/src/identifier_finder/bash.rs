@@ -31,6 +31,6 @@ mod tests {
     fn finds_variable_reference() {
         let src = b"BAR=1\necho $BAR\n";
         let hits = find_identifier_occurrences(src, "BAR");
-        assert!(hits.len() >= 1, "expected at least 1, got {:?}", hits);
+        assert!(!hits.is_empty(), "expected at least 1, got {:?}", hits);
     }
 }
