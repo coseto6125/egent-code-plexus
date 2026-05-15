@@ -131,6 +131,15 @@ crates/
 
 解析器 (Analyzer) 透過 MPSC 通道將 AST 節點傳遞給單一的 Builder 執行緒。Builder 負責組裝圖譜、推導 API 路由與文件分類，最後將其序列化為零拷貝的 `.gitnexus-rs/graph.bin`。讀取端（如 `context` 或 `query`）透過 mmap 直接映射硬碟檔案，達成零延遲查詢。
 
+## ⚙️ 調校
+
+| 環境變數 | 預設值 | 作用 |
+|---|---|---|
+| `GNX_MAX_FILE_BYTES` | `16777216` (16 MiB) | 解析時跳過超過此大小的原始碼檔案，將 worker 最壞情況 RAM 控制在 `num_threads × MAX`。索引含產生器/編譯輸出時可調高；記憶體受限機器可調低。 |
+| `GNX_EMBED_BATCH` | `32` | fastembed 推論 batch 大小。調低可降低 embedding 階段尖峰駐留（BGE-M3 INT8 下 16 ≈ 200 MiB、32 ≈ 300 MiB）。 |
+| `GNX_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 掃描遞迴深度。深層 .NET monorepo 可調高。 |
+| `GNX_MODEL_CACHE` | `$HF_HUB_CACHE` ⤳ `$HF_HOME/hub` ⤳ `~/.cache/huggingface/hub` | 覆寫 BGE-M3 模型快取目錄。 |
+
 ## 📄 授權條款
 
 基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。明確允許個人使用、學術研究、業餘專案與非營利組織。
