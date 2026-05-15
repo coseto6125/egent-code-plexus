@@ -97,10 +97,20 @@ impl LanguageProvider for BashProvider {
                 if let Ok(src_str) =
                     std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
                 {
+                    // `raw_string` capture includes the surrounding single quotes; strip them.
+                    // `word` and `string_content` are already unquoted.
+                    let cleaned = if i_src.kind() == "raw_string" {
+                        src_str
+                            .strip_prefix('\'')
+                            .and_then(|s| s.strip_suffix('\''))
+                            .unwrap_or(src_str)
+                    } else {
+                        src_str
+                    };
                     imports.push(RawImport {
                         alias: None,
                         imported_name: "*".to_string(),
-                        source: src_str.to_string(),
+                        source: cleaned.to_string(),
                     });
                 }
             }
