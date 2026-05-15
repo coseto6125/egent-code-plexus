@@ -18,10 +18,14 @@ use graph_nexus_analyzer::identifier_finder::find_identifier_occurrences;
 use graph_nexus_core::analyzer::types::IdentifierRange;
 use graph_nexus_core::registry::atomic_write_bytes;
 use graph_nexus_core::GnxError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-#[derive(Args, Debug, Clone)]
+/// AST-powered multi-language rename: locates all identifier occurrences
+/// via tree-sitter and rewrites them atomically, with optional dry-run preview.
+#[derive(Args, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RenameArgs {
     /// The symbol name to rename (e.g. `old_name`).
     #[arg(long, alias = "symbol_name")]
@@ -41,7 +45,7 @@ pub struct RenameArgs {
     pub dry_run: bool,
 }
 
-pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run_inner(args: RenameArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let repo_root = args
         .repo
@@ -101,14 +105,35 @@ pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
             let bytes = std::fs::read(path).map_err(GnxError::Io)?;
             print_diff(&bytes, ranges, &args.symbol, &args.new_name, path);
         }
-        return Ok(());
+        return Ok(serde_json::Value::Null);
     }
 
     // Stage 3b: execute — atomic per-file replace by descending offset.
     for (path, ranges) in hits {
         apply_rename(&path, &ranges, args.new_name.as_bytes()).map_err(GnxError::Io)?;
     }
-    Ok(())
+    Ok(serde_json::Value::Null)
+}
+
+pub fn run(args: RenameArgs, engine: &crate::engine::Engine)
+    -> Result<(), graph_nexus_core::GnxError>
+{
+    let format = crate::output::OutputFormat::Toon;
+    let value = run_inner(args, engine)?;
+    crate::output::emit(&value, format)
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+    #[test]
+    fn run_inner_returns_structured_value_not_unit() {
+        fn _accepts(
+            _f: fn(RenameArgs, &crate::engine::Engine)
+                -> Result<serde_json::Value, graph_nexus_core::GnxError>
+        ) {}
+        _accepts(run_inner);
+    }
 }
 
 fn apply_rename(path: &Path, ranges: &[IdentifierRange], new_bytes: &[u8]) -> std::io::Result<()> {
