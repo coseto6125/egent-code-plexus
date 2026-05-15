@@ -53,6 +53,7 @@ crossterm = "0.29"
 toml = "0.9"
 rustc-hash = "2"
 sha2 = "0.10.8"
+dialoguer = "0.11"
 
 [dev-dependencies]
 serde_json = "1.0"
