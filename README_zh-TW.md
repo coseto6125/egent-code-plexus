@@ -1,6 +1,6 @@
 # Graph Nexus for LLM
 
-給 **LLM 與 AI 程式碼代理（AI code agents）** 用的代碼智能圖譜 — **不是給人類 IDE 整合用的**。十幾種語言、毫秒級建圖，然後可以問它「誰呼叫了這個」、「我改這個函式的爆炸半徑多大」、「跟 auth flow 相關的有哪些」這類結構性問題。
+給 **LLM 與 AI 程式碼代理（AI code agents）** 用的代碼智能圖譜 — **不是給人類 IDE 整合用的**。31 種語言、毫秒級建圖，然後可以問它「誰呼叫了這個」、「我改這個函式的爆炸半徑多大」、「跟 auth flow 相關的有哪些」這類結構性問題。
 
 致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)）— 同樣的核心想法（repo 的結構化知識圖譜），用 Rust 重寫成面向**另一群受眾**的版本。基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。
 
@@ -107,7 +107,7 @@ gnx context --name validateUser
 | 架構摘要 / 熱門檔案 / 重要符號 | `gnx summarize` |
 | 框架覆蓋率與盲區報表 | `gnx doctor` |
 | 這個 commit 改了什麼 + 影響範圍 | `gnx detect-changes --scope compare --base-ref HEAD~1` |
-| 跨檔安全 rename 一個符號（目前 Python MVP） | `gnx rename --symbol old --new-name new --dry-run` 再去掉 `--dry-run` |
+| 跨檔安全 rename 一個符號（14 語言 — 見矩陣 Rename 欄） | `gnx rename --symbol old --new-name new --dry-run` 再去掉 `--dry-run` |
 | 列出本機所有已索引的 repo | `gnx list` |
 | 重新註冊一個搬過家的 `.gitnexus-rs/` | `gnx index <path>` |
 | 完全刪除索引 | `gnx clean --repo <path>` |
@@ -168,7 +168,7 @@ gnx context --name validateUser
 
 | 命令 | 用途 | 重點 flag |
 |---|---|---|
-| `rename --symbol <old> --new-name <new>` | AST 驅動的跨檔 rename（目前 Python MVP）。請務必先跑 `--dry-run`。 | `--dry-run` |
+| `rename --symbol <old> --new-name <new>` | AST 驅動的跨檔 rename（14 種語言：Python、TS/TSX、JS、Rust、Java、Kotlin、C#、Go、PHP、Ruby、Swift、C、C++、Dart）。請務必先跑 `--dry-run`。 | `--dry-run` |
 
 #### 診斷
 
@@ -180,36 +180,74 @@ gnx context --name validateUser
 
 ## 語言矩陣
 
-graph-nexus 與上游共有的 14 種語言，每個 cell 直接對照上游宣稱的支援度 vs 我們實際 audit 結果（`crates/graph-nexus-analyzer/src/<lang>/`）。
+graph-nexus 自己的「31 種語言 × 各維度實作狀態」清單。每個 cell 回答一個問題：**這個語言、這個維度，我們今天有沒有做？**
+
+這份矩陣**不是**用來跟任何其他工具對 parity。我們從 GitNexus 的 9 維度切分得到設計啟發（致敬段在最上方），但每個 cell 描述的是**自己的實作狀態**，對照的是自己的 roadmap，不是任何外部宣稱。
 
 **圖例**：
-- ✓ &nbsp;上游有、我們也有
-- ✅ &nbsp;**上游沒宣稱，我們有**（我們贏的地方）
-- ⚠️ &nbsp;**上游有，我們缺或部分**（我們落後的地方）
-- — &nbsp;雙方都沒有
+- ✓ &nbsp;**已實作** — 這個語言這個維度我們現在有抽
+- ☐ &nbsp;**語言適用、還沒做** — 該語言有此概念、我們可以擴；當作 roadmap 標記
+- — &nbsp;**不適用** — 該語言根本沒這個概念（例如 Dockerfile 沒有 Frameworks）
 
-| 語言 | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ⚠️ | ✓ |
-| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ |
-| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ⚠️ | ✓ |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ |
-| Go | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✓ | ⚠️ | ✓ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ |
-| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ⚠️ | ⚠️ | ✓ |
-| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✅ | ⚠️ | ✓ |
-| Swift | ✅ | — | ✓ | ✓ | ⚠️ | ✓ | ⚠️ | ⚠️ | ✓ |
-| C | ✅ | — | ✓ | ✅ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
-| C++ | ✅ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
-| Dart | ✓ | ✅ | ✓ | ✓ | ⚠️ | ✓ | ✅ | ⚠️ | ✓ |
+> 分隔線以下的 17 列，`—` 暫時把「不適用」與「未實作」合併 — 還沒做 per-cell audit。**只有 Rename 欄是例外**：底部 17 個全部 `☐`，因為每種語言都有 identifier 可以 rename。其餘 cell 細分 `☐`/`—` 排為後續 audit。
 
-**我們超越上游的地方**（15 個 ✅）：C / C++ 拿到上游沒宣稱的 Imports & Heritage；Java/Kotlin/Rust/Ruby/Dart 拿到上游沒做的 toolchain Config 解析；PHP 拿到 Heritage；Go/C++/Dart 拿到 Named Bindings；Swift/C/C++ 拿到基本 Imports。
+| 語言 | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call | Rename |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| Go | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| PHP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| Swift | ✓ | — | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| C | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| Dart | ✓ | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ✓ | ✓ | ✓ |
+| ─── *以下結構解析為主，per-cell audit 待補* ─── | | | | | | | | | | | |
+| Bash | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Lua | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Solidity | ✓ | — | ✓ | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Crystal | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Nim | ✓ | — | — | ✓ | — | — | — | — | — | ✓ | ☐ |
+| Cairo | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Move | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Zig | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| HCL | ✓ | — | — | — | — | — | ✓ | — | — | ✓ | ☐ |
+| SQL | — | — | — | ☐ | — | — | — | — | — | ✓ | ☐ |
+| Verilog | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Vyper | ✓ | — | — | — | — | — | — | — | — | ✓ | ☐ |
+| Markdown | — | — | — | — | — | — | — | — | — | — | ☐ |
+| GitHub Actions | ☐ | — | — | — | — | — | ✓ | — | — | — | ☐ |
+| Docker Compose | — | — | — | — | — | — | ✓ | — | — | — | ☐ |
+| Dockerfile | ✓ | — | — | — | — | — | ✓ | — | — | — | ☐ |
+| YAML | — | — | — | — | — | — | ✓ | — | — | — | ☐ |
 
-**Wave 1 補齊 28 個 cells**：Constructor Inference 推廣到全 14 種語言（以 Python `4e4fb1b` receiver-type binding 為原型）、Java static import named bindings、C# `csproj`/`global.json` config、Go/Ruby/C/Dart 各自慣例的 Exports、跨語言 Entry Point scorer（整合 routes + `main()` + framework 裝飾器）。**剩餘 ⚠️（17 cells，Wave 2 目標）**：10 種語言的 Frameworks（JS、Kotlin、C#、Go、PHP、Ruby、Swift、C、C++、Dart）；Go/Swift/Dart/C/C++ 的 Types；PHP 跟 Swift 的 Config。
+**per-cell 註腳**（cell 形狀需要解釋的）：
+Bash Imports 是 `source`/`.`；Lua Imports 是 `require` + binding alias；Lua Heritage 是 `setmetatable(...,{__index=Parent})` 啟發式；Solidity Heritage 是 `is X, Y, Z`；SQL Heritage ☐ 是 foreign-key references 規劃中、未實作；GitHub Actions Imports ☐ 是 `uses:`（workflow → action）邊規劃中；Dockerfile Imports 是 `FROM <base>`。
 
-除了這 14 種以外，Rust 端還有 **17 個 provider**（Bash、Crystal、Cairo、Dockerfile、Docker Compose、GitHub Actions、HCL、Lua、Markdown、Move、Nim、Solidity、SQL、Verilog、Vyper、YAML、Zig）停留在結構層級 — 上游沒對應基準可比。
+**Roadmap（☐ 的 cells）** — 明確標「可做、未做」的：
+- 6 個語言的 **Frameworks**（C# / Ruby / Swift / C / C++ / Dart）— 全新工作，無 reference 實作可抄。
+- Swift / Dart 的 **Types** — grammar shape 差異夠大，先前用在 Go/C/C++ 的 dispatch 邏輯沒收斂；排入專項追蹤。
+
+**近期完成**（脈絡備查）：
+- 跨語言 Constructor Inference（14 種），以 Python `4e4fb1b` receiver-type binding 為原型。
+- Java static import named bindings、C# `csproj` / `global.json` config、Go/Ruby/C/Dart 各自慣例的 Exports、跨語言 Entry Point scorer（整合 routes + `main()` + framework 裝飾器）。
+- Wave 2（PR [#2](https://github.com/coseto6125/graph-nexus/pull/2)）：Go/C/C++ 的 Types（參數 / 回傳值 / 欄位 / 變數的宣告類型）、PHP（`composer.json`）+ Swift（`Package.swift`）的 Config、JS（Express + Hapi）/ Kotlin（Ktor）/ Go（gin + echo）/ PHP（Laravel）的 Frameworks。
+- Matrix-opt batch（HEAD `86e65a7`）：Go 每個 struct field visibility、Dart underscore 慣例、Ruby `attr_*` metaprogramming + mixin 追蹤、TS/JS re-export alias 保留；額外 17 種裡，Bash 增 `source`/`.` imports、Lua 增 `require` aliases + metatable inheritance + table-assigned methods、Solidity 增 state-variable visibility。詳見 `docs/specs/2026-05-15-matrix-optimization-opportunities.md`。
+
+### Call 偵測設計
+
+Call 偵測集中在 `crates/graph-nexus-analyzer/src/calls.rs`。熱路徑 helper 是 `extract_calls(root, source, nodes, call_kinds)`：
+
+- 每個語言 parser 傳入該 grammar 中代表 call 的 tree-sitter node kind — 例如 JS/TS 的 `["call_expression"]`、Lua 的 `["function_call"]`、Python 的 `["call"]`。
+- Walker 對 grammar 無感：一次走完 AST、收集所有 call site、用 `callee_name_from(node, source)` 拿 callee 文字、用 `attach_to_enclosing(line, callee, nodes)`（最小 span 包覆）把每個 call 掛到對應的 enclosing `Function` / `Method`。
+- OO 語言額外綁 **receiver type**（`obj.method` → 知道 `obj` 是什麼）。每個語言有自己的 receiver-type 模組（`<lang>/receiver_types.rs`）追蹤 local 變數標註與 class-scope `this`/`self`。Receiver type 存在 RawCall 上，讓下游 resolution 在 method 名稱衝突時挑出正確的 overload。
+- Reflection / dynamic dispatch（`getattr(self, name)()`、JS dynamic `obj[k]()` 等）**不會**被推測性 resolve；會落到 `BlindSpot` record（遵循專案「老實的 unknown 勝於捏造邊」原則）。
+- Call edges（`RelType::Calls`）是圖中最大的單一邊類型；`calls.rs` 的 saturating-conversion helper `safe_row` 防止 row 超過 `u32::MAX` 損壞 call-to-function 對應關係。
 
 ## 🏗️ 系統架構
 
