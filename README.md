@@ -118,7 +118,9 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 
 **Wave 1 closed 28 cells** (Constructor Inference rolled out to all 14 languages mirroring Python's `4e4fb1b` receiver-type binding prototype; Java static-import named bindings; C# `csproj`/`global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators). **Remaining ⚠️ (17 cells, Wave 2 targets)**: Frameworks across 10 langs (JS, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart); Types for Go / Swift / Dart / C / C++; Config for PHP and Swift.
 
-Beyond these 14, the Rust providers also cover **17 additional languages** (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig) at the structural level — no upstream baseline to compare against.
+**Matrix-opt batch (HEAD `86e65a7`)** deepened existing ✓ cells: Go gained per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + `include`/`extend` mixin tracking, TS/JS re-export alias preservation. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
+
+Beyond these 14, the Rust providers also cover **17 additional languages** (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig) at the structural level. The matrix-opt batch added concrete dimensions to three of these: Bash now records `source`/`.` imports, Lua tracks `local M = require()` aliases + metatable inheritance + table-assigned methods, Solidity classifies state-variable visibility.
 
 ## 🏗️ Architecture
 
