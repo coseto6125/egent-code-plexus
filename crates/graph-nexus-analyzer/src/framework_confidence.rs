@@ -22,3 +22,7 @@ pub const DJANGO_SIGNAL: f32 = 0.9;
 pub const KTOR_ROUTE: f32 = 0.9;
 pub const ASPNET_ROUTE_ATTR: f32 = 0.9;
 pub const ASPNET_MINIMAL_API: f32 = 0.9;
+pub const LARAVEL_ROUTE: f32 = 0.9;
+pub const RAILS_ROUTE: f32 = 0.9;
+pub const GIN_ROUTE: f32 = 0.9;
+pub const ECHO_ROUTE: f32 = 0.9;
