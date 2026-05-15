@@ -1,6 +1,12 @@
 use super::receiver_types::extract_js_calls;
+use crate::framework_confidence;
+use crate::framework_helpers::{
+    enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
+};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
+use graph_nexus_core::analyzer::types::{
+    LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
+};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -64,6 +70,15 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_route_path = self.query.capture_index_for_name("route.path");
         let idx_route_call = self.query.capture_index_for_name("route.call");
 
+        let idx_express_handler = self.query.capture_index_for_name("express.route.handler");
+        let idx_hapi_handler = self.query.capture_index_for_name("hapi.route.handler");
+
+        // Pending framework-handler captures: (handler_name, capture_span).
+        // Enclosing function is resolved after all nodes are collected so the
+        // `enclosing_function_name` span search sees the full node set.
+        let mut pending_express_handlers: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
+        let mut pending_hapi_handlers: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -121,6 +136,20 @@ impl LanguageProvider for JavaScriptProvider {
                 } else if Some(cap_idx) == idx_route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_express_handler {
+                    if let Ok(handler_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        pending_express_handlers
+                            .push((handler_name.to_string(), node_span(&cap.node)));
+                    }
+                } else if Some(cap_idx) == idx_hapi_handler {
+                    if let Ok(handler_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        pending_hapi_handlers
+                            .push((handler_name.to_string(), node_span(&cap.node)));
+                    }
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
@@ -248,6 +277,46 @@ impl LanguageProvider for JavaScriptProvider {
         // - `fn()` → `fn`
         extract_js_calls(tree.root_node(), source, &mut nodes);
 
+        // Framework-presence gates: only emit Express/Hapi refs when the file
+        // actually imports the matching package. Each framework has its own
+        // explicit signal list (rather than a shared regex) so adding more
+        // frameworks stays a one-liner.
+        const EXPRESS_REQUIRED: &[&str] = &["express"];
+        const HAPI_REQUIRED: &[&str] = &["@hapi/hapi", "hapi"];
+        let has_express = has_import_from(&imports, EXPRESS_REQUIRED);
+        let has_hapi = has_import_from(&imports, HAPI_REQUIRED);
+
+        // Resolve framework-ref enclosing functions via span containment.
+        // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent
+        // with TS Express and Actix).
+        let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
+        if has_express {
+            framework_refs.extend(pending_express_handlers.into_iter().map(|(target, span)| {
+                let source_name = enclosing_function_name(&nodes, span)
+                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
+                RawFrameworkRef {
+                    source_name,
+                    target_name: target,
+                    confidence: framework_confidence::EXPRESS_ROUTE,
+                    reason: "express-route".to_string(),
+                    span,
+                }
+            }));
+        }
+        if has_hapi {
+            framework_refs.extend(pending_hapi_handlers.into_iter().map(|(target, span)| {
+                let source_name = enclosing_function_name(&nodes, span)
+                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
+                RawFrameworkRef {
+                    source_name,
+                    target_name: target,
+                    confidence: framework_confidence::HAPI_ROUTE,
+                    reason: "hapi-route".to_string(),
+                    span,
+                }
+            }));
+        }
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
@@ -255,7 +324,7 @@ impl LanguageProvider for JavaScriptProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })
