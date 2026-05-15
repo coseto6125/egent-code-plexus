@@ -201,7 +201,8 @@ fn collect_csproj(root: &Path, dir: &Path, depth: u8, out: &mut Vec<CsprojMeta>)
 }
 
 fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let content = strip_xml_comments(&raw);
     let rel_path = path
         .strip_prefix(repo_root)
         .ok()
@@ -245,9 +246,10 @@ pub fn parse_global_json(repo_path: &Path) -> Option<GlobalJsonMeta> {
 
 /// Parse `NuGet.config` from `repo_path`.  Returns `None` if absent.
 pub fn parse_nuget_config(repo_path: &Path) -> Option<NugetConfigMeta> {
-    let content = std::fs::read_to_string(repo_path.join("NuGet.config"))
+    let raw = std::fs::read_to_string(repo_path.join("NuGet.config"))
         .or_else(|_| std::fs::read_to_string(repo_path.join("nuget.config")))
         .ok()?;
+    let content = strip_xml_comments(&raw);
 
     let package_sources = xml_attrs_pairs(&content, "add", "key", "value");
     Some(NugetConfigMeta {
@@ -257,6 +259,33 @@ pub fn parse_nuget_config(repo_path: &Path) -> Option<NugetConfigMeta> {
 }
 
 // ─── Minimal XML helpers (no external parser needed) ────────────────────────
+
+/// Replace every `<!-- ... -->` block in `xml` with whitespace of equal length
+/// (so byte offsets / line numbers are preserved if anything ever cares).
+/// Returns the cleaned text. Unterminated comments are dropped from `start`
+/// to end-of-input.
+fn strip_xml_comments(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(open) = rest.find("<!--") {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 4..];
+        if let Some(close) = after_open.find("-->") {
+            // Preserve newlines inside the comment so line numbers don't drift.
+            for ch in after_open[..close].chars() {
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+            }
+            out.push_str("   "); // standing in for `-->` (3 chars)
+            rest = &after_open[close + 3..];
+        } else {
+            // Unterminated comment — drop the rest.
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
+}
 
 /// Extract the inner text of the first `<TagName>…</TagName>` occurrence.
 fn xml_first_text(xml: &str, tag: &str) -> Option<String> {
@@ -458,6 +487,33 @@ mod tests {
         assert!(
             !found.is_empty(),
             "ProjectReference should register a path alias for `Shared`"
+        );
+    }
+
+    /// When a `<TargetFramework>` tag is commented-out (e.g. an older value
+    /// left in a `<!-- ... -->` block above the real one), the parser must
+    /// skip the commented value and return the real TFM. The previous
+    /// implementation used naive string-find and could pick the comment.
+    #[test]
+    fn csproj_commented_target_framework_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("App.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <!-- legacy: <TargetFramework>net5.0</TargetFramework> -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .unwrap();
+        let metas = parse_csproj_files(dir.path());
+        assert_eq!(metas.len(), 1);
+        assert_eq!(
+            metas[0].target_framework.as_deref(),
+            Some("net8.0"),
+            "commented <TargetFramework>net5.0</TargetFramework> must not shadow the real value; got {:?}",
+            metas[0].target_framework,
         );
     }
 
