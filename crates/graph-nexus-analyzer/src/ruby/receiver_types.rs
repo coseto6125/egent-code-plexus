@@ -39,7 +39,7 @@ impl ClassContext {
         for (start, end, name) in &self.entries {
             if *start <= line && line <= *end {
                 let width = end - start;
-                if best.map_or(true, |(_, w)| width < w) {
+                if best.is_none_or(|(_, w)| width < w) {
                     best = Some((name.as_str(), width));
                 }
             }
@@ -50,7 +50,7 @@ impl ClassContext {
 
 /// Walk the Ruby AST and attach callees to enclosing nodes with receiver-type
 /// binding for `self.method` and `Constant.method` sites.
-pub fn extract_ruby_calls(root: Node<'_>, source: &[u8], nodes: &mut Vec<RawNode>) {
+pub fn extract_ruby_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
     let ctx = ClassContext::from_nodes(nodes);
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {

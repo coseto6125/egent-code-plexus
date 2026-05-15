@@ -57,10 +57,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     while let Some(n) = stack.pop() {
         match n.kind() {
             "method_declaration" | "constructor_declaration" | "local_function_statement" => {
-                let scope = (
-                    n.start_position().row as u32,
-                    n.end_position().row as u32,
-                );
+                let scope = (n.start_position().row as u32, n.end_position().row as u32);
                 let mut map: HashMap<String, String> = HashMap::new();
                 if let Some(params) = n.child_by_field_name("parameters") {
                     collect_params(params, source, &mut map);
@@ -226,7 +223,11 @@ fn csharp_callee(
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect();
-                if id.is_empty() { None } else { Some(id) }
+                if id.is_empty() {
+                    None
+                } else {
+                    Some(id)
+                }
             })
         }
     }
@@ -271,7 +272,7 @@ fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
         }
         if n.span.0 <= line && n.span.2 >= line {
             let w = n.span.2 - n.span.0;
-            if best.map_or(true, |(bw, _)| w < bw) {
+            if best.is_none_or(|(bw, _)| w < bw) {
                 best = Some((w, &n.name));
             }
         }
@@ -290,7 +291,7 @@ fn enclosing_base_name(nodes: &[RawNode], line: u32) -> Option<String> {
             let w = n.span.2 - n.span.0;
             if w < best_w {
                 best_w = w;
-                result = n.heritage.first().map(|s| s.clone());
+                result = n.heritage.first().cloned();
             }
         }
     }

@@ -171,11 +171,11 @@ fn index_path_collision_gets_hash() {
         &existing,
     )
     .unwrap();
+    // Windows: PathBuf::join 會用 '\'，把斷言走 forward-slash 規範化才能跨平台比對
+    // （與 builder.rs / registry/path.rs uid_path 的 idiom 一致）。
+    let dir_str = layout.index_dir.to_string_lossy().replace('\\', "/");
     assert!(
-        layout
-            .index_dir
-            .to_string_lossy()
-            .starts_with("/home/test/.gnx/graph-nexus-"),
+        dir_str.starts_with("/home/test/.gnx/graph-nexus-"),
         "got {:?}",
         layout.index_dir
     );

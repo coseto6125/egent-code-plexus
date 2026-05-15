@@ -112,9 +112,7 @@ fn rust_fn_main_emits_entrypoint_marker() {
     let entry_edges: Vec<_> = graph
         .edges
         .iter()
-        .filter(|e| {
-            e.source as usize == entry_idx && matches!(e.rel_type, RelType::References)
-        })
+        .filter(|e| e.source as usize == entry_idx && matches!(e.rel_type, RelType::References))
         .collect();
     assert_eq!(entry_edges.len(), 1, "expected 1 References edge");
     assert!(
@@ -123,7 +121,11 @@ fn rust_fn_main_emits_entrypoint_marker() {
         entry_edges[0].confidence
     );
     let reason = resolve_str(&graph.string_pool, &entry_edges[0].reason);
-    assert!(reason.starts_with("main:"), "reason should start with main:, got {}", reason);
+    assert!(
+        reason.starts_with("main:"),
+        "reason should start with main:, got {}",
+        reason
+    );
 }
 
 /// (a) Java `public static void main(String[] args)` — emitted by the
@@ -145,14 +147,17 @@ fn java_static_void_main_emits_entrypoint_marker() {
     let graph = builder.build();
 
     let entries = entry_point_node_indices(&graph);
-    assert_eq!(entries.len(), 1, "expected 1 EntryPoint, got {}", entries.len());
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected 1 EntryPoint, got {}",
+        entries.len()
+    );
 
     let entry_edges: Vec<_> = graph
         .edges
         .iter()
-        .filter(|e| {
-            e.source as usize == entries[0] && matches!(e.rel_type, RelType::References)
-        })
+        .filter(|e| e.source as usize == entries[0] && matches!(e.rel_type, RelType::References))
         .collect();
     assert_eq!(entry_edges.len(), 1);
 
@@ -189,9 +194,7 @@ fn fastapi_route_emits_entrypoint_at_score_1_0() {
     let entry_edges: Vec<_> = graph
         .edges
         .iter()
-        .filter(|e| {
-            e.source as usize == entries[0] && matches!(e.rel_type, RelType::References)
-        })
+        .filter(|e| e.source as usize == entries[0] && matches!(e.rel_type, RelType::References))
         .collect();
     assert_eq!(entry_edges.len(), 1);
     assert!(
@@ -233,9 +236,7 @@ fn spring_decorator_route_emits_entrypoint() {
     let entry_edges: Vec<_> = graph
         .edges
         .iter()
-        .filter(|e| {
-            e.source as usize == entries[0] && matches!(e.rel_type, RelType::References)
-        })
+        .filter(|e| e.source as usize == entries[0] && matches!(e.rel_type, RelType::References))
         .collect();
     assert_eq!(entry_edges.len(), 1);
     assert!((entry_edges[0].confidence - 1.0).abs() < 1e-5);
@@ -382,7 +383,11 @@ fn multi_file_entries_are_isolated_per_file() {
     );
     let file_b = mk_local_graph(
         "src/lib.rs",
-        vec![mk_raw_node("not_an_entry_point", NodeKind::Function, vec![])],
+        vec![mk_raw_node(
+            "not_an_entry_point",
+            NodeKind::Function,
+            vec![],
+        )],
         vec![],
         vec![],
     );

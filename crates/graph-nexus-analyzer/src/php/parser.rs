@@ -1,6 +1,8 @@
 use super::receiver_types::extract_php_calls;
 use crate::framework_confidence;
-use crate::framework_helpers::{enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE};
+use crate::framework_helpers::{
+    enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
+};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -32,13 +34,11 @@ fn extract_controller_action(arr_node: tree_sitter::Node, source: &[u8]) -> Opti
                 "class_constant_access_expression" => {
                     let name_node = sub.child_by_field_name("class").or_else(|| {
                         let mut sc = sub.walk();
-                        let first =
-                            sub.children(&mut sc).find(|c| c.kind() == "name");
+                        let first = sub.children(&mut sc).find(|c| c.kind() == "name");
                         first
                     });
                     if let Some(n) = name_node {
-                        if let Ok(text) =
-                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                        if let Ok(text) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
                         {
                             controller = Some(text.to_string());
                         }
@@ -47,9 +47,9 @@ fn extract_controller_action(arr_node: tree_sitter::Node, source: &[u8]) -> Opti
                 // `'action'` — second array element (a quoted string).
                 "string" | "encapsed_string" => {
                     let mut sc = sub.walk();
-                    let content_node = sub.children(&mut sc).find(|c| {
-                        c.kind() == "string_content" || c.kind() == "string_value"
-                    });
+                    let content_node = sub
+                        .children(&mut sc)
+                        .find(|c| c.kind() == "string_content" || c.kind() == "string_value");
                     let text = match content_node {
                         Some(c) => std::str::from_utf8(&source[c.start_byte()..c.end_byte()])
                             .ok()
@@ -258,9 +258,7 @@ impl LanguageProvider for PhpProvider {
                     if arg_count == 2 {
                         let inner = child.child(0).unwrap_or(child);
                         target_name = match inner.kind() {
-                            "array_creation_expression" => {
-                                extract_controller_action(inner, source)
-                            }
+                            "array_creation_expression" => extract_controller_action(inner, source),
                             "anonymous_function" | "arrow_function" => {
                                 Some("<anonymous>".to_string())
                             }

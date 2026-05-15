@@ -58,8 +58,7 @@ fn build_visibility_map(node: Node<'_>, source: &[u8]) -> HashMap<u32, bool> {
     for child in node.children(&mut cursor) {
         match child.kind() {
             "identifier" => {
-                if let Ok(text) =
-                    std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                if let Ok(text) = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
                 {
                     match text {
                         "private" | "protected" => is_public = false,
@@ -207,9 +206,7 @@ impl LanguageProvider for RubyProvider {
                     let end = root.end_position();
                     // Methods: respect visibility markers. Classes/modules are always exported.
                     let is_exported = if k == NodeKind::Method {
-                        *visibility_map
-                            .get(&(start.row as u32))
-                            .unwrap_or(&true)
+                        *visibility_map.get(&(start.row as u32)).unwrap_or(&true)
                     } else {
                         true
                     };

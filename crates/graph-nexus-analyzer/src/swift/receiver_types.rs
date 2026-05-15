@@ -23,12 +23,16 @@ use tree_sitter::Node;
 /// Per-function-scope local var → type map, plus the enclosing class /
 /// super-class lookup for `self` / `super`. Scope is keyed by row-span so
 /// nested closures inherit outer-scope types via smallest-containing-scope.
+// `(start_line, end_line)` half-open span keyed scope tables.
+type FnScope = ((u32, u32), HashMap<String, String>);
+type ClassScope = ((u32, u32), (String, Option<String>));
+
 #[derive(Debug, Default)]
 pub struct SwiftBindings {
     /// Function/method scopes: (span_start, span_end, var → type).
-    fn_scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    fn_scopes: Vec<FnScope>,
     /// Class/struct/extension scopes: (span_start, span_end, (type_name, superclass_opt)).
-    class_scopes: Vec<((u32, u32), (String, Option<String>))>,
+    class_scopes: Vec<ClassScope>,
 }
 
 impl SwiftBindings {
@@ -67,8 +71,8 @@ impl SwiftBindings {
 
 /// Walk the AST collecting class scopes and per-function local-type maps.
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> SwiftBindings {
-    let mut fn_scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
-    let mut class_scopes: Vec<((u32, u32), (String, Option<String>))> = Vec::new();
+    let mut fn_scopes: Vec<FnScope> = Vec::new();
+    let mut class_scopes: Vec<ClassScope> = Vec::new();
 
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -99,7 +103,10 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> SwiftBindings {
         }
     }
 
-    SwiftBindings { fn_scopes, class_scopes }
+    SwiftBindings {
+        fn_scopes,
+        class_scopes,
+    }
 }
 
 /// Extract the type-name and (optional) first heritage entry from a Swift
@@ -119,8 +126,7 @@ fn swift_class_name_and_super(node: Node<'_>, source: &[u8]) -> Option<(String, 
                 // Extension: `extension Apple { ... }` puts name inside user_type.
                 if let Some(ti) = child.named_child(0) {
                     if ti.kind() == "type_identifier" {
-                        if let Ok(s) =
-                            std::str::from_utf8(&source[ti.start_byte()..ti.end_byte()])
+                        if let Ok(s) = std::str::from_utf8(&source[ti.start_byte()..ti.end_byte()])
                         {
                             name = Some(s.to_string());
                         }
@@ -175,22 +181,20 @@ fn collect_typed_swift_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMa
             for child in n.children(&mut c) {
                 match child.kind() {
                     "simple_identifier" if id.is_none() => {
-                        id = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
-                            .ok();
+                        id =
+                            std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok();
                     }
                     "user_type" if ty.is_none() => {
                         if let Some(ti) = child.named_child(0) {
                             if ti.kind() == "type_identifier" {
-                                ty = std::str::from_utf8(
-                                    &source[ti.start_byte()..ti.end_byte()],
-                                )
-                                .ok();
+                                ty = std::str::from_utf8(&source[ti.start_byte()..ti.end_byte()])
+                                    .ok();
                             }
                         }
                     }
                     "type_identifier" if ty.is_none() => {
-                        ty = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
-                            .ok();
+                        ty =
+                            std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok();
                     }
                     _ => {}
                 }
@@ -253,9 +257,9 @@ fn collect_typed_swift_properties(
                                     }
                                 }
                             } else if sub.kind() == "type_identifier" {
-                                if let Ok(s) = std::str::from_utf8(
-                                    &source[sub.start_byte()..sub.end_byte()],
-                                ) {
+                                if let Ok(s) =
+                                    std::str::from_utf8(&source[sub.start_byte()..sub.end_byte()])
+                                {
                                     ty = Some(s.to_string());
                                     break;
                                 }
@@ -290,23 +294,15 @@ where
     F: Fn(&Node<'a>) -> bool,
 {
     let mut c = node.walk();
-    for child in node.named_children(&mut c) {
-        if pred(&child) {
-            return Some(child);
-        }
-    }
-    None
+    let result = node.named_children(&mut c).find(|child| pred(child));
+    result
 }
 
 /// First child (named or not) whose kind equals `kind`.
 fn first_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut c = node.walk();
-    for child in node.children(&mut c) {
-        if child.kind() == kind {
-            return Some(child);
-        }
-    }
-    None
+    let result = node.children(&mut c).find(|child| child.kind() == kind);
+    result
 }
 
 /// Walk the Swift AST attaching call sites to enclosing functions, with
@@ -332,11 +328,7 @@ pub fn extract_swift_calls(
     }
 }
 
-fn swift_callee_name(
-    call: Node<'_>,
-    source: &[u8],
-    bindings: &SwiftBindings,
-) -> Option<String> {
+fn swift_callee_name(call: Node<'_>, source: &[u8], bindings: &SwiftBindings) -> Option<String> {
     // The callee is the first non-call-suffix named child of `call_expression`.
     let target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
     let line = call.start_position().row as u32;

@@ -179,7 +179,9 @@ impl GraphBuilder {
 
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
-            let path_str = local_graph.file_path.to_string_lossy().to_string();
+            // Path → string 一律走 forward-slash，讓 UID / lookup / 顯示在 Windows
+            // 上與 Linux/macOS 一致（與 resolver.rs / registry/path.rs 既有 idiom 對齊）。
+            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
             let path_ref = string_pool.add(&path_str);
 
             let file_unchanged =
@@ -247,7 +249,7 @@ impl GraphBuilder {
         let mut current_handler_idx = 0;
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
-            let path_str = local_graph.file_path.to_string_lossy().to_string();
+            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
 
             for raw_node in &local_graph.nodes {
                 let handler_idx = current_handler_idx;
@@ -369,7 +371,7 @@ impl GraphBuilder {
         let mut entry_edges: Vec<Edge> = Vec::new();
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
-            let path_str = local_graph.file_path.to_string_lossy().to_string();
+            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
             let entries = crate::entry_points::score_entry_points(
                 &local_graph.routes,
                 &local_graph.framework_refs,
@@ -385,8 +387,7 @@ impl GraphBuilder {
                     // a target would be a dangling marker.
                     continue;
                 };
-                let entry_uid =
-                    format!("EntryPoint:{}:{}:{}", path_str, ep.kind.tag(), ep.uid);
+                let entry_uid = format!("EntryPoint:{}:{}:{}", path_str, ep.kind.tag(), ep.uid);
                 let entry_name = format!("{}@{}", ep.kind.tag(), ep.uid);
                 let entry_idx = nodes.len() as u32;
                 nodes.push(Node {
@@ -575,14 +576,14 @@ impl GraphBuilder {
 
         // Pass: blind spots — pure metadata passthrough, no edges created.
         // Each local_graph's blind_spots are interned and stored in the graph's
-        // file-level metadata for `gnx context` / `gnx analyze` to surface to
+        // file-level metadata for `gnx context` / `gnx index` to surface to
         // the LLM (truly unresolvable patterns like eval/dynamic-import).
         let mut all_blind_spots: Vec<BlindSpotRecord> = Vec::new();
         for local_graph in &self.local_graphs {
             for bs in &local_graph.blind_spots {
                 all_blind_spots.push(BlindSpotRecord {
                     kind: string_pool.add(&bs.kind),
-                    file_path: string_pool.add(&bs.file_path.to_string_lossy()),
+                    file_path: string_pool.add(&bs.file_path.to_string_lossy().replace('\\', "/")),
                     start_row: bs.span.0,
                     start_col: bs.span.1,
                     end_row: bs.span.2,
@@ -912,7 +913,7 @@ fn pass2_emit_framework_and_fanout(
     reason_cache: &FxHashMap<String, StrRef>,
     edges: &mut Vec<Edge>,
 ) {
-    let file_path_lossy = local_graph.file_path.to_string_lossy();
+    let file_path_lossy = local_graph.file_path.to_string_lossy().replace('\\', "/");
 
     for fw_ref in &local_graph.framework_refs {
         let source_id = symbol_table.lookup_in_file(&file_path_lossy, &fw_ref.source_name);
@@ -1147,10 +1148,11 @@ mod tests {
             match original.tier {
                 DecisionTier::ImportScoped => assert_eq!(v["tier"], "ImportScoped"),
                 DecisionTier::Unresolved => assert_eq!(v["tier"], "Unresolved"),
-                DecisionTier::SameFile
-                | DecisionTier::QualifierScoped
-                | DecisionTier::Global => {
-                    panic!("fixture should only produce ImportScoped/Unresolved, got {:?}", original.tier)
+                DecisionTier::SameFile | DecisionTier::QualifierScoped | DecisionTier::Global => {
+                    panic!(
+                        "fixture should only produce ImportScoped/Unresolved, got {:?}",
+                        original.tier
+                    )
                 }
             }
         }

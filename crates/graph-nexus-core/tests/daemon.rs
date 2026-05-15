@@ -8,11 +8,18 @@ fn detached_child_outlives_parent_call() {
     let marker = tmp.path().join("child-ran");
     let marker_path = marker.to_string_lossy().into_owned();
 
+    // cmd /C 的 quoting 規則對含 backslash 的 Windows path escape 不可靠
+    // (`\"PATH\"` 會被當字面字串)，改用 PowerShell 並走單引號 path literal。
+    // 單引號內的 ' 需 escape 為 ''，避免 path 真的含 ' 時破解析。
     let cmd = if cfg!(windows) {
+        let ps_path = marker_path.replace('\'', "''");
         vec![
-            "cmd".to_string(),
-            "/C".to_string(),
-            format!("timeout /t 1 /nobreak >NUL & type NUL > \"{marker_path}\""),
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            format!(
+                "Start-Sleep -Milliseconds 200; New-Item -Force -Path '{ps_path}' -ItemType File | Out-Null"
+            ),
         ]
     } else {
         vec![

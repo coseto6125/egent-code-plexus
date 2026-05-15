@@ -1,6 +1,8 @@
 use super::receiver_types::{build_receiver_map, collect_local_types, extract_go_calls};
 use crate::framework_confidence;
-use crate::framework_helpers::{enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE};
+use crate::framework_helpers::{
+    enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
+};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -291,8 +293,7 @@ impl LanguageProvider for GoProvider {
                             std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
                         {
                             let name = name_str.to_string();
-                            let is_exported =
-                                name.chars().next().is_some_and(|c| c.is_uppercase());
+                            let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
                             let start = n.start_position();
                             let end = root.end_position();
                             nodes.push(RawNode {

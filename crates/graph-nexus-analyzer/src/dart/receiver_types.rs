@@ -19,10 +19,16 @@ use graph_nexus_core::analyzer::types::RawNode;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
+// `(start_line, end_line)` half-open span keyed scope tables. The tuple-of-
+// tuples shape mirrors the rest of the receiver_types modules; the type aliases
+// silence `clippy::type_complexity` without changing behaviour.
+type FnScope = ((u32, u32), HashMap<String, String>);
+type ClassScope = ((u32, u32), (String, Option<String>));
+
 #[derive(Debug, Default)]
 pub struct DartBindings {
-    fn_scopes: Vec<((u32, u32), HashMap<String, String>)>,
-    class_scopes: Vec<((u32, u32), (String, Option<String>))>,
+    fn_scopes: Vec<FnScope>,
+    class_scopes: Vec<ClassScope>,
 }
 
 impl DartBindings {
@@ -60,8 +66,8 @@ impl DartBindings {
 }
 
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
-    let mut fn_scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
-    let mut class_scopes: Vec<((u32, u32), (String, Option<String>))> = Vec::new();
+    let mut fn_scopes: Vec<FnScope> = Vec::new();
+    let mut class_scopes: Vec<ClassScope> = Vec::new();
 
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -89,7 +95,10 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
         }
     }
 
-    DartBindings { fn_scopes, class_scopes }
+    DartBindings {
+        fn_scopes,
+        class_scopes,
+    }
 }
 
 fn dart_class_name_and_super(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
@@ -97,8 +106,7 @@ fn dart_class_name_and_super(node: Node<'_>, source: &[u8]) -> Option<(String, O
     if name_node.kind() != "identifier" {
         return None;
     }
-    let name =
-        std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
+    let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
 
     let sup = node
         .child_by_field_name("superclass")
@@ -128,11 +136,7 @@ fn dart_class_name_and_super(node: Node<'_>, source: &[u8]) -> Option<(String, O
     Some((name.to_string(), sup))
 }
 
-fn collect_typed_dart_params(
-    fn_node: Node<'_>,
-    source: &[u8],
-    out: &mut HashMap<String, String>,
-) {
+fn collect_typed_dart_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
     let mut stack: Vec<Node<'_>> = vec![fn_node];
     while let Some(n) = stack.pop() {
         // Avoid descending into nested fn bodies — they get their own scope.
@@ -174,17 +178,13 @@ fn collect_typed_dart_params(
     }
 }
 
-fn collect_typed_dart_locals(
-    fn_node: Node<'_>,
-    source: &[u8],
-    out: &mut HashMap<String, String>,
-) {
+fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
     let mut stack: Vec<Node<'_>> = vec![fn_node];
     while let Some(n) = stack.pop() {
-        if n.kind() == "method_declaration" || n.kind() == "function_declaration" {
-            if !std::ptr::eq(n.id() as *const u8, fn_node.id() as *const u8) {
-                continue;
-            }
+        if (n.kind() == "method_declaration" || n.kind() == "function_declaration")
+            && !std::ptr::eq(n.id() as *const u8, fn_node.id() as *const u8)
+        {
+            continue;
         }
         if n.kind() == "initialized_variable_definition" {
             let mut ty: Option<String> = None;
@@ -251,8 +251,7 @@ fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> O
             .map(str::to_string),
         "member_expression" => {
             let prop = function.child_by_field_name("property")?;
-            let method =
-                std::str::from_utf8(&source[prop.start_byte()..prop.end_byte()]).ok()?;
+            let method = std::str::from_utf8(&source[prop.start_byte()..prop.end_byte()]).ok()?;
             let obj = function.child_by_field_name("object")?;
             match obj.kind() {
                 "this" => {
@@ -266,8 +265,7 @@ fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> O
                     }
                 }
                 "identifier" => {
-                    if let Ok(var) =
-                        std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()])
+                    if let Ok(var) = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()])
                     {
                         if let Some(ty) = bindings.lookup_local(line, var) {
                             return Some(format!("{ty}.{method}"));

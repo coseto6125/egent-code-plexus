@@ -168,17 +168,30 @@ mod tests {
         }
     }
 
+    // Pick fixture roots that `Path::is_absolute()` actually accepts on the
+    // current platform; "/w/alpha" is absolute on Unix but not on Windows, and
+    // the path-matching branch of `find_matches` short-circuits on the
+    // `is_absolute()` check.
+    #[cfg(windows)]
+    const ALPHA_WORKTREE: &str = r"C:\w\alpha";
+    #[cfg(windows)]
+    const BETA_WORKTREE: &str = r"C:\w\beta";
+    #[cfg(not(windows))]
+    const ALPHA_WORKTREE: &str = "/w/alpha";
+    #[cfg(not(windows))]
+    const BETA_WORKTREE: &str = "/w/beta";
+
     #[test]
     fn find_matches_by_name_returns_single_repo() {
-        let repos = vec![repo("alpha", "/w/alpha"), repo("beta", "/w/beta")];
+        let repos = vec![repo("alpha", ALPHA_WORKTREE), repo("beta", BETA_WORKTREE)];
         let m = find_matches(&repos, "alpha");
         assert_eq!(m, vec!["alpha".to_string()]);
     }
 
     #[test]
     fn find_matches_by_absolute_path_resolves_to_name() {
-        let repos = vec![repo("alpha", "/w/alpha"), repo("beta", "/w/beta")];
-        let m = find_matches(&repos, "/w/beta");
+        let repos = vec![repo("alpha", ALPHA_WORKTREE), repo("beta", BETA_WORKTREE)];
+        let m = find_matches(&repos, BETA_WORKTREE);
         assert_eq!(m, vec!["beta".to_string()]);
     }
 
@@ -186,14 +199,14 @@ mod tests {
     fn find_matches_relative_path_is_not_treated_as_path() {
         // "alpha/main" is not absolute, so it must not collide with a
         // worktree path lookup — only name match would fire (none here).
-        let repos = vec![repo("alpha", "/w/alpha")];
+        let repos = vec![repo("alpha", ALPHA_WORKTREE)];
         let m = find_matches(&repos, "alpha/main");
         assert!(m.is_empty(), "relative input should not match: {m:?}");
     }
 
     #[test]
     fn find_matches_returns_empty_for_unknown_target() {
-        let repos = vec![repo("alpha", "/w/alpha")];
+        let repos = vec![repo("alpha", ALPHA_WORKTREE)];
         let m = find_matches(&repos, "nope");
         assert!(m.is_empty());
     }

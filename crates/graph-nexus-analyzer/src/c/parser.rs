@@ -42,7 +42,11 @@ fn has_static_specifier(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
 ///   words if they want a bare type; the analyzer surfaces the full
 ///   declaration prefix because it's the most information-preserving and
 ///   cheap to compute (one byte-range slice).
-fn slice_type_before(decl: tree_sitter::Node<'_>, name: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+fn slice_type_before(
+    decl: tree_sitter::Node<'_>,
+    name: tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Option<String> {
     let start = decl.start_byte();
     let end = name.start_byte();
     if end <= start {

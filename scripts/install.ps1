@@ -7,37 +7,73 @@
 #   $env:GNX_VERSION        指定版本（不含 v）。預設 latest。
 #   $env:GNX_INSTALL_DIR    安裝目錄。預設 $env:LOCALAPPDATA\Programs\gnx。
 #   $env:GNX_NO_VERIFY = 1  跳過 SHA256 驗證（不建議）。
+#   $env:GNX_FORCE_CARGO=1  跳過 release binary，強制走 `cargo install --git`。
+#
+# 沒有 GitHub Release 或當前架構沒 prebuilt 時，會自動 fallback 到
+# `cargo install --git`（需要 cargo / rustup）。
 
 $ErrorActionPreference = 'Stop'
 
 $repo = 'coseto6125/graph-nexus'
 $bin  = 'gnx'
-
-# ---- 解析版本 ----
 $version = if ($env:GNX_VERSION) { $env:GNX_VERSION } else { 'latest' }
-if ($version -eq 'latest') {
-    $resp = Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -ErrorAction SilentlyContinue `
-        -Uri "https://github.com/$repo/releases/latest"
-    $loc = $resp.Headers.Location
-    if (-not $loc) {
-        # 較新 PS 會 follow，從最終 URL 取 tag
-        $loc = (Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repo/releases/latest").BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+
+function Invoke-CargoFallback([string]$reason) {
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        Write-Host "error: $reason" -ForegroundColor Red
+        Write-Host "       and ``cargo`` not found in PATH — install Rust from https://rustup.rs," -ForegroundColor Red
+        Write-Host "       then re-run this script (or wait for a prebuilt release)." -ForegroundColor Red
+        exit 1
     }
-    $tag = ($loc -split '/tag/')[-1]
-} else {
-    $tag = "v$($version.TrimStart('v'))"
+    Write-Host "==> $reason"
+    Write-Host "==> Falling back to ``cargo install --git`` (source build, may take a few minutes)"
+    $cargoArgs = @('install', '--git', "https://github.com/$repo", '--bin', $bin, '--locked')
+    if ($script:version -ne 'latest') {
+        $cargoArgs += @('--tag', "v$($script:version.TrimStart('v'))")
+    }
+    & cargo @cargoArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Host ""
+    Write-Host "✓ Installed $bin via cargo (binary at `$env:USERPROFILE\.cargo\bin\$bin.exe)"
+    exit 0
 }
-$ver = $tag.TrimStart('v')
+
+if ($env:GNX_FORCE_CARGO -eq '1') {
+    Invoke-CargoFallback 'GNX_FORCE_CARGO=1 set'
+}
 
 # ---- 偵測 ARCH → target triple ----
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 switch ($arch) {
     'X64'   { $target = 'x86_64-pc-windows-msvc' }
     default {
-        Write-Error "unsupported architecture: $arch (only x86_64-pc-windows-msvc is published)"
-        exit 1
+        Invoke-CargoFallback "unsupported prebuilt architecture: $arch (only x86_64-pc-windows-msvc has prebuilt binaries)"
     }
 }
+
+# ---- 解析版本 ----
+if ($version -eq 'latest') {
+    $tag = $null
+    try {
+        $resp = Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -ErrorAction SilentlyContinue `
+            -Uri "https://github.com/$repo/releases/latest"
+        $loc = $resp.Headers.Location
+        if (-not $loc) {
+            $loc = (Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repo/releases/latest").BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+        }
+        if ($loc -match '/tag/') {
+            $tag = ($loc -split '/tag/')[-1]
+        }
+    } catch {
+        # 落到下方 fallback
+    }
+    if (-not $tag) {
+        Invoke-CargoFallback "no published GitHub Release yet for $repo"
+    }
+} else {
+    $tag = "v$($version.TrimStart('v'))"
+}
+$ver = $tag.TrimStart('v')
 
 # ---- 安裝目錄 ----
 if (-not $env:GNX_INSTALL_DIR) {
@@ -59,7 +95,11 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
     Write-Host "==> Downloading $bin $ver ($target)"
     Write-Host "    $url"
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile (Join-Path $tmp $archive)
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile (Join-Path $tmp $archive)
+    } catch {
+        Invoke-CargoFallback "release asset for $target not found (tag $tag)"
+    }
 
     if ($env:GNX_NO_VERIFY -ne '1') {
         Invoke-WebRequest -UseBasicParsing -Uri $shaUrl -OutFile (Join-Path $tmp "$archive.sha256")

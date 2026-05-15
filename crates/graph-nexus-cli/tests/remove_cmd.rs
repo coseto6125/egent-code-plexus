@@ -101,11 +101,19 @@ fn remove_unknown_target_errors_with_helpful_message() {
 #[test]
 fn remove_by_path_match_finds_entry() {
     let home_tmp = tempfile::tempdir().unwrap();
-    let repo_dir = seed_repo(home_tmp.path(), "beta", "/tmp/foo");
+    // Path-match branch requires `Path::is_absolute()` to be true; "/tmp/foo"
+    // is absolute on Unix but not on Windows, so pick a platform-appropriate
+    // root that Windows recognises (e.g. "C:\\tmp\\foo").
+    let worktree = if cfg!(windows) {
+        r"C:\tmp\foo"
+    } else {
+        "/tmp/foo"
+    };
+    let repo_dir = seed_repo(home_tmp.path(), "beta", worktree);
     assert!(repo_dir.exists());
 
     let out = Command::new(gnx_bin())
-        .args(["remove", "/tmp/foo"])
+        .args(["remove", worktree])
         .env("HOME", home_tmp.path())
         .output()
         .expect("gnx spawn failed");

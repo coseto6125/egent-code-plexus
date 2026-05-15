@@ -58,10 +58,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     while let Some(n) = stack.pop() {
         match n.kind() {
             "method_declaration" | "constructor_declaration" => {
-                let scope_span = (
-                    n.start_position().row as u32,
-                    n.end_position().row as u32,
-                );
+                let scope_span = (n.start_position().row as u32, n.end_position().row as u32);
                 let mut map: HashMap<String, String> = HashMap::new();
                 // Collect typed parameters.
                 if let Some(params) = n.child_by_field_name("parameters") {
@@ -198,8 +195,7 @@ fn java_callee(
             "this" => enclosing_class_name(nodes, line),
             "super" => enclosing_superclass(nodes, line),
             "identifier" => {
-                let var =
-                    std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
+                let var = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
                 locals.lookup(line, var).map(|t| t.to_string())
             }
             _ => None,
@@ -257,7 +253,7 @@ fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
         }
         if n.span.0 <= line && n.span.2 >= line {
             let w = n.span.2 - n.span.0;
-            if best.map_or(true, |(bw, _)| w < bw) {
+            if best.is_none_or(|(bw, _)| w < bw) {
                 best = Some((w, &n.name));
             }
         }
@@ -277,7 +273,7 @@ fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
             let w = n.span.2 - n.span.0;
             if w < best_w {
                 best_w = w;
-                result = n.heritage.first().map(|s| s.clone());
+                result = n.heritage.first().cloned();
             }
         }
     }

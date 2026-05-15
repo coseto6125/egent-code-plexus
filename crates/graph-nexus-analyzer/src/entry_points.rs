@@ -180,7 +180,7 @@ pub fn score_entry_points(
         acc.push(EntryPoint {
             uid: fw.source_name.clone(),
             kind: EntryKind::FrameworkRef,
-            score: fw.confidence.min(1.0).max(0.0),
+            score: fw.confidence.clamp(0.0, 1.0),
             reason: format!("framework_ref:{} ({})", fw.reason, fw.confidence),
         });
     }
@@ -254,7 +254,11 @@ fn dedup_keep_highest(mut items: Vec<EntryPoint>) -> Vec<EntryPoint> {
     items.sort_by(|a, b| {
         a.uid
             .cmp(&b.uid)
-            .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.kind.tag().cmp(b.kind.tag()))
     });
 
@@ -446,8 +450,7 @@ mod tests {
         assert!((eps[0].score - 1.0).abs() < 1e-6);
         // Lower-scoring "main" signal folded into the reason.
         assert!(
-            eps[0].reason.contains("also")
-                && eps[0].reason.contains("main"),
+            eps[0].reason.contains("also") && eps[0].reason.contains("main"),
             "expected dropped main signal to be folded into reason: {}",
             eps[0].reason
         );

@@ -5,15 +5,44 @@
 #   curl -sSfL https://github.com/coseto6125/graph-nexus/releases/download/v0.1.0/install.sh | sh
 #
 # 環境變數：
-#   GNX_VERSION   指定版本（不含 v 前綴）。預設 latest。
-#   GNX_INSTALL_DIR  安裝目錄。預設 $HOME/.local/bin，root 時 /usr/local/bin。
-#   GNX_NO_VERIFY=1  跳過 SHA256 驗證（不建議）。
+#   GNX_VERSION       指定版本（不含 v 前綴）。預設 latest。
+#   GNX_INSTALL_DIR   安裝目錄。預設 $HOME/.local/bin，root 時 /usr/local/bin。
+#   GNX_NO_VERIFY=1   跳過 SHA256 驗證（不建議）。
+#   GNX_FORCE_CARGO=1 跳過 release binary，強制走 cargo install --git。
+#
+# 沒有 GitHub Release 或目標平台沒 prebuilt 時，會自動 fallback 到
+# `cargo install --git`（需要 cargo / rustup）。
 
 set -eu
 
 REPO="coseto6125/graph-nexus"
 BIN="gnx"
 GNX_VERSION="${GNX_VERSION:-latest}"
+GNX_FORCE_CARGO="${GNX_FORCE_CARGO:-0}"
+
+cargo_fallback() {
+  reason="$1"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: $reason" >&2
+    echo "       and \`cargo\` not found in PATH — install Rust from https://rustup.rs," >&2
+    echo "       then re-run this script (or wait for a prebuilt release)." >&2
+    exit 1
+  fi
+  echo "==> $reason"
+  echo "==> Falling back to \`cargo install --git\` (source build, may take a few minutes)"
+  if [ "${GNX_VERSION}" = "latest" ]; then
+    cargo install --git "https://github.com/$REPO" --bin "$BIN" --locked
+  else
+    cargo install --git "https://github.com/$REPO" --tag "v${GNX_VERSION#v}" --bin "$BIN" --locked
+  fi
+  echo
+  echo "✓ Installed $BIN via cargo (binary at \$CARGO_HOME/bin/$BIN, usually ~/.cargo/bin/$BIN)"
+  exit 0
+}
+
+if [ "${GNX_FORCE_CARGO}" = "1" ]; then
+  cargo_fallback "GNX_FORCE_CARGO=1 set"
+fi
 
 # ---- 安裝目錄 ----
 if [ -z "${GNX_INSTALL_DIR:-}" ]; then
@@ -34,19 +63,17 @@ case "$os/$arch" in
   darwin/x86_64)        target="x86_64-apple-darwin" ;;
   darwin/arm64|darwin/aarch64) target="aarch64-apple-darwin" ;;
   *)
-    echo "error: unsupported platform $os/$arch" >&2
-    echo "       supported: linux x86_64/aarch64, macOS x86_64/aarch64" >&2
-    exit 1
+    cargo_fallback "unsupported prebuilt platform $os/$arch (linux/macOS x86_64/aarch64 only)"
     ;;
 esac
 
 # ---- 解析版本 ----
 if [ "$GNX_VERSION" = "latest" ]; then
-  # 從 redirect 解析 latest tag，免 GitHub API 額度
-  tag="$(curl -sSfLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" | sed 's|.*/tag/||')"
+  # 從 redirect 解析 latest tag，免 GitHub API 額度。
+  # 若沒有 release（首次發佈前），URL 仍會 200 但 redirect 不含 /tag/。
+  tag="$(curl -sSfLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null | sed -n 's|.*/tag/||p')"
   if [ -z "$tag" ]; then
-    echo "error: unable to resolve latest version" >&2
-    exit 1
+    cargo_fallback "no published GitHub Release yet for $REPO"
   fi
 else
   tag="v${GNX_VERSION#v}"
@@ -64,7 +91,9 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 echo "==> Downloading $BIN $version ($target)"
 echo "    $url"
-curl -sSfL "$url"     -o "$tmpdir/$archive"
+if ! curl -sSfL "$url" -o "$tmpdir/$archive"; then
+  cargo_fallback "release asset for $target not found (tag $tag)"
+fi
 
 if [ "${GNX_NO_VERIFY:-0}" != "1" ]; then
   curl -sSfL "$sha_url" -o "$tmpdir/$archive.sha256"

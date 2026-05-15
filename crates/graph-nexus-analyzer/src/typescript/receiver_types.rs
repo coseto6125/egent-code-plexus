@@ -92,10 +92,7 @@ fn collect_typed_params(params: Node<'_>, source: &[u8], out: &mut HashMap<Strin
     let mut c = params.walk();
     for p in params.children(&mut c) {
         // required_parameter and optional_parameter both carry `pattern` + `type`.
-        if !matches!(
-            p.kind(),
-            "required_parameter" | "optional_parameter"
-        ) {
+        if !matches!(p.kind(), "required_parameter" | "optional_parameter") {
             continue;
         }
         let Some(pat) = p.child_by_field_name("pattern") else {
@@ -122,18 +119,14 @@ fn collect_typed_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, S
         // Don't descend into nested functions — they get their own scope.
         if matches!(
             n.kind(),
-            "function_declaration"
-                | "function"
-                | "method_definition"
-                | "arrow_function"
+            "function_declaration" | "function" | "method_definition" | "arrow_function"
         ) {
             continue;
         }
         if n.kind() == "variable_declarator" {
-            if let (Some(name_node), Some(type_ann)) = (
-                n.child_by_field_name("name"),
-                n.child_by_field_name("type"),
-            ) {
+            if let (Some(name_node), Some(type_ann)) =
+                (n.child_by_field_name("name"), n.child_by_field_name("type"))
+            {
                 if name_node.kind() == "identifier" {
                     if let Some((name, ty)) = simple_name_and_type(name_node, type_ann, source) {
                         out.insert(name, ty);
@@ -178,12 +171,7 @@ fn simple_name_and_type(
 /// - `this.method()` → looks up the innermost enclosing class → emits `ClassName.method`
 /// - `obj.method()` where `obj` is a typed param/var → emits `Type.method`
 /// - anything else falls back to the bare method name (or full expression as before)
-pub fn extract_ts_calls(
-    root: Node<'_>,
-    source: &[u8],
-    nodes: &mut [RawNode],
-    locals: &LocalTypes,
-) {
+pub fn extract_ts_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], locals: &LocalTypes) {
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if n.kind() == "call_expression" {
@@ -196,6 +184,49 @@ pub fn extract_ts_calls(
         for child in n.children(&mut c) {
             stack.push(child);
         }
+    }
+}
+
+fn ts_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+    nodes: &[RawNode],
+) -> Option<String> {
+    let function = call.child_by_field_name("function")?;
+    match function.kind() {
+        "identifier" => function.utf8_text(source).ok().map(str::to_string),
+        "member_expression" => {
+            let obj = function.child_by_field_name("object")?;
+            let prop = function.child_by_field_name("property")?;
+            let prop_name = prop.utf8_text(source).ok()?;
+            let line = call.start_position().row as u32;
+
+            match obj.kind() {
+                "this" => {
+                    // `this.method()` — look up enclosing class.
+                    let call_span = node_span(&call);
+                    if let Some((class_name, _)) = enclosing_class(nodes, call_span) {
+                        return Some(format!("{class_name}.{prop_name}"));
+                    }
+                    // No enclosing class (shouldn't happen for valid TS, but be safe).
+                    Some(prop_name.to_string())
+                }
+                "identifier" => {
+                    let obj_name = obj.utf8_text(source).ok()?;
+                    if let Some(ty) = locals.lookup(line, obj_name) {
+                        return Some(format!("{ty}.{prop_name}"));
+                    }
+                    // Unknown type — emit qualified name so the resolver can try.
+                    Some(format!("{obj_name}.{prop_name}"))
+                }
+                _ => {
+                    // Chained member expression or other complex form: fall back to prop name.
+                    Some(prop_name.to_string())
+                }
+            }
+        }
+        _ => function.utf8_text(source).ok().map(str::to_string),
     }
 }
 
@@ -287,48 +318,5 @@ function process(obj: any): void {
             !calls.iter().any(|c| c.starts_with("any.")),
             "should not bind predefined type 'any': {calls:?}"
         );
-    }
-}
-
-fn ts_callee_name(
-    call: Node<'_>,
-    source: &[u8],
-    locals: &LocalTypes,
-    nodes: &[RawNode],
-) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
-    match function.kind() {
-        "identifier" => function.utf8_text(source).ok().map(str::to_string),
-        "member_expression" => {
-            let obj = function.child_by_field_name("object")?;
-            let prop = function.child_by_field_name("property")?;
-            let prop_name = prop.utf8_text(source).ok()?;
-            let line = call.start_position().row as u32;
-
-            match obj.kind() {
-                "this" => {
-                    // `this.method()` — look up enclosing class.
-                    let call_span = node_span(&call);
-                    if let Some((class_name, _)) = enclosing_class(nodes, call_span) {
-                        return Some(format!("{class_name}.{prop_name}"));
-                    }
-                    // No enclosing class (shouldn't happen for valid TS, but be safe).
-                    Some(prop_name.to_string())
-                }
-                "identifier" => {
-                    let obj_name = obj.utf8_text(source).ok()?;
-                    if let Some(ty) = locals.lookup(line, obj_name) {
-                        return Some(format!("{ty}.{prop_name}"));
-                    }
-                    // Unknown type — emit qualified name so the resolver can try.
-                    Some(format!("{obj_name}.{prop_name}"))
-                }
-                _ => {
-                    // Chained member expression or other complex form: fall back to prop name.
-                    Some(prop_name.to_string())
-                }
-            }
-        }
-        _ => function.utf8_text(source).ok().map(str::to_string),
     }
 }

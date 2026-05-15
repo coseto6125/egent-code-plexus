@@ -48,17 +48,28 @@
 
 ## 📦 安裝
 
-| 平台 / 對象 | 指令 | 備註 |
+> **Pre-release 狀態**：首個 GitHub Release 發出前，預編安裝腳本會自動 fallback 到 `cargo install --git`。下面每個平台**今天**都至少有一條可用的 terminal 安裝路徑。
+
+### 全平台通用（今天就能用，不需 Release）
+
+```bash
+cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx --locked
+```
+
+需要 Rust toolchain（[rustup.rs](https://rustup.rs)）。原始碼編譯，首次數分鐘，之後 incremental 快。
+
+### 各平台一鍵指令
+
+| 平台 | 指令 | 備註 |
 | :--- | :--- | :--- |
-| macOS Homebrew | `brew tap coseto6125/tap && brew install graph-nexus` | tap formula 公開後可用。Package：`graph-nexus`；binary：`gnx` |
-| Linux / macOS | `curl -sSfL https://github.com/coseto6125/graph-nexus/releases/latest/download/install.sh \| sh` | 安裝預編 GitHub Release 二進位 |
-| Windows PowerShell | `irm https://github.com/coseto6125/graph-nexus/releases/latest/download/install.ps1 \| iex` | 安裝預編 GitHub Release 二進位 |
-| Rust 原始碼 build | `cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx` | crates.io 發布前的安裝方式 |
-| 手動下載 | [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | 挑選對應 target 的 archive 並驗證 `.sha256` |
+| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.sh \| sh` | 先試預編 Release；沒 Release 時自動 fallback 到 `cargo install --git`。設 `GNX_FORCE_CARGO=1` 可跳過 Release 偵測。 |
+| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/graph-nexus/main/scripts/install.ps1 -UseBasicParsing \| iex` | 同樣 Release 優先 / cargo fallback。設 `$env:GNX_FORCE_CARGO='1'` 強制 cargo。 |
+| **macOS Homebrew** | `brew tap coseto6125/tap && brew install graph-nexus` | 首個 Release 帶出 tap formula 後可用。 |
+| **手動下載** | [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | 挑選對應 target 的 archive 並驗證 `.sha256`。 |
 
-> `cargo install graph-nexus` 故意不列：crates.io publish 仍被卡，要等所有 analyzer grammar 依賴都能在 crates.io 上發布。
+> 安裝後 binary 是 `gnx`（crates.io 上的套件未來會是 `graph-nexus`）。`cargo install graph-nexus` 故意不列：crates.io publish 仍被卡，要等所有 analyzer grammar 依賴都能在 crates.io 上發布。
 
-安裝後，執行檔名稱為 `gnx`（在 crates.io 上的套件名為 `graph-nexus`）。
+> 一旦有 tag 化 Release，安裝腳本同時也會從 `…/releases/latest/download/install.{sh,ps1}` 提供 — 兩種 URL 皆可用；`raw.githubusercontent.com` 形式只是在**首個 Release 之前**也能 work。
 
 ## ⚡ 使用方式
 

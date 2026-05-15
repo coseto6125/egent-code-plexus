@@ -36,6 +36,33 @@ pub fn extract_js_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
     }
 }
 
+fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
+    let function = call.child_by_field_name("function")?;
+    match function.kind() {
+        "identifier" => function.utf8_text(source).ok().map(str::to_string),
+        "member_expression" => {
+            let obj = function.child_by_field_name("object")?;
+            let prop = function.child_by_field_name("property")?;
+            let prop_name = prop.utf8_text(source).ok()?;
+
+            if obj.kind() == "this" {
+                // `this.method()` — look up the enclosing class.
+                let call_span = node_span(&call);
+                if let Some((class_name, _)) = enclosing_class(nodes, call_span) {
+                    return Some(format!("{class_name}.{prop_name}"));
+                }
+                // `this` outside a class (module-level self-reference, unusual but possible).
+                Some(prop_name.to_string())
+            } else {
+                // Unknown receiver type — emit qualified name so resolver has context.
+                let obj_name = obj.utf8_text(source).ok()?;
+                Some(format!("{obj_name}.{prop_name}"))
+            }
+        }
+        _ => function.utf8_text(source).ok().map(str::to_string),
+    }
+}
+
 /// Tests run as part of `cargo test -p graph-nexus-analyzer`.
 #[cfg(test)]
 mod tests {
@@ -105,32 +132,5 @@ function moduleInit() {
             !calls.is_empty() || calls.is_empty(),
             "should not panic on this.method() outside class"
         );
-    }
-}
-
-fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
-    match function.kind() {
-        "identifier" => function.utf8_text(source).ok().map(str::to_string),
-        "member_expression" => {
-            let obj = function.child_by_field_name("object")?;
-            let prop = function.child_by_field_name("property")?;
-            let prop_name = prop.utf8_text(source).ok()?;
-
-            if obj.kind() == "this" {
-                // `this.method()` — look up the enclosing class.
-                let call_span = node_span(&call);
-                if let Some((class_name, _)) = enclosing_class(nodes, call_span) {
-                    return Some(format!("{class_name}.{prop_name}"));
-                }
-                // `this` outside a class (module-level self-reference, unusual but possible).
-                Some(prop_name.to_string())
-            } else {
-                // Unknown receiver type — emit qualified name so resolver has context.
-                let obj_name = obj.utf8_text(source).ok()?;
-                Some(format!("{obj_name}.{prop_name}"))
-            }
-        }
-        _ => function.utf8_text(source).ok().map(str::to_string),
     }
 }

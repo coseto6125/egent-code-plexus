@@ -15,12 +15,7 @@ const KINDS: &[&str] = &[
 ];
 
 pub fn find_identifier_occurrences(source: &[u8], target_name: &str) -> Vec<IdentifierRange> {
-    find_by_kinds(
-        source,
-        target_name,
-        &tree_sitter_go::LANGUAGE.into(),
-        KINDS,
-    )
+    find_by_kinds(source, target_name, &tree_sitter_go::LANGUAGE.into(), KINDS)
 }
 
 #[cfg(test)]
