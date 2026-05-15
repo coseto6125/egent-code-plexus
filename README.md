@@ -196,9 +196,9 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 | Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
 | Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
 | C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
-| Go | ✓ | ✅ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
+| Go | ✓ | ✅ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ |
-| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
+| PHP | ✓ | ✓ | ✓ | ✅ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Ruby | ✓ | — | ✓ | ✓ | — | ✓ | ✅ | ⚠️ | ✓ | ✓ |
 | Swift | ✅ | — | ✓ | ✓ | ⚠️ | ✓ | ✓ | ⚠️ | ✓ | ✓ |
 | C | ✅ | — | ✓ | ✅ | ✓ | ✓ | ✅ | ⚠️ | ✓ | ✓ |
@@ -209,7 +209,12 @@ For the 14 languages graph-nexus shares with upstream, here's the per-cell delta
 
 **Wave 1 closed 28 cells** (Constructor Inference rolled out to all 14 languages mirroring Python's `4e4fb1b` receiver-type binding prototype; Java static-import named bindings; C# `csproj`/`global.json` config; Exports for Go/Ruby/C/Dart per language conventions; cross-language Entry Point scorer combining routes + `main()` + framework decorators).
 
-**Wave 2 partial (PR #2)** closes 7 more cells: Types for Go / C / C++ (declared types on params, returns, struct fields, vars); Config for PHP (`composer.json`) and Swift (`Package.swift`); Frameworks for JS (Express + Hapi) and Kotlin (Ktor). **Remaining ⚠️ (10 cells, next wave)**: Frameworks for C# / Go / PHP / Ruby / Swift / C / C++ / Dart; Types for Swift / Dart.
+**Wave 2 (PR [#2](https://github.com/coseto6125/graph-nexus/pull/2))** closes 9 cells:
+- **Types**: Go / C / C++ — declared types on params, returns, struct fields, vars.
+- **Config**: PHP (`composer.json`) + Swift (`Package.swift`).
+- **Frameworks**: JS (Express + Hapi), Kotlin (Ktor), Go (gin + echo), PHP (Laravel). Ported from upstream `gitnexus/src/core/group/extractors/http-patterns/` where the equivalent plugins exist.
+
+**Remaining ⚠️ (8 cells)**: Frameworks for C# / Ruby / Swift / C / C++ / Dart — **upstream gitnexus has no plugin for any of these**, so the parity baseline is `—` rather than `⚠️`; what we add here is net-new beyond upstream. Types for Swift / Dart deferred — grammar shape varies enough that the SA dispatch in this wave didn't converge; queued for a focused follow-up.
 
 **Matrix-opt batch (HEAD `86e65a7`)** deepened existing ✓ cells: Go gained per-struct-field visibility, Dart per-symbol underscore convention, Ruby `attr_*` metaprogramming + `include`/`extend` mixin tracking, TS/JS re-export alias preservation. See `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
