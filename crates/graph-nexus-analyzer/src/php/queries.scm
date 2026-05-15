@@ -45,3 +45,15 @@
   name: (_) @route.method (#match? @route.method "(?i)^(get|post|put|delete|patch)$")
   arguments: (_) @route.path
 ) @route.call
+
+;; ---- Laravel ----
+;; `Route::<method>('/path', <handler>)`. Mirrors upstream
+;; `gitnexus/src/core/group/extractors/http-patterns/php.ts:34-42`. The
+;; outer call is the only structural anchor; the parser walks the
+;; `arguments` node at parse time to extract path + handler shape.
+;; Gated downstream by `use Illuminate\...`.
+(scoped_call_expression
+  scope: (name) @_laravel_route_class (#eq? @_laravel_route_class "Route")
+  name: (name) @laravel.route.method
+    (#match? @laravel.route.method "^(get|post|put|patch|delete|options|any)$")
+  arguments: (arguments) @laravel.route.args) @laravel.route.call

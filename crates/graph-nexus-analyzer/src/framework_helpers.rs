@@ -113,12 +113,17 @@ pub fn has_import_from(imports: &[RawImport], modules: &[&str]) -> bool {
         if value == module {
             return true;
         }
-        // Dotted submodule (`django.urls` under required `django`) or
-        // scoped-package (`@nestjs/common` under required `@nestjs`).
+        // Submodule under required prefix. Separator depends on language:
+        //   `.`  — Python (django.urls under django), Java (java.util.List
+        //          under java), Kotlin (io.ktor.server.routing under io.ktor)
+        //   `/`  — JS/TS scoped packages (@nestjs/common under @nestjs)
+        //   `\\` — PHP namespaces (Illuminate\Support under Illuminate)
         // Zero-alloc byte compare avoids `format!()` per pair.
         let v = value.as_bytes();
         let m = module.as_bytes();
-        v.len() > m.len() && v.starts_with(m) && (v[m.len()] == b'.' || v[m.len()] == b'/')
+        v.len() > m.len()
+            && v.starts_with(m)
+            && (v[m.len()] == b'.' || v[m.len()] == b'/' || v[m.len()] == b'\\')
     }
     imports.iter().any(|imp| {
         modules
