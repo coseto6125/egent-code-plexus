@@ -157,12 +157,39 @@ fn hash8(s: &str) -> String {
 /// the dir was writable at some point and we skip the probe entirely (one
 /// stat instead of create+write+unlink on every invocation).
 pub fn resolve_home_gnx() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        let candidate = PathBuf::from(home).join(".gnx");
+    resolve_home_gnx_from_env(std::env::var_os("HOME"))
+}
+
+/// Same resolution logic as [`resolve_home_gnx`], but with the HOME source
+/// supplied by the caller. In-process tests (or any caller wanting to point
+/// gnx at a private home without mutating the process-global `HOME` env
+/// var) call this with an explicit override. Production code paths read
+/// the env var via [`resolve_home_gnx`].
+///
+/// `#[allow(dead_code)]` because the only intended caller today is the
+/// future in-process integration test refactor; ships now so the public
+/// API is in place when that work lands without forcing it into the
+/// same PR.
+#[allow(dead_code)]
+pub fn resolve_home_gnx_from<P: AsRef<Path>>(home: P) -> PathBuf {
+    let candidate = home.as_ref().join(".gnx");
+    if candidate.join("registry.json").exists() || probe_writable(&candidate) {
+        return candidate;
+    }
+    fallback_home()
+}
+
+fn resolve_home_gnx_from_env(home: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(h) = home {
+        let candidate = PathBuf::from(h).join(".gnx");
         if candidate.join("registry.json").exists() || probe_writable(&candidate) {
             return candidate;
         }
     }
+    fallback_home()
+}
+
+fn fallback_home() -> PathBuf {
     std::env::temp_dir()
         .join("graph-nexus-fallback")
         .join(".gnx")

@@ -32,3 +32,24 @@ categories = ["development-tools"]
 # 特定 lint 規則，所有 crate 透過 [lints] workspace = true opt-in。
 [workspace.lints.clippy]
 
+# Distribution release profile — used for `cargo install --git` and
+# the GitHub Release artifact build. Runtime focus (not size, not
+# build-time): whole-program LTO + single codegen unit lets the
+# compiler inline across crate boundaries. Build time ~3-4x default
+# release; only matters for the once-per-version distribution build.
+#
+# Standard `cargo build --release` keeps the default profile (fast
+# build, no LTO) so dev loops and CI test runs stay snappy.
+#
+# Local install with this-CPU instruction set (Skylake AVX, etc.):
+#   RUSTFLAGS="-C target-cpu=native" cargo install --git <url> \
+#     --profile release-dist
+# target-cpu=native is opt-in via env var because the resulting binary
+# only runs on the build host's CPU family — wrong choice for the
+# distribution binary, but right for a user installing onto their own
+# machine.
+[profile.release-dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

@@ -53,10 +53,20 @@ Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via
 ### Every platform (works today, no Release required)
 
 ```bash
-cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx --locked
+cargo install --git https://github.com/coseto6125/graph-nexus graph-nexus --bin gnx --locked
 ```
 
 Needs a Rust toolchain ([rustup.rs](https://rustup.rs)). Source build — first compile takes a few minutes, cached afterwards.
+
+**Optimized for your CPU (recommended for personal install)**:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" \
+  cargo install --git https://github.com/coseto6125/graph-nexus graph-nexus \
+  --bin gnx --locked --profile release-dist
+```
+
+`release-dist` enables fat LTO + single codegen unit (slower build, faster runtime). `target-cpu=native` lets the compiler use this machine's full ISA (AVX2/AVX-512/NEON variants) — the resulting binary will only run on CPUs with the same feature set, which is fine for a self-install.
 
 ### Per-platform one-liners
 
