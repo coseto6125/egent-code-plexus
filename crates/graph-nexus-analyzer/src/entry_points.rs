@@ -262,9 +262,16 @@ fn dedup_keep_highest(mut items: Vec<EntryPoint>) -> Vec<EntryPoint> {
     for ep in items {
         match out.last_mut() {
             Some(prev) if prev.uid == ep.uid => {
-                // ep is the lower-scoring sibling; fold its reason in.
-                prev.reason.push_str("; also: ");
-                prev.reason.push_str(&ep.reason);
+                // ep is the lower-scoring sibling; fold its reason in,
+                // but skip if the same fragment is already present —
+                // happens when a decorator-style route is reported both
+                // by the builder's Pass 1.5 (as RawRoute) and by the
+                // scorer's own decorator walk, yielding identical
+                // `reason` strings.
+                if !prev.reason.contains(ep.reason.as_str()) {
+                    prev.reason.push_str("; also: ");
+                    prev.reason.push_str(&ep.reason);
+                }
             }
             _ => out.push(ep),
         }
@@ -499,5 +506,35 @@ mod tests {
     fn empty_inputs_yield_empty_output() {
         let eps = score_entry_points(&[], &[], &[]);
         assert!(eps.is_empty());
+    }
+
+    /// Regression: FastAPI / Flask decorator-style routes are surfaced
+    /// twice — once by the builder's Pass 1.5 (as a `RawRoute`) and once
+    /// by `score_entry_points` itself walking `node.decorators`. Both
+    /// paths emit identical `reason` strings, and the previous dedup
+    /// would fold the second into `"X; also: X"`. Verify the duplicate
+    /// reason fragment is not appended.
+    #[test]
+    fn decorator_double_report_does_not_duplicate_reason() {
+        let mut handler = mk_node("list_items", NodeKind::Function);
+        handler.decorators.push("@app.get(\"/items\")".to_string());
+
+        let routes = vec![RawRoute {
+            method: "GET".into(),
+            path: "/items".into(),
+            handler: Some("list_items".into()),
+            span: (0, 0, 0, 0),
+        }];
+
+        let eps = score_entry_points(&routes, &[], &[handler]);
+        assert_eq!(eps.len(), 1, "must dedup to one entry, got {:?}", eps);
+        let reason = &eps[0].reason;
+        assert!(
+            !reason.contains("; also: route:GET /items"),
+            "duplicate reason fragment must not be folded in; got {:?}",
+            reason
+        );
+        // The base reason itself stays.
+        assert_eq!(reason, "route:GET /items");
     }
 }

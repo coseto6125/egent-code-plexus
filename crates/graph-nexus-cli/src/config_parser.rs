@@ -174,20 +174,41 @@ pub struct NugetConfigMeta {
 
 /// Scan `repo_path` for all `*.csproj` files (up to 2 directory levels deep)
 /// and parse each one.
+/// Default directory-recursion depth for `*.csproj` discovery. Real .NET
+/// monorepos often nest `src/<area>/<project>/<project>.csproj` (depth 3) or
+/// `eng/templates/<thing>.csproj` (depth 2+); 4 covers the common cases
+/// while still bounding worst-case I/O. Override at runtime via
+/// `GNX_CSPROJ_MAX_DEPTH`.
+const CSPROJ_MAX_DEPTH_DEFAULT: u8 = 4;
+
+fn resolve_csproj_max_depth() -> u8 {
+    std::env::var("GNX_CSPROJ_MAX_DEPTH")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(CSPROJ_MAX_DEPTH_DEFAULT)
+}
+
 pub fn parse_csproj_files(repo_path: &Path) -> Vec<CsprojMeta> {
     let mut results = Vec::new();
-    collect_csproj(repo_path, repo_path, 0, &mut results);
+    let max_depth = resolve_csproj_max_depth();
+    collect_csproj(repo_path, repo_path, 0, max_depth, &mut results);
     results
 }
 
-fn collect_csproj(root: &Path, dir: &Path, depth: u8, out: &mut Vec<CsprojMeta>) {
+fn collect_csproj(
+    root: &Path,
+    dir: &Path,
+    depth: u8,
+    max_depth: u8,
+    out: &mut Vec<CsprojMeta>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() && depth < 2 {
-            collect_csproj(root, &path, depth + 1, out);
+        if path.is_dir() && depth < max_depth {
+            collect_csproj(root, &path, depth + 1, max_depth, out);
         } else if path
             .extension()
             .map(|e| e.eq_ignore_ascii_case("csproj"))
