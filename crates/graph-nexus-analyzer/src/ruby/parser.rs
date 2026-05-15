@@ -104,6 +104,7 @@ fn push_alias_binding(imports: &mut Vec<RawImport>, new_name: &str, source: &str
             alias: Some(new_name.to_string()),
             imported_name: new_name.to_string(),
             source: source.to_string(),
+            binding_kind: None,
         });
     }
 }
