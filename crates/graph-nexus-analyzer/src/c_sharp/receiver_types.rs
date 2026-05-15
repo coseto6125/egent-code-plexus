@@ -382,6 +382,35 @@ class App {
         );
     }
 
+    /// Property guard: a `var items = ...` or `List<string> items = ...`
+    /// declaration must NOT bind `items → List` — calling `items.Add()` would
+    /// then emit `"List.Add"`, which is meaningless against the generic
+    /// instantiation. `simple_id_and_type` rejects non-`identifier` type
+    /// nodes for this reason; this test pins that behaviour.
+    #[test]
+    fn csharp_generic_type_does_not_bind_bare_type() {
+        let src = r#"
+class App {
+    void Use() {
+        List<string> items = new List<string>();
+        items.Add("x");
+    }
+}
+"#;
+        let graph = parse(src);
+        let use_fn = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "Use")
+            .expect("Use method not found");
+        assert!(
+            !use_fn.calls.iter().any(|c| c == "List.Add"),
+            "must NOT bind generic `List<string>` to bare `List`; got {:?}",
+            use_fn.calls
+        );
+        // bare `Add` is acceptable fallback (no type info)
+    }
+
     /// Regression: `base.Foo()` in a class WITHOUT base must emit bare `"Foo"`,
     /// not a synthetic `"base.Foo"` that pollutes the graph.
     #[test]
