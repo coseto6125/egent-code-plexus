@@ -3,7 +3,8 @@
 //! Tests cover:
 //!   - Positional <name> replaces old --target <UID>
 //!   - --kind / --file_path / --relation_types filters
-//!   - --high-trust-only default true
+//!   - --high-trust-only default false (recall-first)
+//!   - hidden_edges counter when min_conf filter drops edges
 //!   - --since <ref> for diff-mode
 //!   - <name> and --since mutual exclusion
 //!   - Empty callers hint when 0 incoming (upstream)
@@ -183,7 +184,7 @@ fn impact_accepts_target_flag_as_alias_for_positional() {
 }
 
 #[test]
-fn impact_high_trust_only_default_true() {
+fn impact_high_trust_only_default_false() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(gnx_bin())
         .args(["impact", "--help"])
@@ -195,12 +196,89 @@ fn impact_high_trust_only_default_true() {
         help.contains("--high-trust-only"),
         "--high-trust-only not in help: {help}"
     );
-    // The description explicitly states "Default ON" to signal the default is true.
+    // After the recall-first flip, the description states "Default OFF" and
+    // tells the user how to opt back into the high-trust filter.
     assert!(
-        help.contains("Default ON")
-            || help.contains("default: true")
-            || help.contains("high-trust-only=false"),
-        "--high-trust-only description should indicate it defaults to on:\n{help}"
+        help.contains("Default OFF")
+            || help.contains("default: false")
+            || help.contains("--high-trust-only=true"),
+        "--high-trust-only description should indicate it defaults to off:\n{help}"
+    );
+}
+
+#[test]
+fn impact_hidden_edges_counted_when_min_conf_filters() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    // Force every edge to fall below threshold (max real confidence is 1.0)
+    // so the BFS visits the start node, considers every outgoing edge, and
+    // increments the counter for each one it drops.
+    let result = run_impact(
+        tmp.path(),
+        &[
+            "caller",
+            "--direction",
+            "down",
+            "--depth",
+            "5",
+            "--min-confidence",
+            "1.5",
+        ],
+    );
+
+    let impact_len = result["impact"].as_array().unwrap().len();
+    assert_eq!(
+        impact_len, 1,
+        "all edges should be filtered, only start node remains: {result}"
+    );
+    let hidden = result["hidden_edges"].as_u64();
+    assert!(
+        hidden.is_some_and(|n| n > 0),
+        "hidden_edges should be present and > 0 when filter drops edges: {result}"
+    );
+}
+
+#[test]
+fn impact_hidden_edges_absent_when_no_filtering() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    // Default flag set (high-trust-only=false → min_conf=0.0) admits every
+    // edge, so the counter stays at zero and the field is omitted to keep
+    // happy-path output noise-free.
+    let result = run_impact(
+        tmp.path(),
+        &["caller", "--direction", "down", "--depth", "5"],
+    );
+
+    assert!(
+        result.get("hidden_edges").is_none(),
+        "hidden_edges should be absent when nothing was filtered: {result}"
+    );
+}
+
+#[test]
+fn impact_hidden_edges_footer_emitted_to_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    let stderr = run_impact_stderr(
+        tmp.path(),
+        &[
+            "caller",
+            "--direction",
+            "down",
+            "--depth",
+            "5",
+            "--min-confidence",
+            "1.5",
+        ],
+    );
+
+    assert!(
+        stderr.contains("edges hidden") && stderr.contains("--high-trust-only"),
+        "stderr footer should mention hidden edges and the flag: {stderr}"
     );
 }
 

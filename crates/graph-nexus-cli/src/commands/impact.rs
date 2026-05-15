@@ -55,9 +55,13 @@ pub struct ImpactArgs {
     #[arg(long, default_value_t = 5)]
     pub depth: usize,
 
-    /// Default ON — only follow confidence ≥ 0.8 edges (framework-aware
-    /// references). Override with `--high-trust-only=false` to walk all.
-    #[arg(long, alias = "high_trust_only", default_value_t = true, action = clap::ArgAction::Set)]
+    /// Default OFF — recall-first: traverse every edge regardless of
+    /// confidence (cross-crate refs at 0.7 are still real callers, just
+    /// less certain). Pass `--high-trust-only=true` to restrict to
+    /// confidence ≥ 0.8 edges for a noise-light view; when filtering kicks
+    /// in, the output reports `hidden_edges` so missed coverage stays
+    /// visible.
+    #[arg(long, alias = "high_trust_only", default_value_t = false, action = clap::ArgAction::Set)]
     pub high_trust_only: bool,
 
     /// Override the high-trust threshold with a custom value (0.0–1.0).
@@ -181,8 +185,9 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
 
     let mut all_results: Vec<Value> = Vec::new();
+    let mut hidden_edges_total: u64 = 0;
     for start_idx in &matches {
-        let bfs_result = run_bfs(
+        let (bfs_result, hidden) = run_bfs(
             graph,
             *start_idx,
             &args.direction,
@@ -192,6 +197,7 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
             &rel_filter,
         );
         all_results.extend(bfs_result);
+        hidden_edges_total += hidden;
     }
 
     // Empty callers hint for upstream direction.
@@ -227,6 +233,7 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
         "direction": direction_str(&args.direction),
         "impact": all_results,
     });
+    attach_hidden_edges(&mut result_obj, hidden_edges_total);
 
     if !all_blind_spot_kinds.is_empty() {
         let mut by_kind = std::collections::BTreeMap::<String, u32>::new();
@@ -253,6 +260,7 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
             "→ \"{name}\" exists but has 0 incoming references. Possible: entry point, dead code, or recent rename. Try --direction both / --include-tests"
         );
     }
+    emit_hidden_edges_footer(hidden_edges_total);
 
     Ok(())
 }
@@ -399,6 +407,7 @@ fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
 
     // Run BFS from each changed symbol.
     let mut impact_by_symbol: Vec<Value> = Vec::new();
+    let mut hidden_edges_total: u64 = 0;
     for &start_idx in &changed_node_indices {
         let node = &graph.nodes[start_idx];
         let sym_name = node.name.resolve(&graph.string_pool).to_string();
@@ -406,7 +415,7 @@ fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
             .path
             .resolve(&graph.string_pool)
             .to_string();
-        let bfs_result = run_bfs(
+        let (bfs_result, hidden) = run_bfs(
             graph,
             start_idx,
             &args.direction,
@@ -420,15 +429,39 @@ fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
             "filePath": sym_file,
             "impact": bfs_result,
         }));
+        hidden_edges_total += hidden;
     }
 
-    let result = json!({
+    let mut result = json!({
         "status": "success",
         "since": since_ref,
         "changed_symbols": changed_symbols,
         "impact_by_symbol": impact_by_symbol,
     });
-    emit(&result, format)
+    attach_hidden_edges(&mut result, hidden_edges_total);
+    emit(&result, format)?;
+    emit_hidden_edges_footer(hidden_edges_total);
+    Ok(())
+}
+
+/// Attach the hidden-edge count to the JSON result when filtering actually
+/// dropped something. Skipping the field when N=0 keeps default invocations
+/// noise-free and lets callers branch on `result.get("hidden_edges")`.
+fn attach_hidden_edges(result: &mut Value, hidden_edges: u64) {
+    if hidden_edges > 0 {
+        result["hidden_edges"] = json!(hidden_edges);
+    }
+}
+
+/// Stderr footer mirroring `attach_hidden_edges` — emitted only when the
+/// trust filter dropped at least one edge, routed to stderr so it doesn't
+/// corrupt machine-readable JSON/TOON on stdout.
+fn emit_hidden_edges_footer(hidden_edges: u64) {
+    if hidden_edges > 0 {
+        eprintln!(
+            "note: {hidden_edges} edges hidden by trust filter (drop --high-trust-only / --min-confidence to see all)"
+        );
+    }
 }
 
 /// Resolve the effective confidence threshold from `--min-confidence` /
@@ -459,10 +492,16 @@ fn direction_str(dir: &Direction) -> &'static str {
 
 /// Core BFS over the graph from `start_idx`.
 ///
-/// Returns a flat Vec of JSON objects (one per visited node). The start node
-/// appears at depth 0. `--include-tests` / `--relation-types` / `min_conf` are
-/// applied here; `--kind` / `--file` emission-only filtering is NOT applied
-/// here (callers can filter the returned Vec if needed).
+/// Returns `(visited_nodes, hidden_edges)`. The start node appears at
+/// depth 0. `--include-tests` / `--relation-types` / `min_conf` are
+/// applied here; `--kind` / `--file` emission-only filtering is NOT
+/// applied here (callers can filter the returned Vec if needed).
+///
+/// `hidden_edges` counts edges dropped *because their confidence fell
+/// below `min_conf`* — i.e. the surface area lost to the high-trust
+/// filter. Edges skipped for other reasons (`--include-tests`,
+/// `--relation-types`, already-visited target) are NOT counted, since
+/// those are explicit user-driven filters rather than the silent default.
 fn run_bfs(
     graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
     start_idx: usize,
@@ -471,7 +510,7 @@ fn run_bfs(
     min_conf: f32,
     include_tests: bool,
     rel_filter: &Option<Vec<String>>,
-) -> Vec<Value> {
+) -> (Vec<Value>, u64) {
     type ViaEdge = Option<(String, f32)>;
     type Step = (usize, usize, ViaEdge);
 
@@ -479,6 +518,7 @@ fn run_bfs(
     let mut queue: VecDeque<Step> = VecDeque::new();
     let mut results = Vec::new();
     let mut test_path_cache = HashMap::new();
+    let mut hidden_edges: u64 = 0;
 
     queue.push_back((start_idx, 0, None));
     visited.insert(start_idx);
@@ -530,6 +570,7 @@ fn run_bfs(
                     let edge = &graph.edges[edge_idx];
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
+                        hidden_edges += 1;
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
@@ -555,6 +596,7 @@ fn run_bfs(
                     let edge = &graph.edges[i];
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
+                        hidden_edges += 1;
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
@@ -578,6 +620,7 @@ fn run_bfs(
                     let edge = &graph.edges[i];
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
+                        hidden_edges += 1;
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
@@ -597,7 +640,7 @@ fn run_bfs(
         }
     }
 
-    results
+    (results, hidden_edges)
 }
 
 fn collect_blind_spots(
