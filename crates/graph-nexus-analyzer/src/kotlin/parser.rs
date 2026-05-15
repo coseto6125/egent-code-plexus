@@ -1,10 +1,25 @@
 use super::receiver_types::extract_kotlin_calls;
+use crate::framework_confidence;
+use crate::framework_helpers::{has_import_from, node_span, MODULE_LEVEL_SOURCE};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+// Framework-presence gate: only emit Ktor refs when the file imports io.ktor.*.
+const KTOR_REQUIRED: &[&str] = &["io.ktor"];
+
+/// Verb capture-index pairs. Indexed in lockstep with the per-verb captures in
+/// `frameworks.scm` so the dispatch reads as a flat table — no alternation regex.
+struct KtorVerbIndices {
+    get: Option<u32>,
+    post: Option<u32>,
+    put: Option<u32>,
+    delete: Option<u32>,
+    patch: Option<u32>,
+}
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -16,14 +31,32 @@ thread_local! {
 }
 pub struct KotlinProvider {
     query: Query,
+    ktor: KtorVerbIndices,
+    idx_ktor_path: Option<u32>,
 }
 
 impl KotlinProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_kotlin::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        let query = Query::new(&language, &query_source)?;
+        let ktor = KtorVerbIndices {
+            get: query.capture_index_for_name("ktor.route.get"),
+            post: query.capture_index_for_name("ktor.route.post"),
+            put: query.capture_index_for_name("ktor.route.put"),
+            delete: query.capture_index_for_name("ktor.route.delete"),
+            patch: query.capture_index_for_name("ktor.route.patch"),
+        };
+        let idx_ktor_path = query.capture_index_for_name("ktor.route.path");
+        Ok(Self {
+            query,
+            ktor,
+            idx_ktor_path,
+        })
     }
 }
 
@@ -56,6 +89,10 @@ impl LanguageProvider for KotlinProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
 
+        // Pending Ktor route refs: (verb, path_string, capture_span).
+        // Emitted only if the file imports `io.ktor.*` — gate applied after the loop.
+        let mut pending_ktor_refs: Vec<(&'static str, String, (u32, u32, u32, u32))> = Vec::new();
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -68,9 +105,32 @@ impl LanguageProvider for KotlinProvider {
             let mut import_src = None;
             let mut import_alias = None;
 
+            // Ktor route capture state for the current match — populated below
+            // when the corresponding @ktor.route.<verb> + @ktor.route.path pair fires.
+            let mut ktor_verb: Option<&'static str> = None;
+            let mut ktor_route_span: Option<(u32, u32, u32, u32)> = None;
+            let mut ktor_path_node: Option<tree_sitter::Node> = None;
+
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_class_name {
+                if Some(cap_idx) == self.ktor.get {
+                    ktor_verb = Some("get");
+                    ktor_route_span = Some(node_span(&cap.node));
+                } else if Some(cap_idx) == self.ktor.post {
+                    ktor_verb = Some("post");
+                    ktor_route_span = Some(node_span(&cap.node));
+                } else if Some(cap_idx) == self.ktor.put {
+                    ktor_verb = Some("put");
+                    ktor_route_span = Some(node_span(&cap.node));
+                } else if Some(cap_idx) == self.ktor.delete {
+                    ktor_verb = Some("delete");
+                    ktor_route_span = Some(node_span(&cap.node));
+                } else if Some(cap_idx) == self.ktor.patch {
+                    ktor_verb = Some("patch");
+                    ktor_route_span = Some(node_span(&cap.node));
+                } else if Some(cap_idx) == self.idx_ktor_path {
+                    ktor_path_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
                 } else if Some(cap_idx) == idx_function_name {
@@ -173,6 +233,19 @@ impl LanguageProvider for KotlinProvider {
                     });
                 }
             }
+
+            // Stash Ktor route capture for post-loop gate. Path is from
+            // `string_content` (already unquoted); verb is the per-pattern
+            // capture name, so no regex alternation in Rust.
+            if let (Some(verb), Some(span), Some(path_node)) =
+                (ktor_verb, ktor_route_span, ktor_path_node)
+            {
+                if let Ok(path_str) =
+                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()])
+                {
+                    pending_ktor_refs.push((verb, path_str.to_string(), span));
+                }
+            }
         }
 
         let mut nodes: Vec<RawNode> = node_map.into_values().collect();
@@ -181,6 +254,25 @@ impl LanguageProvider for KotlinProvider {
         // `super.foo()`, and typed-variable `obj.foo()` patterns.
         extract_kotlin_calls(tree.root_node(), source, &mut nodes);
 
+        // Ktor framework-presence gate: only emit refs when the file
+        // imports `io.ktor.*`. The route DSL verbs (`get`/`post`/...) are
+        // common identifiers, so without the gate we would over-claim.
+        let has_ktor = has_import_from(&imports, KTOR_REQUIRED);
+        let framework_refs: Vec<RawFrameworkRef> = if has_ktor {
+            pending_ktor_refs
+                .into_iter()
+                .map(|(verb, path, span)| RawFrameworkRef {
+                    source_name: MODULE_LEVEL_SOURCE.to_string(),
+                    target_name: path,
+                    confidence: framework_confidence::KTOR_ROUTE,
+                    reason: format!("ktor-route-{}", verb),
+                    span,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes: vec![],
@@ -188,7 +280,7 @@ impl LanguageProvider for KotlinProvider {
             nodes,
             imports,
             documents: vec![],
-            framework_refs: vec![],
+            framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
         })
