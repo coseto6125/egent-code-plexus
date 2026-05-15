@@ -96,12 +96,12 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
             std::process::id()
         ));
 
+        bindings::dump(&repo_dir, &current_jsonl)?;
+
         {
             let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
             bindings::dump(&repo_dir, &baseline_jsonl)?;
         } // _guard dropped here — restores branch + stash
-
-        bindings::dump(&repo_dir, &current_jsonl)?;
 
         let baseline_map = bindings::load_jsonl(&baseline_jsonl)?;
         let current_map = bindings::load_jsonl(&current_jsonl)?;
