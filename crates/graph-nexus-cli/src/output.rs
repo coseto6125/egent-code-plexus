@@ -87,4 +87,21 @@ mod tests {
         assert!(!out.is_empty());
         assert!(!out.starts_with('{'));
     }
+
+    #[test]
+    fn emit_to_string_text_falls_back_to_pretty_json_when_no_results_field() {
+        let value = json!({"status": "success"});
+        let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
+        // Pretty-JSON fallback retains the JSON shape (indented).
+        assert!(out.contains("\"status\""));
+        assert!(out.contains("\"success\""));
+    }
+
+    #[test]
+    fn emit_to_string_text_silently_drops_non_string_results_entries() {
+        let value = json!({"results": [123, "hello", true, "world"]});
+        let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
+        // Non-string entries are filtered out — only strings remain, joined by \n.
+        assert_eq!(out, "hello\nworld");
+    }
 }
