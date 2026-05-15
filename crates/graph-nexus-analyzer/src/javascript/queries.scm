@@ -66,3 +66,32 @@
   function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))
   arguments: (arguments (string (string_fragment) @route.path))
 ) @route.call
+
+;; ---- framework queries ----
+
+;; Express: app.{get,post,put,delete,patch,use}(<path_str>, <handler_ident>)
+;; Captures the handler identifier passed as the second argument so the parser
+;; can bind a handler->route framework_ref. Gated downstream by `import ... 'express'`.
+(call_expression
+  function: (member_expression
+    object: (identifier)
+    property: (property_identifier) @express.route.method
+    (#match? @express.route.method "^(get|post|put|delete|patch|use|all|options|head)$"))
+  arguments: (arguments
+    (string) @express.route.path
+    (identifier) @express.route.handler))
+
+;; Hapi: server.route({ method: 'GET', path: '/u', handler: getUsers })
+;; Captures the handler identifier from the option-object pair. Gated downstream
+;; by `import ... '@hapi/hapi'` (or `'hapi'`).
+(call_expression
+  function: (member_expression
+    object: (identifier)
+    property: (property_identifier) @hapi.route.kw
+    (#eq? @hapi.route.kw "route"))
+  arguments: (arguments
+    (object
+      (pair
+        key: (property_identifier) @hapi.route.handler.key
+        value: (identifier) @hapi.route.handler)
+      (#eq? @hapi.route.handler.key "handler"))))
