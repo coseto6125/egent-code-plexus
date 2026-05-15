@@ -79,46 +79,130 @@ prompt-layer mechanisms; the model sees them as text, not tools.
 ### Pre-reqs
 
 - Claude Code installed (`claude` on PATH)
-- `gnx-mcp` binary on PATH (to be built — see below)
+- `gnx` binary on PATH (the existing CLI; MCP mode is a subcommand of
+  the same binary, not a separate executable — see "Single-binary
+  model" below)
 
-### Build target
+### Single-binary model: `gnx mcp serve`
 
-A new crate `crates/graph-nexus-mcp/` exposes a stdio JSON-RPC MCP
-server. It wraps a subset of `graph-nexus-cli::commands::*` as MCP
-tools. Initial tool set (mirrors upstream gitnexus naming for
-familiarity):
+A new crate `crates/graph-nexus-mcp/` exposes the **server library**
+(stdio JSON-RPC handler, tool dispatch, schema generation). The
+existing `graph-nexus-cli` crate adds a thin `mcp` subcommand that
+wraps the library:
 
-| MCP tool | Wraps |
+```bash
+# CLI mode — existing usage unchanged
+gnx context --name foo
+
+# MCP server mode — what hosts invoke
+gnx mcp serve            # stdio JSON-RPC server, blocks until host disconnects
+gnx mcp tools            # list exposed tools (debug)
+```
+
+Host config writes `command: "gnx", args: ["mcp", "serve"]` —
+one binary serves all callers, no separate `gnx-mcp` install step,
+no PATH duplication.
+
+### Shared business-logic refactor (precondition)
+
+Both CLI and MCP code paths must call the same business logic
+without re-implementation. The refactor splits every
+`commands/<x>.rs` into two halves:
+
+```rust
+// commands/context.rs
+
+// 1. Args struct gains 3 extra derives — no behavioural change for CLI.
+#[derive(Args, Serialize, Deserialize, JsonSchema)]
+pub struct ContextArgs { /* fields */ }
+
+// 2. Business logic moves into run_inner — returns structured JSON.
+pub fn run_inner(args: ContextArgs, engine: &Engine)
+    -> Result<serde_json::Value>;
+
+// 3. CLI entry becomes a thin wrapper: run = run_inner + emit().
+pub fn run(args: ContextArgs, engine: &Engine) -> Result<()> {
+    let value = run_inner(args, engine)?;
+    emit(&value, args.format)
+}
+```
+
+MCP side then consumes `run_inner` directly, **but renders output as
+TOON (token-efficient), not raw JSON** — this preserves the project's
+token-cheapest-output principle which is the whole point of the Rust
+port vs upstream:
+
+```rust
+// graph-nexus-mcp/src/tools.rs
+async fn context_handler(args: Value, engine: &Engine) -> ToolResult {
+    let parsed: ContextArgs = serde_json::from_value(args)?;
+    let value = commands::context::run_inner(parsed, engine)?;
+
+    // Default to TOON for max token economy.  Model may override per
+    // call via an extra `format` arg if it specifically needs JSON
+    // for downstream parsing (mirrors gnx CLI's --format flag).
+    let format = parsed.format.unwrap_or(OutputFormat::Toon);
+    let body = output::emit_to_string(&value, format)?;
+    ToolResult::text(body)   // text content, NOT json content
+}
+```
+
+Output handling refactor (paired with `run_inner` split):
+
+- `output::emit_to_string(value, format) -> Result<String>` — new helper,
+  same serialization logic the CLI uses, but returns a String instead
+  of writing to stdout.
+- `output::emit(value, format)` becomes `println!("{}", emit_to_string(value, format)?)`.
+
+The CLI's per-command default format (some commands default `toon`,
+some `text`, some `compact` — already token-optimized per the
+README) is preserved on the CLI path. MCP defaults to TOON across all
+tools for consistency and best token density.
+
+JSON schema for MCP tool definition is generated automatically from
+the `JsonSchema` derive (via the `schemars` crate). **No hand-written
+tool schemas.** Both sides read the same source of truth.
+
+Refactor scope: 28 `commands/*.rs` files, +10-15 LOC each, total
+~300-400 LOC mechanical refactor. **Must land before
+`graph-nexus-mcp` crate work begins.**
+
+### Tool set (initial)
+
+Tools exposed via MCP (each name `gnx_<subcommand>` mirrors upstream
+gitnexus for familiarity):
+
+| MCP tool | Wraps `run_inner` of |
 |---|---|
-| `gnx_context` | `commands::context::run` |
-| `gnx_impact` | `commands::impact::run` |
-| `gnx_query` | `commands::query::run` |
-| `gnx_detect_changes` | `commands::detect_changes::run` |
-| `gnx_rename` | `commands::rename::run` |
-| `gnx_route_map` | `commands::route_map::run` |
-| `gnx_shape_check` | `commands::shape_check::run` |
-| `gnx_multi_query` | `commands::multi_query::run` |
+| `gnx_context` | `commands::context` |
+| `gnx_impact` | `commands::impact` |
+| `gnx_query` | `commands::query` |
+| `gnx_detect_changes` | `commands::detect_changes` |
+| `gnx_rename` | `commands::rename` |
+| `gnx_route_map` | `commands::route_map` |
+| `gnx_shape_check` | `commands::shape_check` |
+| `gnx_multi_query` | `commands::multi_query` |
 
-Rust MCP SDK: `rmcp` (or `mcp-rs`) — final pick deferred to
-implementation phase.
+Rust MCP SDK: `rmcp` (Anthropic-blessed) primary candidate; `mcp-rs`
+as fallback. Final pick deferred to implementation phase.
 
 ### Registration steps (what the TUI does)
 
 1. Probe `claude --version` — abort with friendly message if not installed.
-2. Write `~/.config/claude-code/mcp-servers.json` (or per-project
-   `.mcp.json` if user picks project scope) entry:
+2. Atomic read-modify-write `~/.config/claude-code/mcp-servers.json`
+   (or per-project `.mcp.json` if user picks project scope):
    ```json
    {
      "mcpServers": {
        "gnx": {
-         "command": "gnx-mcp",
-         "args": [],
+         "command": "gnx",
+         "args": ["mcp", "serve"],
          "env": {}
        }
      }
    }
    ```
-3. Print uninstall reminder: `gnx admin → Host integration → Claude Code → uninstall`.
+3. Print uninstall reminder: `gnx admin → Bind tool to code agent → MCP → Claude Code → uninstall`.
 
 ### Uninstall
 
@@ -345,7 +429,15 @@ spec. Its subcommands stay inside the TUI — never exposed as
 | Top-level command name | `gnx admin` | Sibling to `gnx config`; "admin" signals "one-off setup" vs `config`'s "edit current settings". |
 | Install command exposure | TUI-only, no flat `gnx install` | User constraint. Keeps `gnx` public surface minimal; install is admin work. |
 | Menu top-level grouping | By **mechanism** (Native / MCP), not by host | User-clarified 2026-05-15: Codex and Gemini both support MCP *and* native; grouping by host would force a false either-or per host. Grouping by mechanism lets the user pick "how invasive" first and surfaces that MCP is the universal fallback for everything Anthropic-grade and below. |
-| MCP side-car scope | One binary serves all MCP hosts | The `gnx-mcp` binary is host-agnostic — Claude Code, Cursor, Windsurf, Cline all consume the same stdio JSON-RPC interface. The TUI's only per-host work is writing to the right config file. |
+| MCP side-car scope | One binary serves all MCP hosts | The `gnx` binary's `mcp serve` subcommand is host-agnostic — Claude Code, Cursor, Windsurf, Cline all consume the same stdio JSON-RPC interface. The TUI's only per-host work is writing to the right config file. |
+| Binary layout | Single `gnx` binary; MCP via `gnx mcp serve` subcommand | User-clarified 2026-05-15: avoids second `gnx-mcp` install / PATH entry. Same binary, two execution modes. The `graph-nexus-mcp` crate provides the server library; `graph-nexus-cli` adds the `mcp` subcommand wrapper. |
+| Args + business-logic sharing | Refactor `commands/<x>.rs::run` → `run_inner` (returns Value) + `run` (calls inner + emit) | User-clarified 2026-05-15: no schema or output duplication between CLI and MCP. Args struct adds `Serialize, Deserialize, JsonSchema` derives; schema auto-generated via `schemars::schema_for!`. MCP wrapper consumes `run_inner` directly. Precondition for graph-nexus-mcp crate work. |
+| MCP output format | TOON by default (`ToolResult::text(toon_body)`) | User-clarified 2026-05-15: raw JSON would defeat the token-economy thesis. Reuse CLI's `emit_to_string(value, OutputFormat::Toon)` helper so MCP and CLI share serialization. Model can override via per-call `format` arg if it specifically needs JSON. |
+| Output helper refactor | Add `output::emit_to_string()` returning String | Split serialization from stdout-write so both CLI (`emit`) and MCP (`ToolResult::text`) consume the same code. Paired with the `run_inner` refactor. |
+| Native install automation | Manual (TUI prints patch + steps) | Too easy to corrupt user's git tree. Auto-`git apply` rejected. |
+| MCP install automation | Fully automated (atomic JSON write) | All MCP host config files are well-known JSON; safe to auto-write with read-modify-write atomicity. TUI just asks "which host?" then writes the entry. |
+| Native scope | Codex + Gemini only | User-clarified 2026-05-15: every other host is either closed source (Cursor/Copilot/Windsurf/Claude Code) or open source with too-small user base to justify per-fork maintenance (Cline/Roo/Aider/Continue). MCP catches all of those. |
+| MCP host coverage | Claude Code, Cursor, Windsurf, Cline/Roo, Copilot Extensions, generic paste-it | Each gets a TUI leaf with the right config-file writer. Side-car binary identical across all. |
 | Auto-patch user forks | No | Too easy to corrupt user's git tree. TUI writes patch file + prints manual steps. |
 | Claude Code integration route | MCP only | Closed source — no other route exists. |
 | Codex CLI integration route | Workspace dep (in-process) | Same language; zero IPC overhead; mmap'd graph shared. |
