@@ -1,4 +1,5 @@
 use crate::engine::Engine;
+use crate::output::{emit, OutputFormat};
 use crate::repo_selector;
 use clap::Args;
 use graph_nexus_core::cypher;
@@ -96,10 +97,16 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
             graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e))
         })?;
 
-    match args.format.as_str() {
-        "toon" => println!("{}", serialize_toon(&result)),
-        _ => println!("{}", serialize_json(&result)),
-    }
+    let rows_json: Vec<serde_json::Value> = result
+        .rows
+        .iter()
+        .map(|row| serde_json::Value::Array(row.iter().map(value_to_json_value).collect()))
+        .collect();
+    let payload = serde_json::json!({
+        "columns": result.columns,
+        "rows": rows_json,
+    });
+    emit(&payload, OutputFormat::parse(Some(args.format.as_str())))?;
     Ok(())
 }
 
@@ -123,17 +130,7 @@ fn format_cypher_error(query: &str, e: &cypher::CypherError) -> String {
     out
 }
 
-fn serialize_json(r: &cypher::QueryResult) -> String {
-    let rows: Vec<serde_json::Value> = r
-        .rows
-        .iter()
-        .map(|row| serde_json::Value::Array(row.iter().map(value_to_json).collect()))
-        .collect();
-    let out = serde_json::json!({ "columns": r.columns, "rows": rows });
-    serde_json::to_string_pretty(&out).unwrap()
-}
-
-fn value_to_json(v: &cypher::Value) -> serde_json::Value {
+fn value_to_json_value(v: &cypher::Value) -> serde_json::Value {
     use cypher::Value::*;
     match v {
         Null => serde_json::Value::Null,
@@ -141,7 +138,7 @@ fn value_to_json(v: &cypher::Value) -> serde_json::Value {
         Int(i) => serde_json::json!(i),
         Float(f) => serde_json::json!(f),
         Str(s) => serde_json::json!(s),
-        List(xs) => serde_json::Value::Array(xs.iter().map(value_to_json).collect()),
+        List(xs) => serde_json::Value::Array(xs.iter().map(value_to_json_value).collect()),
         NodeRef {
             name,
             kind,
@@ -158,74 +155,5 @@ fn value_to_json(v: &cypher::Value) -> serde_json::Value {
         } => {
             serde_json::json!({"rel_type": format!("{rel_type:?}"), "confidence": confidence, "reason": reason})
         }
-    }
-}
-
-fn serialize_toon(r: &cypher::QueryResult) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("columns: {}\n", r.columns.join(", ")));
-    out.push_str(&format!("rows[{}]:\n", r.rows.len()));
-    for row in &r.rows {
-        out.push_str("  ");
-        let cells: Vec<String> = row.iter().map(value_to_toon).collect();
-        out.push_str(&cells.join(", "));
-        out.push('\n');
-    }
-    out
-}
-
-fn value_to_toon(v: &cypher::Value) -> String {
-    use cypher::Value::*;
-    match v {
-        Null => "null".into(),
-        Bool(b) => b.to_string(),
-        Int(i) => i.to_string(),
-        Float(f) => f.to_string(),
-        Str(s) => s.clone(),
-        List(xs) => format!(
-            "[{}]",
-            xs.iter().map(value_to_toon).collect::<Vec<_>>().join(",")
-        ),
-        NodeRef { name, kind, .. } => format!("{name}:{kind}"),
-        EdgeRef {
-            rel_type,
-            confidence,
-            ..
-        } => format!("{rel_type:?}:{confidence}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use graph_nexus_core::cypher::{QueryResult, Value};
-
-    #[test]
-    fn json_serialization_shape() {
-        let r = QueryResult {
-            columns: vec!["a.name".into(), "n".into()],
-            rows: vec![vec![Value::Str("caller".into()), Value::Int(3)]],
-        };
-        let s = serialize_json(&r);
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["columns"], serde_json::json!(["a.name", "n"]));
-        assert_eq!(v["rows"][0][0], "caller");
-        assert_eq!(v["rows"][0][1], 3);
-    }
-
-    #[test]
-    fn toon_serialization_shape() {
-        let r = QueryResult {
-            columns: vec!["a.name".into(), "n".into()],
-            rows: vec![
-                vec![Value::Str("caller".into()), Value::Int(3)],
-                vec![Value::Str("foo".into()), Value::Int(1)],
-            ],
-        };
-        let s = serialize_toon(&r);
-        assert!(s.contains("columns: a.name, n"));
-        assert!(s.contains("rows[2]:"));
-        assert!(s.contains("caller, 3"));
-        assert!(s.contains("foo, 1"));
     }
 }

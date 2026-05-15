@@ -71,7 +71,7 @@ fn run_toon(repo: &std::path::Path, query: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Basic toon output: `columns: a.name, b.name` header + `rows[1]:` count line.
+/// Basic toon output: etoon-encoded columns + rows header + cell values.
 #[test]
 fn toon_output_basic() {
     let tmp = tempfile::tempdir().unwrap();
@@ -82,12 +82,14 @@ fn toon_output_basic() {
         "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a.name, b.name",
     );
 
+    // etoon encodes the column names somewhere in the output (e.g. `a.name,b.name`).
     assert!(
-        stdout.contains("columns: a.name, b.name"),
-        "toon output missing column header:\n{stdout}"
+        stdout.contains("a.name") && stdout.contains("b.name"),
+        "toon output missing column names:\n{stdout}"
     );
+    // One result row means the row-count indicator contains "1".
     assert!(
-        stdout.contains("rows[1]:"),
+        stdout.contains("rows[1]"),
         "toon output should report rows[1] (one call edge):\n{stdout}"
     );
     // The row should contain the caller and callee names.
