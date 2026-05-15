@@ -111,3 +111,76 @@ fn hapi_no_import_no_ref() {
         refs
     );
 }
+
+// ─── Express handler-shape regression (PR #2 review issue #2) ──────────
+//
+// Pre-fix, the Express query only captured `(identifier)` as the handler,
+// so the dominant real-world shapes (arrow, function expr, member access)
+// silently emitted ZERO framework_refs even when imports + routes were
+// otherwise correct. These tests pin every shape.
+
+#[test]
+fn express_arrow_handler_emits_anonymous_ref() {
+    let src = r#"
+        import express from 'express';
+        const app = express();
+        app.get('/u', (req, res) => res.json({}));
+    "#;
+    let refs = parse(src);
+    assert!(
+        has_ref(&refs, "<anonymous>", "express-route"),
+        "expected express-route ref with <anonymous> target, got: {:?}",
+        refs
+    );
+}
+
+#[test]
+fn express_function_expression_handler_emits_anonymous_ref() {
+    let src = r#"
+        import express from 'express';
+        const app = express();
+        app.get('/u', function (req, res) { res.send('ok'); });
+    "#;
+    let refs = parse(src);
+    assert!(
+        has_ref(&refs, "<anonymous>", "express-route"),
+        "expected express-route ref with <anonymous> target, got: {:?}",
+        refs
+    );
+}
+
+#[test]
+fn express_member_expression_handler_emits_full_chain() {
+    let src = r#"
+        import express from 'express';
+        const app = express();
+        app.get('/u', userRoutes.list);
+    "#;
+    let refs = parse(src);
+    assert!(
+        has_ref(&refs, "userRoutes.list", "express-route"),
+        "expected express-route ref with userRoutes.list target, got: {:?}",
+        refs
+    );
+}
+
+// ─── Express `use` is NOT a route (PR #2 review issue #3) ──────────────
+//
+// `app.use('/api', router)` mounts middleware; treating it as a route
+// would falsely surface `router` as an HTTP handler. The verb list must
+// exclude `use`.
+
+#[test]
+fn express_use_is_not_a_route() {
+    let src = r#"
+        import express from 'express';
+        const app = express();
+        app.use('/api', apiRouter);
+    "#;
+    let refs = parse(src);
+    assert!(
+        !has_ref(&refs, "apiRouter", "express-route"),
+        "app.use(...) must NOT emit an express-route ref, got: {:?}",
+        refs
+    );
+}

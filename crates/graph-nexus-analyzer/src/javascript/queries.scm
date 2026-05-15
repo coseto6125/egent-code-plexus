@@ -69,17 +69,31 @@
 
 ;; ---- framework queries ----
 
-;; Express: app.{get,post,put,delete,patch,use}(<path_str>, <handler_ident>)
-;; Captures the handler identifier passed as the second argument so the parser
-;; can bind a handler->route framework_ref. Gated downstream by `import ... 'express'`.
+;; Express: app.{get,post,put,delete,patch,all,options,head}(<path_str>, <handler>)
+;; `use` is INTENTIONALLY excluded — it mounts middleware, not a route, and
+;; emitting a framework_ref for `app.use('/api', apiRouter)` would falsely
+;; surface `apiRouter` as an HTTP handler (fixed: PR #2 review issue #3).
+;;
+;; The second argument can be an identifier (`handleUsers`), a member access
+;; (`userRoutes.list`), or an inline function expression / arrow function.
+;; All four shapes are captured; the parser textualises the handler node
+;; (`<anonymous>` is used for inline functions where no symbolic target
+;; exists) — fixed: PR #2 review issue #2.
+;;
+;; Gated downstream by `import ... 'express'`.
 (call_expression
   function: (member_expression
     object: (identifier)
     property: (property_identifier) @express.route.method
-    (#match? @express.route.method "^(get|post|put|delete|patch|use|all|options|head)$"))
+    (#match? @express.route.method "^(get|post|put|delete|patch|all|options|head)$"))
   arguments: (arguments
     (string) @express.route.path
-    (identifier) @express.route.handler))
+    [
+      (identifier)
+      (member_expression)
+      (arrow_function)
+      (function_expression)
+    ] @express.route.handler))
 
 ;; Hapi: server.route({ method: 'GET', path: '/u', handler: getUsers })
 ;; Captures the handler identifier from the option-object pair. Gated downstream
