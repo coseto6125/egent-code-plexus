@@ -7,9 +7,18 @@ use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
 pub struct CypherArgs {
-    /// The Cypher query string. Accepts the positional form
-    /// (`gnx cypher "MATCH ..."`) — the `--query` named form below
-    /// stays as an alias for parity with old MCP / wrapper habits.
+    /// The Cypher query string. Supports a read-only subset of openCypher:
+    ///
+    /// - Multi-hop patterns: (a)-[:Calls]->(b)-[:Calls]->(c)
+    /// - Variable-length:    (a)-[:Calls*1..3]->(b)
+    /// - Label alternation:  (a:Function|Method)
+    /// - WHERE:              =, <>, <, <=, >, >=, AND, OR, NOT, IN, =~, CONTAINS, STARTS WITH, ENDS WITH
+    /// - Properties:         a.name, a.kind, a.filePath, r.confidence, r.reason
+    /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
+    /// - Pipeline:           WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
+    /// - Output shaping:     RETURN [DISTINCT], ORDER BY, SKIP, LIMIT
+    ///
+    /// Cypher operates on a single graph; --repo must resolve to one repo.
     #[arg(value_name = "QUERY")]
     pub query_positional: Option<String>,
 
