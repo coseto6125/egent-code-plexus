@@ -110,20 +110,48 @@ fn var_declaration_explicit() {
 fn var_declaration_inferred_no_annotation() {
     // Short declarations have no `type:` field in the grammar — the
     // provider must NOT invent one. Inside a function body, `n := 1` is
-    // a `short_var_declaration`; it should not emit a Variable node with
-    // a type annotation. If a Variable `n` is emitted at all, its
-    // `type_annotation` must be None.
+    // a `short_var_declaration`; the contract is: NO Variable node with
+    // that name is emitted via the `var` capture path. (If a future
+    // patch chooses to also emit short-decl vars, this test must be
+    // updated to assert `type_annotation.is_none()` instead — but the
+    // current contract is silent, not "emit with no type".)
     let src = "package p\nfunc f() { n := 1; _ = n }\n";
     let nodes = parse(src);
-    if let Some(n) = nodes
+    let n_var = nodes
         .iter()
-        .find(|n| n.name == "n" && n.kind == NodeKind::Variable)
-    {
-        assert!(
-            n.type_annotation.is_none(),
-            "inferred-type `n` must have no type_annotation, got {:?}",
-            n.type_annotation
-        );
-    }
-    // Either way, the previous assert covers the contract: no fabricated type.
+        .find(|n| n.name == "n" && n.kind == NodeKind::Variable);
+    assert!(
+        n_var.is_none(),
+        "short-decl `n := 1` must NOT emit a Variable via the type-annotated path; got {n_var:?}",
+    );
+}
+
+// ─── Multi-name regression (PR #2 review issue #1) ────────────────────────
+//
+// Pre-fix: `param_name_node` / `var_name_node` were `Option<Node>` and got
+// overwritten by each capture in a multi-name match, so only the LAST name
+// emitted a Variable node. These tests pin the contract that EVERY name in
+// a multi-name decl produces its own Variable carrying the shared type.
+
+#[test]
+fn multi_name_param_emits_one_variable_per_name() {
+    let src = "package p\nfunc f(a, b int) {}\n";
+    let nodes = parse(src);
+    let a = find(&nodes, "a", NodeKind::Variable);
+    let b = find(&nodes, "b", NodeKind::Variable);
+    assert_eq!(a.type_annotation.as_deref(), Some("int"));
+    assert_eq!(b.type_annotation.as_deref(), Some("int"));
+}
+
+#[test]
+fn multi_name_var_decl_emits_one_variable_per_name() {
+    let src = "package p\nvar X, Y int\n";
+    let nodes = parse(src);
+    let x = find(&nodes, "X", NodeKind::Variable);
+    let y = find(&nodes, "Y", NodeKind::Variable);
+    assert_eq!(x.type_annotation.as_deref(), Some("int"));
+    assert_eq!(y.type_annotation.as_deref(), Some("int"));
+    // Go uppercase-first → exported.
+    assert!(x.is_exported);
+    assert!(y.is_exported);
 }
