@@ -46,29 +46,54 @@ impl LanguageProvider for LuaProvider {
         // Used to let the @struct/Class pattern override a prior @const match for the same AST node
         // (both patterns fire on table assignments like `local T = {}`).
         let mut span_to_node_idx = std::collections::HashMap::<(u32, u32), usize>::new();
+        // Names of tables that were promoted to Class kind. Used to attach
+        // `setmetatable(child, {__index = parent})` heritage updates only when
+        // the child is actually a known class node in this file.
+        let mut class_name_to_idx = std::collections::HashMap::<String, usize>::new();
+        // Spans of `function_call` nodes already accounted for by the aliased
+        // require pattern, so the bare-require pattern doesn't emit a duplicate.
+        let mut require_inner_spans = std::collections::HashSet::<(u32, u32, u32, u32)>::new();
+        // Deferred metatable inheritance edges (child_name, parent_name).
+        // Processed after the main loop so the child node's index is known
+        // regardless of capture ordering.
+        let mut pending_meta: Vec<(String, String)> = Vec::new();
 
         let idx_function_name = self.query.capture_index_for_name("function.name");
+        let idx_function_table = self.query.capture_index_for_name("function.table");
         let idx_struct_name = self.query.capture_index_for_name("struct.name");
         let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
+        let idx_import_alias = self.query.capture_index_for_name("import.alias");
+        let idx_import_alias_source = self.query.capture_index_for_name("import.alias.source");
+        let idx_import_inner = self.query.capture_index_for_name("import.inner");
+        let idx_meta_child = self.query.capture_index_for_name("meta.child");
+        let idx_meta_parent = self.query.capture_index_for_name("meta.parent");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import = self.query.capture_index_for_name("import");
+        let idx_import_aliased = self.query.capture_index_for_name("import.aliased");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
+            let mut function_table_node = None;
             let mut kind = None;
             let mut root_span_node = None;
             let mut import_src = None;
+            let mut import_alias_node = None;
+            let mut import_inner_span: Option<(u32, u32, u32, u32)> = None;
             let mut is_struct = false;
+            let mut meta_child_node = None;
+            let mut meta_parent_node = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
                 if Some(cap_idx) == idx_function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
+                } else if Some(cap_idx) == idx_function_table {
+                    function_table_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_struct_name {
                     name_node = Some(cap.node);
                     is_struct = true;
@@ -78,12 +103,26 @@ impl LanguageProvider for LuaProvider {
                         name_node = Some(cap.node);
                         kind = Some(NodeKind::Const);
                     }
-                } else if Some(cap_idx) == idx_import_source {
+                } else if Some(cap_idx) == idx_import_source
+                    || Some(cap_idx) == idx_import_alias_source
+                {
                     import_src = Some(cap.node);
+                } else if Some(cap_idx) == idx_import_alias {
+                    import_alias_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_import_inner {
+                    let s = cap.node.start_position();
+                    let e = cap.node.end_position();
+                    import_inner_span =
+                        Some((s.row as u32, s.column as u32, e.row as u32, e.column as u32));
+                } else if Some(cap_idx) == idx_meta_child {
+                    meta_child_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_meta_parent {
+                    meta_parent_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_struct
                     || Some(cap_idx) == idx_const
                     || Some(cap_idx) == idx_import
+                    || Some(cap_idx) == idx_import_aliased
                 {
                     root_span_node = Some(cap.node);
                 }
@@ -104,6 +143,16 @@ impl LanguageProvider for LuaProvider {
                 }
             }
 
+            // Method via `M.foo = function() end` — emit a Method node whose
+            // name is the field; the table name is currently dropped (no
+            // explicit Method↔Class binding pass exists for Lua yet), but the
+            // method itself becomes addressable in the call graph.
+            let is_table_assigned_method =
+                function_table_node.is_some() && matches!(kind, Some(NodeKind::Function));
+            if is_table_assigned_method {
+                kind = Some(NodeKind::Method);
+            }
+
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
@@ -118,11 +167,17 @@ impl LanguageProvider for LuaProvider {
                         let new_has_priority = matches!(k, NodeKind::Class | NodeKind::Function)
                             && matches!(existing_kind, NodeKind::Const);
                         if new_has_priority {
-                            nodes[existing_idx].kind = k;
+                            nodes[existing_idx].kind = k.clone();
+                            if matches!(k, NodeKind::Class) {
+                                class_name_to_idx.insert(name_str.to_string(), existing_idx);
+                            }
                         }
                         continue;
                     }
                     span_to_node_idx.insert(span_key, nodes.len());
+                    if matches!(k, NodeKind::Class) {
+                        class_name_to_idx.insert(name_str.to_string(), nodes.len());
+                    }
 
                     nodes.push(RawNode {
                         decorators: vec![],
@@ -142,15 +197,65 @@ impl LanguageProvider for LuaProvider {
                 }
             }
 
-            if let Some(i_src) = import_src {
-                if let Ok(src_str) =
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
-                {
+            // Imports: aliased form takes precedence — record the inner
+            // function_call span so the bare-require pattern can dedupe.
+            if let (Some(i_src), Some(alias_node)) = (import_src, import_alias_node) {
+                if let (Ok(src_str), Ok(alias_str)) = (
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                    std::str::from_utf8(&source[alias_node.start_byte()..alias_node.end_byte()]),
+                ) {
                     imports.push(RawImport {
-                        alias: None,
+                        alias: Some(alias_str.to_string()),
                         imported_name: "*".to_string(),
                         source: src_str.to_string(),
                     });
+                    if let Some(span) = import_inner_span {
+                        require_inner_spans.insert(span);
+                    }
+                }
+            } else if let Some(i_src) = import_src {
+                // Bare require — dedupe against any aliased require we already
+                // emitted for the same `function_call` AST node.
+                let req_span = root_span_node.map(|r| {
+                    let s = r.start_position();
+                    let e = r.end_position();
+                    (s.row as u32, s.column as u32, e.row as u32, e.column as u32)
+                });
+                let is_dup = req_span
+                    .map(|sp| require_inner_spans.contains(&sp))
+                    .unwrap_or(false);
+                if !is_dup {
+                    if let Ok(src_str) =
+                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+                    {
+                        imports.push(RawImport {
+                            alias: None,
+                            imported_name: "*".to_string(),
+                            source: src_str.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Metatable inheritance: defer to a second pass so the child
+            // class node (which may have been declared in any earlier match)
+            // is reliably present in `class_name_to_idx`.
+            if let (Some(child), Some(parent)) = (meta_child_node, meta_parent_node) {
+                if let (Ok(child_str), Ok(parent_str)) = (
+                    std::str::from_utf8(&source[child.start_byte()..child.end_byte()]),
+                    std::str::from_utf8(&source[parent.start_byte()..parent.end_byte()]),
+                ) {
+                    pending_meta.push((child_str.to_string(), parent_str.to_string()));
+                }
+            }
+        }
+
+        // Apply metatable-inheritance edges. If the child isn't a known class
+        // (e.g. `setmetatable({}, {__index = X})` on a literal table), skip.
+        for (child, parent) in pending_meta {
+            if let Some(&idx) = class_name_to_idx.get(&child) {
+                if !nodes[idx].heritage.iter().any(|h| h == &parent) {
+                    nodes[idx].heritage.push(parent);
                 }
             }
         }
