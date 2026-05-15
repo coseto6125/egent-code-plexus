@@ -69,9 +69,6 @@ enum Commands {
     /// Internal: detached watcher dispatched by hook-handle
     #[command(hide = true)]
     HookWatcher(commands::hook_watcher::HookWatcherArgs),
-    /// Internal: diff resolver dump against language oracle (gnx-dev QA)
-    #[command(hide = true)]
-    VerifyResolver(commands::verify_resolver::VerifyResolverArgs),
     /// Internal: HTTP consumer key vs route response shape check
     /// (will fold into `contracts` in a future task)
     #[command(hide = true)]
@@ -119,9 +116,6 @@ fn main() {
     match &cli.command {
         Commands::HookHandle(args) => run_no_graph!(commands::hook_handle::run(args.clone())),
         Commands::HookWatcher(args) => run_no_graph!(commands::hook_watcher::run(args.clone())),
-        Commands::VerifyResolver(args) => {
-            run_no_graph!(commands::verify_resolver::run(args.clone()))
-        }
         Commands::Coverage(args) => {
             run_no_graph!(commands::coverage::run(args.clone(), &cli.graph))
         }
@@ -145,7 +139,6 @@ fn main() {
         | Commands::Admin { .. }
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
-        | Commands::VerifyResolver(_)
         | Commands::Hook(_) => None,
     };
     let cwd = repo_opt
@@ -181,7 +174,6 @@ fn main() {
         | Commands::Admin { .. }
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
-        | Commands::VerifyResolver(_)
         | Commands::Hook(_) => {
             unreachable!("handled before graph load")
         }

@@ -37,6 +37,8 @@ pub enum AdminCommands {
     Index(index::IndexArgs),
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
+    /// Diff resolver dump against language oracle (gnx-dev QA)
+    VerifyResolver(crate::commands::verify_resolver::VerifyResolverArgs),
 }
 
 pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexus_core::GnxError> {
@@ -51,5 +53,6 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexu
         AdminCommands::Group { command } => group::run(command),
         AdminCommands::Index(args) => index::run(args).map_err(graph_nexus_core::GnxError::Output),
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),
+        AdminCommands::VerifyResolver(args) => crate::commands::verify_resolver::run(args),
     }
 }
