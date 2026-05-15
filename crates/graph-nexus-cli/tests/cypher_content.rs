@@ -214,3 +214,17 @@ fn cypher_content_handles_missing_file_gracefully() {
         }
     }
 }
+
+/// `cypher --help` must mention the single-repo limitation to guide users.
+#[test]
+fn cypher_help_mentions_single_repo_limit() {
+    let out = Command::new(gnx_bin())
+        .args(["cypher", "--help"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("single") || stdout.contains("one repo") || stdout.contains("graph"),
+        "cypher --help missing repo guidance:\n{stdout}"
+    );
+}
