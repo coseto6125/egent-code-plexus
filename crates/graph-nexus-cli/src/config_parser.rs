@@ -172,6 +172,49 @@ pub struct NugetConfigMeta {
     pub package_sources: Vec<(String, String)>,
 }
 
+/// Parsed metadata from `composer.json` (Task F2).
+///
+/// Mirrors the [`CsprojMeta`] shape: a `kind` discriminator plus the most
+/// useful fields extracted from a PHP package manifest. `requires` /
+/// `requires_dev` are key-only (we don't keep the version constraint
+/// strings, mirroring how the matrix only tracks the dependency set).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComposerJsonMeta {
+    /// Always `"composer-json"`.
+    pub kind: &'static str,
+    /// Relative path of the `composer.json` within the repo (forward-slash).
+    pub file_path: String,
+    /// Top-level `"name"` field, e.g. `"vendor/pkg"`.
+    pub name: Option<String>,
+    /// PHP version constraint from `require.php`, e.g. `"^8.0"`.
+    pub php_version: Option<String>,
+    /// Keys of the `"require"` object (excluding `"php"`).
+    pub requires: Vec<String>,
+    /// Keys of the `"require-dev"` object.
+    pub requires_dev: Vec<String>,
+}
+
+/// Parsed metadata from `Package.swift` (Task F3).
+///
+/// Mirrors the [`CsprojMeta`] shape. `Package.swift` is Swift source — not
+/// JSON — so the parser is regex-based and intentionally conservative: it
+/// extracts only the top-level package name, the leading
+/// `// swift-tools-version:` magic comment, and every `.package(url: "…")`
+/// dependency URL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwiftPackageMeta {
+    /// Always `"swift-package"`.
+    pub kind: &'static str,
+    /// Relative path of the `Package.swift` within the repo (forward-slash).
+    pub file_path: String,
+    /// Value parsed from `// swift-tools-version:<X.Y>` magic comment.
+    pub tools_version: Option<String>,
+    /// First `name: "…"` argument of the top-level `Package(…)` initializer.
+    pub name: Option<String>,
+    /// Every URL captured from `.package(url: "https://…", …)` calls.
+    pub dependency_urls: Vec<String>,
+}
+
 /// Scan `repo_path` for all `*.csproj` files (up to 2 directory levels deep)
 /// and parse each one.
 /// Default directory-recursion depth for `*.csproj` discovery. Real .NET
@@ -195,13 +238,7 @@ pub fn parse_csproj_files(repo_path: &Path) -> Vec<CsprojMeta> {
     results
 }
 
-fn collect_csproj(
-    root: &Path,
-    dir: &Path,
-    depth: u8,
-    max_depth: u8,
-    out: &mut Vec<CsprojMeta>,
-) {
+fn collect_csproj(root: &Path, dir: &Path, depth: u8, max_depth: u8, out: &mut Vec<CsprojMeta>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -230,10 +267,8 @@ fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
 
-    let assembly_name = xml_first_text(&content, "AssemblyName").or_else(|| {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-    });
+    let assembly_name = xml_first_text(&content, "AssemblyName")
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()));
 
     let target_framework = xml_first_text(&content, "TargetFramework")
         .or_else(|| xml_first_text(&content, "TargetFrameworks"));
@@ -279,6 +314,117 @@ pub fn parse_nuget_config(repo_path: &Path) -> Option<NugetConfigMeta> {
     })
 }
 
+// ─── PHP Config: composer.json (Task F2) ────────────────────────────────────
+
+/// serde shape for `composer.json` — only the fields we care about.
+/// Unknown keys are silently dropped (composer manifests carry many
+/// optional fields we don't need: `autoload`, `scripts`, `config`, …).
+#[derive(serde::Deserialize)]
+struct ComposerJsonRaw {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    require: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(rename = "require-dev", default)]
+    require_dev: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Parse a single `composer.json` file.  Returns `None` on read error or
+/// malformed JSON (the caller decides whether absence is an error).
+pub fn parse_single_composer_json(path: &Path, repo_root: &Path) -> Option<ComposerJsonMeta> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let raw: ComposerJsonRaw = serde_json::from_str(&content).ok()?;
+    let rel_path = path
+        .strip_prefix(repo_root)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+
+    let (php_version, requires) = raw.require.map_or((None, Vec::new()), |map| {
+        let mut php = None;
+        let mut keys = Vec::with_capacity(map.len());
+        for (k, v) in map {
+            if k == "php" {
+                php = v.as_str().map(str::to_string);
+            } else {
+                keys.push(k);
+            }
+        }
+        (php, keys)
+    });
+    let requires_dev = raw
+        .require_dev
+        .map(|m| m.into_iter().map(|(k, _)| k).collect())
+        .unwrap_or_default();
+
+    Some(ComposerJsonMeta {
+        kind: "composer-json",
+        file_path: rel_path,
+        name: raw.name,
+        php_version,
+        requires,
+        requires_dev,
+    })
+}
+
+// ─── Swift Config: Package.swift (Task F3) ──────────────────────────────────
+
+/// Parse a single `Package.swift` file via regex (it's Swift source, not JSON).
+/// Returns `None` on read error.  Missing fields produce `None` / empty
+/// collections — a syntactically valid but minimal Package.swift parses fine.
+pub fn parse_single_swift_package(path: &Path, repo_root: &Path) -> Option<SwiftPackageMeta> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let rel_path = path
+        .strip_prefix(repo_root)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+
+    // `// swift-tools-version:5.9` or `// swift-tools-version: 5.9` — the
+    // magic comment is conventionally on the very first line, but we scan
+    // the leading comment block to tolerate banner comments above it.
+    let tools_version = TOOLS_VERSION_RE
+        .captures(&content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string());
+
+    // Top-level `Package(name: "MyPkg", …)` — we look for the first
+    // `name:` argument after the `Package(` token. A more thorough parser
+    // would walk the Swift AST, but Package.swift is highly stylized and
+    // the regex captures the conventional shape used by every package on
+    // the SwiftPM index.
+    let name = PACKAGE_NAME_RE
+        .captures(&content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string());
+
+    let dependency_urls: Vec<String> = DEPENDENCY_URL_RE
+        .captures_iter(&content)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect();
+
+    Some(SwiftPackageMeta {
+        kind: "swift-package",
+        file_path: rel_path,
+        tools_version,
+        name,
+        dependency_urls,
+    })
+}
+
+// Compile-once regexes — `Package.swift` parsing happens once per repo so
+// the static guard amortizes the regex build across any future callers
+// that loop over multiple packages.
+static TOOLS_VERSION_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"//\s*swift-tools-version\s*:\s*([0-9][^\s\r\n]*)").unwrap()
+});
+static PACKAGE_NAME_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"Package\s*\(\s*name\s*:\s*"([^"]+)""#).unwrap()
+});
+static DEPENDENCY_URL_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"\.package\s*\(\s*[^)]*?url\s*:\s*"([^"]+)""#).unwrap()
+});
+
 // ─── Minimal XML helpers (no external parser needed) ────────────────────────
 
 /// Replace every `<!-- ... -->` block in `xml` with whitespace of equal length
@@ -315,18 +461,17 @@ fn xml_first_text(xml: &str, tag: &str) -> Option<String> {
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)? + start;
     let text = xml[start..end].trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// For every element matching `<ElemName … AttrA="…" AttrB="…" …>` return
 /// `(value_of_AttrA, value_of_AttrB)` pairs.  Attribute order in source
 /// doesn't matter; we scan for each name independently.
-fn xml_attrs_pairs(
-    xml: &str,
-    elem: &str,
-    attr_a: &str,
-    attr_b: &str,
-) -> Vec<(String, String)> {
+fn xml_attrs_pairs(xml: &str, elem: &str, attr_a: &str, attr_b: &str) -> Vec<(String, String)> {
     let open_tag = format!("<{}", elem);
     let mut results = Vec::new();
     let mut rest = xml;
@@ -377,7 +522,11 @@ fn xml_attr_value(tag_body: &str, attr_name: &str) -> Option<String> {
     };
     let end = rest[content_start..].find(quote)? + content_start;
     let value = rest[content_start..end].trim().to_string();
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
