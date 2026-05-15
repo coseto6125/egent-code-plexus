@@ -9,6 +9,7 @@ use graph_nexus_core::GnxError;
 
 pub mod baseline;
 pub mod bindings;
+pub mod contracts;
 pub mod git_guard;
 pub mod routes;
 
@@ -65,6 +66,11 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         .iter()
         .any(|s| matches!(s, DiffSection::Routes | DiffSection::All));
 
+    let want_contracts = args
+        .section
+        .iter()
+        .any(|s| matches!(s, DiffSection::Contracts | DiffSection::All));
+
     // Fast-path: identical SHAs → nothing could have changed.
     if baseline_sha == current_sha {
         let mut sections = serde_json::Map::new();
@@ -80,6 +86,13 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
                 "routes".into(),
                 serde_json::to_value(routes::RoutesDiff::default())
                     .map_err(|e| GnxError::Output(format!("routes to_value: {e}")))?,
+            );
+        }
+        if want_contracts {
+            sections.insert(
+                "contracts".into(),
+                serde_json::to_value(contracts::ContractsDiff::default())
+                    .map_err(|e| GnxError::Output(format!("contracts to_value: {e}")))?,
             );
         }
         let envelope = serde_json::json!({
@@ -101,6 +114,7 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
 
     let mut bindings_diff: Option<bindings::BindingsDiff> = None;
     let mut routes_diff: Option<routes::RoutesDiff> = None;
+    let mut contracts_diff: Option<contracts::ContractsDiff> = None;
 
     // Perf note: when both bindings and routes are requested, we call
     // `gnx admin index` twice per state (current + baseline) because bindings
@@ -129,7 +143,7 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         let _ = std::fs::remove_file(&current_jsonl);
     }
 
-    if want_routes {
+    if want_routes || want_contracts {
         // `bindings::dump` invokes `gnx admin index --repo <dir>` which writes
         // graph.bin as a side effect. We reuse that invocation pattern here via
         // a throwaway JSONL path so we can resolve graph.bin from the registry.
@@ -138,8 +152,11 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         // This re-runs admin index twice (baseline + current), each of which is
         // a full re-analyze. When `want_bindings` is also true that means 4 total
         // admin index runs. A future shared-index refactor would halve this cost.
+        //
+        // Optimization: routes and contracts share the same graph.bin, so when
+        // both are requested we do a single baseline capture for both sections.
         let scratch_current = std::env::temp_dir().join(format!(
-            "gnx-diff-routes-scratch-current-{}.jsonl",
+            "gnx-diff-graph-scratch-current-{}.jsonl",
             std::process::id()
         ));
         // Build current graph.bin via admin index; ignore the JSONL output.
@@ -151,12 +168,12 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         let current_graph = crate::graph_path::resolve(legacy_default, &repo_dir);
 
         let baseline_graph_tmp = std::env::temp_dir()
-            .join(format!("gnx-diff-routes-baseline-{baseline_sha}.bin"));
+            .join(format!("gnx-diff-graph-baseline-{baseline_sha}.bin"));
 
         {
             let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
             let scratch_baseline = std::env::temp_dir().join(format!(
-                "gnx-diff-routes-scratch-baseline-{baseline_sha}.jsonl"
+                "gnx-diff-graph-scratch-baseline-{baseline_sha}.jsonl"
             ));
             bindings::dump(&repo_dir, &scratch_baseline)?;
             let _ = std::fs::remove_file(&scratch_baseline);
@@ -170,9 +187,17 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
             })?;
         } // _guard dropped — restores branch + stash
 
-        let current_routes = routes::extract(&current_graph)?;
-        let baseline_routes = routes::extract(&baseline_graph_tmp)?;
-        routes_diff = Some(routes::diff(&baseline_routes, &current_routes));
+        if want_routes {
+            let current_routes = routes::extract(&current_graph)?;
+            let baseline_routes = routes::extract(&baseline_graph_tmp)?;
+            routes_diff = Some(routes::diff(&baseline_routes, &current_routes));
+        }
+
+        if want_contracts {
+            let current_contracts = contracts::extract(&current_graph)?;
+            let baseline_contracts = contracts::extract(&baseline_graph_tmp)?;
+            contracts_diff = Some(contracts::diff(&baseline_contracts, &current_contracts));
+        }
 
         let _ = std::fs::remove_file(&baseline_graph_tmp);
     }
@@ -190,6 +215,13 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
             "routes".into(),
             serde_json::to_value(rd)
                 .map_err(|e| GnxError::Output(format!("routes to_value: {e}")))?,
+        );
+    }
+    if let Some(cd) = &contracts_diff {
+        sections.insert(
+            "contracts".into(),
+            serde_json::to_value(cd)
+                .map_err(|e| GnxError::Output(format!("contracts to_value: {e}")))?,
         );
     }
     let envelope = serde_json::json!({
