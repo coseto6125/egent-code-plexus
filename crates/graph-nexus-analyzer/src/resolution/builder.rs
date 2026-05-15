@@ -1041,6 +1041,40 @@ fn lang_for_path(path: &str) -> Option<response_shapes::Lang> {
 /// resolved `target_file` (looked up from `target_id` via the symbol
 /// table). Delegating to `serde_json` keeps escaping (Unicode controls,
 /// surrogates, line separators) compliant with RFC 8259.
+/// Locate the smallest `Class`-kind raw node whose span fully contains
+/// `raw_node`'s span, returning its heritage list. Used by Pass-2 call-edge
+/// emission to power Tier 2.75 (HeritageScoped) lookups: an unqualified
+/// method call inside `class Bar; include Foo; end` carries Bar's heritage
+/// (`["Foo"]`) so the resolver can probe Foo's file when Tier 1/2/2.5 miss.
+/// Returns an empty slice when the node has no enclosing class (top-level
+/// function, etc.). For Ruby `module Foo` and `class Foo` both emit as
+/// `NodeKind::Class`, so this single check covers Ruby module mixins too.
+fn enclosing_class_heritage<'a>(raw_node: &'a RawNode, local_graph: &'a LocalGraph) -> &'a [String] {
+    if raw_node.kind == NodeKind::Class {
+        return &raw_node.heritage;
+    }
+    let (s_row, s_col, e_row, e_col) = raw_node.span;
+    let mut best: Option<&RawNode> = None;
+    let mut best_span: (u32, u32) = (u32::MAX, u32::MAX);
+    for candidate in &local_graph.nodes {
+        if candidate.kind != NodeKind::Class {
+            continue;
+        }
+        let (cs_row, cs_col, ce_row, ce_col) = candidate.span;
+        let starts_before_or_at = (cs_row, cs_col) <= (s_row, s_col);
+        let ends_after_or_at = (ce_row, ce_col) >= (e_row, e_col);
+        if !(starts_before_or_at && ends_after_or_at) {
+            continue;
+        }
+        let size = (ce_row.saturating_sub(cs_row), ce_col.saturating_sub(cs_col));
+        if size < best_span {
+            best_span = size;
+            best = Some(candidate);
+        }
+    }
+    best.map(|n| n.heritage.as_slice()).unwrap_or(&[])
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -1073,12 +1107,14 @@ fn pass2_emit_node_edges(
         }
     }
 
+    let call_heritage = enclosing_class_heritage(raw_node, local_graph);
     for callee in &raw_node.calls {
-        let targets = resolver.resolve_symbol(
+        let targets = resolver.resolve_symbol_with_heritage(
             &local_graph.file_path,
             callee,
             &local_graph.imports,
             ResolveTarget::Callable,
+            call_heritage,
         );
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {
@@ -1358,7 +1394,10 @@ mod tests {
             match original.tier {
                 DecisionTier::ImportScoped => assert_eq!(v["tier"], "ImportScoped"),
                 DecisionTier::Unresolved => assert_eq!(v["tier"], "Unresolved"),
-                DecisionTier::SameFile | DecisionTier::QualifierScoped | DecisionTier::Global => {
+                DecisionTier::SameFile
+                | DecisionTier::QualifierScoped
+                | DecisionTier::HeritageScoped
+                | DecisionTier::Global => {
                     panic!(
                         "fixture should only produce ImportScoped/Unresolved, got {:?}",
                         original.tier

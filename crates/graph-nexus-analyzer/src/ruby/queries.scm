@@ -65,3 +65,36 @@
   (#match? @include_kind "^(include|extend)$")
   arguments: (argument_list
     [ (constant) (scope_resolution) ] @mixin_module))
+
+;; `alias new_name old_name` keyword — emits a named binding.
+;; tree-sitter-ruby labels the NEW name as field `name` and the original as `alias`.
+(alias
+  name: (identifier) @alias.new
+  alias: (identifier) @alias.old)
+
+;; `alias_method :new_name, :old_name` metaprogramming — same shape as the
+;; keyword form, but parsed as a regular `call`. The two `simple_symbol`
+;; positional args carry the new and old names respectively.
+(call
+  method: (identifier) @_alias_method_call
+  (#match? @_alias_method_call "^alias_method$")
+  arguments: (argument_list) @alias_method.args)
+
+;; Constant alias: `MyConst = OtherModule::Const` (or `MyConst = OtherConst`).
+;; The lhs constraint to `(constant)` filters out `local_var = …` because
+;; lowercase identifiers parse as `identifier`, not `constant`.
+(assignment
+  left: (constant) @const_alias.new
+  right: [ (constant) (scope_resolution) ] @const_alias.source)
+
+;; `def_delegator :target, :method` / `def_delegators :target, :m1, :m2, ...` /
+;; `delegate :m1, :m2, to: :target` metaprogramming — each delegated method
+;; becomes a named binding `<host>.<method>` aliased to `<target>.<method>`.
+;; Receiver-awareness (only honour these when the enclosing class has
+;; `extend Forwardable`) is done in `parser.rs` against `pending_mixins`;
+;; the bare whitelist here is a known false-positive vector for user-defined
+;; methods of the same name (documented in the named-binding spec).
+(call
+  method: (identifier) @delegator_method
+  (#match? @delegator_method "^(def_delegator|def_delegators|delegate)$")
+  arguments: (argument_list) @delegator_args)

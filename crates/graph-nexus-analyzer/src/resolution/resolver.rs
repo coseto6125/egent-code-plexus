@@ -21,6 +21,9 @@ pub enum DecisionTier {
     /// Tier 2.5 — qualifier-scoped lookup succeeded (see
     /// [`ResolutionTier::QualifierScoped`]).
     QualifierScoped,
+    /// Tier 2.75 — heritage-scoped lookup succeeded (see
+    /// [`ResolutionTier::HeritageScoped`]).
+    HeritageScoped,
     Global,
     Unresolved,
 }
@@ -96,6 +99,22 @@ impl<'a> Resolver<'a> {
         symbol_name: &str,
         raw_imports: &[RawImport],
         target: ResolveTarget,
+    ) -> Vec<(NodeId, f32)> {
+        self.resolve_symbol_with_heritage(source_file, symbol_name, raw_imports, target, &[])
+    }
+
+    /// Variant that exposes the caller's enclosing-class heritage to enable
+    /// Tier 2.75 (`HeritageScoped`). Production call edges should prefer this
+    /// so cross-file mixin / inherited-method references resolve through
+    /// `Bar extends Foo` / `class Bar; include Foo; end` without falling
+    /// through to the strict Global tier.
+    pub fn resolve_symbol_with_heritage(
+        &self,
+        source_file: &Path,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+        caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
         let mut results = Vec::new();
         let source_file_str = source_file.to_string_lossy();
@@ -213,6 +232,39 @@ impl<'a> Resolver<'a> {
                 None,
             );
             return results;
+        }
+
+        // Tier 2.75: HeritageScoped — bare-name callee in a class that
+        // extends/includes/mixes in another type. Treat each parent name as
+        // an implicit qualifier and probe the parent's defining file. This
+        // is what makes `class Bar; include Foo; end` resolve a delegated
+        // `read` defined inside `Foo` across files, and the same path serves
+        // Java/Kotlin/C# subclasses calling inherited methods without `this.`.
+        // Stops at the first hit (heritage order is the source-order list
+        // recorded by the parser, mirroring MRO precedence).
+        if !caller_heritage.is_empty() {
+            for base in caller_heritage {
+                if let Some(qf) =
+                    self.resolve_qualifier_file(source_file, base, raw_imports)
+                {
+                    if let Some(node_id) =
+                        self.symbol_table.lookup_in_file(&qf, symbol_name)
+                    {
+                        let conf = ResolutionTier::HeritageScoped.base_confidence();
+                        results.push((node_id, conf));
+                        self.record(
+                            &source_file_str,
+                            symbol_name,
+                            Some(base.as_str()),
+                            DecisionTier::HeritageScoped,
+                            Some(node_id),
+                            0,
+                            Some(conf),
+                        );
+                        return results;
+                    }
+                }
+            }
         }
 
         // Tier 3: Global fallback — emit only when the kind-filtered candidate
