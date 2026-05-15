@@ -37,8 +37,9 @@
 //! (`RelType::Fetches`) is deferred — see `extract_contracts_for_repo`.
 //! The architectural shape, multi-repo gate, matching algorithm, and
 //! payload structure are fully wired; `pairs[]` will populate once the
-//! per-repo extraction is ported from `api_impact` (Route nodes) and
-//! `tool_map` (FETCHES edges).
+//! per-repo extraction is ported from prior implementations of Route-node
+//! iteration and FETCHES-edge traversal (see git history for the deleted
+//! commands/api_impact.rs and commands/tool_map.rs).
 
 use crate::output::{emit, OutputFormat};
 use crate::repo_selector;
@@ -227,22 +228,20 @@ fn parse_kind_filter(kind: &str) -> Vec<&'static str> {
 
 /// Extract producers and consumers for a single repo.
 ///
-/// # Stub (v1)
+/// # Implementation roadmap
 ///
-/// Full port is deferred. To implement:
-/// - Load `{repo.index_dir_root}/main/graph.bin` via `Engine::load`.
-/// - Iterate `graph.nodes` for `ArchivedNodeKind::Route` → `Producer`s.
-/// - Iterate `graph.edges` for `ArchivedRelType::Fetches` → `Consumer`s.
-/// - Filter by `kind_filter`.
+/// To turn this into live extraction:
+///   1. Load `{repo.index_dir_root}/<branch>/graph.bin` via `Engine::load`.
+///   2. Iterate graph nodes with `NodeKind::Route` to emit producers.
+///   3. Iterate edges with `RelType::Fetches` to emit consumers.
+///   4. Filter by `kind_filter` and apply `repo.name` for cross-repo matching.
 ///
-/// See `commands/api_impact.rs` for the Route-node iteration pattern and
-/// `commands/tool_map.rs` for the FETCHES-edge pattern.
+/// Reference patterns are preserved in git history (pre-T5.1 commits
+/// for `commands/api_impact.rs` and `commands/tool_map.rs`).
 fn extract_contracts_for_repo(
     _repo: &repo_selector::ResolvedRepo,
     _kind_filter: &[&'static str],
 ) -> Result<(Vec<Producer>, Vec<Consumer>), GnxError> {
-    // TODO(contracts-extraction): port Route node iteration from api_impact.rs
-    // and FETCHES edge iteration from tool_map.rs.
     Ok((vec![], vec![]))
 }
 

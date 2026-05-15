@@ -79,7 +79,7 @@ fn main() {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    // Admin / hidden internal — handled before graph load
+    // Admin is consumed by-value (AdminCommands doesn't implement Clone).
     if let Commands::Admin { command } = cli.command {
         if let Err(e) = commands::admin::run(command) {
             eprintln!("Command failed: {e}");
@@ -87,42 +87,29 @@ fn main() {
         }
         return;
     }
-    if let Commands::HookHandle(args) = &cli.command {
-        if let Err(e) = commands::hook_handle::run(args.clone()) {
-            eprintln!("Command failed: {e}");
-            std::process::exit(1);
-        }
-        return;
+
+    // Dispatch table for commands that don't need a graph loaded.
+    macro_rules! run_no_graph {
+        ($expr:expr) => {{
+            if let Err(e) = $expr {
+                eprintln!("Command failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }};
     }
-    if let Commands::HookWatcher(args) = &cli.command {
-        if let Err(e) = commands::hook_watcher::run(args.clone()) {
-            eprintln!("Command failed: {e}");
-            std::process::exit(1);
+
+    match &cli.command {
+        Commands::HookHandle(args) => run_no_graph!(commands::hook_handle::run(args.clone())),
+        Commands::HookWatcher(args) => run_no_graph!(commands::hook_watcher::run(args.clone())),
+        Commands::VerifyResolver(args) => {
+            run_no_graph!(commands::verify_resolver::run(args.clone()))
         }
-        return;
-    }
-    if let Commands::VerifyResolver(args) = &cli.command {
-        if let Err(e) = commands::verify_resolver::run(args.clone()) {
-            eprintln!("Command failed: {e}");
-            std::process::exit(1);
+        Commands::Coverage(args) => {
+            run_no_graph!(commands::coverage::run(args.clone(), &cli.graph))
         }
-        return;
-    }
-    // Coverage doesn't need to load the graph (it walks the registry).
-    if let Commands::Coverage(args) = &cli.command {
-        if let Err(e) = commands::coverage::run(args.clone(), &cli.graph) {
-            eprintln!("Command failed: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    // Contracts walks the registry + multi-repo gate; no graph load needed.
-    if let Commands::Contracts(args) = &cli.command {
-        if let Err(e) = commands::contracts::run(args.clone()) {
-            eprintln!("Command failed: {e}");
-            std::process::exit(1);
-        }
-        return;
+        Commands::Contracts(args) => run_no_graph!(commands::contracts::run(args.clone())),
+        _ => {} // fall through to graph-loading path
     }
 
     // Agent commands + ShapeCheck (hidden internal) — need graph

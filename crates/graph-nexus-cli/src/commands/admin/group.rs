@@ -1,7 +1,6 @@
 use clap::Subcommand;
 use graph_nexus_core::registry::{resolve_home_gnx, FileLock, GroupEntry, RegistryFile};
 use graph_nexus_core::GnxError;
-use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
 pub enum GroupCommands {
@@ -18,15 +17,11 @@ pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
     }
 }
 
-fn home_gnx() -> PathBuf {
-    resolve_home_gnx()
-}
-
 fn mutate_registry<F>(op: F) -> Result<(), GnxError>
 where
-    F: FnOnce(&mut RegistryFile) -> Result<(), GnxError>,
+    F: FnOnce(&mut RegistryFile) -> Result<bool, GnxError>,
 {
-    let gnx = home_gnx();
+    let gnx = resolve_home_gnx();
     let lock_path = gnx.join("registry.json.lock");
     let _lock = FileLock::acquire_exclusive(&lock_path)
         .map_err(|e| GnxError::InvalidArgument(format!("flock: {e}")))?;
@@ -35,15 +30,19 @@ where
     let mut reg = RegistryFile::read_or_empty(&registry_path)
         .map_err(|e| GnxError::InvalidArgument(format!("registry read: {e}")))?;
 
-    op(&mut reg)?;
+    let mutated = op(&mut reg)?;
 
-    RegistryFile::write_atomic(&registry_path, &reg)
-        .map_err(|e| GnxError::InvalidArgument(format!("registry write: {e}")))?;
+    if mutated {
+        RegistryFile::write_atomic(&registry_path, &reg)
+            .map_err(|e| GnxError::InvalidArgument(format!("registry write: {e}")))?;
+    }
     Ok(())
 }
 
 fn add(repo: &str, group: &str) -> Result<(), GnxError> {
     mutate_registry(|reg| {
+        let mut changed = false;
+
         // 1. Update repo.groups (idempotent).
         let repo_entry = reg
             .repos
@@ -57,45 +56,60 @@ fn add(repo: &str, group: &str) -> Result<(), GnxError> {
             })?;
         if !repo_entry.groups.iter().any(|g| g == group) {
             repo_entry.groups.push(group.to_string());
+            changed = true;
         }
 
         // 2. Update group.members (auto-create group if missing).
         if let Some(g) = reg.groups.iter_mut().find(|g| g.name == group) {
             if !g.members.iter().any(|m| m == repo) {
                 g.members.push(repo.to_string());
+                changed = true;
             }
         } else {
             reg.groups.push(GroupEntry {
                 name: group.to_string(),
                 members: vec![repo.to_string()],
             });
+            changed = true;
         }
 
-        println!("✓ Added \"{repo}\" to group \"{group}\"");
-        Ok(())
+        if changed {
+            println!("✓ Added \"{repo}\" to group \"{group}\"");
+        }
+        Ok(changed)
     })
 }
 
 fn remove(repo: &str, group: &str) -> Result<(), GnxError> {
     mutate_registry(|reg| {
+        let mut changed = false;
+
         // 1. Strip group from repo.groups.
         if let Some(r) = reg.repos.iter_mut().find(|r| r.name == repo) {
+            let before = r.groups.len();
             r.groups.retain(|g| g != group);
+            if r.groups.len() != before {
+                changed = true;
+            }
         }
 
         // 2. Strip repo from group.members; auto-delete group if now empty.
         if let Some(pos) = reg.groups.iter().position(|g| g.name == group) {
+            let before = reg.groups[pos].members.len();
             reg.groups[pos].members.retain(|m| m != repo);
+            if reg.groups[pos].members.len() != before {
+                changed = true;
+            }
             if reg.groups[pos].members.is_empty() {
                 reg.groups.remove(pos);
                 println!("✓ Removed \"{repo}\" from \"{group}\" (group auto-deleted, was empty)");
-            } else {
+            } else if changed {
                 println!("✓ Removed \"{repo}\" from \"{group}\"");
             }
-        } else {
+        } else if !changed {
             println!("✓ \"{repo}\" was not in group \"{group}\" (no-op)");
         }
 
-        Ok(())
+        Ok(changed)
     })
 }

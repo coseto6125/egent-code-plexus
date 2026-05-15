@@ -40,6 +40,15 @@ pub mod zig;
 
 use graph_nexus_core::analyzer::types::IdentifierRange;
 
+/// Identifier node kinds shared by TypeScript and TSX grammars.
+const TS_IDENT_KINDS: &[&str] = &[
+    "identifier",
+    "type_identifier",
+    "property_identifier",
+    "shorthand_property_identifier",
+    "shorthand_property_identifier_pattern",
+];
+
 /// Dispatch a "find all unique identifier names" scan to the matching
 /// per-language tree-sitter module. Returns `(name, first_line)` pairs
 /// (1-indexed) for every distinct identifier found in `source`.
@@ -56,24 +65,12 @@ pub fn find_all_identifier_names(path: &str, source: &[u8]) -> Option<Vec<(Strin
         "ts" => find_all_by_kinds(
             source,
             &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            &[
-                "identifier",
-                "type_identifier",
-                "property_identifier",
-                "shorthand_property_identifier",
-                "shorthand_property_identifier_pattern",
-            ],
+            TS_IDENT_KINDS,
         ),
         "tsx" => find_all_by_kinds(
             source,
             &tree_sitter_typescript::LANGUAGE_TSX.into(),
-            &[
-                "identifier",
-                "type_identifier",
-                "property_identifier",
-                "shorthand_property_identifier",
-                "shorthand_property_identifier_pattern",
-            ],
+            TS_IDENT_KINDS,
         ),
         "js" | "jsx" | "mjs" | "cjs" => find_all_by_kinds(
             source,
