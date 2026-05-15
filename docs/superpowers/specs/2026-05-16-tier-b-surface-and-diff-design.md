@@ -318,10 +318,9 @@ modified: N           # signature / schema 改
 
 ### 5.6 Exit code
 
-- `0` if no changes detected
-- `0` 即使有 changes（diff 是 advisory，不該 fail-hard）
-- `1` 僅當 dispatch / resolve / git 失敗
-- 未來 `--strict` flag 可加：「視 changes 數為 fail criteria」由 CI 決定
+- `0` always when diff runs to completion（無論是否有 changes）— diff 是 advisory，不該 fail-hard
+- `1` 僅當 dispatch / baseline resolve / git ops 失敗
+- 未來 `--strict` flag 可加：「視 changes 數超閾值為 fail criteria」交給 CI 用
 
 ---
 
