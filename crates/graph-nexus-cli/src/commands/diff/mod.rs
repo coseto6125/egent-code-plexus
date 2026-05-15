@@ -8,6 +8,7 @@ use clap::{Args, ValueEnum};
 use graph_nexus_core::GnxError;
 
 pub mod baseline;
+pub mod bindings;
 pub mod git_guard;
 
 /// Section of the graph to diff. `All` = bindings + routes + contracts.
@@ -57,41 +58,91 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         .section
         .iter()
         .any(|s| matches!(s, DiffSection::Bindings | DiffSection::All));
-    let want_routes = args
-        .section
-        .iter()
-        .any(|s| matches!(s, DiffSection::Routes | DiffSection::All));
-    let want_contracts = args
-        .section
-        .iter()
-        .any(|s| matches!(s, DiffSection::Contracts | DiffSection::All));
 
-    // Build baseline snapshot via temp checkout.
-    let _baseline_data = {
-        let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
-        snapshot_sections(&repo_dir, &args.section)?
-    }; // _guard dropped here, restores branch + stash
+    // Fast-path: identical SHAs → nothing could have changed.
+    if baseline_sha == current_sha {
+        let mut sections = serde_json::Map::new();
+        if want_bindings {
+            sections.insert(
+                "bindings".into(),
+                serde_json::to_value(bindings::BindingsDiff::default())
+                    .map_err(|e| GnxError::Output(format!("bindings to_value: {e}")))?,
+            );
+        }
+        let envelope = serde_json::json!({
+            "baseline": {"ref": args.baseline, "sha": baseline_sha},
+            "current": {"ref": "HEAD", "sha": current_sha},
+            "sections": sections,
+        });
+        if args.format == "json" {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&envelope)
+                    .map_err(|e| GnxError::Output(format!("json emit: {e}")))?
+            );
+        } else {
+            println!("Bindings diff baseline={} current={} (identical)", baseline_sha, current_sha);
+        }
+        return Ok(());
+    }
 
-    let _current_data = snapshot_sections(&repo_dir, &args.section)?;
-    let _ = (current_sha, want_bindings, want_routes, want_contracts);
+    let mut bindings_diff: Option<bindings::BindingsDiff> = None;
 
-    // Section diff lands in Tasks 9-12.
-    Err(GnxError::Output(
-        "section diff not yet implemented".into(),
-    ))
-}
+    if want_bindings {
+        let baseline_jsonl = std::env::temp_dir()
+            .join(format!("gnx-diff-bindings-baseline-{baseline_sha}.jsonl"));
+        let current_jsonl = std::env::temp_dir().join(format!(
+            "gnx-diff-bindings-current-{}.jsonl",
+            std::process::id()
+        ));
 
-fn snapshot_sections(
-    _repo_dir: &std::path::Path,
-    _sections: &[DiffSection],
-) -> Result<SectionSnapshot, GnxError> {
-    Ok(SectionSnapshot::default())
-}
+        {
+            let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
+            bindings::dump(&repo_dir, &baseline_jsonl)?;
+        } // _guard dropped here — restores branch + stash
 
-#[derive(Default)]
-#[allow(dead_code)] // fields populated in Tasks 9-12
-pub(crate) struct SectionSnapshot {
-    pub bindings: Vec<serde_json::Value>,
-    pub routes: Vec<serde_json::Value>,
-    pub contracts: Vec<serde_json::Value>,
+        bindings::dump(&repo_dir, &current_jsonl)?;
+
+        let baseline_map = bindings::load_jsonl(&baseline_jsonl)?;
+        let current_map = bindings::load_jsonl(&current_jsonl)?;
+        bindings_diff = Some(bindings::diff(&baseline_map, &current_map));
+
+        let _ = std::fs::remove_file(&baseline_jsonl);
+        let _ = std::fs::remove_file(&current_jsonl);
+    }
+
+    let mut sections = serde_json::Map::new();
+    if let Some(bd) = &bindings_diff {
+        sections.insert(
+            "bindings".into(),
+            serde_json::to_value(bd)
+                .map_err(|e| GnxError::Output(format!("bindings to_value: {e}")))?,
+        );
+    }
+    let envelope = serde_json::json!({
+        "baseline": {"ref": args.baseline, "sha": baseline_sha},
+        "current": {"ref": "HEAD", "sha": current_sha},
+        "sections": sections,
+    });
+
+    if args.format == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope)
+                .map_err(|e| GnxError::Output(format!("json emit: {e}")))?
+        );
+    } else {
+        // Text fallback — proper formatter lands in Task 12.
+        println!(
+            "Bindings diff baseline={} current={}",
+            baseline_sha, current_sha
+        );
+        if let Some(bd) = &bindings_diff {
+            println!("  new_resolutions: {}", bd.new_resolutions.len());
+            println!("  tier_changes:    {}", bd.tier_changes.len());
+            println!("  target_changes:  {}", bd.target_changes.len());
+            println!("  removed:         {}", bd.removed.len());
+        }
+    }
+    Ok(())
 }
