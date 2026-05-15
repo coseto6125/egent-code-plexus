@@ -32,6 +32,29 @@ Total: 7 features + 46 tests; `cargo test --workspace` 593/593.
 - §B4 (SQL view deps + procedures), §B5 (YAML/GitHub Actions workflow entry points)
 - §C1 (shared `is_exported` utility), §C2 (framework detector registry refactor — #1 priority but big), §C3 (receiver-binding generalization post-Wave 1), §C4 (`framework_kind` on RawNode)
 
+## Wave 2 (PR [#2](https://github.com/coseto6125/graph-nexus/pull/2)) — Frameworks / Types / Config
+
+Separately from the matrix-opt scope above, Wave 2 from `docs/specs/2026-05-15-language-coverage-gaps.md` was dispatched as 8 parallel SAs. 7 cells landed; the rest deferred to a follow-up wave.
+
+| Wave 2 task | Status | Test file |
+|---|---|---|
+| D1 Go types | shipped (incl. multi-name fix) | `go_type_annotations.rs` (12) |
+| D3 C types | shipped | `c_type_annotations.rs` (8) |
+| D3 C++ types | shipped | `cpp_type_annotations.rs` (8) |
+| F2 PHP composer.json + F3 Swift Package.swift | shipped | `config_php_swift.rs` (8) |
+| B1 JS Express + Hapi | shipped (incl. handler-shape fix + `use` drop) | `javascript_frameworks.rs` (10) |
+| B2 Kotlin Ktor | shipped | `kotlin_frameworks.rs` (3) |
+| D2 Swift / Dart types | deferred (SA failed to converge) | — |
+| B2 C# ASP.NET Core | deferred (no test file emerged) | — |
+| B3 PHP Laravel + Ruby Rails + Go gin/echo | deferred | — |
+| B4 Swift Vapor + C++ Crow + Dart shelf | deferred | — |
+
+PR #2 review found 4 issues ≥80; all 4 fixed in this branch:
+- Go multi-name param/var → emit one Variable per name (was: only last name)
+- JS Express handler now matches identifier / member_expression / arrow / function_expression
+- JS Express verb list drops `use` (middleware, not route)
+- Go inferred-decl test now asserts node absence explicitly (was vacuous)
+
 ---
 
 ## A. Quality & Depth Issues on ✓ Cells
