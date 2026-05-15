@@ -17,10 +17,11 @@ struct Binding {
     computed: HashMap<String, Value>,
 }
 
-/// Reading file content for `.content` projection.
+/// Reading file content for `.content` projection, plus hot-path caches.
 struct ContentCache {
     repo_root: PathBuf,
     files: HashMap<u32, Option<String>>,
+    regex_cache: HashMap<String, regex::Regex>,
 }
 
 impl ContentCache {
@@ -28,6 +29,7 @@ impl ContentCache {
         Self {
             repo_root,
             files: HashMap::new(),
+            regex_cache: HashMap::new(),
         }
     }
 
@@ -181,18 +183,23 @@ fn execute_inner(
         }
     }
 
-    // Phase 6: C10 — ORDER BY.
+    // Phase 6: ORDER BY.
     if !query.order_by.is_empty() {
+        // Pre-build column index once rather than scanning per comparison.
+        let col_index: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.clone(), i))
+            .collect();
         rows.sort_by(|a, b| {
             for oi in &query.order_by {
-                // Resolve order expression against columns list.
                 let col_name = match &oi.expr {
                     ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
                     ReturnExpr::Var(v) => v.clone(),
                     ReturnExpr::Star => "*".into(),
                     ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
                 };
-                let col_idx = columns.iter().position(|c| c == &col_name);
+                let col_idx = col_index.get(&col_name).copied();
                 let av = col_idx.and_then(|i| a.get(i));
                 let bv = col_idx.and_then(|i| b.get(i));
                 let ord = cmp_values(av, bv);
@@ -990,9 +997,13 @@ fn eval_expr(
         }
         Regex(lhs, pat) => {
             let v = eval_expr(lhs, b, graph, cache)?;
-            let re = regex::Regex::new(pat).map_err(|err| CypherError::Exec {
-                msg: format!("bad regex: {err}"),
-            })?;
+            if !cache.regex_cache.contains_key(pat) {
+                let r = regex::Regex::new(pat).map_err(|e| CypherError::Exec {
+                    msg: format!("bad regex: {e}"),
+                })?;
+                cache.regex_cache.insert(pat.clone(), r);
+            }
+            let re = cache.regex_cache.get(pat).unwrap();
             Ok(Value::Bool(
                 matches!(v, Value::Str(ref s) if re.is_match(s)),
             ))
