@@ -1,8 +1,14 @@
 # Ruby Receiver-Aware Resolver — design spec
 
 **Date**: 2026-05-16
-**Status**: Draft（spec only — 不動 parser code）
+**Status**: Phase 1 landed in PR #13（single-file emit + cross-file pin test）; Phase 2 (cross-file mixin propagation in the resolver tier) deferred.
 **Goal**: 描述如何讓 Ruby parser/resolver 能可靠識別 `def_delegator` / `def_delegators` / `delegate` 等 metaprogramming 呼叫，補上 PR [#13](https://github.com/coseto6125/gitnexus-rs/pull/13)（Ruby Named binding）刻意延後的最後一塊——「需要 receiver type 才能判斷的 method-creating call」。
+
+**Status update (post-implementation, 2026-05-16)**：PR #13 後續 commit 已 ship Option B + Option-A 兼容路徑：
+- `crates/graph-nexus-analyzer/src/ruby/{parser.rs, queries.scm}` 加入 `def_delegator` / `def_delegators` / `delegate` 三個 metaprogramming 呼叫的識別與 RawImport emit。
+- `crates/graph-nexus-analyzer/tests/ruby_named.rs` 新增 5 case 覆蓋 Forwardable / 無 Forwardable fallback / 使用者自定義 `def def_delegator` 反例。
+- `crates/graph-nexus-cli/tests/ruby_cross_file_mixin.rs` 透過全 Resolver pipeline 驗證 cross-file 邊界——目前的 architectural 事實是：跨檔 `module Foo { def_delegators }` + `class Bar { include Foo }` 場景下，Bar 內的 callsite **無法**自動透過 heritage chain 看到 Foo 的 delegator alias，因為 `Resolver::resolve_symbol`（resolver.rs:93-261）的 tier ladder 不會走 heritage closure 去 pull parent 的 `RawImport`。Heritage 只負責 emit `Extends` graph edge（builder.rs:1058-1074），不影響 symbol 查表。
+- 因此 §2 「Cross-file boundary」段落仍適用——跨檔 mixin propagation 留給未來獨立 PR（option C：resolver tier 增加 heritage-aware lookup），目前用 pin test 鎖住現狀。
 
 **Related**:
 - [[named-binding-ruby]] — PR #13，已加入 `alias` keyword / `alias_method` / 常數別名三類靜態可解析的 named binding。
@@ -186,7 +192,8 @@ end
 |---|---|---|
 | 主路線 | Option B（class-scope mixin tracking） | 在「LOC 成本 / false-positive 抑制 / 衝擊半徑」三軸都優於 A 與 C；C 留給未來跨檔 spec。 |
 | Option A 角色 | 收編為 B 的 low-confidence fallback | 避免「看到 `def_delegator` 但沒看到 `extend Forwardable`」直接消失；用 `confidence=low` 標記讓 downstream 可選擇。 |
-| 跨檔 mixin | 一階段不做 | 保持 PR 大小可控；跨檔走 BlindSpot，由獨立 spec 承接。 |
-| 與 PR #13 關係 | Build on top，非 stacked | PR #13 的 `RawImport` shape 已穩定，本 PR 沿用；兩 PR 之間沒有共用未 merge code。 |
+| 跨檔 mixin | 一階段不做（PR #13 已 verified by integration test） | 保持 PR 大小可控；跨檔需要 resolver 走 heritage closure（option C），由獨立 PR 承接。`crates/graph-nexus-cli/tests/ruby_cross_file_mixin.rs` 已 pin 住現狀，未來收尾 PR 直接翻轉 assertion 即可。 |
+| 與 PR #13 關係 | 直接追加 commit 到 PR #13（非 stacked） | `def_delegator/s` + delegate 識別在 PR #13 的 second/third commit 內 ship；同一 PR 的 cross-file pin test 把 architectural 限制鎖住。 |
 | Feature flag | 不引入 | 改進方向，無 rollback 需求。 |
-| README 矩陣調整 | 不改 cell，只追加 per-cell note（可選） | Named 已 ✓；Constructor cell 精準度升級不需改 ✓/⚠️ 標記。 |
+| README 矩陣調整 | 不改 cell，per-cell note 已追加 `def_delegator/s + delegate (with Forwardable mixin detection)` | Named 已 ✓；本 commit 升級 per-cell note 的 coverage 描述。 |
+| BindingKind 欄位 | 暫不引入；low-confidence fallback 仍 emit | PR #15（`BindingKind` on `RawImport`）尚未 merge 到 main；待其落地後可重訪「Forwardable 才高信心 emit」的 strict mode。 |
