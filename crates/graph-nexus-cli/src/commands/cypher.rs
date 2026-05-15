@@ -92,10 +92,53 @@ fn format_cypher_error(query: &str, e: &cypher::CypherError) -> String {
     format!("{e}\nquery: {query}")
 }
 
-fn serialize_json(_r: &cypher::QueryResult) -> String {
-    unimplemented!("D2")
+fn serialize_json(r: &cypher::QueryResult) -> String {
+    let rows: Vec<serde_json::Value> = r
+        .rows
+        .iter()
+        .map(|row| serde_json::Value::Array(row.iter().map(value_to_json).collect()))
+        .collect();
+    let out = serde_json::json!({ "columns": r.columns, "rows": rows });
+    serde_json::to_string_pretty(&out).unwrap()
+}
+
+fn value_to_json(v: &cypher::Value) -> serde_json::Value {
+    use cypher::Value::*;
+    match v {
+        Null => serde_json::Value::Null,
+        Bool(b) => serde_json::json!(b),
+        Int(i) => serde_json::json!(i),
+        Float(f) => serde_json::json!(f),
+        Str(s) => serde_json::json!(s),
+        List(xs) => serde_json::Value::Array(xs.iter().map(value_to_json).collect()),
+        NodeRef { name, kind, file_path, .. } => {
+            serde_json::json!({"name": name, "kind": kind, "filePath": file_path})
+        }
+        EdgeRef { rel_type, confidence, reason, .. } => {
+            serde_json::json!({"rel_type": format!("{rel_type:?}"), "confidence": confidence, "reason": reason})
+        }
+    }
 }
 
 fn serialize_toon(_r: &cypher::QueryResult) -> String {
     unimplemented!("D3")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graph_nexus_core::cypher::{QueryResult, Value};
+
+    #[test]
+    fn json_serialization_shape() {
+        let r = QueryResult {
+            columns: vec!["a.name".into(), "n".into()],
+            rows: vec![vec![Value::Str("caller".into()), Value::Int(3)]],
+        };
+        let s = serialize_json(&r);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["columns"], serde_json::json!(["a.name", "n"]));
+        assert_eq!(v["rows"][0][0], "caller");
+        assert_eq!(v["rows"][0][1], 3);
+    }
 }
