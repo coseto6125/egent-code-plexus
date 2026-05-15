@@ -62,6 +62,8 @@
 
 ## ⚡ 使用方式
 
+### 快速上手
+
 ```bash
 # 1. 為當前專案建立程式碼圖譜 (極速，低於 1 秒)
 gnx analyze --repo .
@@ -85,7 +87,96 @@ gnx impact --target validateUser --direction upstream
 gnx context --name validateUser
 ```
 
-所有指令皆支援 `--format text|json|toon`。`query` 的預設輸出為極度優化的 `text` 格式。
+每個讀取端命令都接受 `--format text|json|toon`。預設值為各命令最省 token 的表示：多數命令採 `toon`、`query` 採 `text`、`cypher`/`status`/`process` 採 `json`、`summarize`/`doctor` 採 `md`/`compact`。
+
+### 任務 → 命令對照
+
+| 目的 | 用什麼 |
+|---|---|
+| 為全新專案建立索引 | `gnx analyze --repo .`（或在專案內 `gnx analyze-here`） |
+| 修改檔案後更新 | 同上 — `analyze` 走 SHA-256 內容雜湊增量 |
+| 符號是否存在？在哪？ | `gnx query --query <name>` |
+| 取得符號的 metadata、呼叫者、被呼叫者 | `gnx context --name <name>` |
+| 編輯 X 會壞掉什麼？ | `gnx impact --target <name> --direction upstream` |
+| X 依賴了什麼？ | `gnx impact --target <name> --direction downstream` |
+| 圖譜任意 traversal / 取原始碼 body | `gnx cypher 'MATCH (m:Method) WHERE … RETURN m.content'` |
+| 列出全部 HTTP route | `gnx route-map` |
+| 誰呼叫 `POST /api/users`？ | `gnx api-impact --route /api/users --method POST` |
+| 何處呼叫外部 HTTP / DB / Redis / queue？ | `gnx tool-map [--category http,db,redis,queue]` |
+| 追蹤單一執行流（從起點到終點） | `gnx process --name <name>` |
+| 架構摘要 / 熱門檔案 / 重要符號 | `gnx summarize` |
+| 框架覆蓋率與盲區報表 | `gnx doctor` |
+| 這個 commit 改了什麼 + 影響範圍 | `gnx detect-changes --scope compare --base-ref HEAD~1` |
+| 跨檔安全 rename 一個符號（目前 Python MVP） | `gnx rename --symbol old --new-name new --dry-run` 再去掉 `--dry-run` |
+| 列出本機所有已索引的 repo | `gnx list` |
+| 重新註冊一個搬過家的 `.gitnexus-rs/` | `gnx index <path>` |
+| 完全刪除索引 | `gnx clean --repo <path>` |
+| Multi-branch / multi-worktree 流程 | `gnx init`（裝 hook）、`gnx prune --branch X`、`gnx rename-branch --from A --to B` |
+| 互動式設定精靈 | `gnx config` |
+| 檢查磁碟上的圖譜是否過期 | `gnx status` |
+| 列出某個 community/cluster 的成員 | `gnx cluster --id <n>` 或 `--name <anchor>` |
+| 對照語言 oracle 驗證 resolver 判斷 | `gnx verify-resolver --oracle … --gnx … --lang <ts\|py\|rs>` |
+
+### 命令參考
+
+所有命令預設從當前目錄讀取 `.gitnexus-rs/graph.bin`，可用 `--graph <path>` 覆寫。讀取端命令用 `--repo <name-or-path>` 在多 repo 註冊表中指定目標。
+
+#### 索引生命週期
+
+| 命令 | 用途 | 重點 flag |
+|---|---|---|
+| `analyze --repo <path>` | 建立 / 刷新 `<path>` 的圖譜。預設增量（內容雜湊快取）。 | `--embeddings`（建 BGE-M3 向量）· `--drop-embeddings` · `--force`（強制全量重建） · `--dump-resolver <file>` |
+| `analyze-here` | `analyze --repo .` 的便利包裝。 | 同上 + `--no-cache` |
+| `init` | 安裝 git reference-transaction hook，分支切換自動追蹤索引。 | `--force` · `--no-chain` |
+| `prune --branch <name> --repo <p>` | 刪除過時的 branch-scoped 索引目錄。 | — |
+| `rename-branch --from <a> --to <b> --repo <p>` | 重命名 branch 索引目錄。 | — |
+| `clean [--repo <p>] [--all]` | 刪除一個或全部的 `.gitnexus-rs/`。 | — |
+| `index [<path>]` | repo 搬家後重新註冊 `.gitnexus-rs/`。 | — |
+| `remove <target>` | 從註冊表移除一筆（依名稱 / 別名 / 路徑）。 | `--force`（保留） |
+| `list` | 列出本機所有已索引的 repo。 | `--format text\|json\|toon` |
+| `status` | 單一 repo 的新舊度檢查（圖譜 vs 工作目錄）。 | `--repo <p>` |
+| `config` | 互動式 TOML 編輯精靈（`.gitnexus-rs/config.toml`）。 | `--repo <p>` |
+
+#### 圖譜查詢
+
+| 命令 | 用途 | 重點 flag |
+|---|---|---|
+| `query --query <text>` | BM25（含可選語意）符號搜尋。 | `--format` |
+| `context --name <sym>` / `--uid <UID>` | 單一符號 → metadata、裝飾器、簽名、呼叫者、被呼叫者。 | `--kind` · `--file_path` · `--relation_types` · `--include_tests` |
+| `impact --target <sym> --direction <dir>` | 爆炸半徑 / 依賴 traversal。`dir` ∈ `upstream`（誰呼叫 X）、`downstream`（X 呼叫了什麼）。 | `--depth <n>`（預設 5） · `--high-trust-only` · `--min-confidence <f>` · `--include-tests` · `--kind` · `--file_path` |
+| `cypher '<query>'` | 任意 openCypher 模式匹配。`m.content` 回傳原始碼。 | `--format` |
+| `process --name <name>` | 單一執行流的步驟 trace。 | — |
+| `cluster --id <n>` / `--name <anchor>` | 列出某個 community / cluster 的成員。 | — |
+
+#### HTTP route 與 tool call
+
+| 命令 | 用途 | 重點 flag |
+|---|---|---|
+| `route-map` | 列出所有萃取到的 HTTP route（含 declarative `@Get` 與 imperative `app.get()`）。 | — |
+| `api-impact --route <path>` | route → handler → 上游呼叫者。 | `--method GET\|POST\|…` · `--depth <n>`（預設 3） |
+| `tool-map` | 對已知 HTTP / DB / Redis / queue client 的呼叫。 | `--category http,db,redis,queue` |
+
+#### 洞察與變更追蹤
+
+| 命令 | 用途 | 重點 flag |
+|---|---|---|
+| `summarize` | Markdown / JSON 專案概覽：架構、熱門檔案（in-edge centrality）、重要符號。 | `--top-files <n>` · `--top-communities <n>` · `--top-symbols <n>` · `--include-orphans` · `--output <file>` |
+| `doctor` | 框架覆蓋率 + 盲區目錄 + 圖譜狀態。LLM 契約報表。 | `--format compact\|json` |
+| `detect-changes` | git diff 改到的符號 + 受影響的執行流。 | `--scope unstaged\|staged\|all\|compare` · `--base-ref <ref>`（搭 `compare` 必填） · `--kind` · `--include-tests` · `--high-trust-only` |
+
+#### 重構
+
+| 命令 | 用途 | 重點 flag |
+|---|---|---|
+| `rename --symbol <old> --new-name <new>` | AST 驅動的跨檔 rename（目前 Python MVP）。請務必先跑 `--dry-run`。 | `--dry-run` |
+
+#### 診斷
+
+| 命令 | 用途 | 重點 flag |
+|---|---|---|
+| `verify-resolver --oracle <f> --gnx <f> --lang <ts\|py\|rs>` | 對照語言 oracle 驗證 resolver dump。給 parity harness 用。 | `--report <md-path>` |
+
+> 每個命令的完整 flag 可用 `gnx <command> --help` 確認。CLI 採非互動式設計（LLM 友善）：所有 flag 透過 `--help` 暴露，所有輸出走 stdout 且可解析。
 
 ## 語言矩陣
 

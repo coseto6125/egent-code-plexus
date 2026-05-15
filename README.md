@@ -62,6 +62,8 @@ After install, the binary is named `gnx` (the package on crates.io is `graph-nex
 
 ## ⚡ Usage
 
+### Quick start
+
 ```bash
 # 1. Build a code graph for the current repo (Extremely fast, < 1s)
 gnx analyze --repo .
@@ -85,7 +87,96 @@ gnx impact --target validateUser --direction upstream
 gnx context --name validateUser
 ```
 
-All commands accept `--format text|json|toon`. The default for query is a highly token-optimized text format.
+Every read-side command accepts `--format text|json|toon`. The default is the token-cheapest representation per command (most: `toon`; `query`: `text`; `cypher`/`status`/`process`: `json`; `summarize`/`doctor`: `md`/`compact`).
+
+### Task → command
+
+| Goal | Use |
+|---|---|
+| Index a fresh repo | `gnx analyze --repo .` (or `gnx analyze-here` from inside the repo) |
+| Re-index after edits | Same — `analyze` is incremental (SHA-256 content hash per file) |
+| Symbol exists? Where? | `gnx query --query <name>` (BM25 + optional semantic) |
+| One symbol → metadata, callers, callees | `gnx context --name <name>` |
+| If I edit X, what breaks? | `gnx impact --target <name> --direction upstream` |
+| What does X depend on? | `gnx impact --target <name> --direction downstream` |
+| Arbitrary graph traversal / source body | `gnx cypher 'MATCH (m:Method) WHERE … RETURN m.content'` |
+| List every HTTP route | `gnx route-map` |
+| Who calls `POST /api/users`? | `gnx api-impact --route /api/users --method POST` |
+| Where do we call external HTTP / DB / Redis / queue? | `gnx tool-map [--category http,db,redis,queue]` |
+| Trace one execution flow start-to-finish | `gnx process --name <name>` |
+| Architecture / hottest files / top symbols | `gnx summarize` |
+| Coverage report (frameworks parsed, blind spots) | `gnx doctor` |
+| What changed in this commit and what it ripples to | `gnx detect-changes --scope compare --base-ref HEAD~1` |
+| Rename a symbol across files (currently Python MVP) | `gnx rename --symbol old --new-name new --dry-run` then drop `--dry-run` |
+| List repos this machine has indexed | `gnx list` |
+| Re-register a `.gitnexus-rs/` folder after moving the repo | `gnx index <path>` |
+| Drop an index entirely | `gnx clean --repo <path>` |
+| Multi-branch / multi-worktree workflows | `gnx init` (install hook), `gnx prune --branch X`, `gnx rename-branch --from A --to B` |
+| Interactive setup wizard | `gnx config` |
+| Check if the on-disk graph is stale | `gnx status` |
+| List members of a graph community/cluster | `gnx cluster --id <n>` or `--name <anchor>` |
+| Verify resolver decisions vs a language oracle | `gnx verify-resolver --oracle … --gnx … --lang <ts\|py\|rs>` |
+
+### Command reference
+
+All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--graph <path>` is given. Read-only commands take `--repo <name-or-path>` to disambiguate when multiple repos are registered.
+
+#### Index lifecycle
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `analyze --repo <path>` | Build / refresh the graph for `<path>`. Incremental by default (content-hash cache). | `--embeddings` (build BGE-M3 vectors) · `--drop-embeddings` · `--force` (full rebuild) · `--dump-resolver <file>` |
+| `analyze-here` | Convenience wrapper for `analyze --repo .`. | Same flags + `--no-cache` |
+| `init` | Install the git reference-transaction hook so branch switches auto-track. | `--force` · `--no-chain` |
+| `prune --branch <name> --repo <p>` | Drop a stale branch-scoped index dir. | — |
+| `rename-branch --from <a> --to <b> --repo <p>` | Rename a branch's on-disk index. | — |
+| `clean [--repo <p>] [--all]` | Delete the `.gitnexus-rs/` for a repo (or all). | — |
+| `index [<path>]` | Re-register an existing `.gitnexus-rs/` after the repo moves. | — |
+| `remove <target>` | Drop a registry entry by name / alias / path. | `--force` (reserved) |
+| `list` | List every repo this machine has indexed. | `--format text\|json\|toon` |
+| `status` | Per-repo staleness check (graph vs working tree). | `--repo <p>` |
+| `config` | Interactive TOML wizard for `.gitnexus-rs/config.toml`. | `--repo <p>` |
+
+#### Query the graph
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `query --query <text>` | BM25 (+ optional semantic) symbol search by name / concept. | `--format` |
+| `context --name <sym>` / `--uid <UID>` | One symbol → metadata, decorators, signature, callers, callees. | `--kind` · `--file_path` · `--relation_types` · `--include_tests` |
+| `impact --target <sym> --direction <dir>` | Blast radius / dependency traversal. `dir` ∈ `upstream` (who calls X), `downstream` (what X calls). | `--depth <n>` (default 5) · `--high-trust-only` · `--min-confidence <f>` · `--include-tests` · `--kind` · `--file_path` |
+| `cypher '<query>'` | Arbitrary openCypher pattern matching. `m.content` returns source body. | `--format` |
+| `process --name <name>` | Per-process step trace (call chain for one execution flow). | — |
+| `cluster --id <n>` / `--name <anchor>` | List members of a graph community / cluster. | — |
+
+#### HTTP routes & tool calls
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `route-map` | Enumerate every HTTP route the analyzer extracted (declarative `@Get` and imperative `app.get()`). | — |
+| `api-impact --route <path>` | A route → its handler → upstream callers. | `--method GET\|POST\|…` · `--depth <n>` (default 3) |
+| `tool-map` | Calls to known HTTP / DB / Redis / queue clients. | `--category http,db,redis,queue` |
+
+#### Insights & change tracking
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `summarize` | Markdown / JSON project overview: architecture, top files (in-edge centrality), top symbols. | `--top-files <n>` · `--top-communities <n>` · `--top-symbols <n>` · `--include-orphans` · `--output <file>` |
+| `doctor` | Framework coverage + blind-spot catalog + graph status. The "LLM contract" report. | `--format compact\|json` |
+| `detect-changes` | Symbols changed by git diff + affected execution flows. | `--scope unstaged\|staged\|all\|compare` · `--base-ref <ref>` (required with `compare`) · `--kind` · `--include-tests` · `--high-trust-only` |
+
+#### Refactoring
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `rename --symbol <old> --new-name <new>` | AST-powered multi-file rename (Python MVP). Always run `--dry-run` first. | `--dry-run` |
+
+#### Diagnostics
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `verify-resolver --oracle <f> --gnx <f> --lang <ts\|py\|rs>` | Diff a resolver-decision dump against a language oracle. Used by the parity harness. | `--report <md-path>` |
+
+> Every command's flags can be re-confirmed with `gnx <command> --help`. The CLI is non-interactive by design (LLM-friendly): all flags surface via `--help`, all output goes to stdout in a parseable format.
 
 ## Language Matrix
 
