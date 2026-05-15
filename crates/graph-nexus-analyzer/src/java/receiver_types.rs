@@ -369,4 +369,32 @@ class App {
             start.calls
         );
     }
+
+    // Regression: after the wave-1 merge dropped `idx.constructor` (main's
+    // 95653b2 collapsed `(constructor_declaration ... ) @method`), method
+    // calls inside a constructor body must still receiver-bind. The risk was
+    // that the constructor node wouldn't be classified as Method and thus
+    // skip the receiver_types pass entirely.
+    #[test]
+    fn java_call_inside_constructor_binds_self() {
+        let src = r#"
+class Foo {
+    public Foo() {
+        this.init();
+    }
+    void init() {}
+}
+"#;
+        let graph = parse(src);
+        let ctor = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "Foo" && !n.calls.is_empty())
+            .expect("Foo constructor not found or has no calls");
+        assert!(
+            ctor.calls.iter().any(|c| c == "Foo.init"),
+            "constructor's this.init() should bind to Foo.init; got {:?}",
+            ctor.calls
+        );
+    }
 }
