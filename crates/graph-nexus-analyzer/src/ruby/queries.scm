@@ -86,3 +86,15 @@
 (assignment
   left: (constant) @const_alias.new
   right: [ (constant) (scope_resolution) ] @const_alias.source)
+
+;; `def_delegator :target, :method` / `def_delegators :target, :m1, :m2, ...` /
+;; `delegate :m1, :m2, to: :target` metaprogramming — each delegated method
+;; becomes a named binding `<host>.<method>` aliased to `<target>.<method>`.
+;; Receiver-awareness (only honour these when the enclosing class has
+;; `extend Forwardable`) is done in `parser.rs` against `pending_mixins`;
+;; the bare whitelist here is a known false-positive vector for user-defined
+;; methods of the same name (documented in the named-binding spec).
+(call
+  method: (identifier) @delegator_method
+  (#match? @delegator_method "^(def_delegator|def_delegators|delegate)$")
+  arguments: (argument_list) @delegator_args)

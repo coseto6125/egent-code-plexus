@@ -108,6 +108,16 @@ fn push_alias_binding(imports: &mut Vec<RawImport>, new_name: &str, source: &str
     }
 }
 
+/// Strip a leading `:` (symbol prefix) and a leading `@` (instance-var prefix)
+/// from a `def_delegator` / `delegate` argument so the result is a plain
+/// receiver / method name suitable for `RawImport.source` composition.
+///
+/// `:@songs` → `songs`, `:method` → `method`, `:customer` → `customer`.
+fn strip_symbol_prefix(s: &str) -> &str {
+    let after_colon = s.strip_prefix(':').unwrap_or(s);
+    after_colon.strip_prefix('@').unwrap_or(after_colon)
+}
+
 pub struct RubyProvider {
     query: Query,
 }
@@ -163,6 +173,16 @@ impl LanguageProvider for RubyProvider {
         let idx_alias_method_args = self.query.capture_index_for_name("alias_method.args");
         let idx_const_alias_new = self.query.capture_index_for_name("const_alias.new");
         let idx_const_alias_source = self.query.capture_index_for_name("const_alias.source");
+        let idx_delegator_method = self.query.capture_index_for_name("delegator_method");
+        let idx_delegator_args = self.query.capture_index_for_name("delegator_args");
+
+        // Pending delegator emissions: (target, method, line). Applied after
+        // the match loop so we can cross-check against `pending_mixins` to
+        // require the enclosing class to `extend`/`include Forwardable`.
+        // Without a Forwardable mixin we fall back to "low-confidence" emit
+        // (still pushed, documented false-positive on user-defined methods
+        // named `def_delegator` / `delegate`).
+        let mut pending_delegators: Vec<(String, String, u32)> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut node_name = None;
@@ -183,6 +203,8 @@ impl LanguageProvider for RubyProvider {
             let mut alias_method_args: Option<tree_sitter::Node<'_>> = None;
             let mut const_alias_new_node: Option<tree_sitter::Node<'_>> = None;
             let mut const_alias_source_node: Option<tree_sitter::Node<'_>> = None;
+            let mut delegator_method_node: Option<tree_sitter::Node<'_>> = None;
+            let mut delegator_args_node: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -231,6 +253,10 @@ impl LanguageProvider for RubyProvider {
                     const_alias_new_node = Some(cap.node);
                 } else if cap_idx == idx_const_alias_source {
                     const_alias_source_node = Some(cap.node);
+                } else if cap_idx == idx_delegator_method {
+                    delegator_method_node = Some(cap.node);
+                } else if cap_idx == idx_delegator_args {
+                    delegator_args_node = Some(cap.node);
                 }
             }
 
@@ -386,13 +412,106 @@ impl LanguageProvider for RubyProvider {
                     push_alias_binding(&mut imports, new_name, source_path);
                 }
             }
+
+            // `def_delegator :target, :method` / `def_delegators :target, :m1, ...` /
+            // `delegate :m1, :m2, to: :target` — parse argument list shape per
+            // method name. Each delegated method is queued for emission; the
+            // Forwardable-mixin check runs after the match loop because the
+            // enclosing class span and `pending_mixins` aren't both finalised
+            // until then.
+            if let (Some(method_node), Some(args)) = (delegator_method_node, delegator_args_node) {
+                let method_name = std::str::from_utf8(
+                    &source[method_node.start_byte()..method_node.end_byte()],
+                )
+                .unwrap_or("");
+                let call_line = method_node.start_position().row as u32;
+                let mut walker = args.walk();
+                let children: Vec<tree_sitter::Node<'_>> = args.named_children(&mut walker).collect();
+
+                match method_name {
+                    "def_delegator" | "def_delegators" => {
+                        // First simple_symbol = target; rest = delegated methods.
+                        let mut symbols = children
+                            .iter()
+                            .filter(|c| c.kind() == "simple_symbol")
+                            .filter_map(|c| {
+                                std::str::from_utf8(&source[c.start_byte()..c.end_byte()]).ok()
+                            });
+                        if let Some(target_raw) = symbols.next() {
+                            let target = strip_symbol_prefix(target_raw).to_string();
+                            if !target.is_empty() {
+                                for m_raw in symbols {
+                                    let m = strip_symbol_prefix(m_raw);
+                                    if !m.is_empty() {
+                                        pending_delegators.push((
+                                            target.clone(),
+                                            m.to_string(),
+                                            call_line,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "delegate" => {
+                        // simple_symbol* (methods), then `pair` with key=`to`,
+                        // value=simple_symbol (target). Walk in order, collect
+                        // method names until the `to:` pair is hit.
+                        let mut methods: Vec<String> = Vec::new();
+                        let mut target: Option<String> = None;
+                        for child in &children {
+                            match child.kind() {
+                                "simple_symbol" => {
+                                    if let Ok(s) = std::str::from_utf8(
+                                        &source[child.start_byte()..child.end_byte()],
+                                    ) {
+                                        let stripped = strip_symbol_prefix(s);
+                                        if !stripped.is_empty() {
+                                            methods.push(stripped.to_string());
+                                        }
+                                    }
+                                }
+                                "pair" => {
+                                    // Look for key=hash_key_symbol with text "to"
+                                    // and value=simple_symbol/string.
+                                    let key = child.child_by_field_name("key");
+                                    let value = child.child_by_field_name("value");
+                                    let key_text = key.and_then(|k| {
+                                        std::str::from_utf8(
+                                            &source[k.start_byte()..k.end_byte()],
+                                        )
+                                        .ok()
+                                    });
+                                    if key_text == Some("to") {
+                                        if let Some(v) = value {
+                                            if let Ok(t) = std::str::from_utf8(
+                                                &source[v.start_byte()..v.end_byte()],
+                                            ) {
+                                                target = Some(strip_symbol_prefix(t).to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(t) = target {
+                            if !t.is_empty() {
+                                for m in methods {
+                                    pending_delegators.push((t.clone(), m, call_line));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
 
-        // Apply mixins: for each (module, line), find the smallest enclosing
-        // class RawNode by span containment and append the module to its
-        // heritage. Mixins outside any class are dropped (matches Ruby
-        // semantics — bare top-level `include` is rare and out of scope).
-        for (module_name, line) in pending_mixins {
+        // Helper: locate the smallest-span class RawNode whose body contains
+        // `line`. Returns its index in `nodes`. Shared between mixin
+        // application and the delegator Forwardable-scope check below.
+        let enclosing_class_idx = |nodes: &[RawNode], line: u32| -> Option<usize> {
             let mut best: Option<usize> = None;
             let mut best_span: u32 = u32::MAX;
             for (i, n) in nodes.iter().enumerate() {
@@ -407,9 +526,43 @@ impl LanguageProvider for RubyProvider {
                     }
                 }
             }
-            if let Some(i) = best {
-                nodes[i].heritage.push(module_name);
+            best
+        };
+
+        // Apply mixins: for each (module, line), find the smallest enclosing
+        // class RawNode by span containment and append the module to its
+        // heritage. Mixins outside any class are dropped (matches Ruby
+        // semantics — bare top-level `include` is rare and out of scope).
+        for (module_name, line) in &pending_mixins {
+            if let Some(i) = enclosing_class_idx(&nodes, *line) {
+                nodes[i].heritage.push(module_name.clone());
             }
+        }
+
+        // Apply delegators: `def_delegator/s` / `delegate` add a method
+        // binding on the enclosing class. We require `extend Forwardable`
+        // (or `include Forwardable`) in the same enclosing class as a
+        // sanity check; without it we still emit (Option-A fallback per
+        // spec §4) at the cost of a known false positive when the user
+        // defines their own method named `def_delegator`.
+        //
+        // The emitted RawImport mirrors the alias-keyword shape:
+        // `{ alias: Some(method), imported_name: method, source: "target.method" }`
+        // so downstream rename / resolution code reuses the existing path.
+        for (target, method, line) in pending_delegators {
+            let enclosing = enclosing_class_idx(&nodes, line);
+            let _has_forwardable = enclosing.is_some_and(|idx| {
+                let span = nodes[idx].span;
+                pending_mixins.iter().any(|(m, ml)| {
+                    m == "Forwardable" && *ml >= span.0 && *ml <= span.2
+                })
+            });
+            // Emit regardless of `_has_forwardable` — Option-A low-confidence
+            // fallback per docs/specs/2026-05-16-ruby-receiver-aware-resolver.md.
+            // The flag is retained as a future hook for telemetry / a
+            // BindingKind discriminant when one becomes available.
+            let source_path = format!("{target}.{method}");
+            push_alias_binding(&mut imports, &method, &source_path);
         }
 
         // Extract call sites with receiver-type binding.
