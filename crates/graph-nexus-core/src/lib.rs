@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod error;
 pub mod graph;
+pub mod cypher;
 pub mod graph_query;
 pub mod pool;
 pub mod registry;
