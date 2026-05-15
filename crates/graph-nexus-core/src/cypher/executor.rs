@@ -880,4 +880,80 @@ mod tests {
             assert_eq!(r.rows.len(), 2);
         });
     }
+
+    // -----------------------------------------------------------------------
+    // C6 – full WHERE (edge props, IN, regex, CONTAINS)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exec_where_edge_confidence() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) WHERE r.confidence > 0.5 RETURN a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+        });
+    }
+
+    #[test]
+    fn exec_where_in_list() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name IN ['caller', 'other'] RETURN b.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+        });
+    }
+
+    #[test]
+    fn exec_where_regex() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name =~ '.*aller.*' RETURN a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+        });
+    }
+
+    #[test]
+    fn exec_where_contains() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[:Calls]->(b:Function) WHERE b.name CONTAINS 'all' RETURN b.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+        });
+    }
+
+    #[test]
+    fn exec_where_starts_with() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name STARTS WITH 'cal' RETURN a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+        });
+    }
+
+    #[test]
+    fn exec_where_edge_reason() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) WHERE r.reason = 'ast-call' RETURN a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+        });
+    }
 }
