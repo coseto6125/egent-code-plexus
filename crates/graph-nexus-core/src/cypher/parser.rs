@@ -75,6 +75,16 @@ fn parse_single_query(_c: &mut Cursor) -> Result<Query, CypherError> {
     })
 }
 
+pub fn parse_match_clause(c: &mut Cursor) -> Result<MatchClause, CypherError> {
+    let optional = c.eat(&Token::Optional);
+    c.expect(&Token::Match)?;
+    let mut patterns = vec![parse_pattern(c)?];
+    while c.eat(&Token::Comma) {
+        patterns.push(parse_pattern(c)?);
+    }
+    Ok(MatchClause { optional, patterns })
+}
+
 pub fn parse_pattern(c: &mut Cursor) -> Result<Pattern, CypherError> {
     let mut nodes = vec![parse_node_pat(c)?];
     let mut rels = Vec::new();
@@ -329,5 +339,30 @@ mod tests {
         assert_eq!(p.rels.len(), 1);
         assert!(p.rels[0].types.is_empty());
         assert_eq!(p.rels[0].dir, Direction::Out);
+    }
+
+    fn mc(s: &str) -> MatchClause {
+        let toks = tokenize(s).unwrap();
+        let mut c = Cursor::new(&toks);
+        parse_match_clause(&mut c).unwrap()
+    }
+
+    #[test]
+    fn match_single_pattern() {
+        let m = mc("MATCH (a)-[:Calls]->(b)");
+        assert!(!m.optional);
+        assert_eq!(m.patterns.len(), 1);
+    }
+
+    #[test]
+    fn match_multiple_patterns_comma() {
+        let m = mc("MATCH (a)-[:Calls]->(b), (c)-[:HasMethod]->(d)");
+        assert_eq!(m.patterns.len(), 2);
+    }
+
+    #[test]
+    fn match_optional() {
+        let m = mc("OPTIONAL MATCH (a)-[:Calls]->(b)");
+        assert!(m.optional);
     }
 }
