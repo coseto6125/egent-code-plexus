@@ -7,6 +7,8 @@
 use clap::{Args, ValueEnum};
 use graph_nexus_core::GnxError;
 
+pub mod baseline;
+
 /// Section of the graph to diff. `All` = bindings + routes + contracts.
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq, Hash)]
 #[value(rename_all = "lowercase")]
@@ -41,9 +43,20 @@ pub struct DiffArgs {
 }
 
 pub fn run(args: DiffArgs) -> Result<(), GnxError> {
-    // Stub for Task 6 — real impl lands in Tasks 7-13.
-    let _ = args;
-    Err(GnxError::Output(
-        "gnx diff not yet implemented; tracked in tier-b plan task 6+".into(),
-    ))
+    let repo_dir = args
+        .repo
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map_err(|e| GnxError::Output(format!("cwd: {e}")))
+                .unwrap()
+        });
+
+    let baseline_sha = baseline::resolve(&args.baseline, &repo_dir)?;
+
+    // Tasks 8+: stash + checkout baseline_sha, run analyzer, compare.
+    Err(GnxError::Output(format!(
+        "baseline resolved to {baseline_sha}; section diff not yet implemented"
+    )))
 }

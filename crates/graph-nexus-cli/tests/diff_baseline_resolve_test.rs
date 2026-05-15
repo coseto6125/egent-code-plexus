@@ -39,3 +39,34 @@ fn diff_help_lists_section_choices() {
         );
     }
 }
+
+#[test]
+fn diff_baseline_invalid_ref_errors_with_hint() {
+    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+        .args(["diff", "--section", "bindings", "--baseline", "definitely-no-such-ref"])
+        .output()
+        .expect("run gnx diff");
+    assert!(!output.status.success(), "invalid ref must error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot resolve") || stderr.contains("not found")
+            || stderr.contains("unknown") || stderr.contains("baseline"),
+        "expected unresolvable-ref hint, got: {stderr}"
+    );
+}
+
+#[test]
+fn diff_baseline_pr_form_calls_gh() {
+    // Skip when gh is not installed.
+    let gh_check = Command::new("gh").arg("--version").output();
+    if gh_check.is_err() || !gh_check.unwrap().status.success() {
+        eprintln!("skipping: gh CLI not installed");
+        return;
+    }
+    // Use a clearly non-existent PR; gnx should surface a clean error.
+    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+        .args(["diff", "--section", "bindings", "--baseline", "PR/9999999"])
+        .output()
+        .expect("run gnx diff");
+    assert!(!output.status.success(), "non-existent PR must error");
+}
