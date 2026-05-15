@@ -103,7 +103,12 @@ fn two_repo_fixture() -> Fixture {
     let home_gnx = home.path().join(".gnx");
 
     let repo_a = seed_repo(&home_gnx, "alpha", "main", &["fetch_user", "save_user"]);
-    let repo_b = seed_repo(&home_gnx, "beta", "main", &["fetch_account", "delete_session"]);
+    let repo_b = seed_repo(
+        &home_gnx,
+        "beta",
+        "main",
+        &["fetch_account", "delete_session"],
+    );
 
     let registry = RegistryFile {
         version: 1,
@@ -160,14 +165,15 @@ fn multi_query_all_searches_both_repos() {
         &f.home_path,
         &["--all", "--query", "fetch", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8(out.stdout).unwrap();
     let json: Value = serde_json::from_str(&stdout).expect(&stdout);
     let results = json["results"].as_array().cloned().unwrap_or_default();
-    let repos: Vec<&str> = results
-        .iter()
-        .filter_map(|r| r["repo"].as_str())
-        .collect();
+    let repos: Vec<&str> = results.iter().filter_map(|r| r["repo"].as_str()).collect();
     assert!(repos.contains(&"alpha"), "alpha missing in {results:?}");
     assert!(repos.contains(&"beta"), "beta missing in {results:?}");
 }
@@ -177,11 +183,13 @@ fn multi_query_explicit_repos_csv() {
     let f = two_repo_fixture();
     let out = run_multi_query(
         &f.home_path,
-        &[
-            "--repos", "alpha", "--query", "user", "--format", "json",
-        ],
+        &["--repos", "alpha", "--query", "user", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     let results = json["results"].as_array().unwrap();
     // Both alpha symbols match 'user' (fetch_user, save_user); beta excluded.
@@ -198,7 +206,11 @@ fn multi_query_group_expands_via_registry() {
         &f.home_path,
         &["--group", "g1", "--query", "session", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     let results = json["results"].as_array().unwrap();
     // Only beta has delete_session; alpha contributes 0 hits but the
@@ -213,11 +225,13 @@ fn multi_query_top_k_bounds_merged_set() {
     let f = two_repo_fixture();
     let out = run_multi_query(
         &f.home_path,
-        &[
-            "--all", "--query", "e", "--top-k", "2", "--format", "json",
-        ],
+        &["--all", "--query", "e", "--top-k", "2", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     let results = json["results"].as_array().unwrap();
     // 'e' appears in all 4 names — top-K cap holds the merged Vec at 2.
@@ -235,7 +249,11 @@ fn multi_query_missing_graph_degrades_gracefully() {
         &f.home_path,
         &["--all", "--query", "fetch", "--format", "json"],
     );
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     let summary = json["summary"].as_str().unwrap();
     // beta still produces fetch_account; alpha is the failed one.

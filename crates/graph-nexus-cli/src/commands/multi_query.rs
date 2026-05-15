@@ -211,16 +211,14 @@ pub fn run(args: MultiQueryArgs) -> Result<(), GnxError> {
             }
             emit(&serde_json::json!({ "results": lines }), format)
         }
-        OutputFormat::Json | OutputFormat::Toon => {
-            emit(
-                &serde_json::json!({
-                    "status": "success",
-                    "summary": summary,
-                    "results": results,
-                }),
-                format,
-            )
-        }
+        OutputFormat::Json | OutputFormat::Toon => emit(
+            &serde_json::json!({
+                "status": "success",
+                "summary": summary,
+                "results": results,
+            }),
+            format,
+        ),
     }
 }
 
@@ -318,7 +316,10 @@ mod tests {
                 heap.pop();
             }
         }
-        let mut got: Vec<f32> = heap.into_iter().map(|r| f32::from_bits(r.0.score_bits)).collect();
+        let mut got: Vec<f32> = heap
+            .into_iter()
+            .map(|r| f32::from_bits(r.0.score_bits))
+            .collect();
         got.sort_by(|a, b| b.partial_cmp(a).unwrap());
         assert_eq!(got, vec![0.9, 0.8, 0.7]);
     }

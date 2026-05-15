@@ -95,10 +95,7 @@ jobs:
     let imports = parse(yaml);
     assert_eq!(imports.len(), 1, "expected one import, got {imports:?}");
     let imp = &imports[0];
-    assert_eq!(
-        imp.imported_name,
-        "org/repo/.github/workflows/build.yml"
-    );
+    assert_eq!(imp.imported_name, "org/repo/.github/workflows/build.yml");
     assert_eq!(imp.source, "org/repo/.github/workflows/build.yml@main");
 }
 
@@ -116,10 +113,7 @@ jobs:
         run: cargo build
 ";
     let imports = parse(yaml);
-    assert!(
-        imports.is_empty(),
-        "expected no imports, got {imports:?}"
-    );
+    assert!(imports.is_empty(), "expected no imports, got {imports:?}");
 }
 
 #[test]
