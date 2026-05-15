@@ -79,7 +79,7 @@ fn build_index_happy_path_returns_ok_and_is_queryable() {
 
     TantivyEngine::build_index(repo, &graph).expect("happy path must succeed");
 
-    let hits = TantivyEngine::search(repo, "resolve_symbol");
+    let hits = TantivyEngine::search(repo, "resolve_symbol").expect("index must be queryable");
     assert!(
         hits.iter().any(|(_, uid)| uid.contains("resolve_symbol")),
         "expected resolve_symbol in BM25 hits, got: {hits:?}"
@@ -103,7 +103,7 @@ fn build_index_wipes_stale_directory_left_by_prior_abort() {
     let graph = make_graph_with_names(&["fresh_symbol"]);
     TantivyEngine::build_index(repo, &graph).expect("stale dir must self-heal");
 
-    let hits = TantivyEngine::search(repo, "fresh_symbol");
+    let hits = TantivyEngine::search(repo, "fresh_symbol").expect("index must be queryable");
     assert!(
         hits.iter().any(|(_, uid)| uid.contains("fresh_symbol")),
         "rebuilt index must be queryable: {hits:?}"

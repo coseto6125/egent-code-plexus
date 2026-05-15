@@ -23,7 +23,7 @@ use graph_nexus_core::registry::{IndexLayout, Registry};
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 const TOP_K: usize = 20;
 
@@ -126,7 +126,20 @@ pub struct Hit {
     pub name: String,
     pub signature: String,
     pub caller_count: usize,
+    /// Up to `HOP_EXPANSION_LIMIT` 1-hop incoming-edge source names.
+    /// Populated from `in_offsets` / `in_edge_idx` / `edges`. Empty when
+    /// the node has no callers or all edges have been truncated.
+    pub callers: Vec<String>,
+    /// Up to `HOP_EXPANSION_LIMIT` 1-hop outgoing-edge target names.
+    /// Populated from `out_offsets` / `edges`.
+    pub callees: Vec<String>,
 }
+
+/// Cap per-direction. Matches the legacy gitnexus augmentation engine,
+/// which sliced top 3 to keep hook context dense without blowing token
+/// budget — empirically the 4th+ caller/callee adds little signal once
+/// the LLM already has the symbol's file:line and kind.
+const HOP_EXPANSION_LIMIT: usize = 3;
 
 /// `BinaryHeap` key that is `Ord`.  f32 isn't `Ord`; use `score_bits` as a
 /// monotonic surrogate (positive floats compare correctly as bit patterns in
@@ -141,6 +154,8 @@ struct OrderedHit {
     kind: String,
     signature: String,
     caller_count: usize,
+    callers: Vec<String>,
+    callees: Vec<String>,
 }
 
 impl OrderedHit {
@@ -154,6 +169,8 @@ impl OrderedHit {
             kind: h.kind,
             signature: h.signature,
             caller_count: h.caller_count,
+            callers: h.callers,
+            callees: h.callees,
         }
     }
 }
@@ -181,6 +198,7 @@ fn compute_single(
     repo_label: Option<String>,
 ) -> Result<Vec<Hit>, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+    let repo_root = engine.repo_root();
 
     let effective_mode = match mode {
         SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
@@ -192,17 +210,17 @@ fn compute_single(
 
     let mut hits = match effective_mode {
         SearchMode::Bm25 | SearchMode::Auto => {
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
         }
         SearchMode::Vector => {
             // TODO: wire to real cosine path (graph_nexus_analyzer::embeddings)
             eprintln!("→ vector mode not yet wired — falling back to bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
         }
         SearchMode::Hybrid => {
             // TODO: fold bm25 + cosine scores when embeddings are wired
             eprintln!("→ hybrid: embeddings not wired — using bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label)
+            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, repo_root)
         }
     };
 
@@ -217,8 +235,74 @@ fn compute_single(
     Ok(hits)
 }
 
-/// BM25 scan directly against the graph nodes: exact → 1.0, prefix → 0.7, substring → 0.4.
+/// Primary BM25 path: queries the persisted Tantivy index when present,
+/// falling back to a per-name substring scan (exact 1.0 / prefix 0.7 /
+/// substring 0.4) when `<repo>/.gitnexus-rs/tantivy/` is missing — which
+/// happens on a freshly-cloned repo before `gnx admin index` has run.
 fn bm25_hits_from_graph(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+    repo_root: Option<&std::path::Path>,
+) -> Vec<Hit> {
+    if let Some(root) = repo_root {
+        if root.join(".gitnexus-rs").join("tantivy").exists() {
+            return tantivy_hits(graph, pattern, kind_set, repo_label, root);
+        }
+    }
+    substring_hits(graph, pattern, kind_set, repo_label)
+}
+
+/// Query the on-disk Tantivy BM25 index, map uids back to graph nodes,
+/// and materialise `Hit` rows. Returns an empty vec when the index opens
+/// but yields no matches; falls through to substring scan if the query
+/// fails outright (e.g. corrupt segment), preserving the contract that
+/// hooks never error out on search.
+fn tantivy_hits(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+    repo_root: &std::path::Path,
+) -> Vec<Hit> {
+    let scored = match crate::search::TantivyEngine::search(repo_root, pattern) {
+        Some(s) => s,
+        // Index unavailable / corrupt / parse error — fall through so
+        // hook context isn't silently empty.
+        None => return substring_hits(graph, pattern, kind_set, repo_label),
+    };
+    // Index ran cleanly. An empty scored vec means BM25 ruled out every
+    // symbol; we MUST NOT fall back to substring scan, since that would
+    // surface 0.4-scored noise the trusted index already rejected.
+    if scored.is_empty() {
+        return Vec::new();
+    }
+
+    // uid → node_idx lookup over the whole graph (capacity matches the
+    // number of insertions, not the smaller `scored` set).
+    let mut uid_to_idx: HashMap<&str, usize> = HashMap::with_capacity(graph.nodes.len());
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        uid_to_idx.insert(node.uid.resolve(&graph.string_pool), idx);
+    }
+
+    let mut hits = Vec::with_capacity(scored.len());
+    for (score, uid) in scored {
+        let Some(&idx) = uid_to_idx.get(uid.as_str()) else {
+            continue;
+        };
+        if let Some(hit) = build_hit(graph, idx, score, kind_set, repo_label) {
+            hits.push(hit);
+        }
+    }
+    hits
+}
+
+/// Fallback BM25-shaped scan when no tantivy index is on disk.
+/// Preserves the legacy 1.0 / 0.7 / 0.4 scoring so hook output stays
+/// shaped the same before the first `gnx admin index` has produced an
+/// index.
+fn substring_hits(
     graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
@@ -226,10 +310,8 @@ fn bm25_hits_from_graph(
 ) -> Vec<Hit> {
     let pattern_lower = pattern.to_lowercase();
     let mut hits = Vec::new();
-
     for (idx, node) in graph.nodes.iter().enumerate() {
-        let name = node.name.resolve(&graph.string_pool);
-        let name_lower = name.to_lowercase();
+        let name_lower = node.name.resolve(&graph.string_pool).to_lowercase();
         let score: f32 = if name_lower == pattern_lower {
             1.0
         } else if name_lower.starts_with(&pattern_lower) {
@@ -239,43 +321,79 @@ fn bm25_hits_from_graph(
         } else {
             continue;
         };
-
-        // Apply --kind filter.
-        if let Some(ks) = kind_set {
-            let node_kind_str = format!("{:?}", node.kind).to_lowercase();
-            if !ks.iter().any(|k| k == &node_kind_str) {
-                continue;
-            }
+        if let Some(hit) = build_hit(graph, idx, score, kind_set, repo_label) {
+            hits.push(hit);
         }
-
-        let file = graph.files[node.file_idx.to_native() as usize]
-            .path
-            .resolve(&graph.string_pool)
-            .to_string();
-        let line = node.span.0.to_native() + 1;
-        let kind_str = kind_to_str(&node.kind).to_string();
-        let signature = format!("{kind_str} {name}");
-
-        // 1-hop caller count: in-edge CSR slice length for this node.
-        let caller_count = {
-            let start = graph.in_offsets[idx].to_native() as usize;
-            let end = graph.in_offsets[idx + 1].to_native() as usize;
-            end.saturating_sub(start)
-        };
-
-        hits.push(Hit {
-            repo: repo_label.clone(),
-            score,
-            kind: kind_str,
-            file,
-            line,
-            name: name.to_string(),
-            signature,
-            caller_count,
-        });
     }
-
     hits
+}
+
+/// Shared per-node Hit constructor. Applies kind filter and reads
+/// file/line/kind/caller_count from the archived graph. Returns `None`
+/// when the node's kind doesn't match the filter.
+fn build_hit(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    idx: usize,
+    score: f32,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+) -> Option<Hit> {
+    let node = &graph.nodes[idx];
+    if let Some(ks) = kind_set {
+        let node_kind_str = format!("{:?}", node.kind).to_lowercase();
+        if !ks.iter().any(|k| k == &node_kind_str) {
+            return None;
+        }
+    }
+    let name = node.name.resolve(&graph.string_pool);
+    let file = graph.files[node.file_idx.to_native() as usize]
+        .path
+        .resolve(&graph.string_pool)
+        .to_string();
+    let line = node.span.0.to_native() + 1;
+    let kind_str = kind_to_str(&node.kind).to_string();
+    let signature = format!("{kind_str} {name}");
+
+    let in_start = graph.in_offsets[idx].to_native() as usize;
+    let in_end = graph.in_offsets[idx + 1].to_native() as usize;
+    let caller_count = in_end.saturating_sub(in_start);
+    let callers: Vec<String> = graph.in_edge_idx[in_start..in_end]
+        .iter()
+        .take(HOP_EXPANSION_LIMIT)
+        .map(|eidx| {
+            let e = &graph.edges[eidx.to_native() as usize];
+            graph.nodes[e.source.to_native() as usize]
+                .name
+                .resolve(&graph.string_pool)
+                .to_string()
+        })
+        .collect();
+
+    let out_start = graph.out_offsets[idx].to_native() as usize;
+    let out_end = graph.out_offsets[idx + 1].to_native() as usize;
+    let callees: Vec<String> = graph.edges[out_start..out_end]
+        .iter()
+        .take(HOP_EXPANSION_LIMIT)
+        .map(|e| {
+            graph.nodes[e.target.to_native() as usize]
+                .name
+                .resolve(&graph.string_pool)
+                .to_string()
+        })
+        .collect();
+
+    Some(Hit {
+        repo: repo_label.clone(),
+        score,
+        kind: kind_str,
+        file,
+        line,
+        name: name.to_string(),
+        signature,
+        caller_count,
+        callers,
+        callees,
+    })
 }
 
 // ── Multi-repo fan-out ────────────────────────────────────────────────────────
@@ -347,6 +465,8 @@ fn compute_multi(
             name: o.name,
             signature: o.signature,
             caller_count: o.caller_count,
+            callers: o.callers,
+            callees: o.callees,
         })
         .collect();
 
@@ -404,6 +524,7 @@ fn scan_repo(
     let graph = engine
         .graph()
         .map_err(|e| format!("{repo_name}: access: {e}"))?;
+    let repo_root = engine.repo_root();
 
     let effective_mode = match mode {
         SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
@@ -418,6 +539,7 @@ fn scan_repo(
         pattern,
         kind_set,
         &Some(repo_name.to_string()),
+        repo_root,
     ))
 }
 
@@ -497,7 +619,8 @@ fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Res
         // renders as a blank line on stdout, which agents can't tell apart
         // from "command crashed silently". Surface the same hint json/toon
         // already include.
-        let hint = "No matches found. Try a shorter pattern or `gnx search --mode bm25 <fragment>`.";
+        let hint =
+            "No matches found. Try a shorter pattern or `gnx search --mode bm25 <fragment>`.";
         if matches!(format, OutputFormat::Text) {
             return emit(
                 &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),
@@ -604,6 +727,8 @@ mod tests {
                 kind: "Function".into(),
                 signature: "fn n".into(),
                 caller_count: 0,
+                callers: vec![],
+                callees: vec![],
             };
             heap.push(Reverse(h));
             if heap.len() > k {

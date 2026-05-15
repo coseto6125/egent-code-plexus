@@ -3,22 +3,30 @@ use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct Engine {
     mmap: Mmap,
+    graph_path: PathBuf,
 }
 
 impl Engine {
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path.as_ref())?;
+        let graph_path = path.as_ref().to_path_buf();
+        let file = File::open(&graph_path)?;
         let mmap = unsafe { Mmap::map(&file)? };
         validate_header(&mmap)?;
-        Ok(Self { mmap })
+        Ok(Self { mmap, graph_path })
     }
 
     pub fn graph(&self) -> Result<&ArchivedZeroCopyGraph, Error> {
         rkyv::access::<ArchivedZeroCopyGraph, Error>(&self.mmap)
+    }
+
+    /// Repo root for tantivy lookup: `graph.bin` lives at
+    /// `<repo>/.gitnexus-rs/graph.bin`, so the root is two parents up.
+    pub fn repo_root(&self) -> Option<&Path> {
+        self.graph_path.parent()?.parent()
     }
 }
 
