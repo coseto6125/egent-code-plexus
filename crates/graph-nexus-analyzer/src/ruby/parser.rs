@@ -422,13 +422,13 @@ impl LanguageProvider for RubyProvider {
             // enclosing class span and `pending_mixins` aren't both finalised
             // until then.
             if let (Some(method_node), Some(args)) = (delegator_method_node, delegator_args_node) {
-                let method_name = std::str::from_utf8(
-                    &source[method_node.start_byte()..method_node.end_byte()],
-                )
-                .unwrap_or("");
+                let method_name =
+                    std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()])
+                        .unwrap_or("");
                 let call_line = method_node.start_position().row as u32;
                 let mut walker = args.walk();
-                let children: Vec<tree_sitter::Node<'_>> = args.named_children(&mut walker).collect();
+                let children: Vec<tree_sitter::Node<'_>> =
+                    args.named_children(&mut walker).collect();
 
                 match method_name {
                     "def_delegator" | "def_delegators" => {
@@ -479,10 +479,8 @@ impl LanguageProvider for RubyProvider {
                                     let key = child.child_by_field_name("key");
                                     let value = child.child_by_field_name("value");
                                     let key_text = key.and_then(|k| {
-                                        std::str::from_utf8(
-                                            &source[k.start_byte()..k.end_byte()],
-                                        )
-                                        .ok()
+                                        std::str::from_utf8(&source[k.start_byte()..k.end_byte()])
+                                            .ok()
                                     });
                                     if key_text == Some("to") {
                                         if let Some(v) = value {
@@ -555,9 +553,9 @@ impl LanguageProvider for RubyProvider {
             let enclosing = enclosing_class_idx(&nodes, line);
             let _has_forwardable = enclosing.is_some_and(|idx| {
                 let span = nodes[idx].span;
-                pending_mixins.iter().any(|(m, ml)| {
-                    m == "Forwardable" && *ml >= span.0 && *ml <= span.2
-                })
+                pending_mixins
+                    .iter()
+                    .any(|(m, ml)| m == "Forwardable" && *ml >= span.0 && *ml <= span.2)
             });
             // Emit regardless of `_has_forwardable` — Option-A low-confidence
             // fallback per docs/specs/2026-05-16-ruby-receiver-aware-resolver.md.

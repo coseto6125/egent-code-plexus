@@ -21,11 +21,7 @@ fn parse(source: &str) -> LocalGraph {
         .expect("parse")
 }
 
-fn find_binding<'a>(
-    graph: &'a LocalGraph,
-    new_name: &str,
-    source: &str,
-) -> Option<&'a RawImport> {
+fn find_binding<'a>(graph: &'a LocalGraph, new_name: &str, source: &str) -> Option<&'a RawImport> {
     graph.imports.iter().find(|i| {
         i.alias.as_deref() == Some(new_name) && i.imported_name == new_name && i.source == source
     })
@@ -81,10 +77,7 @@ fn test_ruby_local_variable_assignment_is_not_a_binding() {
     // constant-alias query MUST NOT fire.
     let graph = parse("local_var = some_method()\n");
     assert!(
-        graph
-            .imports
-            .iter()
-            .all(|i| i.imported_name != "local_var"),
+        graph.imports.iter().all(|i| i.imported_name != "local_var"),
         "local variable assignment leaked as named binding: {:?}",
         graph.imports
     );
@@ -116,9 +109,7 @@ fn test_ruby_alias_keyword_outside_class_emits_binding() {
 
 #[test]
 fn test_ruby_def_delegator_with_forwardable_emits_binding() {
-    let graph = parse(
-        "class Album\n  extend Forwardable\n  def_delegator :@songs, :each\nend\n",
-    );
+    let graph = parse("class Album\n  extend Forwardable\n  def_delegator :@songs, :each\nend\n");
     let binding = find_binding(&graph, "each", "songs.each");
     assert!(
         binding.is_some(),
@@ -145,9 +136,7 @@ fn test_ruby_def_delegators_emits_one_binding_per_method() {
 
 #[test]
 fn test_ruby_delegate_rails_style_emits_bindings() {
-    let graph = parse(
-        "class Order\n  delegate :address, :phone, to: :customer\nend\n",
-    );
+    let graph = parse("class Order\n  delegate :address, :phone, to: :customer\nend\n");
     for method in ["address", "phone"] {
         let source = format!("customer.{method}");
         let binding = find_binding(&graph, method, &source);
@@ -182,15 +171,12 @@ fn test_ruby_user_defined_def_delegator_method_is_not_a_binding() {
     // `call` node the query matches. Only an actual *call* to a same-named
     // identifier would be a false positive, and that case is the known
     // limitation we document but do not try to disambiguate.
-    let graph = parse(
-        "class C\n  def def_delegator(a, b)\n    nil\n  end\nend\n",
-    );
+    let graph = parse("class C\n  def def_delegator(a, b)\n    nil\n  end\nend\n");
     assert!(
         graph
             .imports
             .iter()
-            .all(|i| i.imported_name != "def_delegator"
-                && !i.source.contains("def_delegator")),
+            .all(|i| i.imported_name != "def_delegator" && !i.source.contains("def_delegator")),
         "user-defined def_delegator method leaked as a delegator binding: {:?}",
         graph.imports
     );

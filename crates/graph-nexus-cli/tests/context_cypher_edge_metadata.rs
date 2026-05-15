@@ -159,24 +159,46 @@ fn cypher_direct_edge_results_expose_edge_reason_and_confidence() {
         tmp.path(),
         &[
             "cypher",
-            "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a, b",
+            "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a.name, b.name, r.confidence, r.reason",
             "--format",
             "json",
         ],
     );
 
-    let results = out["results"]
+    let columns = out["columns"]
         .as_array()
-        .unwrap_or_else(|| panic!("expected results array, got {out}"));
+        .unwrap_or_else(|| panic!("expected columns array, got {out}"));
+    let rows = out["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected rows array, got {out}"));
     assert!(
-        !results.is_empty(),
+        !rows.is_empty(),
         "cypher should return at least one direct call edge: {out}"
     );
 
-    for row in results {
-        let edge = row
-            .get("edge")
-            .unwrap_or_else(|| panic!("row missing edge block: {row}"));
-        assert_edge_metadata(edge, "cypher direct edge");
+    let col_names: Vec<&str> = columns.iter().map(|c| c.as_str().unwrap()).collect();
+    for expected in ["a.name", "b.name", "r.confidence", "r.reason"] {
+        assert!(
+            col_names.contains(&expected),
+            "expected column {expected} in {col_names:?}"
+        );
+    }
+
+    let conf_col = col_names.iter().position(|&c| c == "r.confidence").unwrap();
+    let reason_col = col_names.iter().position(|&c| c == "r.reason").unwrap();
+
+    for row in rows {
+        let conf = row[conf_col]
+            .as_f64()
+            .unwrap_or_else(|| panic!("r.confidence should be a number: {row}"));
+        assert!(
+            (0.0..=1.0).contains(&conf),
+            "r.confidence should be in [0,1]: {conf} in {row}"
+        );
+
+        let reason = row[reason_col]
+            .as_str()
+            .unwrap_or_else(|| panic!("r.reason should be a string: {row}"));
+        assert!(!reason.is_empty(), "r.reason should be non-empty: {row}");
     }
 }

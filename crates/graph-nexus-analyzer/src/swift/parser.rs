@@ -410,7 +410,8 @@ fn attribute_objc_external_name(attr: tree_sitter::Node<'_>, source: &[u8]) -> O
     for child in attr.children(&mut cur) {
         match child.kind() {
             "user_type" => {
-                let txt = std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok()?;
+                let txt =
+                    std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok()?;
                 if txt == "objc" {
                     is_objc = true;
                 }

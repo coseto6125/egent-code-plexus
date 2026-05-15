@@ -1593,6 +1593,7 @@ dependencies = [
  "memmap2",
  "nix",
  "rayon",
+ "regex",
  "rkyv",
  "rustc-hash",
  "serde",

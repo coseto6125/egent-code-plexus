@@ -244,12 +244,8 @@ impl<'a> Resolver<'a> {
         // recorded by the parser, mirroring MRO precedence).
         if !caller_heritage.is_empty() {
             for base in caller_heritage {
-                if let Some(qf) =
-                    self.resolve_qualifier_file(source_file, base, raw_imports)
-                {
-                    if let Some(node_id) =
-                        self.symbol_table.lookup_in_file(&qf, symbol_name)
-                    {
+                if let Some(qf) = self.resolve_qualifier_file(source_file, base, raw_imports) {
+                    if let Some(node_id) = self.symbol_table.lookup_in_file(&qf, symbol_name) {
                         let conf = ResolutionTier::HeritageScoped.base_confidence();
                         results.push((node_id, conf));
                         self.record(

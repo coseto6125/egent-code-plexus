@@ -130,7 +130,9 @@ fn extern_bound_identifier<'a>(decl: Node<'a>) -> Option<Node<'a>> {
     for child in decl.named_children(&mut cursor) {
         match child.kind() {
             "identifier" => return Some(child),
-            "function_declarator" | "pointer_declarator" | "array_declarator"
+            "function_declarator"
+            | "pointer_declarator"
+            | "array_declarator"
             | "init_declarator" => {
                 if let Some(found) = extern_bound_identifier(child) {
                     return Some(found);
@@ -189,17 +191,19 @@ fn classify_define_body(body: &str) -> BindingKind {
     let is_numeric = {
         let s = body.trim_start_matches('-');
         (s.starts_with("0x") || s.starts_with("0X"))
-            && s[2..].trim_end_matches(['u', 'U', 'l', 'L']).chars().all(|c| c.is_ascii_hexdigit())
-        || {
-            let stripped = s
-                .trim_end_matches(['u', 'U', 'l', 'L', 'f', 'F']);
-            let mut parts = stripped.splitn(2, '.');
-            let integer_part = parts.next().unwrap_or("");
-            let frac_part = parts.next().unwrap_or("");
-            !integer_part.is_empty()
-                && integer_part.chars().all(|c| c.is_ascii_digit())
-                && frac_part.chars().all(|c| c.is_ascii_digit())
-        }
+            && s[2..]
+                .trim_end_matches(['u', 'U', 'l', 'L'])
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+            || {
+                let stripped = s.trim_end_matches(['u', 'U', 'l', 'L', 'f', 'F']);
+                let mut parts = stripped.splitn(2, '.');
+                let integer_part = parts.next().unwrap_or("");
+                let frac_part = parts.next().unwrap_or("");
+                !integer_part.is_empty()
+                    && integer_part.chars().all(|c| c.is_ascii_digit())
+                    && frac_part.chars().all(|c| c.is_ascii_digit())
+            }
     };
     if is_numeric {
         return BindingKind::Constant;

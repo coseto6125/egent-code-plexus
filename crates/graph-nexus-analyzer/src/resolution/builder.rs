@@ -1049,7 +1049,10 @@ fn lang_for_path(path: &str) -> Option<response_shapes::Lang> {
 /// Returns an empty slice when the node has no enclosing class (top-level
 /// function, etc.). For Ruby `module Foo` and `class Foo` both emit as
 /// `NodeKind::Class`, so this single check covers Ruby module mixins too.
-fn enclosing_class_heritage<'a>(raw_node: &'a RawNode, local_graph: &'a LocalGraph) -> &'a [String] {
+fn enclosing_class_heritage<'a>(
+    raw_node: &'a RawNode,
+    local_graph: &'a LocalGraph,
+) -> &'a [String] {
     if raw_node.kind == NodeKind::Class {
         return &raw_node.heritage;
     }
