@@ -44,10 +44,14 @@ Separately from the matrix-opt scope above, Wave 2 from `docs/specs/2026-05-15-l
 | F2 PHP composer.json + F3 Swift Package.swift | shipped | `config_php_swift.rs` (8) |
 | B1 JS Express + Hapi | shipped (incl. handler-shape fix + `use` drop) | `javascript_frameworks.rs` (10) |
 | B2 Kotlin Ktor | shipped | `kotlin_frameworks.rs` (3) |
-| D2 Swift / Dart types | deferred (SA failed to converge) | — |
-| B2 C# ASP.NET Core | deferred (no test file emerged) | — |
-| B3 PHP Laravel + Ruby Rails + Go gin/echo | deferred | — |
-| B4 Swift Vapor + C++ Crow + Dart shelf | deferred | — |
+| B3 Go gin + echo | shipped (ported from upstream `http-patterns/go.ts`) | `go_frameworks.rs` (6) |
+| B3 PHP Laravel | shipped (ported from upstream `http-patterns/php.ts`, simplified) | `php_frameworks.rs` (5) |
+| D2 Swift / Dart types | deferred (SA failed to converge; not in upstream) | — |
+| B2 C# ASP.NET Core | deferred — **not in upstream baseline** | — |
+| B3 Ruby Rails | deferred — **not in upstream baseline** | — |
+| B4 Swift Vapor + C++ Crow + Dart shelf | deferred — **not in upstream baseline** | — |
+
+**Upstream coverage note**: gitnexus' `http-patterns/` directory has plugins for **5 langs only**: Go, Java, Node (JS/TS), PHP, Python. The framework langs we've closed here mirror those plugins (Express/Hapi for JS, Ktor for Kotlin, gin/echo for Go, Laravel for PHP). Closing C# / Ruby / Swift / C++ / Dart frameworks would be **net-new beyond upstream parity** — outside the scope of "fork from upstream" and best treated as a separate roadmap item.
 
 PR #2 review found 4 issues ≥80; all 4 fixed in this branch:
 - Go multi-name param/var → emit one Variable per name (was: only last name)
