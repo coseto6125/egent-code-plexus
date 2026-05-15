@@ -23,6 +23,7 @@ pub mod remove;
 pub mod rename;
 pub mod rename_branch;
 pub mod route_map;
+pub mod shape_check;
 pub mod status;
 pub mod summarize;
 pub mod tool_map;
