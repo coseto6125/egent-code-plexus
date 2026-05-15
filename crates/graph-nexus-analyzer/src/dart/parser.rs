@@ -47,6 +47,7 @@ impl LanguageProvider for DartProvider {
         let idx_function_name = self.query.capture_index_for_name("function.name");
         let idx_method_name = self.query.capture_index_for_name("method.name");
         let idx_interface_name = self.query.capture_index_for_name("interface.name");
+        let idx_property_name = self.query.capture_index_for_name("property.name");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_import_source = self.query.capture_index_for_name("import.source");
@@ -57,6 +58,7 @@ impl LanguageProvider for DartProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
+        let idx_property = self.query.capture_index_for_name("property");
         let idx_import = self.query.capture_index_for_name("import");
 
         while let Some(m) = matches.next() {
@@ -84,6 +86,9 @@ impl LanguageProvider for DartProvider {
                 } else if Some(cap_idx) == idx_interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
+                } else if Some(cap_idx) == idx_property_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Property);
                 } else if Some(cap_idx) == idx_heritage {
                     if let Ok(h) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -112,6 +117,7 @@ impl LanguageProvider for DartProvider {
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
                     || Some(cap_idx) == idx_interface
+                    || Some(cap_idx) == idx_property
                     || Some(cap_idx) == idx_import
                 {
                     root_span_node = Some(cap.node);
@@ -121,6 +127,10 @@ impl LanguageProvider for DartProvider {
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let name_str = name_str.trim();
+                    // Dart visibility convention: identifiers starting with `_` are
+                    // library-private regardless of `library` directive (per Dart
+                    // language spec). Applies to all symbol kinds (Class, Function,
+                    // Method, Interface, Property).
                     let is_exported = !name_str.starts_with('_');
                     let start = root.start_position();
                     let end = root.end_position();
