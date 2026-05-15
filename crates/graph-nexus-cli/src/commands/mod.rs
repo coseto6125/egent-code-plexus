@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod analyze;
 pub mod analyze_here;
 pub mod api_impact;
@@ -20,9 +21,11 @@ pub mod process;
 pub mod prune;
 pub mod query;
 pub mod remove;
+pub mod contracts;
 pub mod rename;
 pub mod rename_branch;
 pub mod route_map;
+pub mod scan;
 pub mod shape_check;
 pub mod status;
 pub mod summarize;
