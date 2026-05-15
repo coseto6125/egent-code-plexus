@@ -1,27 +1,20 @@
-//! `gnx rename` — AST-powered Python rename (P0 MVP).
+//! `gnx rename` — AST-powered multi-lang rename.
 //!
 //! Pipeline:
 //! 1. **Plan (graph)**: load `graph.bin`, find the target node by name,
 //!    collect inbound-edge source files + the target's own file. Bails
 //!    with `error: ambiguous` if multiple nodes share the name.
-//! 2. **Verify (AST)**: tree-sitter Python parse each affected `.py`
-//!    file, find every `identifier` byte-range whose text matches the
-//!    target. Skips non-Python files (multi-lang is post-MVP).
+//! 2. **Verify (AST)**: tree-sitter parse each affected file,
+//!    find every `identifier` byte-range whose text matches the
+//!    target.
 //! 3. **Execute / Dry-run**: dry-run prints the count + a unified diff
 //!    preview to stdout and exits. Execute writes each file atomically
 //!    (tmp + fsync + rename) by descending byte offset to avoid shift.
-//!
-//! Scope note: the MVP intentionally trusts the AST identifier text
-//! match without intersecting against per-call-site byte offsets from
-//! the graph (the graph doesn't carry those today). Coarse hits like a
-//! local variable shadowing the target's name will also be rewritten;
-//! the dry-run diff is the user's review surface.
 
 use crate::engine::Engine;
 use clap::Args;
-use graph_nexus_analyzer::python::identifier_finder::{
-    find_identifier_occurrences, IdentifierRange,
-};
+use graph_nexus_analyzer::identifier_finder::find_identifier_occurrences;
+use graph_nexus_core::analyzer::types::IdentifierRange;
 use graph_nexus_core::registry::atomic_write_bytes;
 use graph_nexus_core::GnxError;
 use std::collections::HashSet;
@@ -84,18 +77,15 @@ pub fn run(args: RenameArgs, engine: &Engine) -> Result<(), GnxError> {
         }
     }
 
-    // Stage 2: parse each Python file, find identifier occurrences.
+    // Stage 2: parse each file, find identifier occurrences.
     let mut hits: Vec<(PathBuf, Vec<IdentifierRange>)> = Vec::new();
     for file_idx in affected_file_idx {
         let rel_path = graph.files[file_idx].path.resolve(&graph.string_pool);
-        if !rel_path.ends_with(".py") {
-            continue; // MVP: Python only
-        }
         let abs_path = repo_root.join(rel_path);
         let Ok(bytes) = std::fs::read(&abs_path) else {
             continue;
         };
-        let occurrences = find_identifier_occurrences(&bytes, &args.symbol);
+        let occurrences = find_identifier_occurrences(rel_path, &bytes, &args.symbol);
         if !occurrences.is_empty() {
             hits.push((abs_path, occurrences));
         }

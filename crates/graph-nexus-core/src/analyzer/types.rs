@@ -2,6 +2,14 @@ use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy)]
+pub struct IdentifierRange {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub row: usize,
+    pub col: usize,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawNode {

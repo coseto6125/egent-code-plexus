@@ -8,15 +8,8 @@
 //! happens to share the target's name. The dry-run diff is the user's
 //! review surface to catch shadowing false-positives.
 
+use graph_nexus_core::analyzer::types::IdentifierRange;
 use tree_sitter::{Node, Parser};
-
-#[derive(Debug, Clone, Copy)]
-pub struct IdentifierRange {
-    pub start_byte: usize,
-    pub end_byte: usize,
-    pub row: usize,
-    pub col: usize,
-}
 
 /// Parse `source` as Python and return every `identifier` byte-range
 /// whose text equals `target_name`. Returns an empty vec on parse
