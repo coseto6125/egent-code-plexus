@@ -116,17 +116,28 @@ fn build_groups_overview(reg: &RegistryFile) -> Value {
 // ── Per-repo health ──────────────────────────────────────────────────────────
 
 fn build_repo_health(r: &crate::repo_selector::ResolvedRepo) -> Value {
+    // Load the graph once per repo and share it between framework + blind-spot
+    // sections. Without this, each section would mmap+validate independently
+    // — wasteful when `--repo @all` spans many repos.
+    let engine = try_load_engine(r);
+    let (graph, status) = match engine.as_ref() {
+        None => (None, Some("graph_unavailable")),
+        Some(e) => match e.graph() {
+            Ok(g) => (Some(g), None),
+            Err(_) => (None, Some("graph_load_failed")),
+        },
+    };
     json!({
         "repo": r.name,
-        "frameworks": fetch_frameworks(r),
+        "frameworks": fetch_frameworks(graph, status),
         "freshness": fetch_freshness(r),
-        "blind_spots": fetch_blind_spots(r),
+        "blind_spots": fetch_blind_spots(graph, status),
     })
 }
 
-/// Per-repo graph path. Mirrors the convention used by `fetch_freshness` —
-/// the "main" branch is the canonical default; non-main branches are not
-/// inspected here (they get their own coverage when explicitly selected).
+/// Per-repo graph path. The "main" branch is the canonical default; non-main
+/// branches are not inspected here (they get their own coverage when
+/// explicitly selected).
 fn graph_main_path(r: &crate::repo_selector::ResolvedRepo) -> PathBuf {
     Path::new(&r.index_dir_root).join("main").join("graph.bin")
 }
@@ -139,12 +150,8 @@ fn try_load_engine(r: &crate::repo_selector::ResolvedRepo) -> Option<Engine> {
 }
 
 /// Freshness check: compare graph.bin mtime to newest source file.
-/// Uses the "main" branch graph path by default; falls back gracefully
-/// when no branch directory is found.
 fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo) -> Value {
-    // Try the default "main" branch path, then fall back to the index_dir_root
-    // directly in case the repo uses a different primary branch name.
-    let main_path = Path::new(&r.index_dir_root).join("main").join("graph.bin");
+    let main_path = graph_main_path(r);
     let worktree = Path::new(&r.worktree_path);
 
     match ensure_index(&main_path, worktree) {
@@ -159,22 +166,16 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo) -> Value {
 
 /// Framework coverage: the static supported catalog plus a `detected` list
 /// derived from edge `reason` tags in the live graph. When the graph is
-/// missing or unreadable, `detected` is `[]` and a `status` field explains.
-fn fetch_frameworks(r: &crate::repo_selector::ResolvedRepo) -> Value {
+/// missing or unreadable, `detected` is `[]` and `status` explains.
+fn fetch_frameworks(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'static str>) -> Value {
     let supported = supported_framework_catalog();
-
-    let (detected, status) = match try_load_engine(r) {
-        None => (json!([]), Some("graph_unavailable")),
-        Some(engine) => match engine.graph() {
-            Ok(graph) => (count_detected_frameworks(graph), None),
-            Err(_) => (json!([]), Some("graph_load_failed")),
-        },
-    };
+    let detected = graph
+        .map(count_detected_frameworks)
+        .unwrap_or_else(|| json!([]));
 
     let mut out = serde_json::Map::new();
-    let supported_arr = supported.as_array().expect("supported is array").clone();
-    out.insert("supported_count".into(), json!(supported_arr.len()));
-    out.insert("supported".into(), Value::Array(supported_arr));
+    out.insert("supported_count".into(), json!(supported.len()));
+    out.insert("supported".into(), Value::Array(supported));
     out.insert("detected".into(), detected);
     if let Some(s) = status {
         out.insert("status".into(), json!(s));
@@ -182,11 +183,10 @@ fn fetch_frameworks(r: &crate::repo_selector::ResolvedRepo) -> Value {
     Value::Object(out)
 }
 
-/// The supported-frameworks catalog. Static — mirrors what the analyzer
-/// actually knows how to detect, paired with each pattern's confidence
-/// gate. Listed here so `coverage` can show "supported but not seen" in
-/// downstream tooling.
-fn supported_framework_catalog() -> Value {
+/// The supported-frameworks catalog: static list of (lang_framework, reason_tag,
+/// confidence) tuples returned alongside `detected` so downstream tooling can
+/// identify frameworks the analyzer supports but hasn't seen in this graph.
+fn supported_framework_catalog() -> Vec<Value> {
     use graph_nexus_analyzer::framework_confidence as fc;
 
     let patterns: &[(&str, &str)] = &[
@@ -199,7 +199,7 @@ fn supported_framework_catalog() -> Value {
         ("Python/reflection", "reflection-getattr-fanout"),
         ("Rust/Axum", "axum-route-handler"),
         ("Rust/Actix", "actix-route-<method>"),
-        ("TypeScript/Express", "express-route-handler"),
+        ("Web/Express", "express-route-handler"),
         ("TypeScript/NestJS", "nestjs-route-handler"),
         ("Java/Spring", "spring-autowired"),
         ("Java/Spring", "spring-route-handler"),
@@ -223,20 +223,23 @@ fn supported_framework_catalog() -> Value {
         }
     };
 
-    json!(patterns
+    patterns
         .iter()
-        .map(|(lang_fw, tag)| json!({
-            "lang_framework": lang_fw,
-            "reason_tag": tag,
-            "confidence": confidence_for(tag),
-        }))
-        .collect::<Vec<_>>())
+        .map(|(lang_fw, tag)| {
+            json!({
+                "lang_framework": lang_fw,
+                "reason_tag": tag,
+                "confidence": confidence_for(tag),
+            })
+        })
+        .collect()
 }
 
 /// Map an edge `reason` string to the lang_framework it represents. Some
 /// reasons carry a dynamic suffix (`fastapi-route-GET`, `actix-route-POST`)
-/// — match those by prefix. Returns `None` for non-framework reasons
-/// (`ast-call`, generic call edges, etc.).
+/// — match those by prefix. The `Web/Express` bucket covers both the JS
+/// parser tag (`"express-route"`) and the TS parser tag
+/// (`"express-route-handler"`). Returns `None` for non-framework reasons.
 fn classify_framework_reason(reason: &str) -> Option<&'static str> {
     if reason == "fastapi-depends" || reason.starts_with("fastapi-route-") {
         Some("Python/FastAPI")
@@ -250,8 +253,8 @@ fn classify_framework_reason(reason: &str) -> Option<&'static str> {
         Some("Rust/Axum")
     } else if reason.starts_with("actix-route-") {
         Some("Rust/Actix")
-    } else if reason == "express-route-handler" {
-        Some("TypeScript/Express")
+    } else if reason == "express-route" || reason == "express-route-handler" {
+        Some("Web/Express")
     } else if reason == "nestjs-route-handler" {
         Some("TypeScript/NestJS")
     } else if reason == "spring-autowired" || reason == "spring-route-handler" {
@@ -281,29 +284,22 @@ fn count_detected_frameworks(graph: &ArchivedZeroCopyGraph) -> Value {
 /// Blind spots: unsupported dynamic-dispatch sites recorded by the analyzer
 /// during indexing. Read directly from `graph.blind_spots` (no extra
 /// scanning). Falls back to a `status` note when the graph is unavailable.
-fn fetch_blind_spots(r: &crate::repo_selector::ResolvedRepo) -> Value {
-    let (graph_data, status) = match try_load_engine(r) {
-        None => (None, Some("graph_unavailable")),
-        Some(engine) => match engine.graph() {
-            Ok(graph) => (Some(count_blind_spots(graph)), None),
-            Err(_) => (None, Some("graph_load_failed")),
-        },
-    };
-
-    match (graph_data, status) {
-        (Some(v), _) => v,
-        (None, Some(s)) => json!({ "total": 0, "by_kind": {}, "status": s }),
-        (None, None) => json!({ "total": 0, "by_kind": {} }),
+fn fetch_blind_spots(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'static str>) -> Value {
+    match graph {
+        Some(g) => count_blind_spots(g),
+        None => {
+            json!({ "total": 0, "by_kind": {}, "status": status.unwrap_or("graph_unavailable") })
+        }
     }
 }
 
 /// Group `graph.blind_spots` by their `kind` tag (e.g. `dynamic-import`,
-/// `reflection`). `BTreeMap` keeps the output deterministic so callers can
-/// snapshot-test it.
+/// `reflection`). Keys borrow zero-copy from `graph.string_pool`; the
+/// `BTreeMap` makes the output deterministic for snapshot-style assertions.
 fn count_blind_spots(graph: &ArchivedZeroCopyGraph) -> Value {
-    let mut by_kind: BTreeMap<String, u32> = BTreeMap::new();
+    let mut by_kind: BTreeMap<&str, u32> = BTreeMap::new();
     for bs in graph.blind_spots.iter() {
-        let kind = bs.kind.resolve(&graph.string_pool).to_string();
+        let kind = bs.kind.resolve(&graph.string_pool);
         *by_kind.entry(kind).or_insert(0) += 1;
     }
     let total: u32 = by_kind.values().sum();
@@ -320,8 +316,7 @@ mod tests {
     use graph_nexus_core::pool::StringPool;
 
     /// rkyv-archive an in-memory `ZeroCopyGraph` and pass the borrowed
-    /// `ArchivedZeroCopyGraph` into the test body. Mirrors the fixture
-    /// helper used in `cypher::executor` tests.
+    /// `ArchivedZeroCopyGraph` into the test body.
     fn with_archived(g: ZeroCopyGraph, f: impl FnOnce(&ArchivedZeroCopyGraph)) {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec();
         let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
@@ -446,7 +441,13 @@ mod tests {
         );
         assert_eq!(
             classify_framework_reason("express-route-handler"),
-            Some("TypeScript/Express")
+            Some("Web/Express")
+        );
+        // JS parser emits the shorter tag; both must route to the same bucket
+        // so JS-only Express apps aren't silently dropped from `detected`.
+        assert_eq!(
+            classify_framework_reason("express-route"),
+            Some("Web/Express")
         );
         assert_eq!(
             classify_framework_reason("nestjs-route-handler"),
@@ -467,7 +468,6 @@ mod tests {
         assert_eq!(classify_framework_reason("ast-call"), None);
         assert_eq!(classify_framework_reason(""), None);
         assert_eq!(classify_framework_reason("calls"), None);
-        // Prefix lookalike that's not actually a framework tag
         assert_eq!(classify_framework_reason("django-other"), None);
     }
 

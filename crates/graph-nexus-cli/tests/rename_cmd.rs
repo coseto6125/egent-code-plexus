@@ -9,24 +9,14 @@
 //! - Post-rename verification: residuals + new_distribution sections
 //! - Pre-flight collision detection: COLLISION warning in dry-run
 
+mod common;
+
+use common::run_git;
 use std::path::Path;
 use std::process::Command;
 
 fn gnx_bin() -> &'static str {
     env!("CARGO_BIN_EXE_gnx")
-}
-
-fn run_git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git failed to spawn");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 /// Build the graph index for a repo. `home` is an isolated home dir to avoid

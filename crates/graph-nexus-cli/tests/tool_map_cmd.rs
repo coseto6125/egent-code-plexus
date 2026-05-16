@@ -4,6 +4,9 @@
 //! non-client helper so we can assert the catalog filter is exact and
 //! not just a substring match.
 
+mod common;
+
+use common::run_git;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -47,19 +50,6 @@ function compute(): number {
     return 1;
 }
 "#;
-
-fn run_git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git spawn failed");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 fn setup_repo(repo: &Path, home: &Path, src: &str, origin: &str) {
     setup_repo_with_file(repo, home, "src/main.ts", src, origin);
@@ -264,69 +254,49 @@ fn tool_map_empty_when_no_clients_used() {
     }
 }
 
-// ─── Cross-language coverage (Python / Go / Rust) ───────────────────────────
+// ─── Cross-language / cross-category coverage ───────────────────────────────
 //
-// The 4 tests above all use TypeScript fixtures. The package-import scanner
-// supports four languages — these tests exercise the remaining three so a
-// future grammar / parser change in any of them doesn't silently regress.
+// The 4 tests above all use TypeScript fixtures (only the HTTP bucket). The
+// package-import scanner supports four languages × four categories — these
+// per-axis tests cover the remaining permutations so a future grammar /
+// parser change or PACKAGE_CATEGORY edit can't silently regress one.
 
-const FIXTURE_PYTHON_REQUESTS: &str = r#"
-import requests
+/// Set up a one-file fixture, run `gnx tool-map`, assert that `callee`
+/// appears under `category`. Six tests below differ only in (file path,
+/// fixture, origin, category, expected callee) — extracting this helper
+/// keeps each test to a three-line declaration.
+fn assert_callee_present(rel_path: &str, src: &str, origin: &str, category: &str, callee: &str) {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_repo_with_file(repo.path(), home.path(), rel_path, src, origin);
 
-def fetch_user(uid):
-    r = requests.get(f"/api/users/{uid}")
-    return r
-"#;
+    let json = run_tool_map(repo.path(), home.path(), &[]);
+    let callees = callee_names(&json["calls"][category]);
+    assert!(
+        callees.contains(&callee),
+        "expected `{callee}` in {category} category for {rel_path}: {callees:?}"
+    );
+}
 
 #[test]
 fn tool_map_python_requests_detected() {
-    let repo = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    setup_repo_with_file(
-        repo.path(),
-        home.path(),
+    assert_callee_present(
         "src/main.py",
-        FIXTURE_PYTHON_REQUESTS,
+        "import requests\n\ndef fetch_user(uid):\n    r = requests.get(f\"/api/users/{uid}\")\n    return r\n",
         "git@github.com:E-NoR/tool-map-py-test.git",
-    );
-
-    let json = run_tool_map(repo.path(), home.path(), &[]);
-    let callees = callee_names(&json["calls"]["http"]);
-    assert!(
-        callees.contains(&"requests.get"),
-        "expected `requests.get` from Python `import requests` + `requests.get(...)`: {callees:?}"
+        "http",
+        "requests.get",
     );
 }
-
-const FIXTURE_GO_NET_HTTP: &str = r#"
-package main
-
-import (
-    "net/http"
-)
-
-func fetchOrder() {
-    http.Get("/api/orders")
-}
-"#;
 
 #[test]
 fn tool_map_go_net_http_detected() {
-    let repo = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    setup_repo_with_file(
-        repo.path(),
-        home.path(),
+    assert_callee_present(
         "main.go",
-        FIXTURE_GO_NET_HTTP,
+        "package main\n\nimport (\n    \"net/http\"\n)\n\nfunc fetchOrder() {\n    http.Get(\"/api/orders\")\n}\n",
         "git@github.com:E-NoR/tool-map-go-test.git",
-    );
-
-    let json = run_tool_map(repo.path(), home.path(), &[]);
-    let callees = callee_names(&json["calls"]["http"]);
-    assert!(
-        callees.contains(&"http.Get"),
-        "expected `http.Get` from Go `import \"net/http\"` (basename binding `http`): {callees:?}"
+        "http",
+        "http.Get",
     );
 }
 
@@ -334,119 +304,46 @@ fn tool_map_go_net_http_detected() {
 // scanner can detect — `use reqwest::Client; Client::new()` won't match
 // because the scanner looks for `binding.method` / `binding(...)`, not the
 // `binding::method` path syntax. Documented limitation, not a regression.
-const FIXTURE_RUST_REQWEST: &str = r#"
-use reqwest::get;
-
-pub async fn fetch_data() {
-    let _ = get("https://example.com/api").await;
-}
-"#;
-
 #[test]
 fn tool_map_rust_reqwest_detected() {
-    let repo = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    setup_repo_with_file(
-        repo.path(),
-        home.path(),
+    assert_callee_present(
         "src/main.rs",
-        FIXTURE_RUST_REQWEST,
+        "use reqwest::get;\n\npub async fn fetch_data() {\n    let _ = get(\"https://example.com/api\").await;\n}\n",
         "git@github.com:E-NoR/tool-map-rs-test.git",
-    );
-
-    let json = run_tool_map(repo.path(), home.path(), &[]);
-    let callees = callee_names(&json["calls"]["http"]);
-    assert!(
-        callees.contains(&"get"),
-        "expected `get` from Rust `use reqwest::get;` + bare `get(...)` call: {callees:?}"
+        "http",
+        "get",
     );
 }
-
-// ─── Cross-category coverage (DB / Redis / Queue) ───────────────────────────
-//
-// HTTP is exercised by every test above. These three target the remaining
-// PACKAGE_CATEGORY buckets so a category-name typo or PACKAGE_CATEGORY
-// table edit doesn't silently drop them.
-
-const FIXTURE_TS_PG: &str = r#"
-import pg from "pg";
-
-export async function dbQuery() {
-    const r = await pg.connect();
-    return r;
-}
-"#;
 
 #[test]
 fn tool_map_db_category_detected_via_pg() {
-    let repo = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    setup_repo_with_file(
-        repo.path(),
-        home.path(),
+    assert_callee_present(
         "src/main.ts",
-        FIXTURE_TS_PG,
+        "import pg from \"pg\";\n\nexport async function dbQuery() {\n    const r = await pg.connect();\n    return r;\n}\n",
         "git@github.com:E-NoR/tool-map-db-test.git",
-    );
-
-    let json = run_tool_map(repo.path(), home.path(), &[]);
-    let callees = callee_names(&json["calls"]["db"]);
-    assert!(
-        callees.contains(&"pg.connect"),
-        "expected `pg.connect` in db category from `import pg from \"pg\"`: {callees:?}"
+        "db",
+        "pg.connect",
     );
 }
-
-const FIXTURE_TS_REDIS: &str = r#"
-import redis from "redis";
-
-export async function cacheSet(k: string, v: string) {
-    await redis.set(k, v);
-}
-"#;
 
 #[test]
 fn tool_map_redis_category_detected() {
-    let repo = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    setup_repo_with_file(
-        repo.path(),
-        home.path(),
+    assert_callee_present(
         "src/main.ts",
-        FIXTURE_TS_REDIS,
+        "import redis from \"redis\";\n\nexport async function cacheSet(k: string, v: string) {\n    await redis.set(k, v);\n}\n",
         "git@github.com:E-NoR/tool-map-redis-test.git",
-    );
-
-    let json = run_tool_map(repo.path(), home.path(), &[]);
-    let callees = callee_names(&json["calls"]["redis"]);
-    assert!(
-        callees.contains(&"redis.set"),
-        "expected `redis.set` in redis category from `import redis from \"redis\"`: {callees:?}"
+        "redis",
+        "redis.set",
     );
 }
 
-const FIXTURE_PYTHON_CELERY: &str = r#"
-from celery import Celery
-
-app = Celery("my_app")
-"#;
-
 #[test]
 fn tool_map_queue_category_detected_via_celery() {
-    let repo = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    setup_repo_with_file(
-        repo.path(),
-        home.path(),
+    assert_callee_present(
         "src/main.py",
-        FIXTURE_PYTHON_CELERY,
+        "from celery import Celery\n\napp = Celery(\"my_app\")\n",
         "git@github.com:E-NoR/tool-map-queue-test.git",
-    );
-
-    let json = run_tool_map(repo.path(), home.path(), &[]);
-    let callees = callee_names(&json["calls"]["queue"]);
-    assert!(
-        callees.contains(&"Celery"),
-        "expected `Celery` in queue category from Python `from celery import Celery; Celery(...)`: {callees:?}"
+        "queue",
+        "Celery",
     );
 }
