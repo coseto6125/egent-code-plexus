@@ -5,6 +5,7 @@ mod admin;
 mod auto_ensure;
 mod background;
 mod commands;
+mod commit_lookup;
 mod config_parser;
 mod embedder;
 mod engine;

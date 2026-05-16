@@ -2,6 +2,7 @@ pub mod admin;
 pub mod auto_ensure;
 pub mod background;
 pub mod commands;
+pub mod commit_lookup;
 pub mod config_parser;
 pub mod embedder;
 pub mod engine;
