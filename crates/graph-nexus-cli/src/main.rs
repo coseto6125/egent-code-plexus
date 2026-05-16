@@ -46,7 +46,8 @@ enum Commands {
     Rename(commands::rename::RenameArgs),
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),
-    /// Registry + repo health (indexed repos, freshness, frameworks, externals, blind spots)
+    /// Registry + repo health (indexed repos, freshness, frameworks, blind spots).
+    /// External-client (HTTP/DB/Redis/queue) usage detail: see `gnx tool-map`.
     Coverage(commands::coverage::CoverageArgs),
     /// List HTTP routes; with path, show handler + caller chain
     Routes(commands::routes::RoutesArgs),
@@ -74,6 +75,8 @@ enum Commands {
     HookWatcher(commands::hook_watcher::HookWatcherArgs),
     /// Detect drift between HTTP consumer access patterns and Route response shapes.
     ShapeCheck(commands::shape_check::ShapeCheckArgs),
+    /// Enumerate calls to external HTTP/DB/Redis/queue clients via per-file import-binding analysis.
+    ToolMap(commands::tool_map::ToolMapArgs),
     /// Internal: Claude Code / Codex / Gemini agent hook dispatch.
     #[command(hide = true)]
     Hook(commands::hook::HookArgs),
@@ -136,6 +139,7 @@ fn main() {
         Commands::Routes(args) => args.repo.as_deref(),
         Commands::Scan(args) => args.repo.as_deref(),
         Commands::ShapeCheck(args) => args.repo.as_deref(),
+        Commands::ToolMap(args) => args.repo.as_deref(),
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -172,6 +176,7 @@ fn main() {
         Commands::Routes(args) => commands::routes::run(args, &engine),
         Commands::Scan(args) => commands::scan::run(args, &engine),
         Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
+        Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)

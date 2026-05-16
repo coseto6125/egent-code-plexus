@@ -1,8 +1,8 @@
 pub mod admin;
 pub mod contracts;
-pub mod diff;
 pub mod coverage;
 pub mod cypher;
+pub mod diff;
 pub mod format;
 pub mod hook;
 pub mod hook_handle;
@@ -15,4 +15,5 @@ pub mod routes;
 pub mod scan;
 pub mod search;
 pub mod shape_check;
+pub mod tool_map;
 pub mod verify_resolver;
