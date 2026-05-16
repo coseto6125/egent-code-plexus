@@ -172,7 +172,37 @@
 **Audit cross-check:** Mirrors production template at `crates/graph-nexus-cli/src/background.rs:73-91`. Non-blocking `flock` means no deadlock risk even if a holding process panics — file descriptor closes on exit, releasing the lock.
 
 ## §5 TSan results
-(populated by Phase 7)
+
+**Status**: deferred — `rust-src` component not installed for nightly toolchain
+
+**Toolchain present**: `rustc 1.97.0-nightly (d7f14d3d8 2026-05-15)` — nightly-2025-10-31-x86_64-unknown-linux-gnu
+
+**TSan runtime**: `librustc-nightly_rt.tsan.a` IS present in nightly target-libdir (`$(rustc +nightly --print target-libdir)/librustc-nightly_rt.tsan.a`)
+
+**Blocking component**: `rust-src` is NOT installed. `-Z build-std` (required for TSan) demands the standard library source tree at `$(rustc +nightly --print sysroot)/lib/rustlib/src/rust/library/Cargo.lock`. Exact error from smoke test:
+
+```
+error: "/home/enor/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/Cargo.lock"
+       does not exist, unable to build with the standard library, try:
+       rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+```
+
+**Smoke-test command attempted**:
+```bash
+RUSTFLAGS="-Z sanitizer=thread" RUSTDOCFLAGS="-Z sanitizer=thread" \
+cargo +nightly test -Z build-std \
+  --target x86_64-unknown-linux-gnu \
+  -p graph-nexus-core --test concurrency_string_pool_intern \
+  -- --test-threads=2
+```
+
+**Reason for deferral (per spec §11.2)**: spec explicitly accepts `deferred — toolchain unavailable` outcome. No system packages or rustup config modifications were made per task instructions.
+
+**To enable TSan**: `rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu` (no system packages needed; TSan runtime already present). Recommend running at first release-tag CI promotion.
+
+**Mitigation**: §4 equivalence tests (Phases 2–6 — all PASS) cover the user-observable concurrency contracts. TSan would catch subtler race-class bugs not surfaced by equivalence testing. The one confirmed suspect site (inv-001/inv-002, `unsafe set_var/remove_var` in pipeline tests) is documented in §7 and flagged as `needs_verification`.
+
+**Suppressions file**: `tsan-suppressions.txt` created at repo root — empty (no rules) pending first TSan run. Suppression format documented in file header.
 
 ## §6 Performance findings (surfaced)
 (populated by Phase 8)
