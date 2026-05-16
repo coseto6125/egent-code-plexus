@@ -259,7 +259,18 @@ impl LanguageProvider for PhpProvider {
                     if let Ok(p_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        let path = p_str.trim_matches(|c| c == '\'' || c == '"').to_string();
+                        let trimmed = p_str.trim_matches(|c| c == '\'' || c == '"');
+                        // Laravel allows leading-slash-optional routes:
+                        // `Route::get('register', ...)` is semantically `/register`.
+                        // Normalize so the builder-side `looks_like_path` (which
+                        // requires leading `/`) doesn't drop them. Without this,
+                        // bare-path Laravel routes get extracted by the parser but
+                        // silently rejected when the builder constructs Route nodes.
+                        let path = if trimmed.starts_with('/') {
+                            trimmed.to_string()
+                        } else {
+                            format!("/{trimmed}")
+                        };
                         route_path = Some(path);
                     }
                 } else if Some(cap_idx) == idx_route_call {

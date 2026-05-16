@@ -252,6 +252,37 @@ def dynamic_handler():
     );
 }
 
+// ─── Python — Flask transitive Blueprint import (recall fix) ─────────
+
+#[test]
+fn python_flask_blueprint_transitive_import_extracts() {
+    // Real-world Flask pattern that gnx previously missed (recall gap
+    // found via gitnexus cross-validation against miguelgrinberg/microblog
+    // `app/api/tokens.py`): a sub-module file does `from app.api import
+    // bp` (no direct `from flask import ...`) and decorates handlers
+    // with `@bp.route('/x', methods=[...])`. The framework-import gate
+    // can't see through the transitive chain, so the relaxation here
+    // allows route-registration method names (`route`, `add_route`,
+    // `add_url_rule`, `add_api_route`) to bypass the gate. These method
+    // names are sufficiently framework-specific that the bypass is safer
+    // than the recall loss.
+    let src = r#"
+from app.api import bp
+
+@bp.route("/tokens", methods=["POST"])
+def get_token():
+    return {"token": "..."}
+
+@bp.route("/tokens", methods=["DELETE"])
+def revoke_token():
+    return "", 204
+"#;
+    assert_routes(
+        &py_routes(src),
+        &[("POST", "/tokens"), ("DELETE", "/tokens")],
+    );
+}
+
 // ─── Python — Flask Blueprint (custom identifier — S7) ───────────────
 
 #[test]
@@ -482,8 +513,11 @@ fn php_laravel_routes_extract_bare_and_slash_paths() {
     // Laravel routes accept paths with OR without a leading slash —
     // `Route::get('register', ...)` and `Route::get('/users', ...)` are
     // both valid. The PHP parser uses a `route.scope` allowlist
-    // (Route/Router/Slim/App/Symfony/Lumen) instead of the path-shape
-    // filter so bare paths still extract.
+    // (Route/Router/Slim/App/Symfony/Lumen) and a framework import gate
+    // (Illuminate/Laravel/Slim/Symfony/etc.) instead of a path-shape
+    // filter. Bare paths are normalized to leading-slash form so the
+    // builder's `looks_like_path` predicate (which requires `/`) doesn't
+    // drop them downstream.
     let src = r#"<?php
         use Illuminate\Support\Facades\Route;
 
@@ -498,9 +532,42 @@ fn php_laravel_routes_extract_bare_and_slash_paths() {
         &[
             ("GET", "/users"),
             ("POST", "/users"),
-            ("GET", "register"),
-            ("POST", "forgot-password"),
-            ("DELETE", "users/{id}"),
+            ("GET", "/register"),
+            ("POST", "/forgot-password"),
+            ("DELETE", "/users/{id}"),
+        ],
+    );
+}
+
+// ─── PHP — Laravel nested middleware group + bare paths (recall fix) ──
+
+#[test]
+fn php_laravel_nested_middleware_group_routes_extract() {
+    // Real-world Laravel pattern that gnx previously missed (PR #50
+    // review finding): routes declared inside `Route::middleware(...)
+    // ->group(function () { ... })` with bare paths and chained
+    // `->name(...)`. Matches the breeze stubs structure verbatim.
+    let src = r#"<?php
+        use Illuminate\Support\Facades\Route;
+
+        Route::middleware('auth')->group(function () {
+            Route::get('confirm-password', [ConfirmablePasswordController::class, 'show'])
+                ->name('password.confirm');
+            Route::post('confirm-password', [ConfirmablePasswordController::class, 'store']);
+            Route::put('password', [PasswordController::class, 'update'])
+                ->name('password.update');
+            Route::get('reset-password/{token}', [NewPasswordController::class, 'create']);
+            Route::get('verify-email', EmailVerificationPromptController::class);
+        });
+    "#;
+    assert_routes(
+        &php_routes(src),
+        &[
+            ("GET", "/confirm-password"),
+            ("POST", "/confirm-password"),
+            ("PUT", "/password"),
+            ("GET", "/reset-password/{token}"),
+            ("GET", "/verify-email"),
         ],
     );
 }

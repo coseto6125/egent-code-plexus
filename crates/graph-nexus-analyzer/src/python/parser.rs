@@ -581,7 +581,26 @@ impl LanguageProvider for PythonProvider {
             // the single source of truth and lets the framework gates run before
             // any pending_*_refs push.
 
-            if is_route && has_any_http_framework {
+            // Framework-presence gate, with a relaxation for route-registration
+            // methods (`route`, `add_route`, `add_url_rule`, `add_api_route`).
+            // These method names are sufficiently framework-specific that a
+            // bare `@bp.route(...)` in a file that does `from app.api import bp`
+            // (transitive Flask Blueprint — common pattern in real Flask apps,
+            // e.g. miguelgrinberg/microblog `app/api/tokens.py`) still gets
+            // emitted even though gnx can't statically follow the chain to
+            // confirm `bp` is a `Blueprint`. Risk: a user-defined `class Foo
+            // { def route(self, ...) }` could FP, but `.route(string)` calls
+            // outside web frameworks are rare in practice.
+            let route_method_is_framework_specific = route_method
+                .and_then(|n| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok())
+                .map(|s| {
+                    matches!(
+                        s.to_ascii_lowercase().as_str(),
+                        "route" | "add_route" | "add_url_rule" | "add_api_route"
+                    )
+                })
+                .unwrap_or(false);
+            if is_route && (has_any_http_framework || route_method_is_framework_specific) {
                 if let (Some(r_method), Some(r_path), Some(root)) =
                     (route_method, route_path, root_span_node)
                 {
