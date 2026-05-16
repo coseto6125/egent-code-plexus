@@ -11,6 +11,8 @@ pub mod hook_watcher;
 pub mod impact;
 pub mod inspect;
 pub mod mcp;
+pub mod peers;
+pub mod peers_msg;
 pub mod rename;
 pub mod routes;
 pub mod scan;

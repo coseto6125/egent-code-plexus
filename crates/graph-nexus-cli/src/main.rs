@@ -88,6 +88,8 @@ enum Commands {
     Hook(commands::hook::HookArgs),
     /// Watch peer sessions for dirty events; inject into hook context.
     Watch(commands::watch::WatchArgs),
+    /// Multi-session peer collaboration (status / diff / log / gc + Ƀ messaging)
+    Peers(commands::peers::PeersArgs),
 }
 
 fn main() {
@@ -138,6 +140,7 @@ fn main() {
         Commands::Diff(args) => run_no_graph!(commands::diff::run(args.clone())),
         Commands::Hook(args) => run_no_graph!(commands::hook::run(args.clone())),
         Commands::Watch(args) => run_no_graph!(commands::watch::run(args.clone())),
+        Commands::Peers(args) => run_no_graph!(commands::peers::run(args.clone())),
         _ => {} // fall through to graph-loading path
     }
 
@@ -160,7 +163,8 @@ fn main() {
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
         | Commands::Hook(_)
-        | Commands::Watch(_) => None,
+        | Commands::Watch(_)
+        | Commands::Peers(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -199,7 +203,8 @@ fn main() {
         | Commands::HookHandle(_)
         | Commands::HookWatcher(_)
         | Commands::Hook(_)
-        | Commands::Watch(_) => unreachable!("handled before graph load"),
+        | Commands::Watch(_)
+        | Commands::Peers(_) => unreachable!("handled before graph load"),
     };
     if let Err(e) = result {
         eprintln!("Command failed: {e}");
