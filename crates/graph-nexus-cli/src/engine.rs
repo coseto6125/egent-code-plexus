@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub struct Engine {
     mmap: Mmap,
     graph_path: PathBuf,
+    overlay_dir: Option<PathBuf>,
 }
 
 impl Engine {
@@ -23,19 +24,36 @@ impl Engine {
         let file = File::open(&graph_path)?;
         let mmap = unsafe { Mmap::map(&file)? };
         validate_header(&mmap)?;
-        Ok(Self { mmap, graph_path })
+        Ok(Self {
+            mmap,
+            graph_path,
+            overlay_dir: None,
+        })
+    }
+
+    /// Attach an L1 session overlay dir (`~/.gnx/<repo>/sessions/<sid>/`)
+    /// to merge dirty graph fragments + tantivy delta over the L2 base.
+    /// Phase 3 lands the slot; Phase 5 wires the merge logic into query paths.
+    pub fn with_overlay(mut self, dir: PathBuf) -> Self {
+        self.overlay_dir = Some(dir);
+        self
     }
 
     pub fn graph(&self) -> Result<&ArchivedZeroCopyGraph, Error> {
         rkyv::access::<ArchivedZeroCopyGraph, Error>(&self.mmap)
     }
 
-    /// Resolved index directory: `graph.bin` lives directly inside
-    /// `~/.gnx/<repo>/<branch>/` (per `IndexLayout`), so the index dir
-    /// is the immediate parent of the graph path. Tantivy and meta.json
-    /// also live there.
+    /// Resolved L2 commit directory: `graph.bin` lives directly inside
+    /// `~/.gnx/<repo>/commits/<dirname>/`, so the index dir is the immediate
+    /// parent of the graph path. Tantivy and meta.json also live there.
     pub fn index_dir(&self) -> Option<&Path> {
         self.graph_path.parent()
+    }
+
+    /// Resolved L1 session overlay dir, set via `with_overlay`. None when
+    /// no session is attached (e.g. queries without `--session-id`).
+    pub fn overlay_dir(&self) -> Option<&Path> {
+        self.overlay_dir.as_deref()
     }
 }
 
