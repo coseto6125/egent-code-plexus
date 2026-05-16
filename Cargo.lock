@@ -1501,6 +1501,7 @@ dependencies = [
  "dialoguer",
  "etoon",
  "fastembed",
+ "fs2",
  "graph-nexus-analyzer",
  "graph-nexus-core",
  "graph-nexus-mcp",
@@ -1523,6 +1524,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "walkdir",
 ]
 
 [[package]]
