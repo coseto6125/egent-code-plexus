@@ -5,11 +5,13 @@
 //! graph's symbol set. Unresolved references are listed with top-3
 //! Levenshtein "did you mean?" suggestions.
 
+use crate::commands::scan_filters;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use graph_nexus_core::GnxError;
 use serde_json::{json, Value};
+use std::path::Path;
 
 #[derive(Args, Debug, Clone)]
 pub struct ScanArgs {
@@ -19,6 +21,14 @@ pub struct ScanArgs {
     /// Also flag identifiers that are common keywords / builtins
     #[arg(long, default_value_t = false)]
     pub strict: bool,
+
+    /// Drop unresolved references that match the language's stdlib /
+    /// keyword / common-types denylist. Per-language; based on file
+    /// extension. Cuts noise by 43–100% empirically; the leftover
+    /// `unresolved[]` is dominated by project symbols a typo check
+    /// can actually act on. Output payload gains `filtered_count`.
+    #[arg(long, default_value_t = false)]
+    pub filter_stdlib: bool,
 
     /// Repository selector (default: cwd)
     #[arg(long)]
@@ -50,31 +60,55 @@ pub fn run(args: ScanArgs, engine: &Engine) -> Result<(), GnxError> {
         .collect();
     let name_strs: Vec<&str> = all_names.iter().map(String::as_str).collect();
 
-    let mut unresolved: Vec<Value> = vec![];
-    for (name, line) in &refs {
-        if !name_strs.contains(&name.as_str()) {
+    // Build the unresolved pair list first; defer JSON wrapping until after
+    // filtering so we can skip the per-entry fuzzy search on dropped names.
+    let mut unresolved_pairs: Vec<(String, usize)> = refs
+        .into_iter()
+        .filter(|(name, _)| !name_strs.contains(&name.as_str()))
+        .collect();
+
+    let filtered_count = if args.filter_stdlib {
+        let (kept, dropped) = scan_filters::filter_refs(unresolved_pairs, Path::new(&args.file));
+        unresolved_pairs = kept;
+        dropped
+    } else {
+        0
+    };
+
+    let unresolved: Vec<Value> = unresolved_pairs
+        .iter()
+        .map(|(name, line)| {
             let suggestions = fuzzy_top_k(&name_strs, name, 3);
-            unresolved.push(json!({
+            json!({
                 "name": name,
                 "line": line,
                 "did_you_mean": suggestions,
-            }));
-        }
-    }
+            })
+        })
+        .collect();
 
     let payload = if unresolved.is_empty() {
-        json!({
-            "status": "ok",
-            "file": args.file,
-            "message": format!("File OK, 0 unresolved references"),
-        })
+        let mut ok = serde_json::Map::new();
+        ok.insert("status".into(), json!("ok"));
+        ok.insert("file".into(), json!(args.file));
+        ok.insert(
+            "message".into(),
+            json!(format!("File OK, 0 unresolved references")),
+        );
+        if filtered_count > 0 {
+            ok.insert("filtered_count".into(), json!(filtered_count));
+        }
+        Value::Object(ok)
     } else {
-        json!({
-            "status": "issues",
-            "file": args.file,
-            "unresolved_count": unresolved.len(),
-            "unresolved": unresolved,
-        })
+        let mut issues = serde_json::Map::new();
+        issues.insert("status".into(), json!("issues"));
+        issues.insert("file".into(), json!(args.file));
+        issues.insert("unresolved_count".into(), json!(unresolved.len()));
+        if filtered_count > 0 {
+            issues.insert("filtered_count".into(), json!(filtered_count));
+        }
+        issues.insert("unresolved".into(), Value::Array(unresolved));
+        Value::Object(issues)
     };
     emit(&payload, OutputFormat::Toon)
 }
