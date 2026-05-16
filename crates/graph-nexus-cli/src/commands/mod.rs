@@ -19,3 +19,4 @@ pub mod search;
 pub mod shape_check;
 pub mod tool_map;
 pub mod verify_resolver;
+pub mod watch;
