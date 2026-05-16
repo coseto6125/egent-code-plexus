@@ -183,7 +183,8 @@ impl OverlayWriter {
         content_hash: &str,
         fragment_id: &str,
     ) -> io::Result<()> {
-        let (dirty_symbols, parse_failed) = extract_symbols(path);
+        let rel = relativise(&self.session_dir, path);
+        let (dirty_symbols, parse_failed) = extract_symbols(path, &rel);
 
         let manifest_path = self.session_dir.join("dirty_files.json");
         let mut df = if manifest_path.exists() {
@@ -192,10 +193,8 @@ impl OverlayWriter {
             DirtyFiles::empty()
         };
 
-        // Use the file name as the key (relative-style key for simple callers).
-        let key = path.display().to_string();
         df.entries.insert(
-            key,
+            rel.clone(),
             DirtyEntry {
                 mtime_ns: 0,
                 content_hash: content_hash.to_string(),
@@ -219,14 +218,28 @@ impl OverlayWriter {
     }
 }
 
+/// Strip the repo_root prefix from `path` so dirty.json carries paths
+/// relative to the registry repo, not absolute filesystem paths.
+/// Falls back to the file basename if the path is not under repo_root
+/// (e.g., absolute tempfile paths in tests).
+fn relativise(session_dir: &Path, path: &Path) -> String {
+    if let Some(repo_root) = session_dir.parent().and_then(|p| p.parent()) {
+        if let Ok(rel) = path.strip_prefix(repo_root) {
+            return rel.to_string_lossy().into_owned();
+        }
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Run the pipeline on `path` and convert nodes to `SymbolRef`s.
 /// Returns `(symbols, parse_failed)` — `parse_failed` is true when the
 /// pipeline has no provider for the extension or returns no graph.
-fn extract_symbols(path: &Path) -> (Vec<SymbolRef>, bool) {
+fn extract_symbols(path: &Path, file_str: &str) -> (Vec<SymbolRef>, bool) {
     let abs = path.to_path_buf();
     // Use the file name as the rel_path so the pipeline selects on extension.
     let rel = PathBuf::from(path.file_name().unwrap_or(path.as_os_str()));
-    let file_str = path.display().to_string();
 
     let graphs = pipeline().analyze(vec![(abs, rel)]);
     match graphs.into_iter().next() {
@@ -238,7 +251,7 @@ fn extract_symbols(path: &Path) -> (Vec<SymbolRef>, bool) {
                 .map(|n| SymbolRef {
                     name: n.name.clone(),
                     kind: map_node_kind(&n.kind),
-                    file: file_str.clone(),
+                    file: file_str.to_string(),
                     line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
                     line_end: n.span.2 + 1,
                 })
