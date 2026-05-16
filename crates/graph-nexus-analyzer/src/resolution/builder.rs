@@ -182,7 +182,15 @@ impl GraphBuilder {
         self.local_graphs.push(graph);
     }
 
-    pub fn build(self) -> ZeroCopyGraph {
+    pub fn build(mut self) -> ZeroCopyGraph {
+        // Determinism: sort by file_path so node IDs and edge endpoints are
+        // assigned in canonical order regardless of how the producer (scanner,
+        // hook, manual add_graph) enumerated files. Without this, the same repo
+        // indexed on two machines with different filesystem walk orders would
+        // produce different graph.bin payloads — breaks the reproducibility
+        // contract pinned by audit §4.2 (inv-003).
+        self.local_graphs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
         let mut symbol_table = SymbolTable::new();
         let mut string_pool = StringPool::new();
         let mut nodes = Vec::new();

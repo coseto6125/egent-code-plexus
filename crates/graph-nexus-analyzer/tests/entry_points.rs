@@ -398,7 +398,20 @@ fn multi_file_entries_are_isolated_per_file() {
 
     let entries = entry_point_node_indices(&graph);
     assert_eq!(entries.len(), 1, "only file_a has an entry point");
-    // The EntryPoint's file_idx must match file_a's index (0), not file_b.
+    // Resolve the actual file_idx for src/main.rs from the graph's files array.
+    // Do not hardcode 0: build() sorts local_graphs by file_path for
+    // determinism (inv-003), so src/lib.rs < src/main.rs lexicographically
+    // and main.rs lands at index 1 in a sorted build.
+    let main_rs_idx = graph
+        .files
+        .iter()
+        .enumerate()
+        .find(|(_, f)| resolve_str(&graph.string_pool, &f.path).ends_with("main.rs"))
+        .map(|(i, _)| i as u32)
+        .expect("src/main.rs must be present in the built graph");
     let entry_file_idx = graph.nodes[entries[0]].file_idx;
-    assert_eq!(entry_file_idx, 0);
+    assert_eq!(
+        entry_file_idx, main_rs_idx,
+        "EntryPoint's file_idx must match src/main.rs, not src/lib.rs"
+    );
 }
