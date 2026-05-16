@@ -286,15 +286,6 @@ fn is_installed(settings: &Value, ev: &str) -> bool {
 }
 
 fn write_atomic(path: &Path, value: &Value) -> Result<(), GnxError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| GnxError::Output(format!("mkdir {}: {e}", parent.display())))?;
-        }
-    }
-    let serialized = serde_json::to_string_pretty(value)
-        .map_err(|e| GnxError::Output(format!("serialize: {e}")))?;
-    graph_nexus_core::registry::atomic_write_bytes(path, serialized.as_bytes())
-        .map_err(|e| GnxError::Output(format!("atomic write {}: {e}", path.display())))?;
-    Ok(())
+    graph_nexus_core::registry::atomic_write_json(path, value)
+        .map_err(|e| GnxError::Output(format!("atomic write {}: {e}", path.display())))
 }

@@ -38,6 +38,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 etoon = "0.4"
 ignore = "0.4.25"
+libc = "0.2"
 rayon = "1.10"
 tantivy = "0.26.1"
 tempfile = "3.27"
@@ -50,7 +51,10 @@ crossterm = "0.29"
 toml = "0.9"
 rustc-hash = "2"
 sha2 = "0.10.8"
+hex = "0.4"
 dialoguer = "0.11"
+fs2 = "0.4"
+walkdir = "2"
 
 [dev-dependencies]
 serde_json = "1.0"

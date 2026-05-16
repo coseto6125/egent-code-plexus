@@ -4,18 +4,21 @@ use std::path::PathBuf;
 mod admin;
 mod auto_ensure;
 mod background;
+mod build;
 mod commands;
+mod commit_lookup;
 mod config_parser;
 mod engine;
 mod git;
 mod git_state;
 mod graph_path;
 mod hint;
-mod incremental_cache;
 mod output;
 pub mod reanalyze;
+mod repo_identity;
 mod repo_selector;
 pub mod search;
+mod session;
 
 use engine::Engine;
 
@@ -91,6 +94,9 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+
+    maybe_spawn_background_gc();
+
     let cli = Cli::parse();
 
     // Admin: subcommand → run the admin operation; no subcommand → launch TUI.
@@ -191,4 +197,26 @@ fn main() {
         eprintln!("Command failed: {e}");
         std::process::exit(1);
     }
+}
+
+/// Auto-trigger background GC when the home heartbeat stamp is missing
+/// or older than 24h. Spawned detached; failures are silent (best-effort).
+fn maybe_spawn_background_gc() {
+    let home = graph_nexus_core::registry::resolve_home_gnx();
+    let stamp = home.join(".last-gc");
+    let stale = std::fs::metadata(&stamp)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs() > 24 * 3600)
+        .unwrap_or(true);
+    if !stale {
+        return;
+    }
+    // Touch the stamp synchronously so concurrent CLI invocations don't all spawn.
+    let _ = std::fs::create_dir_all(&home);
+    let _ = std::fs::write(&stamp, b"");
+    // Detach background sweep — gc admin command not yet wired (Phase 8 Task 8.5),
+    // so until then this fn just touches the stamp. Once `gnx admin gc` lands,
+    // change the body to spawn it as a detached subprocess.
 }

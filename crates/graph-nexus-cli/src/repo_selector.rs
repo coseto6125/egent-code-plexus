@@ -63,19 +63,20 @@ fn parse_atom(part: &str) -> Result<Atom, ParseError> {
     Ok(Atom::Name(part.to_string()))
 }
 
-// ── Resolver (Task 0.4) ──────────────────────────────────────────────────────
+// ── Resolver ────────────────────────────────────────────────────────────────
 
-use graph_nexus_core::registry::{BranchEntry, RegistryFile, RepoEntry};
+use crate::git::safe_exec;
+use graph_nexus_core::registry::{RegistryFile, RepoAlias};
 use std::collections::HashSet;
 
-/// A repo resolved from a selector atom — points into the registry,
-/// retaining the name + paths the caller needs to load the graph.
+/// A repo resolved from a selector atom — derived from a v2 `RepoAlias`,
+/// carrying the alias's stable `dir_name` (which is the `<repo>/` segment
+/// under `~/.gnx/`) and the canonical git common-dir.
 #[derive(Debug, Clone)]
 pub struct ResolvedRepo {
-    pub name: String,
-    pub worktree_path: String,
-    pub index_dir_root: String,
-    pub branches: Vec<BranchEntry>,
+    pub dir_name: String,
+    pub common_dir: String,
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,8 +89,8 @@ pub enum ResolveError {
     PathNotRegistered(String),
 }
 
-/// Resolve a selector to a deduplicated list of repos. Preserves the first
-/// occurrence order across the union to give the caller a stable iteration.
+/// Resolve a selector to a deduplicated list of repos. Preserves first
+/// occurrence order across the union so the caller has stable iteration.
 pub fn resolve(
     sel: &Selector,
     registry: &RegistryFile,
@@ -101,23 +102,24 @@ pub fn resolve(
     for atom in &sel.0 {
         match atom {
             Atom::Cwd => {
-                let repo = find_by_path(registry, cwd)
+                let alias = find_by_path(registry, cwd)
                     .ok_or_else(|| ResolveError::PathNotRegistered(cwd.into()))?;
-                push_unique(&mut seen, &mut out, repo);
+                push_unique(&mut seen, &mut out, alias);
             }
             Atom::Path(p) => {
-                let p_str = p.to_string_lossy();
-                let repo = find_by_path(registry, &p_str)
-                    .ok_or_else(|| ResolveError::PathNotRegistered(p_str.into_owned()))?;
-                push_unique(&mut seen, &mut out, repo);
+                let s = p.to_string_lossy();
+                let alias = find_by_path(registry, &s)
+                    .ok_or_else(|| ResolveError::PathNotRegistered(s.into_owned()))?;
+                push_unique(&mut seen, &mut out, alias);
             }
             Atom::Name(n) => {
-                let repo = registry
+                // Match by user-facing alias OR by storage dir_name.
+                let alias = registry
                     .repos
-                    .iter()
-                    .find(|r| r.name == *n)
+                    .values()
+                    .find(|r| r.aliases.iter().any(|a| a == n) || r.dir_name == *n)
                     .ok_or_else(|| ResolveError::NotFound(n.clone()))?;
-                push_unique(&mut seen, &mut out, repo);
+                push_unique(&mut seen, &mut out, alias);
             }
             Atom::Group(g) => {
                 let group = registry
@@ -125,15 +127,15 @@ pub fn resolve(
                     .iter()
                     .find(|gr| gr.name == *g)
                     .ok_or_else(|| ResolveError::GroupNotFound(g.clone()))?;
-                for member_name in &group.members {
-                    if let Some(repo) = registry.repos.iter().find(|r| r.name == *member_name) {
-                        push_unique(&mut seen, &mut out, repo);
+                for member in &group.members {
+                    if let Some(a) = registry.repos.get(member) {
+                        push_unique(&mut seen, &mut out, a);
                     }
                 }
             }
             Atom::All => {
-                for repo in &registry.repos {
-                    push_unique(&mut seen, &mut out, repo);
+                for alias in registry.repos.values() {
+                    push_unique(&mut seen, &mut out, alias);
                 }
             }
         }
@@ -141,23 +143,37 @@ pub fn resolve(
     Ok(out)
 }
 
-fn find_by_path<'a>(registry: &'a RegistryFile, p: &str) -> Option<&'a RepoEntry> {
-    let target = Path::new(p).canonicalize().unwrap_or_else(|_| p.into());
-    registry.repos.iter().find(|r| {
-        Path::new(&r.worktree_path)
-            .canonicalize()
-            .map(|c| c == target)
-            .unwrap_or(false)
+/// Locate the registered alias whose stored `common_dir` matches `p`'s
+/// canonical git common-dir. This makes any cwd inside a worktree (and
+/// every `git worktree add` sibling) resolve to the same alias.
+pub fn find_by_path<'a>(registry: &'a RegistryFile, p: &str) -> Option<&'a RepoAlias> {
+    let target_common = git_common_dir_canonical(Path::new(p))?;
+    registry.repos.values().find(|alias| {
+        std::fs::canonicalize(&alias.common_dir).ok().as_deref() == Some(&target_common)
     })
 }
 
-fn push_unique(seen: &mut HashSet<String>, out: &mut Vec<ResolvedRepo>, repo: &RepoEntry) {
-    if seen.insert(repo.name.clone()) {
+fn git_common_dir_canonical(cwd: &Path) -> Option<std::path::PathBuf> {
+    let out = safe_exec::git()
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = std::str::from_utf8(&out.stdout).ok()?.trim();
+    let p = std::path::PathBuf::from(s);
+    let resolved = if p.is_absolute() { p } else { cwd.join(p) };
+    std::fs::canonicalize(resolved).ok()
+}
+
+fn push_unique(seen: &mut HashSet<String>, out: &mut Vec<ResolvedRepo>, alias: &RepoAlias) {
+    if seen.insert(alias.dir_name.clone()) {
         out.push(ResolvedRepo {
-            name: repo.name.clone(),
-            worktree_path: repo.worktree_path.clone(),
-            index_dir_root: repo.index_dir_root.clone(),
-            branches: repo.branches.clone(),
+            dir_name: alias.dir_name.clone(),
+            common_dir: alias.common_dir.clone(),
+            aliases: alias.aliases.clone(),
         });
     }
 }

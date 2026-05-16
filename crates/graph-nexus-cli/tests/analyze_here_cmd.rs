@@ -65,10 +65,13 @@ fn analyze_here_indexes_cwd() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let index_dir = home_tmp.path().join(".gnx/analyze-here-test/main");
-    assert!(
-        index_dir.join("graph.bin").exists(),
-        "graph.bin missing at {:?}",
-        index_dir
-    );
+    // v2 layout: ~/.gnx/<repo>__<hash8>/commits/<source_type>_<source_id>__<sha>/graph.bin
+    // Walk ~/.gnx/*/commits/*/graph.bin and assert at least one exists.
+    let gnx_root = home_tmp.path().join(".gnx");
+    let found = walkdir::WalkDir::new(&gnx_root)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name() == "graph.bin");
+    assert!(found, "graph.bin missing under {:?}", gnx_root);
 }

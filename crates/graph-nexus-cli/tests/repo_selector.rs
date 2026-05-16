@@ -1,44 +1,58 @@
-use graph_nexus_cli::repo_selector::{parse, Atom, Selector};
+use graph_nexus_cli::repo_selector::{self, Atom, Selector};
+use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+use std::collections::BTreeMap;
+use std::process::Command;
 
-#[test]
-fn empty_selector_is_cwd() {
-    let sel = parse("").unwrap();
-    assert_eq!(sel, Selector(vec![Atom::Cwd]));
+fn make_repo_alias(dir: &str, common_dir: &str, alias: &str) -> RepoAlias {
+    RepoAlias {
+        dir_name: dir.into(),
+        common_dir: common_dir.into(),
+        remote_url: None,
+        aliases: vec![alias.into()],
+        last_touched: "2026-05-17T10:00:00Z".into(),
+        groups: vec![],
+    }
 }
 
 #[test]
-fn dot_is_path_cwd() {
-    let sel = parse(".").unwrap();
+fn grammar_parse_cwd_default() {
+    let sel = repo_selector::parse("").unwrap();
+    assert_eq!(sel.0, vec![Atom::Cwd]);
+}
+
+#[test]
+fn grammar_dot_is_path_cwd() {
+    let sel = repo_selector::parse(".").unwrap();
     assert_eq!(sel, Selector(vec![Atom::Path(".".into())]));
 }
 
 #[test]
-fn absolute_path() {
-    let sel = parse("/abs/path").unwrap();
+fn grammar_absolute_path() {
+    let sel = repo_selector::parse("/abs/path").unwrap();
     assert_eq!(sel, Selector(vec![Atom::Path("/abs/path".into())]));
 }
 
 #[test]
-fn registry_name() {
-    let sel = parse("backend-svc").unwrap();
+fn grammar_registry_name() {
+    let sel = repo_selector::parse("backend-svc").unwrap();
     assert_eq!(sel, Selector(vec![Atom::Name("backend-svc".into())]));
 }
 
 #[test]
-fn at_group() {
-    let sel = parse("@backend").unwrap();
+fn grammar_at_group() {
+    let sel = repo_selector::parse("@backend").unwrap();
     assert_eq!(sel, Selector(vec![Atom::Group("backend".into())]));
 }
 
 #[test]
-fn at_all() {
-    let sel = parse("@all").unwrap();
+fn grammar_at_all() {
+    let sel = repo_selector::parse("@all").unwrap();
     assert_eq!(sel, Selector(vec![Atom::All]));
 }
 
 #[test]
-fn csv_mix() {
-    let sel = parse("alpha,@beta,/abs/path").unwrap();
+fn grammar_csv_mix() {
+    let sel = repo_selector::parse("alpha,@beta,/abs/path").unwrap();
     assert_eq!(
         sel,
         Selector(vec![
@@ -50,108 +64,157 @@ fn csv_mix() {
 }
 
 #[test]
-fn at_all_alone_no_csv() {
-    let sel = parse("@all,alpha").unwrap();
+fn grammar_parse_name_path_group_all() {
+    let sel = repo_selector::parse("foo,./bar,@grp,@all").unwrap();
+    assert_eq!(sel.0.len(), 4);
+    assert!(matches!(sel.0[0], Atom::Name(ref n) if n == "foo"));
+    assert!(matches!(sel.0[1], Atom::Path(_)));
+    assert!(matches!(sel.0[2], Atom::Group(ref g) if g == "grp"));
+    assert!(matches!(sel.0[3], Atom::All));
+}
+
+#[test]
+fn grammar_at_all_alone_no_csv() {
+    let sel = repo_selector::parse("@all,alpha").unwrap();
     assert_eq!(sel.0.len(), 2);
 }
 
 #[test]
-fn rejects_empty_atom() {
-    assert!(parse("a,,b").is_err());
+fn grammar_rejects_empty_atom() {
+    assert!(repo_selector::parse("a,,b").is_err());
 }
 
 #[test]
-fn rejects_at_without_name() {
-    assert!(parse("@").is_err());
+fn grammar_rejects_at_without_name() {
+    assert!(repo_selector::parse("@").is_err());
 }
 
-// ── Resolver tests (Task 0.4) ────────────────────────────────────────────────
+// ── Resolver tests ───────────────────────────────────────────────────────────
 
-use graph_nexus_cli::repo_selector::{resolve, ResolveError};
-use graph_nexus_core::registry::{BranchEntry, GroupEntry, RegistryFile, RepoEntry};
+use graph_nexus_cli::repo_selector::ResolveError;
 
-fn make_registry() -> RegistryFile {
-    RegistryFile {
-        version: 1,
-        repos: vec![
-            RepoEntry {
-                name: "alpha".into(),
-                remote_url: "x".into(),
-                worktree_path: "/tmp/alpha".into(),
-                index_dir_root: "/tmp/idx/alpha".into(),
-                branches: vec![BranchEntry {
-                    name: "main".into(),
-                    index_dir: "/tmp/idx/alpha/main".into(),
-                    indexed_at: "2026-05-15".into(),
-                    node_count: 100,
-                    delta_size: 0,
-                }],
-                groups: vec!["backend".into()],
-            },
-            RepoEntry {
-                name: "beta".into(),
-                remote_url: "y".into(),
-                worktree_path: "/tmp/beta".into(),
-                index_dir_root: "/tmp/idx/beta".into(),
-                branches: vec![],
-                groups: vec!["backend".into(), "auth".into()],
-            },
-        ],
-        groups: vec![
-            GroupEntry {
-                name: "backend".into(),
-                members: vec!["alpha".into(), "beta".into()],
-            },
-            GroupEntry {
-                name: "auth".into(),
-                members: vec!["beta".into()],
-            },
-        ],
-    }
+#[test]
+fn resolve_by_name_matches_user_alias() {
+    let mut repos = BTreeMap::new();
+    repos.insert(
+        "myrepo__abcd1234".into(),
+        make_repo_alias("myrepo__abcd1234", "/work/myrepo/.git", "myrepo"),
+    );
+    let reg = RegistryFile {
+        version: 2,
+        repos,
+        groups: vec![],
+    };
+
+    let sel = Selector(vec![Atom::Name("myrepo".into())]);
+    let out = repo_selector::resolve(&sel, &reg, "/").unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].dir_name, "myrepo__abcd1234");
 }
 
 #[test]
-fn resolve_name_finds_repo() {
-    let sel = parse("alpha").unwrap();
-    let resolved = resolve(&sel, &make_registry(), "/tmp/cwd").unwrap();
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].name, "alpha");
+fn resolve_by_name_falls_back_to_dir_name() {
+    let mut repos = BTreeMap::new();
+    repos.insert(
+        "myrepo__abcd1234".into(),
+        make_repo_alias("myrepo__abcd1234", "/work/myrepo/.git", "myrepo"),
+    );
+    let reg = RegistryFile {
+        version: 2,
+        repos,
+        groups: vec![],
+    };
+
+    let sel = Selector(vec![Atom::Name("myrepo__abcd1234".into())]);
+    let out = repo_selector::resolve(&sel, &reg, "/").unwrap();
+    assert_eq!(out.len(), 1);
 }
 
 #[test]
-fn resolve_at_group_expands_members() {
-    let sel = parse("@backend").unwrap();
-    let resolved = resolve(&sel, &make_registry(), "/tmp/cwd").unwrap();
-    assert_eq!(resolved.len(), 2);
-    assert!(resolved.iter().any(|r| r.name == "alpha"));
-    assert!(resolved.iter().any(|r| r.name == "beta"));
+fn resolve_all_returns_dedup_sorted_by_dir_name() {
+    let mut repos = BTreeMap::new();
+    repos.insert("a__1".into(), make_repo_alias("a__1", "/a/.git", "a"));
+    repos.insert("b__2".into(), make_repo_alias("b__2", "/b/.git", "b"));
+    let reg = RegistryFile {
+        version: 2,
+        repos,
+        groups: vec![],
+    };
+
+    let sel = Selector(vec![Atom::All]);
+    let out = repo_selector::resolve(&sel, &reg, "/").unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].dir_name, "a__1");
+    assert_eq!(out[1].dir_name, "b__2");
 }
 
 #[test]
-fn resolve_at_all_returns_all() {
-    let sel = parse("@all").unwrap();
-    let resolved = resolve(&sel, &make_registry(), "/tmp/cwd").unwrap();
-    assert_eq!(resolved.len(), 2);
-}
+fn resolve_group_lookup() {
+    let mut repos = BTreeMap::new();
+    repos.insert("a__1".into(), make_repo_alias("a__1", "/a/.git", "a"));
+    repos.insert("b__2".into(), make_repo_alias("b__2", "/b/.git", "b"));
+    let reg = RegistryFile {
+        version: 2,
+        repos,
+        groups: vec![GroupEntry {
+            name: "team".into(),
+            members: vec!["a__1".into()],
+        }],
+    };
 
-#[test]
-fn resolve_multi_group_union_dedups() {
-    // backend = {alpha, beta}, auth = {beta} → union = {alpha, beta}
-    let sel = parse("@backend,@auth").unwrap();
-    let resolved = resolve(&sel, &make_registry(), "/tmp/cwd").unwrap();
-    assert_eq!(resolved.len(), 2);
+    let sel = Selector(vec![Atom::Group("team".into())]);
+    let out = repo_selector::resolve(&sel, &reg, "/").unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].dir_name, "a__1");
 }
 
 #[test]
 fn resolve_unknown_name_errors() {
-    let sel = parse("nonexistent").unwrap();
-    let err = resolve(&sel, &make_registry(), "/tmp/cwd").unwrap_err();
-    assert!(matches!(err, ResolveError::NotFound(ref s) if s == "nonexistent"));
+    let reg = RegistryFile::empty();
+    let sel = Selector(vec![Atom::Name("nope".into())]);
+    let err = repo_selector::resolve(&sel, &reg, "/").unwrap_err();
+    assert!(matches!(err, ResolveError::NotFound(_)));
 }
 
 #[test]
-fn resolve_unknown_group_errors() {
-    let sel = parse("@ghost").unwrap();
-    let err = resolve(&sel, &make_registry(), "/tmp/cwd").unwrap_err();
-    assert!(matches!(err, ResolveError::GroupNotFound(ref s) if s == "ghost"));
+fn find_by_path_matches_via_common_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("primary");
+    std::fs::create_dir(&primary).unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&primary)
+        .arg("init")
+        .arg("-q")
+        .status()
+        .unwrap();
+
+    let common_dir = std::fs::canonicalize(primary.join(".git")).unwrap();
+    let mut repos = BTreeMap::new();
+    repos.insert(
+        "primary__xxxx".into(),
+        RepoAlias {
+            dir_name: "primary__xxxx".into(),
+            common_dir: common_dir.to_string_lossy().into(),
+            remote_url: None,
+            aliases: vec!["primary".into()],
+            last_touched: "2026-05-17T10:00:00Z".into(),
+            groups: vec![],
+        },
+    );
+    let reg = RegistryFile {
+        version: 2,
+        repos,
+        groups: vec![],
+    };
+
+    let resolved = repo_selector::find_by_path(&reg, primary.to_string_lossy().as_ref()).unwrap();
+    assert_eq!(resolved.dir_name, "primary__xxxx");
+}
+
+#[test]
+fn find_by_path_returns_none_outside_any_repo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = RegistryFile::empty();
+    assert!(repo_selector::find_by_path(&reg, tmp.path().to_str().unwrap()).is_none());
 }

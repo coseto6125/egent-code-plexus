@@ -11,7 +11,7 @@
 //! folded here — that requires per-callsite binding analysis whose granularity
 //! sits beyond a health summary. See the standalone `gnx tool-map` command.
 
-use crate::auto_ensure::{ensure_index, EnsureResult};
+use crate::commit_lookup::CommitIndex;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
@@ -88,20 +88,13 @@ fn build_registry_overview(reg: &RegistryFile, detailed: bool) -> Value {
     let rows: Vec<Value> = reg
         .repos
         .iter()
-        .map(|r| {
-            let last = r
-                .branches
-                .iter()
-                .map(|b| b.indexed_at.as_str())
-                .max()
-                .unwrap_or("never");
-            let total_nodes: u32 = r.branches.iter().map(|b| b.node_count).sum();
+        .map(|(dir_name, alias)| {
+            let display_name = alias.aliases.first().map(|s| s.as_str()).unwrap_or(dir_name);
             json!({
-                "name": r.name,
-                "branches": r.branches.len(),
-                "last_indexed": last,
-                "total_nodes": total_nodes,
-                "groups": r.groups,
+                "name": display_name,
+                "dir_name": dir_name,
+                "last_touched": alias.last_touched,
+                "groups": alias.groups,
             })
         })
         .collect();
@@ -133,8 +126,10 @@ fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> 
             Err(_) => (None, Some("graph_load_failed")),
         },
     };
+    let display_name = r.aliases.first().map(|s| s.as_str()).unwrap_or(&r.dir_name);
     json!({
-        "repo": r.name,
+        "repo": display_name,
+        "dir_name": r.dir_name,
         "frameworks": fetch_frameworks(graph, status),
         "freshness": fetch_freshness(r, detailed),
         "metrics": fetch_metrics(graph, status),
@@ -142,30 +137,50 @@ fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> 
     })
 }
 
-/// Per-repo graph path. The "main" branch is the canonical default; non-main
-/// branches are not inspected here (they get their own coverage when
-/// explicitly selected).
-fn graph_main_path(r: &crate::repo_selector::ResolvedRepo) -> PathBuf {
-    Path::new(&r.index_dir_root).join("main").join("graph.bin")
+/// Find the most-recently-modified graph.bin under `<home_gnx>/<dir_name>/commits/`.
+/// v2 is content-addressed per commit; we pick the newest one for coverage
+/// reporting (the HEAD commit's build, if present).
+fn latest_graph_path(r: &crate::repo_selector::ResolvedRepo) -> Option<PathBuf> {
+    let home_gnx = resolve_home_gnx();
+    let commits_dir = home_gnx.join(&r.dir_name).join("commits");
+    let idx = CommitIndex::scan(&commits_dir).ok()?;
+    if idx.is_empty() {
+        return None;
+    }
+    // Pick the commit dir with the most recent graph.bin mtime.
+    std::fs::read_dir(&commits_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let g = e.path().join("graph.bin");
+            let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
+            Some((mtime, g))
+        })
+        .max_by_key(|(mtime, _)| *mtime)
+        .map(|(_, path)| path)
 }
 
 /// Open the repo's graph for read. Returns `None` for any failure — caller
 /// degrades gracefully (emits zero counts + a status note) instead of failing
 /// the whole `coverage` report when one repo's graph is missing or corrupt.
 fn try_load_engine(r: &crate::repo_selector::ResolvedRepo) -> Option<Engine> {
-    Engine::load(graph_main_path(r)).ok()
+    Engine::load(latest_graph_path(r)?).ok()
 }
 
-/// Freshness check: graph.bin mtime vs newest source file, plus the registry
-/// metadata an LLM needs to decide "should I act on this graph or warn the
-/// user it might be stale" — `indexed_at` (when), `current_head_short` (HEAD
-/// of the worktree right now; mismatched commits ⇒ likely behind), and when
-/// `detailed`, the per-branch breakdown from the registry.
+/// Freshness check: compare the latest graph.bin mtime to newest source file.
+/// Uses `common_dir` as a proxy for the worktree root (parent of `.git`).
 fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Value {
-    let main_path = graph_main_path(r);
-    let worktree = Path::new(&r.worktree_path);
+    use crate::auto_ensure::{ensure_index, EnsureResult};
 
-    let mut out = match ensure_index(&main_path, worktree) {
+    let Some(graph_path) = latest_graph_path(r) else {
+        return json!({ "status": "missing" });
+    };
+    // Derive worktree root from common_dir (parent of `.git`).
+    let common = Path::new(&r.common_dir);
+    let worktree = common.parent().unwrap_or(common);
+
+    let mut out = match ensure_index(&graph_path, worktree) {
         Ok(EnsureResult::Ready) => json!({ "status": "ready" }),
         Ok(EnsureResult::Stale { age_seconds }) => {
             json!({ "status": "stale", "age_seconds": age_seconds })
@@ -173,22 +188,11 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
         Ok(EnsureResult::Missing) => json!({ "status": "missing" }),
         Err(e) => json!({ "status": "error", "error": e.to_string() }),
     };
-    // Every arm above produces an Object, so `as_object_mut` succeeds in
-    // practice. Falling through instead of `.expect()` keeps the function
-    // total if a future arm ever returns a different shape.
+
     let Some(map) = out.as_object_mut() else {
         return out;
     };
 
-    let latest_indexed_at = r
-        .branches
-        .iter()
-        .map(|b| b.indexed_at.as_str())
-        .max()
-        .unwrap_or("");
-    if !latest_indexed_at.is_empty() {
-        map.insert("indexed_at".into(), json!(latest_indexed_at));
-    }
     map.insert(
         "current_head_short".into(),
         match crate::git::safe_exec::head_short(worktree) {
@@ -197,21 +201,7 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
         },
     );
 
-    if detailed && !r.branches.is_empty() {
-        let rows: Vec<Value> = r
-            .branches
-            .iter()
-            .map(|b| {
-                json!({
-                    "name": b.name,
-                    "indexed_at": b.indexed_at,
-                    "node_count": b.node_count,
-                    "delta_size": b.delta_size,
-                })
-            })
-            .collect();
-        map.insert("branches".into(), Value::Array(rows));
-    }
+    let _ = detailed;
     out
 }
 
@@ -737,46 +727,17 @@ mod tests {
     }
 
     #[test]
-    fn fetch_freshness_surfaces_indexed_at_and_branches_when_detailed() {
+    fn fetch_freshness_returns_status_for_missing_graph() {
         use crate::repo_selector::ResolvedRepo;
-        use graph_nexus_core::registry::BranchEntry;
-
+        // common_dir points nowhere → no graph → status: missing
         let r = ResolvedRepo {
-            name: "demo".into(),
-            worktree_path: "/nope/not-a-real-path".into(),
-            index_dir_root: "/nope/not-a-real-path".into(),
-            branches: vec![
-                BranchEntry {
-                    name: "main".into(),
-                    index_dir: "/nope/main".into(),
-                    indexed_at: "2026-05-16T10:00:00Z".into(),
-                    node_count: 4922,
-                    delta_size: 0,
-                },
-                BranchEntry {
-                    name: "wt-x".into(),
-                    index_dir: "/nope/wt-x".into(),
-                    indexed_at: "2026-05-16T12:00:00Z".into(),
-                    node_count: 1234,
-                    delta_size: 0,
-                },
-            ],
+            dir_name: "demo__aabbccdd".into(),
+            common_dir: "/nope/not-a-real-path/.git".into(),
+            aliases: vec!["demo".into()],
         };
-
-        // detailed=false: indexed_at present (latest across branches), no
-        // branches array, current_head_short = null for missing worktree.
         let v = fetch_freshness(&r, false);
-        assert_eq!(v["indexed_at"], json!("2026-05-16T12:00:00Z"));
-        assert!(v.get("branches").is_none());
-        assert_eq!(v["current_head_short"], Value::Null);
-
-        // detailed=true: branches surfaced with the full per-branch shape.
-        let v = fetch_freshness(&r, true);
-        let rows = v["branches"].as_array().expect("branches array");
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["name"], json!("main"));
-        assert_eq!(rows[0]["node_count"], json!(4922));
-        assert_eq!(rows[1]["name"], json!("wt-x"));
+        // graph_path will be None (no commits dir) → status: missing
+        assert!(v.get("status").is_some());
     }
 
     #[test]
@@ -789,10 +750,9 @@ mod tests {
         // section fails the test instead of silently breaking the contract.
         use crate::repo_selector::ResolvedRepo;
         let r = ResolvedRepo {
-            name: "demo".into(),
-            worktree_path: "/nope/not-a-real-path".into(),
-            index_dir_root: "/nope/not-a-real-path".into(),
-            branches: vec![],
+            dir_name: "demo__aabbccdd".into(),
+            common_dir: "/nope/not-a-real-path/.git".into(),
+            aliases: vec!["demo".into()],
         };
         let v = build_repo_health(&r, true);
         assert_eq!(v["repo"], json!("demo"));

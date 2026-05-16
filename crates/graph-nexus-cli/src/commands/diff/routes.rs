@@ -77,8 +77,10 @@ pub fn diff(baseline: &[RouteEntry], current: &[RouteEntry]) -> RoutesDiff {
         }
     }
     // Sort for deterministic output (HashMap iteration is non-deterministic).
-    out.added.sort_by(|a, b| (&a.method, &a.path).cmp(&(&b.method, &b.path)));
-    out.removed.sort_by(|a, b| (&a.method, &a.path).cmp(&(&b.method, &b.path)));
+    out.added
+        .sort_by(|a, b| (&a.method, &a.path).cmp(&(&b.method, &b.path)));
+    out.removed
+        .sort_by(|a, b| (&a.method, &a.path).cmp(&(&b.method, &b.path)));
     out.modified
         .sort_by(|a, b| (&a.after.method, &a.after.path).cmp(&(&b.after.method, &b.after.path)));
     out

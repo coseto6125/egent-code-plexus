@@ -51,8 +51,7 @@ pub struct DiffArgs {
 pub fn run(args: DiffArgs) -> Result<(), GnxError> {
     let repo_dir = match args.repo.as_deref() {
         Some(p) => std::path::PathBuf::from(p),
-        None => std::env::current_dir()
-            .map_err(|e| GnxError::Output(format!("cwd: {e}")))?,
+        None => std::env::current_dir().map_err(|e| GnxError::Output(format!("cwd: {e}")))?,
     };
 
     let baseline_sha = baseline::resolve(&args.baseline, &repo_dir)?;
@@ -102,12 +101,12 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
     // both the resolver JSONL (for bindings) and graph.bin (for routes /
     // contracts) as side effects of one analyze pass — so we run it ONCE
     // per state regardless of which sections are requested.
-    let current_jsonl = std::env::temp_dir()
-        .join(format!("gnx-diff-current-{}.jsonl", std::process::id()));
-    let baseline_jsonl = std::env::temp_dir()
-        .join(format!("gnx-diff-baseline-{baseline_sha}.jsonl"));
-    let baseline_graph_tmp = std::env::temp_dir()
-        .join(format!("gnx-diff-graph-baseline-{baseline_sha}.bin"));
+    let current_jsonl =
+        std::env::temp_dir().join(format!("gnx-diff-current-{}.jsonl", std::process::id()));
+    let baseline_jsonl =
+        std::env::temp_dir().join(format!("gnx-diff-baseline-{baseline_sha}.jsonl"));
+    let baseline_graph_tmp =
+        std::env::temp_dir().join(format!("gnx-diff-graph-baseline-{baseline_sha}.bin"));
     let legacy_default = std::path::Path::new(".gnx/graph.bin");
 
     bindings::dump(&repo_dir, &current_jsonl)?;

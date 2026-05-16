@@ -15,7 +15,12 @@ fn gnx() -> Command {
 /// should fail with a helpful message mentioning the cross-repo requirement.
 #[test]
 fn contracts_single_repo_errors() {
-    let output = gnx().args(["contracts", "--repo", "."]).output().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let output = gnx()
+        .args(["contracts", "--repo", "."])
+        .env("HOME", home_tmp.path())
+        .output()
+        .unwrap();
 
     // Must exit non-zero.
     assert!(
