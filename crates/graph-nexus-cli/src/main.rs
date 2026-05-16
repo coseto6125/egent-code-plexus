@@ -40,7 +40,7 @@ enum Commands {
     Inspect(commands::inspect::InspectArgs),
     /// Find symbols by name or concept (auto bm25 / hybrid / vector)
     Search(commands::search::SearchArgs),
-    /// Blast radius — from <name> or git diff via --since <ref>
+    /// Blast radius — from <name> or git diff via --baseline <ref>
     Impact(commands::impact::ImpactArgs),
     /// AST-aware multi-file rename
     Rename(commands::rename::RenameArgs),
