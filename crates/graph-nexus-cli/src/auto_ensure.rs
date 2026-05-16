@@ -41,6 +41,25 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     Ok(EnsureResult::Ready)
 }
 
+/// Returns `true` iff the graph at `graph_path` exists, loads cleanly,
+/// and has an embeddings table. Used by reindex spawn sites to decide
+/// whether to pass `--embeddings` to the new build — preserving the
+/// previous state so a `git commit` doesn't silently disable vector /
+/// hybrid search on the next query.
+///
+/// Any failure (missing file, corrupt rkyv, mmap error) returns `false`
+/// — the caller falls back to a non-embedded rebuild rather than
+/// erroring out the hook path.
+pub fn embeddings_present(graph_path: &Path) -> bool {
+    let Ok(engine) = crate::engine::Engine::load(graph_path) else {
+        return false;
+    };
+    let Ok(graph) = engine.graph() else {
+        return false;
+    };
+    graph.embeddings.is_some()
+}
+
 /// Ensure the graph exists and is fresher than the working tree. On Missing
 /// or Stale, invokes `admin index` synchronously for `worktree_root`, prints
 /// a one-line "Index refreshed" notice to stderr, and returns. Ready returns
@@ -54,10 +73,14 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
         EnsureResult::Stale { .. } => "stale",
     };
 
+    // Preserve the previous embedding state so the rebuild doesn't
+    // silently demote a vector-capable graph to BM25-only.
+    let keep_embeddings = embeddings_present(graph_path);
+
     let start = Instant::now();
     let args = crate::commands::admin::index::IndexArgs {
         repo: worktree_root.to_string_lossy().into_owned(),
-        embeddings: false,
+        embeddings: keep_embeddings,
         drop_embeddings: false,
         force: false,
         dump_resolver: None,

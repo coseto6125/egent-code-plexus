@@ -75,7 +75,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
         None => return Ok(()),
     };
 
-    if !spawn_background_reindex(repo_root, &state_dir) {
+    if !spawn_background_reindex(repo_root, &state_dir, &graph_path) {
         return Ok(());
     }
 
@@ -97,15 +97,24 @@ fn is_git_mutation(cmd: &str) -> bool {
 /// or `.rebuild-failed` after MAX=3 attempts. Returns true iff the
 /// launcher subprocess was spawned (the analyze outcome surfaces
 /// asynchronously via marker files consumed by UserPromptSubmit).
-fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
+///
+/// `graph_path` is inspected to decide whether to append `--embeddings`
+/// to the rebuild — if the previous graph had embeddings, the new one
+/// keeps them so `git commit` doesn't silently disable vector search.
+fn spawn_background_reindex(repo_root: &Path, state_dir: &Path, graph_path: &Path) -> bool {
     let repo_str = repo_root.to_string_lossy();
     let lock = state_dir.join(".analyze.lock");
     let complete = state_dir.join(".rebuild-complete");
     let failed = state_dir.join(".rebuild-failed");
     let log = state_dir.join("last-rebuild.log");
 
+    let mut args: Vec<&str> = vec!["admin", "index", "--repo", repo_str.as_ref()];
+    if crate::auto_ensure::embeddings_present(graph_path) {
+        args.push("--embeddings");
+    }
+
     spawn_bg(BgJob {
-        args: &["admin", "index", "--repo", repo_str.as_ref()],
+        args: &args,
         lock: &lock,
         cwd: repo_root,
         retry: (3, 2),
