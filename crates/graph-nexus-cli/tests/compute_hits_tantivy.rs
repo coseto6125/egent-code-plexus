@@ -3,7 +3,7 @@
 //! scoring in `bm25_hits_from_graph`. Drives B+ step 1 (tantivy wireup).
 
 use graph_nexus_cli::commands::hook::pre_tool_use::format_hits;
-use graph_nexus_cli::commands::search::{compute_hits, Hit, SearchArgs, SearchMode};
+use graph_nexus_cli::commands::search::{compute_hits, Hit, ScoreSource, SearchArgs, SearchMode};
 use graph_nexus_cli::engine::Engine;
 use graph_nexus_cli::search::TantivyEngine;
 use graph_nexus_core::graph::{
@@ -229,6 +229,7 @@ fn format_hits_emits_legacy_style_called_by_and_calls_block() {
     let hit = Hit {
         repo: None,
         score: 1.23,
+        score_source: ScoreSource::Bm25,
         kind: "Function".to_string(),
         file: "src/config.rs".to_string(),
         line: 42,
@@ -256,6 +257,7 @@ fn format_hits_skips_empty_caller_callee_lines() {
     let hit = Hit {
         repo: None,
         score: 0.5,
+        score_source: ScoreSource::Substring,
         kind: "Function".to_string(),
         file: "src/main.rs".to_string(),
         line: 1,
