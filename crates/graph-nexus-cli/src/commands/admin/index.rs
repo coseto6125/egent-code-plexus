@@ -23,13 +23,6 @@ pub struct IndexArgs {
     #[arg(long)]
     pub repo: String,
 
-    #[arg(long, default_value_t = false)]
-    pub embeddings: bool,
-
-    /// Drop the existing embeddings cache entirely during analysis.
-    #[arg(long, default_value_t = false)]
-    pub drop_embeddings: bool,
-
     /// Force full analysis even if the graph seems up to date.
     #[arg(long, default_value_t = false)]
     pub force: bool,
@@ -160,7 +153,6 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 
     let bin_path = layout.index_dir.join("graph.bin");
     let meta_path = layout.index_dir.join("meta.json");
-    let embeddings_flag = args.embeddings;
 
     // Step 2: Initialize pipeline and register only the providers needed for
     // files we actually scanned. tree-sitter language load + query compile is
@@ -279,11 +271,11 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     // the closure is called concurrently across rayon worker threads.
     let cache_hits_counter = std::sync::atomic::AtomicUsize::new(0);
 
-    // Step 3b: Analyze and load embeddings cache concurrently. The parse
+    // Step 3b: Analyze and load file-hash cache concurrently. The parse
     // cache is consulted per-file inside `analyze_with_cache`; the
-    // embeddings cache (separate concept) still pre-loads serially here
-    // when `--embeddings` is on.
-    let (local_graphs, (old_file_hashes, old_embeddings_cache)) = rayon::join(
+    // per-file content hashes are read from any prior graph.bin so the
+    // builder can skip re-deriving symbols whose source hasn't changed.
+    let (local_graphs, old_file_hashes) = rayon::join(
         || {
             let cache_ref = cache_index.as_ref();
             let hits = &cache_hits_counter;
@@ -297,7 +289,6 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
         },
         || {
             let mut hashes = std::collections::HashMap::new();
-            let mut embs = std::collections::HashMap::new();
             if !args.force {
                 if let Ok(old_engine) = crate::engine::Engine::load(&bin_path) {
                     if let Ok(old_graph) = old_engine.graph() {
@@ -305,24 +296,10 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
                             let path = file.path.resolve(&old_graph.string_pool);
                             hashes.insert(path.to_string(), file.content_hash);
                         }
-                        if embeddings_flag && !args.drop_embeddings {
-                            if let rkyv::option::ArchivedOption::Some(old_embs) =
-                                &old_graph.embeddings
-                            {
-                                for (idx, node) in old_graph.nodes.iter().enumerate() {
-                                    if let Some(emb) = old_embs.get(idx) {
-                                        let uid = node.uid.resolve(&old_graph.string_pool);
-                                        let vec_f32: Vec<f32> =
-                                            emb.iter().map(|x| x.to_native()).collect();
-                                        embs.insert(uid.to_string(), vec_f32);
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
-            (hashes, embs)
+            hashes
         },
     );
     let analyze_duration = analyze_start.elapsed();
@@ -354,8 +331,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     let build_start = Instant::now();
     let aliases = crate::config_parser::parse_configs(&repo_path);
     let mut builder = GraphBuilder::new()
-        .with_embeddings(args.embeddings)
-        .with_cache(old_file_hashes, old_embeddings_cache)
+        .with_cache(old_file_hashes)
         .with_resolver_dump(args.dump_resolver.clone())
         .with_path_aliases(aliases)
         .with_repo_root(repo_path.clone());
@@ -419,11 +395,6 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
             indexed_at: indexed_at.clone(),
             node_count: node_count as u32,
             delta_size: 0,
-            embedding_status: if args.embeddings {
-                "in_progress".into()
-            } else {
-                "skipped".into()
-            },
         };
         let mut branches = vec![branch_entry.clone()];
         if let Some(existing) = registry

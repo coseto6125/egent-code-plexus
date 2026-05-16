@@ -4,7 +4,6 @@ pub mod background;
 pub use background::flock_preamble;
 pub mod commands;
 pub mod config_parser;
-pub mod embedder;
 pub mod engine;
 pub mod git;
 pub mod git_state;

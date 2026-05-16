@@ -1,6 +1,6 @@
 [package]
 name = "graph-nexus"
-description = "Graph Nexus for LLM — code intelligence graph for AI agents and LLMs (multi-language AST analysis + BGE-M3 semantic search)"
+description = "Graph Nexus for LLM — code intelligence graph for AI agents and LLMs (multi-language AST analysis)"
 version = "0.1.0"
 edition = "2021"
 default-run = "gnx"
@@ -38,7 +38,6 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 etoon = "0.4"
 ignore = "0.4.25"
-fastembed = "5"
 rayon = "1.10"
 tantivy = "0.26.1"
 tempfile = "3.27"

@@ -36,7 +36,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     };
     let args = SearchArgs {
         pattern: Some(pattern),
-        mode: SearchMode::Auto,
+        mode: SearchMode::Bm25,
         kind: None,
         repo: None,
         format: None,

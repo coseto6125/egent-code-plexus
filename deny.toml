@@ -8,11 +8,7 @@ all-features = true
 [advisories]
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-ignore = [
-    # paste 1.0.15 unmaintained (透過 tokenizers → fastembed 引入)。
-    # 上游若改用 pastey 即可解；非漏洞，僅 advisory。
-    "RUSTSEC-2024-0436",
-]
+ignore = []
 
 # ==================== Licenses ====================
 [licenses]

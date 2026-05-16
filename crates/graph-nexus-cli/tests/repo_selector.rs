@@ -85,7 +85,6 @@ fn make_registry() -> RegistryFile {
                     indexed_at: "2026-05-15".into(),
                     node_count: 100,
                     delta_size: 0,
-                    embedding_status: "none".into(),
                 }],
                 groups: vec!["backend".into()],
             },

@@ -19,7 +19,6 @@ fn round_trip_serialize_deserialize() {
                 indexed_at: "2026-05-14T03:00:00Z".into(),
                 node_count: 12453,
                 delta_size: 0,
-                embedding_status: "complete".into(),
             }],
             groups: vec![],
         }],

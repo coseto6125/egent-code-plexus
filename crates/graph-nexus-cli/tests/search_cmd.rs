@@ -2,9 +2,7 @@
 //!
 //! Exercises:
 //! - Single-repo BM25 search (positional pattern, replaces old `--query` flag)
-//! - `--mode` flag accepted with all 4 values
-//! - Auto-mode slug detection routes to BM25 (no fallback hint)
-//! - Auto-mode phrase falls back to BM25 with a stderr hint (no embeddings)
+//! - `--mode bm25` accepted; `vector` / `hybrid` / `auto` rejected by clap
 //! - Multi-repo fan-out via `--repo @<group>` (port from multi_query_cmd)
 //! - Missing-graph degradation in multi-repo mode
 //! - Empty result returns "No matches" hint
@@ -59,7 +57,6 @@ fn seed_repo(home_gnx: &Path, repo: &str, branch: &str, node_names: &[&str]) -> 
         in_offsets: vec![0; (n + 1) as usize],
         in_edge_idx: vec![],
         name_index: (0..n).collect(),
-        embeddings: None,
         process_start: n,
         traces_offsets: vec![0],
         traces_data: vec![],
@@ -112,7 +109,6 @@ fn two_repo_fixture() -> Fixture {
                     indexed_at: "now".into(),
                     node_count: 2,
                     delta_size: 0,
-                    embedding_status: "none".into(),
                 }],
                 groups: vec!["g1".into()],
             },
@@ -127,7 +123,6 @@ fn two_repo_fixture() -> Fixture {
                     indexed_at: "now".into(),
                     node_count: 2,
                     delta_size: 0,
-                    embedding_status: "none".into(),
                 }],
                 groups: vec!["g1".into()],
             },
@@ -212,85 +207,27 @@ fn search_accepts_mode_bm25() {
     assert!(!String::from_utf8_lossy(&out.stderr).contains("error: "));
 }
 
+/// clap must reject any `--mode` value other than `bm25` with
+/// `invalid value … possible values: [bm25]`.
 #[test]
-fn search_accepts_mode_vector_stub() {
+fn search_rejects_removed_modes() {
     let f = two_repo_fixture();
-    let out = run_search(
-        &f.home_path,
-        &f.alpha_graph,
-        &["fetch_user", "--mode", "vector", "--format", "json"],
-    );
-    assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!String::from_utf8_lossy(&out.stderr).contains("error: "));
-}
-
-#[test]
-fn search_accepts_mode_hybrid_stub() {
-    let f = two_repo_fixture();
-    let out = run_search(
-        &f.home_path,
-        &f.alpha_graph,
-        &["fetch_user", "--mode", "hybrid", "--format", "json"],
-    );
-    assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!String::from_utf8_lossy(&out.stderr).contains("error: "));
-}
-
-#[test]
-fn search_accepts_mode_auto() {
-    let f = two_repo_fixture();
-    let out = run_search(
-        &f.home_path,
-        &f.alpha_graph,
-        &["fetch_user", "--mode", "auto", "--format", "json"],
-    );
-    assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn search_slug_input_auto_no_fallback_hint() {
-    // Slug-like → bm25; should NOT emit the "falling back to bm25" hint.
-    let f = two_repo_fixture();
-    let out = run_search(
-        &f.home_path,
-        &f.alpha_graph,
-        &["fetch_user", "--mode", "auto", "--format", "json"],
-    );
-    assert!(out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("falling back to bm25"),
-        "unexpected fallback hint for slug input: {stderr}"
-    );
-}
-
-#[test]
-fn search_phrase_input_auto_emits_fallback_hint() {
-    // Phrase input + no embeddings → bm25 fallback with stderr hint.
-    let f = two_repo_fixture();
-    let out = run_search(
-        &f.home_path,
-        &f.alpha_graph,
-        &["how does auth work", "--mode", "auto", "--format", "json"],
-    );
-    assert!(out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("falling back to bm25"),
-        "expected fallback hint for phrase input, got: {stderr}"
-    );
+    for mode in &["vector", "hybrid", "auto"] {
+        let out = run_search(
+            &f.home_path,
+            &f.alpha_graph,
+            &["fetch_user", "--mode", mode, "--format", "json"],
+        );
+        assert!(
+            !out.status.success(),
+            "--mode {mode} should be rejected by clap"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("invalid value"),
+            "expected 'invalid value' in stderr for --mode {mode}, got: {stderr}"
+        );
+    }
 }
 
 #[test]

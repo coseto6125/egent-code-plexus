@@ -21,7 +21,6 @@ fn lifecycle_create_upsert_reopen() {
             indexed_at: "2026-05-14T00:00:00Z".into(),
             node_count: 100,
             delta_size: 0,
-            embedding_status: "skipped".into(),
         }],
         groups: vec![],
     })

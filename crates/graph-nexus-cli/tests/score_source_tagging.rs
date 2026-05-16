@@ -1,8 +1,5 @@
 //! `Hit.score_source` must reflect which ranker produced the score:
-//! substring (no tantivy index on disk) vs BM25 (tantivy built) vs RRF
-//! (hybrid). Vector / cosine is covered by the live `gnx search --mode vector`
-//! smoke and `search_vector_fallback` together — embedder init costs ~1.7 GB
-//! RAM so we don't pay it in CI here.
+//! substring (no tantivy index on disk) vs BM25 (tantivy built).
 
 use graph_nexus_cli::commands::search::{compute_hits, ScoreSource, SearchArgs, SearchMode};
 use graph_nexus_cli::engine::Engine;
@@ -54,7 +51,6 @@ fn make_graph(names: &[&str]) -> ZeroCopyGraph {
         in_offsets,
         in_edge_idx: vec![],
         name_index: vec![],
-        embeddings: None,
         process_start: n as u32,
         traces_offsets: vec![],
         traces_data: vec![],

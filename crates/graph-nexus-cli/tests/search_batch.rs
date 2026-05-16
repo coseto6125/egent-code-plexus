@@ -1,7 +1,8 @@
 //! `gnx search --batch` reads patterns from stdin (one per line, `#`
 //! comments and empty lines skipped) and emits a per-query block
 //! prefixed by `=== pattern: <pattern> ===`. The point is to amortise
-//! the BGE-M3 cold start across N queries inside a single process.
+//! Engine load + mmap setup + tantivy open across N queries inside a
+//! single process.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -31,32 +32,32 @@ fn run_batch_with_stdin(stdin_payload: &str, extra_args: &[&str]) -> std::proces
 
 #[test]
 fn batch_emits_per_query_divider_lines() {
-    let payload = "rrf_merge\ncosine_top_k_indices\n";
+    let payload = "compute_hits\nbuild_hit\n";
     let out = run_batch_with_stdin(payload, &[]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Each query's block must start with the divider.
     assert!(
-        stdout.contains("=== pattern: rrf_merge ==="),
-        "missing divider for rrf_merge in:\n{stdout}"
+        stdout.contains("=== pattern: compute_hits ==="),
+        "missing divider for compute_hits in:\n{stdout}"
     );
     assert!(
-        stdout.contains("=== pattern: cosine_top_k_indices ==="),
-        "missing divider for cosine_top_k_indices in:\n{stdout}"
+        stdout.contains("=== pattern: build_hit ==="),
+        "missing divider for build_hit in:\n{stdout}"
     );
 }
 
 #[test]
 fn batch_skips_blank_and_commented_lines() {
     // 5 lines on stdin but only 1 is a real query.
-    let payload = "\n# this is a comment\n   \nrrf_merge\n# trailing comment\n";
+    let payload = "\n# this is a comment\n   \ncompute_hits\n# trailing comment\n";
     let out = run_batch_with_stdin(payload, &[]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let divider_count = stdout.matches("=== pattern: ").count();
     assert_eq!(
         divider_count, 1,
-        "expected exactly 1 divider (only 'rrf_merge' is a real query), got {divider_count} in:\n{stdout}"
+        "expected exactly 1 divider (only 'compute_hits' is a real query), got {divider_count} in:\n{stdout}"
     );
-    assert!(stdout.contains("=== pattern: rrf_merge ==="));
+    assert!(stdout.contains("=== pattern: compute_hits ==="));
 }
 
 #[test]

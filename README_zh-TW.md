@@ -27,11 +27,11 @@
 | **Agent 整合** | MCP server、resources、prompts、setup、hooks、generated skills | 無狀態 CLI，可透過 shell/tool wrapper 調用。**目前沒有內建 MCP server。** |
 | **核心查詢工具** | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `inspect`, `search`, `impact`, `routes`, `cypher`, `coverage`, `rename`（agent）；`admin index/drop/prune/…`（admin） |
 | **Context 輸出** | 完整的 MCP responses 與 repo skills | 精簡 `toon`/JSON/text，適合 shell-mediated LLM 調用 |
-| **搜尋** | 文件化的 BM25 + semantic + RRF 混合 | 有 embedding 走混合；沒有就 fallback Tantivy BM25 |
+| **搜尋** | 文件化的 BM25 + semantic + RRF 混合 | Tantivy BM25（無索引時 fallback 到 substring）|
 | **Runtime / 儲存** | Node.js + LadybugDB | Rust + mmap `rkyv` graph 檔 |
 | **最適合場景** | 有強 MCP/editor 整合的 agent runtime | 想要小執行檔、少零件的 local LLM harness / scripts |
 
-底層細節：rkyv + mmap 的 zero-copy 硬碟儲存、Tantivy BM25 + BGE-M3 dense vector 混合檢索、框架路由自動抽取。CLI 命令是 `gnx`。
+底層細節：rkyv + mmap 的 zero-copy 硬碟儲存、Tantivy BM25 全文檢索、框架路由自動抽取。CLI 命令是 `gnx`。
 
 [English README](./README.md)
 
@@ -39,10 +39,8 @@
 
 *   **極速與零拷貝 (Zero-Copy)**：冷啟動索引 `.sample_repo` — **22,772 檔、25 種偵測到的語言，僅 4.9 秒**（Java 3535、PHP 2907、TypeScript 1704、C# 945、Rust 870、C 801、Markdown 783、Dart 616、Bash 487、C++ 476、JavaScript 466、Solidity 403、Move 367、YAML 343、Ruby 156、Python 134、Swift 105、Go 99、Crystal 72、Kotlin 49、Lua 32、Zig 31、Dockerfile 20、Docker Compose 8、SQL 4）。同一張 graph 的查詢延遲：cypher 9 ms · context 9 ms · impact 5–6 ms · route-map 13 ms · BM25 query 24 ms · summarize 38 ms · detect-changes 230 ms。硬體：**AMD Ryzen 9 9950X（WSL2 內 8 顆邏輯 CPU、11.7 GiB RAM）**、Linux 6.6.87。Tree-sitter + Rayon 平行解析、`rkyv` mmap 零拷貝 `graph.bin`。重現：`python scripts/benchmark_gnx.py`。
 *   **LLM 原生輸出**：產出極度節省 Token 的格式（[TOON](https://crates.io/crates/etoon)）與簡潔的字串摘要，杜絕複雜 JSON 括號引發的 LLM 幻覺。
-*   **混合檢索引擎 (Hybrid Search)**：
-    *   **語意搜尋 (Semantic)**：透過 `fastembed-rs` (`--embeddings`) 載入 **BGE-M3 INT8 量化模型**。支援精準的跨語言概念對齊（例如：搜中文「會話管理」，精準命中英文的 `SessionInterface`），並利用 AVX2 指令集大幅降低 CPU 負載與記憶體。
-    *   **全文關鍵字 (Lexical)**：內建 **Tantivy (BM25)** 搜尋引擎，提供零延遲的精確關鍵字分詞比對。
-*   **增量快取 (Incremental Caching)**：透過 SHA-256 檔案雜湊比對，只有被修改的檔案才會重新執行 AST 與神經網路運算。這讓圖譜重構時間從 50 秒（冷啟動）瞬間暴跌至 **小於 0.25 秒**！
+*   **全文關鍵字檢索 (Lexical)**：內建 **Tantivy (BM25)** 搜尋引擎，提供零延遲的精確關鍵字分詞比對；尚未建立索引時自動 fallback 到 substring 評分（1.0 完全相等 / 0.7 prefix / 0.4 contains），讓剛 clone 的 repo 也能立刻出結果。
+*   **增量快取 (Incremental Caching)**：透過 SHA-256 檔案雜湊比對，只有被修改的檔案才會重新解析 AST。這讓圖譜重構時間從 50 秒（冷啟動）瞬間暴跌至 **小於 0.25 秒**！
 *   **零維護的路由萃取 (Route Extraction)**：拋棄寫死框架名稱的過度設計，純粹依賴 RFC 7231 HTTP 標準協定常數。完美兼容聲明式（如 `@Get`）與指令式（如 `app.get()`）寫法，一鍵透視微服務全域 API。
 *   **RAG 文件獨立索引**：安全地將 Markdown (`.md`) 與 GitHub Actions (`.yaml`) 隔離至專屬的文件陣列，並原生解析標題段落 (`Section`)。這讓 LLM 能夠精準查閱架構文件，又不會污染程式碼的執行流。
 
@@ -91,22 +89,16 @@ GitNexus 採用為 LLM agent 設計的**雙層 CLI**：
 # 1. 為當前專案建立程式碼圖譜 (極速，低於 1 秒)
 gnx admin index --repo .
 
-# 2. 建立附帶 BGE-M3 向量的圖譜 (初次執行會下載 ~540MB 的 INT8 模型)
-gnx admin index --repo . --embeddings
-
-# 3. 混合檢索：語意與概念搜尋 (需要先執行 --embeddings)
-gnx search "資料庫連線池設定"
-
-# 4. 混合檢索：精確關鍵字 BM25 (使用 Tantivy)
+# 2. BM25 關鍵字搜尋（建好索引後走 Tantivy）
 gnx search "DatabaseConnection"
 
-# 5. 一鍵萃取微服務中所有的 API 路由
+# 3. 一鍵萃取微服務中所有的 API 路由
 gnx routes --repo .
 
-# 6. 尋找特定符號的爆炸半徑 / 上游呼叫鏈 (Refactor 前必備)
+# 4. 尋找特定符號的爆炸半徑 / 上游呼叫鏈 (Refactor 前必備)
 gnx impact validateUser --direction upstream
 
-# 7. 探索上下文 (包含 Metadata、裝飾器、簽名)
+# 5. 探索上下文 (包含 Metadata、裝飾器、簽名)
 gnx inspect validateUser
 ```
 
@@ -148,7 +140,7 @@ gnx inspect validateUser
 | 命令 | 用途 | 重點 flag |
 |---|---|---|
 | `inspect <name>` | 單一符號 → metadata、裝飾器、簽名、呼叫者、被呼叫者。 | `--kind` · `--file_path` · `--relation_types` · `--include_tests` |
-| `search <pattern>` | BM25（含可選語意）符號搜尋。 | `--mode bm25\|vector\|hybrid\|auto` · `--format` |
+| `search <pattern>` | BM25 全文符號搜尋。 | `--mode bm25`（no-op alias）· `--format` · `--batch` |
 | `impact <name> --direction <dir>` | 爆炸半徑 / 依賴 traversal。`dir` ∈ `upstream`（誰呼叫 X）、`downstream`（X 呼叫了什麼）。 | `--depth <n>`（預設 5） · `--high-trust-only`（預設 true） · `--min-confidence <f>` · `--include-tests` · `--kind` · `--file_path` · `--since <ref>` |
 | `rename --symbol <old> --new-name <new>` | AST 驅動的跨檔 rename（14 種語言：Python、TS/TSX、JS、Rust、Java、Kotlin、C#、Go、PHP、Ruby、Swift、C、C++、Dart）。請務必先跑 `--dry-run`。 | `--dry-run` · `--markdown` |
 | `cypher '<query>'` | 任意 openCypher 模式匹配。`m.content` 回傳原始碼。 | `--format` |
@@ -161,7 +153,7 @@ gnx inspect validateUser
 
 | 命令 | 用途 | 重點 flag |
 |---|---|---|
-| `admin index --repo <path>` | 建立 / 刷新 `<path>` 的圖譜。預設增量（內容雜湊快取）。 | `--embeddings`（建 BGE-M3 向量）· `--drop-embeddings` · `--force`（強制全量重建） · `--dump-resolver <file>` |
+| `admin index --repo <path>` | 建立 / 刷新 `<path>` 的圖譜。預設增量（內容雜湊快取）。 | `--force`（強制全量重建） · `--dump-resolver <file>` · `--no-cache` |
 | `admin install-hook` | 安裝 git reference-transaction hook，分支切換自動追蹤索引。 | `--force` · `--no-chain` |
 | `admin drop [--repo <p>] [--all]` | 刪除一個或全部的 `.gitnexus-rs/` 及其 registry 記錄。 | — |
 | `admin prune --branch <name> --repo <p>` | 刪除過時的 branch-scoped 索引目錄。 | — |
@@ -247,7 +239,7 @@ Call 偵測集中在 `crates/graph-nexus-analyzer/src/calls.rs`。熱路徑 help
 ```
 crates/
 ├── graph-nexus-core        # 零拷貝圖譜定義 (rkyv)、增量快取演算法、圖譜檢索 helper
-├── graph-nexus-analyzer    # Tree-sitter 解析器、BGE-M3 向量生成、HTTP 路由偵測器
+├── graph-nexus-analyzer    # Tree-sitter 解析器、HTTP 路由偵測、Framework Confidence
 └── graph-nexus-cli         # `gnx` 命令列、Tantivy BM25 全文引擎、Token 最佳化輸出
 ```
 
@@ -258,9 +250,7 @@ crates/
 | 環境變數 | 預設值 | 作用 |
 |---|---|---|
 | `GNX_MAX_FILE_BYTES` | `16777216` (16 MiB) | 解析時跳過超過此大小的原始碼檔案，將 worker 最壞情況 RAM 控制在 `num_threads × MAX`。索引含產生器/編譯輸出時可調高；記憶體受限機器可調低。 |
-| `GNX_EMBED_BATCH` | `32` | fastembed 推論 batch 大小。調低可降低 embedding 階段尖峰駐留（BGE-M3 INT8 下 16 ≈ 200 MiB、32 ≈ 300 MiB）。 |
 | `GNX_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 掃描遞迴深度。深層 .NET monorepo 可調高。 |
-| `GNX_MODEL_CACHE` | `$HF_HUB_CACHE` ⤳ `$HF_HOME/hub` ⤳ `~/.cache/huggingface/hub` | 覆寫 BGE-M3 模型快取目錄。 |
 
 ## 📄 授權條款
 

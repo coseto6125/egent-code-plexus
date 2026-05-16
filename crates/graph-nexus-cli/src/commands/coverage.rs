@@ -206,7 +206,6 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
                     "name": b.name,
                     "indexed_at": b.indexed_at,
                     "node_count": b.node_count,
-                    "embedding_status": b.embedding_status,
                     "delta_size": b.delta_size,
                 })
             })
@@ -430,7 +429,6 @@ mod tests {
             in_offsets: vec![0],
             in_edge_idx: vec![],
             name_index: vec![],
-            embeddings: None,
             process_start: 0,
             traces_offsets: vec![],
             traces_data: vec![],
@@ -754,7 +752,6 @@ mod tests {
                     indexed_at: "2026-05-16T10:00:00Z".into(),
                     node_count: 4922,
                     delta_size: 0,
-                    embedding_status: "none".into(),
                 },
                 BranchEntry {
                     name: "wt-x".into(),
@@ -762,7 +759,6 @@ mod tests {
                     indexed_at: "2026-05-16T12:00:00Z".into(),
                     node_count: 1234,
                     delta_size: 0,
-                    embedding_status: "none".into(),
                 },
             ],
         };

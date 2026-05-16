@@ -33,11 +33,6 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
 
 fn build_refresh_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
     let repo = input(theme, "Repo path", ".")?;
-    let embeddings = Confirm::with_theme(theme)
-        .with_prompt("Build embeddings")
-        .default(false)
-        .interact()
-        .map_err(dialoguer_err)?;
     let force = Confirm::with_theme(theme)
         .with_prompt("Force full refresh")
         .default(false)
@@ -46,8 +41,6 @@ fn build_refresh_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
 
     index::run(index::IndexArgs {
         repo,
-        embeddings,
-        drop_embeddings: false,
         force,
         dump_resolver: None,
         no_cache: false,
@@ -81,8 +74,8 @@ fn print_registry(registry: &RegistryFile, home_gnx: &std::path::Path) {
         }
         for branch in &repo.branches {
             println!(
-                "    branch {:<24} nodes={} embeddings={} indexed_at={}",
-                branch.name, branch.node_count, branch.embedding_status, branch.indexed_at
+                "    branch {:<24} nodes={} indexed_at={}",
+                branch.name, branch.node_count, branch.indexed_at
             );
         }
     }
@@ -199,7 +192,6 @@ mod tests {
                     indexed_at: "2026-05-16T00:00:00Z".into(),
                     node_count: 1,
                     delta_size: 0,
-                    embedding_status: "none".into(),
                 }],
                 groups: vec!["core".into()],
             }],

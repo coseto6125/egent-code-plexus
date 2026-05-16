@@ -18,7 +18,6 @@ pub mod crystal;
 pub mod dart;
 pub mod docker_compose;
 pub mod dockerfile;
-pub mod embeddings;
 pub mod entry_points;
 pub mod fetch_shape;
 pub mod framework_confidence;

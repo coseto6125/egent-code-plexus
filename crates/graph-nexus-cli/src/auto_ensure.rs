@@ -31,6 +31,14 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
         Err(e) => return Err(e),
     };
 
+    // A CLI upgrade that bumped GRAPH_FORMAT_VERSION would otherwise surface
+    // as engine::Engine::load's InvalidData error on the next query. Treat a
+    // schema break the same as a stale graph so ensure_fresh transparently
+    // rebuilds.
+    if !crate::engine::header_compatible(graph_path) {
+        return Ok(EnsureResult::Stale { age_seconds: 0 });
+    }
+
     if any_source_newer_than(graph_path, worktree_root, graph_mtime)? {
         let age = SystemTime::now()
             .duration_since(graph_mtime)
@@ -39,25 +47,6 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
         return Ok(EnsureResult::Stale { age_seconds: age });
     }
     Ok(EnsureResult::Ready)
-}
-
-/// Returns `true` iff the graph at `graph_path` exists, loads cleanly,
-/// and has an embeddings table. Used by reindex spawn sites to decide
-/// whether to pass `--embeddings` to the new build — preserving the
-/// previous state so a `git commit` doesn't silently disable vector /
-/// hybrid search on the next query.
-///
-/// Any failure (missing file, corrupt rkyv, mmap error) returns `false`
-/// — the caller falls back to a non-embedded rebuild rather than
-/// erroring out the hook path.
-pub fn embeddings_present(graph_path: &Path) -> bool {
-    let Ok(engine) = crate::engine::Engine::load(graph_path) else {
-        return false;
-    };
-    let Ok(graph) = engine.graph() else {
-        return false;
-    };
-    graph.embeddings.is_some()
 }
 
 /// Ensure the graph exists and is fresher than the working tree. On Missing
@@ -73,15 +62,9 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
         EnsureResult::Stale { .. } => "stale",
     };
 
-    // Preserve the previous embedding state so the rebuild doesn't
-    // silently demote a vector-capable graph to BM25-only.
-    let keep_embeddings = embeddings_present(graph_path);
-
     let start = Instant::now();
     let args = crate::commands::admin::index::IndexArgs {
         repo: worktree_root.to_string_lossy().into_owned(),
-        embeddings: keep_embeddings,
-        drop_embeddings: false,
         force: false,
         dump_resolver: None,
         no_cache: false,

@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 // `framework_confidence.rs` carries the confidence constants written into
 // `RawFrameworkRef.confidence` — a change there reshapes cached graphs even
 // without touching parser.rs.
-// `embeddings.rs`, `ast_test.rs`, `lib.rs` are excluded — embedding code is
-// runtime-only, ast_test is a dev helper, and lib.rs is just re-exports.
+// `ast_test.rs`, `lib.rs` are excluded — ast_test is a dev helper, and
+// lib.rs is just re-exports.
 const TOP_LEVEL_FILES: &[&str] = &[
     "calls.rs",
     "framework_helpers.rs",

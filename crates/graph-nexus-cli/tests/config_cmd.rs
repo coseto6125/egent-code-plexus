@@ -44,10 +44,6 @@ fn round_trip_load_save_preserves_all_fields() {
     let root = repo.path();
 
     let mut cfg = Config::default();
-    cfg.embedding.model = "nomic-embed-text".into();
-    cfg.embedding.endpoint = "http://localhost:11434/v1".into();
-    cfg.embedding.api_key = "sk-test".into();
-    cfg.embedding.batch_size = 64;
     cfg.output.default_format = "json".into();
     cfg.confidence.high_trust_threshold = 0.65;
 

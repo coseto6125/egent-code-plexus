@@ -14,7 +14,7 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | ONE symbol → signature + body + 1-hop edges + callers + 1-hop impact | `gnx inspect --name X --repo .` |
 | ONE symbol → blast radius | `gnx impact X --direction upstream --repo .` (positional; `--target X` alias works too. `--direction` accepts `up`/`down`/`both` or `upstream`/`downstream`. Filters: `--kind --file_path --relation_types --depth --min-confidence --include-tests`) |
 | PR blast radius — symbol view (who breaks) | `gnx impact --baseline origin/main --repo .` |
-| Find symbol by name / concept | `gnx search "term" --repo .` (auto-picks bm25 / hybrid / vector; force via `--mode`) |
+| Find symbol by name | `gnx search "term" --repo .` (BM25 via tantivy; substring fallback when index absent) |
 | Arbitrary graph query / source body via Cypher | `gnx cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query "..."` alias works. Single-repo only. Minimal grammar — see Cypher subset below) |
 | AST-aware multi-file rename | `gnx rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `gnx routes <path?> --repo .` (no path = list all) |
@@ -42,7 +42,7 @@ No need to `gnx admin index` before querying — first query on a fresh
 checkout pays the index cost once (~30s–2min depending on tree size).
 
 `gnx admin index --repo <path>` is still available as an explicit form
-for human-driven workflows (full re-index, `--embeddings`, `--force`).
+for human-driven workflows (full re-index, `--force`).
 
 ### "Not found" but `grep` shows the symbol
 

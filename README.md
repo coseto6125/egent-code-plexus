@@ -27,11 +27,11 @@ Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhi
 | **Agent integration** | MCP server, resources, prompts, setup, hooks, generated skills | Stateless CLI; use through shell/tool wrappers. **No built-in MCP server yet.** |
 | **Core query tools** | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `inspect`, `search`, `impact`, `routes`, `cypher`, `coverage`, `rename` (agent); `admin index/drop/prune/…` (admin) |
 | **Context output** | Rich MCP responses and generated repo skills | Compact `toon`/JSON/text for shell-mediated LLM calls |
-| **Search** | Documented BM25 + semantic + RRF hybrid search | Embeddings when available; otherwise Tantivy BM25 fallback |
+| **Search** | Documented BM25 + semantic + RRF hybrid search | Tantivy BM25 (substring fallback when index absent) |
 | **Runtime/storage** | Node.js + LadybugDB | Rust + mmap `rkyv` graph file |
 | **Best fit** | Agent runtimes with strong MCP/editor integration | Local LLM harnesses/scripts that want a small executable with few moving parts |
 
-Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via Tantivy + BGE-M3 dense vectors), framework-aware route extraction. The CLI is `gnx`.
+Under the hood: zero-copy on-disk storage (rkyv + mmap), BM25 lexical search via Tantivy, framework-aware route extraction. The CLI is `gnx`.
 
 [繁體中文說明 (Traditional Chinese)](./README_zh-TW.md)
 
@@ -39,10 +39,8 @@ Under the hood: zero-copy on-disk storage (rkyv + mmap), hybrid search (BM25 via
 
 *   **Blazing Fast & Zero-Copy**: cold-indexed `.sample_repo` — **22,772 files across 25 detected languages in 4.9 s** (Java 3535, PHP 2907, TypeScript 1704, C# 945, Rust 870, C 801, Markdown 783, Dart 616, Bash 487, C++ 476, JavaScript 466, Solidity 403, Move 367, YAML 343, Ruby 156, Python 134, Swift 105, Go 99, Crystal 72, Kotlin 49, Lua 32, Zig 31, Dockerfile 20, Docker Compose 8, SQL 4). Per-query latency on the same graph: cypher 9 ms · context 9 ms · impact 5–6 ms · route-map 13 ms · BM25 query 24 ms · summarize 38 ms · detect-changes 230 ms. Hardware: **AMD Ryzen 9 9950X (8 vCPU under WSL2, 11.7 GiB RAM)**, Linux 6.6.87. Tree-sitter + Rayon for parse, `rkyv` mmap for zero-copy `graph.bin`. Reproduce: `python scripts/benchmark_gnx.py`.
 *   **LLM-Native Output**: Emits extreme token-efficient formats ([TOON](https://crates.io/crates/etoon)) and concise string summaries. No hallucination-inducing formatting.
-*   **Hybrid Search Engine**:
-    *   **Semantic Search**: Uses **BGE-M3 INT8 Quantized Model** via `fastembed-rs` (`--embeddings`). Cross-lingual concept matching (e.g., search "Session Management" in Chinese, find English functions) with AVX2 CPU acceleration and massive memory reduction.
-    *   **Lexical Search**: Uses **Tantivy (BM25)** for zero-latency, full-text tokenized keyword matching.
-*   **Incremental Caching**: Only re-computes ASTs and Embeddings for modified files (SHA-256 Content Hash). Graph rebuilds drop from ~50s (Cold Start) to **< 0.25s**!
+*   **Lexical Search**: **Tantivy (BM25)** for zero-latency, full-text tokenized keyword matching across the entire indexed corpus, with a per-name substring fallback (1.0 exact / 0.7 prefix / 0.4 contains) so freshly-cloned repos still produce shaped output before the first index materialises.
+*   **Incremental Caching**: Only re-computes ASTs for modified files (SHA-256 Content Hash). Graph rebuilds drop from ~50s (Cold Start) to **< 0.25s**!
 *   **Zero-Maintenance Route Extraction**: Purely based on RFC 7231 HTTP constants. Extracts API routes from both Declarative (e.g., `@Get`) and Imperative (e.g., `app.get()`) definitions across all languages.
 *   **RAG Document Indexing**: Securely isolates `.md` (Markdown) and `.yaml` (GitHub Actions) files into parallel structures, parsing sections natively for LLM documentation retrieval without polluting the code execution graph.
 
@@ -102,22 +100,16 @@ for the full design.
 # 1. Build a code graph for the current repo (Extremely fast, < 1s)
 gnx admin index --repo .
 
-# 2. Build with BGE-M3 Semantic Embeddings (Downloads ~540MB INT8 model on first run)
-gnx admin index --repo . --embeddings
-
-# 3. Hybrid Search: Semantic Concept (Requires --embeddings)
-gnx search "authentication flow"
-
-# 4. Hybrid Search: Exact Keyword BM25 (Uses Tantivy)
+# 2. BM25 keyword search (uses Tantivy when the index is present)
 gnx search "loginUser"
 
-# 5. Extract all API Routes across the Microservice
+# 3. Extract all API Routes across the Microservice
 gnx routes --repo .
 
-# 6. Find a symbol's blast-radius / execution flow
+# 4. Find a symbol's blast-radius / execution flow
 gnx impact validateUser --direction upstream
 
-# 7. Explore Context (Metadata, Decorators, Signatures)
+# 5. Explore Context (Metadata, Decorators, Signatures)
 gnx inspect validateUser
 ```
 
@@ -129,7 +121,7 @@ Every read-side command accepts `--format text|json|toon`. The default is the to
 |---|---|
 | Index a fresh repo | `gnx admin index --repo .` (first query also auto-indexes) |
 | Re-index after edits | Same — `admin index` is incremental (SHA-256 content hash per file) |
-| Symbol exists? Where? | `gnx search <name>` (BM25 + optional semantic) |
+| Symbol exists? Where? | `gnx search <name>` (BM25) |
 | One symbol → metadata, callers, callees | `gnx inspect <name>` |
 | If I edit X, what breaks? | `gnx impact <name> --direction upstream` |
 | What does X depend on? | `gnx impact <name> --direction downstream` |
@@ -190,7 +182,7 @@ All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--gra
 | Command | Purpose | Key flags |
 |---|---|---|
 | `inspect <name>` | One symbol → metadata, decorators, signature, callers, callees. | `--kind` · `--file_path` · `--relation_types` · `--include_tests` |
-| `search <pattern>` | BM25 (+ optional semantic) symbol search by name / concept. | `--mode bm25\|vector\|hybrid\|auto` · `--format` |
+| `search <pattern>` | BM25 lexical symbol search by name. | `--mode bm25` (no-op alias) · `--format` · `--batch` |
 | `impact <name> --direction <dir>` | Blast radius / dependency traversal. `dir` ∈ `upstream` (who calls X), `downstream` (what X calls). | `--depth <n>` (default 5) · `--high-trust-only` (default true) · `--min-confidence <f>` · `--include-tests` · `--kind` · `--file_path` · `--since <ref>` |
 | `rename --symbol <old> --new-name <new>` | AST-powered multi-file rename across 14 languages (Python, TS/TSX, JS, Rust, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart). Always run `--dry-run` first. | `--dry-run` · `--markdown` |
 | `cypher '<query>'` | Arbitrary openCypher pattern matching. `m.content` returns source body. | `--format` |
@@ -203,7 +195,7 @@ All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--gra
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `admin index --repo <path>` | Build / refresh the graph for `<path>`. Incremental by default (content-hash cache). | `--embeddings` (build BGE-M3 vectors) · `--drop-embeddings` · `--force` (full rebuild) · `--dump-resolver <file>` |
+| `admin index --repo <path>` | Build / refresh the graph for `<path>`. Incremental by default (content-hash cache). | `--force` (full rebuild) · `--dump-resolver <file>` · `--no-cache` |
 | `admin install-hook` | Install the git reference-transaction hook so branch switches auto-track. | `--force` · `--no-chain` |
 | `admin drop [--repo <p>] [--all]` | Delete the `.gitnexus-rs/` for a repo (or all) and its registry entry. | — |
 | `admin prune --branch <name> --repo <p>` | Drop a stale branch-scoped index dir. | — |
@@ -294,7 +286,7 @@ Call detection is centralised in `crates/graph-nexus-analyzer/src/calls.rs`. The
 ```
 crates/
 ├── graph-nexus-core        # Zero-copy graph (rkyv), Incremental Caching, Graph Queries
-├── graph-nexus-analyzer    # Tree-sitter parsers, BGE-M3 Embedder, HTTP Route Detector
+├── graph-nexus-analyzer    # Tree-sitter parsers, HTTP Route Detector, Framework Confidence
 └── graph-nexus-cli         # `gnx` binary, Tantivy BM25 Engine, Token-optimized Output
 ```
 
@@ -305,9 +297,7 @@ The analyzer streams parsed nodes through an MPSC channel into a single builder 
 | Env var | Default | Effect |
 |---|---|---|
 | `GNX_MAX_FILE_BYTES` | `16777216` (16 MiB) | Skip source files larger than this during ingest. Caps worst-case worker RAM at `num_threads × MAX`. Raise for legitimate generated/compiled-output indexing; lower on memory-constrained machines. |
-| `GNX_EMBED_BATCH` | `32` | fastembed inference batch size. Lower to reduce peak resident during embedding (16 ≈ 200 MiB / 32 ≈ 300 MiB on BGE-M3 INT8). |
 | `GNX_CSPROJ_MAX_DEPTH` | `4` | Directory recursion depth for `*.csproj` discovery. Raise for deeply-nested .NET monorepos. |
-| `GNX_MODEL_CACHE` | `$HF_HUB_CACHE` ⤳ `$HF_HOME/hub` ⤳ `~/.cache/huggingface/hub` | Override the BGE-M3 model cache directory. |
 
 ## Concurrency invariants
 
@@ -353,7 +343,5 @@ contact the upstream GitNexus author Abhigyan Patwari.
 
 *   [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by Abhigyan Patwari — original design, CLI surface, and conceptual model.
 *   [tree-sitter](https://tree-sitter.github.io/) — robust incremental AST parsing.
-*   [fastembed-rs](https://github.com/Anush008/fastembed-rs) — local ONNX inference engine.
 *   [rkyv](https://rkyv.org/) — ultimate zero-copy deserialization.
 *   [Tantivy](https://github.com/quickwit-oss/tantivy) — blazing fast Rust full-text search.
-*   [BGE-M3 INT8](https://huggingface.co/MahradHosseini/bge-m3-onnx-int8) — High-quality community quantized multi-lingual model.

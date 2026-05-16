@@ -151,7 +151,6 @@ fn make_graph() -> ZeroCopyGraph {
         in_offsets,
         in_edge_idx,
         name_index: vec![],
-        embeddings: None,
         process_start: 3,
         traces_offsets: vec![],
         traces_data: vec![],
@@ -193,8 +192,7 @@ fn with_index_emits_legacy_block_via_subprocess() {
                 "index_dir": index_dir.to_string_lossy(),
                 "indexed_at": "2026-05-16T00:00:00Z",
                 "node_count": 3u32,
-                "delta_size": 0u64,
-                "embedding_status": "none"
+                "delta_size": 0u64
             }],
             "groups": []
         }],

@@ -33,7 +33,7 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: group::GroupCommands,
     },
-    /// Build or refresh the graph (explicit / bulk / embeddings)
+    /// Build or refresh the graph (explicit / bulk)
     Index(index::IndexArgs),
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),

@@ -74,7 +74,6 @@ pub struct BranchEntry {
     pub node_count: u32,
     #[serde(default)]
     pub delta_size: u64,
-    pub embedding_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,7 +236,6 @@ impl RegistryFile {
                     indexed_at: meta.indexed_at.clone(),
                     node_count: meta.node_count,
                     delta_size: meta.delta_size,
-                    embedding_status: "unknown".into(),
                 };
                 let entry = by_repo.entry(repo_name.clone()).or_insert_with(|| {
                     (
@@ -381,7 +379,6 @@ mod find_by_cwd_tests {
             indexed_at: indexed_at.into(),
             node_count: 0,
             delta_size: 0,
-            embedding_status: "none".into(),
         }
     }
 

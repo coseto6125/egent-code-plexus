@@ -56,7 +56,6 @@ fn build_graph(names: &[&str]) -> ZeroCopyGraph {
         in_offsets,
         in_edge_idx: vec![],
         name_index: vec![],
-        embeddings: None,
         process_start: n as u32,
         traces_offsets: vec![],
         traces_data: vec![],

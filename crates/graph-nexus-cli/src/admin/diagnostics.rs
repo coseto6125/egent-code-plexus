@@ -253,7 +253,6 @@ mod tests {
                         indexed_at: "2026-05-16T00:00:00Z".into(),
                         node_count: 1,
                         delta_size: 0,
-                        embedding_status: "none".into(),
                     }],
                     groups: vec![],
                 }],

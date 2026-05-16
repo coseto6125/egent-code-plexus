@@ -39,6 +39,22 @@ impl Engine {
     }
 }
 
+/// Cheap predicate for `auto_ensure`: returns `true` iff `graph.bin`
+/// can be memory-mapped and passes magic + version validation. Any
+/// I/O / mmap / rkyv access / magic / version failure returns `false`
+/// so the caller treats a schema break the same as a stale graph and
+/// triggers a clean rebuild — without surfacing `InvalidData` on a
+/// CLI upgrade that bumped `GRAPH_FORMAT_VERSION`.
+pub fn header_compatible(graph_path: &Path) -> bool {
+    let Ok(file) = File::open(graph_path) else {
+        return false;
+    };
+    let Ok(mmap) = (unsafe { Mmap::map(&file) }) else {
+        return false;
+    };
+    validate_header(&mmap).is_ok()
+}
+
 /// Reject `graph.bin` files that don't carry the gnx magic header or
 /// whose on-disk format version this reader doesn't understand. Both
 /// failure modes would otherwise be undetected by `rkyv::access`

@@ -47,41 +47,6 @@ fn determine_category(path: &str) -> FileCategory {
     FileCategory::Source
 }
 
-/// NodeKinds whose identifier names carry too little semantic signal to be
-/// worth the BGE-M3 inference cost. Skipped nodes still occupy a slot in the
-/// `embeddings` vector (zero-vec) so that `embeddings[i] ↔ nodes[i]` alignment
-/// is preserved for downstream query code.
-fn should_embed(kind: NodeKind) -> bool {
-    !matches!(
-        kind,
-        NodeKind::Variable | NodeKind::Const | NodeKind::Import
-    )
-}
-
-/// Build the per-node text fed to the embedding model. Combines structural
-/// signals (kind, name, path, export flag, decorators, type annotation,
-/// heritage) so that semantic search hits patterns like "express route" or
-/// "scheduled job" via the decorator strings.
-fn build_embed_text(raw_node: &RawNode, path_str: &str) -> String {
-    let mut parts = vec![
-        format!("{:?}: {}", raw_node.kind, raw_node.name),
-        format!("Path: {}", path_str),
-    ];
-    if raw_node.is_exported {
-        parts.push("Export: true".to_string());
-    }
-    if !raw_node.decorators.is_empty() {
-        parts.push(raw_node.decorators.join(" "));
-    }
-    if let Some(ty) = &raw_node.type_annotation {
-        parts.push(format!("Type: {}", ty));
-    }
-    if !raw_node.heritage.is_empty() {
-        parts.push(format!("Heritage: {}", raw_node.heritage.join(", ")));
-    }
-    parts.join("\n")
-}
-
 use std::collections::HashMap;
 
 fn capitalize(s: &str) -> String {
@@ -107,9 +72,7 @@ fn sanitize_id(s: &str) -> String {
 
 pub struct GraphBuilder {
     local_graphs: Vec<LocalGraph>,
-    generate_embeddings: bool,
     old_file_hashes: HashMap<String, [u8; 32]>,
-    old_embeddings_cache: HashMap<String, Vec<f32>>,
     /// When `Some`, the resolver pass 2 buffers every decision and writes a
     /// JSONL line per resolution attempt to this path. Used by the oracle
     /// verification harness (see specs/2026-05-15-resolver-oracle-harness.md).
@@ -136,9 +99,7 @@ impl GraphBuilder {
     pub fn new() -> Self {
         Self {
             local_graphs: Vec::new(),
-            generate_embeddings: false,
             old_file_hashes: HashMap::new(),
-            old_embeddings_cache: HashMap::new(),
             resolver_dump_path: None,
             path_aliases: PathAliases::new(),
             repo_root: None,
@@ -158,18 +119,8 @@ impl GraphBuilder {
         self
     }
 
-    pub fn with_embeddings(mut self, generate: bool) -> Self {
-        self.generate_embeddings = generate;
-        self
-    }
-
-    pub fn with_cache(
-        mut self,
-        hashes: HashMap<String, [u8; 32]>,
-        embs: HashMap<String, Vec<f32>>,
-    ) -> Self {
+    pub fn with_cache(mut self, hashes: HashMap<String, [u8; 32]>) -> Self {
         self.old_file_hashes = hashes;
-        self.old_embeddings_cache = embs;
         self
     }
 
@@ -202,9 +153,6 @@ impl GraphBuilder {
 
         // Pass 1: Register all nodes into SymbolTable and StringPool
         let mut current_node_idx = 0;
-        let mut embed_texts = Vec::new();
-
-        let mut final_embeddings: Vec<Option<Vec<f32>>> = Vec::new();
 
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
@@ -212,9 +160,6 @@ impl GraphBuilder {
             // 上與 Linux/macOS 一致（與 resolver.rs / registry/path.rs 既有 idiom 對齊）。
             let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
             let path_ref = string_pool.add(&path_str);
-
-            let file_unchanged =
-                self.old_file_hashes.get(&path_str) == Some(&local_graph.content_hash);
 
             files.push(File {
                 path: path_ref,
@@ -243,26 +188,6 @@ impl GraphBuilder {
                     span: raw_node.span,
                     community_id: 0,
                 });
-
-                if self.generate_embeddings {
-                    let mut reused = false;
-                    if file_unchanged {
-                        if let Some(old_emb) = self.old_embeddings_cache.get(&uid_str) {
-                            final_embeddings.push(Some(old_emb.clone()));
-                            reused = true;
-                        }
-                    }
-
-                    if !reused {
-                        final_embeddings.push(None); // Will be filled later
-                        let text = if should_embed(raw_node.kind) {
-                            build_embed_text(raw_node, &path_str)
-                        } else {
-                            String::new()
-                        };
-                        embed_texts.push((current_node_idx, text));
-                    }
-                }
 
                 current_node_idx += 1;
             }
@@ -300,25 +225,6 @@ impl GraphBuilder {
                             community_id: 0,
                         });
 
-                        if self.generate_embeddings {
-                            let mut reused = false;
-                            let file_unchanged = self.old_file_hashes.get(&path_str)
-                                == Some(&local_graph.content_hash);
-                            if file_unchanged {
-                                if let Some(old_emb) = self.old_embeddings_cache.get(&uid_str) {
-                                    final_embeddings.push(Some(old_emb.clone()));
-                                    reused = true;
-                                }
-                            }
-                            if !reused {
-                                final_embeddings.push(None);
-                                embed_texts.push((
-                                    route_idx,
-                                    format!("Route: {}\nPath: {}", route_name, path_str),
-                                ));
-                            }
-                        }
-
                         route_edges.push(Edge {
                             source: handler_idx,
                             target: route_idx,
@@ -347,25 +253,6 @@ impl GraphBuilder {
                         span: raw_route.span,
                         community_id: 0,
                     });
-
-                    if self.generate_embeddings {
-                        let mut reused = false;
-                        let file_unchanged =
-                            self.old_file_hashes.get(&path_str) == Some(&local_graph.content_hash);
-                        if file_unchanged {
-                            if let Some(old_emb) = self.old_embeddings_cache.get(&uid_str) {
-                                final_embeddings.push(Some(old_emb.clone()));
-                                reused = true;
-                            }
-                        }
-                        if !reused {
-                            final_embeddings.push(None);
-                            embed_texts.push((
-                                route_idx,
-                                format!("Route: {}\nPath: {}", route_name, path_str),
-                            ));
-                        }
-                    }
 
                     // Resolve the imperative-route handler, if the parser captured
                     // a named handler (e.g. `app.get("/x", loginHandler)`). The
@@ -604,15 +491,6 @@ impl GraphBuilder {
                     span: (0, 0, 0, 0),
                     community_id: 0,
                 });
-
-                if self.generate_embeddings {
-                    // EntryPoint markers are synthetic; skip embedding
-                    // and preserve the embeddings[i] ↔ nodes[i] alignment
-                    // by pushing a sentinel zero-vec slot. `should_embed`
-                    // already handles structurally-noisy kinds the same
-                    // way (Variable/Const/Import).
-                    final_embeddings.push(Some(vec![0.0; 1024]));
-                }
 
                 // Encode score in the edge reason: "{tag}:{score}:{reason}".
                 // Downstream parsing is trivial (split on first ':') and
@@ -974,55 +852,6 @@ impl GraphBuilder {
             in_offsets[i + 1] += in_offsets[i];
         }
 
-        let embeddings = if self.generate_embeddings {
-            if !embed_texts.is_empty() {
-                tracing::info!(
-                    "Generating embeddings for {} nodes ({} reused)...",
-                    embed_texts.len(),
-                    final_embeddings.len() - embed_texts.len()
-                );
-                match crate::embeddings::Embedder::new() {
-                    Ok(embedder) => {
-                        let texts: Vec<String> = embed_texts.into_iter().map(|(_, t)| t).collect();
-                        if let Ok(new_embs) = embedder.embed(texts) {
-                            // Find all None in final_embeddings and fill them
-                            let mut new_embs_iter = new_embs.into_iter();
-                            for emb in final_embeddings.iter_mut() {
-                                if emb.is_none() {
-                                    if let Some(new_emb) = new_embs_iter.next() {
-                                        *emb = Some(new_emb);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => tracing::warn!("Failed to initialize embedder: {}", e),
-                }
-            } else {
-                tracing::info!(
-                    "Reused all {} embeddings from cache.",
-                    final_embeddings.len()
-                );
-            }
-
-            let mut final_embs_unwrapped = Vec::with_capacity(final_embeddings.len());
-            let mut all_some = true;
-            for emb in final_embeddings {
-                if let Some(e) = emb {
-                    final_embs_unwrapped.push(e);
-                } else {
-                    final_embs_unwrapped.push(vec![0.0; 1024]);
-                    all_some = false;
-                }
-            }
-            if !all_some {
-                tracing::warn!("Some embeddings failed to generate, filled with zeros.");
-            }
-            Some(final_embs_unwrapped)
-        } else {
-            None
-        };
-
         ZeroCopyGraph {
             magic: graph_nexus_core::graph::GRAPH_MAGIC,
             version: graph_nexus_core::graph::GRAPH_FORMAT_VERSION,
@@ -1034,7 +863,6 @@ impl GraphBuilder {
             in_offsets,
             in_edge_idx,
             name_index: Vec::new(), // To be implemented if name indexing is needed
-            embeddings,
             process_start: process_start_idx,
             traces_offsets,
             traces_data,

@@ -112,7 +112,6 @@ fn make_config_graph() -> ZeroCopyGraph {
         in_offsets,
         in_edge_idx,
         name_index: vec![],
-        embeddings: None,
         process_start: 6,
         traces_offsets: vec![],
         traces_data: vec![],

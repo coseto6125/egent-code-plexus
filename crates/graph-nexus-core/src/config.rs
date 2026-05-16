@@ -12,46 +12,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
     #[serde(default)]
-    pub embedding: EmbeddingConfig,
-    #[serde(default)]
     pub output: OutputConfig,
     #[serde(default)]
     pub confidence: ConfidenceConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EmbeddingConfig {
-    /// **stored** — model identifier. Currently `embeddings.rs` is hard-wired
-    /// to `bge-m3` (vendored ONNX from HuggingFace); the configured value
-    /// is preserved but ignored by `gnx analyze`. Wiring lands when the
-    /// embedding backend gains an HTTP API mode.
-    #[serde(default = "default_embedding_model")]
-    pub model: String,
-
-    /// **stored** — endpoint URL for an OpenAI-compatible embedding API
-    /// (Ollama / vLLM / TEI / OpenAI). Same wiring caveat as `model`.
-    #[serde(default = "default_embedding_endpoint")]
-    pub endpoint: String,
-
-    /// **stored** — API key. Same wiring caveat. Empty string means none.
-    #[serde(default)]
-    pub api_key: String,
-
-    /// **stored** — request concurrency (parallel batches against the
-    /// remote embedder).
-    #[serde(default = "default_embedding_batch_size")]
-    pub batch_size: u32,
-}
-
-impl Default for EmbeddingConfig {
-    fn default() -> Self {
-        Self {
-            model: default_embedding_model(),
-            endpoint: default_embedding_endpoint(),
-            api_key: String::new(),
-            batch_size: default_embedding_batch_size(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -89,15 +52,6 @@ impl Default for ConfidenceConfig {
     }
 }
 
-fn default_embedding_model() -> String {
-    "bge-m3".to_string()
-}
-fn default_embedding_endpoint() -> String {
-    "http://localhost:11434/v1".to_string()
-}
-fn default_embedding_batch_size() -> u32 {
-    32
-}
 fn default_output_format() -> String {
     "toon".to_string()
 }
@@ -158,7 +112,7 @@ mod tests {
     fn save_then_load_round_trip() {
         let dir = tempdir().unwrap();
         let mut cfg = Config::default();
-        cfg.embedding.endpoint = "http://example.test/v1".into();
+        cfg.output.default_format = "json".into();
         cfg.confidence.high_trust_threshold = 0.7;
         save(dir.path(), &cfg).unwrap();
         let back = load(dir.path()).unwrap();
@@ -173,7 +127,6 @@ mod tests {
         std::fs::write(&cfg_path, "[output]\ndefault_format = \"json\"\n").unwrap();
         let cfg = load(dir.path()).unwrap();
         assert_eq!(cfg.output.default_format, "json");
-        assert_eq!(cfg.embedding, EmbeddingConfig::default());
         assert_eq!(cfg.confidence, ConfidenceConfig::default());
     }
 }

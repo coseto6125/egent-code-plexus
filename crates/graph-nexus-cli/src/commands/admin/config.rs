@@ -3,7 +3,7 @@
 //! Layout (top → bottom):
 //!   1. ANSI-Shadow title `GNX FOR LLM` (static, GNX cyan → gold gradient)
 //!   2. Animated 4-frame walking beaver, bouncing left↔right
-//!   3. Form: Embedding / Output / Confidence groups, edit-in-place
+//!   3. Form: Output / Confidence groups, edit-in-place
 //!   4. Footer: keybinding hints
 //!
 //! Non-TTY environments (CI, pipes) exit with a helpful message pointing
@@ -89,22 +89,11 @@ fn leave_tui(terminal: &mut Tui) -> io::Result<()> {
 
 #[derive(Clone, Copy, PartialEq)]
 enum FieldId {
-    EmbeddingModel,
-    EmbeddingEndpoint,
-    EmbeddingApiKey,
-    EmbeddingBatchSize,
     OutputFormat,
     ConfidenceHighTrust,
 }
 
-const FIELDS: [FieldId; 6] = [
-    FieldId::EmbeddingModel,
-    FieldId::EmbeddingEndpoint,
-    FieldId::EmbeddingApiKey,
-    FieldId::EmbeddingBatchSize,
-    FieldId::OutputFormat,
-    FieldId::ConfidenceHighTrust,
-];
+const FIELDS: [FieldId; 2] = [FieldId::OutputFormat, FieldId::ConfidenceHighTrust];
 
 struct App {
     cfg: Config,
@@ -142,16 +131,6 @@ impl App {
 
     fn field_value(&self, f: FieldId) -> String {
         match f {
-            FieldId::EmbeddingModel => self.cfg.embedding.model.clone(),
-            FieldId::EmbeddingEndpoint => self.cfg.embedding.endpoint.clone(),
-            FieldId::EmbeddingApiKey => {
-                if self.cfg.embedding.api_key.is_empty() {
-                    "(empty)".into()
-                } else {
-                    "*".repeat(self.cfg.embedding.api_key.len().min(8))
-                }
-            }
-            FieldId::EmbeddingBatchSize => self.cfg.embedding.batch_size.to_string(),
             FieldId::OutputFormat => self.cfg.output.default_format.clone(),
             FieldId::ConfidenceHighTrust => {
                 format!("{:.2}", self.cfg.confidence.high_trust_threshold)
@@ -161,12 +140,8 @@ impl App {
 
     fn enter_edit(&mut self) {
         self.editing = true;
-        // Pre-populate buffer with current raw value (not masked).
+        // Pre-populate buffer with current raw value.
         self.edit_buf = match self.current_field() {
-            FieldId::EmbeddingModel => self.cfg.embedding.model.clone(),
-            FieldId::EmbeddingEndpoint => self.cfg.embedding.endpoint.clone(),
-            FieldId::EmbeddingApiKey => self.cfg.embedding.api_key.clone(),
-            FieldId::EmbeddingBatchSize => self.cfg.embedding.batch_size.to_string(),
             FieldId::OutputFormat => self.cfg.output.default_format.clone(),
             FieldId::ConfidenceHighTrust => {
                 format!("{:.2}", self.cfg.confidence.high_trust_threshold)
@@ -177,14 +152,6 @@ impl App {
     fn commit_edit(&mut self) {
         let v = self.edit_buf.trim().to_string();
         match self.current_field() {
-            FieldId::EmbeddingModel => self.cfg.embedding.model = v,
-            FieldId::EmbeddingEndpoint => self.cfg.embedding.endpoint = v,
-            FieldId::EmbeddingApiKey => self.cfg.embedding.api_key = v,
-            FieldId::EmbeddingBatchSize => {
-                if let Ok(n) = v.parse::<u32>() {
-                    self.cfg.embedding.batch_size = n;
-                }
-            }
             FieldId::OutputFormat => self.cfg.output.default_format = v,
             FieldId::ConfidenceHighTrust => {
                 if let Ok(f) = v.parse::<f32>() {
@@ -433,12 +400,6 @@ fn render_form(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(block, area);
 
     let lines: Vec<Line> = vec![
-        group_header("Embedding"),
-        field_line(app, FieldId::EmbeddingModel, "Model"),
-        field_line(app, FieldId::EmbeddingEndpoint, "Endpoint"),
-        field_line(app, FieldId::EmbeddingApiKey, "API key"),
-        field_line(app, FieldId::EmbeddingBatchSize, "Batch size"),
-        Line::from(""),
         group_header("Output"),
         field_line(app, FieldId::OutputFormat, "Default format"),
         Line::from(""),

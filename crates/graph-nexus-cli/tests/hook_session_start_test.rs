@@ -80,8 +80,7 @@ fn template_placeholders_get_rendered_when_meta_present() {
                 "index_dir": index_dir.to_string_lossy(),
                 "indexed_at": "2026-05-16T00:00:00Z",
                 "node_count": 1234u32,
-                "delta_size": 0u64,
-                "embedding_status": "none"
+                "delta_size": 0u64
             }],
             "groups": []
         }],
