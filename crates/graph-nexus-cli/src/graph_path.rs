@@ -31,7 +31,7 @@ fn resolve_v2(cwd: &Path) -> Option<PathBuf> {
     Some(commits.join(dir).join("graph.bin"))
 }
 
-fn head_sha_bytes(cwd: &Path) -> Option<[u8; 20]> {
+pub(crate) fn head_sha_bytes(cwd: &Path) -> Option<[u8; 20]> {
     let out = safe_exec::git()
         .args(["rev-parse", "HEAD"])
         .current_dir(cwd)

@@ -968,20 +968,8 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
         if idx.is_empty() {
             continue; // repo registered but not yet built
         }
-        // Pick the commit dir with the most recent graph.bin mtime.
-        let Some(graph_path) = std::fs::read_dir(&commits_dir)
-            .ok()
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| {
-                let g = e.path().join("graph.bin");
-                let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
-                Some((mtime, g))
-            })
-            .max_by_key(|(mtime, _)| *mtime)
-            .map(|(_, p)| p)
+        let Some(graph_path) = crate::commit_lookup::find_latest_by_mtime(&commits_dir)
+            .map(|d| d.join("graph.bin"))
         else {
             continue;
         };
