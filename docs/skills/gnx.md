@@ -19,7 +19,7 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | AST-aware multi-file rename | `gnx rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `gnx routes <path?> --repo .` (no path = list all) |
 | Cross-repo API contracts (routes / queue / RPC) | `gnx contracts --repo @all` (needs ≥2 repos in group) |
-| Verify references in a changed file resolve in the graph | `gnx scan <file> --repo .` |
+| Verify references in a changed file resolve in the graph | `gnx scan <file> --repo . --filter-stdlib` (drops language-builtin / stdlib noise — typically −20% to −54%) |
 | HTTP consumer → Route shape drift detection | `gnx shape_check --route <path>? --repo .` (no `--route` = scan all routes; drift = consumer reads key not in Route's response/error keys) |
 | Binding tier / route / contract delta — edge view | `gnx diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required; accepts branch / tag / SHA / `HEAD~N` / `PR/<n>`. Multi-select via `,`. Formats: text / json / toon. Use `--verbose` for full lists.) |
 | Registry health / freshness / frameworks / blind spots | `gnx coverage` (registry-wide) or `gnx coverage --repo @all --detailed` |
@@ -85,7 +85,7 @@ Supports the openCypher read subset commonly used for graph queries: boolean WHE
 2. **`cypher --repo @group` errors** — single-repo only.
 3. **Default `--graph .gitnexus-rs/graph.bin`** is a cwd-relative legacy path. If you don't have a checked-in graph file, pass `--repo` (preferred) or absolute `--graph`.
 4. **Auto-ensure on every agent command** — first query after a source change pays a brief re-index cost. The stderr `✓ Index refreshed` line is informational, not an error.
-5. **`scan --strict`** flags identifiers that match language keywords / builtins. Off by default; turn on for high-noise files.
+5. **`scan` flags push in opposite directions.** `--strict` ADDS noise (also flags language keywords / builtins; off by default). `--filter-stdlib` REMOVES noise (drops stdlib / builtin / common-type names per language; off by default — but agents should default to passing it). The trimmed payload gains a `filtered_count` field so the caller can see how much was suppressed.
 6. **`rename --markdown`** is OFF by default — code-only rename. Add the flag to sweep `.md / .rst / .txt`.
 
 ## PR-touching workflow
@@ -98,7 +98,7 @@ gnx impact Foo --direction upstream --repo .
 gnx impact --baseline origin/main --repo .
 
 # After edits: verify changed files' references still resolve
-gnx scan crates/.../changed_file.rs --repo .
+gnx scan crates/.../changed_file.rs --repo . --filter-stdlib
 
 # Touched HTTP routing / handlers?
 gnx routes /api/foo --repo .
