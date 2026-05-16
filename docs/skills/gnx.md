@@ -77,6 +77,8 @@ MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='Val'] RETURN a,b
 - `m.content` returns the symbol body (the only non-name field exposed).
 - For richer queries: `gnx search` (BM25 / embedding), `gnx inspect` (full edge view), or post-process JSON output downstream.
 
+**`HasMethod` target kind is parser-determined**: Python `def` and Rust associated fn surface as `Function`, true methods surface as `Method`. Cypher convention is `MATCH (c:Class)-[:HasMethod]->(m) RETURN m` — **don't add `:Method` filter** or you'll miss those languages. `gnx inspect <Class>.contained_methods` keeps each entry's `kind` field if callers need to distinguish.
+
 ## Common pitfalls
 
 1. **`--repo` is required for cross-repo modes**. `@group / @all / csv` only work when explicit.
