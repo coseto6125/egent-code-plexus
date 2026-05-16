@@ -326,3 +326,31 @@ Estimated total: ~280 LOC added (+ ~220 prod, ~60 tests), 0 LOC removed except t
 8. Add ignored end-to-end test.
 9. `cargo fmt` + `cargo clippy` + `cargo test`.
 10. Manual smoke: `gnx admin index --embeddings` on a small repo, then `gnx search "<phrase>" --mode vector` / `--mode hybrid`.
+
+## Scope Extension — Phase 1 & 2 (added mid-PR)
+
+Two follow-ups originally planned for separate PRs were folded into this branch after concurrent-execution analysis (see PR conversation) confirmed they address the highest-impact UX gaps. Both fit the same architecture and share tests with the core wire-up.
+
+### Phase 1 — Preserve embeddings across auto-reindex
+
+**Problem.** Every `git commit` triggered `post_tool_use` to spawn `gnx admin index --repo .` without `--embeddings`, silently demoting a vector-capable graph to BM25-only on the next query. `auto_ensure::ensure_fresh` had the same bug for synchronous rebuilds.
+
+**Fix.** New `pub fn auto_ensure::embeddings_present(graph_path: &Path) -> bool` inspects the previous graph. Both reindex spawn sites (`auto_ensure::ensure_fresh` and `post_tool_use::spawn_background_reindex`) call it and conditionally append `--embeddings` to the rebuild args. Any failure (missing / corrupt graph) collapses to `false` so the hook contract is preserved.
+
+**Tests.** `crates/graph-nexus-cli/tests/auto_ensure_embeddings.rs` covers the three branches (with embeddings / without / missing file).
+
+### Phase 2 — `gnx search --batch` (stdin amortisation)
+
+**Problem.** Every `gnx search --mode vector` is a fresh process paying ~1.1 s of BGE-M3 cold start (~1.7 GB RSS for the ONNX session). Scripted batch workloads multiply this linearly.
+
+**Fix.** New `--batch` flag on `SearchArgs` reads patterns from stdin (one per line, `#` / blank lines skipped). All queries share the OnceLock-cached Embedder so cold start is paid once. Each query block is preceded by `=== pattern: <pattern> ===` on stdout so downstream scripts can split per-query regardless of `--format`.
+
+**Internal API change.** `SearchArgs::pattern` is now `Option<String>` with `#[arg(required_unless_present = "batch")]`. Internal callers (`pre_tool_use::handle`, integration tests) updated to pass `Some(...)`. `compute_hits()` rejects `pattern == None` with `GnxError::InvalidArgument` — batch is CLI-only, hooks always run one pattern at a time.
+
+**Measured speedup.** 3 vector queries on the worktree's own graph:
+- Sequential (3× fresh CLI): 3315 ms
+- `--batch` (single process): 1167 ms — **2.8× speedup, 65 % wall-time saved**
+
+The win scales linearly with N: at N=10 expect ~7× speedup.
+
+**Tests.** `crates/graph-nexus-cli/tests/search_batch.rs` covers divider emission, blank/comment line skipping, and the empty-stdin contract (one-line stderr hint, no spurious dividers).

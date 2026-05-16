@@ -891,3 +891,24 @@ Cross-checking against `docs/specs/2026-05-16-vector-hybrid-search-design.md`:
 - ✅ Sequencing matches the spec's ordering.
 
 No placeholder text remains. Types are consistent: `Hit`, `SearchArgs`, `SearchMode`, `ZeroCopyGraph`, `Engine`, `Embedder`, `OnceLock` used identically across tasks.
+
+## Tasks 11–12 (added mid-PR for scope extension)
+
+### Task 11: Preserve embeddings across auto-reindex
+
+**Files:**
+- Modify: `crates/graph-nexus-cli/src/auto_ensure.rs` — add `pub fn embeddings_present(graph_path: &Path) -> bool`; wire it into `ensure_fresh` so the synchronous rebuild keeps the previous state
+- Modify: `crates/graph-nexus-cli/src/commands/hook/post_tool_use.rs` — pass `graph_path` to `spawn_background_reindex`; conditionally append `"--embeddings"` to the spawned-process args
+- Create: `crates/graph-nexus-cli/tests/auto_ensure_embeddings.rs` — 3 unit tests (with embeddings, without, missing file)
+
+Executed in commit `9d2203f`.
+
+### Task 12: `gnx search --batch`
+
+**Files:**
+- Modify: `crates/graph-nexus-cli/src/commands/search.rs` — `SearchArgs::pattern: Option<String>` with `required_unless_present = "batch"`, new `batch: bool` flag, new `run_batch` dispatch; `compute_hits` rejects None pattern with `GnxError::InvalidArgument`
+- Modify: `crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs` — pass `pattern: Some(pattern), batch: false`
+- Modify: `crates/graph-nexus-cli/tests/compute_hits_tantivy.rs` + `crates/graph-nexus-cli/tests/search_vector_fallback.rs` — same `Some(...)` / `batch: false` updates for fixtures
+- Create: `crates/graph-nexus-cli/tests/search_batch.rs` — 3 integration tests covering divider emission, blank/comment skip, empty-stdin contract
+
+Executed in commit `de599de`.
