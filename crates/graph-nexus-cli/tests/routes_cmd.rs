@@ -4,6 +4,9 @@
 //! two routes (`GET /api/users`, `POST /api/users`) each with a named
 //! handler and an upstream caller function.
 
+mod common;
+
+use common::run_git;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -44,19 +47,6 @@ export function caller_creating() {
 app.get("/api/users", list_users);
 app.post("/api/users", create_user);
 "#;
-
-fn run_git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git spawn failed");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 fn setup_repo(repo: &Path, home: &Path) {
     std::fs::create_dir_all(repo.join("src")).unwrap();
