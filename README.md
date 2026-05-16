@@ -309,6 +309,38 @@ The analyzer streams parsed nodes through an MPSC channel into a single builder 
 | `GNX_CSPROJ_MAX_DEPTH` | `4` | Directory recursion depth for `*.csproj` discovery. Raise for deeply-nested .NET monorepos. |
 | `GNX_MODEL_CACHE` | `$HF_HUB_CACHE` ⤳ `$HF_HOME/hub` ⤳ `~/.cache/huggingface/hub` | Override the BGE-M3 model cache directory. |
 
+## Concurrency invariants
+
+The audit at `docs/superpowers/specs/2026-05-16-concurrency-audit-design.md`
+froze the following invariants. Any change to the parallel emit surface
+(rayon pass2, Registry concurrent writes, StringPool intern, hook flock)
+MUST keep these tests passing before merge.
+
+1. **pass2 emit determinism** — `pass2_parallel_serial_identical_per_reltype`
+   (`crates/graph-nexus-analyzer/src/resolution/builder.rs`) asserts identical
+   `(source, target, RelType, reason)` set across serial dump path and
+   parallel production path. Per-RelType stratification means a regression
+   points at the rel-type that diverged.
+2. **GraphBuilder order independence** — `graph_builder_order_independence_under_default_threads`
+   (`crates/graph-nexus-analyzer/tests/concurrency_graph_builder_order.rs`)
+   asserts canonical projection (sorted Nodes/Edges/Files → BLAKE3) is
+   identical across ingest permutations and across repeated builds.
+3. **Registry inter-process flock** — `registry_concurrent_writers_converge`
+   (`crates/graph-nexus-core/tests/concurrency_registry_writers.rs`)
+   asserts N concurrent child-process upserts all converge into the final
+   registry. Models real Claude Code hook contention.
+4. **StringPool intern dedup** — `string_pool_mutex_wrapped_concurrent_dedupe`
+   (`crates/graph-nexus-core/tests/concurrency_string_pool_intern.rs`)
+   asserts that when `StringPool` is shared across threads it MUST be
+   `Mutex`/`RwLock` wrapped (the type system enforces this; the test pins
+   that the wrap preserves dedup).
+5. **Hook flock serialisation** — `hook_concurrent_spawn_flock_serializes`
+   (`crates/graph-nexus-cli/tests/concurrency_hook_flock.rs`) asserts two
+   concurrent hook spawns produce exactly one reindex side-effect; the
+   second no-ops cleanly with exit 0.
+
+Run `./scripts/audit-concurrency.sh` to re-verify all five.
+
 ## 📄 License
 
 Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). Personal use, research,
