@@ -54,18 +54,28 @@ impl RegistryFile {
             return Ok(RegistryFile::empty());
         }
         let bytes = fs::read(path)?;
-        // Probe the version field before a full parse so old schemas get a
-        // clear rejection message rather than a confusing type-mismatch error.
+        // Probe the version field before a full parse: stale schemas auto-migrate
+        // via `rebuild_from_disk` (spec §12 recovery) instead of hard-failing.
+        // Trade-off: group memberships are registry-only and get wiped — operator
+        // must re-apply via `gnx admin group add`. This is preferred over forcing
+        // every CLI invocation to error until manual intervention.
         #[derive(Deserialize)]
         struct VersionProbe {
             version: u32,
         }
         if let Ok(probe) = serde_json::from_slice::<VersionProbe>(&bytes) {
             if probe.version != CURRENT_VERSION {
-                return Err(io::Error::other(format!(
-                    "registry schema v{} (expected v{CURRENT_VERSION}); run `gnx admin reset` to wipe and rebuild",
-                    probe.version
-                )));
+                let home_gnx = path
+                    .parent()
+                    .ok_or_else(|| io::Error::other("registry path has no parent directory"))?;
+                let rebuilt = RegistryFile::rebuild_from_disk(home_gnx)?;
+                atomic_write_json(path, &rebuilt)?;
+                eprintln!(
+                    "registry.migrated from=v{} to=v{CURRENT_VERSION} repos={} groups_lost=true",
+                    probe.version,
+                    rebuilt.repos.len()
+                );
+                return Ok(rebuilt);
             }
         }
         serde_json::from_slice(&bytes).map_err(io::Error::other)
