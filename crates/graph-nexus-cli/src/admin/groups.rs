@@ -1,16 +1,19 @@
 //! Group management workflows for `gnx admin`.
 
-use crate::admin::menu::select;
+use crate::admin::menu::{self, select};
 use crate::commands::admin::group;
 use dialoguer::{theme::ColorfulTheme, Input};
 use graph_nexus_core::registry::{resolve_home_gnx, Registry};
 use graph_nexus_core::GnxError;
 
-const MENU: &[&str] = &[
-    "Create / add repo",
-    "Remove repo",
-    "Sync contracts",
-    "← Back",
+const MENU: &[menu::Item<'_>] = &[
+    (
+        "Create / add repo",
+        "attach a repo to a group (creates group if new)",
+    ),
+    ("Remove repo", "detach a repo from a group"),
+    ("Sync contracts", "list groups for cross-repo contract sync"),
+    ("← Back", ""),
 ];
 
 pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
@@ -75,13 +78,14 @@ mod tests {
 
     #[test]
     fn groups_menu_matches_target_order() {
+        let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
         assert_eq!(
-            MENU,
-            &[
+            labels,
+            vec![
                 "Create / add repo",
                 "Remove repo",
                 "Sync contracts",
-                "← Back"
+                "← Back",
             ]
         );
     }
