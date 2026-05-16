@@ -2,6 +2,7 @@
 //! See spec §1-§2, §9.
 
 mod audit;
+pub mod commit_meta;
 pub mod dirname;
 mod io;
 mod lock;
@@ -10,6 +11,7 @@ mod path;
 mod store;
 
 pub use audit::{AuditEvent, AuditLog};
+pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord};
 pub use dirname::{CommitDirName, ParseError as DirNameParseError, SourceType};
 pub use io::atomic_write_bytes;
 /// Internal implementation detail. Not part of public API.
