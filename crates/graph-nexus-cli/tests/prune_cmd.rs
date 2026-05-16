@@ -55,8 +55,10 @@ fn prune_removes_index_dir_and_registry_branch() {
         .args([
             "admin",
             "prune",
-            "--branch=feat-x",
-            &format!("--repo={}", repo_tmp.path().display()),
+            "--branch",
+            "feat-x",
+            "--repo",
+            &repo_tmp.path().display().to_string(),
         ])
         .env("HOME", home_tmp.path())
         .output()

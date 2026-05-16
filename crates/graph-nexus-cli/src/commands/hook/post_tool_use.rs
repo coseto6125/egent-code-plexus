@@ -73,6 +73,16 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
             "gnx reindex started in background (index stale ~{age}s). Subsequent gnx tools may use stale data until completion (~30-120s). If it appears stuck, run `gnx admin index` manually."
         ),
     );
+
+    // Periodic orphan sweep — at most once per hour.
+    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    if should_run_orphan_prune(&home_gnx) && spawn_background_prune(&home_gnx) {
+        emit_additional_context(
+            "PostToolUse",
+            "gnx orphan-registry sweep started in background. Stale ~/.gnx/<repo>/<branch>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.",
+        );
+    }
+
     Ok(())
 }
 
@@ -103,4 +113,45 @@ fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
             failed: &failed,
         }),
     })
+}
+
+/// Detached background `gnx admin prune --orphans` under flock at
+/// `<home_gnx>/.prune.lock`. Writes `.prune-complete` on success or
+/// `.prune-failed` on failure. Returns true iff the launcher spawned.
+fn spawn_background_prune(home_gnx: &Path) -> bool {
+    let lock = home_gnx.join(".prune.lock");
+    let complete = home_gnx.join(".prune-complete");
+    let failed = home_gnx.join(".prune-failed");
+    let log = home_gnx.join("last-prune.log");
+
+    spawn_bg(BgJob {
+        args: &["admin", "prune", "--orphans"],
+        lock: &lock,
+        cwd: home_gnx,
+        retry: (1, 0),
+        markers: Some(BgMarkers {
+            log: &log,
+            complete: &complete,
+            failed: &failed,
+        }),
+    })
+}
+
+/// Check if orphan prune should run (at most once per hour).
+/// Updates the throttle marker before returning true.
+fn should_run_orphan_prune(home_gnx: &Path) -> bool {
+    let marker = home_gnx.join(".last-prune");
+    let now = std::time::SystemTime::now();
+    let due = match std::fs::metadata(&marker).and_then(|m| m.modified()) {
+        Ok(mtime) => now
+            .duration_since(mtime)
+            .map(|d| d.as_secs() >= 3600)
+            .unwrap_or(true),
+        Err(_) => true, // no marker = first run, fire
+    };
+    if due {
+        // Touch the marker BEFORE the spawn so concurrent invocations no-op.
+        let _ = std::fs::write(&marker, b"");
+    }
+    due
 }
