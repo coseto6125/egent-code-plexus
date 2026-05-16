@@ -138,6 +138,17 @@
 
 **Result summary:** Both sub-tests pass across all thread counts. Fixed via single `self.local_graphs.sort_by(|a, b| a.file_path.cmp(&b.file_path))` inserted as the first operation of `build()` (inv-003). The sort makes node index assignment canonical regardless of producer enumeration order, guaranteeing byte-identical `graph.bin` across machines. See `inv-003` in §7.
 
+### 4.3 Registry concurrent process writers
+
+| Sub-test | default | --test-threads=1 | --test-threads=N |
+|----------|---------|------------------|-------------------|
+| `registry_concurrent_writers_converge` | PASS | PASS | PASS |
+| `registry_concurrent_same_repo_last_writer_wins_safely` | PASS | PASS | PASS |
+
+**Invariant pinned:** `Registry::upsert_repo`'s `FileLock::acquire_exclusive` serialises read-modify-write across N child processes. Distinct-name writers all survive; same-key contention produces exactly one entry (last-writer-wins is acceptable, lost-write is not).
+
+**Audit cross-check:** flock is RAII-released on drop (`crates/graph-nexus-core/src/registry/lock.rs`). `Registry::upsert_repo` re-reads under the lock to pick up concurrent changes.
+
 ### 4.4 StringPool concurrent intern
 
 | Sub-test | default | --test-threads=1 | --test-threads=N |
