@@ -36,7 +36,7 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Atomic JSON write: serialize → [`atomic_write_bytes`]. Caller is
 /// responsible for any backup/.bak orchestration outside this call.
-pub(crate) fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     atomic_write_bytes(path, &bytes)
 }
