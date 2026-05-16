@@ -23,12 +23,12 @@ fn canonical_hash(g: &ZeroCopyGraph) -> [u8; 32] {
     use blake3::Hasher;
     let mut h = Hasher::new();
 
-    // Nodes: sort by (uid_resolved, name, kind, span, file_idx)
+    // Nodes: sort by (uid_resolved, name, kind, span, file_idx, community_id)
     let mut nodes: Vec<_> = g.nodes.iter().collect();
     nodes.sort_by_cached_key(|n| {
         let uid = resolve(&g.string_pool, &n.uid);
         let name = resolve(&g.string_pool, &n.name);
-        (uid, name, format!("{:?}", n.kind), n.span, n.file_idx)
+        (uid, name, format!("{:?}", n.kind), n.span, n.file_idx, n.community_id)
     });
     for n in &nodes {
         h.update(resolve(&g.string_pool, &n.uid).as_bytes());
@@ -40,6 +40,9 @@ fn canonical_hash(g: &ZeroCopyGraph) -> [u8; 32] {
         h.update(&b.to_le_bytes());
         h.update(&c.to_le_bytes());
         h.update(&d.to_le_bytes());
+        // community_id is Pass-3 Leiden output; include so a future change
+        // to the clustering algorithm cannot silently regress the projection.
+        h.update(&n.community_id.to_le_bytes());
     }
 
     // Edges: sort by (rel_type, source, target, resolved_reason)
@@ -118,8 +121,8 @@ fn make_fixture_files() -> Vec<LocalGraph> {
         .collect()
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+fn hex(b: &[u8; 32]) -> String {
+    blake3::Hash::from(*b).to_hex().to_string()
 }
 
 #[test]
@@ -145,8 +148,7 @@ fn graph_builder_order_independence_under_default_threads() {
     assert_eq!(
         h1, h2,
         "canonical projection differs across ingest order: {} vs {}",
-        hex(&h1),
-        hex(&h2)
+        hex(&h1), hex(&h2)
     );
 }
 

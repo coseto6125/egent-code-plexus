@@ -189,7 +189,11 @@ impl GraphBuilder {
         // indexed on two machines with different filesystem walk orders would
         // produce different graph.bin payloads — breaks the reproducibility
         // contract pinned by audit §4.2 (inv-003).
-        self.local_graphs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+        // `file_path` is unique across LocalGraph entries (one ingest per file),
+        // so unstable sort has no observable tie-breaking concern and avoids
+        // the temporary allocation that stable sort needs.
+        self.local_graphs
+            .sort_unstable_by(|a, b| a.file_path.cmp(&b.file_path));
 
         let mut symbol_table = SymbolTable::new();
         let mut string_pool = StringPool::new();
