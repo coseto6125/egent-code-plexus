@@ -1,17 +1,19 @@
 //! Auto-ensure index for agent CLI commands.
 //!
 //! `ensure_index` reports state (Ready / Stale / Missing). `ensure_fresh`
-//! is the actionable wrapper: if state is Stale or Missing it invokes
-//! `admin index` synchronously, prints a one-line stderr notice once the
-//! rebuild succeeds, then returns. Agent commands call `ensure_fresh`
-//! before loading the graph so the user never sees a "stale" warning or
-//! a "graph.bin not found" failure for a tracked worktree.
+//! is the actionable wrapper:
+//!
+//! - Missing → full L2 build via `build_l2` (sync, cold path).
+//! - Stale → per-file L1 overlay update; only dirty files are re-parsed
+//!   and written as fragments under `<repo>/sessions/<sid>/`.
+//! - Ready → noop.
 
+use graph_nexus_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::fs;
 use std::io;
-use std::path::Path;
-use std::time::{Instant, SystemTime};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureResult {
@@ -60,40 +62,116 @@ pub fn embeddings_present(graph_path: &Path) -> bool {
     graph.embeddings.is_some()
 }
 
-/// Ensure the graph exists and is fresher than the working tree. On Missing
-/// or Stale, invokes `admin index` synchronously for `worktree_root`, prints
-/// a one-line "Index refreshed" notice to stderr, and returns. Ready returns
-/// immediately with no output. Errors from the rebuild surface verbatim.
+/// Ensure the graph exists and is fresher than the working tree.
+///
+/// - Missing → `build_l2` (sync, L2 cold path).
+/// - Stale → per-file L1 overlay refresh under `<repo>/sessions/<sid>/`.
+/// - Ready → noop.
 pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), String> {
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
-    let reason = match state {
-        EnsureResult::Ready => return Ok(()),
-        EnsureResult::Missing => "missing",
-        EnsureResult::Stale { .. } => "stale",
-    };
+    match state {
+        EnsureResult::Ready => Ok(()),
+        EnsureResult::Missing => {
+            let start = std::time::Instant::now();
+            crate::build::orchestrator::build_l2(worktree_root, None)
+                .map_err(|e| format!("build_l2: {e}"))?;
+            eprintln!(
+                "✓ Index built (L2 cold path in {:.1}s)",
+                start.elapsed().as_secs_f32()
+            );
+            Ok(())
+        }
+        EnsureResult::Stale { .. } => apply_l1_overlay_updates(graph_path, worktree_root)
+            .map_err(|e| format!("L1 overlay refresh: {e}")),
+    }
+}
 
-    // Preserve the previous embedding state so the rebuild doesn't
-    // silently demote a vector-capable graph to BM25-only.
-    let keep_embeddings = embeddings_present(graph_path);
+fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Result<()> {
+    use crate::session::{overlay_writer, resolver};
 
-    let start = Instant::now();
-    let args = crate::commands::admin::index::IndexArgs {
-        repo: worktree_root.to_string_lossy().into_owned(),
-        embeddings: keep_embeddings,
-        drop_embeddings: false,
-        force: false,
-        dump_resolver: None,
-        no_cache: false,
-        quiet: true,
-    };
-    crate::commands::admin::index::run(args)?;
-    eprintln!(
-        "✓ Index refreshed ({} → fresh in {:.1}s)",
-        reason,
-        start.elapsed().as_secs_f32(),
-    );
+    let session_id = resolver::resolve_session_id(None);
+    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(worktree_root)?;
+    let session_dir = home_gnx.join(&repo_dir).join("sessions").join(&session_id);
+    fs::create_dir_all(&session_dir)?;
+    ensure_session_meta(&session_dir, worktree_root)?;
+
+    let graph_mtime = fs::metadata(graph_path)?.modified()?;
+    let dirty_files = collect_dirty_files(graph_path, worktree_root, graph_mtime)?;
+
+    let mut n_written = 0usize;
+    let mut n_failed = 0usize;
+    for dirty_path in &dirty_files {
+        let rel = dirty_path
+            .strip_prefix(worktree_root)
+            .unwrap_or(dirty_path.as_path());
+        let content = match fs::read(dirty_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("warning: overlay read for {}: {e}", rel.display());
+                continue;
+            }
+        };
+        let mtime_ns = fs::metadata(dirty_path)?
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let input = overlay_writer::FragmentInput {
+            rel_path: rel.to_string_lossy().into(),
+            content,
+            mtime_ns,
+        };
+        match overlay_writer::write_dirty_fragment(&session_dir, &input) {
+            Ok(o) if o.parse_failed => n_failed += 1,
+            Ok(_) => n_written += 1,
+            Err(e) => eprintln!("warning: overlay write for {}: {e}", rel.display()),
+        }
+    }
+    if n_written > 0 || n_failed > 0 {
+        eprintln!("✓ L1 overlay refreshed ({n_written} written, {n_failed} parse-failed)");
+    }
     Ok(())
+}
+
+fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
+    let meta_path = session_dir.join("session_meta.json");
+    if meta_path.exists() {
+        return Ok(());
+    }
+    let head_sha = git_head_sha(worktree)?;
+    let sid = session_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let sm = SessionMeta {
+        version: 1,
+        session_id: sid,
+        pid: Some(std::process::id()),
+        started_at: now.clone(),
+        last_touched: now,
+        base_sha: head_sha,
+        source_worktree: worktree.to_string_lossy().into(),
+        overlay_version: 0,
+    };
+    SessionMeta::write_atomic(&meta_path, &sm)
+}
+
+fn git_head_sha(worktree: &Path) -> io::Result<String> {
+    let out = crate::git::safe_exec::git()
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree)
+        .output()?;
+    if !out.status.success() {
+        return Err(io::Error::other("git rev-parse HEAD failed"));
+    }
+    Ok(std::str::from_utf8(&out.stdout)
+        .map_err(io::Error::other)?
+        .trim()
+        .to_string())
 }
 
 /// Build artifacts, vendor dirs, and language-specific caches: walking
@@ -154,4 +232,43 @@ fn any_source_newer_than(
         }
     }
     Ok(false)
+}
+
+/// Returns all source files under `root` with mtime newer than `graph_mtime`.
+/// Same walk logic as `any_source_newer_than` but collects instead of
+/// short-circuiting — used by `apply_l1_overlay_updates`.
+fn collect_dirty_files(
+    graph_path: &Path,
+    root: &Path,
+    graph_mtime: SystemTime,
+) -> io::Result<Vec<PathBuf>> {
+    let graph_canonical = fs::canonicalize(graph_path).ok();
+    let mut out = Vec::new();
+
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !SKIP_DIRS.contains(&name.as_ref())
+        })
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+    {
+        let skip = graph_canonical
+            .as_deref()
+            .is_some_and(|gc| fs::canonicalize(entry.path()).ok().as_deref() == Some(gc));
+        if skip {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(mtime) = meta.modified() {
+                if mtime > graph_mtime {
+                    out.push(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+    Ok(out)
 }
