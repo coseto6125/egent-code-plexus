@@ -184,11 +184,16 @@ fn search_positional_pattern_finds_match() {
         .find('{')
         .unwrap_or_else(|| panic!("no JSON in: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
-    let results = json["results"].as_array().cloned().unwrap_or_default();
-    assert!(
-        !results.is_empty(),
-        "expected hits for 'fetch': {results:?}"
-    );
+    // Output is now bucketed: check all 5 bucket keys are present.
+    for key in &["source", "tests", "reference", "document", "config"] {
+        assert!(json[key].is_array(), "expected bucket '{key}' in: {json}");
+    }
+    // At least one bucket must be non-empty for 'fetch'.
+    let total: usize = ["source", "tests", "reference", "document", "config"]
+        .iter()
+        .map(|k| json[k].as_array().map(|a| a.len()).unwrap_or(0))
+        .sum();
+    assert!(total > 0, "expected hits for 'fetch': {json}");
 }
 
 #[test]
@@ -293,8 +298,12 @@ fn search_multi_repo_at_group_both_repos() {
         .find('{')
         .unwrap_or_else(|| panic!("no JSON: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
-    let results = json["results"].as_array().cloned().unwrap_or_default();
-    let repos: Vec<&str> = results.iter().filter_map(|r| r["repo"].as_str()).collect();
+    // Collect all hits across all 5 buckets.
+    let all_hits: Vec<&Value> = ["source", "tests", "reference", "document", "config"]
+        .iter()
+        .flat_map(|k| json[k].as_array().into_iter().flatten())
+        .collect();
+    let repos: Vec<&str> = all_hits.iter().filter_map(|r| r["repo"].as_str()).collect();
     assert!(repos.contains(&"alpha"), "alpha missing: {repos:?}");
     assert!(repos.contains(&"beta"), "beta missing: {repos:?}");
 }
@@ -335,12 +344,15 @@ fn search_multi_repo_csv_single() {
         .find('{')
         .unwrap_or_else(|| panic!("no JSON: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
-    let results = json["results"].as_array().cloned().unwrap_or_default();
+    let all_hits: Vec<&Value> = ["source", "tests", "reference", "document", "config"]
+        .iter()
+        .flat_map(|k| json[k].as_array().into_iter().flatten())
+        .collect();
     assert!(
-        !results.is_empty(),
-        "alpha has fetch_user/save_user: {results:?}"
+        !all_hits.is_empty(),
+        "alpha has fetch_user/save_user: {json}"
     );
-    for r in &results {
+    for r in &all_hits {
         assert_eq!(r["repo"].as_str(), Some("alpha"), "unexpected repo: {r}");
     }
 }
@@ -383,10 +395,10 @@ fn search_multi_repo_missing_graph_degrades_gracefully() {
         .find('{')
         .unwrap_or_else(|| panic!("no JSON: {stdout}"));
     let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
-    // Alpha still has fetch_user — expect ≥1 result.
-    let results = json["results"].as_array().cloned().unwrap_or_default();
-    assert!(
-        !results.is_empty(),
-        "alpha should still produce hits: {results:?}"
-    );
+    // Alpha still has fetch_user — expect ≥1 result across buckets.
+    let total: usize = ["source", "tests", "reference", "document", "config"]
+        .iter()
+        .map(|k| json[k].as_array().map(|a| a.len()).unwrap_or(0))
+        .sum();
+    assert!(total > 0, "alpha should still produce hits: {json}");
 }

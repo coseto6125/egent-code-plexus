@@ -182,7 +182,7 @@ All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--gra
 | Command | Purpose | Key flags |
 |---|---|---|
 | `inspect <name>` | One symbol → metadata, decorators, signature, callers, callees. | `--kind` · `--file_path` · `--relation_types` · `--include_tests` |
-| `search <pattern>` | BM25 lexical symbol search by name. | `--mode bm25` (no-op alias) · `--format` · `--batch` |
+| `search <pattern>` | BM25 lexical symbol search by name. Output is partitioned into five independent top-20 buckets: `source` (production code), `tests`, `reference` (vendored/deps), `document`, `config`. Each hit includes a `language` field. | `--mode bm25` (no-op alias) · `--format` · `--batch` |
 | `impact <name> --direction <dir>` | Blast radius / dependency traversal. `dir` ∈ `upstream` (who calls X), `downstream` (what X calls). | `--depth <n>` (default 5) · `--high-trust-only` (default true) · `--min-confidence <f>` · `--include-tests` · `--kind` · `--file_path` · `--since <ref>` |
 | `rename --symbol <old> --new-name <new>` | AST-powered multi-file rename across 14 languages (Python, TS/TSX, JS, Rust, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart). Always run `--dry-run` first. | `--dry-run` · `--markdown` |
 | `cypher '<query>'` | Arbitrary openCypher pattern matching. `m.content` returns source body. | `--format` |

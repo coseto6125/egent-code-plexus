@@ -11,11 +11,19 @@
 //! ## Cross-repo fan-out
 //! When `--repo` resolves to multiple repos, workers run in parallel via
 //! rayon and hits are merged via a top-K BinaryHeap (port from multi_query).
+//!
+//! ## Output schema
+//! Results are partitioned into five independent top-K buckets by `FileCategory`:
+//! `source` / `tests` / `reference` / `document` / `config`. Each bucket
+//! caps at `TOP_K` (20). `reference` covers vendored / dependency paths
+//! (Rust `vendor/`, JS `node_modules/`, Python `site-packages/`, etc.).
+//! Every hit carries a `language` field derived from file extension.
 
 use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
+use graph_nexus_core::graph::{ArchivedFileCategory, FileCategory};
 use graph_nexus_core::registry::{IndexLayout, Registry};
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
@@ -165,7 +173,8 @@ fn run_batch(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
             hits
         };
 
-        emit_hits(&hits, format, None)?;
+        let buckets = BucketedResults::partition(hits);
+        emit_bucketed(&buckets, format, None)?;
     }
     Ok(())
 }
@@ -206,6 +215,8 @@ pub struct Hit {
     pub score_source: ScoreSource,
     pub kind: String,
     pub file: String,
+    /// Language derived from file extension at output time (e.g. "Rust", "Python").
+    pub language: String,
     pub line: u32,
     pub name: String,
     pub signature: String,
@@ -217,6 +228,8 @@ pub struct Hit {
     /// Up to `HOP_EXPANSION_LIMIT` 1-hop outgoing-edge target names.
     /// Populated from `out_offsets` / `edges`.
     pub callees: Vec<String>,
+    /// File category used for bucket partitioning; not emitted to consumers.
+    pub category: FileCategory,
 }
 
 /// Cap per-direction. Matches the legacy gitnexus augmentation engine,
@@ -233,6 +246,7 @@ struct OrderedHit {
     score_bits: u32,
     repo: Option<String>,
     file: String,
+    language: String,
     line: u32,
     name: String,
     kind: String,
@@ -241,14 +255,18 @@ struct OrderedHit {
     callers: Vec<String>,
     callees: Vec<String>,
     score_source: ScoreSource,
+    // FileCategory doesn't impl Ord; store as u8 discriminant (Source=0, Test=1, Reference=2, Document=3, Config=4).
+    category_ord: u8,
 }
 
 impl OrderedHit {
     fn from(h: Hit) -> Self {
+        let category_ord = category_to_ord(h.category);
         Self {
             score_bits: h.score.to_bits(),
             repo: h.repo,
             file: h.file,
+            language: h.language,
             line: h.line,
             name: h.name,
             kind: h.kind,
@@ -257,6 +275,130 @@ impl OrderedHit {
             callers: h.callers,
             callees: h.callees,
             score_source: h.score_source,
+            category_ord,
+        }
+    }
+}
+
+fn category_to_ord(c: FileCategory) -> u8 {
+    match c {
+        FileCategory::Source => 0,
+        FileCategory::Test => 1,
+        FileCategory::Reference => 2,
+        FileCategory::Document => 3,
+        FileCategory::Config => 4,
+    }
+}
+
+fn ord_to_category(n: u8) -> FileCategory {
+    match n {
+        0 => FileCategory::Source,
+        1 => FileCategory::Test,
+        2 => FileCategory::Reference,
+        3 => FileCategory::Document,
+        _ => FileCategory::Config,
+    }
+}
+
+/// Detect language from file path extension (or Dockerfile filename).
+fn detect_language(path: &str) -> &'static str {
+    use std::path::Path;
+    let p = Path::new(path);
+    // Dockerfile-style: no extension but filename contains "Dockerfile"
+    if let Some(fname) = p.file_name().and_then(|f| f.to_str()) {
+        if fname.contains("Dockerfile") || fname == "dockerfile" {
+            return "Dockerfile";
+        }
+    }
+    match p.extension().and_then(|e| e.to_str()) {
+        Some("rs") => "Rust",
+        Some("py") => "Python",
+        Some("ts") | Some("tsx") => "TypeScript",
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => "JavaScript",
+        Some("java") => "Java",
+        Some("kt") | Some("kts") => "Kotlin",
+        Some("cs") => "CSharp",
+        Some("go") => "Go",
+        Some("php") => "PHP",
+        Some("rb") => "Ruby",
+        Some("swift") => "Swift",
+        Some("c") | Some("h") => "C",
+        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => "C++",
+        Some("dart") => "Dart",
+        Some("lua") => "Lua",
+        Some("cr") => "Crystal",
+        Some("zig") => "Zig",
+        Some("sol") => "Solidity",
+        Some("move") => "Move",
+        Some("sh") | Some("bash") => "Bash",
+        Some("md") | Some("rst") | Some("txt") => "Markdown",
+        Some("toml") | Some("yaml") | Some("yml") | Some("json") => "Config",
+        _ => "Unknown",
+    }
+}
+
+/// Five-bucket output — one per `FileCategory`. Empty buckets emit `[]` in
+/// JSON and `(none)` in text; each bucket independently capped at `TOP_K`.
+struct BucketedResults {
+    source: Vec<Hit>,
+    tests: Vec<Hit>,
+    reference: Vec<Hit>,
+    document: Vec<Hit>,
+    config: Vec<Hit>,
+}
+
+impl BucketedResults {
+    fn partition(mut hits: Vec<Hit>) -> Self {
+        // Sort overall by descending score before partitioning so each bucket
+        // gets the best representatives across repos.
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut source = Vec::new();
+        let mut tests = Vec::new();
+        let mut reference = Vec::new();
+        let mut document = Vec::new();
+        let mut config = Vec::new();
+
+        for h in hits {
+            match h.category {
+                FileCategory::Source => {
+                    if source.len() < TOP_K {
+                        source.push(h);
+                    }
+                }
+                FileCategory::Test => {
+                    if tests.len() < TOP_K {
+                        tests.push(h);
+                    }
+                }
+                FileCategory::Reference => {
+                    if reference.len() < TOP_K {
+                        reference.push(h);
+                    }
+                }
+                FileCategory::Document => {
+                    if document.len() < TOP_K {
+                        document.push(h);
+                    }
+                }
+                FileCategory::Config => {
+                    if config.len() < TOP_K {
+                        config.push(h);
+                    }
+                }
+            }
+        }
+
+        Self {
+            source,
+            tests,
+            reference,
+            document,
+            config,
         }
     }
 }
@@ -272,10 +414,12 @@ fn run_single(
     repo_label: Option<String>,
 ) -> Result<(), GnxError> {
     let hits = compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
-    emit_hits(&hits, format, None)
+    let buckets = BucketedResults::partition(hits);
+    emit_bucketed(&buckets, format, None)
 }
 
-/// Pure compute path for single-repo search: returns owned Hit rows top-K trimmed.
+/// Pure compute path for single-repo search: returns owned Hit rows, all
+/// candidates (bucketing + per-bucket TOP_K applied at emit time).
 fn compute_single(
     pattern: &str,
     mode: &SearchMode,
@@ -290,16 +434,7 @@ fn compute_single(
         kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     let _ = mode;
-    let mut hits = bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir);
-
-    // Sort by score descending, trim to TOP_K.
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    hits.truncate(TOP_K);
-
+    let hits = bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir);
     Ok(hits)
 }
 
@@ -423,10 +558,16 @@ fn build_hit(
         }
     }
     let name = node.name.resolve(&graph.string_pool);
-    let file = graph.files[node.file_idx.to_native() as usize]
-        .path
-        .resolve(&graph.string_pool)
-        .to_string();
+    let file_entry = &graph.files[node.file_idx.to_native() as usize];
+    let file = file_entry.path.resolve(&graph.string_pool).to_string();
+    let language = detect_language(&file).to_string();
+    let category = match file_entry.category {
+        ArchivedFileCategory::Source => FileCategory::Source,
+        ArchivedFileCategory::Test => FileCategory::Test,
+        ArchivedFileCategory::Reference => FileCategory::Reference,
+        ArchivedFileCategory::Document => FileCategory::Document,
+        ArchivedFileCategory::Config => FileCategory::Config,
+    };
     let line = node.span.0.to_native() + 1;
     let kind_str = kind_to_str(&node.kind).to_string();
     let signature = format!("{kind_str} {name}");
@@ -465,12 +606,14 @@ fn build_hit(
         score_source,
         kind: kind_str,
         file,
+        language,
         line,
         name: name.to_string(),
         signature,
         caller_count,
         callers,
         callees,
+        category,
     })
 }
 
@@ -484,7 +627,8 @@ fn run_multi(
     targets: Vec<(String, String)>, // (repo_name, graph_path_str)
 ) -> Result<(), GnxError> {
     let (hits, summary) = compute_multi(&pattern, &mode, kind_filter.as_deref(), targets)?;
-    emit_hits(&hits, format, Some(summary))
+    let buckets = BucketedResults::partition(hits);
+    emit_bucketed(&buckets, format, Some(summary))
 }
 
 /// Pre-load engines for a batch of target repos. Each engine load is
@@ -540,8 +684,11 @@ pub fn compute_multi_with_engines(
         })
         .collect();
 
-    // Top-K merge using BinaryHeap<Reverse<OrderedHit>> — O(N log K).
-    let mut heap: BinaryHeap<Reverse<OrderedHit>> = BinaryHeap::with_capacity(TOP_K + 1);
+    // Collect enough candidates to fill all 5 buckets × TOP_K each.
+    // Cap at TOP_K * 5 globally so the per-bucket partitioning step has
+    // top-scoring representatives from every category.
+    const MULTI_CAP: usize = TOP_K * 5;
+    let mut heap: BinaryHeap<Reverse<OrderedHit>> = BinaryHeap::with_capacity(MULTI_CAP + 1);
     let mut repos_with_hits = 0usize;
     let mut repos_failed = 0usize;
 
@@ -554,7 +701,7 @@ pub fn compute_multi_with_engines(
                 }
                 for h in hits {
                     heap.push(Reverse(OrderedHit::from(h)));
-                    if heap.len() > TOP_K {
+                    if heap.len() > MULTI_CAP {
                         heap.pop();
                     }
                 }
@@ -574,12 +721,14 @@ pub fn compute_multi_with_engines(
             score_source: o.score_source,
             kind: o.kind,
             file: o.file,
+            language: o.language,
             line: o.line,
             name: o.name,
             signature: o.signature,
             caller_count: o.caller_count,
             callers: o.callers,
             callees: o.callees,
+            category: ord_to_category(o.category_ord),
         })
         .collect();
 
@@ -712,28 +861,77 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
 
 // ── Emission ──────────────────────────────────────────────────────────────────
 
-fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Result<(), GnxError> {
-    if hits.is_empty() {
-        // Text-format must show *something* — an empty `results` array
-        // renders as a blank line on stdout, which agents can't tell apart
-        // from "command crashed silently". Surface the same hint json/toon
-        // already include.
+fn hit_to_json(h: &Hit) -> serde_json::Value {
+    serde_json::json!({
+        "repo": h.repo,
+        "name": h.name,
+        "kind": h.kind,
+        "file": h.file,
+        "language": h.language,
+        "line": h.line,
+        "signature": h.signature,
+        "caller_count": h.caller_count,
+        "score": h.score,
+        "score_source": h.score_source.as_str(),
+    })
+}
+
+fn hit_to_text(h: &Hit) -> String {
+    let repo_prefix = h
+        .repo
+        .as_deref()
+        .map(|r| format!("@{r} "))
+        .unwrap_or_default();
+    format!(
+        "[{}] {}{}:{} ({}) {} callers:{} [score:{:.4} source:{}]",
+        h.kind,
+        repo_prefix,
+        h.file,
+        h.line,
+        h.name,
+        h.language,
+        h.caller_count,
+        h.score,
+        h.score_source.as_str(),
+    )
+}
+
+fn emit_bucketed(
+    buckets: &BucketedResults,
+    format: OutputFormat,
+    summary: Option<String>,
+) -> Result<(), GnxError> {
+    let all_empty = buckets.source.is_empty()
+        && buckets.tests.is_empty()
+        && buckets.reference.is_empty()
+        && buckets.document.is_empty()
+        && buckets.config.is_empty();
+
+    if all_empty {
         let hint =
             "No matches found. Try a shorter pattern or `gnx search --mode bm25 <fragment>`.";
-        if matches!(format, OutputFormat::Text) {
-            return emit(
-                &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),
-                format,
-            );
+        match format {
+            OutputFormat::Text => {
+                return emit(
+                    &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),
+                    format,
+                );
+            }
+            _ => {
+                return emit(
+                    &serde_json::json!({
+                        "status": "success",
+                        "source": [],
+                        "tests": [],
+                        "reference": [],
+                        "document": [],
+                        "config": [],
+                        "hint": hint,
+                    }),
+                    format,
+                );
+            }
         }
-        return emit(
-            &serde_json::json!({
-                "status": "success",
-                "results": [],
-                "hint": hint,
-            }),
-            format,
-        );
     }
 
     match format {
@@ -742,46 +940,35 @@ fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Res
             if let Some(s) = &summary {
                 lines.push(serde_json::Value::String(s.clone()));
             }
-            for h in hits {
-                let repo_prefix = h
-                    .repo
-                    .as_deref()
-                    .map(|r| format!("@{r} "))
-                    .unwrap_or_default();
-                lines.push(serde_json::Value::String(format!(
-                    "[{}] {}{}:{} ({}) callers:{} [score:{:.4} source:{}]",
-                    h.kind,
-                    repo_prefix,
-                    h.file,
-                    h.line,
-                    h.name,
-                    h.caller_count,
-                    h.score,
-                    h.score_source.as_str(),
-                )));
+            for (label, bucket) in [
+                ("source", &buckets.source),
+                ("tests", &buckets.tests),
+                ("reference", &buckets.reference),
+                ("document", &buckets.document),
+                ("config", &buckets.config),
+            ] {
+                lines.push(serde_json::Value::String(format!("=== {label} ===")));
+                if bucket.is_empty() {
+                    lines.push(serde_json::Value::String("(none)".into()));
+                } else {
+                    for h in bucket.iter() {
+                        lines.push(serde_json::Value::String(hit_to_text(h)));
+                    }
+                }
             }
             emit(&serde_json::json!({ "results": lines }), format)
         }
         OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
-            let results: Vec<serde_json::Value> = hits
-                .iter()
-                .map(|h| {
-                    serde_json::json!({
-                        "repo": h.repo,
-                        "name": h.name,
-                        "kind": h.kind,
-                        "file": h.file,
-                        "line": h.line,
-                        "signature": h.signature,
-                        "caller_count": h.caller_count,
-                        "score": h.score,
-                        "score_source": h.score_source.as_str(),
-                    })
-                })
-                .collect();
+            let bucket_json = |bucket: &[Hit]| -> serde_json::Value {
+                serde_json::Value::Array(bucket.iter().map(hit_to_json).collect())
+            };
             let mut payload = serde_json::json!({
                 "status": "success",
-                "results": results,
+                "source": bucket_json(&buckets.source),
+                "tests": bucket_json(&buckets.tests),
+                "reference": bucket_json(&buckets.reference),
+                "document": bucket_json(&buckets.document),
+                "config": bucket_json(&buckets.config),
             });
             if let Some(s) = summary {
                 payload["summary"] = serde_json::Value::String(s);
@@ -807,6 +994,7 @@ mod tests {
                 score_bits: s.to_bits(),
                 repo: None,
                 file: "f".into(),
+                language: "Rust".into(),
                 line: i as u32,
                 name: "n".into(),
                 kind: "Function".into(),
@@ -815,6 +1003,7 @@ mod tests {
                 callers: vec![],
                 callees: vec![],
                 score_source: ScoreSource::Bm25,
+                category_ord: 0,
             };
             heap.push(Reverse(h));
             if heap.len() > k {

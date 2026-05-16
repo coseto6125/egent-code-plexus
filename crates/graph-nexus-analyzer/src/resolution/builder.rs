@@ -10,8 +10,32 @@ use graph_nexus_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-fn determine_category(path: &str) -> FileCategory {
-    let lower_path = path.to_lowercase().replace('\\', "/");
+pub fn determine_category(path: &str) -> FileCategory {
+    // Normalise to forward-slashes and prefix with "/" so patterns like
+    // "/vendor/" match both embedded segments AND top-level paths
+    // (e.g. `vendor/foo` → `/vendor/foo` → contains `/vendor/`).
+    let lower_path = format!("/{}", path.to_lowercase().replace('\\', "/"));
+
+    let is_reference = lower_path.contains("/vendor/")
+        || lower_path.contains("/node_modules/")
+        || lower_path.contains("/.venv/")
+        || lower_path.contains("/venv/")
+        || lower_path.contains("/site-packages/")
+        || lower_path.contains("/.tox/")
+        || lower_path.contains("/.bundle/")
+        || lower_path.contains("/gems/")
+        || lower_path.contains("/.pub-cache/")
+        || lower_path.contains("/.gradle/")
+        || lower_path.contains("/.m2/")
+        || lower_path.contains("/pods/")
+        || lower_path.contains("/carthage/")
+        || lower_path.contains("/.build/")
+        || lower_path.contains("/third_party/")
+        || lower_path.contains("/external/")
+        || lower_path.contains("/deps/");
+    if is_reference {
+        return FileCategory::Reference;
+    }
 
     let is_test = lower_path.contains(".test.")
         || lower_path.contains(".spec.")
@@ -1787,7 +1811,10 @@ mod tests {
         // RelType key sets must match before per-bucket comparison.
         let p_keys: Vec<_> = parallel_buckets.keys().cloned().collect();
         let s_keys: Vec<_> = serial_buckets.keys().cloned().collect();
-        assert_eq!(p_keys, s_keys, "parallel vs serial produced different RelType sets");
+        assert_eq!(
+            p_keys, s_keys,
+            "parallel vs serial produced different RelType sets"
+        );
 
         // Per-RelType equality — divergence is localised to the failing bucket.
         for (rel, p_edges) in &parallel_buckets {

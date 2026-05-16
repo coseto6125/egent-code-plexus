@@ -206,7 +206,10 @@ pub fn run(args: ToolMapArgs, engine: &Engine) -> Result<(), GnxError> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     for file in graph.files.iter() {
-        if matches!(file.category, ArchivedFileCategory::Test) {
+        if matches!(
+            file.category,
+            ArchivedFileCategory::Test | ArchivedFileCategory::Reference
+        ) {
             continue;
         }
         let rel = file.path.resolve(&graph.string_pool);

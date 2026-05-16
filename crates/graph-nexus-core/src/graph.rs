@@ -11,7 +11,7 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"GNX-RS\0\0";
 /// the new reader (or vice-versa). The reader refuses any version it
 /// does not recognize, so a stale CLI does not segfault on a fresh
 /// `graph.bin` and a fresh CLI does not silently misinterpret old data.
-pub const GRAPH_FORMAT_VERSION: u32 = 3;
+pub const GRAPH_FORMAT_VERSION: u32 = 4;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -149,6 +149,7 @@ pub struct Edge {
 pub enum FileCategory {
     Source,
     Test,
+    Reference,
     Document,
     Config,
 }

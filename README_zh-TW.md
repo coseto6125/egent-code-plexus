@@ -140,7 +140,7 @@ gnx inspect validateUser
 | 命令 | 用途 | 重點 flag |
 |---|---|---|
 | `inspect <name>` | 單一符號 → metadata、裝飾器、簽名、呼叫者、被呼叫者。 | `--kind` · `--file_path` · `--relation_types` · `--include_tests` |
-| `search <pattern>` | BM25 全文符號搜尋。 | `--mode bm25`（no-op alias）· `--format` · `--batch` |
+| `search <pattern>` | BM25 全文符號搜尋。輸出分為五個獨立 top-20 bucket：`source`（生產程式碼）、`tests`、`reference`（vendor/deps）、`document`、`config`。每筆結果附帶 `language` 欄位。 | `--mode bm25`（no-op alias）· `--format` · `--batch` |
 | `impact <name> --direction <dir>` | 爆炸半徑 / 依賴 traversal。`dir` ∈ `upstream`（誰呼叫 X）、`downstream`（X 呼叫了什麼）。 | `--depth <n>`（預設 5） · `--high-trust-only`（預設 true） · `--min-confidence <f>` · `--include-tests` · `--kind` · `--file_path` · `--since <ref>` |
 | `rename --symbol <old> --new-name <new>` | AST 驅動的跨檔 rename（14 種語言：Python、TS/TSX、JS、Rust、Java、Kotlin、C#、Go、PHP、Ruby、Swift、C、C++、Dart）。請務必先跑 `--dry-run`。 | `--dry-run` · `--markdown` |
 | `cypher '<query>'` | 任意 openCypher 模式匹配。`m.content` 回傳原始碼。 | `--format` |
