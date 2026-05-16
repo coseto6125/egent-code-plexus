@@ -7,7 +7,6 @@ use super::common::{
 use crate::auto_ensure::{ensure_index, EnsureResult};
 use graph_nexus_core::GnxError;
 use std::path::Path;
-use std::process::Command;
 use std::sync::OnceLock;
 
 /// Git-mutation matcher. Compiled once per process — PostToolUse fires
@@ -86,54 +85,21 @@ fn is_git_mutation(cmd: &str) -> bool {
 /// launcher subprocess was spawned (the analyze outcome surfaces
 /// asynchronously via marker files consumed by UserPromptSubmit).
 fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
+    let repo_str = repo_root.to_string_lossy();
     let lock = state_dir.join(".analyze.lock");
     let complete = state_dir.join(".rebuild-complete");
     let failed = state_dir.join(".rebuild-failed");
     let log = state_dir.join("last-rebuild.log");
-    let self_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
 
-    let shell = format!(
-        r#"exec 9>{lock} || exit 0
-flock -n 9 || exit 0
-: > {log}
-MAX=3; ATTEMPT=0
-while [ $ATTEMPT -lt $MAX ]; do
-  ATTEMPT=$((ATTEMPT+1))
-  echo "=== attempt $ATTEMPT/$MAX ===" >> {log}
-  if {gnx} admin index --repo {repo} >> {log} 2>&1; then
-    rm -f {failed}
-    : > {complete}
-    exit 0
-  fi
-  [ $ATTEMPT -lt $MAX ] && sleep 2
-done
-rm -f {complete}
-: > {failed}
-"#,
-        lock = shell_quote(&lock),
-        log = shell_quote(&log),
-        gnx = shell_quote(&self_exe),
-        repo = shell_quote(repo_root),
-        complete = shell_quote(&complete),
-        failed = shell_quote(&failed),
-    );
-
-    Command::new("sh")
-        .arg("-c")
-        .arg(&shell)
-        .current_dir(repo_root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .is_ok()
-}
-
-fn shell_quote<P: AsRef<Path>>(p: P) -> String {
-    let s = p.as_ref().to_string_lossy().to_string();
-    let escaped = s.replace('\'', r"'\''");
-    format!("'{}'", escaped)
+    crate::background::spawn_bg(crate::background::BgJob {
+        args: &["admin", "index", "--repo", repo_str.as_ref()],
+        lock: &lock,
+        cwd: repo_root,
+        retry: (3, 2),
+        markers: Some(crate::background::BgMarkers {
+            log: &log,
+            complete: &complete,
+            failed: &failed,
+        }),
+    })
 }

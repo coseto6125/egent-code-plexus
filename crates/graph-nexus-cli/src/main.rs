@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod admin;
 mod auto_ensure;
+mod background;
 mod commands;
 mod config_parser;
 mod engine;
