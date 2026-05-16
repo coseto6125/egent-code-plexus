@@ -10,9 +10,32 @@ use graph_nexus_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-fn determine_category(path: &str) -> FileCategory {
+pub fn determine_category(path: &str) -> FileCategory {
     let normalized_path = path.replace('\\', "/");
-    let lower_path = normalized_path.to_lowercase();
+    // Prefix with "/" so patterns like "/vendor/" match both embedded
+    // segments AND top-level paths (e.g. `vendor/foo` → `/vendor/foo`).
+    let lower_path = format!("/{}", normalized_path.to_lowercase());
+
+    let is_reference = lower_path.contains("/vendor/")
+        || lower_path.contains("/node_modules/")
+        || lower_path.contains("/.venv/")
+        || lower_path.contains("/venv/")
+        || lower_path.contains("/site-packages/")
+        || lower_path.contains("/.tox/")
+        || lower_path.contains("/.bundle/")
+        || lower_path.contains("/gems/")
+        || lower_path.contains("/.pub-cache/")
+        || lower_path.contains("/.gradle/")
+        || lower_path.contains("/.m2/")
+        || lower_path.contains("/pods/")
+        || lower_path.contains("/carthage/")
+        || lower_path.contains("/.build/")
+        || lower_path.contains("/third_party/")
+        || lower_path.contains("/external/")
+        || lower_path.contains("/deps/");
+    if is_reference {
+        return FileCategory::Reference;
+    }
 
     let is_test = lower_path.contains(".test.")
         || lower_path.contains(".spec.")

@@ -11,11 +11,20 @@
 //! ## Cross-repo fan-out
 //! When `--repo` resolves to multiple repos, workers run in parallel via
 //! rayon and hits are merged via a top-K BinaryHeap (port from multi_query).
+//!
+//! ## Output schema
+//! Results are partitioned into five independent top-K buckets by `FileCategory`:
+//! `source` / `tests` / `reference` / `document` / `config`. Each bucket
+//! caps at `TOP_K` (20). `reference` covers vendored / dependency paths
+//! (Rust `vendor/`, JS `node_modules/`, Python `site-packages/`, etc.).
+//! Every hit carries a `language` field derived from file extension.
 
 use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
+use graph_nexus_analyzer::resolution::index::Language;
+use graph_nexus_core::graph::FileCategory;
 use graph_nexus_core::registry::{resolve_home_gnx, Registry};
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
@@ -23,6 +32,12 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
 const TOP_K: usize = 20;
+
+/// Raw-candidate cap before 5-way bucketing. With 5 categories each wanting
+/// up to `TOP_K` items, fetch `TOP_K * 5` candidates so no bucket starves
+/// when results cluster in fewer categories. Cap stays bounded — a query
+/// matching thousands of names doesn't drag every node through ranking.
+const MULTI_CAP: usize = TOP_K * 5;
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -165,7 +180,8 @@ fn run_batch(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
             hits
         };
 
-        emit_hits(&hits, format, None)?;
+        let buckets = BucketedResults::partition(hits);
+        emit_bucketed(&buckets, format, None)?;
     }
     Ok(())
 }
@@ -206,6 +222,8 @@ pub struct Hit {
     pub score_source: ScoreSource,
     pub kind: String,
     pub file: String,
+    /// Language derived from file extension at output time (e.g. "Rust", "Python").
+    pub language: String,
     pub line: u32,
     pub name: String,
     pub signature: String,
@@ -217,6 +235,8 @@ pub struct Hit {
     /// Up to `HOP_EXPANSION_LIMIT` 1-hop outgoing-edge target names.
     /// Populated from `out_offsets` / `edges`.
     pub callees: Vec<String>,
+    /// File category used for bucket partitioning; not emitted to consumers.
+    pub category: FileCategory,
 }
 
 /// Cap per-direction. Matches the legacy gitnexus augmentation engine,
@@ -233,6 +253,7 @@ struct OrderedHit {
     score_bits: u32,
     repo: Option<String>,
     file: String,
+    language: String,
     line: u32,
     name: String,
     kind: String,
@@ -241,6 +262,7 @@ struct OrderedHit {
     callers: Vec<String>,
     callees: Vec<String>,
     score_source: ScoreSource,
+    category: FileCategory,
 }
 
 impl OrderedHit {
@@ -249,6 +271,7 @@ impl OrderedHit {
             score_bits: h.score.to_bits(),
             repo: h.repo,
             file: h.file,
+            language: h.language,
             line: h.line,
             name: h.name,
             kind: h.kind,
@@ -257,6 +280,56 @@ impl OrderedHit {
             callers: h.callers,
             callees: h.callees,
             score_source: h.score_source,
+            category: h.category,
+        }
+    }
+}
+
+/// Five-bucket output — one per `FileCategory`. Empty buckets emit `[]` in
+/// JSON and `(none)` in text; each bucket independently capped at `TOP_K`.
+struct BucketedResults {
+    source: Vec<Hit>,
+    tests: Vec<Hit>,
+    reference: Vec<Hit>,
+    document: Vec<Hit>,
+    config: Vec<Hit>,
+}
+
+impl BucketedResults {
+    fn partition(mut hits: Vec<Hit>) -> Self {
+        // Sort overall by descending score before partitioning so each bucket
+        // gets the best representatives across repos.
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut source = Vec::new();
+        let mut tests = Vec::new();
+        let mut reference = Vec::new();
+        let mut document = Vec::new();
+        let mut config = Vec::new();
+
+        for h in hits {
+            let bucket = match h.category {
+                FileCategory::Source => &mut source,
+                FileCategory::Test => &mut tests,
+                FileCategory::Reference => &mut reference,
+                FileCategory::Document => &mut document,
+                FileCategory::Config => &mut config,
+            };
+            if bucket.len() < TOP_K {
+                bucket.push(h);
+            }
+        }
+
+        Self {
+            source,
+            tests,
+            reference,
+            document,
+            config,
         }
     }
 }
@@ -272,10 +345,12 @@ fn run_single(
     repo_label: Option<String>,
 ) -> Result<(), GnxError> {
     let hits = compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
-    emit_hits(&hits, format, None)
+    let buckets = BucketedResults::partition(hits);
+    emit_bucketed(&buckets, format, None)
 }
 
-/// Pure compute path for single-repo search: returns owned Hit rows top-K trimmed.
+/// Pure compute path for single-repo search: returns owned Hit rows, all
+/// candidates (bucketing + per-bucket TOP_K applied at emit time).
 fn compute_single(
     pattern: &str,
     mode: &SearchMode,
@@ -290,16 +365,7 @@ fn compute_single(
         kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     let _ = mode;
-    let mut hits = bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir);
-
-    // Sort by score descending, trim to TOP_K.
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    hits.truncate(TOP_K);
-
+    let hits = bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir);
     Ok(hits)
 }
 
@@ -334,7 +400,7 @@ fn tantivy_hits(
     repo_label: &Option<String>,
     index_dir: &std::path::Path,
 ) -> Vec<Hit> {
-    let scored = match crate::search::TantivyEngine::search(index_dir, pattern) {
+    let scored = match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
         Some(s) => s,
         // Index unavailable / corrupt / parse error — fall through so
         // hook context isn't silently empty.
@@ -400,6 +466,17 @@ fn substring_hits(
             hits.push(hit);
         }
     }
+    // Substring fallback scans every node — on large monorepos a 3-char
+    // pattern can return thousands. Cap to MULTI_CAP so partition's sort
+    // stays bounded on the pre_tool_use::handle hot path.
+    if hits.len() > MULTI_CAP {
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(MULTI_CAP);
+    }
     hits
 }
 
@@ -423,10 +500,10 @@ fn build_hit(
         }
     }
     let name = node.name.resolve(&graph.string_pool);
-    let file = graph.files[node.file_idx.to_native() as usize]
-        .path
-        .resolve(&graph.string_pool)
-        .to_string();
+    let file_entry = &graph.files[node.file_idx.to_native() as usize];
+    let file = file_entry.path.resolve(&graph.string_pool).to_string();
+    let language = Language::from_path(&file).as_str().to_string();
+    let category = FileCategory::from(&file_entry.category);
     let line = node.span.0.to_native() + 1;
     let kind_str = kind_to_str(&node.kind).to_string();
     let signature = format!("{kind_str} {name}");
@@ -465,12 +542,14 @@ fn build_hit(
         score_source,
         kind: kind_str,
         file,
+        language,
         line,
         name: name.to_string(),
         signature,
         caller_count,
         callers,
         callees,
+        category,
     })
 }
 
@@ -484,7 +563,8 @@ fn run_multi(
     targets: Vec<(String, String)>, // (repo_name, graph_path_str)
 ) -> Result<(), GnxError> {
     let (hits, summary) = compute_multi(&pattern, &mode, kind_filter.as_deref(), targets)?;
-    emit_hits(&hits, format, Some(summary))
+    let buckets = BucketedResults::partition(hits);
+    emit_bucketed(&buckets, format, Some(summary))
 }
 
 /// Pre-load engines for a batch of target repos. Each engine load is
@@ -540,8 +620,11 @@ pub fn compute_multi_with_engines(
         })
         .collect();
 
-    // Top-K merge using BinaryHeap<Reverse<OrderedHit>> — O(N log K).
-    let mut heap: BinaryHeap<Reverse<OrderedHit>> = BinaryHeap::with_capacity(TOP_K + 1);
+    // Collect enough candidates to fill all 5 buckets × TOP_K each.
+    // Cap at TOP_K * 5 globally so the per-bucket partitioning step has
+    // top-scoring representatives from every category.
+    const MULTI_CAP: usize = TOP_K * 5;
+    let mut heap: BinaryHeap<Reverse<OrderedHit>> = BinaryHeap::with_capacity(MULTI_CAP + 1);
     let mut repos_with_hits = 0usize;
     let mut repos_failed = 0usize;
 
@@ -554,7 +637,7 @@ pub fn compute_multi_with_engines(
                 }
                 for h in hits {
                     heap.push(Reverse(OrderedHit::from(h)));
-                    if heap.len() > TOP_K {
+                    if heap.len() > MULTI_CAP {
                         heap.pop();
                     }
                 }
@@ -574,12 +657,14 @@ pub fn compute_multi_with_engines(
             score_source: o.score_source,
             kind: o.kind,
             file: o.file,
+            language: o.language,
             line: o.line,
             name: o.name,
             signature: o.signature,
             caller_count: o.caller_count,
             callers: o.callers,
             callees: o.callees,
+            category: o.category,
         })
         .collect();
 
@@ -717,28 +802,77 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
 
 // ── Emission ──────────────────────────────────────────────────────────────────
 
-fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Result<(), GnxError> {
-    if hits.is_empty() {
-        // Text-format must show *something* — an empty `results` array
-        // renders as a blank line on stdout, which agents can't tell apart
-        // from "command crashed silently". Surface the same hint json/toon
-        // already include.
+fn hit_to_json(h: &Hit) -> serde_json::Value {
+    serde_json::json!({
+        "repo": h.repo,
+        "name": h.name,
+        "kind": h.kind,
+        "file": h.file,
+        "language": h.language,
+        "line": h.line,
+        "signature": h.signature,
+        "caller_count": h.caller_count,
+        "score": h.score,
+        "score_source": h.score_source.as_str(),
+    })
+}
+
+fn hit_to_text(h: &Hit) -> String {
+    let repo_prefix = h
+        .repo
+        .as_deref()
+        .map(|r| format!("@{r} "))
+        .unwrap_or_default();
+    format!(
+        "[{}] {}{}:{} ({}) {} callers:{} [score:{:.4} source:{}]",
+        h.kind,
+        repo_prefix,
+        h.file,
+        h.line,
+        h.name,
+        h.language,
+        h.caller_count,
+        h.score,
+        h.score_source.as_str(),
+    )
+}
+
+fn emit_bucketed(
+    buckets: &BucketedResults,
+    format: OutputFormat,
+    summary: Option<String>,
+) -> Result<(), GnxError> {
+    let all_empty = buckets.source.is_empty()
+        && buckets.tests.is_empty()
+        && buckets.reference.is_empty()
+        && buckets.document.is_empty()
+        && buckets.config.is_empty();
+
+    if all_empty {
         let hint =
             "No matches found. Try a shorter pattern or `gnx search --mode bm25 <fragment>`.";
-        if matches!(format, OutputFormat::Text) {
-            return emit(
-                &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),
-                format,
-            );
+        match format {
+            OutputFormat::Text => {
+                return emit(
+                    &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),
+                    format,
+                );
+            }
+            _ => {
+                return emit(
+                    &serde_json::json!({
+                        "status": "success",
+                        "source": [],
+                        "tests": [],
+                        "reference": [],
+                        "document": [],
+                        "config": [],
+                        "hint": hint,
+                    }),
+                    format,
+                );
+            }
         }
-        return emit(
-            &serde_json::json!({
-                "status": "success",
-                "results": [],
-                "hint": hint,
-            }),
-            format,
-        );
     }
 
     match format {
@@ -747,46 +881,35 @@ fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Res
             if let Some(s) = &summary {
                 lines.push(serde_json::Value::String(s.clone()));
             }
-            for h in hits {
-                let repo_prefix = h
-                    .repo
-                    .as_deref()
-                    .map(|r| format!("@{r} "))
-                    .unwrap_or_default();
-                lines.push(serde_json::Value::String(format!(
-                    "[{}] {}{}:{} ({}) callers:{} [score:{:.4} source:{}]",
-                    h.kind,
-                    repo_prefix,
-                    h.file,
-                    h.line,
-                    h.name,
-                    h.caller_count,
-                    h.score,
-                    h.score_source.as_str(),
-                )));
+            for (label, bucket) in [
+                ("source", &buckets.source),
+                ("tests", &buckets.tests),
+                ("reference", &buckets.reference),
+                ("document", &buckets.document),
+                ("config", &buckets.config),
+            ] {
+                lines.push(serde_json::Value::String(format!("=== {label} ===")));
+                if bucket.is_empty() {
+                    lines.push(serde_json::Value::String("(none)".into()));
+                } else {
+                    for h in bucket.iter() {
+                        lines.push(serde_json::Value::String(hit_to_text(h)));
+                    }
+                }
             }
             emit(&serde_json::json!({ "results": lines }), format)
         }
         OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
-            let results: Vec<serde_json::Value> = hits
-                .iter()
-                .map(|h| {
-                    serde_json::json!({
-                        "repo": h.repo,
-                        "name": h.name,
-                        "kind": h.kind,
-                        "file": h.file,
-                        "line": h.line,
-                        "signature": h.signature,
-                        "caller_count": h.caller_count,
-                        "score": h.score,
-                        "score_source": h.score_source.as_str(),
-                    })
-                })
-                .collect();
+            let bucket_json = |bucket: &[Hit]| -> serde_json::Value {
+                serde_json::Value::Array(bucket.iter().map(hit_to_json).collect())
+            };
             let mut payload = serde_json::json!({
                 "status": "success",
-                "results": results,
+                "source": bucket_json(&buckets.source),
+                "tests": bucket_json(&buckets.tests),
+                "reference": bucket_json(&buckets.reference),
+                "document": bucket_json(&buckets.document),
+                "config": bucket_json(&buckets.config),
             });
             if let Some(s) = summary {
                 payload["summary"] = serde_json::Value::String(s);
@@ -812,6 +935,7 @@ mod tests {
                 score_bits: s.to_bits(),
                 repo: None,
                 file: "f".into(),
+                language: "Rust".into(),
                 line: i as u32,
                 name: "n".into(),
                 kind: "Function".into(),
@@ -820,6 +944,7 @@ mod tests {
                 callers: vec![],
                 callees: vec![],
                 score_source: ScoreSource::Bm25,
+                category: FileCategory::Source,
             };
             heap.push(Reverse(h));
             if heap.len() > k {

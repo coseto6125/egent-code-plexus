@@ -231,12 +231,14 @@ fn format_hits_emits_legacy_style_called_by_and_calls_block() {
         score_source: ScoreSource::Bm25,
         kind: "Function".to_string(),
         file: "src/config.rs".to_string(),
+        language: "Rust".to_string(),
         line: 42,
         name: "parseConfig".to_string(),
         signature: "Function parseConfig".to_string(),
         caller_count: 2,
         callers: vec!["loadSettings".to_string(), "initApp".to_string()],
         callees: vec!["tokenize".to_string()],
+        category: graph_nexus_core::graph::FileCategory::Source,
     };
     let out = format_hits(&[hit]);
     assert!(out.contains("parseConfig (src/config.rs:42)"), "got: {out}");
@@ -259,12 +261,14 @@ fn format_hits_skips_empty_caller_callee_lines() {
         score_source: ScoreSource::Substring,
         kind: "Function".to_string(),
         file: "src/main.rs".to_string(),
+        language: "Rust".to_string(),
         line: 1,
         name: "orphan".to_string(),
         signature: "Function orphan".to_string(),
         caller_count: 0,
         callers: vec![],
         callees: vec![],
+        category: graph_nexus_core::graph::FileCategory::Source,
     };
     let out = format_hits(&[hit]);
     assert!(out.contains("orphan (src/main.rs:1)"));

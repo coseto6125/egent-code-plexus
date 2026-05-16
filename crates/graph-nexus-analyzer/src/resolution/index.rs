@@ -114,6 +114,47 @@ impl Language {
             _ => Self::Unknown,
         }
     }
+
+    /// Canonical display name. Used by `gnx search` to emit the `language`
+    /// field on each Hit. Overrides Debug formatting for `Php` ("PHP") and
+    /// `Cpp` ("C++") where the conventional name differs from the variant
+    /// identifier.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Rust => "Rust",
+            Self::Python => "Python",
+            Self::TypeScript => "TypeScript",
+            Self::JavaScript => "JavaScript",
+            Self::Java => "Java",
+            Self::Kotlin => "Kotlin",
+            Self::Go => "Go",
+            Self::Ruby => "Ruby",
+            Self::Php => "PHP",
+            Self::CSharp => "CSharp",
+            Self::Swift => "Swift",
+            Self::Dart => "Dart",
+            Self::Solidity => "Solidity",
+            Self::Sql => "SQL",
+            Self::C => "C",
+            Self::Cpp => "C++",
+            Self::Move => "Move",
+            Self::Nim => "Nim",
+            Self::Cairo => "Cairo",
+            Self::Vyper => "Vyper",
+            Self::Verilog => "Verilog",
+            Self::Hcl => "HCL",
+            Self::Crystal => "Crystal",
+            Self::Lua => "Lua",
+            Self::Zig => "Zig",
+            Self::Bash => "Bash",
+            Self::Dockerfile => "Dockerfile",
+            Self::DockerCompose => "DockerCompose",
+            Self::GitHubActions => "GitHubActions",
+            Self::Yaml => "YAML",
+            Self::Markdown => "Markdown",
+        }
+    }
 }
 
 /// Build-time metadata about a file, cached per node id so `lookup_unique_global`
