@@ -12,12 +12,14 @@
 |-----------|---------|---------|--------|
 | `crates/graph-nexus-core/src/analyzer/pipeline.rs:262` | `files.into_par_iter().for_each_with(tx, ...` | safe | closure reads `&self` (immutable provider lookup), owns all output via crossbeam sender; no shared mutable state |
 | `crates/graph-nexus-cli/src/commands/search.rs:586` | `embeddings.par_iter().enumerate().filter_map(` | safe | closure reads shared slice + `q_norm` (f32 copy), owns `(idx, f32)` output; no writes to shared state |
-| `crates/graph-nexus-cli/src/commands/search.rs:785` | `loaded.par_iter().map(|(repo_name, engine_result)` | safe | closure reads shared `&[(String, Result<Engine,_>)]`, owns `Vec<Hit>` output; `dispatch_by_mode` takes `&ArchivedZeroCopyGraph` |
+| `crates/graph-nexus-cli/src/commands/search.rs:785` | `loaded.par_iter().map(|(...)| ...)` | safe | closure reads shared `&[(String, Result<Engine,_>)]`, owns `Vec<Hit>` output; `dispatch_by_mode` takes `&ArchivedZeroCopyGraph` |
 | `crates/graph-nexus-analyzer/src/resolution/builder.rs:627` | `// par_iter so the inner closure only needs read` | safe | comment explaining pre-computation strategy; not a callsite itself |
 | `crates/graph-nexus-analyzer/src/resolution/builder.rs:685` | `// par_iter worker so each thread owns its own` | safe | comment documenting per-thread `Resolver` construction; not a callsite itself |
 | `crates/graph-nexus-analyzer/src/resolution/builder.rs:734` | `local_graphs.par_iter().enumerate().flat_map_iter(` | safe | each worker constructs its own `Resolver` (no sharing); reads `&symbol_table`, `&reason_cache` (immutable after pre-computation); owns `Vec<Edge>` output |
 
 ### 3.2 Interior mutability (RefCell / Cell / UnsafeCell)
+
+**Pattern note**: 19 per-language tree-sitter parsers follow the same `thread_local! { static PARSER: RefCell<tree_sitter::Parser> }` pattern. `tree_sitter::Parser` is `!Send`, so `thread_local!` is the only correct sharing pattern under rayon. Each rayon worker thread instantiates its own `Parser` lazily; no cross-thread sharing is possible by construction. The per-row reasons below abbreviate this as "same `thread_local!` pattern".
 
 | file:line | snippet | verdict | reason |
 |-----------|---------|---------|--------|
