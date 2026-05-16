@@ -213,14 +213,10 @@ fn compute_single(
             bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
         }
         SearchMode::Vector => {
-            // TODO: wire to real cosine path (graph_nexus_analyzer::embeddings)
-            eprintln!("→ vector mode not yet wired — falling back to bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
+            vector_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
         }
         SearchMode::Hybrid => {
-            // TODO: fold bm25 + cosine scores when embeddings are wired
-            eprintln!("→ hybrid: embeddings not wired — using bm25");
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
+            hybrid_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
         }
     };
 
