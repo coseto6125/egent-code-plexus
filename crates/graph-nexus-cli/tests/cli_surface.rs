@@ -57,17 +57,10 @@ fn top_level_hides_admin() {
 }
 
 #[test]
-fn admin_help_lists_seven_entries() {
+fn admin_help_lists_expected_entries() {
+    // rename-branch removed in v2 (branch not in storage)
     let help = gnx_admin_help();
-    for cmd in [
-        "install-hook",
-        "drop",
-        "prune",
-        "rename-branch",
-        "config",
-        "group",
-        "index",
-    ] {
+    for cmd in ["install-hook", "drop", "prune", "config", "group", "index"] {
         assert!(help.contains(cmd), "missing {cmd} in admin --help:\n{help}");
     }
 }

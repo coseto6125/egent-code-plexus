@@ -4,8 +4,10 @@ fn gnx_bin() -> &'static str {
     env!("CARGO_BIN_EXE_gnx")
 }
 
+/// `gnx admin prune --branch` is a no-op in v2 (branch isn't stored).
+/// The command now returns an error directing users to --orphans.
 #[test]
-fn prune_removes_index_dir_and_registry_branch() {
+fn prune_branch_returns_informative_error() {
     let home_tmp = tempfile::tempdir().unwrap();
     let repo_tmp = tempfile::tempdir().unwrap();
 
@@ -15,41 +17,6 @@ fn prune_removes_index_dir_and_registry_branch() {
         .current_dir(repo_tmp.path())
         .output()
         .unwrap();
-    Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:E-NoR/prune-test.git",
-        ])
-        .current_dir(repo_tmp.path())
-        .output()
-        .unwrap();
-    std::fs::write(repo_tmp.path().join("x"), "x").unwrap();
-    Command::new("git")
-        .args(["add", "x"])
-        .current_dir(repo_tmp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args([
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "i",
-        ])
-        .current_dir(repo_tmp.path())
-        .output()
-        .unwrap();
-
-    // Pre-create a fake index for a branch
-    let branch_dir = home_tmp.path().join(".gnx/prune-test/feat-x");
-    std::fs::create_dir_all(&branch_dir).unwrap();
-    std::fs::write(branch_dir.join("graph.bin"), b"junk").unwrap();
 
     let out = Command::new(gnx_bin())
         .args([
@@ -63,50 +30,67 @@ fn prune_removes_index_dir_and_registry_branch() {
         .env("HOME", home_tmp.path())
         .output()
         .unwrap();
+    // v2: --branch prune is stubbed and returns an error
     assert!(
-        out.status.success(),
-        "admin prune failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        !out.status.success(),
+        "expected error for --branch in v2; stdout={}",
+        String::from_utf8_lossy(&out.stdout)
     );
-
-    assert!(!branch_dir.exists(), "expected branch dir to be removed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no-op") || stderr.contains("v2") || stderr.contains("orphans"),
+        "expected informative v2 message; stderr={stderr}"
+    );
 }
 
 #[test]
-fn prune_orphans_drops_entries_with_missing_worktree_path() {
-    use graph_nexus_core::registry::{RegistryFile, RepoEntry};
+fn prune_orphans_drops_entries_with_missing_common_dir() {
+    use graph_nexus_core::registry::{RegistryFile, RepoAlias};
+    use std::collections::BTreeMap;
 
     let home_tmp = tempfile::tempdir().unwrap();
-    let valid_wt = tempfile::tempdir().unwrap();
     let home_gnx = home_tmp.path().join(".gnx");
     std::fs::create_dir_all(&home_gnx).unwrap();
 
-    let valid_index = home_gnx.join("valid-repo");
-    let orphan_index = home_gnx.join("orphan-repo");
-    std::fs::create_dir_all(valid_index.join("main")).unwrap();
-    std::fs::create_dir_all(orphan_index.join("main")).unwrap();
-    std::fs::write(orphan_index.join("main/graph.bin"), b"junk").unwrap();
+    // valid-repo: common_dir exists (use the home_gnx dir itself as a stand-in)
+    let valid_common_dir = home_gnx.clone();
+    let valid_index = home_gnx.join("valid-repo__aabbccdd");
+    // orphan-repo: common_dir does NOT exist
+    let orphan_index = home_gnx.join("orphan-repo__aabbccdd");
+    std::fs::create_dir_all(valid_index.join("commits")).unwrap();
+    std::fs::create_dir_all(orphan_index.join("commits").join("sha_abc12345")).unwrap();
+    std::fs::write(
+        orphan_index.join("commits/sha_abc12345/graph.bin"),
+        b"junk",
+    )
+    .unwrap();
 
+    let mut repos = BTreeMap::new();
+    repos.insert(
+        "valid-repo__aabbccdd".into(),
+        RepoAlias {
+            dir_name: "valid-repo__aabbccdd".into(),
+            common_dir: valid_common_dir.to_string_lossy().into_owned(),
+            remote_url: Some("git@github.com:E-NoR/valid.git".into()),
+            aliases: vec!["valid-repo".into()],
+            last_touched: "2026-05-16T00:00:00Z".into(),
+            groups: vec![],
+        },
+    );
+    repos.insert(
+        "orphan-repo__aabbccdd".into(),
+        RepoAlias {
+            dir_name: "orphan-repo__aabbccdd".into(),
+            common_dir: "/nonexistent/path/that/does/not/exist/.git".into(),
+            remote_url: Some("git@github.com:E-NoR/orphan.git".into()),
+            aliases: vec!["orphan-repo".into()],
+            last_touched: "2026-05-16T00:00:00Z".into(),
+            groups: vec![],
+        },
+    );
     let registry = RegistryFile {
-        version: 1,
-        repos: vec![
-            RepoEntry {
-                name: "valid-repo".into(),
-                remote_url: "git@github.com:E-NoR/valid.git".into(),
-                worktree_path: valid_wt.path().display().to_string(),
-                index_dir_root: valid_index.display().to_string(),
-                branches: vec![],
-                groups: vec![],
-            },
-            RepoEntry {
-                name: "orphan-repo".into(),
-                remote_url: "git@github.com:E-NoR/orphan.git".into(),
-                worktree_path: "/nonexistent/path/that/does/not/exist".into(),
-                index_dir_root: orphan_index.display().to_string(),
-                branches: vec![],
-                groups: vec![],
-            },
-        ],
+        version: 2,
+        repos,
         groups: vec![],
     };
     let registry_path = home_gnx.join("registry.json");
@@ -143,5 +127,8 @@ fn prune_orphans_drops_entries_with_missing_worktree_path() {
         1,
         "expected one repo to remain after orphan sweep"
     );
-    assert_eq!(updated.repos[0].name, "valid-repo");
+    assert!(
+        updated.repos.contains_key("valid-repo__aabbccdd"),
+        "valid-repo should remain"
+    );
 }

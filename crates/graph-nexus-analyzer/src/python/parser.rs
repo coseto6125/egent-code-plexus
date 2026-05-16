@@ -4,6 +4,7 @@ use crate::framework_helpers::{
     enclosing_class, enclosing_function_name, enumerate_class_methods, has_import_from, node_span,
     Span, MODULE_LEVEL_SOURCE,
 };
+use graph_nexus_core::algorithms::process_trace::is_test_path;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode, RawRoute,
@@ -19,6 +20,27 @@ use tree_sitter::{Node, Query, QueryCursor};
 const FASTAPI_REQUIRED: &[&str] = &["fastapi"];
 const DJANGO_REQUIRED: &[&str] = &["django"];
 const CELERY_REQUIRED: &[&str] = &["celery"];
+
+/// Module prefixes that gate generic Route emission. A file that doesn't
+/// import any of these can still produce framework-specific refs
+/// (FastAPI Depends, Django signals, Celery tasks) but its `obj.get(...)`
+/// / `obj.post(...)` calls are NOT considered routes — they're almost
+/// always `dict.get` / response-key access FPs. Spec:
+/// `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+const HTTP_FRAMEWORK_MODULES: &[&str] = &[
+    "fastapi",
+    "flask",
+    "django",
+    "starlette",
+    "aiohttp",
+    "tornado",
+    "sanic",
+    "bottle",
+    "falcon",
+    "pyramid",
+    "quart",
+    "litestar",
+];
 
 /// Blind-spot kind/hint pairs. Order matches the capture-index lookup in
 /// `parse_file` (eval / exec / compile / dynamic-import / builtin-import /
@@ -49,6 +71,166 @@ const BLIND_SPEC: &[(&str, &str)] = &[
         "getattr(<obj>, name)() with obj != self — cross-object reflection; target class not enumerated by gnx Phase 2",
     ),
 ];
+
+/// Test-client chain markers — segments that appear in test-suite client
+/// patterns but not in production route registration. `app.test_client.get(...)`
+/// (Flask / Sanic / Tornado), `app.asgi_client.get(...)` (Sanic async),
+/// `app.sync_client.get(...)` (some custom test harnesses). Each is
+/// overwhelmingly a testing convention; user code that names a production
+/// attribute the same way would be false-negative.
+const TEST_CLIENT_CHAIN_MARKERS: &[&str] = &[".test_client.", ".asgi_client.", ".sync_client."];
+
+/// Route-registration method names that don't encode an HTTP verb in the
+/// name. They default to GET when no `methods=[...]` kwarg is supplied;
+/// otherwise the kwarg specifies the verb(s). Used to gate (a) the
+/// framework-presence relaxation, (b) bare-path normalization, (c) the
+/// methods-kwarg parse branch. Single source of truth — keeps the three
+/// emission-time checks aligned when a new registration method is added.
+const REGISTRATION_METHOD_NAMES: &[&str] = &["route", "add_route", "add_url_rule", "add_api_route"];
+
+/// Direct receiver names that — only inside test files (path/filename
+/// classified as Test) — indicate a test-client variable injected via
+/// pytest fixture or similar. Common conventions: `http_client` (Sanic
+/// inspector tests), `client` / `api_client` / `async_client` (Flask /
+/// FastAPI). In production files these names could legitimately be a
+/// Blueprint or app variable, so we only treat them as test-client when
+/// the source file is itself a test file.
+///
+/// Caller must combine with `is_test_path(file_path)`. Empirical impact
+/// on sanic-org/sanic `tests/worker/test_inspector.py`: removes 3 final
+/// `--include-tests` FPs (`/reload`, `/shutdown`, `/scale`) where
+/// `http_client` is a pytest fixture function.
+const TEST_FILE_DIRECT_RECEIVERS: &[&str] = &[
+    "http_client",
+    "client",
+    "api_client",
+    "async_client",
+    "asgi_client",
+    "test_client",
+    "sync_client",
+];
+
+/// True when `call_node`'s function chain's immediate receiver is a bare
+/// identifier matching one of `TEST_FILE_DIRECT_RECEIVERS`. Used only in
+/// combination with a test-file path check (caller responsibility).
+fn is_test_file_direct_receiver_call(call_node: Node, source: &[u8]) -> bool {
+    let Some(fn_node) = call_node.child_by_field_name("function") else {
+        return false;
+    };
+    // function is an attribute node like `http_client.post`; its object
+    // field is the receiver. Only check bare identifiers — chained
+    // accesses like `self.http_client.X` are out of scope for this filter
+    // (the `.test_client.` chain filter handles those).
+    let Some(obj_node) = fn_node.child_by_field_name("object") else {
+        return false;
+    };
+    if obj_node.kind() != "identifier" {
+        return false;
+    }
+    let Ok(name) = std::str::from_utf8(&source[obj_node.start_byte()..obj_node.end_byte()]) else {
+        return false;
+    };
+    TEST_FILE_DIRECT_RECEIVERS.contains(&name)
+}
+
+/// True when the call's function chain contains any test-client marker,
+/// identifying patterns like `app.test_client.get('/x')` /
+/// `self.app.asgi_client.post(...)`. These are test-client REQUESTS, not
+/// route DEFINITIONS — tree-sitter sees the same call shape for both, so
+/// the parser-side filter keeps them out of `routes` regardless of file
+/// category. Empirical impact on sanic-org/sanic: cuts ~88% of the
+/// `--include-tests` "extra paths" vs gitnexus.
+fn is_test_client_chained_call(call_node: Node, source: &[u8]) -> bool {
+    let Some(fn_node) = call_node.child_by_field_name("function") else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&source[fn_node.start_byte()..fn_node.end_byte()]) else {
+        return false;
+    };
+    TEST_CLIENT_CHAIN_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+/// Walk a route-registration call node (`@app.route(...)`, `app.add_url_rule(...)`,
+/// `app.add_api_route(...)`) for the optional `methods=[...]` kwarg.
+///
+/// Return value semantics (matches caller's three-state handling):
+/// - `None` — no `methods=` kwarg at all → caller defaults to `["GET"]`
+///   per Flask / Sanic / FastAPI semantics.
+/// - `Some(empty)` — kwarg present but value isn't a list of string literals
+///   we can parse → caller skips emit (don't fabricate a method).
+/// - `Some(non-empty)` — parsed methods, caller emits one Route per method.
+///
+/// P1 review fix for PR #50: previously `@app.route("/x", methods=["POST"])`
+/// silently translated to `GET /x`, producing fake GET routes and missing
+/// real POSTs.
+fn extract_methods_kwarg(call_node: Node, source: &[u8]) -> Option<Vec<String>> {
+    let args = call_node.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    for child in args.children(&mut cursor) {
+        if child.kind() != "keyword_argument" {
+            continue;
+        }
+        // Use `continue` not `?` for inner-loop skips — `?` would abort
+        // the entire function on a single malformed kwarg and silently
+        // fall back to the default `GET`, masking later valid `methods=`
+        // arguments.
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Ok(name) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+        else {
+            continue;
+        };
+        if name != "methods" {
+            continue;
+        }
+        let Some(raw_value) = child.child_by_field_name("value") else {
+            continue;
+        };
+        // Unwrap `frozenset({...})` / `set([...])` / `tuple([...])` wrappers
+        // common in Sanic (`methods=frozenset({"PUT","POST"})`). The literal
+        // collection (set/list/tuple) lives as the first arg of the call.
+        let value = match raw_value.kind() {
+            "call" => {
+                let fn_node = raw_value.child_by_field_name("function")?;
+                let fn_name =
+                    std::str::from_utf8(&source[fn_node.start_byte()..fn_node.end_byte()]).ok()?;
+                if !matches!(fn_name, "frozenset" | "set" | "tuple" | "list") {
+                    return Some(Vec::new()); // unrecognized wrapper
+                }
+                let args = raw_value.child_by_field_name("arguments")?;
+                let mut arg_cursor = args.walk();
+                let inner = args
+                    .children(&mut arg_cursor)
+                    .find(|c| matches!(c.kind(), "set" | "list" | "tuple"));
+                inner.unwrap_or(raw_value)
+            }
+            _ => raw_value,
+        };
+        if !matches!(value.kind(), "list" | "set" | "tuple") {
+            return Some(Vec::new()); // present but unparseable
+        }
+        let mut methods = Vec::new();
+        let mut list_cursor = value.walk();
+        for el in value.children(&mut list_cursor) {
+            if el.kind() != "string" {
+                continue;
+            }
+            if let Ok(text) = std::str::from_utf8(&source[el.start_byte()..el.end_byte()]) {
+                let cleaned = text
+                    .trim_matches(|c: char| c == '\'' || c == '"' || c == '`')
+                    .to_ascii_uppercase();
+                if !cleaned.is_empty() {
+                    methods.push(cleaned);
+                }
+            }
+        }
+        return Some(methods);
+    }
+    None
+}
 
 /// Push a Django signal RawFrameworkRef when both `sig_node` (signal name) and
 /// `handler_node` (handler identifier) decode as UTF-8. Shared by `@receiver`
@@ -234,6 +416,12 @@ impl LanguageProvider for PythonProvider {
         let has_fastapi = has_import_from(&imports, FASTAPI_REQUIRED);
         let has_django = has_import_from(&imports, DJANGO_REQUIRED);
         let has_celery = has_import_from(&imports, CELERY_REQUIRED);
+        let has_any_http_framework = has_import_from(&imports, HTTP_FRAMEWORK_MODULES);
+        // Path-conditional flag for the test-file-only direct-receiver
+        // filter. `is_test_path` matches `tests/` / `test_*.py` / `conftest.`
+        // / `*_test.py` / `_spec.` and the rest of the FileCategory::Test
+        // patterns. Production files keep their permissive emission rules.
+        let file_is_test = is_test_path(&path.to_string_lossy());
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
@@ -267,6 +455,7 @@ impl LanguageProvider for PythonProvider {
 
             let mut route_method = None;
             let mut route_path = None;
+            let mut route_call_node: Option<Node> = None;
             let mut is_route = false;
 
             let mut fa_route_app_node = None;
@@ -314,6 +503,7 @@ impl LanguageProvider for PythonProvider {
                 } else if cap_idx == idx.route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
+                    route_call_node = Some(cap.node);
                 } else if cap_idx == idx.function || cap_idx == idx.class {
                     root_span_node = Some(cap.node);
                 } else if cap_idx == idx.fastapi_depends_target {
@@ -507,7 +697,49 @@ impl LanguageProvider for PythonProvider {
             // the single source of truth and lets the framework gates run before
             // any pending_*_refs push.
 
-            if is_route {
+            // Framework-presence gate, with a relaxation for route-registration
+            // methods (`route`, `add_route`, `add_url_rule`, `add_api_route`).
+            // These method names are sufficiently framework-specific that a
+            // bare `@bp.route(...)` in a file that does `from app.api import bp`
+            // (transitive Flask Blueprint — common pattern in real Flask apps,
+            // e.g. miguelgrinberg/microblog `app/api/tokens.py`) still gets
+            // emitted even though gnx can't statically follow the chain to
+            // confirm `bp` is a `Blueprint`.
+            //
+            // Defense-in-depth: the relaxation also requires the file to have
+            // AT LEAST ONE import. A self-contained script that defines its
+            // own `class CustomRouter { def route(...) }` and calls it inline
+            // has zero imports — that's almost certainly not a web framework
+            // and the relaxation would FP. Files using a Blueprint always
+            // import the blueprint identifier, so the recall path is
+            // preserved.
+            let route_method_is_framework_specific = route_method
+                .and_then(|n| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok())
+                .map(|s| REGISTRATION_METHOD_NAMES.contains(&s.to_ascii_lowercase().as_str()))
+                .unwrap_or(false)
+                && !imports.is_empty();
+            // Drop `<receiver>.test_client.X(...)` patterns up-front: these
+            // are test-client REQUESTS, not route definitions. Tree-sitter
+            // can't distinguish them by call shape; the `.test_client.`
+            // substring in the chained function name is the cheapest reliable
+            // signal. Empirical: removes ~88% of the Sanic `--include-tests`
+            // FPs.
+            if let Some(call_node) = route_call_node {
+                if is_test_client_chained_call(call_node, source) {
+                    continue;
+                }
+                // Path-conditional filter: in test files, also drop calls
+                // whose immediate receiver is a known test-client fixture
+                // name (`http_client`, `client`, `api_client`, ...). These
+                // are pytest fixtures that bind to HTTP clients — not
+                // route registrations. Production files keep emitting on
+                // these names because there `client = Blueprint(...)`
+                // / `client = APIRouter()` is legitimate.
+                if file_is_test && is_test_file_direct_receiver_call(call_node, source) {
+                    continue;
+                }
+            }
+            if is_route && (has_any_http_framework || route_method_is_framework_specific) {
                 if let (Some(r_method), Some(r_path), Some(root)) =
                     (route_method, route_path, root_span_node)
                 {
@@ -515,12 +747,50 @@ impl LanguageProvider for PythonProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
-                        routes.push(RawRoute {
-                            method: method_str.to_string(),
-                            path: path_str.to_string(),
-                            handler: None,
-                            span: node_span(&root),
-                        });
+                        // For route-registration methods (see
+                        // `REGISTRATION_METHOD_NAMES`), framework convention
+                        // (Sanic, Flask) accepts both `'path'` and `'/path'` —
+                        // semantically `/path`. Normalize bare paths so the
+                        // builder's `looks_like_path` filter doesn't drop them
+                        // (mirrors PHP/Laravel bare-path handling).
+                        let method_lower = method_str.to_ascii_lowercase();
+                        let is_registration_method =
+                            REGISTRATION_METHOD_NAMES.contains(&method_lower.as_str());
+                        let resolved_path = if is_registration_method {
+                            crate::route_detector::clean_route_path_lax(path_str)
+                        } else {
+                            crate::route_detector::clean_route_path(path_str)
+                        };
+                        if let Some(clean_path) = resolved_path {
+                            // Registration methods don't encode the HTTP verb;
+                            // default to GET when no `methods=[...]` kwarg is
+                            // supplied, otherwise parse the kwarg. P1 review
+                            // fix for PR #50: previously translated unconditionally
+                            // to GET, fabricating data when `methods=["POST"]`
+                            // was present.
+                            let methods_to_emit: Vec<String> = if is_registration_method {
+                                match route_call_node.and_then(|n| extract_methods_kwarg(n, source))
+                                {
+                                    None => vec!["GET".to_string()],
+                                    Some(methods) if !methods.is_empty() => methods,
+                                    Some(_) => {
+                                        // kwarg present but unparseable — skip
+                                        // rather than fabricate a method.
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                vec![method_str.to_string()]
+                            };
+                            for method in methods_to_emit {
+                                routes.push(RawRoute {
+                                    method,
+                                    path: clean_path.clone(),
+                                    handler: None,
+                                    span: node_span(&root),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -581,6 +851,24 @@ impl LanguageProvider for PythonProvider {
                 span,
             });
         }
+
+        // Dedupe routes by (method, path, span). The generic tree-sitter query
+        // `arguments: (argument_list (string) @route.path)` matches EVERY string
+        // child of the argument list — so `app.add_url_rule("/path", "endpoint",
+        // handler)` fires twice (once for "/path", once for "endpoint"). The
+        // endpoint name normally fails the strict `clean_route_path` filter
+        // (no leading `/`), but for registration methods we use the lax variant
+        // which prepends `/` and would emit `/endpoint` as a duplicate of
+        // `/path` after both normalize. Dedupe is the simplest fix without
+        // changing the query (which would break Sanic's
+        // `add_route(handler, "/path")` arg-order variant).
+        routes.sort_by(|a, b| {
+            a.method
+                .cmp(&b.method)
+                .then(a.path.cmp(&b.path))
+                .then(a.span.cmp(&b.span))
+        });
+        routes.dedup_by(|a, b| a.method == b.method && a.path == b.path && a.span == b.span);
 
         Ok(LocalGraph {
             content_hash: [0; 32],

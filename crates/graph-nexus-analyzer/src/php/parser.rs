@@ -16,6 +16,61 @@ use tree_sitter::{Parser, Query, QueryCursor};
 /// codebase shouldn't surface as a Laravel route.
 const LARAVEL_REQUIRED: &[&str] = &["Illuminate"];
 
+/// PHP HTTP-framework namespace allowlist. Generic Route emission
+/// (`Route::get('/x')`, `Slim::get(...)`, etc.) requires the file to
+/// import from one of these — without this gate, a user-defined
+/// `class Route { static get($k) {...} }` would fire route emission
+/// just by matching the scope-name allowlist. P1 review finding on
+/// PR #50; see `2026-05-17-route-precision-design.md`.
+const PHP_HTTP_FRAMEWORK_NAMESPACES: &[&str] = &[
+    "Illuminate", // Laravel
+    "Laravel",    // Lumen (Laravel\Lumen\...) and other Laravel-flavored
+    "Slim",       // Slim
+    "Symfony",    // Symfony
+    "Laminas",    // Laminas
+    "Zend",       // Zend Framework
+    "CodeIgniter",
+];
+
+/// Router-class scope allowlist for the generic `scoped_call_expression`
+/// route capture. Without it, `Cache::get('key')` / `Config::get('app.name')`
+/// / `Auth::get(...)` all match the regex and surface as fake routes.
+/// Pairs with `PHP_HTTP_FRAMEWORK_NAMESPACES` import gate: scope match
+/// alone isn't enough, the file must also import from a known framework
+/// namespace. List intentionally narrow — `App` was removed (too generic;
+/// any user `class App` would FP) and `Lumen` was removed (Lumen routes
+/// flow through `$app->get(...)` instance calls, not `Lumen::get(...)`
+/// static calls).
+const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symfony"];
+
+/// Walk a chained member-call expression inward through any depth of
+/// `member_call_expression` until it reaches a `scoped_call_expression` root.
+/// Returns the scope name (`Route`, `Router`, etc.) when the chain terminates
+/// in a scoped call; `None` for any other shape (regular method calls, deep
+/// object navigation, etc.).
+///
+/// Powers chained-route detection like `Route::middleware(['auth'])->get(...)`
+/// or `Route::middleware(...)->prefix(...)->post(...)`. The query captures the
+/// outer member_call; this walks the object field inward to find the root.
+fn walk_to_scoped_root_scope(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut cur = node;
+    loop {
+        match cur.kind() {
+            "member_call_expression" | "member_access_expression" => {
+                cur = cur.child_by_field_name("object")?;
+            }
+            "scoped_call_expression" => {
+                let scope_node = cur.child_by_field_name("scope")?;
+                let scope_text =
+                    std::str::from_utf8(&source[scope_node.start_byte()..scope_node.end_byte()])
+                        .ok()?;
+                return Some(scope_text.to_string());
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Walk an `array_creation_expression` of shape `[Controller::class, 'action']`
 /// and produce `"Controller@action"` matching Laravel's `@`-routing syntax.
 /// Returns `None` for any array that doesn't match this exact shape.
@@ -128,8 +183,12 @@ impl LanguageProvider for PhpProvider {
         let idx_method = self.query.capture_index_for_name("method");
 
         let idx_route_call = self.query.capture_index_for_name("route.call");
+        let idx_route_scope = self.query.capture_index_for_name("route.scope");
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
+        // Chained-call variant: `Route::middleware(...)->get('/x', ...)`.
+        let idx_route_chained_call = self.query.capture_index_for_name("route.chained.call");
+        let idx_route_chained_object = self.query.capture_index_for_name("route.chained.object");
 
         // Laravel `Route::method('/path', <handler>)`. The outer call
         // anchors the match; the parser walks the `arguments` node to
@@ -157,6 +216,7 @@ impl LanguageProvider for PhpProvider {
             let mut route_method = None;
             let mut route_path = None;
             let mut route_span_node = None;
+            let mut route_scope: Option<String> = None;
 
             // Per-match Laravel route captures. `laravel_call_span` is
             // the whole `Route::method(...)` expression; `laravel_args_node`
@@ -218,6 +278,12 @@ impl LanguageProvider for PhpProvider {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);
                     }
+                } else if Some(cap_idx) == idx_route_scope {
+                    if let Ok(s_str) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        route_scope = Some(s_str.to_string());
+                    }
                 } else if Some(cap_idx) == idx_route_method {
                     if let Ok(m_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -228,11 +294,28 @@ impl LanguageProvider for PhpProvider {
                     if let Ok(p_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        let path = p_str.trim_matches(|c| c == '\'' || c == '"').to_string();
-                        route_path = Some(path);
+                        // Laravel allows leading-slash-optional routes:
+                        // `Route::get('register', ...)` is semantically `/register`.
+                        // `clean_route_path_lax` strips quotes and prepends `/`
+                        // when missing — same helper Python parser uses for
+                        // Sanic / Flask / FastAPI bare paths so the builder's
+                        // strict `looks_like_path` filter accepts both forms.
+                        route_path = crate::route_detector::clean_route_path_lax(p_str);
                     }
                 } else if Some(cap_idx) == idx_route_call {
                     route_span_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_route_chained_call {
+                    // Same role as idx_route_call for the chained variant — the
+                    // outer member_call_expression spans the whole route registration.
+                    route_span_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_route_chained_object {
+                    // Walk the object chain inward to find the scoped_call root.
+                    // If found, treat that scope as `route_scope` so the scope-name
+                    // allowlist gate downstream fires the same way as for direct
+                    // `Route::get(...)` calls.
+                    if let Some(root_scope) = walk_to_scoped_root_scope(cap.node, source) {
+                        route_scope = Some(root_scope);
+                    }
                 } else if Some(cap_idx) == idx_laravel_call {
                     laravel_call_span = Some(node_span(&cap.node));
                 } else if Some(cap_idx) == idx_laravel_args {
@@ -272,7 +355,16 @@ impl LanguageProvider for PhpProvider {
                 }
             }
 
-            if let (Some(rm), Some(rp), Some(rs_node)) = (route_method, route_path, route_span_node)
+            // Router-class allowlist gate — drop matches where the scope
+            // doesn't belong to a known PHP router class. This is the
+            // primary FP filter for PHP (replaces the path-shape filter
+            // that would mis-reject Laravel bare paths like 'register').
+            let scope_ok = route_scope
+                .as_deref()
+                .map(|s| PHP_ROUTER_SCOPES.contains(&s))
+                .unwrap_or(false);
+            if let (true, Some(rm), Some(rp), Some(rs_node)) =
+                (scope_ok, route_method, route_path, route_span_node)
             {
                 let start = rs_node.start_position();
                 let end = rs_node.end_position();
@@ -416,6 +508,17 @@ impl LanguageProvider for PhpProvider {
                     span: *span,
                 });
             }
+        }
+
+        // Framework-presence gate (P1 review fix). Scope-name allowlist
+        // alone isn't enough — a user-defined `class Route { static function
+        // get($k) {...} }` in a non-framework PHP project would still pass
+        // (reviewer's regression test confirmed). Require the file to
+        // import from a known PHP web-framework namespace before any Route
+        // is emitted. No path-shape filter (Laravel uses bare paths like
+        // `'register'`). Spec: 2026-05-17-route-precision-design.md.
+        if !has_import_from(&imports, PHP_HTTP_FRAMEWORK_NAMESPACES) {
+            routes.clear();
         }
 
         Ok(LocalGraph {

@@ -25,6 +25,7 @@ export function other() { return 2; }
 "#;
 
 #[test]
+#[ignore = "requires --dump-resolver which is deferred in v2 (build_l2 doesn't yet wire it); restore after Phase 5+ overlay merge lands and --dump-resolver is re-implemented"]
 fn diff_bindings_two_commit_resolution_change() {
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path();

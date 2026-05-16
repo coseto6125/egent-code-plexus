@@ -1094,10 +1094,13 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "etoon",
+ "fs2",
  "graph-nexus-analyzer",
  "graph-nexus-core",
  "graph-nexus-mcp",
+ "hex",
  "ignore",
+ "libc",
  "memmap2",
  "ratatui",
  "rayon",
@@ -1115,6 +1118,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "walkdir",
 ]
 
 [[package]]

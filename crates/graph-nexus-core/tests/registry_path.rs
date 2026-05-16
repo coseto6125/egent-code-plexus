@@ -42,30 +42,6 @@ fn accepts_valid_names() {
     assert_eq!(sanitize_segment("ABC-123").unwrap(), "ABC-123");
 }
 
-use graph_nexus_core::registry::sanitize_branch;
-
-#[test]
-fn branch_normalizes_slash() {
-    assert_eq!(sanitize_branch("feat/foo").unwrap(), "feat__foo");
-    assert_eq!(sanitize_branch("feat/foo/bar").unwrap(), "feat__foo__bar");
-}
-
-#[test]
-fn branch_replaces_invalid_chars_with_underscore() {
-    assert_eq!(sanitize_branch("feat:foo").unwrap(), "feat_foo");
-    assert_eq!(sanitize_branch("feat foo").unwrap(), "feat_foo");
-}
-
-#[test]
-fn branch_handles_real_world_names() {
-    assert_eq!(sanitize_branch("main").unwrap(), "main");
-    assert_eq!(sanitize_branch("fix/hook-race").unwrap(), "fix__hook-race");
-    assert_eq!(
-        sanitize_branch("release/v1.2.3").unwrap(),
-        "release__v1.2.3"
-    );
-}
-
 use graph_nexus_core::registry::derive_repo_name;
 
 #[test]
@@ -133,78 +109,3 @@ fn uid_errors_if_not_under_repo() {
     assert!(uid_path(abs, repo).is_err());
 }
 
-use graph_nexus_core::registry::IndexLayout;
-use std::path::PathBuf;
-
-fn fake_home() -> PathBuf {
-    PathBuf::from("/home/test/.gnx")
-}
-
-#[test]
-fn index_path_basic() {
-    let layout = IndexLayout::resolve(
-        &fake_home(),
-        "graph-nexus",
-        "main",
-        "/home/test/code/graph-nexus",
-        &[],
-    )
-    .unwrap();
-    assert_eq!(
-        layout.index_dir,
-        PathBuf::from("/home/test/.gnx/graph-nexus/main")
-    );
-    assert_eq!(layout.disambiguator, None);
-}
-
-#[test]
-fn index_path_collision_gets_hash() {
-    let existing = vec![(
-        "graph-nexus".to_string(),
-        "/home/test/other-worktree".to_string(),
-    )];
-    let layout = IndexLayout::resolve(
-        &fake_home(),
-        "graph-nexus",
-        "main",
-        "/home/test/code/graph-nexus",
-        &existing,
-    )
-    .unwrap();
-    // Windows: PathBuf::join 會用 '\'，把斷言走 forward-slash 規範化才能跨平台比對
-    // （與 builder.rs / registry/path.rs uid_path 的 idiom 一致）。
-    let dir_str = layout.index_dir.to_string_lossy().replace('\\', "/");
-    assert!(
-        dir_str.starts_with("/home/test/.gnx/graph-nexus-"),
-        "got {:?}",
-        layout.index_dir
-    );
-    assert!(layout.disambiguator.is_some());
-}
-
-#[test]
-fn index_path_same_worktree_no_collision() {
-    // Same repo name + same worktree path → not a collision
-    let existing = vec![(
-        "graph-nexus".to_string(),
-        "/home/test/code/graph-nexus".to_string(),
-    )];
-    let layout = IndexLayout::resolve(
-        &fake_home(),
-        "graph-nexus",
-        "main",
-        "/home/test/code/graph-nexus",
-        &existing,
-    )
-    .unwrap();
-    assert_eq!(layout.disambiguator, None);
-}
-
-#[test]
-fn index_path_rejects_escape_via_relative_segments() {
-    // Even though sanitize_segment rejects ".." now, this guards
-    // against future refactors that loosen the segment check.
-    // Using a normal call to verify the assertion path doesn't false-alarm:
-    let layout = IndexLayout::resolve(&fake_home(), "valid-repo", "main", "/path", &[]).unwrap();
-    assert!(layout.index_dir.starts_with(fake_home()));
-}

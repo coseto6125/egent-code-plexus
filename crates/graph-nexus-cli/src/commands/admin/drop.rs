@@ -28,8 +28,8 @@ pub fn run(args: DropArgs) -> Result<(), graph_nexus_core::GnxError> {
 
     if args.all {
         let snapshot = registry.snapshot().clone();
-        for repo in &snapshot.repos {
-            let index_dir = home_gnx.join(&repo.name);
+        for (dir_name, _alias) in &snapshot.repos {
+            let index_dir = home_gnx.join(dir_name);
             if index_dir.exists() {
                 std::fs::remove_dir_all(&index_dir)?;
             }
@@ -87,13 +87,13 @@ fn rewrite_without(
 
     match repo_name {
         Some(name) => {
-            current.repos.retain(|r| r.name != name);
+            current.repos.retain(|k, _v| k != name);
             for g in current.groups.iter_mut() {
                 g.members.retain(|m| m != name);
             }
         }
         None => {
-            let all_names: Vec<String> = current.repos.iter().map(|r| r.name.clone()).collect();
+            let all_names: Vec<String> = current.repos.keys().cloned().collect();
             current.repos.clear();
             for g in current.groups.iter_mut() {
                 g.members.retain(|m| !all_names.contains(m));

@@ -43,8 +43,8 @@ pub struct BindingChange {
 
 /// Invoke `gnx admin index --repo <repo_dir> --dump-resolver <out_path>`.
 pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
-    let self_exe = std::env::current_exe()
-        .map_err(|e| GnxError::Output(format!("current_exe: {e}")))?;
+    let self_exe =
+        std::env::current_exe().map_err(|e| GnxError::Output(format!("current_exe: {e}")))?;
     let repo_str = repo_dir.to_str().ok_or_else(|| {
         GnxError::Output(format!(
             "repo path contains non-UTF-8: {}",
@@ -58,7 +58,14 @@ pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
         ))
     })?;
     let out = Command::new(&self_exe)
-        .args(["admin", "index", "--repo", repo_str, "--dump-resolver", out_str])
+        .args([
+            "admin",
+            "index",
+            "--repo",
+            repo_str,
+            "--dump-resolver",
+            out_str,
+        ])
         .output()
         .map_err(|e| GnxError::Output(format!("gnx admin index spawn: {e}")))?;
     if !out.status.success() {
@@ -71,9 +78,7 @@ pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
 }
 
 /// Parse a JSONL file of `BindingDecision` records into a keyed map.
-pub fn load_jsonl(
-    path: &Path,
-) -> Result<HashMap<(String, String), BindingDecision>, GnxError> {
+pub fn load_jsonl(path: &Path) -> Result<HashMap<(String, String), BindingDecision>, GnxError> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| GnxError::Output(format!("read {}: {e}", path.display())))?;
     let mut map = HashMap::new();
@@ -82,9 +87,8 @@ pub fn load_jsonl(
         if line.is_empty() {
             continue;
         }
-        let dec: BindingDecision = serde_json::from_str(line).map_err(|e| {
-            GnxError::Output(format!("JSONL line {} parse: {e}", idx + 1))
-        })?;
+        let dec: BindingDecision = serde_json::from_str(line)
+            .map_err(|e| GnxError::Output(format!("JSONL line {} parse: {e}", idx + 1)))?;
         map.insert((dec.src_file.clone(), dec.name.clone()), dec);
     }
     Ok(map)
@@ -96,8 +100,7 @@ pub fn diff(
     current: &HashMap<(String, String), BindingDecision>,
 ) -> BindingsDiff {
     let mut out = BindingsDiff::default();
-    let mut keys: Vec<&(String, String)> =
-        baseline.keys().chain(current.keys()).collect();
+    let mut keys: Vec<&(String, String)> = baseline.keys().chain(current.keys()).collect();
     keys.sort();
     keys.dedup();
 

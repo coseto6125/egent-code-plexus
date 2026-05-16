@@ -43,11 +43,13 @@ fn add(repo: &str, group: &str) -> Result<(), GnxError> {
     mutate_registry(|reg| {
         let mut changed = false;
 
-        // 1. Update repo.groups (idempotent).
+        // 1. Update alias.groups (idempotent).
+        // Match by dir_name or any alias name.
         let repo_entry = reg
             .repos
             .iter_mut()
-            .find(|r| r.name == repo)
+            .find(|(_k, v)| v.dir_name == repo || v.aliases.iter().any(|a| a == repo))
+            .map(|(_k, v)| v)
             .ok_or_else(|| {
                 GnxError::Output(format!(
                     "repo not found in registry: {repo}\n\
@@ -84,8 +86,12 @@ fn remove(repo: &str, group: &str) -> Result<(), GnxError> {
     mutate_registry(|reg| {
         let mut changed = false;
 
-        // 1. Strip group from repo.groups.
-        if let Some(r) = reg.repos.iter_mut().find(|r| r.name == repo) {
+        // 1. Strip group from alias.groups.
+        if let Some((_k, r)) = reg
+            .repos
+            .iter_mut()
+            .find(|(_k, v)| v.dir_name == repo || v.aliases.iter().any(|a| a == repo))
+        {
             let before = r.groups.len();
             r.groups.retain(|g| g != group);
             if r.groups.len() != before {

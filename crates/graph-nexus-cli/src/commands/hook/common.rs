@@ -94,17 +94,25 @@ pub fn gnx_state_dir_ensure(cwd: &str) -> Option<PathBuf> {
 }
 
 /// Registry-aware index dir resolution. Reads `~/.gnx/registry.json`,
-/// finds the `RepoEntry` whose `worktree_path` is the longest prefix
-/// of `cwd`, and returns the resolved `<index_dir>` for the current
-/// git branch at that cwd (falling back to the most recently indexed
-/// branch when the current one hasn't been indexed yet).
+/// finds the `RepoAlias` whose `common_dir` matches cwd's git common-dir,
+/// then resolves the commit dir for the current branch's HEAD SHA.
+///
+/// Branch-affinity primary: resolves HEAD SHA and looks up its commit dir
+/// so hook on branch A always loads branch A's graph even when branch B
+/// was indexed more recently (restores the invariant from 47596ff).
+///
+/// Falls back to the most-recently-built commit dir when the current
+/// branch hasn't been indexed yet — same behavior as the original
+/// `find_by_cwd(branch_hint)` fallback.
 ///
 /// Returns `None` when:
 ///   - cwd is not absolute (defensive: shell envs occasionally arrive empty)
 ///   - the registry file doesn't exist or can't be parsed
-///   - no `RepoEntry` covers cwd (worktree never registered)
-///   - the matched repo has zero branches
+///   - no `RepoAlias` covers cwd (worktree never registered)
+///   - the matched repo has zero built commits
 pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
+    use crate::commit_lookup::CommitIndex;
+
     let path = Path::new(cwd);
     if !path.is_absolute() {
         return None;
@@ -112,9 +120,19 @@ pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
     let home_gnx = resolve_home_gnx();
     let registry_path = home_gnx.join("registry.json");
     let registry = RegistryFile::read_or_empty(&registry_path).ok()?;
-    let branch_hint = current_git_branch(path);
-    let (_repo, branch) = registry.find_by_cwd(path, branch_hint.as_deref())?;
-    Some(PathBuf::from(&branch.index_dir))
+    let alias = crate::repo_selector::find_by_path(&registry, cwd)?;
+    let commits_dir = home_gnx.join(&alias.dir_name).join("commits");
+
+    // Branch-affinity primary: HEAD SHA → exact commit dir.
+    if let Some(head) = crate::graph_path::head_sha_bytes(path) {
+        let idx = CommitIndex::scan(&commits_dir).ok()?;
+        if let Some(dir) = idx.find(&head) {
+            return Some(commits_dir.join(dir));
+        }
+    }
+
+    // Fallback: most-recently-built commit dir (current branch not yet indexed).
+    crate::commit_lookup::find_latest_by_mtime(&commits_dir)
 }
 
 /// Resolve the current branch by reading `.git/HEAD` directly instead

@@ -98,7 +98,10 @@ fn build_payload(
             let route_node = &graph.nodes[target_idx as usize];
             let route_name = route_node.name.resolve(&graph.string_pool);
             // Extract path from route name (format: "METHOD /path" or "/path")
-            let route_path = route_name.split_once(' ').map(|(_, p)| p).unwrap_or(route_name);
+            let route_path = route_name
+                .split_once(' ')
+                .map(|(_, p)| p)
+                .unwrap_or(route_name);
             if !route_path.contains(route_filter) {
                 continue;
             }

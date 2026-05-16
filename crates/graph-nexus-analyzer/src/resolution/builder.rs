@@ -11,10 +11,10 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 pub fn determine_category(path: &str) -> FileCategory {
-    // Normalise to forward-slashes and prefix with "/" so patterns like
-    // "/vendor/" match both embedded segments AND top-level paths
-    // (e.g. `vendor/foo` → `/vendor/foo` → contains `/vendor/`).
-    let lower_path = format!("/{}", path.to_lowercase().replace('\\', "/"));
+    let normalized_path = path.replace('\\', "/");
+    // Prefix with "/" so patterns like "/vendor/" match both embedded
+    // segments AND top-level paths (e.g. `vendor/foo` → `/vendor/foo`).
+    let lower_path = format!("/{}", normalized_path.to_lowercase());
 
     let is_reference = lower_path.contains("/vendor/")
         || lower_path.contains("/node_modules/")
@@ -51,7 +51,24 @@ pub fn determine_category(path: &str) -> FileCategory {
         || lower_path.ends_with("_test.rb")
         || lower_path.contains("/spec/")
         || lower_path.contains("/test_")
-        || lower_path.contains("/conftest.");
+        || lower_path.contains("/conftest.")
+        // PascalCase test-class suffixes (Java/JUnit, Kotlin, Swift XCTest,
+        // .NET MSTest/xUnit/NUnit, PHPUnit, ScalaTest/specs2). Case-sensitive
+        // intentionally: `Manifest.java` lowercased ends with `test.java`, so
+        // a case-insensitive check would mis-classify it. PascalCase `Test`
+        // (capital T) is the language-mandated convention for these
+        // ecosystems, so a literal `Test.ext` / `Tests.ext` / `Spec.ext`
+        // suffix is a reliable signal.
+        || normalized_path.ends_with("Test.java")
+        || normalized_path.ends_with("Tests.java")
+        || normalized_path.ends_with("Test.kt")
+        || normalized_path.ends_with("Tests.kt")
+        || normalized_path.ends_with("Tests.swift")
+        || normalized_path.ends_with("Tests.cs")
+        || normalized_path.ends_with("Test.cs")
+        || normalized_path.ends_with("Test.php")
+        || normalized_path.ends_with("Spec.scala")
+        || normalized_path.ends_with("Test.scala");
 
     if is_test {
         return FileCategory::Test;
@@ -1144,6 +1161,60 @@ struct DumpLine<'a> {
     target_file: Option<&'a str>,
     alt_count: u32,
     confidence: Option<f32>,
+}
+
+#[cfg(test)]
+mod determine_category_tests {
+    use super::{determine_category, FileCategory};
+
+    fn assert_test(path: &str) {
+        assert_eq!(
+            determine_category(path),
+            FileCategory::Test,
+            "expected Test for {path}",
+        );
+    }
+
+    fn assert_source(path: &str) {
+        assert_eq!(
+            determine_category(path),
+            FileCategory::Source,
+            "expected Source for {path}",
+        );
+    }
+
+    #[test]
+    fn java_kotlin_swift_csharp_php_scala_test_suffixes_classify_as_test() {
+        // Per-language test-file conventions added in PR #51.
+        assert_test("src/main/java/com/foo/BarTest.java"); // JUnit
+        assert_test("src/main/java/com/foo/BarTests.java"); // JUnit alt
+        assert_test("app/src/main/kotlin/FooTest.kt"); // Kotlin
+        assert_test("app/src/main/kotlin/FooTests.kt"); // Kotlin alt
+        assert_test("MyAppTests/AuthFlowTests.swift"); // Swift XCTest
+        assert_test("src/Auth.Tests/LoginTests.cs"); // .NET xUnit
+        assert_test("src/MyApp/UserTest.cs"); // .NET MSTest alt
+        assert_test("app/Http/Controllers/UserControllerTest.php"); // PHPUnit
+        assert_test("src/main/scala/com/foo/BarSpec.scala"); // ScalaTest
+        assert_test("src/main/scala/com/foo/BarTest.scala"); // ScalaTest alt
+    }
+
+    #[test]
+    fn non_test_files_classify_as_source() {
+        // Files whose names happen to contain the substring "test" but aren't
+        // test files — these would mis-classify if the suffix check were
+        // case-insensitive, since after lowercasing `Manifest.java` ends with
+        // `test.java`. Case-sensitive PascalCase suffix matching keeps them
+        // as Source.
+        assert_source("src/main/java/com/foo/Manifest.java"); // ends with test.java when lowercased
+        assert_source("src/main/java/com/foo/Tester.java");
+        assert_source("src/main/java/com/foo/Contestant.java");
+        assert_source("app/src/main/kotlin/StressTester.kt");
+        assert_source("src/Trading/Backtest.cs"); // lowercased ends with `test.cs`
+        assert_source("app/src/main/scala/com/foo/Latest.scala"); // lowercased ends with `test.scala`
+                                                                  // Also confirm production code with PascalCase test-like names but
+                                                                  // not the literal `Test.ext` suffix stays Source.
+        assert_source("src/Auth/AttestationService.cs");
+    }
 }
 
 #[cfg(test)]

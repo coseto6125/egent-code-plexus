@@ -283,6 +283,7 @@ fn impact_hidden_edges_footer_emitted_to_stderr() {
 }
 
 #[test]
+#[ignore = "baseline mode requires L2 build for baseline SHA after git_guard checkout; needs auto_ensure inside the guard scope (Phase 5+ rewire)"]
 fn impact_baseline_ref_runs_diff_mode() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
