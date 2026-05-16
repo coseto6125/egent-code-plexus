@@ -209,9 +209,22 @@ fn sweep_sessions_marks_idle_sessions_dead() {
     let stats = sweep_sessions(repo_root).unwrap();
     assert_eq!(stats.marked, 1);
     assert!(!sessions.exists());
+    let sessions_dir = repo_root.join("sessions");
+    let dead_dir_exists = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.starts_with("old-sid.dead")
+        });
     assert!(
-        repo_root.join("sessions").join("old-sid.dead").exists(),
-        ".dead rename expected"
+        dead_dir_exists,
+        ".dead.<ts> rename expected; entries: {:?}",
+        std::fs::read_dir(&sessions_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
     );
 }
 

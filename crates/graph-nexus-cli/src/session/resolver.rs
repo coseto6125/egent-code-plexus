@@ -27,5 +27,5 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
     h.update(pid.to_le_bytes());
     h.update(nanos.to_le_bytes());
     let digest = h.finalize();
-    format!("cli-{}", hex::encode(&digest[..4]))
+    format!("cli-{}", hex::encode(&digest[..8]))
 }

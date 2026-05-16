@@ -49,7 +49,9 @@ pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<HashSet<Str
         for entry in it.flatten() {
             let name = entry.file_name();
             let s = name.to_string_lossy();
-            if s.ends_with(".dead") || s.contains(".stale-") {
+            let is_dead = s.ends_with(".dead")
+                || s.rsplit_once(".dead.").map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit())).unwrap_or(false);
+            if is_dead || s.contains(".stale-") {
                 continue;
             }
             let sm_path = entry.path().join("session_meta.json");
@@ -150,7 +152,9 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
     for entry in it.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        if name.ends_with(".dead") || name.contains(".stale-") {
+        let is_dead = name.ends_with(".dead")
+            || name.rsplit_once(".dead.").map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit())).unwrap_or(false);
+        if is_dead || name.contains(".stale-") {
             fs::remove_dir_all(&path)?;
             removed += 1;
             continue;
@@ -189,7 +193,8 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
         }
 
         if should_mark {
-            let dead = path.with_extension("dead");
+            let ts = chrono::Utc::now().timestamp();
+            let dead = path.with_extension(format!("dead.{ts}"));
             fs::rename(&path, &dead)?;
             marked += 1;
         }

@@ -33,16 +33,17 @@ fn empty_env_falls_through_to_pid() {
     assert!(id.starts_with("cli-"), "got: {id}");
     assert_eq!(
         id.len(),
-        "cli-".len() + 8,
-        "expected 4-byte hex (8 chars) suffix, got: {id}"
+        "cli-".len() + 16,
+        "expected 8-byte hex (16 chars) suffix, got: {id}"
     );
 }
 
 #[test]
-fn pid_fallback_format_is_hex8() {
+fn pid_fallback_format_is_hex16() {
     std::env::remove_var(ENV_KEY);
     let id = resolve_session_id(None);
     let suffix = id.strip_prefix("cli-").expect("must start with cli-");
+    assert_eq!(suffix.len(), 16, "expected 8-byte hex (16 chars) suffix, got: {id}");
     assert!(
         suffix.chars().all(|c| c.is_ascii_hexdigit()),
         "suffix must be hex: {suffix}"
