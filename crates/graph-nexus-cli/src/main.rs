@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod admin;
 mod auto_ensure;
 mod background;
+mod build;
 mod commands;
 mod commit_lookup;
 mod config_parser;
