@@ -14,7 +14,6 @@ import argparse
 import json
 import os
 import platform
-import shutil
 import subprocess
 import sys
 import time
@@ -22,23 +21,58 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import median
 
+CMD_TIMEOUT_S = 600
+# Resolve workspace dynamically: scripts/benchmark_gnx.py → parent → workspace root.
+# Hard-coding `/home/enor/gitnexus-rs` would cargo-build main even when this
+# script runs from a worktree, defeating the auto-rebuild check entirely.
+WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_BINARY = WORKSPACE_ROOT / "target" / "release" / "gnx"
+# Bench fixtures live in the canonical repo, not per-worktree — worktrees never
+# copy `.sample_repo` (multi-GB of polyglot test sources). Keep absolute so a
+# bench run from a worktree still targets the canonical fixture.
 DEFAULT_REPO = Path("/home/enor/gitnexus-rs/.sample_repo")
 DEFAULT_GIT_REPO = Path("/home/enor/gitnexus-rs")
-DEFAULT_BINARY = Path("/home/enor/gitnexus-rs/target/release/gnx")
-DEFAULT_HOME_GNX = Path.home() / ".gnx"
-CMD_TIMEOUT_S = 600
 
 
-def _resolve_index_dir(home_gnx: Path, repo: Path) -> Path:
-    """Mirror IndexLayout::resolve — repo basename + current branch (no collision suffix)."""
-    name = repo.resolve().name.lstrip(".-") or "unknown"
-    branch = "main"
-    head_file = repo / ".git" / "HEAD"
-    if head_file.exists():
-        ref = head_file.read_text().strip()
-        if ref.startswith("ref: refs/heads/"):
-            branch = ref.removeprefix("ref: refs/heads/")
-    return home_gnx / name / branch
+def _ensure_binary_fresh(binary: Path, *, skip: bool) -> None:
+    """Auto-rebuild the binary so the bench never runs against a stale build.
+
+    Mtime comparison against tracked .rs files is unreliable — `git checkout`
+    can stamp src files older than the previous release binary, hiding real
+    drift (post-PR fix already in main but binary still pre-fix). Cargo's
+    own fingerprint check is the source of truth, so just invoke it: noop
+    when up-to-date (<100ms), rebuild when source / deps moved.
+    """
+    if skip:
+        return
+    proc = subprocess.run(
+        ["cargo", "build", "--release", "-p", "graph-nexus", "--bin", "gnx"],
+        cwd=WORKSPACE_ROOT, capture_output=True, text=True, timeout=900,
+    )
+    if proc.returncode != 0:
+        print(
+            f"error: cargo build failed (rc={proc.returncode}):\n{proc.stderr}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not binary.exists():
+        print(f"error: cargo build succeeded but {binary} missing", file=sys.stderr)
+        sys.exit(1)
+
+
+def _admin_drop(binary: Path, repo: Path) -> None:
+    """Issue `gnx admin drop --repo <repo>` to wipe this repo's index.
+
+    Replaces the legacy `_resolve_index_dir` + `shutil.rmtree` pattern,
+    which assumed an outdated `<home>/<name>/<branch>` layout — the
+    current layout is `<home>/<dir-name>__<hash>/commits/<dirname>/`
+    and the canonical wipe lives in the CLI itself. Quiet on not-indexed
+    repos.
+    """
+    subprocess.run(
+        [str(binary), "admin", "drop", "--repo", str(repo)],
+        capture_output=True, text=True, timeout=30,
+    )
 
 
 @dataclass
@@ -216,17 +250,18 @@ def main() -> int:
     ap.add_argument("--json", type=Path, help="Write JSON result to this path")
     ap.add_argument("--skip-cold", action="store_true",
                     help="Don't delete the registry index dir before the first analyze")
-    ap.add_argument("--home-gnx", type=Path, default=DEFAULT_HOME_GNX,
-                    help="gnx home dir (default ~/.gnx); graph is stored at <home>/<repo>/<branch>/graph.bin")
     ap.add_argument("--with-embeddings", action="store_true",
                     help="After the no-embedding sweep, rebuild with --embeddings and re-run query commands "
                          "to measure BGE-M3 INT8 dense-vector overhead (slow: minutes)")
+    ap.add_argument("--no-build", action="store_true",
+                    help="Skip the auto `cargo build --release` step (use the existing binary as-is)")
     args = ap.parse_args()
 
+    _ensure_binary_fresh(args.binary, skip=args.no_build)
     if not args.binary.exists():
         print(
             f"error: {args.binary} missing — run "
-            f"`cargo build --release -p graph-nexus-cli`",
+            f"`cargo build --release -p graph-nexus --bin gnx`",
             file=sys.stderr,
         )
         return 1
@@ -249,10 +284,9 @@ def main() -> int:
     samples: list[Sample] = []
 
     # Phase 1: analyze (cold)
-    idx = _resolve_index_dir(args.home_gnx, args.repo)
-    if not args.skip_cold and idx.exists():
-        print(f"→ rm -rf {idx}")
-        shutil.rmtree(idx)
+    if not args.skip_cold:
+        print(f"→ gnx admin drop --repo {args.repo}")
+        _admin_drop(args.binary, args.repo)
     label = "analyze (cold)" if not args.skip_cold else "analyze (baseline)"
     print(f"→ {label}")
     s = _bench(label, [str(args.binary), "admin", "index", "--repo", str(args.repo)],
@@ -359,9 +393,8 @@ def main() -> int:
     # Phase 5: optional --embeddings sweep
     if args.with_embeddings:
         print()
-        print(f"→ rm -rf {idx}  (rebuild with embeddings)")
-        if idx.exists():
-            shutil.rmtree(idx)
+        print(f"→ gnx admin drop --repo {args.repo}  (rebuild with embeddings)")
+        _admin_drop(args.binary, args.repo)
         print("→ admin index --embeddings (cold)")
         s = _bench(
             "admin index --embeddings (cold)",
