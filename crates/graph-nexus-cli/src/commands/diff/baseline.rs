@@ -32,7 +32,10 @@ fn warn_if_local_diverges_from_remote(ref_str: &str, local_sha: &str, repo_dir: 
     }
     let remote_ref = format!("origin/{ref_str}");
     let Ok(remote_sha) = resolve_via_git(&remote_ref, repo_dir) else {
-        return; // no such remote ref — silent
+        eprintln!(
+            "note: `{remote_ref}` not configured; baseline divergence check skipped."
+        );
+        return;
     };
     if remote_sha == local_sha {
         return;

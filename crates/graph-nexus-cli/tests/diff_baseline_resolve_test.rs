@@ -211,3 +211,33 @@ fn diff_baseline_qualified_ref_no_warning() {
         "qualified ref must not emit divergence warning, got: {stderr}"
     );
 }
+
+#[test]
+fn diff_baseline_short_name_no_remote_emits_note() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let repo = tmp.path();
+
+    // git init + 1 commit on main, but NO origin remote configured.
+    let _ = Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(repo).output();
+    std::fs::write(repo.join("a.txt"), "hello").unwrap();
+    let _ = Command::new("git").args(["add", "-A"]).current_dir(repo).output();
+    let _ = Command::new("git").args([
+        "-c","user.email=t@t","-c","user.name=t",
+        "commit","-q","-m","init"
+    ]).current_dir(repo).output();
+
+    // Run gnx diff --baseline main. No origin remote → expect skip-note on stderr.
+    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+        .args(["diff", "--section", "bindings", "--baseline", "main"])
+        .current_dir(repo)
+        .env("HOME", repo)
+        .output()
+        .expect("run gnx diff");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("note:") && stderr.contains("origin/main") && stderr.contains("skipped"),
+        "expected missing-remote note in stderr, got: {stderr}"
+    );
+}
