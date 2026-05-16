@@ -60,6 +60,19 @@ impl ArchivedStrRef {
     }
 }
 
+impl StrRef {
+    /// Resolve to a borrowed `&str` slice of `pool_bytes`. Mirror of
+    /// `ArchivedStrRef::resolve` for the owned-form (`StrRef`) used by
+    /// `ZeroCopyGraph` before rkyv-archive. Allows tests and ad-hoc
+    /// callers to read pool data without going through `StringPool` (which
+    /// owns the `Vec<u8>`; some call sites only have `&[u8]` access).
+    pub fn resolve<'a>(&self, pool_bytes: &'a [u8]) -> &'a str {
+        let start = self.offset as usize;
+        let end = start + self.len as usize;
+        std::str::from_utf8(&pool_bytes[start..end]).expect("Invalid UTF-8 in pool")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
