@@ -235,6 +235,22 @@ fn skip_ws(bytes: &[u8], from: usize) -> usize {
     p
 }
 
+/// Slice `s[start..end]` after clamping and expanding the byte offsets to the
+/// nearest surrounding char boundaries. Used by status-code lookback/lookahead
+/// heuristics that derive offsets via byte arithmetic and may land mid-codepoint
+/// (e.g. box-drawing chars in a doc-comment banner adjacent to the match site).
+fn safe_slice(s: &str, start: usize, end: usize) -> &str {
+    let mut start = start.min(s.len());
+    while start > 0 && !s.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = end.min(s.len());
+    while end < s.len() && !s.is_char_boundary(end) {
+        end += 1;
+    }
+    &s[start..end]
+}
+
 /// Locate the HTTP status code surrounding a `.json(` match.
 /// Looks ~200 bytes back for an Express-style `.status(N)` chain, then
 /// ~150 bytes forward past the closing brace for a Next-style
@@ -242,7 +258,7 @@ fn skip_ws(bytes: &[u8], from: usize) -> usize {
 /// `new Response(JSON.stringify({...}), { status: N })` pattern.
 fn detect_js_status_code(content: &str, json_pos: usize, closing: i64) -> Option<u16> {
     let lookback_start = json_pos.saturating_sub(200);
-    let before = &content[lookback_start..json_pos];
+    let before = safe_slice(content, lookback_start, json_pos);
     if let Some(c) = STATUS_CHAIN.captures(before) {
         if let Ok(n) = c[1].parse() {
             return Some(n);
@@ -251,18 +267,18 @@ fn detect_js_status_code(content: &str, json_pos: usize, closing: i64) -> Option
     if closing > 0 {
         let after_start = (closing as usize) + 1;
         let after_end = (after_start + 150).min(content.len());
-        if let Some(c) = SECOND_ARG_STATUS.captures(&content[after_start..after_end]) {
+        if let Some(c) = SECOND_ARG_STATUS.captures(safe_slice(content, after_start, after_end)) {
             if let Ok(n) = c[1].parse() {
                 return Some(n);
             }
         }
     }
     let ext_start = json_pos.saturating_sub(300);
-    let ext_before = &content[ext_start..json_pos];
+    let ext_before = safe_slice(content, ext_start, json_pos);
     if NEW_RESPONSE_STRINGIFY.is_match(ext_before) && closing > 0 {
         let after_start = (closing as usize) + 1;
         let after_end = (after_start + 200).min(content.len());
-        if let Some(c) = NEW_RESPONSE_STATUS.captures(&content[after_start..after_end]) {
+        if let Some(c) = NEW_RESPONSE_STATUS.captures(safe_slice(content, after_start, after_end)) {
             if let Ok(n) = c[1].parse() {
                 return Some(n);
             }
@@ -333,6 +349,8 @@ fn extract_php(content: &str) -> (Vec<String>, Vec<String>) {
         } else {
             continue;
         };
+        // safety: array_start points to '[' or '(' (ASCII), so +1 is a char
+        // boundary; array_end points to ']' or ')' (ASCII), also a boundary.
         let array_content = &content[array_start + 1..array_end];
         let call_keys = extract_php_array_keys(array_content);
         if call_keys.is_empty() {
@@ -448,7 +466,7 @@ fn extract_php_array_keys(array_content: &str) -> Vec<String> {
 /// earlier control-flow doesn't contaminate the lookup.
 fn detect_php_status_code(content: &str, json_encode_pos: usize) -> Option<u16> {
     let lookback_start = json_encode_pos.saturating_sub(300);
-    let mut before = &content[lookback_start..json_encode_pos];
+    let mut before = safe_slice(content, lookback_start, json_encode_pos);
     let boundary_end = find_last_exit_boundary(before);
     if boundary_end >= 0 {
         before = &before[boundary_end as usize..];
