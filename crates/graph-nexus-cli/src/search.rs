@@ -147,7 +147,7 @@ impl TantivyEngine {
     ///   substring scan would produce noisy 0.4 hits that the trusted
     ///   index already ruled out.
     /// - `Some(vec)` — ranked uids + scores.
-    pub fn search(index_dir: &Path, query_str: &str) -> Option<Vec<(f32, String)>> {
+    pub fn search(index_dir: &Path, query_str: &str, limit: usize) -> Option<Vec<(f32, String)>> {
         let index_dir = index_dir.join("tantivy");
         if !index_dir.exists() {
             return None;
@@ -167,7 +167,7 @@ impl TantivyEngine {
         let expanded = tokenize_identifier(query_str);
         let query = query_parser.parse_query(&expanded).ok()?;
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(20).order_by_score())
+            .search(&query, &TopDocs::with_limit(limit).order_by_score())
             .ok()?;
 
         let mut results = Vec::with_capacity(top_docs.len());

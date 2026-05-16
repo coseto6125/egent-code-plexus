@@ -143,7 +143,7 @@ pub struct Edge {
     pub reason: StrRef,
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
 pub enum FileCategory {
@@ -152,6 +152,18 @@ pub enum FileCategory {
     Reference,
     Document,
     Config,
+}
+
+impl From<&ArchivedFileCategory> for FileCategory {
+    fn from(a: &ArchivedFileCategory) -> Self {
+        match a {
+            ArchivedFileCategory::Source => FileCategory::Source,
+            ArchivedFileCategory::Test => FileCategory::Test,
+            ArchivedFileCategory::Reference => FileCategory::Reference,
+            ArchivedFileCategory::Document => FileCategory::Document,
+            ArchivedFileCategory::Config => FileCategory::Config,
+        }
+    }
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]

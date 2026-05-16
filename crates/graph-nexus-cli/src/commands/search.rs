@@ -23,7 +23,8 @@ use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
-use graph_nexus_core::graph::{ArchivedFileCategory, FileCategory};
+use graph_nexus_analyzer::resolution::index::Language;
+use graph_nexus_core::graph::FileCategory;
 use graph_nexus_core::registry::{IndexLayout, Registry};
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
@@ -31,6 +32,12 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
 const TOP_K: usize = 20;
+
+/// Raw-candidate cap before 5-way bucketing. With 5 categories each wanting
+/// up to `TOP_K` items, fetch `TOP_K * 5` candidates so no bucket starves
+/// when results cluster in fewer categories. Cap stays bounded — a query
+/// matching thousands of names doesn't drag every node through ranking.
+const MULTI_CAP: usize = TOP_K * 5;
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -255,13 +262,11 @@ struct OrderedHit {
     callers: Vec<String>,
     callees: Vec<String>,
     score_source: ScoreSource,
-    // FileCategory doesn't impl Ord; store as u8 discriminant (Source=0, Test=1, Reference=2, Document=3, Config=4).
-    category_ord: u8,
+    category: FileCategory,
 }
 
 impl OrderedHit {
     fn from(h: Hit) -> Self {
-        let category_ord = category_to_ord(h.category);
         Self {
             score_bits: h.score.to_bits(),
             repo: h.repo,
@@ -275,65 +280,8 @@ impl OrderedHit {
             callers: h.callers,
             callees: h.callees,
             score_source: h.score_source,
-            category_ord,
+            category: h.category,
         }
-    }
-}
-
-fn category_to_ord(c: FileCategory) -> u8 {
-    match c {
-        FileCategory::Source => 0,
-        FileCategory::Test => 1,
-        FileCategory::Reference => 2,
-        FileCategory::Document => 3,
-        FileCategory::Config => 4,
-    }
-}
-
-fn ord_to_category(n: u8) -> FileCategory {
-    match n {
-        0 => FileCategory::Source,
-        1 => FileCategory::Test,
-        2 => FileCategory::Reference,
-        3 => FileCategory::Document,
-        _ => FileCategory::Config,
-    }
-}
-
-/// Detect language from file path extension (or Dockerfile filename).
-fn detect_language(path: &str) -> &'static str {
-    use std::path::Path;
-    let p = Path::new(path);
-    // Dockerfile-style: no extension but filename contains "Dockerfile"
-    if let Some(fname) = p.file_name().and_then(|f| f.to_str()) {
-        if fname.contains("Dockerfile") || fname == "dockerfile" {
-            return "Dockerfile";
-        }
-    }
-    match p.extension().and_then(|e| e.to_str()) {
-        Some("rs") => "Rust",
-        Some("py") => "Python",
-        Some("ts") | Some("tsx") => "TypeScript",
-        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => "JavaScript",
-        Some("java") => "Java",
-        Some("kt") | Some("kts") => "Kotlin",
-        Some("cs") => "CSharp",
-        Some("go") => "Go",
-        Some("php") => "PHP",
-        Some("rb") => "Ruby",
-        Some("swift") => "Swift",
-        Some("c") | Some("h") => "C",
-        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => "C++",
-        Some("dart") => "Dart",
-        Some("lua") => "Lua",
-        Some("cr") => "Crystal",
-        Some("zig") => "Zig",
-        Some("sol") => "Solidity",
-        Some("move") => "Move",
-        Some("sh") | Some("bash") => "Bash",
-        Some("md") | Some("rst") | Some("txt") => "Markdown",
-        Some("toml") | Some("yaml") | Some("yml") | Some("json") => "Config",
-        _ => "Unknown",
     }
 }
 
@@ -364,32 +312,15 @@ impl BucketedResults {
         let mut config = Vec::new();
 
         for h in hits {
-            match h.category {
-                FileCategory::Source => {
-                    if source.len() < TOP_K {
-                        source.push(h);
-                    }
-                }
-                FileCategory::Test => {
-                    if tests.len() < TOP_K {
-                        tests.push(h);
-                    }
-                }
-                FileCategory::Reference => {
-                    if reference.len() < TOP_K {
-                        reference.push(h);
-                    }
-                }
-                FileCategory::Document => {
-                    if document.len() < TOP_K {
-                        document.push(h);
-                    }
-                }
-                FileCategory::Config => {
-                    if config.len() < TOP_K {
-                        config.push(h);
-                    }
-                }
+            let bucket = match h.category {
+                FileCategory::Source => &mut source,
+                FileCategory::Test => &mut tests,
+                FileCategory::Reference => &mut reference,
+                FileCategory::Document => &mut document,
+                FileCategory::Config => &mut config,
+            };
+            if bucket.len() < TOP_K {
+                bucket.push(h);
             }
         }
 
@@ -469,7 +400,7 @@ fn tantivy_hits(
     repo_label: &Option<String>,
     index_dir: &std::path::Path,
 ) -> Vec<Hit> {
-    let scored = match crate::search::TantivyEngine::search(index_dir, pattern) {
+    let scored = match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
         Some(s) => s,
         // Index unavailable / corrupt / parse error — fall through so
         // hook context isn't silently empty.
@@ -535,6 +466,17 @@ fn substring_hits(
             hits.push(hit);
         }
     }
+    // Substring fallback scans every node — on large monorepos a 3-char
+    // pattern can return thousands. Cap to MULTI_CAP so partition's sort
+    // stays bounded on the pre_tool_use::handle hot path.
+    if hits.len() > MULTI_CAP {
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(MULTI_CAP);
+    }
     hits
 }
 
@@ -560,14 +502,8 @@ fn build_hit(
     let name = node.name.resolve(&graph.string_pool);
     let file_entry = &graph.files[node.file_idx.to_native() as usize];
     let file = file_entry.path.resolve(&graph.string_pool).to_string();
-    let language = detect_language(&file).to_string();
-    let category = match file_entry.category {
-        ArchivedFileCategory::Source => FileCategory::Source,
-        ArchivedFileCategory::Test => FileCategory::Test,
-        ArchivedFileCategory::Reference => FileCategory::Reference,
-        ArchivedFileCategory::Document => FileCategory::Document,
-        ArchivedFileCategory::Config => FileCategory::Config,
-    };
+    let language = Language::from_path(&file).as_str().to_string();
+    let category = FileCategory::from(&file_entry.category);
     let line = node.span.0.to_native() + 1;
     let kind_str = kind_to_str(&node.kind).to_string();
     let signature = format!("{kind_str} {name}");
@@ -728,7 +664,7 @@ pub fn compute_multi_with_engines(
             caller_count: o.caller_count,
             callers: o.callers,
             callees: o.callees,
-            category: ord_to_category(o.category_ord),
+            category: o.category,
         })
         .collect();
 
@@ -1003,7 +939,7 @@ mod tests {
                 callers: vec![],
                 callees: vec![],
                 score_source: ScoreSource::Bm25,
-                category_ord: 0,
+                category: FileCategory::Source,
             };
             heap.push(Reverse(h));
             if heap.len() > k {
