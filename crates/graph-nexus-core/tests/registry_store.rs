@@ -50,15 +50,55 @@ fn v2_round_trip_deterministic_and_full_equality() {
 }
 
 #[test]
-fn v1_rejected_with_clear_message() {
-    let tmp = NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), r#"{"version":1,"repos":[]}"#).unwrap();
-    let err = RegistryFile::read_or_empty(tmp.path()).unwrap_err();
-    let s = err.to_string();
-    assert!(
-        s.contains("v2") || s.contains("v1") || s.contains("reset"),
-        "v1 detection must surface a clear migration message, got: {s}"
+fn v1_auto_migrates_via_rebuild_from_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let registry_path = home.join("registry.json");
+    std::fs::write(&registry_path, r#"{"version":1,"repos":[]}"#).unwrap();
+
+    let repo_dir = home.join("myrepo__abcd1234");
+    std::fs::create_dir(&repo_dir).unwrap();
+    let repo_meta = graph_nexus_core::registry::RepoMeta {
+        version: 1,
+        common_dir: "/work/myrepo/.git".into(),
+        remote_url: Some("https://github.com/u/r.git".into()),
+        aliases: vec!["myrepo".into()],
+        known_refs: BTreeMap::new(),
+        last_built_sha: None,
+        total_size_bytes: 0,
+        last_touched: "2026-05-17T10:00:00Z".into(),
+    };
+    graph_nexus_core::registry::RepoMeta::write_atomic(&repo_dir.join("meta.json"), &repo_meta)
+        .unwrap();
+
+    let reg = RegistryFile::read_or_empty(&registry_path).unwrap();
+    assert_eq!(reg.version, 2, "auto-migrated registry must be v2");
+    assert_eq!(
+        reg.repos.len(),
+        1,
+        "rebuild_from_disk must populate from meta.json"
     );
+    assert!(reg.repos.contains_key("myrepo__abcd1234"));
+
+    // Persisted to disk as v2 — next call must not re-migrate.
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        version: u32,
+    }
+    let disk_bytes = std::fs::read(&registry_path).unwrap();
+    let probe: Probe = serde_json::from_slice(&disk_bytes).unwrap();
+    assert_eq!(probe.version, 2, "migration must persist v2 to disk");
+}
+
+#[test]
+fn v1_auto_migrates_with_empty_home_yields_empty_v2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry_path = tmp.path().join("registry.json");
+    std::fs::write(&registry_path, r#"{"version":1,"repos":[]}"#).unwrap();
+
+    let reg = RegistryFile::read_or_empty(&registry_path).unwrap();
+    assert_eq!(reg.version, 2);
+    assert!(reg.repos.is_empty());
 }
 
 #[test]
