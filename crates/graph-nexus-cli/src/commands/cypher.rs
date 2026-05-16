@@ -36,9 +36,10 @@ pub struct CypherArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: `json` (default, column-based) or `toon` (LLM-friendly compact).
+    /// Output format. Omit for the LLM-tuned default; explicit `--format
+    /// toon|json|text` for the neutral / round-trippable / human paths.
     #[arg(long)]
-    pub format: String,
+    pub format: Option<String>,
 }
 
 impl CypherArgs {
@@ -106,7 +107,7 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
         "columns": result.columns,
         "rows": rows_json,
     });
-    emit(&payload, OutputFormat::parse(Some(args.format.as_str())))?;
+    emit(&payload, OutputFormat::parse(args.format.as_deref()))?;
     Ok(())
 }
 
