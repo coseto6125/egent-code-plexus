@@ -259,15 +259,14 @@ impl LanguageProvider for RustProvider {
         extract_rust_calls(tree.root_node(), source, &mut nodes, &local_types);
 
         // Stamp impl-target sentinel onto each impl method's heritage so the
-        // class-membership post-process (analyzer/post_process/class_membership)
-        // can bridge `struct Foo` ↔ `impl Foo { fn bar() {} }` — the method's
-        // span lies OUTSIDE the struct span, so pure span containment misses.
-        // Same prefix `IMPL_TARGET_PREFIX` is referenced from that module.
+        // class-membership post-process can bridge `struct Foo` ↔ `impl Foo
+        // { fn bar() {} }` — the method's span lies OUTSIDE the struct span,
+        // so pure span containment misses.
+        let prefix = crate::post_process::class_membership::IMPL_TARGET_PREFIX;
         for raw in nodes.iter_mut() {
             if matches!(raw.kind, NodeKind::Function | NodeKind::Method) {
                 if let Some(impl_ty) = impl_map.entries.get(&raw.name) {
-                    raw.heritage
-                        .push(format!("__impl_target__:{}", impl_ty));
+                    raw.heritage.push(format!("{}{}", prefix, impl_ty));
                 }
             }
         }

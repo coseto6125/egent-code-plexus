@@ -41,8 +41,7 @@ pub fn emit_edges(
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
-    let reason_method = string_pool.add("post_process:class_membership");
-    let reason_property = string_pool.add("post_process:class_membership");
+    let reason = string_pool.add("post_process:class_membership");
     let reason_impl = string_pool.add("post_process:class_membership:rust_impl");
 
     let mut emitted = 0usize;
@@ -51,7 +50,7 @@ pub fn emit_edges(
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
         let raws = &local_graph.nodes;
 
-        emitted += emit_pass1_span(raws, &path_str, symbol_table, reason_method, reason_property, edges_out);
+        emitted += emit_pass1_span(raws, &path_str, symbol_table, reason, edges_out);
         emitted += emit_pass2_rust_impl(raws, &path_str, symbol_table, reason_impl, edges_out);
     }
 
@@ -68,33 +67,23 @@ fn emit_pass1_span(
     raws: &[RawNode],
     path_str: &str,
     symbol_table: &SymbolTable,
-    reason_method: graph_nexus_core::pool::StrRef,
-    reason_property: graph_nexus_core::pool::StrRef,
+    reason: graph_nexus_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let mut emitted = 0usize;
 
     for member in raws {
-        let (rel_type, reason) = match member.kind {
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor => {
-                (RelType::HasMethod, reason_method)
-            }
-            NodeKind::Property => (RelType::HasProperty, reason_property),
+        let rel_type = match member.kind {
+            NodeKind::Function | NodeKind::Method | NodeKind::Constructor => RelType::HasMethod,
+            NodeKind::Property => RelType::HasProperty,
             _ => continue,
         };
 
         // Innermost enclosing class — handles nested-class case via
         // `min_by_key(span_area)` inside the helper.
-        let Some((class_name, _class_span)) = enclosing_class(raws, member.span) else {
+        let Some((class_name, _)) = enclosing_class(raws, member.span) else {
             continue;
         };
-
-        // Self-containment guard: a Class's own span trivially contains
-        // itself. enclosing_class already filters by kind=Class so a
-        // class isn't its own member, but defensively skip name-equal.
-        if member.name == class_name {
-            continue;
-        }
 
         let Some(class_idx) = symbol_table.lookup_in_file(path_str, &class_name) else {
             continue;
@@ -102,6 +91,17 @@ fn emit_pass1_span(
         let Some(member_idx) = symbol_table.lookup_in_file(path_str, &member.name) else {
             continue;
         };
+
+        // SymbolTable `file_scoped` maps (file, name) → single node_id with
+        // last-write-wins. When a member has the same name as its enclosing
+        // class — Java/C# `class Foo { public Foo() {} }` constructors are
+        // the canonical case — both lookups resolve to the same idx (the
+        // later-registered Method overwrites the Class). Emitting would
+        // create a self-loop. Skip; documented limitation pending a
+        // future SymbolTable change that handles multi-id-per-name.
+        if class_idx == member_idx {
+            continue;
+        }
 
         edges_out.push(Edge {
             source: class_idx,
@@ -386,6 +386,26 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert!(matches!(edges[0].rel_type, RelType::HasMethod));
         assert_eq!(edges[0].target, 1); // bar
+    }
+
+    #[test]
+    fn java_style_same_named_constructor_is_skipped() {
+        // Java emits `class Foo { public Foo() {} }` as Class "Foo" containing
+        // Method "Foo". SymbolTable file_scoped is name→single-id; the
+        // later-registered Method overwrites the Class, so lookup_in_file
+        // returns the same idx for both. Skip to avoid emitting a self-loop.
+        // Pin current behaviour so a future SymbolTable change that handles
+        // multi-id-per-name flips this expectation deliberately, not silently.
+        let nodes = vec![
+            raw("Foo", NodeKind::Class, (1, 0, 10, 0)),
+            raw("Foo", NodeKind::Method, (2, 4, 4, 4)),
+        ];
+        let edges = run(vec![lg("Foo.java", nodes)]);
+        assert_eq!(
+            edges.len(),
+            0,
+            "same-name collision must NOT emit a self-loop edge"
+        );
     }
 
     #[test]
