@@ -4121,3 +4121,22 @@ After writing all tasks, checked against spec:
 These are unavoidable integration points; the plan tells engineer **what** to produce, not how to navigate every existing fn signature.
 
 **Estimated effort:** 5–9 working days for a Rust-fluent engineer with codebase context; 12–18 days if starting cold. **Net code change: +300 LOC** (del ~600 / add ~900) per spec §15.
+
+---
+
+## Phase 5 Status Note (added during execution, 2026-05-17)
+
+**Task 5.4 deferred from autonomous execution.** Reason: overlay merge in Engine requires fragment-shape design that benefits from real workload feedback (which query patterns hit which override classes most). Splitting into a dedicated follow-up plan once Phase 6/7/8 have shaped the read-path requirements concretely.
+
+**What's in place from Phase 5:**
+- Task 5.1: `resolve_session_id` (explicit > env > pid fallback) ✓
+- Task 5.2: `write_dirty_fragment` with `parse_single_file_to_fragment` returning empty rkyv stub. File-write atomic semantics + manifest plumbing work; the fragment payload is a structural no-op until 5.4 lands. ✓
+- Task 5.3: `auto_ensure` Stale path walks worktree, calls `write_dirty_fragment` per file — wires the trigger. ✓
+
+**What 5.4 still needs:**
+- Fragment shape: rkyv-archived `(Vec<NodeUid>, Vec<NewNode>, Vec<NewEdge>)` likely; consumer-driven
+- `parse_single_file_to_fragment` real per-file analyzer integration
+- `Engine::graph()` returns an `OverlayView` wrapper when `overlay_dir.is_some()` — wrapper holds base mmap + per-fragment overrides HashMap, dispatches lookups to override-first/base-second
+- Update query commands (`inspect / cypher / search / impact / scan`) to consume `OverlayView`'s shape
+
+**Acceptable interim state:** L1 fragments are written to disk and tracked in `dirty_files.json`, but queries continue to see L2-only view. Promotion Case A's content-hash comparison (Phase 6) still works since it reads file content via `git cat-file blob`, not the L1 fragment.
