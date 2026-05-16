@@ -1,4 +1,9 @@
 //! Garbage collection: reachability-based LRU eviction + session orphan sweep.
+//!
+//! Covered by `tests/gc.rs` integration tests; bin compilation sees zero
+//! callers because the `admin gc` subcommand isn't wired yet — lift the
+//! module allow when it lands.
+#![allow(dead_code)]
 
 use crate::git::safe_exec;
 use graph_nexus_core::registry::{CommitBuildMeta, CommitDirName};

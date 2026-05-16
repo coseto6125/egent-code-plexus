@@ -41,6 +41,7 @@ impl CommitIndex {
         self.by_sha.get(sha).map(|s| s.as_str())
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.by_sha.len()
     }

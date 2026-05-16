@@ -8,8 +8,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct GitState {
     pub repo_name: String,
+    // Returned for downstream registry / hook callers; only `repo_name` is read
+    // by the current bin surface, the rest are covered by `tests/git_state.rs`.
+    #[allow(dead_code)]
     pub branch: String,
+    #[allow(dead_code)]
     pub worktree_path: PathBuf,
+    #[allow(dead_code)]
     pub remote_url: Option<String>,
 }
 

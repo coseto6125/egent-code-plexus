@@ -135,50 +135,6 @@ pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
     crate::commit_lookup::find_latest_by_mtime(&commits_dir)
 }
 
-/// Resolve the current branch by reading `.git/HEAD` directly instead
-/// of spawning `git rev-parse`. Hooks fire on every Claude Code event;
-/// a fork+exec per event adds a few ms on local FS and visibly stalls
-/// on NFS / WSL2 paths. Reading the HEAD ref file is a single open+read
-/// on any FS, with no subprocess overhead.
-///
-/// Handles three layouts:
-///   - regular repo: `<cwd>/.git` is a directory; read `<cwd>/.git/HEAD`
-///   - worktree: `<cwd>/.git` is a file containing `gitdir: <abs path>`
-///   - cwd is a subdir: walk parents until `.git` is found
-///
-/// Returns `None` when not in a git work tree, on detached HEAD, or on
-/// any read error — callers fall back to "most recent indexed".
-fn current_git_branch(cwd: &Path) -> Option<String> {
-    let toplevel = find_git_toplevel(cwd)?;
-    let head_path = resolve_head_path(&toplevel)?;
-    let content = fs::read_to_string(head_path).ok()?;
-    let line = content.lines().next()?;
-    line.strip_prefix("ref: refs/heads/").map(str::to_string)
-}
-
-fn find_git_toplevel(start: &Path) -> Option<PathBuf> {
-    let mut current = start.to_path_buf();
-    loop {
-        if current.join(".git").exists() {
-            return Some(current);
-        }
-        current = current.parent()?.to_path_buf();
-    }
-}
-
-fn resolve_head_path(toplevel: &Path) -> Option<PathBuf> {
-    let dotgit = toplevel.join(".git");
-    let meta = fs::metadata(&dotgit).ok()?;
-    if meta.is_dir() {
-        return Some(dotgit.join("HEAD"));
-    }
-    // `.git` is a file (worktree layout):
-    //   `gitdir: /path/to/main-repo/.git/worktrees/<name>`
-    let content = fs::read_to_string(&dotgit).ok()?;
-    let gitdir = content.lines().next()?.strip_prefix("gitdir: ")?;
-    Some(PathBuf::from(gitdir).join("HEAD"))
-}
-
 /// Remove the contents of single- and double-quoted segments from a
 /// shell command so subsequent regex matchers don't trip on literal
 /// substrings (e.g. `echo "git commit"` must not look like an actual

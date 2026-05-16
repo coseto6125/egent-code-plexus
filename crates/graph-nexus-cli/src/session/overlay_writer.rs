@@ -20,6 +20,9 @@ pub struct FragmentInput {
 }
 
 pub struct FragmentOutcome {
+    // Asserted by `tests/overlay_writer.rs` + `tests/promotion.rs`; bin path
+    // currently only branches on `parse_failed`.
+    #[allow(dead_code)]
     pub fragment_id: String,
     pub parse_failed: bool,
 }

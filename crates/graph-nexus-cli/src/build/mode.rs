@@ -3,6 +3,10 @@
 //! Rationale: first build for a repo MUST be sync because no fallback L2 exists
 //! to serve queries while the build runs. Subsequent builds (SHA drift) can be
 //! background — caller can serve from old L2 + L1 overlay until new L2 lands.
+//!
+//! Covered by `tests/build_mode.rs`; bin compilation reports unused because the
+//! orchestrator hasn't switched to mode-aware dispatch yet.
+#![allow(dead_code)]
 
 use crate::commit_lookup::CommitIndex;
 use std::path::Path;

@@ -16,6 +16,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub struct BuildResult {
+    // Read only by `tests/build_orchestrator.rs`; bin callers ignore it today.
+    #[allow(dead_code)]
     pub commit_dir: PathBuf,
     pub sha_hex: String,
     pub source_type: SourceType,
