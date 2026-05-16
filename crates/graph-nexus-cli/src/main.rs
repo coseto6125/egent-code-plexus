@@ -38,7 +38,7 @@ struct Cli {
 enum Commands {
     /// Show symbol's full context: signature, body, edges, callers, overrides, and 1-hop upstream impact
     Inspect(commands::inspect::InspectArgs),
-    /// Find symbols by name or concept (auto bm25 / hybrid / vector)
+    /// Find symbols by name (BM25 lexical search)
     Search(commands::search::SearchArgs),
     /// Symbol blast radius — affected callers + risk_level. For binding tier-degradation or resolver delta, use `gnx diff`.
     Impact(commands::impact::ImpactArgs),
