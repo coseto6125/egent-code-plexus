@@ -306,12 +306,13 @@ impl LanguageProvider for JavaScriptProvider {
         // (`Map.get("k")` / `headers.get("x-trace")` / `cache.get(id)`)
         // because none of those literals start with `/`. Spec:
         // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
-        routes.retain(|r| crate::route_detector::clean_route_path(&r.path).is_some());
-        for r in routes.iter_mut() {
-            if let Some(clean) = crate::route_detector::clean_route_path(&r.path) {
+        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+            Some(clean) => {
                 r.path = clean;
+                true
             }
-        }
+            None => false,
+        });
 
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent

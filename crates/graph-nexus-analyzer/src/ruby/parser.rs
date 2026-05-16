@@ -590,12 +590,13 @@ impl LanguageProvider for RubyProvider {
         // string arg doesn't look like an HTTP route. Same rationale as
         // the JS/TS/Python parsers; spec:
         // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
-        routes.retain(|r| crate::route_detector::clean_route_path(&r.path).is_some());
-        for r in routes.iter_mut() {
-            if let Some(clean) = crate::route_detector::clean_route_path(&r.path) {
+        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+            Some(clean) => {
                 r.path = clean;
+                true
             }
-        }
+            None => false,
+        });
 
         Ok(LocalGraph {
             content_hash: [0; 32],

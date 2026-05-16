@@ -32,6 +32,17 @@ const PHP_HTTP_FRAMEWORK_NAMESPACES: &[&str] = &[
     "CodeIgniter",
 ];
 
+/// Router-class scope allowlist for the generic `scoped_call_expression`
+/// route capture. Without it, `Cache::get('key')` / `Config::get('app.name')`
+/// / `Auth::get(...)` all match the regex and surface as fake routes.
+/// Pairs with `PHP_HTTP_FRAMEWORK_NAMESPACES` import gate: scope match
+/// alone isn't enough, the file must also import from a known framework
+/// namespace. List intentionally narrow — `App` was removed (too generic;
+/// any user `class App` would FP) and `Lumen` was removed (Lumen routes
+/// flow through `$app->get(...)` instance calls, not `Lumen::get(...)`
+/// static calls).
+const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symfony"];
+
 /// Walk a chained member-call expression inward through any depth of
 /// `member_call_expression` until it reaches a `scoped_call_expression` root.
 /// Returns the scope name (`Route`, `Router`, etc.) when the chain terminates
@@ -179,13 +190,6 @@ impl LanguageProvider for PhpProvider {
         let idx_route_chained_call = self.query.capture_index_for_name("route.chained.call");
         let idx_route_chained_object = self.query.capture_index_for_name("route.chained.object");
 
-        // Router-class allowlist gates generic Route emission. Without it,
-        // `Cache::get('key')` / `Config::get('app.name')` / `Auth::get(...)`
-        // all match the regex and surface as fake routes. List covers
-        // mainstream PHP routers and is short enough that adding a new one
-        // is a one-liner. Spec: 2026-05-17-route-precision-design.md.
-        const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "App", "Symfony", "Lumen"];
-
         // Laravel `Route::method('/path', <handler>)`. The outer call
         // anchors the match; the parser walks the `arguments` node to
         // extract path + handler shape.
@@ -290,19 +294,13 @@ impl LanguageProvider for PhpProvider {
                     if let Ok(p_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        let trimmed = p_str.trim_matches(|c| c == '\'' || c == '"');
                         // Laravel allows leading-slash-optional routes:
                         // `Route::get('register', ...)` is semantically `/register`.
-                        // Normalize so the builder-side `looks_like_path` (which
-                        // requires leading `/`) doesn't drop them. Without this,
-                        // bare-path Laravel routes get extracted by the parser but
-                        // silently rejected when the builder constructs Route nodes.
-                        let path = if trimmed.starts_with('/') {
-                            trimmed.to_string()
-                        } else {
-                            format!("/{trimmed}")
-                        };
-                        route_path = Some(path);
+                        // `clean_route_path_lax` strips quotes and prepends `/`
+                        // when missing — same helper Python parser uses for
+                        // Sanic / Flask / FastAPI bare paths so the builder's
+                        // strict `looks_like_path` filter accepts both forms.
+                        route_path = crate::route_detector::clean_route_path_lax(p_str);
                     }
                 } else if Some(cap_idx) == idx_route_call {
                     route_span_node = Some(cap.node);

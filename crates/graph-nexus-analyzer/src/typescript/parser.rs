@@ -363,12 +363,13 @@ impl LanguageProvider for TypeScriptProvider {
         // `import` statements, so gating would regress Node.js code using
         // `require('express')`. The path-shape predicate alone removes
         // the dominant FP class (Map/headers/cache `.get("key")`).
-        routes.retain(|r| crate::route_detector::clean_route_path(&r.path).is_some());
-        for r in routes.iter_mut() {
-            if let Some(clean) = crate::route_detector::clean_route_path(&r.path) {
+        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+            Some(clean) => {
                 r.path = clean;
+                true
             }
-        }
+            None => false,
+        });
 
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent with Actix).

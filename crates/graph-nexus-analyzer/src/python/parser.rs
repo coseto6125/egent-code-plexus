@@ -80,6 +80,14 @@ const BLIND_SPEC: &[(&str, &str)] = &[
 /// attribute the same way would be false-negative.
 const TEST_CLIENT_CHAIN_MARKERS: &[&str] = &[".test_client.", ".asgi_client.", ".sync_client."];
 
+/// Route-registration method names that don't encode an HTTP verb in the
+/// name. They default to GET when no `methods=[...]` kwarg is supplied;
+/// otherwise the kwarg specifies the verb(s). Used to gate (a) the
+/// framework-presence relaxation, (b) bare-path normalization, (c) the
+/// methods-kwarg parse branch. Single source of truth — keeps the three
+/// emission-time checks aligned when a new registration method is added.
+const REGISTRATION_METHOD_NAMES: &[&str] = &["route", "add_route", "add_url_rule", "add_api_route"];
+
 /// Direct receiver names that — only inside test files (path/filename
 /// classified as Test) — indicate a test-client variable injected via
 /// pytest fixture or similar. Common conventions: `http_client` (Sanic
@@ -164,13 +172,23 @@ fn extract_methods_kwarg(call_node: Node, source: &[u8]) -> Option<Vec<String>> 
         if child.kind() != "keyword_argument" {
             continue;
         }
-        let name_node = child.child_by_field_name("name")?;
-        let name =
-            std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
+        // Use `continue` not `?` for inner-loop skips — `?` would abort
+        // the entire function on a single malformed kwarg and silently
+        // fall back to the default `GET`, masking later valid `methods=`
+        // arguments.
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Ok(name) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+        else {
+            continue;
+        };
         if name != "methods" {
             continue;
         }
-        let raw_value = child.child_by_field_name("value")?;
+        let Some(raw_value) = child.child_by_field_name("value") else {
+            continue;
+        };
         // Unwrap `frozenset({...})` / `set([...])` / `tuple([...])` wrappers
         // common in Sanic (`methods=frozenset({"PUT","POST"})`). The literal
         // collection (set/list/tuple) lives as the first arg of the call.
@@ -697,12 +715,7 @@ impl LanguageProvider for PythonProvider {
             // preserved.
             let route_method_is_framework_specific = route_method
                 .and_then(|n| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok())
-                .map(|s| {
-                    matches!(
-                        s.to_ascii_lowercase().as_str(),
-                        "route" | "add_route" | "add_url_rule" | "add_api_route"
-                    )
-                })
+                .map(|s| REGISTRATION_METHOD_NAMES.contains(&s.to_ascii_lowercase().as_str()))
                 .unwrap_or(false)
                 && !imports.is_empty();
             // Drop `<receiver>.test_client.X(...)` patterns up-front: these
@@ -734,47 +747,41 @@ impl LanguageProvider for PythonProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
-                        // For route-registration methods (route, add_route,
-                        // add_url_rule, add_api_route), framework convention
+                        // For route-registration methods (see
+                        // `REGISTRATION_METHOD_NAMES`), framework convention
                         // (Sanic, Flask) accepts both `'path'` and `'/path'` —
                         // semantically `/path`. Normalize bare paths so the
                         // builder's `looks_like_path` filter doesn't drop them
                         // (mirrors PHP/Laravel bare-path handling).
-                        let is_registration_method = matches!(
-                            method_str.to_ascii_lowercase().as_str(),
-                            "route" | "add_route" | "add_url_rule" | "add_api_route"
-                        );
+                        let method_lower = method_str.to_ascii_lowercase();
+                        let is_registration_method =
+                            REGISTRATION_METHOD_NAMES.contains(&method_lower.as_str());
                         let resolved_path = if is_registration_method {
                             crate::route_detector::clean_route_path_lax(path_str)
                         } else {
                             crate::route_detector::clean_route_path(path_str)
                         };
                         if let Some(clean_path) = resolved_path {
-                            // Route-registration methods (`route`, `add_route`,
-                            // `add_url_rule`, `add_api_route`) don't encode an
-                            // HTTP verb in the name. They default to GET when
-                            // no `methods=[...]` kwarg is supplied; otherwise
-                            // the kwarg specifies the verb(s). Parse the kwarg
-                            // (P1 review fix for PR #50: previously translated
-                            // unconditionally to GET, fabricating data when
-                            // `methods=["POST"]` was present).
-                            let methods_to_emit: Vec<String> =
-                                match method_str.to_ascii_lowercase().as_str() {
-                                    "route" | "add_route" | "add_url_rule" | "add_api_route" => {
-                                        match route_call_node
-                                            .and_then(|n| extract_methods_kwarg(n, source))
-                                        {
-                                            None => vec!["GET".to_string()],
-                                            Some(methods) if !methods.is_empty() => methods,
-                                            Some(_) => {
-                                                // kwarg present but unparseable — skip
-                                                // rather than fabricate a method.
-                                                continue;
-                                            }
-                                        }
+                            // Registration methods don't encode the HTTP verb;
+                            // default to GET when no `methods=[...]` kwarg is
+                            // supplied, otherwise parse the kwarg. P1 review
+                            // fix for PR #50: previously translated unconditionally
+                            // to GET, fabricating data when `methods=["POST"]`
+                            // was present.
+                            let methods_to_emit: Vec<String> = if is_registration_method {
+                                match route_call_node.and_then(|n| extract_methods_kwarg(n, source))
+                                {
+                                    None => vec!["GET".to_string()],
+                                    Some(methods) if !methods.is_empty() => methods,
+                                    Some(_) => {
+                                        // kwarg present but unparseable — skip
+                                        // rather than fabricate a method.
+                                        continue;
                                     }
-                                    _ => vec![method_str.to_string()],
-                                };
+                                }
+                            } else {
+                                vec![method_str.to_string()]
+                            };
                             for method in methods_to_emit {
                                 routes.push(RawRoute {
                                     method,
