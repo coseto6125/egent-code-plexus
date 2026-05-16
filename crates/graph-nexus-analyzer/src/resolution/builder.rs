@@ -1803,21 +1803,26 @@ mod tests {
 
     /// Pins the contract that Pass-2 emits the same edge set whether the
     /// dump-enabled serial path or the dump-disabled parallel path runs.
-    /// Without this test, all 8 existing builder tests exercise only the
-    /// parallel path (none set `with_resolver_dump`), so a divergence
-    /// between the two `pass2_emit_*` call sites would slip through
-    /// until a user enables the oracle harness.
     ///
-    /// The fixtures cover all five edge-emission categories so the test
-    /// would catch:
+    /// Extended from the original aggregated-set assertion to:
+    ///   (a) stratify per `RelType` so a divergence on one type doesn't hide
+    ///       behind equality in another;
+    ///   (b) include the resolved `reason` string in the equality predicate;
+    ///   (c) add a `HandlesRoute` fixture to fire that emit branch;
+    ///   (d) pin emit-zero invariant for Sub-projects 1/5 types
+    ///       (Imports, Defines, Implements, Fetches).
+    ///
+    /// The fixtures cover these edge-emission categories:
     ///   * heritage (`Extends`) — Class with base
     ///   * calls (`Calls`) — Function with callee
     ///   * type_annotation (`Accesses`)
     ///   * framework_refs (`References` via Spring fixture)
     ///   * fanout_refs (`References` via reflection fixture)
+    ///   * routes (`HandlesRoute`) — bar.rs exposes GET /users → other_fn
     #[test]
-    fn pass2_parallel_and_serial_emit_identical_edges() {
-        use graph_nexus_core::analyzer::types::{RawFanoutRef, RawFrameworkRef};
+    fn pass2_parallel_serial_identical_per_reltype() {
+        use graph_nexus_core::analyzer::types::{RawFanoutRef, RawFrameworkRef, RawRoute};
+        use std::collections::{BTreeMap, BTreeSet};
 
         fn build_fixtures() -> Vec<LocalGraph> {
             vec![
@@ -1890,7 +1895,12 @@ mod tests {
                     ],
                     documents: vec![],
                     imports: vec![],
-                    routes: vec![],
+                    routes: vec![RawRoute {
+                        method: "GET".into(),
+                        path: "/users".into(),
+                        handler: Some("other_fn".into()),
+                        span: (20, 0, 20, 30),
+                    }],
                     framework_refs: vec![],
                     fanout_refs: vec![],
                     blind_spots: vec![],
@@ -1914,34 +1924,70 @@ mod tests {
         }
         let serial_graph = serial_builder.build();
 
-        // Compare edges as multisets — flat_map_iter ordering across rayon
-        // workers can differ from the serial nested loop, but the SET of
-        // (source, target, rel_type) tuples must match. `RelType` doesn't
-        // derive Ord, so we use `{:?}` formatting as a stable key.
-        let parallel_edges: std::collections::BTreeSet<(u32, u32, String)> = parallel_graph
-            .edges
-            .iter()
-            .map(|e| (e.source, e.target, format!("{:?}", e.rel_type)))
-            .collect();
-        let serial_edges: std::collections::BTreeSet<(u32, u32, String)> = serial_graph
-            .edges
-            .iter()
-            .map(|e| (e.source, e.target, format!("{:?}", e.rel_type)))
-            .collect();
-        assert_eq!(
-            parallel_edges, serial_edges,
-            "parallel Pass 2 must emit the same edges as the serial dump path",
-        );
+        // Resolve a StrRef to a String from the raw pool bytes.
+        let resolve_str = |pool: &Vec<u8>, sref: graph_nexus_core::pool::StrRef| -> String {
+            let start = sref.offset as usize;
+            let end = start + sref.len as usize;
+            std::str::from_utf8(&pool[start..end])
+                .expect("utf-8 in pool")
+                .to_string()
+        };
+
+        // Bucketize edges per RelType; include resolved reason in the key so a
+        // diverging reason on the same (source, target) pair is caught.
+        let bucketize = |g: &graph_nexus_core::graph::ZeroCopyGraph|
+            -> BTreeMap<String, BTreeSet<(u32, u32, String)>>
+        {
+            let mut buckets: BTreeMap<String, BTreeSet<(u32, u32, String)>> = BTreeMap::new();
+            for e in &g.edges {
+                let key = format!("{:?}", e.rel_type);
+                let reason = resolve_str(&g.string_pool, e.reason);
+                buckets.entry(key).or_default().insert((e.source, e.target, reason));
+            }
+            buckets
+        };
+
+        let parallel_buckets = bucketize(&parallel_graph);
+        let serial_buckets = bucketize(&serial_graph);
+
+        // RelType key sets must match before per-bucket comparison.
+        let p_keys: Vec<_> = parallel_buckets.keys().cloned().collect();
+        let s_keys: Vec<_> = serial_buckets.keys().cloned().collect();
+        assert_eq!(p_keys, s_keys, "parallel vs serial produced different RelType sets");
+
+        // Per-RelType equality — divergence is localised to the failing bucket.
+        for (rel, p_edges) in &parallel_buckets {
+            let s_edges = serial_buckets.get(rel).expect("rel exists in both");
+            assert_eq!(
+                p_edges, s_edges,
+                "parallel vs serial diverged on RelType {rel}",
+            );
+        }
+
+        // Emit-zero invariant: Sub-projects 1/5 types must not appear yet.
+        // Update these assertions when those sub-projects ship.
+        for unimplemented in &["Imports", "Defines", "Implements", "Fetches"] {
+            assert!(
+                !parallel_buckets.contains_key(*unimplemented),
+                "RelType {unimplemented} unexpectedly emitted (parallel) — \
+                 Sub-projects 1/5 will lift this; update this assertion when they ship",
+            );
+        }
 
         // Node counts identical (both paths build identical SymbolTable + StringPool)
         assert_eq!(parallel_graph.nodes.len(), serial_graph.nodes.len());
 
         // Sanity: dump file actually exists for the serial run (proves the
         // serial branch was the one taken).
-        assert!(
-            dump_path.exists(),
-            "serial branch must have produced a resolver dump file",
-        );
+        assert!(dump_path.exists(), "serial dump path was not taken");
+
+        // Fixture coverage: assert each expected category fired at least once.
+        for required in &["Calls", "Extends", "Accesses", "References", "HandlesRoute"] {
+            assert!(
+                parallel_buckets.contains_key(*required),
+                "fixture failed to trigger {required} emit",
+            );
+        }
     }
 
     // ─── Pass 1.6: fetch-shape extraction ──────────────────────────────────

@@ -115,7 +115,15 @@
 | `crates/graph-nexus-cli/src/commands/hook_watcher.rs:53` | `let mut cmd = std::process::Command::new(&gnx_bin);` | fire_forget_ok | `.output()` called at :62 (`let _ = cmd.output()`); result intentionally discarded (best-effort rename/prune); synchronous wait, no orphaned child |
 
 ## §4 Hot-path equivalence test results
-(populated by Phases 2–6)
+
+### 4.1 pass2_parallel_serial_identical_per_reltype
+
+**Existing fixture covered:** Calls, Extends, Accesses, References (×2)
+**Extended fixture covers (additionally):** HandlesRoute (bar.rs GET /users → other_fn via `detect_from_call` + `lookup_in_file`)
+**Asserts emit-zero invariant for:** Implements, Imports, Defines, Fetches (zero-edge sanity; Sub-projects 1, 5 will lift these)
+**Stratification:** per `RelType` BTreeMap, asserted independently
+**Equality includes:** `(source, target, RelType, resolved_reason_string)`
+**Result:** PASS default threads / PASS --test-threads=1 / PASS --test-threads=16
 
 ## §5 TSan results
 (populated by Phase 7)
