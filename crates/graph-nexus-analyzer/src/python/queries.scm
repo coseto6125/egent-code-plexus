@@ -45,6 +45,6 @@
 
 ;; Routes
 (call
-  function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))
+  function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|route|GET|POST|PUT|DELETE|PATCH|ROUTE)$"))
   arguments: (argument_list (string) @route.path)
 ) @route.call

@@ -357,6 +357,20 @@ impl LanguageProvider for TypeScriptProvider {
         let has_express = has_import_from(&imports, EXPRESS_REQUIRED);
         let has_nestjs = has_import_from(&imports, NESTJS_REQUIRED);
 
+        // Path-shape filter for generic Route emission — see
+        // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+        // No framework-presence gate here: the parser only captures ES
+        // `import` statements, so gating would regress Node.js code using
+        // `require('express')`. The path-shape predicate alone removes
+        // the dominant FP class (Map/headers/cache `.get("key")`).
+        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+            Some(clean) => {
+                r.path = clean;
+                true
+            }
+            None => false,
+        });
+
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent with Actix).
         let mut framework_refs: Vec<RawFrameworkRef> = if has_express {

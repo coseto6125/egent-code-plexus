@@ -298,6 +298,22 @@ impl LanguageProvider for JavaScriptProvider {
         let has_express = has_import_from(&imports, EXPRESS_REQUIRED);
         let has_hapi = has_import_from(&imports, HAPI_REQUIRED);
 
+        // Path-shape filter for generic Route emission. The JS parser
+        // captures imports via ES `import` statements only — CommonJS
+        // `require()` is not tracked, so a framework-presence gate would
+        // regress Node.js codebases that use `require('express')`. The
+        // path-shape predicate alone removes the dominant FP class
+        // (`Map.get("k")` / `headers.get("x-trace")` / `cache.get(id)`)
+        // because none of those literals start with `/`. Spec:
+        // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+            Some(clean) => {
+                r.path = clean;
+                true
+            }
+            None => false,
+        });
+
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent
         // with TS Express and Actix).

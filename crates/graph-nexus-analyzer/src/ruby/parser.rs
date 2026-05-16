@@ -586,6 +586,18 @@ impl LanguageProvider for RubyProvider {
 
         let framework_refs = detect_ast_framework_patterns(source, RUBY_FRAMEWORKS);
 
+        // Path-shape filter — drop generic route captures whose first
+        // string arg doesn't look like an HTTP route. Same rationale as
+        // the JS/TS/Python parsers; spec:
+        // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+            Some(clean) => {
+                r.path = clean;
+                true
+            }
+            None => false,
+        });
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
