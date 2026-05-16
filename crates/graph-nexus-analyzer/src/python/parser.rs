@@ -71,6 +71,33 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     ),
 ];
 
+/// Test-client chain markers — segments that appear in test-suite client
+/// patterns but not in production route registration. `app.test_client.get(...)`
+/// (Flask / Sanic / Tornado), `app.asgi_client.get(...)` (Sanic async),
+/// `app.sync_client.get(...)` (some custom test harnesses). Each is
+/// overwhelmingly a testing convention; user code that names a production
+/// attribute the same way would be false-negative.
+const TEST_CLIENT_CHAIN_MARKERS: &[&str] = &[".test_client.", ".asgi_client.", ".sync_client."];
+
+/// True when the call's function chain contains any test-client marker,
+/// identifying patterns like `app.test_client.get('/x')` /
+/// `self.app.asgi_client.post(...)`. These are test-client REQUESTS, not
+/// route DEFINITIONS — tree-sitter sees the same call shape for both, so
+/// the parser-side filter keeps them out of `routes` regardless of file
+/// category. Empirical impact on sanic-org/sanic: cuts ~88% of the
+/// `--include-tests` "extra paths" vs gitnexus.
+fn is_test_client_chained_call(call_node: Node, source: &[u8]) -> bool {
+    let Some(fn_node) = call_node.child_by_field_name("function") else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&source[fn_node.start_byte()..fn_node.end_byte()]) else {
+        return false;
+    };
+    TEST_CLIENT_CHAIN_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
 /// Walk a route-registration call node (`@app.route(...)`, `app.add_url_rule(...)`,
 /// `app.add_api_route(...)`) for the optional `methods=[...]` kwarg.
 ///
@@ -627,6 +654,17 @@ impl LanguageProvider for PythonProvider {
                 })
                 .unwrap_or(false)
                 && !imports.is_empty();
+            // Drop `<receiver>.test_client.X(...)` patterns up-front: these
+            // are test-client REQUESTS, not route definitions. Tree-sitter
+            // can't distinguish them by call shape; the `.test_client.`
+            // substring in the chained function name is the cheapest reliable
+            // signal. Empirical: removes ~88% of the Sanic `--include-tests`
+            // FPs.
+            if let Some(call_node) = route_call_node {
+                if is_test_client_chained_call(call_node, source) {
+                    continue;
+                }
+            }
             if is_route && (has_any_http_framework || route_method_is_framework_specific) {
                 if let (Some(r_method), Some(r_path), Some(root)) =
                     (route_method, route_path, root_span_node)

@@ -310,20 +310,51 @@ fn php_laravel_chain_with_router_dsl_intermediates_extracts() {
     );
 }
 
-// ─── Sanic test-client URLs (documented FP, mitigated by --include-tests) ──
+// ─── Python — `.test_client.X(...)` chained calls NEGATIVE (parser filter) ──
 
 #[test]
-fn python_sanic_test_client_request_at_parser_level_emits_route() {
-    // INTENTIONAL parser-level behavior — tree-sitter sees `client.get(...)`
-    // and `app.get(...)` as the same call shape, so the parser can't
-    // distinguish a test-client REQUEST from a route DEFINITION. This is
-    // a known FP class for routes declared inside test files. The PR #52
-    // `gnx routes --include-tests` flag is the mitigation: production
-    // routes default-filter out test-file entries via the existing
-    // `FileCategory::Test` classification at index time.
+fn python_app_test_client_chained_calls_emit_zero() {
+    // `app.test_client.get(...)` / `self.app.test_client.post(...)` are
+    // test-client REQUESTS, not route DEFINITIONS. The parser-side filter
+    // drops them by detecting `.test_client.` in the chained function name
+    // (impossible to distinguish at tree-sitter call-shape level — they
+    // look identical to `app.get(...)`).
     //
-    // This test pins the parser-level behavior so that anyone changing
-    // the gate is forced to consider the test-file filter alongside.
+    // Empirical impact: this removes ~88% of the FPs that surfaced when
+    // running gnx with `--include-tests` on sanic-org/sanic. A user who
+    // names a production attribute `test_client` would be false-negative,
+    // but `test_client` is overwhelmingly a testing convention.
+    let src = r#"
+from sanic import Sanic
+
+app = Sanic("api")
+
+# Real test-client REQUESTS, not route definitions. Must NOT emit.
+_, response = app.test_client.get("/api/foo")
+_, response = app.test_client.post("/api/items", data={"name": "x"})
+_, response = app.test_client.delete("/api/items/42")
+_, response = await app.asgi_client.get("/api/asgi")
+_, response = app.sync_client.put("/api/sync")
+"#;
+    assert_no_routes(
+        &py_routes(src),
+        ".test_client / .asgi_client / .sync_client chained-call test-client requests",
+    );
+}
+
+// ─── Python — direct `client.X(...)` is indistinguishable, documented ──
+
+#[test]
+fn python_direct_client_get_emits_route_documented_limitation() {
+    // The `.test_client.` chained-access filter does NOT catch direct
+    // single-level `client.get('/x')` calls (where `client` is e.g.
+    // `SanicTestClient(app)`). Tree-sitter sees the same shape as
+    // `app.get('/x')` and the `client` variable's type isn't tracked.
+    //
+    // This is a documented limitation. The `--include-tests` flag and
+    // `FileCategory::Test` classification at index/query time are the
+    // mitigation — `client = SanicTestClient(...)` patterns live in
+    // test files which get filtered by default in `gnx routes`.
     let src = r#"
 from sanic_testing.testing import SanicTestClient
 from sanic import Sanic
@@ -331,18 +362,14 @@ from sanic import Sanic
 app = Sanic("api")
 client = SanicTestClient(app)
 
-# Real test-client REQUESTS, not route definitions.
+# Indistinguishable at parser level from a real `app.get('/x')` route.
 client.get("/api/foo")
-client.post("/api/items", json={"name": "x"})
-client.delete("/api/items/42")
 "#;
     let routes = py_routes(src);
     let pairs_set: std::collections::BTreeSet<_> = pairs(&routes).into_iter().collect();
-    // Parser emits these — production-vs-test discrimination happens at
-    // index/query time via `FileCategory::Test`, not in the parser.
     assert!(
         pairs_set.contains(&("GET".to_string(), "/api/foo".to_string())),
-        "expected parser to emit test-client GET (mitigated at query time): {:?}",
+        "expected parser to emit direct client.get (mitigated at query time): {:?}",
         pairs_set
     );
 }
