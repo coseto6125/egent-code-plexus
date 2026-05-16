@@ -14,6 +14,7 @@ mod graph_path;
 mod hint;
 mod output;
 pub mod reanalyze;
+mod repo_identity;
 mod repo_selector;
 pub mod search;
 

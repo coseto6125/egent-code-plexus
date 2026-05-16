@@ -1504,6 +1504,7 @@ dependencies = [
  "graph-nexus-analyzer",
  "graph-nexus-core",
  "graph-nexus-mcp",
+ "hex",
  "ignore",
  "memmap2",
  "ratatui",
