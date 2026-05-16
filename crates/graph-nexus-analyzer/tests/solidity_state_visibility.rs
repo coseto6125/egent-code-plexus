@@ -63,10 +63,9 @@ fn internal_state_var_is_not_exported() {
 #[test]
 fn external_state_var_when_grammar_accepts() {
     // `external` is not a semantically valid visibility for state vars in
-    // Solidity, but `tree-sitter-solidity`'s grammar still permits it
-    // (see the `FIXME` comment on `state_variable_declaration`). We only
-    // assert behaviour when the parser actually emits the node — if a future
-    // grammar version rejects it, the symbol simply won't appear.
+    // Solidity, but `tree-sitter-solidity`'s grammar still permits it. We
+    // only assert behaviour when the parser actually emits the node — if a
+    // future grammar version rejects it, the symbol simply won't appear.
     let nodes = parse("contract C { uint256 external x; }");
     if let Some(x) = nodes
         .iter()
