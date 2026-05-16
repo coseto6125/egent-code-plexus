@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use toml::Value;
 
 const SERVER_NAME: &str = "gnx";
-const SERVER_ARGS: &[&str] = &["mcp", "serve"];
+const SERVER_ARGS: &[&str] = &["admin", "mcp", "serve"];
 
 pub fn install(_theme: &ColorfulTheme) {
     match run_install() {
@@ -168,7 +168,7 @@ fn status_from_config(config: &Value, command: &str) -> HostStatus {
         }
     } else {
         HostStatus::Outdated {
-            reason: "mcp_servers.gnx differs from current gnx mcp serve entry".into(),
+            reason: "mcp_servers.gnx differs from current gnx admin mcp serve entry".into(),
         }
     }
 }
@@ -240,7 +240,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
             r#"
 [mcp_servers.gnx]
 command = "/usr/local/bin/gnx"
-args = ["mcp", "serve"]
+args = ["admin", "mcp", "serve"]
 enabled = false
 "#,
         )
