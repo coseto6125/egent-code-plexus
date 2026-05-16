@@ -19,6 +19,7 @@ pub mod reanalyze;
 mod repo_identity;
 mod repo_selector;
 pub mod search;
+mod session;
 
 use engine::Engine;
 

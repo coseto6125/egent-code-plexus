@@ -16,3 +16,4 @@ pub mod reanalyze;
 pub mod repo_identity;
 pub mod repo_selector;
 pub mod search;
+pub mod session;
