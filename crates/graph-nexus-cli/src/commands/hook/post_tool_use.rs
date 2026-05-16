@@ -23,6 +23,18 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     if input.tool_name != "Bash" {
         return Ok(());
     }
+
+    // Orphan-registry sweep is registry-level; not gated on git/index
+    // state so it actually fires on idle Edit-only sessions too. The
+    // 1-hour throttle keeps the per-call stat negligible.
+    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    if should_run_orphan_prune(&home_gnx) && spawn_background_prune(&home_gnx) {
+        emit_additional_context(
+            "PostToolUse",
+            "gnx orphan-registry sweep started in background. Stale ~/.gnx/<repo>/<branch>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.",
+        );
+    }
+
     let cmd = input
         .tool_input
         .get("command")
@@ -73,16 +85,6 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
             "gnx reindex started in background (index stale ~{age}s). Subsequent gnx tools may use stale data until completion (~30-120s). If it appears stuck, run `gnx admin index` manually."
         ),
     );
-
-    // Periodic orphan sweep — at most once per hour.
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
-    if should_run_orphan_prune(&home_gnx) && spawn_background_prune(&home_gnx) {
-        emit_additional_context(
-            "PostToolUse",
-            "gnx orphan-registry sweep started in background. Stale ~/.gnx/<repo>/<branch>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.",
-        );
-    }
-
     Ok(())
 }
 
