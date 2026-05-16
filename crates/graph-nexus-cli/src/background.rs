@@ -6,8 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Optional marker files written by the background job to report
-/// outcome to the parent process (consumed asynchronously via e.g.
-/// UserPromptSubmit hook reading these files later).
+/// outcome — consumed asynchronously by e.g. the UserPromptSubmit hook.
 pub struct BgMarkers<'a> {
     pub log: &'a Path,
     pub complete: &'a Path,

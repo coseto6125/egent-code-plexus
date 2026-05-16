@@ -5,6 +5,7 @@ use super::common::{
     emit_additional_context, gnx_state_dir_ensure, lookup_index_dir, strip_shell_quotes, HookInput,
 };
 use crate::auto_ensure::{ensure_index, EnsureResult};
+use crate::background::{spawn_bg, BgJob, BgMarkers};
 use graph_nexus_core::GnxError;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -91,12 +92,12 @@ fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
     let failed = state_dir.join(".rebuild-failed");
     let log = state_dir.join("last-rebuild.log");
 
-    crate::background::spawn_bg(crate::background::BgJob {
+    spawn_bg(BgJob {
         args: &["admin", "index", "--repo", repo_str.as_ref()],
         lock: &lock,
         cwd: repo_root,
         retry: (3, 2),
-        markers: Some(crate::background::BgMarkers {
+        markers: Some(BgMarkers {
             log: &log,
             complete: &complete,
             failed: &failed,
