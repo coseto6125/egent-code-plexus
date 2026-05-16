@@ -852,6 +852,24 @@ impl LanguageProvider for PythonProvider {
             });
         }
 
+        // Dedupe routes by (method, path, span). The generic tree-sitter query
+        // `arguments: (argument_list (string) @route.path)` matches EVERY string
+        // child of the argument list — so `app.add_url_rule("/path", "endpoint",
+        // handler)` fires twice (once for "/path", once for "endpoint"). The
+        // endpoint name normally fails the strict `clean_route_path` filter
+        // (no leading `/`), but for registration methods we use the lax variant
+        // which prepends `/` and would emit `/endpoint` as a duplicate of
+        // `/path` after both normalize. Dedupe is the simplest fix without
+        // changing the query (which would break Sanic's
+        // `add_route(handler, "/path")` arg-order variant).
+        routes.sort_by(|a, b| {
+            a.method
+                .cmp(&b.method)
+                .then(a.path.cmp(&b.path))
+                .then(a.span.cmp(&b.span))
+        });
+        routes.dedup_by(|a, b| a.method == b.method && a.path == b.path && a.span == b.span);
+
         Ok(LocalGraph {
             content_hash: [0; 32],
             routes,
