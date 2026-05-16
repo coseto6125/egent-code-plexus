@@ -1129,6 +1129,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "uuid",
  "walkdir",
 ]
 
