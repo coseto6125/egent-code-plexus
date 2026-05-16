@@ -76,10 +76,7 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
             let start = std::time::Instant::now();
             crate::build::orchestrator::build_l2(worktree_root, None)
                 .map_err(|e| format!("build_l2: {e}"))?;
-            eprintln!(
-                "✓ Index built (L2 cold path in {:.1}s)",
-                start.elapsed().as_secs_f32()
-            );
+            eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
             Ok(())
         }
         EnsureResult::Stale { .. } => apply_l1_overlay_updates(graph_path, worktree_root)
@@ -105,14 +102,11 @@ fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Resu
         match promotion::promotion_case(&session_meta.base_sha, &current_head, worktree_root) {
             promotion::PromotionCase::A => {
                 let stats = promotion::promote_case_a(&session_dir, worktree_root, &current_head)?;
-                eprintln!(
-                    "✓ session promoted (Case A: fast-forward, {} dropped, {} kept)",
-                    stats.dropped, stats.kept
-                );
+                eprintln!("session.promoted case=A dropped={} kept={}", stats.dropped, stats.kept);
             }
             promotion::PromotionCase::B => {
                 promotion::promote_case_b(&session_dir, &session_meta.base_sha, &current_head)?;
-                eprintln!("✓ session rebased (Case B: diverged, L1 invalidated)");
+                eprintln!("session.rebased case=B");
             }
         }
     }
@@ -151,7 +145,7 @@ fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Resu
         }
     }
     if n_written > 0 || n_failed > 0 {
-        eprintln!("✓ L1 overlay refreshed ({n_written} written, {n_failed} parse-failed)");
+        eprintln!("l1.refreshed written={n_written} failed={n_failed}");
     }
     Ok(())
 }

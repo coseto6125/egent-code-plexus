@@ -331,12 +331,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 
     if !args.quiet {
         let elapsed = start.elapsed().as_secs_f32();
-        eprintln!(
-            "✓ Built L2 at {} ({:?}) in {:.1}s",
-            &result.sha_hex[..8],
-            result.source_type,
-            elapsed,
-        );
+        eprintln!("l2.built sha={} type={:?} elapsed={:.2}s", &result.sha_hex[..8], result.source_type, elapsed);
     }
     Ok(())
 }
