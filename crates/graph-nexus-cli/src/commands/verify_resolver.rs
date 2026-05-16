@@ -196,14 +196,18 @@ fn diff(
     // Index gnx by (src_file, name) — there may be multiple gnx attempts per
     // key (e.g. heritage + type annotation + call). Pick the BEST attempt:
     //   resolved (tier != Unresolved) > unresolved
-    //   SameFile/ImportScoped > Global > Unresolved
+    //   SameFile/ImportScoped > Global > AmbiguousGlobal > Unresolved
+    // AmbiguousGlobal ranks above Unresolved because it carries diagnostic
+    // signal (candidates were found, just suppressed) — preferring it on
+    // dedup surfaces "defence fired" over the silent "nothing found".
     let mut gnx_by_key: HashMap<(String, String), &Record> = HashMap::new();
     let tier_rank = |t: &str| -> u8 {
         match t {
             "SameFile" => 0,
             "ImportScoped" => 1,
             "Global" => 2,
-            _ => 3,
+            "AmbiguousGlobal" => 3,
+            _ => 4,
         }
     };
     for r in gnx {
