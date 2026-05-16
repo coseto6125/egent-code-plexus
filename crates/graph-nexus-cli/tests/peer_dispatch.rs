@@ -129,3 +129,15 @@ fn empty_dirty_symbols_writes_nothing() {
     let (entries, _) = drain(&inbox, 0).unwrap();
     assert!(entries.is_empty());
 }
+
+#[test]
+fn watcher_lock_rejects_second_holder() {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("watcher.lock");
+    let f1 = OpenOptions::new().create(true).read(true).write(true).open(&lock).unwrap();
+    f1.try_lock_exclusive().unwrap();
+    let f2 = OpenOptions::new().create(true).read(true).write(true).open(&lock).unwrap();
+    assert!(f2.try_lock_exclusive().is_err(), "second flock must fail while first holds it");
+}
