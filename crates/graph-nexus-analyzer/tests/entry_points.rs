@@ -52,17 +52,6 @@ fn mk_local_graph(
     }
 }
 
-/// Resolve a `StrRef` against a `Vec<u8>` string pool. The `StrRef`
-/// itself doesn't expose `.resolve()` — that's on `StringPool` /
-/// `ArchivedStrRef`. Tests work with the raw `Vec<u8>` from a
-/// just-built `ZeroCopyGraph` so we provide a thin helper.
-fn resolve_str(pool: &[u8], sref: &graph_nexus_core::pool::StrRef) -> String {
-    let start = sref.offset as usize;
-    let end = start + sref.len as usize;
-    std::str::from_utf8(&pool[start..end])
-        .expect("EntryPoint test: invalid UTF-8 in string pool")
-        .to_string()
-}
 
 /// Locate the EntryPoint marker node(s) in a built graph by inspecting
 /// `node.kind`. Returns indices for downstream assertions.
@@ -101,7 +90,7 @@ fn rust_fn_main_emits_entrypoint_marker() {
 
     let entry_idx = entries[0];
     let entry_node = &graph.nodes[entry_idx];
-    let name = resolve_str(&graph.string_pool, &entry_node.name);
+    let name = entry_node.name.resolve(&graph.string_pool).to_string();
     assert!(
         name.contains("main"),
         "EntryPoint name should embed 'main', got {}",
@@ -120,7 +109,7 @@ fn rust_fn_main_emits_entrypoint_marker() {
         "confidence should be 0.9, got {}",
         entry_edges[0].confidence
     );
-    let reason = resolve_str(&graph.string_pool, &entry_edges[0].reason);
+    let reason = entry_edges[0].reason.resolve(&graph.string_pool).to_string();
     assert!(
         reason.starts_with("main:"),
         "reason should start with main:, got {}",
@@ -164,7 +153,7 @@ fn java_static_void_main_emits_entrypoint_marker() {
     // Target should be the `main` Method node, not the App Class.
     let target_idx = entry_edges[0].target as usize;
     let target_node = &graph.nodes[target_idx];
-    let target_name = resolve_str(&graph.string_pool, &target_node.name);
+    let target_name = target_node.name.resolve(&graph.string_pool).to_string();
     assert_eq!(target_name, "main");
     assert!(matches!(target_node.kind, NodeKind::Method));
 }
@@ -202,7 +191,7 @@ fn fastapi_route_emits_entrypoint_at_score_1_0() {
         "route confidence should be 1.0, got {}",
         entry_edges[0].confidence
     );
-    let reason = resolve_str(&graph.string_pool, &entry_edges[0].reason);
+    let reason = entry_edges[0].reason.resolve(&graph.string_pool).to_string();
     assert!(
         reason.starts_with("route:"),
         "reason should encode route kind, got {}",
@@ -406,7 +395,7 @@ fn multi_file_entries_are_isolated_per_file() {
         .files
         .iter()
         .enumerate()
-        .find(|(_, f)| resolve_str(&graph.string_pool, &f.path).ends_with("main.rs"))
+        .find(|(_, f)| f.path.resolve(&graph.string_pool).ends_with("main.rs"))
         .map(|(i, _)| i as u32)
         .expect("src/main.rs must be present in the built graph");
     let entry_file_idx = graph.nodes[entries[0]].file_idx;

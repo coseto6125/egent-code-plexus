@@ -1936,15 +1936,6 @@ mod tests {
         }
         let serial_graph = serial_builder.build();
 
-        // Resolve a StrRef to a String from the raw pool bytes.
-        let resolve_str = |pool: &[u8], sref: graph_nexus_core::pool::StrRef| -> String {
-            let start = sref.offset as usize;
-            let end = start + sref.len as usize;
-            std::str::from_utf8(&pool[start..end])
-                .expect("utf-8 in pool")
-                .to_string()
-        };
-
         // Bucketize edges per RelType; include resolved reason in the key so a
         // diverging reason on the same (source, target) pair is caught.
         // `RelType` doesn't derive `Ord`, so `format!("{:?}", …)` is used as a
@@ -1956,7 +1947,7 @@ mod tests {
             let mut buckets: BTreeMap<String, BTreeSet<(u32, u32, String)>> = BTreeMap::new();
             for e in &g.edges {
                 let key = format!("{:?}", e.rel_type);
-                let reason = resolve_str(&g.string_pool, e.reason);
+                let reason = e.reason.resolve(&g.string_pool).to_string();
                 buckets.entry(key).or_default().insert((e.source, e.target, reason));
             }
             buckets

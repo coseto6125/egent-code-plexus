@@ -8,31 +8,25 @@
 use graph_nexus_analyzer::resolution::builder::GraphBuilder;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFanoutRef, RawFrameworkRef, RawNode};
 use graph_nexus_core::graph::{NodeKind, ZeroCopyGraph};
-use graph_nexus_core::pool::StrRef;
-
-fn resolve(pool: &[u8], sref: &StrRef) -> String {
-    let s = sref.offset as usize;
-    let e = s + sref.len as usize;
-    std::str::from_utf8(&pool[s..e]).unwrap().to_string()
-}
 
 /// Canonical projection: every consumer-visible byte, in a deterministic
 /// order. Excludes rkyv padding bytes (which are stable but not asserted)
 /// and excludes timing-derived metadata.
 fn canonical_hash(g: &ZeroCopyGraph) -> [u8; 32] {
     use blake3::Hasher;
+    let pool = g.string_pool.as_slice();
     let mut h = Hasher::new();
 
     // Nodes: sort by (uid_resolved, name, kind, span, file_idx, community_id)
     let mut nodes: Vec<_> = g.nodes.iter().collect();
     nodes.sort_by_cached_key(|n| {
-        let uid = resolve(&g.string_pool, &n.uid);
-        let name = resolve(&g.string_pool, &n.name);
+        let uid = n.uid.resolve(pool).to_string();
+        let name = n.name.resolve(pool).to_string();
         (uid, name, format!("{:?}", n.kind), n.span, n.file_idx, n.community_id)
     });
     for n in &nodes {
-        h.update(resolve(&g.string_pool, &n.uid).as_bytes());
-        h.update(resolve(&g.string_pool, &n.name).as_bytes());
+        h.update(n.uid.resolve(pool).as_bytes());
+        h.update(n.name.resolve(pool).as_bytes());
         h.update(format!("{:?}", n.kind).as_bytes());
         h.update(&n.file_idx.to_le_bytes());
         let (a, b, c, d) = n.span;
@@ -48,22 +42,22 @@ fn canonical_hash(g: &ZeroCopyGraph) -> [u8; 32] {
     // Edges: sort by (rel_type, source, target, resolved_reason)
     let mut edges: Vec<_> = g.edges.iter().collect();
     edges.sort_by_cached_key(|e| {
-        let reason = resolve(&g.string_pool, &e.reason);
+        let reason = e.reason.resolve(pool).to_string();
         (format!("{:?}", e.rel_type), e.source, e.target, reason)
     });
     for e in &edges {
         h.update(format!("{:?}", e.rel_type).as_bytes());
         h.update(&e.source.to_le_bytes());
         h.update(&e.target.to_le_bytes());
-        h.update(resolve(&g.string_pool, &e.reason).as_bytes());
+        h.update(e.reason.resolve(pool).as_bytes());
         h.update(&e.confidence.to_le_bytes());
     }
 
     // Files: sort by path
     let mut files: Vec<_> = g.files.iter().collect();
-    files.sort_by_cached_key(|f| resolve(&g.string_pool, &f.path));
+    files.sort_by_cached_key(|f| f.path.resolve(pool).to_string());
     for f in &files {
-        h.update(resolve(&g.string_pool, &f.path).as_bytes());
+        h.update(f.path.resolve(pool).as_bytes());
         h.update(&f.content_hash);
         h.update(format!("{:?}", f.category).as_bytes());
     }
