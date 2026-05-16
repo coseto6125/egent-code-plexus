@@ -447,6 +447,56 @@ pub(crate) fn cosine_top_k_indices(
     out
 }
 
+/// Reciprocal Rank Fusion constant. k=60 is the Cormack et al. 2009
+/// default — the parameter used by Elasticsearch / Vespa / Weaviate
+/// for hybrid retrieval. Hard-wired; add a flag if we ever need to
+/// tune per query type.
+const RRF_K: f32 = 60.0;
+
+/// Fuse two ranked `Vec<Hit>` lists by Reciprocal Rank Fusion:
+/// `score(uid) = Σ 1/(RRF_K + rank_i + 1)` over the lists containing
+/// `uid`. Output sorted descending by combined score, truncated to
+/// `TOP_K`. The merged Hit's `score` field is overwritten with the
+/// RRF score so emit/serialise layers see the fused number.
+///
+/// Dedup key: `(file, line, name)`. Stable within a single graph —
+/// the only context this helper runs in. Multi-repo merge happens
+/// later in `compute_multi`, which keys on the full `OrderedHit`
+/// including `repo`.
+pub(crate) fn rrf_merge(bm25: Vec<Hit>, vec: Vec<Hit>) -> Vec<Hit> {
+    type Key = (String, u32, String);
+    let key = |h: &Hit| -> Key { (h.file.clone(), h.line, h.name.clone()) };
+
+    let mut scores: HashMap<Key, (f32, Hit)> = HashMap::new();
+
+    for (rank, h) in bm25.into_iter().enumerate() {
+        let s = 1.0 / (RRF_K + rank as f32 + 1.0);
+        scores
+            .entry(key(&h))
+            .and_modify(|e| e.0 += s)
+            .or_insert_with(|| (s, h));
+    }
+    for (rank, h) in vec.into_iter().enumerate() {
+        let s = 1.0 / (RRF_K + rank as f32 + 1.0);
+        scores
+            .entry(key(&h))
+            .and_modify(|e| e.0 += s)
+            .or_insert_with(|| (s, h));
+    }
+
+    let mut combined: Vec<(f32, Hit)> = scores.into_values().collect();
+    combined.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    combined
+        .into_iter()
+        .take(TOP_K)
+        .map(|(score, mut h)| {
+            h.score = score;
+            h
+        })
+        .collect()
+}
+
 // ── Multi-repo fan-out ────────────────────────────────────────────────────────
 
 fn run_multi(
@@ -825,5 +875,58 @@ mod tests {
         assert_eq!(ranked[0].0, 1, "node 1 should rank first");
         assert_eq!(ranked[1].0, 2, "node 2 should rank second");
         assert!(ranked.iter().all(|(idx, _)| *idx != 3));
+    }
+
+    fn make_test_hit(name: &str, file: &str, line: u32, score: f32) -> super::Hit {
+        super::Hit {
+            repo: None,
+            score,
+            kind: "function".into(),
+            file: file.into(),
+            line,
+            name: name.into(),
+            signature: format!("function {name}"),
+            caller_count: 0,
+            callers: vec![],
+            callees: vec![],
+        }
+    }
+
+    #[test]
+    fn rrf_merge_combines_two_ranked_lists() {
+        let bm25 = vec![
+            make_test_hit("A", "a.rs", 1, 10.0),
+            make_test_hit("B", "b.rs", 2, 8.0),
+            make_test_hit("C", "c.rs", 3, 6.0),
+        ];
+        let vec = vec![
+            make_test_hit("B", "b.rs", 2, 0.9),
+            make_test_hit("A", "a.rs", 1, 0.8),
+            make_test_hit("D", "d.rs", 4, 0.7),
+        ];
+        let merged = super::rrf_merge(bm25, vec);
+        // A and B appear in both lists → expected to take the top 2 slots.
+        let top_names: Vec<&str> = merged.iter().take(2).map(|h| h.name.as_str()).collect();
+        assert!(top_names.contains(&"A") && top_names.contains(&"B"));
+        assert_eq!(merged.len(), 4);
+    }
+
+    #[test]
+    fn rrf_merge_dedupes_by_file_line_name() {
+        let bm25 = vec![make_test_hit("A", "a.rs", 1, 5.0)];
+        let vec = vec![make_test_hit("A", "a.rs", 1, 0.9)];
+        let merged = super::rrf_merge(bm25, vec);
+        assert_eq!(merged.len(), 1);
+        // 1/(60+1) + 1/(60+1) = 2/61
+        assert!((merged[0].score - (2.0 / 61.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rrf_merge_truncates_to_top_k() {
+        let bm25: Vec<super::Hit> = (0..30)
+            .map(|i| make_test_hit(&format!("n{i}"), "x.rs", i, 1.0))
+            .collect();
+        let merged = super::rrf_merge(bm25, vec![]);
+        assert_eq!(merged.len(), super::TOP_K);
     }
 }
