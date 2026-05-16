@@ -6,12 +6,16 @@
 //! rewrite happens after the fragment rename, in the same `atomic_write_json`
 //! style — readers always see a consistent snapshot.
 
+use graph_nexus_core::analyzer::pipeline::AnalyzerPipeline;
+use graph_nexus_core::graph::NodeKind;
 use graph_nexus_core::registry::atomic_write_json;
+use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
 use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub struct FragmentInput {
     pub rel_path: String,
@@ -128,4 +132,118 @@ fn bump_overlay_version(session_dir: &Path) -> io::Result<()> {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+// Process-wide pipeline — built once, shared across all `OverlayWriter` calls.
+// OnceLock ensures construction happens exactly once even under concurrent access.
+static PIPELINE: OnceLock<AnalyzerPipeline> = OnceLock::new();
+
+fn pipeline() -> &'static AnalyzerPipeline {
+    PIPELINE.get_or_init(crate::reanalyze::make_pipeline)
+}
+
+fn map_node_kind(k: &NodeKind) -> SymbolKind {
+    match k {
+        NodeKind::Function => SymbolKind::Function,
+        NodeKind::Method | NodeKind::Constructor => SymbolKind::Method,
+        NodeKind::Class => SymbolKind::Struct,
+        NodeKind::Interface => SymbolKind::Trait,
+        NodeKind::Const => SymbolKind::Const,
+        // File, Variable, Import, Route, Process, Document, Section, EntryPoint, Property
+        // NodeKind has no Module/Namespace/Struct/Enum/Trait/Type variants.
+        _ => SymbolKind::Unknown,
+    }
+}
+
+/// Stateful overlay writer for a single session directory.
+///
+/// Tracks the session dir and exposes `append_dirty` which runs the analyzer
+/// pipeline on each recorded path, extracting `dirty_symbols` at write-time.
+/// The pipeline is cached process-wide via `OnceLock` to avoid re-registering
+/// 16 language providers on every call.
+pub struct OverlayWriter {
+    session_dir: PathBuf,
+}
+
+impl OverlayWriter {
+    pub fn new(session_dir: &Path) -> Self {
+        Self {
+            session_dir: session_dir.to_path_buf(),
+        }
+    }
+
+    /// Record `path` as dirty and run the analyzer to populate `dirty_symbols`.
+    ///
+    /// `content_hash` and `fragment_id` are stored verbatim — callers compute
+    /// them (e.g. SHA-256 prefix of file content). Unsupported extensions or
+    /// empty analyzer output → `parse_failed=true`, `dirty_symbols=[]`.
+    pub fn append_dirty(
+        &mut self,
+        path: &Path,
+        content_hash: &str,
+        fragment_id: &str,
+    ) -> io::Result<()> {
+        let (dirty_symbols, parse_failed) = extract_symbols(path);
+
+        let manifest_path = self.session_dir.join("dirty_files.json");
+        let mut df = if manifest_path.exists() {
+            DirtyFiles::read(&manifest_path)?
+        } else {
+            DirtyFiles::empty()
+        };
+
+        // Use the file name as the key (relative-style key for simple callers).
+        let key = path.display().to_string();
+        df.entries.insert(
+            key,
+            DirtyEntry {
+                mtime_ns: 0,
+                content_hash: content_hash.to_string(),
+                fragment_id: fragment_id.to_string(),
+                tantivy_delta_segment: None,
+                parse_failed,
+                dirty_symbols,
+            },
+        );
+        atomic_write_json(&manifest_path, &df)
+    }
+
+    /// Read the current `dirty_files.json` for this session.
+    pub fn read_dirty(&self) -> io::Result<DirtyFiles> {
+        let manifest_path = self.session_dir.join("dirty_files.json");
+        if manifest_path.exists() {
+            DirtyFiles::read(&manifest_path)
+        } else {
+            Ok(DirtyFiles::empty())
+        }
+    }
+}
+
+/// Run the pipeline on `path` and convert nodes to `SymbolRef`s.
+/// Returns `(symbols, parse_failed)` — `parse_failed` is true when the
+/// pipeline has no provider for the extension or returns no graph.
+fn extract_symbols(path: &Path) -> (Vec<SymbolRef>, bool) {
+    let abs = path.to_path_buf();
+    // Use the file name as the rel_path so the pipeline selects on extension.
+    let rel = PathBuf::from(path.file_name().unwrap_or(path.as_os_str()));
+    let file_str = path.display().to_string();
+
+    let graphs = pipeline().analyze(vec![(abs, rel)]);
+    match graphs.into_iter().next() {
+        None => (vec![], true),
+        Some(graph) => {
+            let symbols = graph
+                .nodes
+                .iter()
+                .map(|n| SymbolRef {
+                    name: n.name.clone(),
+                    kind: map_node_kind(&n.kind),
+                    file: file_str.clone(),
+                    line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
+                    line_end: n.span.2 + 1,
+                })
+                .collect();
+            (symbols, false)
+        }
+    }
 }
