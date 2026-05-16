@@ -104,7 +104,11 @@ fn prune_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
         .interact()
         .map_err(dialoguer_err)?;
     if confirmed {
-        prune::run(prune::PruneArgs { branch, repo })?;
+        prune::run(prune::PruneArgs {
+            orphans: false,
+            branch: Some(branch),
+            repo: Some(repo),
+        })?;
     }
     Ok(())
 }

@@ -16,6 +16,14 @@ fn gnx_admin_help() -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+fn gnx_admin_prune_help() -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_gnx"))
+        .args(["admin", "prune", "--help"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
 #[test]
 fn top_level_lists_nine_agent_commands() {
     let help = gnx_help();
@@ -61,6 +69,15 @@ fn admin_help_lists_seven_entries() {
     ] {
         assert!(help.contains(cmd), "missing {cmd} in admin --help:\n{help}");
     }
+}
+
+#[test]
+fn admin_prune_help_keeps_orphan_sweep_mode() {
+    let help = gnx_admin_prune_help();
+    assert!(
+        help.contains("--orphans"),
+        "missing --orphans in prune help:\n{help}"
+    );
 }
 
 #[test]
