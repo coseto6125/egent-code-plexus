@@ -1,22 +1,25 @@
-//! `gnx admin` — interactive TUI for host integration management.
+//! `gnx admin` — interactive TUI for operational maintenance.
 //!
-//! Opens a `dialoguer`-based menu tree.  All install / uninstall / status
-//! actions for MCP and Native integrations are reachable from here.
+//! Opens a `dialoguer`-based menu tree.  Index, agent integration,
+//! config, group, and diagnostic workflows are reachable from here.
 //! No top-level `gnx install` / `gnx integrate` command is exposed — this
 //! is the sole entry point per the UX constraint in the host-integration spec.
 //!
 //! # Menu tree
 //! ```text
 //! gnx admin
-//! └── Bind tool to code agent
-//!     ├── Native (no side-car)
-//!     │   ├── Codex CLI → install / uninstall / status
-//!     │   └── Gemini CLI → install / uninstall / status
-//!     └── MCP (shared side-car)
-//!         └── (8 hosts) → install / uninstall / status
+//! ├── Indexes
+//! ├── Agent Integrations
+//! ├── Config
+//! ├── Groups
+//! └── Diagnostics
 //! ```
 
+pub mod config;
+pub mod diagnostics;
+pub mod groups;
 pub mod host_integration;
+pub mod indexes;
 pub mod menu;
 pub mod status;
 
@@ -36,11 +39,44 @@ pub fn run(_args: AdminArgs) -> Result<(), GnxError> {
 
 fn main_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
     loop {
-        let choice = menu::select(theme, "gnx admin", &["Bind tool to code agent", "Exit"])?;
+        let choice = menu::select(theme, "gnx admin", MAIN_MENU)?;
         match choice {
-            Some(0) => host_integration::run(theme)?,
-            Some(1) | None => return Ok(()),
+            Some(0) => indexes::run(theme)?,
+            Some(1) => host_integration::run(theme)?,
+            Some(2) => config::run(theme)?,
+            Some(3) => groups::run(theme)?,
+            Some(4) => diagnostics::run(theme)?,
+            Some(5) | None => return Ok(()),
             _ => unreachable!(),
         }
+    }
+}
+
+pub const MAIN_MENU: &[&str] = &[
+    "Indexes",
+    "Agent Integrations",
+    "Config",
+    "Groups",
+    "Diagnostics",
+    "Exit",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_level_admin_menu_matches_target_information_architecture() {
+        assert_eq!(
+            MAIN_MENU,
+            &[
+                "Indexes",
+                "Agent Integrations",
+                "Config",
+                "Groups",
+                "Diagnostics",
+                "Exit",
+            ]
+        );
     }
 }
