@@ -13,7 +13,7 @@ mod store;
 pub use audit::{AuditEvent, AuditLog};
 pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord};
 pub use dirname::{CommitDirName, ParseError as DirNameParseError, SourceType};
-pub use io::atomic_write_bytes;
+pub use io::{atomic_write_bytes, atomic_write_json};
 /// Internal implementation detail. Not part of public API.
 /// Use only within graph-nexus-core or in tests.
 #[doc(hidden)]
