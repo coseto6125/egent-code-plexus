@@ -37,7 +37,9 @@ pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
         if !pid_alive(pid) {
             continue;
         }
-        let last_touched: DateTime<Utc> = meta.last_touched.parse().unwrap_or_else(|_| Utc::now());
+        let Ok(last_touched) = meta.last_touched.parse::<DateTime<Utc>>() else {
+            continue;
+        };
         let watcher_alive = meta.watcher_pid.is_some_and(pid_alive);
         out.push(PeerSession {
             session_id: id.to_string(),
@@ -51,6 +53,9 @@ pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
 }
 
 pub fn pid_alive(pid: u32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
     #[cfg(unix)]
     {
         use nix::sys::signal;
@@ -59,7 +64,6 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
         false
     }
 }
