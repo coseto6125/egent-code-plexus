@@ -707,6 +707,65 @@ async def health(request):
     );
 }
 
+// ─── Python — `add_route` family (Sanic / Flask / FastAPI imperative form) ──
+
+#[test]
+fn python_sanic_add_route_extracts_route() {
+    // `app.add_route(handler, '/path')` — Sanic-style imperative route
+    // registration. The handler is the 1st arg, path is the 2nd; the
+    // generic query captures the first string in argument_list which is
+    // the path either way.
+    let src = r#"
+from sanic import Sanic
+
+app = Sanic("api")
+
+async def list_items(request):
+    pass
+
+app.add_route(list_items, "/items")
+"#;
+    assert_routes(&py_routes(src), &[("GET", "/items")]);
+}
+
+#[test]
+fn python_flask_add_url_rule_extracts_route() {
+    // `app.add_url_rule('/path', endpoint, view_func)` — Flask-style.
+    // Defaults to GET; methods=[...] kwarg parsing is a follow-up.
+    let src = r#"
+from flask import Flask
+
+app = Flask(__name__)
+
+def home():
+    pass
+
+app.add_url_rule("/home", "home", home)
+app.add_url_rule("/about", "about", about_view)
+"#;
+    assert_routes(&py_routes(src), &[("GET", "/home"), ("GET", "/about")]);
+}
+
+#[test]
+fn python_fastapi_add_api_route_extracts_route() {
+    // `app.add_api_route('/path', endpoint)` — FastAPI imperative form.
+    let src = r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+async def get_items():
+    pass
+
+app.add_api_route("/items", get_items)
+app.add_api_route("/items/{item_id}", get_item)
+"#;
+    assert_routes(
+        &py_routes(src),
+        &[("GET", "/items"), ("GET", "/items/{item_id}")],
+    );
+}
+
 // ─── Python — Sanic Blueprint (custom identifier) ────────────────────
 
 #[test]
