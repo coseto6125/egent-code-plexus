@@ -2,6 +2,7 @@
 //! go through `safe_exec::git()` to ensure hostile repo configs cannot
 //! escalate to code execution. See spec §8 H4.
 
+use std::path::Path;
 use std::process::Command;
 
 /// Build a `Command` rooted at `git` with security-hardening flags
@@ -25,4 +26,21 @@ pub fn git() -> Command {
         "credential.helper=",
     ]);
     cmd
+}
+
+/// Short HEAD SHA for `repo_root` via the hardened `git()` wrapper.
+/// Returns `None` when git is missing, the directory isn't a checkout, or
+/// the command fails — callers degrade to a `null` / `"?"` field rather
+/// than failing the whole report.
+pub fn head_short(repo_root: &Path) -> Option<String> {
+    let out = git()
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
 }

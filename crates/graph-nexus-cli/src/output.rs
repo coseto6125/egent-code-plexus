@@ -88,13 +88,12 @@ pub fn emit(value: &Value, format: OutputFormat) -> Result<(), GnxError> {
 pub fn compress_for_llm(v: &mut Value) {
     match v {
         Value::Object(map) => {
-            // Drop fields that are deterministic derivatives of other fields
-            // already in the same object (`<kind>:<filePath>:<name>` triple).
-            // `inspect` already does this; `routes` / `impact` were leaking
-            // the same redundancy. Stripping here keeps the value-level
-            // compression centralised. JSON / Toon paths see the full keys.
+            // `uid` is a deterministic `<kind>:<filePath>:<name>` triple of
+            // fields that already co-reside in every emit-row, so it's pure
+            // redundancy. `handlerUid` looks similar but points at a
+            // *different* node (the handler) than the row's own filePath/name
+            // — keep it; the LLM has no other handle to link route → handler.
             map.remove("uid");
-            map.remove("handlerUid");
             for child in map.values_mut() {
                 compress_for_llm(child);
             }
@@ -226,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn compress_for_llm_strips_uid_and_handler_uid_keys() {
+    fn compress_for_llm_strips_uid_but_keeps_handler_uid() {
         let mut v = json!({
             "results": [
                 {
@@ -234,15 +233,17 @@ mod tests {
                     "filePath": "src/api.py",
                     "name": "GET /users",
                     "uid": "Route:src/api.py:GET /users",
-                    "handlerUid": "Function:src/api.py:list_users"
+                    "handlerUid": "Function:src/handlers.py:list_users"
                 }
             ]
         });
         compress_for_llm(&mut v);
         let row = &v["results"][0];
-        assert!(row.get("uid").is_none(), "uid should be stripped");
-        assert!(row.get("handlerUid").is_none(), "handlerUid should be stripped");
-        // Co-resident fields stay.
+        assert!(row.get("uid").is_none(), "uid should be stripped (derivable)");
+        assert!(
+            row.get("handlerUid").is_some(),
+            "handlerUid links to a different node — must stay"
+        );
         assert_eq!(row["kind"], json!("Route"));
         assert_eq!(row["filePath"], json!("src/api.py"));
         assert_eq!(row["name"], json!("GET /users"));

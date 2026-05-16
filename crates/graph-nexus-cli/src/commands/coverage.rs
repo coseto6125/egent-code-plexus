@@ -173,7 +173,12 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
         Ok(EnsureResult::Missing) => json!({ "status": "missing" }),
         Err(e) => json!({ "status": "error", "error": e.to_string() }),
     };
-    let map = out.as_object_mut().expect("ensure_index payload is object");
+    // Every arm above produces an Object, so `as_object_mut` succeeds in
+    // practice. Falling through instead of `.expect()` keeps the function
+    // total if a future arm ever returns a different shape.
+    let Some(map) = out.as_object_mut() else {
+        return out;
+    };
 
     let latest_indexed_at = r
         .branches
@@ -186,7 +191,7 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
     }
     map.insert(
         "current_head_short".into(),
-        match current_head_short(worktree) {
+        match crate::git::safe_exec::head_short(worktree) {
             Some(sha) => json!(sha),
             None => Value::Null,
         },
@@ -211,27 +216,6 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
     out
 }
 
-/// Short HEAD SHA for the worktree. Best-effort: returns `None` when git is
-/// missing, the worktree isn't a git checkout, or the command fails — coverage
-/// degrades to a `null` field instead of failing the whole report.
-fn current_head_short(worktree: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(worktree)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
-}
-
 /// Four post-index metrics surfaced inline so an LLM doesn't have to run a
 /// follow-up Cypher to learn "how big is this graph". Matches the gitnexus
 /// precedent of shipping a quantitative summary right after indexing.
@@ -247,18 +231,18 @@ fn fetch_metrics(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'static 
             let nodes = g.nodes.len();
             let edges = g.edges.len();
             let files = g.files.len();
+            // NodeKind derives `#[rkyv(compare(PartialEq))]`, so the archived
+            // value can be compared against the owned enum directly — no
+            // per-node deserialize. Skipping the deserialize avoids a heap
+            // alloc per node for large graphs (`--repo @all` × ~10k nodes).
+            use graph_nexus_core::graph::NodeKind;
             let mut symbols: u32 = 0;
             for node in g.nodes.iter() {
-                let kind: graph_nexus_core::graph::NodeKind =
-                    rkyv::deserialize::<_, rkyv::rancor::Error>(&node.kind)
-                        .unwrap_or(graph_nexus_core::graph::NodeKind::File);
-                if matches!(
-                    kind,
-                    graph_nexus_core::graph::NodeKind::Function
-                        | graph_nexus_core::graph::NodeKind::Method
-                        | graph_nexus_core::graph::NodeKind::Class
-                        | graph_nexus_core::graph::NodeKind::Interface
-                ) {
+                if node.kind == NodeKind::Function
+                    || node.kind == NodeKind::Method
+                    || node.kind == NodeKind::Class
+                    || node.kind == NodeKind::Interface
+                {
                     symbols += 1;
                 }
             }
