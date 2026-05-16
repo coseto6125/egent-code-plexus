@@ -11,6 +11,7 @@ target/
 .claude/
 .gemini/
 .fastembed_cache/
+CLAUDE.md
 
 # Local index
 .gitnexus-rs/
