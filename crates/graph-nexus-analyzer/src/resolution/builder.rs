@@ -1925,7 +1925,7 @@ mod tests {
         let serial_graph = serial_builder.build();
 
         // Resolve a StrRef to a String from the raw pool bytes.
-        let resolve_str = |pool: &Vec<u8>, sref: graph_nexus_core::pool::StrRef| -> String {
+        let resolve_str = |pool: &[u8], sref: graph_nexus_core::pool::StrRef| -> String {
             let start = sref.offset as usize;
             let end = start + sref.len as usize;
             std::str::from_utf8(&pool[start..end])
@@ -1935,6 +1935,9 @@ mod tests {
 
         // Bucketize edges per RelType; include resolved reason in the key so a
         // diverging reason on the same (source, target) pair is caught.
+        // `RelType` doesn't derive `Ord`, so `format!("{:?}", …)` is used as a
+        // stable string key for the BTreeMap — the Debug repr of each variant
+        // is its identifier name and is not subject to drift.
         let bucketize = |g: &graph_nexus_core::graph::ZeroCopyGraph|
             -> BTreeMap<String, BTreeSet<(u32, u32, String)>>
         {
