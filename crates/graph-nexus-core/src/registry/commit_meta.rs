@@ -4,6 +4,19 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// String baked into every `CommitBuildMeta` at build time. The fast path
+/// in `build_l2` only reuses a cached L2 entry when its persisted
+/// fingerprint matches the running binary's — upgrading `gnx` (or bumping
+/// the `+schema<N>` suffix below) invalidates older entries automatically,
+/// preventing a stale parser from feeding mismatched bytes back to a new
+/// reader.
+///
+/// Bump the `+schema<N>` literal whenever `graph.bin`, `CommitBuildMeta`,
+/// or any persisted L2 artefact changes shape in a way pre-bump binaries
+/// can't read back.
+pub const BUILDER_FINGERPRINT: &str =
+    concat!("v", env!("CARGO_PKG_VERSION"), "+schema1");
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
     pub version: u32,
@@ -18,6 +31,11 @@ pub struct CommitBuildMeta {
     pub refs_at_build: Vec<RefRecord>,
     #[serde(default)]
     pub refs_seen_since: Vec<RefRecord>,
+    /// Fingerprint of the binary that wrote this entry. `None` on meta
+    /// files written by pre-fingerprint binaries — treated as a fast-path
+    /// miss so the next run rewrites with the current fingerprint.
+    #[serde(default)]
+    pub builder_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

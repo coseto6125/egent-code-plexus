@@ -120,6 +120,7 @@ fn make_commit_dir(commits: &std::path::Path, sha_hex: &str, built_at: &str, siz
         embedding_status: EmbeddingStatus::None,
         refs_at_build: vec![],
         refs_seen_since: vec![],
+        builder_fingerprint: None,
     };
     CommitBuildMeta::write_atomic(&dir.join("meta.json"), &meta).unwrap();
     std::fs::write(dir.join("graph.bin"), vec![0u8; size_bytes]).unwrap();

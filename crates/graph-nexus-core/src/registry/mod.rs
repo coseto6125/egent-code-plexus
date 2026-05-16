@@ -11,7 +11,7 @@ pub mod repo_meta;
 mod store;
 
 pub use audit::{AuditEvent, AuditLog};
-pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord};
+pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord, BUILDER_FINGERPRINT};
 pub use dirname::{CommitDirName, ParseError as DirNameParseError, SourceType};
 pub use io::{atomic_write_bytes, atomic_write_json};
 /// Internal implementation detail. Not part of public API.
