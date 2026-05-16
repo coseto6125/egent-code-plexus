@@ -215,7 +215,7 @@ Cypher escape hatch for queries not covered by canned commands.
 
 #### 3.2.6 `gnx coverage`
 
-Single entry point for "what do I have / how healthy is it". Folds the old `doctor` + `status` + `list` + `overview`. External-client (HTTP/DB/Redis/queue) usage detail is **not** folded here — see the standalone `gnx tool_map` command (its per-callsite binding analysis sits beyond a health summary's granularity).
+Single entry point for "what do I have / how healthy is it". Folds the old `doctor` + `status` + `list` + `overview`. External-client (HTTP/DB/Redis/queue) usage detail is **not** folded here — see the standalone `gnx tool-map` command (its per-callsite binding analysis sits beyond a health summary's granularity).
 
 | Arg / Flag | Type | Default | Purpose |
 |---|---|---|---|

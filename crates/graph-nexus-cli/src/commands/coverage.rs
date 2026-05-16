@@ -9,7 +9,7 @@
 //!
 //! External-client (HTTP/DB/Redis/queue) usage detail is intentionally NOT
 //! folded here — that requires per-callsite binding analysis whose granularity
-//! sits beyond a health summary. See the standalone `gnx tool_map` command.
+//! sits beyond a health summary. See the standalone `gnx tool-map` command.
 
 use crate::auto_ensure::{ensure_index, EnsureResult};
 use crate::engine::Engine;

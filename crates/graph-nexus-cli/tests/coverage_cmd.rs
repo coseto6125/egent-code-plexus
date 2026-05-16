@@ -132,7 +132,7 @@ fn coverage_default_format_succeeds() {
 /// With `--repo .` pointing to a registered repo, per-repo health sections
 /// (frameworks, freshness, blind_spots) must be present. External-client
 /// usage (HTTP/DB/Redis/queue) is intentionally NOT a coverage section —
-/// see the standalone `gnx tool_map` command.
+/// see the standalone `gnx tool-map` command.
 ///
 /// This test is marked `#[ignore]` because it depends on the `admin register`
 /// sub-command recognising the temp repo path; registration reliability across
@@ -168,7 +168,7 @@ fn coverage_with_repo_includes_health_sections() {
     );
     assert!(
         entry.get("externals_summary").is_none(),
-        "externals_summary should NOT be a coverage section (use `gnx tool_map`)"
+        "externals_summary should NOT be a coverage section (use `gnx tool-map`)"
     );
 }
 

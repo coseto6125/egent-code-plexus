@@ -29,6 +29,7 @@ fn top_level_lists_nine_agent_commands() {
         "routes",
         "scan",
         "contracts",
+        "tool-map",
     ] {
         assert!(help.contains(cmd), "missing {cmd} in --help:\n{help}");
     }
@@ -77,7 +78,9 @@ fn no_old_top_level_commands() {
         "detect-changes",
         "route-map",
         "api-impact",
-        "tool-map",
+        // `tool-map` was initially folded into `coverage --externals` but
+        // restored as a standalone command (the per-callsite binding
+        // analysis sits beyond a health-summary's granularity).
         "cluster",
         "process",
         "multi-query",
