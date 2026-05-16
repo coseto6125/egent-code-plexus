@@ -125,6 +125,19 @@
 **Equality includes:** `(source, target, RelType, resolved_reason_string)`
 **Result:** PASS default threads / PASS --test-threads=1 / PASS --test-threads=16
 
+### 4.2 GraphBuilder ingest-order independence
+
+| Sub-test | default | --test-threads=1 | --test-threads=N |
+|----------|---------|------------------|-------------------|
+| `graph_builder_order_independence_under_default_threads` | FAIL | FAIL | FAIL |
+| `graph_builder_repeated_build_is_stable` | PASS | PASS | PASS |
+
+**Canonical projection:** sorted (Nodes by `(uid, name, kind, span, file_idx)`, Edges by `(rel_type, source, target, reason)`, Files by path) → BLAKE3 hash. Rkyv padding excluded.
+
+**Audit cross-check:** parallel path's `flat_map_iter` output order is non-deterministic by rayon design; `build()` sort-and-archive normalises it. The canonical projection is what consumers actually see.
+
+**Result summary:** `graph_builder_repeated_build_is_stable` passes — same-order builds are byte-stable across 5 repeated runs. `graph_builder_order_independence_under_default_threads` fails with identical mismatched hashes on all thread counts, confirming this is a structural determinism bug, NOT a rayon scheduling flake. See `inv-003` in §7.
+
 ### 4.4 StringPool concurrent intern
 
 | Sub-test | default | --test-threads=1 | --test-threads=N |
@@ -148,6 +161,7 @@
 |----|--------|------------|--------|
 | inv-001 | `crates/graph-nexus-core/src/analyzer/pipeline.rs:367` (axis §3.3) | `unsafe { std::env::set_var("GNX_MAX_FILE_BYTES", "10") }` in test `oversize_file_is_skipped` races with the sibling test (line 325) which calls `pipeline.analyze()` → `resolve_max_file_bytes()` → `std::env::var(...)` under parallel test execution (cargo test default). Both tests are in the same crate test binary; no `#[serial]` guard or `--test-threads=1` annotation. Outcome: sibling test may see the poisoned 10-byte cap and silently skip files, producing a false-failing assertion. Fix: wrap the set/remove in a mutex-guarded serial block (e.g. `serial_test` crate) or isolate in a separate integration test binary. | needs_verification |
 | inv-002 | `crates/graph-nexus-core/src/analyzer/pipeline.rs:399` (axis §3.3) | Paired `unsafe { std::env::remove_var(...) }` cleanup for inv-001's `set_var`. Same race surface — if a parallel sibling test reads the env var between :367 set and :399 remove, it sees the poisoned value. Same hypothesis and same fix as inv-001 (single serial guard covers both sites; do not fix one without the other). | needs_verification |
+| inv-003 | `crates/graph-nexus-analyzer/src/resolution/builder.rs:185-934` (axis §4.2) | `build()` assigns node indices (`source`/`target` in `Edge`) sequentially in file-ingest order (`self.local_graphs.iter().enumerate()`). UIDs are content-derived (`format!("{:?}:{}:{}", kind, path, name)`) and are ingest-order-independent, but edge endpoints use absolute integer node indices which are insertion-order-dependent. Reversing input files shifts all node indices: what was node 0 becomes node 14. The `build()` sort (`edges.sort_by_key(\|e\| e.source)`) is a CSR-construction sort over integer indices, not a semantic normalisation. Result: canonical hash of `(rel_type, source_idx, target_idx, reason)` differs when input order differs. **Fix hypothesis:** after all nodes are registered, sort `nodes` by `uid` string, remap all edge endpoints through the new position map, then proceed. Alternatively: sort `local_graphs` by `file_path` before processing in Pass 1 (simpler but requires caller agreement). The `uid` string is already fully content-derived and path-stable. | open |
 
 ## §8 Closure checklist
 - [ ] All §3 axes populated
