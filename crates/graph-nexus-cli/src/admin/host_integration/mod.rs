@@ -3,16 +3,19 @@
 pub mod mcp;
 pub mod native;
 
-use crate::admin::menu::select;
+use crate::admin::menu::{self, select};
 use crate::commands::admin::{claude_code, install_hook};
 use dialoguer::theme::ColorfulTheme;
 use graph_nexus_core::GnxError;
 
-const MECHANISMS: &[&str] = &[
-    "MCP (shared side-car for any MCP-capable host)",
-    "Native (no side-car; integrates into host's own tool registry)",
-    "Hooks",
-    "← Back",
+const MECHANISMS: &[menu::Item<'_>] = &[
+    ("MCP", "shared side-car for any MCP-capable host"),
+    (
+        "Native",
+        "no side-car; integrates into host's own tool registry",
+    ),
+    ("Hooks", "shell hooks (Claude Code) for auto-reindex on edits"),
+    ("← Back", ""),
 ];
 
 /// Entry point called from `admin::main_menu`.
@@ -29,8 +32,16 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
     }
 }
 
-const HOOK_HOSTS: &[&str] = &["Claude Code hooks", "← Back"];
-const HOOK_ACTIONS: &[&str] = &["install", "uninstall", "status", "← Back"];
+const HOOK_HOSTS: &[menu::Item<'_>] = &[
+    ("Claude Code hooks", "PreToolUse + PostToolUse for auto-reindex"),
+    ("← Back", ""),
+];
+const HOOK_ACTIONS: &[menu::Item<'_>] = &[
+    ("install", "write hook entries to ~/.claude/settings.json"),
+    ("uninstall", "remove gnx hook entries from the host settings"),
+    ("status", "show whether gnx hooks are registered"),
+    ("← Back", ""),
+];
 
 fn hooks_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
     loop {
@@ -75,14 +86,7 @@ mod tests {
 
     #[test]
     fn agent_integrations_menu_groups_mechanisms_and_hooks() {
-        assert_eq!(
-            MECHANISMS,
-            &[
-                "MCP (shared side-car for any MCP-capable host)",
-                "Native (no side-car; integrates into host's own tool registry)",
-                "Hooks",
-                "← Back",
-            ]
-        );
+        let labels: Vec<&str> = MECHANISMS.iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, vec!["MCP", "Native", "Hooks", "← Back"]);
     }
 }

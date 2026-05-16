@@ -1,13 +1,18 @@
 //! Config workflows for `gnx admin`.
 
-use crate::admin::menu::select;
+use crate::admin::menu::{self, select};
 use crate::commands::admin::config as config_cmd;
 use dialoguer::{theme::ColorfulTheme, Input};
 use graph_nexus_core::config::{config_path, load};
 use graph_nexus_core::GnxError;
 use std::path::PathBuf;
 
-const MENU: &[&str] = &["View config", "Edit config", "Validate config", "← Back"];
+const MENU: &[menu::Item<'_>] = &[
+    ("View config", "print the parsed gnx.toml as TOML"),
+    ("Edit config", "open gnx.toml in $EDITOR"),
+    ("Validate config", "load + check gnx.toml without writing"),
+    ("← Back", ""),
+];
 
 pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
     loop {
@@ -61,9 +66,10 @@ mod tests {
 
     #[test]
     fn config_menu_matches_target_order() {
+        let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
         assert_eq!(
-            MENU,
-            &["View config", "Edit config", "Validate config", "← Back"]
+            labels,
+            vec!["View config", "Edit config", "Validate config", "← Back"]
         );
     }
 }
