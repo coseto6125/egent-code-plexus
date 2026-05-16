@@ -81,7 +81,7 @@ fn server_spec(exe: &str) -> String {
     json!({
         "type": "stdio",
         "command": exe,
-        "args": ["mcp", "serve"],
+        "args": ["admin", "mcp", "serve"],
     })
     .to_string()
 }
@@ -122,7 +122,7 @@ mod tests {
         let spec: Value = serde_json::from_str(&text_args[5]).expect("json spec");
         assert_eq!(spec["type"], "stdio");
         assert_eq!(spec["command"], "/usr/local/bin/gnx");
-        assert_eq!(spec["args"], json!(["mcp", "serve"]));
+        assert_eq!(spec["args"], json!(["admin", "mcp", "serve"]));
     }
 
     #[test]
