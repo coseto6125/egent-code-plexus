@@ -5,7 +5,7 @@
 //! Mirrors the production shell template at
 //! `crates/graph-nexus-cli/src/background.rs:73-91` (markerless branch).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn slow_noop_path() -> PathBuf {
@@ -23,7 +23,7 @@ fn slow_noop_path() -> PathBuf {
 
 /// Replicates the production flock pattern from background.rs:73-91
 /// without depending on a real `gnx` binary.
-fn flock_shell(lock: &PathBuf, inner: &str) -> String {
+fn flock_shell(lock: &Path, inner: &str) -> String {
     format!(
         r#"exec 9>'{lock}' || exit 0
 flock -n 9 || exit 0
