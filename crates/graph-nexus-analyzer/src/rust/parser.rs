@@ -258,6 +258,19 @@ impl LanguageProvider for RustProvider {
         let local_types = collect_local_types(tree.root_node(), source, &impl_map);
         extract_rust_calls(tree.root_node(), source, &mut nodes, &local_types);
 
+        // Stamp impl-target sentinel onto each impl method's heritage so the
+        // class-membership post-process can bridge `struct Foo` ↔ `impl Foo
+        // { fn bar() {} }` — the method's span lies OUTSIDE the struct span,
+        // so pure span containment misses.
+        let prefix = crate::post_process::class_membership::IMPL_TARGET_PREFIX;
+        for raw in nodes.iter_mut() {
+            if matches!(raw.kind, NodeKind::Function | NodeKind::Method) {
+                if let Some(impl_ty) = impl_map.entries.get(&raw.name) {
+                    raw.heritage.push(format!("{}{}", prefix, impl_ty));
+                }
+            }
+        }
+
         // Framework-presence gates: only claim Axum/Actix refs when the file
         // actually `use`s the matching crate. Saves us from false positives in
         // files that happen to define a `get()` fn or use `#[get]` from another

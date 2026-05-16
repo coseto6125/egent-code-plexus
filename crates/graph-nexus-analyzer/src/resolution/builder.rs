@@ -916,6 +916,19 @@ impl GraphBuilder {
             traces_offsets.push(traces_data.len() as u32);
         }
 
+        // Cross-language class membership post-process. Emits HasMethod /
+        // HasProperty edges (Class → Function|Method|Property) for every
+        // language whose class body encloses its members by span, plus a
+        // Rust impl bridge that uses the `__impl_target__:` sentinel the
+        // Rust parser stamped into heritage. Must run BEFORE the CSR
+        // construction below so new edges land in `out_offsets` / `in_offsets`.
+        crate::post_process::class_membership::emit_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut edges,
+        );
+
         // Final pass: Construct CSR (out_offsets and in_offsets)
         // Sort edges by source to build out_offsets easily
         edges.sort_by_key(|e| e.source);

@@ -176,6 +176,17 @@ fn build_inspect_block(
     // 1-hop upstream impact: direct callers/importers.
     let upstream_1hop = bfs_upstream_1hop(graph, node_idx);
 
+    // Class-only derived view: flatten outgoing HasMethod / HasProperty edges
+    // into compact member lists. Kept per-entry `kind` so callers can still
+    // distinguish Method (true method) vs Function (Python `def` / Rust assoc
+    // fn) — B.1 emission unifies them but doesn't hide the underlying kind.
+    let (contained_methods, contained_properties) =
+        if matches!(node.kind, graph_nexus_core::graph::ArchivedNodeKind::Class) {
+            collect_contained_members(graph, node_idx)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
     serde_json::json!({
         "symbol": {
             "name": node.name.resolve(&graph.string_pool),
@@ -188,7 +199,40 @@ fn build_inspect_block(
         "outgoing": outgoing,
         "blind_spots": blind_spots,
         "impact_upstream_1hop": upstream_1hop,
+        "contained_methods": contained_methods,
+        "contained_properties": contained_properties,
     })
+}
+
+/// Walk outgoing HasMethod / HasProperty edges and produce flat member lists
+/// for `gnx inspect`'s Class view. Skips the test/file filters used by the
+/// generic incoming/outgoing buckets — class membership is structural and
+/// shouldn't disappear because a method happens to live in a test file.
+fn collect_contained_members(
+    graph: &ArchivedZeroCopyGraph,
+    node_idx: usize,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let mut methods = Vec::new();
+    let mut properties = Vec::new();
+    let out_start = graph.out_offsets[node_idx].to_native() as usize;
+    let out_end = graph.out_offsets[node_idx + 1].to_native() as usize;
+    for i in out_start..out_end {
+        let edge = &graph.edges[i];
+        let bucket = match edge.rel_type {
+            graph_nexus_core::graph::ArchivedRelType::HasMethod => &mut methods,
+            graph_nexus_core::graph::ArchivedRelType::HasProperty => &mut properties,
+            _ => continue,
+        };
+        let target_node = &graph.nodes[edge.target.to_native() as usize];
+        let target_file = &graph.files[target_node.file_idx.to_native() as usize];
+        bucket.push(serde_json::json!({
+            "name": target_node.name.resolve(&graph.string_pool),
+            "kind": kind_to_str(&target_node.kind),
+            "filePath": target_file.path.resolve(&graph.string_pool),
+            "line": target_node.span.0.to_native(),
+        }));
+    }
+    (methods, properties)
 }
 
 /// Collect direct callers/importers of `node_idx` (depth=1 upstream).
@@ -273,6 +317,8 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             "processes": [],
             "blind_spots": block["blind_spots"],
             "impact_upstream_1hop": block["impact_upstream_1hop"],
+            "contained_methods": block["contained_methods"],
+            "contained_properties": block["contained_properties"],
         });
         return emit(&result, format);
     }

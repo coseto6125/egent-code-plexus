@@ -63,19 +63,21 @@ tree on each call and re-indexes if mtime moved).
 
 Rule of thumb: **toon** for agent → agent piping (compact key:value), **json** for parsing in scripts, **text** for human inspection.
 
-## Cypher minimal grammar
-
-The cypher subset only accepts:
+## Cypher subset
 
 ```
-MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='Val'] RETURN a,b
+MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE ...] RETURN ...
 ```
 
-- `Kind` is required on both sides: `Function / Method / Class / Property / Const / Variable / Route / File / Process`.
-- `Rel` types: `CALLS / IMPORTS / EXTENDS / HAS_METHOD / HANDLES_ROUTE / FETCHES / METHOD_OVERRIDES / ACCESSES / MEMBER_OF / CONTAINS / DEFINES`.
-- `WHERE` accepts equality on `a.name` or `b.name` only — no `STARTS WITH`, `count(*)`, multi-clause, aggregations.
-- `m.content` returns the symbol body (the only non-name field exposed).
-- For richer queries: `gnx search` (BM25 / embedding), `gnx inspect` (full edge view), or post-process JSON output downstream.
+Supports the openCypher read subset commonly used for graph queries: boolean WHERE (`AND / OR / NOT`), comparisons (`= != < <= > >=`), string ops (`STARTS WITH / ENDS WITH / CONTAINS / =~ / IN [...]`), aggregations (`COUNT(*)`, etc.), `DISTINCT`, `ORDER BY / SKIP / LIMIT`, `WITH`, `UNION`, variable-length paths (`[:Rel*1..2]`), and reverse arrows (`<-[r:Rel]-`). Convention: **keep queries minimal** — for richer needs use `gnx search` / `gnx inspect` / post-process JSON.
+
+**NodeKind** (case-sensitive labels): `Function / Method / Class / Property / Constructor / Interface / Const / Variable / Import / Route / Process / Document / Section / EntryPoint / File`.
+
+**RelType** (CamelCase only — `HAS_METHOD` fails with `unknown RelType` semantic error, use `HasMethod`): `Calls / Extends / Imports / Implements / HasMethod / HasProperty / Accesses / HandlesRoute / StepInProcess / References / Defines / Fetches`.
+
+**Node properties** (in `WHERE` / `RETURN`): `a.name / a.uid / a.kind / a.filePath / a.content`. **Edge properties**: `r.rel_type / r.confidence / r.reason`.
+
+**`HasMethod` target kind is parser-determined**: Python `def` and Rust associated fn surface as `Function`, true methods as `Method`. Use `MATCH (c:Class)-[:HasMethod]->(m) RETURN m` — **don't add `:Method` filter** or you'll miss those languages. `gnx inspect <Class>.contained_methods` keeps each entry's `kind` field if callers need to distinguish.
 
 ## Common pitfalls
 
