@@ -20,6 +20,27 @@ const FASTAPI_REQUIRED: &[&str] = &["fastapi"];
 const DJANGO_REQUIRED: &[&str] = &["django"];
 const CELERY_REQUIRED: &[&str] = &["celery"];
 
+/// Module prefixes that gate generic Route emission. A file that doesn't
+/// import any of these can still produce framework-specific refs
+/// (FastAPI Depends, Django signals, Celery tasks) but its `obj.get(...)`
+/// / `obj.post(...)` calls are NOT considered routes — they're almost
+/// always `dict.get` / response-key access FPs. Spec:
+/// `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+const HTTP_FRAMEWORK_MODULES: &[&str] = &[
+    "fastapi",
+    "flask",
+    "django",
+    "starlette",
+    "aiohttp",
+    "tornado",
+    "sanic",
+    "bottle",
+    "falcon",
+    "pyramid",
+    "quart",
+    "litestar",
+];
+
 /// Blind-spot kind/hint pairs. Order matches the capture-index lookup in
 /// `parse_file` (eval / exec / compile / dynamic-import / builtin-import /
 /// cross-getattr) so the dispatch reads as a flat table.
@@ -234,6 +255,7 @@ impl LanguageProvider for PythonProvider {
         let has_fastapi = has_import_from(&imports, FASTAPI_REQUIRED);
         let has_django = has_import_from(&imports, DJANGO_REQUIRED);
         let has_celery = has_import_from(&imports, CELERY_REQUIRED);
+        let has_any_http_framework = has_import_from(&imports, HTTP_FRAMEWORK_MODULES);
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
@@ -507,7 +529,7 @@ impl LanguageProvider for PythonProvider {
             // the single source of truth and lets the framework gates run before
             // any pending_*_refs push.
 
-            if is_route {
+            if is_route && has_any_http_framework {
                 if let (Some(r_method), Some(r_path), Some(root)) =
                     (route_method, route_path, root_span_node)
                 {
@@ -515,12 +537,15 @@ impl LanguageProvider for PythonProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
-                        routes.push(RawRoute {
-                            method: method_str.to_string(),
-                            path: path_str.to_string(),
-                            handler: None,
-                            span: node_span(&root),
-                        });
+                        if let Some(clean_path) = crate::route_detector::clean_route_path(path_str)
+                        {
+                            routes.push(RawRoute {
+                                method: method_str.to_string(),
+                                path: clean_path,
+                                handler: None,
+                                span: node_span(&root),
+                            });
+                        }
                     }
                 }
             }

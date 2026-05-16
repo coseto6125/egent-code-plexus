@@ -11,12 +11,14 @@ pub struct DetectedRoute {
 }
 
 fn looks_like_path(s: &str) -> bool {
+    // Strict: legitimate HTTP route literals start with `/`. The previous
+    // lenient form (colon-, curly-, angle-, or pure-alphanumeric fallback)
+    // produced a ~86% FP rate on the gnx-rs self-corpus because
+    // `dict.get("key")` / `Map.get(...)` / `headers.get(...)` all matched.
+    // Frameworks whose canonical literal is bare (`[HttpGet("users")]` in
+    // C#) need their own parser-side path — they should not piggy-back on
+    // this generic predicate. Spec: 2026-05-17-route-precision-design.md.
     s.starts_with('/')
-        || s.contains(':')
-        || s.contains('{')
-        || s.contains('<')
-        // Lenient fallback for cases like [HttpGet("users")]
-        || (!s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-'))
 }
 
 fn extract_string_args(s: &str) -> Vec<String> {
@@ -82,6 +84,16 @@ fn strip_string_quotes(s: &str) -> &str {
         }
     }
     s
+}
+
+/// Parser-side helper: strip surrounding quotes from a tree-sitter string
+/// capture and return the path only if it satisfies the strict route
+/// shape check. Used to keep `RawRoute` records clean of `dict.get("key")`
+/// style FPs at extraction time, instead of relying on a downstream filter
+/// in the builder. Returns `None` when the literal is not a route path.
+pub fn clean_route_path(raw_with_quotes: &str) -> Option<String> {
+    let stripped = strip_string_quotes(raw_with_quotes);
+    looks_like_path(stripped).then(|| stripped.to_string())
 }
 
 #[cfg(test)]
