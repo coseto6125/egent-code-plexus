@@ -1,0 +1,120 @@
+//! `Hit.score_source` must reflect which ranker produced the score:
+//! substring (no tantivy index on disk) vs BM25 (tantivy built) vs RRF
+//! (hybrid). Vector / cosine is covered by the live `gnx search --mode vector`
+//! smoke and `search_vector_fallback` together — embedder init costs ~1.7 GB
+//! RAM so we don't pay it in CI here.
+
+use graph_nexus_cli::commands::search::{compute_hits, ScoreSource, SearchArgs, SearchMode};
+use graph_nexus_cli::engine::Engine;
+use graph_nexus_cli::search::TantivyEngine;
+use graph_nexus_core::graph::{
+    File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
+};
+use graph_nexus_core::pool::StringPool;
+use rkyv::rancor::Error;
+use std::fs;
+use tempfile::tempdir;
+
+fn make_graph(names: &[&str]) -> ZeroCopyGraph {
+    let mut pool = StringPool::new();
+    let file_ref = pool.add("src/lib.rs");
+    let nodes: Vec<Node> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let name_ref = pool.add(name);
+            let uid_ref = pool.add(&format!("Function:src/lib.rs:{name}"));
+            Node {
+                uid: uid_ref,
+                name: name_ref,
+                file_idx: 0,
+                kind: NodeKind::Function,
+                span: (i as u32, 0, i as u32 + 1, 0),
+                community_id: 0,
+            }
+        })
+        .collect();
+    let n = nodes.len();
+    let out_offsets: Vec<u32> = (0..=n as u32).map(|_| 0).collect();
+    let in_offsets: Vec<u32> = (0..=n as u32).map(|_| 0).collect();
+    ZeroCopyGraph {
+        magic: GRAPH_MAGIC,
+        version: GRAPH_FORMAT_VERSION,
+        fingerprint: [0; 32],
+        string_pool: pool.bytes,
+        files: vec![File {
+            path: file_ref,
+            mtime: 0,
+            content_hash: [0; 32],
+            category: FileCategory::Source,
+        }],
+        nodes,
+        edges: vec![],
+        out_offsets,
+        in_offsets,
+        in_edge_idx: vec![],
+        name_index: vec![],
+        embeddings: None,
+        process_start: n as u32,
+        traces_offsets: vec![],
+        traces_data: vec![],
+        blind_spots: vec![],
+        route_shapes: vec![],
+    }
+}
+
+fn persist(dir: &std::path::Path, graph: &ZeroCopyGraph) {
+    fs::create_dir_all(dir).unwrap();
+    let bytes = rkyv::to_bytes::<Error>(graph).unwrap();
+    fs::write(dir.join("graph.bin"), bytes.as_slice()).unwrap();
+}
+
+#[test]
+fn substring_path_emits_substring_source_tag() {
+    let dir = tempdir().unwrap();
+    persist(dir.path(), &make_graph(&["parseConfig", "configLoad"]));
+    let engine = Engine::load(dir.path().join("graph.bin")).unwrap();
+
+    // No tantivy index on disk → bm25 path falls through to substring_hits.
+    let args = SearchArgs {
+        pattern: Some("config".into()),
+        mode: SearchMode::Bm25,
+        kind: None,
+        repo: None,
+        format: None,
+        batch: false,
+    };
+    let hits = compute_hits(args, &engine).unwrap();
+    assert!(!hits.is_empty(), "expected substring hits");
+    assert!(
+        hits.iter()
+            .all(|h| h.score_source == ScoreSource::Substring),
+        "expected all hits tagged Substring, got: {:?}",
+        hits.iter().map(|h| h.score_source).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tantivy_path_emits_bm25_source_tag() {
+    let dir = tempdir().unwrap();
+    let graph = make_graph(&["parseConfig", "configLoad"]);
+    persist(dir.path(), &graph);
+    TantivyEngine::build_index(dir.path(), &graph).unwrap();
+    let engine = Engine::load(dir.path().join("graph.bin")).unwrap();
+
+    let args = SearchArgs {
+        pattern: Some("config".into()),
+        mode: SearchMode::Bm25,
+        kind: None,
+        repo: None,
+        format: None,
+        batch: false,
+    };
+    let hits = compute_hits(args, &engine).unwrap();
+    assert!(!hits.is_empty(), "expected tantivy hits");
+    assert!(
+        hits.iter().all(|h| h.score_source == ScoreSource::Bm25),
+        "expected all hits tagged Bm25, got: {:?}",
+        hits.iter().map(|h| h.score_source).collect::<Vec<_>>()
+    );
+}

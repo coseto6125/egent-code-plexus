@@ -188,11 +188,18 @@ fn detect_mode(input: &str, embeddings_available: bool) -> SearchMode {
     if embeddings_available {
         SearchMode::Hybrid
     } else {
-        eprintln!(
-            "→ falling back to bm25 (no embeddings — build with `gnx admin index --embeddings`)"
-        );
+        warn_fallback("auto", "phrase pattern needs embeddings but graph has none");
         SearchMode::Bm25
     }
+}
+
+/// Emit the standard "→ {mode}: {reason} — falling back to bm25" stderr
+/// warning shared by detect_mode / vector_hits / hybrid_hits failure
+/// paths. Centralised so the rebuild hint stays in sync across sites.
+fn warn_fallback(mode: &str, reason: &str) {
+    eprintln!(
+        "→ {mode}: {reason} — falling back to bm25 (rebuild with `gnx admin index --embeddings`)"
+    );
 }
 
 /// Returns true when the graph has an embeddings table. Drives
@@ -207,11 +214,44 @@ fn embeddings_available_for(graph: &graph_nexus_core::graph::ArchivedZeroCopyGra
 
 // ── Per-repo hit struct ───────────────────────────────────────────────────────
 
+/// Origin of `Hit.score` — annotates which ranker produced the value
+/// so downstream consumers (the LLM, tests, scripts) can tell a BM25
+/// score apart from a cosine similarity apart from an RRF fused score
+/// without inferring it from the magnitude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScoreSource {
+    /// Tantivy BM25 (term frequency × IDF × field length norm).
+    Bm25,
+    /// Hardcoded substring buckets (1.0 exact / 0.7 prefix / 0.4 contains)
+    /// — emitted when `<index_dir>/tantivy/` is missing.
+    Substring,
+    /// Cosine similarity against BGE-M3 embeddings.
+    Cosine,
+    /// Reciprocal Rank Fusion of BM25 + vector ranks.
+    Rrf,
+}
+
+impl ScoreSource {
+    /// Wire-format tag used in JSON / Toon `score_source` field and the
+    /// text-format `[score:N source:X]` suffix.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bm25 => "bm25",
+            Self::Substring => "substring",
+            Self::Cosine => "cosine",
+            Self::Rrf => "rrf",
+        }
+    }
+}
+
 /// One result row — owned strings so rayon workers can return across threads.
 #[derive(Debug, Clone)]
 pub struct Hit {
     pub repo: Option<String>,
     pub score: f32,
+    /// Which ranker produced `score`. Annotation only — does not change
+    /// the score value or the sort order.
+    pub score_source: ScoreSource,
     pub kind: String,
     pub file: String,
     pub line: u32,
@@ -248,6 +288,7 @@ struct OrderedHit {
     caller_count: usize,
     callers: Vec<String>,
     callees: Vec<String>,
+    score_source: ScoreSource,
 }
 
 impl OrderedHit {
@@ -263,6 +304,7 @@ impl OrderedHit {
             caller_count: h.caller_count,
             callers: h.callers,
             callees: h.callees,
+            score_source: h.score_source,
         }
     }
 }
@@ -364,7 +406,7 @@ fn tantivy_hits(
         let Some(&idx) = uid_to_idx.get(uid.as_str()) else {
             continue;
         };
-        if let Some(hit) = build_hit(graph, idx, score, kind_set, repo_label) {
+        if let Some(hit) = build_hit(graph, idx, score, ScoreSource::Bm25, kind_set, repo_label) {
             hits.push(hit);
         }
     }
@@ -394,7 +436,14 @@ fn substring_hits(
         } else {
             continue;
         };
-        if let Some(hit) = build_hit(graph, idx, score, kind_set, repo_label) {
+        if let Some(hit) = build_hit(
+            graph,
+            idx,
+            score,
+            ScoreSource::Substring,
+            kind_set,
+            repo_label,
+        ) {
             hits.push(hit);
         }
     }
@@ -403,11 +452,13 @@ fn substring_hits(
 
 /// Shared per-node Hit constructor. Applies kind filter and reads
 /// file/line/kind/caller_count from the archived graph. Returns `None`
-/// when the node's kind doesn't match the filter.
+/// when the node's kind doesn't match the filter. `score_source`
+/// annotates which ranker produced `score` (BM25 / substring / cosine).
 fn build_hit(
     graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
     idx: usize,
     score: f32,
+    score_source: ScoreSource,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
 ) -> Option<Hit> {
@@ -458,6 +509,7 @@ fn build_hit(
     Some(Hit {
         repo: repo_label.clone(),
         score,
+        score_source,
         kind: kind_str,
         file,
         line,
@@ -561,16 +613,14 @@ fn vector_hits_from_graph(
     index_dir: Option<&std::path::Path>,
 ) -> Vec<Hit> {
     let Some(archived_embs) = graph.embeddings.as_ref() else {
-        eprintln!(
-            "→ vector: graph has no embeddings — falling back to bm25 (rebuild with `gnx admin index --embeddings`)"
-        );
+        warn_fallback("vector", "graph has no embeddings");
         return bm25_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir);
     };
 
     let embedder = match crate::embedder::get_embedder() {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("→ vector: embedder unavailable ({e}) — falling back to bm25");
+            warn_fallback("vector", &format!("embedder unavailable ({e})"));
             return bm25_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir);
         }
     };
@@ -578,7 +628,7 @@ fn vector_hits_from_graph(
     let query_vec = match embedder.embed(vec![pattern.to_string()]) {
         Ok(mut vs) if !vs.is_empty() => vs.swap_remove(0),
         _ => {
-            eprintln!("→ vector: query embed failed — falling back to bm25");
+            warn_fallback("vector", "query embed failed");
             return bm25_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir);
         }
     };
@@ -598,7 +648,9 @@ fn vector_hits_from_graph(
 
     ranked
         .into_iter()
-        .filter_map(|(idx, score)| build_hit(graph, idx, score, kind_set, repo_label))
+        .filter_map(|(idx, score)| {
+            build_hit(graph, idx, score, ScoreSource::Cosine, kind_set, repo_label)
+        })
         .collect()
 }
 
@@ -614,9 +666,7 @@ fn hybrid_hits_from_graph(
     index_dir: Option<&std::path::Path>,
 ) -> Vec<Hit> {
     if graph.embeddings.is_none() {
-        eprintln!(
-            "→ hybrid: graph has no embeddings — falling back to bm25 (rebuild with `gnx admin index --embeddings`)"
-        );
+        warn_fallback("hybrid", "graph has no embeddings");
         return bm25_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir);
     }
 
@@ -634,8 +684,10 @@ const RRF_K: f32 = 60.0;
 /// Fuse two ranked `Vec<Hit>` lists by Reciprocal Rank Fusion:
 /// `score(uid) = Σ 1/(RRF_K + rank_i + 1)` over the lists containing
 /// `uid`. Output sorted descending by combined score, truncated to
-/// `TOP_K`. The merged Hit's `score` field is overwritten with the
-/// RRF score so emit/serialise layers see the fused number.
+/// `TOP_K`. The merged Hit's `score` and `score_source` are
+/// overwritten (`Rrf` source, fused score) so consumers see the
+/// fused value tagged honestly rather than inheriting the BM25 /
+/// cosine source of whichever input survived first.
 ///
 /// Dedup key: `(file, line, name)`. Stable within a single graph —
 /// the only context this helper runs in. Multi-repo merge happens
@@ -670,6 +722,7 @@ pub(crate) fn rrf_merge(bm25: Vec<Hit>, vec: Vec<Hit>) -> Vec<Hit> {
         .take(TOP_K)
         .map(|(score, mut h)| {
             h.score = score;
+            h.score_source = ScoreSource::Rrf;
             h
         })
         .collect()
@@ -772,6 +825,7 @@ pub fn compute_multi_with_engines(
         .map(|o| Hit {
             repo: o.repo,
             score: f32::from_bits(o.score_bits),
+            score_source: o.score_source,
             kind: o.kind,
             file: o.file,
             line: o.line,
@@ -949,8 +1003,15 @@ fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Res
                     .map(|r| format!("@{r} "))
                     .unwrap_or_default();
                 lines.push(serde_json::Value::String(format!(
-                    "[{}] {}{}:{} ({}) callers:{} [score:{:.4}]",
-                    h.kind, repo_prefix, h.file, h.line, h.name, h.caller_count, h.score,
+                    "[{}] {}{}:{} ({}) callers:{} [score:{:.4} source:{}]",
+                    h.kind,
+                    repo_prefix,
+                    h.file,
+                    h.line,
+                    h.name,
+                    h.caller_count,
+                    h.score,
+                    h.score_source.as_str(),
                 )));
             }
             emit(&serde_json::json!({ "results": lines }), format)
@@ -968,6 +1029,7 @@ fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Res
                         "signature": h.signature,
                         "caller_count": h.caller_count,
                         "score": h.score,
+                        "score_source": h.score_source.as_str(),
                     })
                 })
                 .collect();
@@ -1028,6 +1090,7 @@ mod tests {
                 caller_count: 0,
                 callers: vec![],
                 callees: vec![],
+                score_source: ScoreSource::Bm25,
             };
             heap.push(Reverse(h));
             if heap.len() > k {
@@ -1079,6 +1142,7 @@ mod tests {
         super::Hit {
             repo: None,
             score,
+            score_source: super::ScoreSource::Bm25,
             kind: "function".into(),
             file: file.into(),
             line,
