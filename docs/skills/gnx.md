@@ -13,7 +13,7 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 |---|---|
 | ONE symbol → signature + body + 1-hop edges + callers + 1-hop impact | `gnx inspect --name X --repo .` |
 | ONE symbol → blast radius | `gnx impact X --direction upstream --repo .` (positional; `--target X` alias works too. `--direction` accepts `up`/`down`/`both` or `upstream`/`downstream`. Filters: `--kind --file_path --relation_types --depth --min-confidence --include-tests`) |
-| Diff blast radius (pre-commit / pre-edit) | `gnx impact --since origin/main --repo .` |
+| Diff blast radius (pre-commit / pre-edit) | `gnx impact --baseline origin/main --repo .` |
 | Find symbol by name / concept | `gnx search "term" --repo .` (auto-picks bm25 / hybrid / vector; force via `--mode`) |
 | Arbitrary graph query / source body via Cypher | `gnx cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query "..."` alias works. Single-repo only. Minimal grammar — see Cypher subset below) |
 | AST-aware multi-file rename | `gnx rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
@@ -91,7 +91,7 @@ MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='Val'] RETURN a,b
 gnx impact Foo --direction upstream --repo .
 
 # After staging a diff: see what changed + downstream/upstream callers
-gnx impact --since origin/main --repo .
+gnx impact --baseline origin/main --repo .
 
 # After edits: verify changed files' references still resolve
 gnx scan crates/.../changed_file.rs --repo .

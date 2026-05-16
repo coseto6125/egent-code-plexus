@@ -21,23 +21,26 @@ pub enum Direction {
     Both,
 }
 
-/// Traverse the call-graph from a target symbol and return every upstream
-/// caller or downstream callee up to a configurable depth.
+/// Symbol-level blast radius. From `<name>` traverses call-graph for upstream
+/// callers / downstream callees with risk_level. From `--baseline <ref>`
+/// detects symbols changed vs the baseline and runs the same traversal per
+/// change. For edge-level resolver delta (tier degradation, silent break),
+/// use `gnx diff --section bindings` instead.
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
-    /// Target symbol name (mutually exclusive with --since). Equivalent to
+    /// Target symbol name (mutually exclusive with --baseline). Equivalent to
     /// the `--target` named form below.
     pub name: Option<String>,
 
     /// Named alias for the positional NAME argument — kept for parity with
     /// old MCP / wrapper habits.
-    #[arg(long = "target", value_name = "TARGET", conflicts_with_all = ["name", "since"])]
+    #[arg(long = "target", value_name = "TARGET", conflicts_with_all = ["name", "baseline"])]
     pub target: Option<String>,
 
-    /// Git ref — compute blast radius across all symbols changed since this
-    /// ref. Mutually exclusive with positional <name>.
+    /// Git ref — compute blast radius across all symbols changed between
+    /// this baseline and HEAD. Mutually exclusive with positional <name>.
     #[arg(long, conflicts_with = "name")]
-    pub since: Option<String>,
+    pub baseline: Option<String>,
 
     /// Disambiguate when name has multiple matches: substring on file path.
     #[arg(long = "file_path", alias = "file-path")]
@@ -103,11 +106,11 @@ pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     if args.name.is_none() && args.target.is_some() {
         args.name = args.target.take();
     }
-    match (args.name.as_ref(), args.since.as_ref()) {
+    match (args.name.as_ref(), args.baseline.as_ref()) {
         (Some(_), None) => impact_by_name(args, engine),
-        (None, Some(_)) => impact_since(args, engine),
+        (None, Some(_)) => impact_with_baseline(args, engine),
         (None, None) => Err(GnxError::InvalidArgument(
-            "impact requires a symbol (positional <name> or --target <name>) or --since <ref>"
+            "impact requires a symbol (positional <name> or --target <name>) or --baseline <ref>"
                 .into(),
         )),
         (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
@@ -265,19 +268,19 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     Ok(())
 }
 
-fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
-    let since_ref = args.since.as_deref().unwrap();
+fn impact_with_baseline(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
+    let baseline_ref = args.baseline.as_deref().unwrap();
     let repo_path = PathBuf::from(args.repo.as_deref().unwrap_or("."));
     let format = OutputFormat::parse(args.format.as_deref());
 
-    let scope = DiffScope::Compare(since_ref.to_string());
+    let scope = DiffScope::Compare(baseline_ref.to_string());
     let provider = ShellGitProvider;
     let file_diffs = provider.diff(&repo_path, &scope)?;
 
     if file_diffs.is_empty() {
         let result = json!({
             "status": "success",
-            "since": since_ref,
+            "baseline": baseline_ref,
             "message": "0 changes detected — no symbols to assess",
             "changed_symbols": [],
             "impact_by_symbol": [],
@@ -321,7 +324,7 @@ fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
             }
         }
 
-        if let Some(old_src) = head_blob_at(&repo_path, rel_path, since_ref) {
+        if let Some(old_src) = head_blob_at(&repo_path, rel_path, baseline_ref) {
             let rel_pb = PathBuf::from(rel_path);
             if let Ok(lg) = pipeline.parse_file_raw(&rel_pb, &old_src) {
                 let lines: Vec<&[u8]> = old_src.split(|&b| b == b'\n').collect();
@@ -434,7 +437,7 @@ fn impact_since(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
 
     let mut result = json!({
         "status": "success",
-        "since": since_ref,
+        "baseline": baseline_ref,
         "changed_symbols": changed_symbols,
         "impact_by_symbol": impact_by_symbol,
     });
