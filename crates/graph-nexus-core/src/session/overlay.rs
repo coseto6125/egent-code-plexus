@@ -20,6 +20,31 @@ pub struct DirtyEntry {
     pub tantivy_delta_segment: Option<String>,
     #[serde(default)]
     pub parse_failed: bool,
+    #[serde(default)]
+    pub dirty_symbols: Vec<SymbolRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolRef {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub file: String,
+    pub line_start: u32,
+    pub line_end: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolKind {
+    Function,
+    Method,
+    Struct,
+    Enum,
+    Trait,
+    Const,
+    Type,
+    Module,
+    Unknown,
 }
 
 impl DirtyFiles {

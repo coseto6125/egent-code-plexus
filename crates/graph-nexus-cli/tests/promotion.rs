@@ -168,6 +168,7 @@ fn case_a_drops_fragment_when_content_matches_new_l2() {
             fragment_id: frag_id,
             tantivy_delta_segment: None,
             parse_failed: false,
+            dirty_symbols: vec![],
         },
     );
     DirtyFiles::write_atomic(&sid_dir.join("dirty_files.json"), &df).unwrap();
@@ -220,6 +221,7 @@ fn case_a_keeps_fragment_when_content_diverges() {
             fragment_id: frag_id.into(),
             tantivy_delta_segment: None,
             parse_failed: false,
+            dirty_symbols: vec![],
         },
     );
     DirtyFiles::write_atomic(&sid_dir.join("dirty_files.json"), &df).unwrap();

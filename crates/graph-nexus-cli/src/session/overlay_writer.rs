@@ -112,6 +112,7 @@ fn update_manifest(
             fragment_id: fragment_id.to_string(),
             tantivy_delta_segment: None,
             parse_failed,
+            dirty_symbols: vec![],
         },
     );
     atomic_write_json(&manifest_path, &df)
