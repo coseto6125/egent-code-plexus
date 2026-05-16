@@ -23,8 +23,7 @@ fn round_trip_deterministic_json() {
     let s2 = serde_json::to_string(&meta).unwrap();
     assert_eq!(s1, s2, "serialization must be deterministic");
     let back: CommitBuildMeta = serde_json::from_str(&s1).unwrap();
-    assert_eq!(back.sha, meta.sha);
-    assert_eq!(back.source_type, meta.source_type);
+    assert_eq!(back, meta);
 }
 
 #[test]
@@ -45,7 +44,7 @@ fn atomic_write_round_trip() {
     };
     CommitBuildMeta::write_atomic(tmp.path(), &meta).unwrap();
     let read = CommitBuildMeta::read(tmp.path()).unwrap();
-    assert_eq!(read.node_count, 42);
+    assert_eq!(read, meta);
 }
 
 #[test]

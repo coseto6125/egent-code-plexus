@@ -16,6 +16,7 @@ pub struct CommitBuildMeta {
     pub node_count: u32,
     pub embedding_status: EmbeddingStatus,
     pub refs_at_build: Vec<RefRecord>,
+    #[serde(default)]
     pub refs_seen_since: Vec<RefRecord>,
 }
 
