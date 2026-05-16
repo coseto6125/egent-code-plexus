@@ -13,16 +13,18 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 |---|---|
 | ONE symbol → signature + body + 1-hop edges + callers + 1-hop impact | `gnx inspect --name X --repo .` |
 | ONE symbol → blast radius | `gnx impact X --direction upstream --repo .` (positional; `--target X` alias works too. `--direction` accepts `up`/`down`/`both` or `upstream`/`downstream`. Filters: `--kind --file_path --relation_types --depth --min-confidence --include-tests`) |
-| Diff blast radius (pre-commit / pre-edit) | `gnx impact --baseline origin/main --repo .` |
+| PR blast radius — symbol view (who breaks) | `gnx impact --baseline origin/main --repo .` |
 | Find symbol by name / concept | `gnx search "term" --repo .` (auto-picks bm25 / hybrid / vector; force via `--mode`) |
 | Arbitrary graph query / source body via Cypher | `gnx cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query "..."` alias works. Single-repo only. Minimal grammar — see Cypher subset below) |
 | AST-aware multi-file rename | `gnx rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `gnx routes <path?> --repo .` (no path = list all) |
 | Cross-repo API contracts (routes / queue / RPC) | `gnx contracts --repo @all` (needs ≥2 repos in group) |
 | Verify references in a changed file resolve in the graph | `gnx scan <file> --repo .` |
+| HTTP consumer → Route shape drift detection | `gnx shape_check --route <path>? --repo .` (no `--route` = scan all routes; drift = consumer reads key not in Route's response/error keys) |
+| Binding tier / route / contract delta — edge view | `gnx diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required; accepts branch / tag / SHA / `HEAD~N` / `PR/<n>`. Multi-select via `,`. Formats: text / json / toon. Use `--verbose` for full lists.) |
 | Registry health / freshness / frameworks / blind spots | `gnx coverage` (registry-wide) or `gnx coverage --repo @all --detailed` |
 | String literals / config keys / vendored / generated / fs layout | grep / glob |
-| MCP host integration / install hooks / config TUI | `gnx admin` (hidden namespace) |
+| MCP host integration / install hooks / config TUI / **MCP server (`mcp serve\|tools`)** / **resolver vs LSP oracle benchmark (`verify-resolver`)** | `gnx admin` (hidden namespace) |
 
 ## Repo + graph path resolution
 
