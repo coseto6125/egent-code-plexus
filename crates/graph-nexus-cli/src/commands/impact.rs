@@ -21,8 +21,11 @@ pub enum Direction {
     Both,
 }
 
-/// Traverse the call-graph from a target symbol and return every upstream
-/// caller or downstream callee up to a configurable depth.
+/// Symbol-level blast radius. From `<name>` traverses call-graph for upstream
+/// callers / downstream callees with risk_level. From `--baseline <ref>`
+/// detects symbols changed vs the baseline and runs the same traversal per
+/// change. For edge-level resolver delta (tier degradation, silent break),
+/// use `gnx diff --section bindings` instead.
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
     /// Target symbol name (mutually exclusive with --baseline). Equivalent to
