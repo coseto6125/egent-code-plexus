@@ -78,6 +78,7 @@
 | `crates/graph-nexus-core/src/registry/mod.rs:62` | `let _lock = FileLock::acquire_exclusive(&lock_path)` | raii_safe | `_lock` keeps file open; `FileLock` wraps `File` with no explicit `unlock` — released on drop; panic during write would unwind and drop the lock cleanly |
 | `crates/graph-nexus-core/src/registry/lock.rs:4` | `use fs2::FileExt;` | raii_safe | import; `fs2` advisory locks are released when the `File` fd is closed, which happens on `FileLock` drop |
 | `crates/graph-nexus-core/src/registry/lock.rs:10` | `pub struct FileLock { _file: File }` | raii_safe | RAII struct; lock released when `_file` drops; no `ManuallyDrop`, no `mem::forget` risk observed at callsites |
+| `crates/graph-nexus-core/src/registry/lock.rs:14` | `impl FileLock {` | raii_safe | impl block header for the RAII struct at :10; no separate concern beyond the struct's drop semantics |
 | `crates/graph-nexus-cli/src/background.rs:3` | `// non-blocking \`flock\` so concurrent triggers no-op` | raii_safe | doc comment only; shell-level `flock -n 9` in subprocess script |
 | `crates/graph-nexus-cli/src/background.rs:21` | `/// Non-blocking \`flock\` target. If another process` | raii_safe | doc comment only |
 | `crates/graph-nexus-cli/src/background.rs:48` | `flock -n 9 \|\| exit 0` | raii_safe | shell script embedded in string literal; non-blocking flock exits 0 on contention — no deadlock possible; shell process lifetime bounds the lock |
@@ -125,6 +126,7 @@
 | ID | Source | Hypothesis | Status |
 |----|--------|------------|--------|
 | inv-001 | `crates/graph-nexus-core/src/analyzer/pipeline.rs:367` (axis §3.3) | `unsafe { std::env::set_var("GNX_MAX_FILE_BYTES", "10") }` in test `oversize_file_is_skipped` races with the sibling test (line 325) which calls `pipeline.analyze()` → `resolve_max_file_bytes()` → `std::env::var(...)` under parallel test execution (cargo test default). Both tests are in the same crate test binary; no `#[serial]` guard or `--test-threads=1` annotation. Outcome: sibling test may see the poisoned 10-byte cap and silently skip files, producing a false-failing assertion. Fix: wrap the set/remove in a mutex-guarded serial block (e.g. `serial_test` crate) or isolate in a separate integration test binary. | needs_verification |
+| inv-002 | `crates/graph-nexus-core/src/analyzer/pipeline.rs:399` (axis §3.3) | Paired `unsafe { std::env::remove_var(...) }` cleanup for inv-001's `set_var`. Same race surface — if a parallel sibling test reads the env var between :367 set and :399 remove, it sees the poisoned value. Same hypothesis and same fix as inv-001 (single serial guard covers both sites; do not fix one without the other). | needs_verification |
 
 ## §8 Closure checklist
 - [ ] All §3 axes populated
