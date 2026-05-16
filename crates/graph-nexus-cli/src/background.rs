@@ -30,6 +30,17 @@ pub struct BgJob<'a> {
     pub markers: Option<BgMarkers<'a>>,
 }
 
+/// The two-line shell preamble used to guard `spawn_bg`'s inner job
+/// with a non-blocking `flock`. Exposed so tests can pin to the same
+/// quoting + redirect behaviour as production (otherwise tests would
+/// re-implement the template and silently drift).
+pub fn flock_preamble(lock: &Path) -> String {
+    format!(
+        "exec 9>{lock} || exit 0\nflock -n 9 || exit 0\n",
+        lock = shell_quote(lock),
+    )
+}
+
 /// Spawn the job as a detached subprocess. Returns `true` iff the
 /// launcher subprocess started. The job's actual outcome surfaces
 /// via the marker files (if configured).
@@ -44,9 +55,7 @@ pub fn spawn_bg(job: BgJob) -> bool {
 
     let shell = if let Some(markers) = &job.markers {
         format!(
-            r#"exec 9>{lock} || exit 0
-flock -n 9 || exit 0
-: > {log}
+            r#"{preamble}: > {log}
 MAX={max}; ATTEMPT=0
 while [ $ATTEMPT -lt $MAX ]; do
   ATTEMPT=$((ATTEMPT+1))
@@ -61,7 +70,7 @@ done
 rm -f {complete}
 : > {failed}
 "#,
-            lock = shell_quote(job.lock),
+            preamble = flock_preamble(job.lock),
             log = shell_quote(markers.log),
             gnx = shell_quote(&self_exe),
             args = args_joined,
@@ -72,9 +81,7 @@ rm -f {complete}
         )
     } else {
         format!(
-            r#"exec 9>{lock} || exit 0
-flock -n 9 || exit 0
-MAX={max}; ATTEMPT=0
+            r#"{preamble}MAX={max}; ATTEMPT=0
 while [ $ATTEMPT -lt $MAX ]; do
   ATTEMPT=$((ATTEMPT+1))
   if {gnx} {args} >/dev/null 2>&1; then
@@ -83,7 +90,7 @@ while [ $ATTEMPT -lt $MAX ]; do
   [ $ATTEMPT -lt $MAX ] && sleep {sleep_secs}
 done
 "#,
-            lock = shell_quote(job.lock),
+            preamble = flock_preamble(job.lock),
             gnx = shell_quote(&self_exe),
             args = args_joined,
             max = job.retry.0,

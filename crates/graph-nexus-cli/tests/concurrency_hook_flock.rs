@@ -5,6 +5,7 @@
 //! Mirrors the production shell template at
 //! `crates/graph-nexus-cli/src/background.rs:73-91` (markerless branch).
 
+use graph_nexus_cli::flock_preamble;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -21,16 +22,10 @@ fn slow_noop_path() -> PathBuf {
     target_dir.join(profile).join("examples").join("slow_noop")
 }
 
-/// Replicates the production flock pattern from background.rs:73-91
-/// without depending on a real `gnx` binary.
+/// Wraps `inner` with the production flock preamble so the test pins to
+/// the same quoting + redirect behaviour as `spawn_bg` (not a hand-rolled copy).
 fn flock_shell(lock: &Path, inner: &str) -> String {
-    format!(
-        r#"exec 9>'{lock}' || exit 0
-flock -n 9 || exit 0
-{inner}
-"#,
-        lock = lock.display(),
-    )
+    format!("{}{inner}\n", flock_preamble(lock))
 }
 
 #[test]

@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auto_ensure;
 pub mod background;
+pub use background::flock_preamble;
 pub mod commands;
 pub mod config_parser;
 pub mod embedder;
