@@ -85,8 +85,8 @@ fn no_old_top_level_commands() {
         "clean",
         "remove",
         "init",
-        "shape-check",
-        "shape_check",
+        // shape_check / shape-check intentionally surfaced at top-level
+        // (PR Tier B Task 3 — drift detector is agent-facing).
         "analyze-here",
         "analyze_here",
     ] {
