@@ -25,6 +25,12 @@ pub enum DecisionTier {
     /// [`ResolutionTier::HeritageScoped`]).
     HeritageScoped,
     Global,
+    /// Tier 3 produced ≥2 kind-filtered candidates and suppressed the edge.
+    /// Distinct from `Unresolved` (=0 candidates) so the verification
+    /// harness can tell "no defence needed" from "defence fired" without
+    /// needing to inspect `alt_count`. Edge behaviour is unchanged — both
+    /// outcomes emit no edge.
+    AmbiguousGlobal,
     Unresolved,
 }
 
@@ -311,11 +317,25 @@ impl<'a> Resolver<'a> {
                 Some(ResolutionTier::Global.base_confidence()),
             );
         } else {
+            // Distinguish "no candidates" from "≥2 candidates, suppressed
+            // by the unique-only cap". The post-filter count walks the
+            // same predicates as `lookup_unique_global` so the two views
+            // can't drift. Cost paid only on miss (Tier 3 hits skip this).
+            let filtered = self.symbol_table.count_global_kind_filtered(
+                symbol_name,
+                target,
+                caller_meta,
+            );
+            let tier = if filtered >= 2 {
+                DecisionTier::AmbiguousGlobal
+            } else {
+                DecisionTier::Unresolved
+            };
             self.record(
                 &source_file_str,
                 symbol_name,
                 specifier,
-                DecisionTier::Unresolved,
+                tier,
                 None,
                 raw_count,
                 None,
@@ -1130,5 +1150,104 @@ mod tests {
             out,
             vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
         );
+    }
+
+    // ── Ambiguity sentinel: distinguish "no candidates" from "many" ─────────
+
+    #[test]
+    fn tier3_ambiguous_records_ambiguous_global_decision_across_14_langs() {
+        // For every mainstream language, two same-name global functions
+        // produce zero edges (preserved behavior) AND a single
+        // `AmbiguousGlobal` decision — replacing the prior `Unresolved`
+        // outcome that conflated "not found" with "found ≥2, suppressed".
+        let langs: &[&str] = &[
+            "ts", "js", "py", "java", "kt", "cs", "go", "rs", "php", "rb", "swift", "c", "cpp",
+            "dart",
+        ];
+        for ext in langs {
+            let st = st_with(&[
+                (
+                    Box::leak(format!("a.{ext}").into_boxed_str()),
+                    "ambiguity_demo",
+                    NodeKind::Function,
+                ),
+                (
+                    Box::leak(format!("b.{ext}").into_boxed_str()),
+                    "ambiguity_demo",
+                    NodeKind::Function,
+                ),
+            ]);
+            let mut r = Resolver::new(&st);
+            r.enable_dump();
+            let out = r.resolve_symbol(
+                &PathBuf::from(format!("c.{ext}")),
+                "ambiguity_demo",
+                &[],
+                ResolveTarget::Callable,
+            );
+            assert!(out.is_empty(), "{ext}: ambiguous bare call must not emit");
+
+            let decisions = r.take_decisions().unwrap();
+            let last = decisions.last().expect("a decision was recorded");
+            assert_eq!(
+                last.tier,
+                DecisionTier::AmbiguousGlobal,
+                "{ext}: Tier-3 with ≥2 kind-filtered candidates must record \
+                 AmbiguousGlobal, got {:?} (alt_count={})",
+                last.tier,
+                last.alt_count
+            );
+            assert!(
+                last.alt_count >= 2,
+                "{ext}: alt_count should reflect the candidate set, got {}",
+                last.alt_count
+            );
+            assert!(last.target_id.is_none(), "{ext}: must not pick a target");
+        }
+    }
+
+    #[test]
+    fn tier3_zero_candidates_still_records_unresolved() {
+        // Empty symbol table → bare name truly has no matches → keep the
+        // `Unresolved` decision (NOT AmbiguousGlobal). Pins that the new
+        // variant only fires on the "found, suppressed" path.
+        let st = st_with(&[]);
+        let mut r = Resolver::new(&st);
+        r.enable_dump();
+        let out = r.resolve_symbol(
+            &PathBuf::from("a.rs"),
+            "nonexistent",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty());
+
+        let last = r.take_decisions().unwrap().pop().unwrap();
+        assert_eq!(last.tier, DecisionTier::Unresolved);
+        assert_eq!(last.alt_count, 0);
+    }
+
+    #[test]
+    fn tier3_unique_kind_filter_recovers_does_not_surface_ambiguity() {
+        // One Function + one Variable share the name. Callable target filters
+        // out the Variable → uniqueness restored → Global decision wins.
+        // Pins that AmbiguousGlobal only fires when the *post-filter* set is
+        // ≥2, not when the raw same-name set is ≥2.
+        let st = st_with(&[
+            ("a.rs", "config", NodeKind::Function),
+            ("b.rs", "config", NodeKind::Variable),
+        ]);
+        let mut r = Resolver::new(&st);
+        r.enable_dump();
+        let out = r.resolve_symbol(
+            &PathBuf::from("c.rs"),
+            "config",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert_eq!(out, vec![(0, ResolutionTier::Global.base_confidence())]);
+
+        let last = r.take_decisions().unwrap().pop().unwrap();
+        assert_eq!(last.tier, DecisionTier::Global);
     }
 }

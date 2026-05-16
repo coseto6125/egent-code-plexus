@@ -320,6 +320,41 @@ impl SymbolTable {
             .unwrap_or(0)
     }
 
+    /// Post-filter candidate count for the same predicate chain that
+    /// `lookup_unique_global` walks (language barrier, vendor barrier,
+    /// kind filter). Called on lookup miss only — the hot Tier-3 path
+    /// still short-circuits via `lookup_unique_global` and only invokes
+    /// this when it needs to tell `AmbiguousGlobal` from `Unresolved`.
+    pub fn count_global_kind_filtered(
+        &self,
+        node_name: &str,
+        target: ResolveTarget,
+        caller: FileMeta,
+    ) -> u32 {
+        let Some(raw) = self.global_scoped.get(node_name) else {
+            return 0;
+        };
+        let predicate: fn(NodeKind) -> bool = match target {
+            ResolveTarget::Callable => NodeKind::is_callable,
+            ResolveTarget::Type => NodeKind::is_type,
+        };
+        let mut count = 0u32;
+        for &id in raw {
+            let cand = self.node_file_meta[id as usize];
+            if cand.language != caller.language {
+                continue;
+            }
+            if cand.is_vendor && !caller.is_vendor {
+                continue;
+            }
+            if !predicate(self.node_kinds[id as usize]) {
+                continue;
+            }
+            count += 1;
+        }
+        count
+    }
+
     /// Reverse lookup: given a `node_id`, return its owning file path. Used by
     /// the resolver decision dump to materialize `target_file` in JSONL output.
     pub fn file_of(&self, node_id: u32) -> Option<&str> {

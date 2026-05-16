@@ -1411,7 +1411,8 @@ mod tests {
                 DecisionTier::SameFile
                 | DecisionTier::QualifierScoped
                 | DecisionTier::HeritageScoped
-                | DecisionTier::Global => {
+                | DecisionTier::Global
+                | DecisionTier::AmbiguousGlobal => {
                     panic!(
                         "fixture should only produce ImportScoped/Unresolved, got {:?}",
                         original.tier
