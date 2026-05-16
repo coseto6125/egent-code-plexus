@@ -4,12 +4,14 @@
 //! (cross-repo rayon fan-out + top-K heap merge).
 //!
 //! ## Mode routing
-//! - `bm25`   — pure lexical (substring scoring against graph node names)
-//! - `vector` — semantic cosine similarity (stub; falls back to bm25 until
-//!   full embedding wiring is complete — TODO: wire to real embed path)
-//! - `hybrid` — bm25 + vector folded (stub: falls back to bm25 without embeddings)
-//! - `auto`   — detect: slug-like input → bm25; else → hybrid if embeddings
+//! - `bm25`   — pure lexical (tantivy BM25 or substring scan fallback)
+//! - `vector` — cosine similarity against per-node BGE-M3 embeddings
+//! - `hybrid` — bm25 + vector fused via Reciprocal Rank Fusion (k=60)
+//! - `auto`   — slug-like input → bm25; else → hybrid if embeddings
 //!   present, else bm25 with a stderr hint
+//!
+//! Vector and hybrid degrade to bm25 + a stderr warning when the graph
+//! has no embeddings — the hook contract requires search never errors.
 //!
 //! ## Cross-repo fan-out
 //! When `--repo` resolves to multiple repos, workers run in parallel via
@@ -113,10 +115,11 @@ pub fn run(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
 ///
 /// Output: each query block is preceded by a `=== pattern: <pattern> ===`
 /// stdout line so scripts can split per-query regardless of `--format`.
-/// Single-repo and multi-repo targets are honoured the same way as the
-/// non-batch path; for multi-repo, engine reload still happens per
-/// query (the win is purely on Embedder amortisation, which is the
-/// dominant cost anyway).
+/// For a single-repo target the Engine is also loaded once outside the
+/// per-query loop (mmap setup is the next non-trivial cost after model
+/// init); for multi-repo, each per-pattern `compute_multi` call still
+/// reloads per-repo engines internally — bundling those across N
+/// queries is a deeper refactor and out of scope for this PR.
 fn run_batch(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
     use std::io::BufRead;
 
@@ -137,20 +140,28 @@ fn run_batch(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
         return Ok(());
     }
 
+    // Load the single-repo engine once if applicable. Multi-repo
+    // targets fan out per-query inside compute_multi — see docstring.
+    let single_repo_engine: Option<(String, Engine)> = if targets.len() == 1 {
+        let (repo_name, graph_path) = &targets[0];
+        let eng = Engine::load(std::path::PathBuf::from(graph_path))
+            .map_err(|e| GnxError::InvalidArgument(format!("{repo_name}: load: {e}")))?;
+        Some((repo_name.clone(), eng))
+    } else {
+        None
+    };
+
     for pattern in &queries {
         println!("=== pattern: {pattern} ===");
 
         let hits = if targets.is_empty() {
             compute_single(pattern, &args.mode, args.kind.as_deref(), engine, None)?
-        } else if targets.len() == 1 {
-            let (repo_name, graph_path) = &targets[0];
-            let local_engine = Engine::load(std::path::PathBuf::from(graph_path))
-                .map_err(|e| GnxError::Rkyv(format!("{repo_name}: load: {e}")))?;
+        } else if let Some((repo_name, local_engine)) = single_repo_engine.as_ref() {
             compute_single(
                 pattern,
                 &args.mode,
                 args.kind.as_deref(),
-                &local_engine,
+                local_engine,
                 Some(repo_name.clone()),
             )?
         } else {
@@ -181,8 +192,12 @@ fn detect_mode(input: &str, embeddings_available: bool) -> SearchMode {
     }
 }
 
-/// Stub: returns true only when the graph has an embeddings table.
-/// TODO: query per-repo BranchEntry.embedding_status from the registry.
+/// Returns true when the graph has an embeddings table. Drives
+/// `detect_mode`'s phrase→hybrid routing.
+//
+// TODO: prefer per-repo BranchEntry.embedding_status from the registry
+// once that surface gains a query API — avoids loading the graph just
+// to inspect one Option.
 fn embeddings_available_for(graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph) -> bool {
     graph.embeddings.is_some()
 }
