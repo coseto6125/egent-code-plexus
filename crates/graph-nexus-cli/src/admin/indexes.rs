@@ -1,7 +1,7 @@
 //! Index maintenance workflows for `gnx admin`.
 
 use crate::admin::menu::select;
-use crate::commands::admin::{drop, index, prune, rename_branch};
+use crate::commands::admin::{drop, index, prune};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use graph_nexus_core::registry::{resolve_home_gnx, Registry, RegistryFile};
 use graph_nexus_core::GnxError;
@@ -10,7 +10,6 @@ use std::path::PathBuf;
 const MENU: &[&str] = &[
     "Build / refresh index",
     "Inspect indexed repos",
-    "Rename branch index",
     "Prune stale indexes",
     "Drop index",
     "← Back",
@@ -22,10 +21,9 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
         match choice {
             Some(0) => build_refresh_wizard(theme)?,
             Some(1) => inspect_indexed_repos()?,
-            Some(2) => rename_branch_wizard(theme)?,
-            Some(3) => prune_wizard(theme)?,
-            Some(4) => drop_wizard(theme)?,
-            Some(5) | None => return Ok(()),
+            Some(2) => prune_wizard(theme)?,
+            Some(3) => drop_wizard(theme)?,
+            Some(4) | None => return Ok(()),
             _ => unreachable!(),
         }
     }
@@ -70,44 +68,33 @@ fn print_registry(registry: &RegistryFile, home_gnx: &std::path::Path) {
         println!("  no indexed repos");
         return;
     }
-    for repo in &registry.repos {
-        println!("  {}", repo.name);
-        println!("    worktree: {}", repo.worktree_path);
-        println!("    remote: {}", repo.remote_url);
-        if repo.groups.is_empty() {
+    for (dir_name, alias) in &registry.repos {
+        let display_name = alias.aliases.first().map(|s| s.as_str()).unwrap_or(dir_name);
+        println!("  {}", display_name);
+        println!("    dir_name: {}", dir_name);
+        println!("    common_dir: {}", alias.common_dir);
+        if let Some(url) = &alias.remote_url {
+            println!("    remote: {}", url);
+        }
+        if alias.groups.is_empty() {
             println!("    groups: -");
         } else {
-            println!("    groups: {}", repo.groups.join(", "));
-        }
-        for branch in &repo.branches {
-            println!(
-                "    branch {:<24} nodes={} embeddings={} indexed_at={}",
-                branch.name, branch.node_count, branch.embedding_status, branch.indexed_at
-            );
+            println!("    groups: {}", alias.groups.join(", "));
         }
     }
 }
 
-fn rename_branch_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
-    let repo = input_path(theme, "Repo path", ".")?;
-    let from = input(theme, "From branch", "")?;
-    let to = input(theme, "To branch", "")?;
-    rename_branch::run(rename_branch::RenameBranchArgs { from, to, repo })
-}
-
 fn prune_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
-    let repo = input_path(theme, "Repo path", ".")?;
-    let branch = input(theme, "Branch to prune", "")?;
     let confirmed = Confirm::with_theme(theme)
-        .with_prompt(format!("Delete index data for branch `{branch}`"))
+        .with_prompt("Sweep orphan repos (common_dir no longer exists)")
         .default(false)
         .interact()
         .map_err(dialoguer_err)?;
     if confirmed {
         prune::run(prune::PruneArgs {
-            orphans: false,
-            branch: Some(branch),
-            repo: Some(repo),
+            orphans: true,
+            branch: None,
+            repo: None,
         })?;
     }
     Ok(())
@@ -165,7 +152,8 @@ fn dialoguer_err(e: dialoguer::Error) -> GnxError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::registry::{BranchEntry, RepoEntry};
+    use graph_nexus_core::registry::RepoAlias;
+    use std::collections::BTreeMap;
 
     #[test]
     fn indexes_menu_matches_target_order() {
@@ -174,7 +162,6 @@ mod tests {
             &[
                 "Build / refresh index",
                 "Inspect indexed repos",
-                "Rename branch index",
                 "Prune stale indexes",
                 "Drop index",
                 "← Back",
@@ -185,23 +172,21 @@ mod tests {
     #[test]
     fn print_registry_accepts_empty_and_populated_registry() {
         print_registry(&RegistryFile::empty(), std::path::Path::new("/tmp/gnx"));
-        let registry = RegistryFile {
-            version: 1,
-            repos: vec![RepoEntry {
-                name: "repo".into(),
-                remote_url: "https://example.test/repo.git".into(),
-                worktree_path: "/work/repo".into(),
-                index_dir_root: "/home/me/.gnx/repo".into(),
-                branches: vec![BranchEntry {
-                    name: "main".into(),
-                    index_dir: "/home/me/.gnx/repo/main".into(),
-                    indexed_at: "2026-05-16T00:00:00Z".into(),
-                    node_count: 1,
-                    delta_size: 0,
-                    embedding_status: "none".into(),
-                }],
+        let mut repos = BTreeMap::new();
+        repos.insert(
+            "repo__aabbccdd".into(),
+            RepoAlias {
+                dir_name: "repo__aabbccdd".into(),
+                common_dir: "/work/repo/.git".into(),
+                remote_url: Some("https://example.test/repo.git".into()),
+                aliases: vec!["repo".into()],
+                last_touched: "2026-05-16T00:00:00Z".into(),
                 groups: vec!["core".into()],
-            }],
+            },
+        );
+        let registry = RegistryFile {
+            version: 2,
+            repos,
             groups: vec![],
         };
         print_registry(&registry, std::path::Path::new("/tmp/gnx"));

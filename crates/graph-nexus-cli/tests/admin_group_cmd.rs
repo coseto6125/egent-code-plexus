@@ -3,7 +3,8 @@
 //! Registry redirection: set HOME to a temp dir so `resolve_home_gnx`
 //! resolves to `<temp>/.gnx/registry.json`.
 
-use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoEntry};
+use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -26,24 +27,28 @@ fn read_registry(home: &Path) -> RegistryFile {
 }
 
 /// Seed `<home>/.gnx/registry.json` with the given repos and initial groups.
-fn seed_registry(home: &Path, repos: Vec<RepoEntry>, groups: Vec<GroupEntry>) {
+fn seed_registry(home: &Path, repos: Vec<RepoAlias>, groups: Vec<GroupEntry>) {
     let home_gnx = home.join(".gnx");
     std::fs::create_dir_all(&home_gnx).unwrap();
+    let mut repo_map = BTreeMap::new();
+    for r in repos {
+        repo_map.insert(r.dir_name.clone(), r);
+    }
     let reg = RegistryFile {
-        version: 1,
-        repos,
+        version: 2,
+        repos: repo_map,
         groups,
     };
     RegistryFile::write_atomic(&home_gnx.join("registry.json"), &reg).unwrap();
 }
 
-fn make_repo(name: &str, groups: Vec<String>) -> RepoEntry {
-    RepoEntry {
-        name: name.into(),
-        remote_url: format!("https://example.com/{name}.git"),
-        worktree_path: format!("/tmp/{name}"),
-        index_dir_root: format!("/tmp/idx/{name}"),
-        branches: vec![],
+fn make_repo(name: &str, groups: Vec<String>) -> RepoAlias {
+    RepoAlias {
+        dir_name: format!("{name}__aabbccdd"),
+        common_dir: format!("/tmp/{name}/.git"),
+        remote_url: Some(format!("https://example.com/{name}.git")),
+        aliases: vec![name.into()],
+        last_touched: "2026-05-16T00:00:00Z".into(),
         groups,
     }
 }
@@ -105,6 +110,7 @@ fn group_add_creates_group_if_missing() {
     let home = tempfile::tempdir().unwrap();
     seed_registry(home.path(), vec![make_repo("alpha", vec![])], vec![]);
 
+    // group.rs matches by alias ("alpha") so we pass the alias, not dir_name.
     let out = run_admin_group(home.path(), &["add", "alpha", "newgroup"]);
     assert!(
         out.status.success(),
@@ -113,10 +119,15 @@ fn group_add_creates_group_if_missing() {
     );
 
     let reg = read_registry(home.path());
-    let repo = reg.repos.iter().find(|r| r.name == "alpha").unwrap();
-    assert_eq!(repo.groups, vec!["newgroup"]);
+    let alias = reg
+        .repos
+        .values()
+        .find(|r| r.aliases.iter().any(|a| a == "alpha"))
+        .unwrap();
+    assert_eq!(alias.groups, vec!["newgroup"]);
     assert_eq!(reg.groups.len(), 1, "expected 1 group entry");
     assert_eq!(reg.groups[0].name, "newgroup");
+    // group member is whatever string the user passed (alias "alpha")
     assert_eq!(reg.groups[0].members, vec!["alpha"]);
 }
 
@@ -134,12 +145,16 @@ fn group_add_idempotent() {
     );
 
     let reg = read_registry(home.path());
-    let repo = reg.repos.iter().find(|r| r.name == "alpha").unwrap();
+    let alias = reg
+        .repos
+        .values()
+        .find(|r| r.aliases.iter().any(|a| a == "alpha"))
+        .unwrap();
     assert_eq!(
-        repo.groups.len(),
+        alias.groups.len(),
         1,
         "expected 1 group entry, got {:?}",
-        repo.groups
+        alias.groups
     );
     let group = reg.groups.iter().find(|g| g.name == "backend").unwrap();
     assert_eq!(
@@ -187,10 +202,14 @@ fn group_remove_auto_deletes_empty_group() {
         "expected empty groups after removing last member, got {:?}",
         reg.groups
     );
-    let repo = reg.repos.iter().find(|r| r.name == "alpha").unwrap();
+    let alias = reg
+        .repos
+        .values()
+        .find(|r| r.aliases.iter().any(|a| a == "alpha"))
+        .unwrap();
     assert!(
-        repo.groups.is_empty(),
-        "repo.groups should be empty after remove"
+        alias.groups.is_empty(),
+        "alias.groups should be empty after remove"
     );
 }
 
@@ -205,6 +224,7 @@ fn group_remove_preserves_non_empty_group() {
         ],
         vec![GroupEntry {
             name: "backend".into(),
+            // members use the alias strings (whatever was passed to `gnx admin group add`)
             members: vec!["alpha".into(), "beta".into()],
         }],
     );
@@ -224,12 +244,20 @@ fn group_remove_preserves_non_empty_group() {
     );
     let group = reg.groups.iter().find(|g| g.name == "backend").unwrap();
     assert_eq!(group.members, vec!["beta"]);
-    let alpha = reg.repos.iter().find(|r| r.name == "alpha").unwrap();
+    let alpha = reg
+        .repos
+        .values()
+        .find(|r| r.aliases.iter().any(|a| a == "alpha"))
+        .unwrap();
     assert!(
         alpha.groups.is_empty(),
         "alpha.groups should be empty after remove"
     );
-    let beta = reg.repos.iter().find(|r| r.name == "beta").unwrap();
+    let beta = reg
+        .repos
+        .values()
+        .find(|r| r.aliases.iter().any(|a| a == "beta"))
+        .unwrap();
     assert_eq!(
         beta.groups,
         vec!["backend"],

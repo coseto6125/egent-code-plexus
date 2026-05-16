@@ -11,7 +11,7 @@
 //! folded here — that requires per-callsite binding analysis whose granularity
 //! sits beyond a health summary. See the standalone `gnx tool-map` command.
 
-use crate::auto_ensure::{ensure_index, EnsureResult};
+use crate::commit_lookup::CommitIndex;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
@@ -82,20 +82,13 @@ fn build_registry_overview(reg: &RegistryFile, detailed: bool) -> Value {
     let rows: Vec<Value> = reg
         .repos
         .iter()
-        .map(|r| {
-            let last = r
-                .branches
-                .iter()
-                .map(|b| b.indexed_at.as_str())
-                .max()
-                .unwrap_or("never");
-            let total_nodes: u32 = r.branches.iter().map(|b| b.node_count).sum();
+        .map(|(dir_name, alias)| {
+            let display_name = alias.aliases.first().map(|s| s.as_str()).unwrap_or(dir_name);
             json!({
-                "name": r.name,
-                "branches": r.branches.len(),
-                "last_indexed": last,
-                "total_nodes": total_nodes,
-                "groups": r.groups,
+                "name": display_name,
+                "dir_name": dir_name,
+                "last_touched": alias.last_touched,
+                "groups": alias.groups,
             })
         })
         .collect();
@@ -127,34 +120,60 @@ fn build_repo_health(r: &crate::repo_selector::ResolvedRepo) -> Value {
             Err(_) => (None, Some("graph_load_failed")),
         },
     };
+    let display_name = r.aliases.first().map(|s| s.as_str()).unwrap_or(&r.dir_name);
     json!({
-        "repo": r.name,
+        "repo": display_name,
+        "dir_name": r.dir_name,
         "frameworks": fetch_frameworks(graph, status),
         "freshness": fetch_freshness(r),
         "blind_spots": fetch_blind_spots(graph, status),
     })
 }
 
-/// Per-repo graph path. The "main" branch is the canonical default; non-main
-/// branches are not inspected here (they get their own coverage when
-/// explicitly selected).
-fn graph_main_path(r: &crate::repo_selector::ResolvedRepo) -> PathBuf {
-    Path::new(&r.index_dir_root).join("main").join("graph.bin")
+/// Find the most-recently-modified graph.bin under `<home_gnx>/<dir_name>/commits/`.
+/// v2 is content-addressed per commit; we pick the newest one for coverage
+/// reporting (the HEAD commit's build, if present).
+fn latest_graph_path(r: &crate::repo_selector::ResolvedRepo) -> Option<PathBuf> {
+    let home_gnx = resolve_home_gnx();
+    let commits_dir = home_gnx.join(&r.dir_name).join("commits");
+    let idx = CommitIndex::scan(&commits_dir).ok()?;
+    if idx.is_empty() {
+        return None;
+    }
+    // Pick the commit dir with the most recent graph.bin mtime.
+    std::fs::read_dir(&commits_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let g = e.path().join("graph.bin");
+            let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
+            Some((mtime, g))
+        })
+        .max_by_key(|(mtime, _)| *mtime)
+        .map(|(_, path)| path)
 }
 
 /// Open the repo's graph for read. Returns `None` for any failure — caller
 /// degrades gracefully (emits zero counts + a status note) instead of failing
 /// the whole `coverage` report when one repo's graph is missing or corrupt.
 fn try_load_engine(r: &crate::repo_selector::ResolvedRepo) -> Option<Engine> {
-    Engine::load(graph_main_path(r)).ok()
+    Engine::load(latest_graph_path(r)?).ok()
 }
 
-/// Freshness check: compare graph.bin mtime to newest source file.
+/// Freshness check: compare the latest graph.bin mtime to newest source file.
+/// Uses `common_dir` as a proxy for the worktree root (parent of `.git`).
 fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo) -> Value {
-    let main_path = graph_main_path(r);
-    let worktree = Path::new(&r.worktree_path);
+    use crate::auto_ensure::{ensure_index, EnsureResult};
 
-    match ensure_index(&main_path, worktree) {
+    let Some(graph_path) = latest_graph_path(r) else {
+        return json!({ "status": "missing" });
+    };
+    // Derive worktree root from common_dir (parent of `.git`).
+    let common = Path::new(&r.common_dir);
+    let worktree = common.parent().unwrap_or(common);
+
+    match ensure_index(&graph_path, worktree) {
         Ok(EnsureResult::Ready) => json!({ "status": "ready" }),
         Ok(EnsureResult::Stale { age_seconds }) => {
             json!({ "status": "stale", "age_seconds": age_seconds })

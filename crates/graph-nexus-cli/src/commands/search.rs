@@ -21,7 +21,7 @@ use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
-use graph_nexus_core::registry::{IndexLayout, Registry};
+use graph_nexus_core::registry::{resolve_home_gnx, Registry};
 use graph_nexus_core::GnxError;
 use rayon::prelude::*;
 use std::cmp::Reverse;
@@ -909,21 +909,24 @@ pub fn compute_hits(args: SearchArgs, engine: &Engine) -> Result<Vec<Hit>, GnxEr
 
 // ── Repo selector resolution ─────────────────────────────────────────────────
 
-/// Resolve `--repo` to `Vec<(name, graph_path_str)>`.
+/// Resolve `--repo` to `Vec<(display_name, graph_path_str)>`.
 /// Returns empty Vec when the selector is absent (caller uses pre-loaded engine).
 fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxError> {
+    use crate::commit_lookup::CommitIndex;
+
     let sel = match selector {
         None | Some(".") | Some("") => return Ok(vec![]),
         Some(s) => s,
     };
 
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    let home_gnx = resolve_home_gnx();
     let registry = Registry::open(&home_gnx)
         .map_err(|e| GnxError::InvalidArgument(format!("open registry: {e}")))?;
     let snapshot = registry.snapshot();
 
-    let repo_names: Vec<String> = if sel == "@all" {
-        snapshot.repos.iter().map(|r| r.name.clone()).collect()
+    // Expand selector into dir_names (v2 key).
+    let dir_names: Vec<String> = if sel == "@all" {
+        snapshot.repos.keys().cloned().collect()
     } else if let Some(group_name) = sel.strip_prefix('@') {
         match snapshot.groups.iter().find(|g| g.name == group_name) {
             Some(g) => g.members.clone(),
@@ -934,42 +937,56 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
             }
         }
     } else {
+        // Comma-separated list of names or dir_names.
         sel.split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            .flat_map(|name| {
+                // Match by alias or dir_name; return the dir_name (map key).
+                snapshot
+                    .repos
+                    .iter()
+                    .find(|(_k, v)| v.dir_name == name || v.aliases.iter().any(|a| a == &name))
+                    .map(|(k, _v)| k.clone())
+            })
             .collect()
     };
 
-    if repo_names.is_empty() {
+    if dir_names.is_empty() {
         return Ok(vec![]);
     }
 
-    let name_path_pairs: Vec<(String, String)> = snapshot
-        .repos
-        .iter()
-        .map(|r| (r.name.clone(), r.worktree_path.clone()))
-        .collect();
-
-    let mut targets = Vec::with_capacity(repo_names.len());
-    for repo_name in &repo_names {
-        let repo = match snapshot.repos.iter().find(|r| &r.name == repo_name) {
-            Some(r) => r,
-            None => continue, // silently skip unknown names
-        };
-        let branch = match repo.branches.first() {
-            Some(b) => b,
+    let mut targets: Vec<(String, String)> = Vec::with_capacity(dir_names.len());
+    for dir_name in &dir_names {
+        let alias = match snapshot.repos.get(dir_name) {
+            Some(a) => a,
             None => continue,
         };
-        let layout = IndexLayout::resolve(
-            &home_gnx,
-            &repo.name,
-            &branch.name,
-            &repo.worktree_path,
-            &name_path_pairs,
-        )
-        .map_err(|e| GnxError::InvalidArgument(format!("{repo_name}: layout: {e}")))?;
-        let graph_path = layout.index_dir.join("graph.bin");
-        targets.push((repo_name.clone(), graph_path.to_string_lossy().into_owned()));
+        let commits_dir = home_gnx.join(dir_name).join("commits");
+        let idx = CommitIndex::scan(&commits_dir)
+            .map_err(|e| GnxError::InvalidArgument(format!("{dir_name}: scan commits: {e}")))?;
+        if idx.is_empty() {
+            continue; // repo registered but not yet built
+        }
+        // Pick the commit dir with the most recent graph.bin mtime.
+        let Some(graph_path) = std::fs::read_dir(&commits_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| {
+                let g = e.path().join("graph.bin");
+                let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
+                Some((mtime, g))
+            })
+            .max_by_key(|(mtime, _)| *mtime)
+            .map(|(_, p)| p)
+        else {
+            continue;
+        };
+        let display_name = alias.aliases.first().cloned().unwrap_or_else(|| dir_name.clone());
+        targets.push((display_name, graph_path.to_string_lossy().into_owned()));
     }
 
     Ok(targets)

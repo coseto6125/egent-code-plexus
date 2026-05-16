@@ -94,17 +94,17 @@ pub fn gnx_state_dir_ensure(cwd: &str) -> Option<PathBuf> {
 }
 
 /// Registry-aware index dir resolution. Reads `~/.gnx/registry.json`,
-/// finds the `RepoEntry` whose `worktree_path` is the longest prefix
-/// of `cwd`, and returns the resolved `<index_dir>` for the current
-/// git branch at that cwd (falling back to the most recently indexed
-/// branch when the current one hasn't been indexed yet).
+/// finds the `RepoAlias` whose `common_dir` matches cwd's git common-dir,
+/// then scans the repo's commits dir for the most recent graph.bin.
 ///
 /// Returns `None` when:
 ///   - cwd is not absolute (defensive: shell envs occasionally arrive empty)
 ///   - the registry file doesn't exist or can't be parsed
-///   - no `RepoEntry` covers cwd (worktree never registered)
-///   - the matched repo has zero branches
+///   - no `RepoAlias` covers cwd (worktree never registered)
+///   - the matched repo has zero built commits
 pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
+    use crate::commit_lookup::CommitIndex;
+
     let path = Path::new(cwd);
     if !path.is_absolute() {
         return None;
@@ -112,9 +112,24 @@ pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
     let home_gnx = resolve_home_gnx();
     let registry_path = home_gnx.join("registry.json");
     let registry = RegistryFile::read_or_empty(&registry_path).ok()?;
-    let branch_hint = current_git_branch(path);
-    let (_repo, branch) = registry.find_by_cwd(path, branch_hint.as_deref())?;
-    Some(PathBuf::from(&branch.index_dir))
+    let alias = crate::repo_selector::find_by_path(&registry, cwd)?;
+    let commits_dir = home_gnx.join(&alias.dir_name).join("commits");
+    let idx = CommitIndex::scan(&commits_dir).ok()?;
+    if idx.is_empty() {
+        return None;
+    }
+    // Pick the commit dir with the most recent graph.bin mtime.
+    std::fs::read_dir(&commits_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let g = e.path().join("graph.bin");
+            let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
+            Some((mtime, g.parent()?.to_path_buf()))
+        })
+        .max_by_key(|(mtime, _)| *mtime)
+        .map(|(_, dir)| dir)
 }
 
 /// Resolve the current branch by reading `.git/HEAD` directly instead
