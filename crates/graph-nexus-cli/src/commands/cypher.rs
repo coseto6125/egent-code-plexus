@@ -36,9 +36,10 @@ pub struct CypherArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: `json` (default, column-based) or `toon` (LLM-friendly compact).
-    #[arg(long, default_value = "json")]
-    pub format: String,
+    /// Output format. Omit for the LLM-tuned default; explicit `--format
+    /// toon|json|text` for the neutral / round-trippable / human paths.
+    #[arg(long)]
+    pub format: Option<String>,
 }
 
 impl CypherArgs {
@@ -97,17 +98,30 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::Gn
             graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e))
         })?;
 
-    let rows_json: Vec<serde_json::Value> = result
+    let rows_json: Vec<Vec<serde_json::Value>> = result
         .rows
         .iter()
-        .map(|row| serde_json::Value::Array(row.iter().map(value_to_json_value).collect()))
+        .map(|row| row.iter().map(value_to_json_value).collect())
         .collect();
-    let payload = serde_json::json!({
-        "columns": result.columns,
-        "rows": rows_json,
-    });
-    emit(&payload, OutputFormat::parse(Some(args.format.as_str())))?;
+    let payload = build_payload(result.columns, rows_json);
+    emit(&payload, OutputFormat::parse(args.format.as_deref()))?;
     Ok(())
+}
+
+/// Wrap the cypher result into the emitted JSON shape, collapsing
+/// `rows: [[a], [b]]` into `rows: [a, b]` when there's exactly one
+/// projected column. The reader can still tell rows are scalars from
+/// `columns.len() == 1`; the saving is one nesting level (plus a
+/// disorienting `[1]:` toon prefix per row).
+fn build_payload(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
+    let rows_json: Vec<serde_json::Value> = if columns.len() == 1 {
+        rows.into_iter()
+            .map(|mut row| row.pop().unwrap_or(serde_json::Value::Null))
+            .collect()
+    } else {
+        rows.into_iter().map(serde_json::Value::Array).collect()
+    };
+    serde_json::json!({ "columns": columns, "rows": rows_json })
 }
 
 fn format_cypher_error(query: &str, e: &cypher::CypherError) -> String {
@@ -155,5 +169,44 @@ fn value_to_json_value(v: &cypher::Value) -> serde_json::Value {
         } => {
             serde_json::json!({"rel_type": format!("{rel_type:?}"), "confidence": confidence, "reason": reason})
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_payload_single_column_flattens_rows_to_scalars() {
+        let columns = vec!["n.name".to_string()];
+        let rows = vec![vec![json!("alpha")], vec![json!("beta")], vec![json!("gamma")]];
+        let payload = build_payload(columns, rows);
+        assert_eq!(payload["columns"], json!(["n.name"]));
+        // Single-column projection: rows are scalars, not 1-element arrays.
+        assert_eq!(payload["rows"], json!(["alpha", "beta", "gamma"]));
+    }
+
+    #[test]
+    fn build_payload_multi_column_preserves_row_arrays() {
+        let columns = vec!["n.name".to_string(), "n.kind".to_string()];
+        let rows = vec![
+            vec![json!("alpha"), json!("Function")],
+            vec![json!("Beta"), json!("Class")],
+        ];
+        let payload = build_payload(columns, rows);
+        assert_eq!(payload["columns"], json!(["n.name", "n.kind"]));
+        assert_eq!(
+            payload["rows"],
+            json!([["alpha", "Function"], ["Beta", "Class"]])
+        );
+    }
+
+    #[test]
+    fn build_payload_single_column_empty_row_yields_null() {
+        // Defensive: a degenerate single-column row with no value still
+        // emits Null rather than panicking.
+        let payload = build_payload(vec!["x".to_string()], vec![vec![]]);
+        assert_eq!(payload["rows"], json!([null]));
     }
 }

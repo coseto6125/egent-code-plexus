@@ -143,7 +143,7 @@ pub struct ToolMapArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    #[arg(long, default_value = "toon")]
+    #[arg(long)]
     pub format: Option<String>,
 }
 

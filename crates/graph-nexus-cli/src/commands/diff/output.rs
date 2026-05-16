@@ -26,7 +26,7 @@ pub struct DiffEnvelope<'a> {
 pub fn emit(envelope: &DiffEnvelope, format: &str) -> Result<(), GnxError> {
     let fmt = OutputFormat::parse(Some(format));
     match fmt {
-        OutputFormat::Json | OutputFormat::Toon => {
+        OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
             let json_value = build_json(envelope);
             println!("{}", emit_to_string(&json_value, fmt)?);
         }

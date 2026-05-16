@@ -33,7 +33,7 @@ pub struct RoutesArgs {
     pub depth: usize,
 
     /// Output format (toon / json / text).
-    #[arg(long, default_value = "toon")]
+    #[arg(long)]
     pub format: Option<String>,
 }
 

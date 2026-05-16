@@ -59,7 +59,7 @@ pub struct SearchArgs {
     pub repo: Option<String>,
 
     /// Output format: text (default) | json | toon.
-    #[arg(long, default_value = "text")]
+    #[arg(long)]
     pub format: Option<String>,
 
     /// Read patterns from stdin (one per line, lines starting with `#`
@@ -1027,7 +1027,7 @@ fn emit_hits(hits: &[Hit], format: OutputFormat, summary: Option<String>) -> Res
             }
             emit(&serde_json::json!({ "results": lines }), format)
         }
-        OutputFormat::Json | OutputFormat::Toon => {
+        OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
             let results: Vec<serde_json::Value> = hits
                 .iter()
                 .map(|h| {

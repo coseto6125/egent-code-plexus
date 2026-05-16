@@ -90,21 +90,8 @@ fn read_stats(index_dir: &Path, repo_root: &Path) -> (String, String, String) {
             }
         }
     }
-    let head = git_head_short(repo_root).unwrap_or_else(|| "?".into());
+    let head = safe_exec::head_short(repo_root).unwrap_or_else(|| "?".into());
     (nodes, edges, head)
-}
-
-fn git_head_short(repo_root: &Path) -> Option<String> {
-    let out = safe_exec::git()
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(repo_root)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    (!s.is_empty()).then_some(s)
 }
 
 fn render_conditional(text: &str, key: &str, keep: bool) -> String {

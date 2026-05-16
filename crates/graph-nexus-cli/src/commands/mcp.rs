@@ -27,9 +27,10 @@ pub enum McpAction {
     Serve,
     /// List tools that would be exposed by `serve`.
     Tools {
-        /// Output format: text (default) | json | toon
-        #[arg(long, default_value = "text")]
-        format: String,
+        /// Output format. Omit for the LLM-tuned default (text-tab); pass
+        /// `--format json|toon` for the structured shapes.
+        #[arg(long)]
+        format: Option<String>,
     },
 }
 
@@ -41,9 +42,9 @@ pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), GnxError> {
         McpAction::Tools { format } => {
             let tools = server.list_tools();
 
-            match format.as_str() {
-                "json" | "toon" => {
-                    if format == "toon" {
+            match format.as_deref() {
+                Some("json") | Some("toon") => {
+                    if format.as_deref() == Some("toon") {
                         eprintln!("warning: toon renderer not yet integrated, falling back to json");
                     }
                     let tool_infos: Vec<ToolInfo> = tools

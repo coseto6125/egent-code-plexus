@@ -36,7 +36,7 @@ pub struct ShapeCheckArgs {
     pub repo: Option<String>,
 
     /// Output format: text (default) | json | toon
-    #[arg(long, default_value = "text")]
+    #[arg(long)]
     pub format: Option<String>,
 
     /// Filter: only report drift for routes whose path matches this substring.
@@ -203,7 +203,7 @@ pub fn run(
             }
             serde_json::json!({ "results": lines })
         }
-        OutputFormat::Json | OutputFormat::Toon => value,
+        OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => value,
     };
     emit(&emit_value, format)
 }

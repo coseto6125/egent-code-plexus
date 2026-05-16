@@ -64,7 +64,7 @@ pub struct ContractsArgs {
     pub repo: Option<String>,
 
     /// Output format: toon (default) | json.
-    #[arg(long, default_value = "toon")]
+    #[arg(long)]
     pub format: Option<String>,
 }
 

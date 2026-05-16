@@ -65,7 +65,7 @@ fn parse_atom(part: &str) -> Result<Atom, ParseError> {
 
 // ── Resolver (Task 0.4) ──────────────────────────────────────────────────────
 
-use graph_nexus_core::registry::{RegistryFile, RepoEntry};
+use graph_nexus_core::registry::{BranchEntry, RegistryFile, RepoEntry};
 use std::collections::HashSet;
 
 /// A repo resolved from a selector atom — points into the registry,
@@ -75,6 +75,7 @@ pub struct ResolvedRepo {
     pub name: String,
     pub worktree_path: String,
     pub index_dir_root: String,
+    pub branches: Vec<BranchEntry>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -156,6 +157,7 @@ fn push_unique(seen: &mut HashSet<String>, out: &mut Vec<ResolvedRepo>, repo: &R
             name: repo.name.clone(),
             worktree_path: repo.worktree_path.clone(),
             index_dir_root: repo.index_dir_root.clone(),
+            branches: repo.branches.clone(),
         });
     }
 }
