@@ -17,11 +17,12 @@
 //! cross-language without callers having to learn per-language target-kind
 //! routing rules.
 
-use crate::framework_helpers::{enclosing_class, span_contains};
+use crate::framework_helpers::{span_area, span_contains, Span};
 use crate::resolution::index::SymbolTable;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
 use graph_nexus_core::graph::{Edge, NodeKind, RelType};
 use graph_nexus_core::pool::StringPool;
+use rustc_hash::FxHashMap;
 
 /// Sentinel prefix the Rust parser writes into `RawNode.heritage` for
 /// methods defined inside an `impl` block. Carries the impl target's type
@@ -47,11 +48,39 @@ pub fn emit_edges(
     let mut emitted = 0usize;
 
     for local_graph in local_graphs {
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
         let raws = &local_graph.nodes;
 
-        emitted += emit_pass1_span(raws, &path_str, symbol_table, reason, edges_out);
-        emitted += emit_pass2_rust_impl(raws, &path_str, symbol_table, reason_impl, edges_out);
+        // Pre-pass: collect Class nodes + group by name. Both passes hot-loop
+        // over this O(N) once-per-file index instead of re-scanning `raws`
+        // for kind=Class on every member lookup. Typical K = #classes/file
+        // is 1-10, so this drops both passes from O(N²) to O(N·K) and lets
+        // class-free files short-circuit cleanly.
+        let mut classes: Vec<(&str, Span)> = Vec::new();
+        let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
+        for n in raws {
+            if matches!(n.kind, NodeKind::Class) {
+                classes.push((n.name.as_str(), n.span));
+                classes_by_name
+                    .entry(n.name.as_str())
+                    .or_default()
+                    .push(n.span);
+            }
+        }
+        if classes.is_empty() {
+            continue;
+        }
+
+        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+
+        emitted += emit_pass1_span(raws, &classes, &path_str, symbol_table, reason, edges_out);
+        emitted += emit_pass2_rust_impl(
+            raws,
+            &classes_by_name,
+            &path_str,
+            symbol_table,
+            reason_impl,
+            edges_out,
+        );
     }
 
     emitted
@@ -65,6 +94,7 @@ pub fn emit_edges(
 /// (Property) edge from `c` to the member.
 fn emit_pass1_span(
     raws: &[RawNode],
+    classes: &[(&str, Span)],
     path_str: &str,
     symbol_table: &SymbolTable,
     reason: graph_nexus_core::pool::StrRef,
@@ -79,13 +109,18 @@ fn emit_pass1_span(
             _ => continue,
         };
 
-        // Innermost enclosing class — handles nested-class case via
-        // `min_by_key(span_area)` inside the helper.
-        let Some((class_name, _)) = enclosing_class(raws, member.span) else {
+        // Innermost enclosing class via smallest-area span. Scans the
+        // pre-collected classes slice (K entries) instead of all raws.
+        let Some((class_name, _)) = classes
+            .iter()
+            .filter(|(_, span)| span_contains(*span, member.span))
+            .min_by_key(|(_, span)| span_area(*span))
+            .copied()
+        else {
             continue;
         };
 
-        let Some(class_idx) = symbol_table.lookup_in_file(path_str, &class_name) else {
+        let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
             continue;
         };
         let Some(member_idx) = symbol_table.lookup_in_file(path_str, &member.name) else {
@@ -129,6 +164,7 @@ fn emit_pass1_span(
 /// the same file with `class_name`, Pass 1 already emitted.
 fn emit_pass2_rust_impl(
     raws: &[RawNode],
+    classes_by_name: &FxHashMap<&str, Vec<Span>>,
     path_str: &str,
     symbol_table: &SymbolTable,
     reason: graph_nexus_core::pool::StrRef,
@@ -145,13 +181,13 @@ fn emit_pass2_rust_impl(
                 continue;
             };
 
-            // Skip if Pass 1 would have covered: any Class node in this file
-            // with matching name whose span contains the member span.
-            let already_via_span = raws.iter().any(|n| {
-                matches!(n.kind, NodeKind::Class)
-                    && n.name == class_name
-                    && span_contains(n.span, member.span)
-            });
+            // Skip if Pass 1 already emitted via span containment. Hash
+            // lookup by name (typical bucket size 1) replaces the prior
+            // O(N) full-raws scan.
+            let already_via_span = classes_by_name
+                .get(class_name)
+                .map(|spans| spans.iter().any(|s| span_contains(*s, member.span)))
+                .unwrap_or(false);
             if already_via_span {
                 continue;
             }
@@ -162,6 +198,9 @@ fn emit_pass2_rust_impl(
             let Some(member_idx) = symbol_table.lookup_in_file(path_str, &member.name) else {
                 continue;
             };
+            if class_idx == member_idx {
+                continue;
+            }
 
             edges_out.push(Edge {
                 source: class_idx,
