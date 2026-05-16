@@ -703,17 +703,20 @@ fn scan_repo(
         SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
         m => m.clone(),
     };
+    let repo_label = Some(repo_name.to_string());
 
-    // All modes except a real vector path fall through to bm25 for now.
-    // TODO: wire vector/hybrid to graph_nexus_analyzer::embeddings.
-    let _ = effective_mode;
-    Ok(bm25_hits_from_graph(
-        graph,
-        pattern,
-        kind_set,
-        &Some(repo_name.to_string()),
-        index_dir,
-    ))
+    let hits = match effective_mode {
+        SearchMode::Bm25 | SearchMode::Auto => {
+            bm25_hits_from_graph(graph, pattern, kind_set, &repo_label, index_dir)
+        }
+        SearchMode::Vector => {
+            vector_hits_from_graph(graph, pattern, kind_set, &repo_label, index_dir)
+        }
+        SearchMode::Hybrid => {
+            hybrid_hits_from_graph(graph, pattern, kind_set, &repo_label, index_dir)
+        }
+    };
+    Ok(hits)
 }
 
 // ── Repo selector resolution ─────────────────────────────────────────────────
