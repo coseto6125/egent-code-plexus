@@ -79,9 +79,7 @@ pub fn run(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
 
     let format = OutputFormat::parse(args.format.as_deref());
     let pattern = args.pattern.clone().ok_or_else(|| {
-        GnxError::InvalidArgument(
-            "pattern is required (or use --batch to read from stdin)".into(),
-        )
+        GnxError::InvalidArgument("pattern is required (or use --batch to read from stdin)".into())
     })?;
 
     // Resolve --repo to a list of targets.  When the selector is absent or
@@ -115,11 +113,11 @@ pub fn run(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
 ///
 /// Output: each query block is preceded by a `=== pattern: <pattern> ===`
 /// stdout line so scripts can split per-query regardless of `--format`.
-/// For a single-repo target the Engine is also loaded once outside the
-/// per-query loop (mmap setup is the next non-trivial cost after model
-/// init); for multi-repo, each per-pattern `compute_multi` call still
-/// reloads per-repo engines internally — bundling those across N
-/// queries is a deeper refactor and out of scope for this PR.
+/// Engine instances are also loaded once outside the per-query loop
+/// (single-repo: one Engine; multi-repo: one per target via
+/// `load_engines_lossy`) so mmap setup + rkyv access are amortised
+/// across queries. Per-repo load failures in multi-repo mode degrade
+/// to 0 hits + failure count rather than killing the batch.
 fn run_batch(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
     use std::io::BufRead;
 
@@ -140,13 +138,16 @@ fn run_batch(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
         return Ok(());
     }
 
-    // Load the single-repo engine once if applicable. Multi-repo
-    // targets fan out per-query inside compute_multi — see docstring.
     let single_repo_engine: Option<(String, Engine)> = if targets.len() == 1 {
         let (repo_name, graph_path) = &targets[0];
         let eng = Engine::load(std::path::PathBuf::from(graph_path))
             .map_err(|e| GnxError::InvalidArgument(format!("{repo_name}: load: {e}")))?;
         Some((repo_name.clone(), eng))
+    } else {
+        None
+    };
+    let multi_repo_engines: Option<Vec<(String, Result<Engine, String>)>> = if targets.len() > 1 {
+        Some(load_engines_lossy(&targets))
     } else {
         None
     };
@@ -165,8 +166,10 @@ fn run_batch(args: SearchArgs, engine: &Engine) -> Result<(), GnxError> {
                 Some(repo_name.clone()),
             )?
         } else {
-            compute_multi(pattern, &args.mode, args.kind.as_deref(), targets.clone())
-                .map(|(h, _)| h)?
+            let loaded = multi_repo_engines.as_ref().unwrap();
+            let (hits, _summary) =
+                compute_multi_with_engines(pattern, &args.mode, args.kind.as_deref(), loaded);
+            hits
         };
 
         emit_hits(&hits, format, None)?;
@@ -289,25 +292,10 @@ fn compute_single(
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let index_dir = engine.index_dir();
 
-    let effective_mode = match mode {
-        SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
-        m => m.clone(),
-    };
-
     let kind_set: Option<Vec<String>> =
         kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
-    let mut hits = match effective_mode {
-        SearchMode::Bm25 | SearchMode::Auto => {
-            bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
-        }
-        SearchMode::Vector => {
-            vector_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
-        }
-        SearchMode::Hybrid => {
-            hybrid_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir)
-        }
-    };
+    let mut hits = dispatch_by_mode(graph, pattern, mode, &kind_set, &repo_label, index_dir);
 
     // Sort by score descending, trim to TOP_K.
     hits.sort_by(|a, b| {
@@ -479,6 +467,35 @@ fn build_hit(
         callers,
         callees,
     })
+}
+
+/// Pure dispatch: pick BM25 / Vector / Hybrid based on the requested
+/// (or auto-detected) mode and run the matching scorer against the
+/// archived graph. Shared between single-repo (`compute_single`) and
+/// multi-repo worker paths (`compute_multi_with_engines`).
+fn dispatch_by_mode(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    pattern: &str,
+    mode: &SearchMode,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+    index_dir: Option<&std::path::Path>,
+) -> Vec<Hit> {
+    let effective_mode = match mode {
+        SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
+        m => m.clone(),
+    };
+    match effective_mode {
+        SearchMode::Bm25 | SearchMode::Auto => {
+            bm25_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir)
+        }
+        SearchMode::Vector => {
+            vector_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir)
+        }
+        SearchMode::Hybrid => {
+            hybrid_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir)
+        }
+    }
 }
 
 // ── Vector scoring primitives ────────────────────────────────────────────────
@@ -671,21 +688,55 @@ fn run_multi(
     emit_hits(&hits, format, Some(summary))
 }
 
-/// Pure compute path for multi-repo fan-out. Returns merged top-K hits + summary string.
-fn compute_multi(
+/// Pre-load engines for a batch of target repos. Each engine load is
+/// captured as a per-repo `Result<Engine, String>` so individual
+/// failures don't kill the whole multi-repo query — the failing repo
+/// contributes 0 hits and is counted in the summary.
+pub fn load_engines_lossy(targets: &[(String, String)]) -> Vec<(String, Result<Engine, String>)> {
+    targets
+        .iter()
+        .map(|(repo_name, graph_path)| {
+            let result = Engine::load(std::path::PathBuf::from(graph_path))
+                .map_err(|e| format!("load {graph_path}: {e}"));
+            (repo_name.clone(), result)
+        })
+        .collect()
+}
+
+/// Fan out across pre-loaded engines via rayon, score each repo, then
+/// merge to a global top-K. Exposed (vs the thin `compute_multi`
+/// wrapper) so batch callers can pay the `Engine::load` cost once
+/// across N queries instead of N × M times.
+pub fn compute_multi_with_engines(
     pattern: &str,
     mode: &SearchMode,
     kind_filter: Option<&str>,
-    targets: Vec<(String, String)>, // (repo_name, graph_path_str)
-) -> Result<(Vec<Hit>, String), GnxError> {
+    loaded: &[(String, Result<Engine, String>)],
+) -> (Vec<Hit>, String) {
     let kind_set: Option<Vec<String>> =
         kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     // Fan out via rayon; workers return owned hit rows.
-    let worker_results: Vec<(String, Result<Vec<Hit>, String>)> = targets
+    let worker_results: Vec<(String, Result<Vec<Hit>, String>)> = loaded
         .par_iter()
-        .map(|(repo_name, graph_path)| {
-            let outcome = scan_repo(repo_name, graph_path, pattern, &kind_set, mode);
+        .map(|(repo_name, engine_result)| {
+            let outcome = match engine_result {
+                Err(e) => Err(format!("{repo_name}: {e}")),
+                Ok(engine) => engine
+                    .graph()
+                    .map_err(|e| format!("{repo_name}: access: {e}"))
+                    .map(|graph| {
+                        let repo_label = Some(repo_name.clone());
+                        dispatch_by_mode(
+                            graph,
+                            pattern,
+                            mode,
+                            &kind_set,
+                            &repo_label,
+                            engine.index_dir(),
+                        )
+                    }),
+            };
             (repo_name.clone(), outcome)
         })
         .collect();
@@ -734,13 +785,33 @@ fn compute_multi(
 
     let summary = format!(
         "search: {} repo(s) targeted, {} with hits, {} failed; returned top-{} of merged set",
-        targets.len(),
+        loaded.len(),
         repos_with_hits,
         repos_failed,
         hits.len()
     );
 
-    Ok((hits, summary))
+    (hits, summary)
+}
+
+/// Pure compute path for multi-repo fan-out. Loads all engines up-front
+/// then delegates to `compute_multi_with_engines`. Single-shot callers
+/// (single query × multi-repo) use this directly; batch callers should
+/// pre-load engines themselves and call `compute_multi_with_engines`
+/// inside the per-query loop to avoid reloading per query.
+fn compute_multi(
+    pattern: &str,
+    mode: &SearchMode,
+    kind_filter: Option<&str>,
+    targets: Vec<(String, String)>, // (repo_name, graph_path_str)
+) -> Result<(Vec<Hit>, String), GnxError> {
+    let loaded = load_engines_lossy(&targets);
+    Ok(compute_multi_with_engines(
+        pattern,
+        mode,
+        kind_filter,
+        &loaded,
+    ))
 }
 
 /// In-process search entry point for hooks and other internal consumers.
@@ -769,41 +840,6 @@ pub fn compute_hits(args: SearchArgs, engine: &Engine) -> Result<Vec<Hit>, GnxEr
         compute_multi(pattern, &args.mode, args.kind.as_deref(), targets)
             .map(|(hits, _summary)| hits)
     }
-}
-
-/// Load one repo's graph and scan it (used by rayon workers).
-fn scan_repo(
-    repo_name: &str,
-    graph_path: &str,
-    pattern: &str,
-    kind_set: &Option<Vec<String>>,
-    mode: &SearchMode,
-) -> Result<Vec<Hit>, String> {
-    let engine = Engine::load(std::path::PathBuf::from(graph_path))
-        .map_err(|e| format!("{repo_name}: load {graph_path}: {e}"))?;
-    let graph = engine
-        .graph()
-        .map_err(|e| format!("{repo_name}: access: {e}"))?;
-    let index_dir = engine.index_dir();
-
-    let effective_mode = match mode {
-        SearchMode::Auto => detect_mode(pattern, embeddings_available_for(graph)),
-        m => m.clone(),
-    };
-    let repo_label = Some(repo_name.to_string());
-
-    let hits = match effective_mode {
-        SearchMode::Bm25 | SearchMode::Auto => {
-            bm25_hits_from_graph(graph, pattern, kind_set, &repo_label, index_dir)
-        }
-        SearchMode::Vector => {
-            vector_hits_from_graph(graph, pattern, kind_set, &repo_label, index_dir)
-        }
-        SearchMode::Hybrid => {
-            hybrid_hits_from_graph(graph, pattern, kind_set, &repo_label, index_dir)
-        }
-    };
-    Ok(hits)
 }
 
 // ── Repo selector resolution ─────────────────────────────────────────────────
