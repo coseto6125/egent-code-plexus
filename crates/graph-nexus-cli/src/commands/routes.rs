@@ -10,7 +10,7 @@ use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use graph_nexus_core::graph::{ArchivedNodeKind, ArchivedRelType};
+use graph_nexus_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType};
 use graph_nexus_core::GnxError;
 use std::collections::{HashSet, VecDeque};
 
@@ -32,6 +32,15 @@ pub struct RoutesArgs {
     #[arg(long, default_value = "3")]
     pub depth: usize,
 
+    /// Include routes declared inside test files (`tests/`, `test/`, `*_test.*`,
+    /// `*.spec.*`, etc.). Default: off — most agent queries want production
+    /// routes, not test fixtures. When set, the output gains a `test_results`
+    /// array listing the test-only routes alongside the regular `results`.
+    /// Test classification reuses `File.category = FileCategory::Test` set at
+    /// index time (`graph-nexus-analyzer/src/resolution/builder.rs:32`).
+    #[arg(long)]
+    pub include_tests: bool,
+
     /// Output format (toon / json / text).
     #[arg(long)]
     pub format: Option<String>,
@@ -39,7 +48,12 @@ pub struct RoutesArgs {
 
 pub fn run(args: RoutesArgs, engine: &Engine) -> Result<(), GnxError> {
     match args.path.as_deref() {
-        None => list_routes(engine, args.method.as_deref(), args.format.as_deref()),
+        None => list_routes(
+            engine,
+            args.method.as_deref(),
+            args.include_tests,
+            args.format.as_deref(),
+        ),
         Some(path) => inspect_route(
             engine,
             path,
@@ -53,6 +67,7 @@ pub fn run(args: RoutesArgs, engine: &Engine) -> Result<(), GnxError> {
 fn list_routes(
     engine: &Engine,
     method_filter: Option<&str>,
+    include_tests: bool,
     format: Option<&str>,
 ) -> Result<(), GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
@@ -60,6 +75,7 @@ fn list_routes(
     let wanted_method = method_filter.map(|m| m.to_ascii_uppercase());
 
     let mut results = Vec::new();
+    let mut test_results = Vec::new();
 
     for node in graph.nodes.iter() {
         if !matches!(&node.kind, ArchivedNodeKind::Route) {
@@ -75,29 +91,54 @@ fn list_routes(
         }
 
         let file_node = &graph.files[node.file_idx.to_native() as usize];
-        results.push(serde_json::json!({
+        let is_test = matches!(file_node.category, ArchivedFileCategory::Test);
+        let row = serde_json::json!({
             "uid": node.uid.resolve(&graph.string_pool),
             "method": method,
             "path": path,
             "kind": "Route",
             "filePath": file_node.path.resolve(&graph.string_pool),
             "line": node.span.0.to_native(),
-        }));
+        });
+        match (is_test, include_tests) {
+            (false, _) => results.push(row),
+            (true, true) => test_results.push(row),
+            (true, false) => {} // silently dropped — that's the default
+        }
     }
 
-    if results.is_empty() {
+    if results.is_empty() && test_results.is_empty() {
         eprintln!(
             "No HTTP routes detected.\n\
              → Possible causes: framework not yet supported, no route declarations found,\n\
              or a coverage gap. Run `gnx coverage --detailed` for framework scan details."
         );
+    } else if results.is_empty() && !include_tests {
+        eprintln!(
+            "No production routes detected ({} test-file routes were filtered).\n\
+             → Re-run with `--include-tests` to inspect them.",
+            graph
+                .nodes
+                .iter()
+                .filter(|n| matches!(&n.kind, ArchivedNodeKind::Route))
+                .filter(|n| {
+                    matches!(
+                        graph.files[n.file_idx.to_native() as usize].category,
+                        ArchivedFileCategory::Test
+                    )
+                })
+                .count()
+        );
     }
 
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "status": "success",
         "method_filter": wanted_method,
         "results": results,
     });
+    if include_tests {
+        result["test_results"] = serde_json::json!(test_results);
+    }
 
     emit(&result, fmt)
 }
