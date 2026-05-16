@@ -1,5 +1,10 @@
 //! Resolve (repo_name, branch, worktree_path) from a cwd's git state.
 //! All git invocations go through safe_exec.
+//!
+//! Bin surface stopped constructing `GitState` after `admin drop` switched
+//! to `repo_dir_name_for_cwd` (the only previous caller). Kept alive by
+//! `tests/git_state.rs`; lift this allow when a new bin caller appears.
+#![allow(dead_code)]
 
 use crate::git::safe_exec;
 use graph_nexus_core::registry::{derive_repo_name, sanitize_segment, PathError};
@@ -8,13 +13,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct GitState {
     pub repo_name: String,
-    // Returned for downstream registry / hook callers; only `repo_name` is read
-    // by the current bin surface, the rest are covered by `tests/git_state.rs`.
-    #[allow(dead_code)]
     pub branch: String,
-    #[allow(dead_code)]
     pub worktree_path: PathBuf,
-    #[allow(dead_code)]
     pub remote_url: Option<String>,
 }
 

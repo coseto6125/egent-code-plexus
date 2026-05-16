@@ -8,7 +8,7 @@
 //!
 //! Use `--all` to drop every registered repo at once.
 
-use crate::git_state;
+use crate::repo_identity::repo_dir_name_for_cwd;
 use clap::Args;
 use std::path::{Path, PathBuf};
 
@@ -46,23 +46,27 @@ pub fn run(args: DropArgs) -> Result<(), graph_nexus_core::GnxError> {
             });
         }
     } else {
-        let state = git_state::resolve(&args.repo)
-            .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("git_state: {e}")))?;
+        // `git_state::resolve` returned the bare basename ("sample_repo"), but the
+        // PR #55 layout writes to `<basename>__<sha256(common_dir)[:8]>/` — drop
+        // would silently miss the dir and registry entry. `repo_dir_name_for_cwd`
+        // is the same helper `build_l2` uses to write the dir, so identifying
+        // the target the same way guarantees we find it.
+        let dir_name = repo_dir_name_for_cwd(&args.repo)
+            .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("repo_identity: {e}")))?;
 
-        let index_dir = home_gnx.join(&state.repo_name);
+        let index_dir = home_gnx.join(&dir_name);
         if index_dir.exists() {
             std::fs::remove_dir_all(&index_dir)?;
         }
 
         // Drop registry handle before acquiring exclusive flock.
-        let repo_name = state.repo_name.clone();
         drop(registry);
-        rewrite_without(&home_gnx, Some(&repo_name))?;
+        rewrite_without(&home_gnx, Some(&dir_name))?;
 
         if let Ok(audit) = graph_nexus_core::registry::AuditLog::open(&home_gnx.join("audit.log")) {
             let _ = audit.append(&graph_nexus_core::registry::AuditEvent::RegistryMutate {
                 op: "drop".into(),
-                repo: repo_name,
+                repo: dir_name,
                 branch: None,
             });
         }
