@@ -40,7 +40,7 @@ enum Commands {
     Inspect(commands::inspect::InspectArgs),
     /// Find symbols by name or concept (auto bm25 / hybrid / vector)
     Search(commands::search::SearchArgs),
-    /// Blast radius — from <name> or git diff via --since <ref>
+    /// Symbol blast radius — affected callers + risk_level. For binding tier-degradation or resolver delta, use `gnx diff`.
     Impact(commands::impact::ImpactArgs),
     /// AST-aware multi-file rename
     Rename(commands::rename::RenameArgs),
@@ -54,7 +54,7 @@ enum Commands {
     Scan(commands::scan::ScanArgs),
     /// Cross-repo API contracts inventory (routes / queue / RPC)
     Contracts(commands::contracts::ContractsArgs),
-    /// Cross-commit graph diff (bindings / routes / contracts).
+    /// Edge-level resolver delta — binding tier-degradation (silent break), route / contract changes. For symbol blast-radius, use `gnx impact`.
     Diff(commands::diff::DiffArgs),
 
     /// Administrative operations. With no subcommand: launches the interactive

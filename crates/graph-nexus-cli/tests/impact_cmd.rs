@@ -5,8 +5,8 @@
 //!   - --kind / --file_path / --relation_types filters
 //!   - --high-trust-only default false (recall-first)
 //!   - hidden_edges counter when min_conf filter drops edges
-//!   - --since <ref> for diff-mode
-//!   - <name> and --since mutual exclusion
+//!   - --baseline <ref> for diff-mode
+//!   - <name> and --baseline mutual exclusion
 //!   - Empty callers hint when 0 incoming (upstream)
 
 use serde_json::Value;
@@ -283,7 +283,7 @@ fn impact_hidden_edges_footer_emitted_to_stderr() {
 }
 
 #[test]
-fn impact_since_ref_runs_diff_mode() {
+fn impact_baseline_ref_runs_diff_mode() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
@@ -315,30 +315,30 @@ fn impact_since_ref_runs_diff_mode() {
 
     let out = Command::new(gnx_bin())
         .args([
-            "impact", "--since", "HEAD~1", "--repo", ".", "--format", "json",
+            "impact", "--baseline", "HEAD~1", "--repo", ".", "--format", "json",
         ])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
-        .expect("impact --since failed to spawn");
+        .expect("impact --baseline failed to spawn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "--since HEAD~1 failed: stderr={stderr}\nstdout={stdout}"
+        "--baseline HEAD~1 failed: stderr={stderr}\nstdout={stdout}"
     );
     // Accept "changed" in output, or "0 changes" / empty message.
     assert!(
-        stdout.contains("changed") || stdout.contains("since") || stdout.contains("changes"),
-        "--since output doesn't mention changes:\nstdout={stdout}"
+        stdout.contains("changed") || stdout.contains("baseline") || stdout.contains("changes"),
+        "--baseline output doesn't mention changes:\nstdout={stdout}"
     );
 }
 
 #[test]
-fn impact_name_and_since_mutually_exclusive() {
+fn impact_name_and_baseline_mutually_exclusive() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(gnx_bin())
-        .args(["impact", "foo", "--since", "HEAD~1"])
+        .args(["impact", "foo", "--baseline", "HEAD~1"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
@@ -346,7 +346,7 @@ fn impact_name_and_since_mutually_exclusive() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
-        "foo + --since should be rejected but process succeeded"
+        "foo + --baseline should be rejected but process succeeded"
     );
     assert!(
         stderr.contains("conflict")
