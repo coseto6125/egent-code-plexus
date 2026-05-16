@@ -44,6 +44,7 @@ pub enum SymbolKind {
     Const,
     Type,
     Module,
+    /// Fallback when the analyzer returns a kind string we don't map (cross-language tail).
     Unknown,
 }
 
