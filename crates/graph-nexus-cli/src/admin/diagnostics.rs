@@ -1,7 +1,7 @@
 //! Diagnostic reports for `gnx admin`.
 
 use crate::admin::menu::{self, select};
-use graph_nexus_core::registry::{resolve_home_gnx, BranchMeta, RegistryFile};
+use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile};
 use graph_nexus_core::GnxError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -124,52 +124,69 @@ fn registry_health(home_gnx: &Path) -> Result<RegistryHealth, GnxError> {
     let registry_path = home_gnx.join("registry.json");
     let registry = RegistryFile::read_or_empty(&registry_path)
         .map_err(|e| GnxError::InvalidArgument(format!("registry read: {e}")))?;
+    // v2: repos is BTreeMap<dir_name, RepoAlias>; commit indexes live under
+    // <home_gnx>/<dir_name>/commits/<commit_dirname>/graph.bin
     let mut health = RegistryHealth {
         root: home_gnx.to_path_buf(),
         registry_path,
         root_exists: home_gnx.exists(),
         registry_exists: home_gnx.join("registry.json").exists(),
         repo_count: registry.repos.len(),
-        branch_count: registry.repos.iter().map(|repo| repo.branches.len()).sum(),
+        branch_count: 0, // v2 has no per-branch counter; commit count varies per repo
         ..RegistryHealth::default()
     };
 
-    let mut expected_index_dirs = std::collections::BTreeSet::new();
-    for repo in &registry.repos {
-        for branch in &repo.branches {
-            let index_dir = PathBuf::from(&branch.index_dir);
-            expected_index_dirs.insert(index_dir.clone());
-            if !index_dir.is_dir() {
-                health.missing_index_dirs.push(index_dir.clone());
-                continue;
-            }
-            let graph = index_dir.join("graph.bin");
-            if !graph.is_file() {
-                health.missing_graphs.push(graph);
-            }
-            let meta = index_dir.join("meta.json");
-            if !meta.is_file() {
-                health.missing_meta.push(meta);
-            } else if BranchMeta::read(&meta).is_err() {
-                health.corrupt_meta.push(meta);
+    // Build set of repo dir_names that ARE registered.
+    let registered_dirs: std::collections::BTreeSet<String> =
+        registry.repos.keys().cloned().collect();
+
+    // Check each registered repo's commits dir for missing graph.bin / meta.
+    for (dir_name, _alias) in &registry.repos {
+        let commits_dir = home_gnx.join(dir_name).join("commits");
+        if let Ok(entries) = std::fs::read_dir(&commits_dir) {
+            for entry in entries.flatten().filter(|e| e.path().is_dir()) {
+                let index_dir = entry.path();
+                let graph = index_dir.join("graph.bin");
+                if !graph.is_file() {
+                    health.missing_graphs.push(graph);
+                }
+                let meta = index_dir.join("meta.json");
+                if !meta.is_file() {
+                    health.missing_meta.push(meta);
+                } else {
+                    // Validate meta is parseable JSON
+                    if std::fs::read(&meta)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                        .is_none()
+                    {
+                        health.corrupt_meta.push(meta);
+                    }
+                }
             }
         }
     }
 
+    // Orphans: top-level dirs under home_gnx whose name is NOT in the registry.
     if let Ok(repos) = std::fs::read_dir(home_gnx) {
         for repo_entry in repos.flatten().filter(|entry| entry.path().is_dir()) {
             let repo_path = repo_entry.path();
-            if repo_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with('_'))
-            {
+            let dir_name = match repo_path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if dir_name.starts_with('_') || dir_name.starts_with('.') {
                 continue;
             }
-            if let Ok(branches) = std::fs::read_dir(&repo_path) {
-                for branch_entry in branches.flatten().filter(|entry| entry.path().is_dir()) {
-                    let path = branch_entry.path();
-                    if path.join("graph.bin").exists() && !expected_index_dirs.contains(&path) {
+            if registered_dirs.contains(&dir_name) {
+                continue;
+            }
+            // This dir is not in registry → any commit dirs with graph.bin are orphans.
+            let commits_dir = repo_path.join("commits");
+            if let Ok(commits) = std::fs::read_dir(&commits_dir) {
+                for commit_entry in commits.flatten().filter(|e| e.path().is_dir()) {
+                    let path = commit_entry.path();
+                    if path.join("graph.bin").exists() {
                         health.orphan_index_dirs.push(path);
                     }
                 }
@@ -212,7 +229,8 @@ fn command_version(command: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::registry::{BranchEntry, RepoEntry};
+    use graph_nexus_core::registry::RepoAlias;
+    use std::collections::BTreeMap;
 
     #[test]
     fn diagnostics_menu_matches_target_order() {
@@ -230,32 +248,37 @@ mod tests {
     }
 
     #[test]
-    fn registry_health_reports_missing_and_orphan_indexes() {
+    fn registry_health_reports_orphan_indexes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
-        let expected = home.join("repo").join("main");
-        let orphan = home.join("repo").join("old");
-        std::fs::create_dir_all(&orphan).expect("orphan dir");
-        std::fs::write(orphan.join("graph.bin"), b"graph").expect("orphan graph");
-        std::fs::create_dir_all(home).expect("home dir");
+        // v2 layout: commits live under <home>/<dir_name>/commits/<commit_dirname>/
+        let registered_dir_name = "repo__aabbccdd";
+        // orphan: a top-level dir NOT in the registry, with a commit subdir containing graph.bin
+        let orphan_dir_name = "ghost__deadbeef";
+        let orphan_commit = home
+            .join(orphan_dir_name)
+            .join("commits")
+            .join("sha_orphan9");
+        std::fs::create_dir_all(&orphan_commit).expect("orphan dir");
+        std::fs::write(orphan_commit.join("graph.bin"), b"graph").expect("orphan graph");
+
+        let mut repos = BTreeMap::new();
+        repos.insert(
+            registered_dir_name.into(),
+            RepoAlias {
+                dir_name: registered_dir_name.into(),
+                common_dir: "/work/repo/.git".into(),
+                remote_url: Some("https://example.test/repo.git".into()),
+                aliases: vec!["repo".into()],
+                last_touched: "2026-05-16T00:00:00Z".into(),
+                groups: vec![],
+            },
+        );
         RegistryFile::write_atomic(
             &home.join("registry.json"),
             &RegistryFile {
-                version: 1,
-                repos: vec![RepoEntry {
-                    name: "repo".into(),
-                    remote_url: "https://example.test/repo.git".into(),
-                    worktree_path: "/work/repo".into(),
-                    index_dir_root: home.join("repo").to_string_lossy().into_owned(),
-                    branches: vec![BranchEntry {
-                        name: "main".into(),
-                        index_dir: expected.to_string_lossy().into_owned(),
-                        indexed_at: "2026-05-16T00:00:00Z".into(),
-                        node_count: 1,
-                        delta_size: 0,
-                    }],
-                    groups: vec![],
-                }],
+                version: 2,
+                repos,
                 groups: vec![],
             },
         )
@@ -264,8 +287,9 @@ mod tests {
         let health = registry_health(home).expect("health");
 
         assert_eq!(health.repo_count, 1);
-        assert_eq!(health.branch_count, 1);
-        assert_eq!(health.missing_index_dirs, vec![expected]);
-        assert_eq!(health.orphan_index_dirs, vec![orphan]);
+        assert_eq!(health.branch_count, 0);
+        // orphan_commit is under a dir NOT in registry → it's an orphan
+        assert_eq!(health.orphan_index_dirs, vec![orphan_commit]);
+        assert!(health.missing_index_dirs.is_empty());
     }
 }

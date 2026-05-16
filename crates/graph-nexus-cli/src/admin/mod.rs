@@ -17,6 +17,7 @@
 
 pub mod config;
 pub mod diagnostics;
+pub mod gc;
 pub mod groups;
 pub mod host_integration;
 pub mod indexes;

@@ -8,6 +8,7 @@ pub mod graph;
 pub mod graph_query;
 pub mod pool;
 pub mod registry;
+pub mod session;
 
 pub use error::{GnxError, GnxResult};
 

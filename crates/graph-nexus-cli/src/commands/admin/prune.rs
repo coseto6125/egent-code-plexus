@@ -1,15 +1,14 @@
-use crate::git_state;
 use clap::Args;
 use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
 pub struct PruneArgs {
-    /// Sweep all registry entries whose worktree_path no longer exists.
+    /// Sweep all registry entries whose common_dir no longer exists.
     /// Mutually exclusive with --branch / --repo.
     #[arg(long, conflicts_with_all = ["branch", "repo"])]
     pub orphans: bool,
 
-    /// Target branch to prune (required unless --orphans).
+    /// Target branch to prune (legacy flag; no-op in v2 — branch is not stored).
     #[arg(long, required_unless_present = "orphans")]
     pub branch: Option<String>,
 
@@ -23,50 +22,14 @@ pub fn run(args: PruneArgs) -> Result<(), graph_nexus_core::GnxError> {
         return run_orphan_sweep();
     }
 
-    let branch = args
-        .branch
-        .ok_or_else(|| graph_nexus_core::GnxError::InvalidArgument("branch required".into()))?;
-    let repo = args
-        .repo
-        .ok_or_else(|| graph_nexus_core::GnxError::InvalidArgument("repo required".into()))?;
-
-    let state = git_state::resolve(&repo)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("git_state: {e}")))?;
-
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
-
-    let branch_seg = graph_nexus_core::registry::sanitize_branch(&branch)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("branch: {e}")))?;
-    let index_dir = home_gnx.join(&state.repo_name).join(&branch_seg);
-    if index_dir.exists() {
-        std::fs::remove_dir_all(&index_dir)?;
-    }
-
-    let mut registry = graph_nexus_core::registry::Registry::open(&home_gnx)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("registry: {e}")))?;
-    if let Some(repo_entry) = registry
-        .snapshot()
-        .repos
-        .iter()
-        .find(|r| r.name == state.repo_name)
-        .cloned()
-    {
-        let mut new_repo = repo_entry;
-        new_repo.branches.retain(|b| b.name != branch);
-        registry
-            .upsert_repo(new_repo)
-            .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("upsert: {e}")))?;
-    }
-
-    if let Ok(audit) = graph_nexus_core::registry::AuditLog::open(&home_gnx.join("audit.log")) {
-        let _ = audit.append(&graph_nexus_core::registry::AuditEvent::HookFired {
-            kind: "prune".into(),
-            from: Some(branch.clone()),
-            to: None,
-            repo: state.repo_name,
-        });
-    }
-    Ok(())
+    // TODO(phase-5-rewire): per-commit prune — v2 stores commits, not branches.
+    // Branch-based prune has no meaning in v2. Use `gnx admin gc` once
+    // per-commit GC (Phase 5+) is implemented.
+    Err(graph_nexus_core::GnxError::Output(
+        "gnx admin prune --branch is a no-op in v2 (branch is not stored). \
+         Use `gnx admin prune --orphans` to sweep repos whose worktree is gone."
+            .into(),
+    ))
 }
 
 fn run_orphan_sweep() -> Result<(), graph_nexus_core::GnxError> {
@@ -83,25 +46,26 @@ fn run_orphan_sweep_in(home_gnx: &std::path::Path) -> Result<(), graph_nexus_cor
     let registry_path = home_gnx.join("registry.json");
     let mut registry = graph_nexus_core::registry::RegistryFile::read_or_empty(&registry_path)
         .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("registry read: {e}")))?;
-    let mut orphan_names = Vec::new();
+    let mut orphan_names: Vec<String> = Vec::new();
 
-    for repo in &registry.repos {
-        let worktree_path = std::path::Path::new(&repo.worktree_path);
-        if !worktree_path.exists() {
-            let index_root = std::path::Path::new(&repo.index_dir_root);
-            match std::fs::remove_dir_all(index_root) {
+    // v2: orphan = common_dir no longer exists on disk.
+    for (dir_name, alias) in &registry.repos {
+        let common_dir = std::path::Path::new(&alias.common_dir);
+        if !common_dir.exists() {
+            let index_root = home_gnx.join(dir_name);
+            match std::fs::remove_dir_all(&index_root) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            orphan_names.push(repo.name.clone());
+            orphan_names.push(dir_name.clone());
         }
     }
 
     if !orphan_names.is_empty() {
         registry
             .repos
-            .retain(|repo| !orphan_names.iter().any(|name| name == &repo.name));
+            .retain(|k, _v| !orphan_names.iter().any(|name| name == k));
         for group in &mut registry.groups {
             group
                 .members
@@ -129,41 +93,40 @@ fn run_orphan_sweep_in(home_gnx: &std::path::Path) -> Result<(), graph_nexus_cor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::registry::{BranchEntry, GroupEntry, RegistryFile, RepoEntry};
+    use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+    use std::collections::BTreeMap;
 
     #[test]
     fn orphan_sweep_removes_repo_group_member_and_index_root() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home_gnx = dir.path();
-        let index_root = home_gnx.join("orphan-repo");
-        let branch_dir = index_root.join("main");
-        std::fs::create_dir_all(&branch_dir).expect("index root");
-        std::fs::write(branch_dir.join("graph.bin"), b"graph").expect("graph");
+        let dir_name = "orphan-repo__aabbccdd";
+        let index_root = home_gnx.join(dir_name);
+        let commits_dir = index_root.join("commits").join("sha_abc12345");
+        std::fs::create_dir_all(&commits_dir).expect("commits dir");
+        std::fs::write(commits_dir.join("graph.bin"), b"graph").expect("graph");
 
+        let missing_common = home_gnx.join("missing-common-dir").join(".git");
+        let mut repos = BTreeMap::new();
+        repos.insert(
+            dir_name.into(),
+            RepoAlias {
+                dir_name: dir_name.into(),
+                common_dir: missing_common.to_string_lossy().into_owned(),
+                remote_url: Some("https://example.test/orphan-repo.git".into()),
+                aliases: vec!["orphan-repo".into()],
+                last_touched: "2026-05-16T00:00:00Z".into(),
+                groups: vec!["stale".into()],
+            },
+        );
         RegistryFile::write_atomic(
             &home_gnx.join("registry.json"),
             &RegistryFile {
-                version: 1,
-                repos: vec![RepoEntry {
-                    name: "orphan-repo".into(),
-                    remote_url: "https://example.test/orphan-repo.git".into(),
-                    worktree_path: home_gnx
-                        .join("missing-worktree")
-                        .to_string_lossy()
-                        .into_owned(),
-                    index_dir_root: index_root.to_string_lossy().into_owned(),
-                    branches: vec![BranchEntry {
-                        name: "main".into(),
-                        index_dir: branch_dir.to_string_lossy().into_owned(),
-                        indexed_at: "2026-05-16T00:00:00Z".into(),
-                        node_count: 1,
-                        delta_size: 0,
-                    }],
-                    groups: vec!["stale".into()],
-                }],
+                version: 2,
+                repos,
                 groups: vec![GroupEntry {
                     name: "stale".into(),
-                    members: vec!["orphan-repo".into()],
+                    members: vec![dir_name.into()],
                 }],
             },
         )

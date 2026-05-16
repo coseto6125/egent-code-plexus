@@ -70,29 +70,33 @@ fn analyze_writes_to_registry_resolved_path() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let index_dir = home_tmp.path().join(".gnx/routing-test/main");
+    // v2 layout: ~/.gnx/<repo>__<hash8>/commits/<source_type>_<source_id>__<sha>/graph.bin
+    let gnx_root = home_tmp.path().join(".gnx");
+    let entries: Vec<_> = walkdir::WalkDir::new(&gnx_root)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+
+    let graph_bin = entries.iter().find(|e| e.file_name() == "graph.bin");
     assert!(
-        index_dir.exists(),
-        "expected ~/.gnx/routing-test/main/ to exist; got listing of .gnx: {:?}",
-        std::fs::read_dir(home_tmp.path().join(".gnx"))
-            .map(|it| it.flatten().map(|e| e.path()).collect::<Vec<_>>())
-            .ok()
+        graph_bin.is_some(),
+        "graph.bin missing under {:?}; entries: {:?}",
+        gnx_root,
+        entries.iter().map(|e| e.path()).collect::<Vec<_>>()
     );
-    assert!(index_dir.join("graph.bin").exists(), "graph.bin missing");
-    assert!(index_dir.join("meta.json").exists(), "meta.json missing");
+    let commit_dir = graph_bin.unwrap().path().parent().unwrap();
+    assert!(
+        commit_dir.join("meta.json").exists(),
+        "commit meta.json missing at {:?}",
+        commit_dir
+    );
 
-    let registry_path = home_tmp.path().join(".gnx/registry.json");
-    assert!(registry_path.exists());
-    let registry: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&registry_path).unwrap()).unwrap();
-    let repos = registry["repos"].as_array().expect("repos array");
-    assert_eq!(repos.len(), 1);
-    assert_eq!(repos[0]["name"], "routing-test");
-    assert_eq!(repos[0]["branches"].as_array().unwrap().len(), 1);
-    assert_eq!(repos[0]["branches"][0]["name"], "main");
-
-    let audit_path = home_tmp.path().join(".gnx/audit.log");
-    assert!(audit_path.exists(), "audit.log not written");
-    let audit_content = std::fs::read_to_string(&audit_path).unwrap();
-    assert!(audit_content.contains("\"event\":\"analyze.complete\""));
+    // Per-repo RepoMeta (v2): ~/.gnx/<repo>__<hash>/meta.json
+    let repo_dir = commit_dir.parent().unwrap().parent().unwrap();
+    assert!(
+        repo_dir.join("meta.json").exists(),
+        "repo meta.json missing at {:?}",
+        repo_dir
+    );
 }

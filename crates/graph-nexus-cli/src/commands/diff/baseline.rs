@@ -33,9 +33,7 @@ fn warn_if_local_diverges_from_remote(ref_str: &str, local_sha: &str, repo_dir: 
     }
     let remote_ref = format!("origin/{ref_str}");
     let Ok(remote_sha) = resolve_via_git(&remote_ref, repo_dir) else {
-        eprintln!(
-            "note: `{remote_ref}` not configured; baseline divergence check skipped."
-        );
+        eprintln!("note: `{remote_ref}` not configured; baseline divergence check skipped.");
         return;
     };
     if remote_sha == local_sha {
@@ -81,13 +79,19 @@ fn resolve_pr(pr_num: &str, repo_dir: &Path) -> Result<String, GnxError> {
         )));
     }
     let out = Command::new("gh")
-        .args(["pr", "view", pr_num, "--json", "baseRefOid", "--jq", ".baseRefOid"])
+        .args([
+            "pr",
+            "view",
+            pr_num,
+            "--json",
+            "baseRefOid",
+            "--jq",
+            ".baseRefOid",
+        ])
         .current_dir(repo_dir)
         .output()
         .map_err(|_| {
-            GnxError::Output(
-                "gh CLI not found; install gh or pass commit SHA directly".into(),
-            )
+            GnxError::Output("gh CLI not found; install gh or pass commit SHA directly".into())
         })?;
 
     if !out.status.success() {

@@ -113,6 +113,17 @@ pub fn run(args: ScanArgs, engine: &Engine) -> Result<(), GnxError> {
     emit(&payload, OutputFormat::Toon)
 }
 
+/// **Phase 5 stub**: returns an empty rkyv-archived fragment. Real per-file
+/// parse integration is deferred until Task 5.4 (overlay merge) is designed
+/// — the merge mechanism informs what container shape this function must
+/// produce. For now, `write_dirty_fragment` exercises the file-write atomic
+/// semantics and manifest plumbing; queries against L1 fragments will be
+/// no-ops until both this shim and Task 5.4 land.
+pub fn parse_single_file_to_fragment(rel_path: &str, content: &[u8]) -> std::io::Result<Vec<u8>> {
+    let _ = (rel_path, content);
+    Ok(vec![])
+}
+
 // ----- helpers -----
 
 /// Return the top-`k` names from `names` whose Levenshtein distance to

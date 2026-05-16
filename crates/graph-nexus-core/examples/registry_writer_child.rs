@@ -1,9 +1,9 @@
-//! Test helper: opens registry at $1, upserts a `RepoEntry` with name=$2,
-//! marker=$3 (embedded in `remote_url` to differentiate writers).
+//! Test helper: opens registry at $1, upserts a `RepoAlias` with dir_name=$2,
+//! marker=$3 (embedded in `common_dir` to differentiate writers).
 //! Used by `tests/concurrency_registry_writers.rs` to simulate
 //! N concurrent `gnx` invocations.
 
-use graph_nexus_core::registry::{Registry, RepoEntry};
+use graph_nexus_core::registry::{Registry, RepoAlias};
 use std::path::PathBuf;
 
 fn main() {
@@ -13,12 +13,12 @@ fn main() {
     let marker = args.next().expect("arg 3: slot marker");
 
     let mut reg = Registry::open(&home_gnx).expect("registry open");
-    reg.upsert_repo(RepoEntry {
-        name: repo_name.clone(),
-        remote_url: format!("https://github.com/test/{repo_name}#{marker}"),
-        worktree_path: format!("/tmp/test/{repo_name}"),
-        index_dir_root: format!("/tmp/test/{repo_name}/.gnx"),
-        branches: vec![],
+    reg.upsert_repo(RepoAlias {
+        dir_name: repo_name.clone(),
+        common_dir: format!("/tmp/test/{repo_name}#{marker}/.git"),
+        remote_url: Some(format!("https://github.com/test/{repo_name}")),
+        aliases: vec![repo_name.clone()],
+        last_touched: "2026-05-17T00:00:00Z".into(),
         groups: vec![],
     })
     .expect("upsert");
