@@ -56,10 +56,16 @@ pub struct IndexArgs {
 /// - creating `out_dir` before calling (use `std::fs::create_dir_all`).
 /// - all registry / branch-meta bookkeeping (this function is pure I/O).
 ///
+/// `parse_cache_root`, when `Some`, enables the persistent per-file parse
+/// cache rooted at `<repo_root>/parse_cache/<fp>/`. Cache reads are
+/// best-effort: misses / corruption fall back to a fresh parse. Bypassed
+/// when env `GNX_NO_CACHE=1` is set — matches `--no-cache` flag semantics.
+///
 /// Returns the number of nodes written to `graph.bin`.
 pub fn run_analyzer_for_paths(
     src_root: &std::path::Path,
     out_dir: &std::path::Path,
+    parse_cache_root: Option<&std::path::Path>,
 ) -> std::io::Result<usize> {
     // ── Step 1: Scan files ────────────────────────────────────────────────
     let mut files_to_analyze: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
@@ -269,8 +275,43 @@ pub fn run_analyzer_for_paths(
         ));
     }
 
-    // ── Step 3: Analyze files (no incremental cache; caller decides caching) ─
-    let local_graphs = pipeline.analyze_with_cache(files_to_analyze, |_rel_path, _hash| None);
+    // ── Step 3: Analyze files (persistent per-file parse cache) ──────────
+    let parse_cache = match parse_cache_root {
+        Some(root) if std::env::var_os("GNX_NO_CACHE").is_none() => {
+            match crate::parse_cache::ParseCache::open(root) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(
+                        "parse_cache: open failed at {:?}: {} — falling back to full parse",
+                        root,
+                        e
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let cache_ref: Option<&crate::parse_cache::ParseCache> = parse_cache.as_ref();
+    let local_graphs = pipeline.analyze_with_cache(files_to_analyze, |_rel_path, hash| {
+        cache_ref.and_then(|c| c.get(hash))
+    });
+    // Write back only fresh parses. Cache hits return the same blob we'd
+    // re-serialize on put — the existence stat skips that round-trip for
+    // the (~99% on typical commits) hit fraction.
+    if let Some(cache) = cache_ref {
+        for g in &local_graphs {
+            if !cache.path_for(&g.content_hash).exists() {
+                if let Err(e) = cache.put(g) {
+                    tracing::warn!(
+                        "parse_cache: put failed for {:?}: {}",
+                        g.file_path,
+                        e
+                    );
+                }
+            }
+        }
+    }
 
     // ── Step 4: Build global graph ────────────────────────────────────────
     let aliases = crate::config_parser::parse_configs(src_root);

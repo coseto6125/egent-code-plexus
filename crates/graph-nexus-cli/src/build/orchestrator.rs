@@ -79,8 +79,17 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
         src
     };
 
-    // 2. Build graph.bin + tantivy via analyzer pipeline (Task 4.4 carves this out)
-    let node_count = crate::commands::admin::index::run_analyzer_for_paths(&src_root, &building)?;
+    // 2. Build graph.bin + tantivy via analyzer pipeline.
+    // `repo_root` doubles as the persistent parse_cache root — cache
+    // entries live in `<repo_root>/parse_cache/<fp>/` and survive across
+    // L2 commit_dirs as long as the file content (and binary build) is
+    // unchanged. p50 commit on this repo touches ~6 / 3176 files; with
+    // the cache active, the remaining 3170 skip tree-sitter entirely.
+    let node_count = crate::commands::admin::index::run_analyzer_for_paths(
+        &src_root,
+        &building,
+        Some(&repo_root),
+    )?;
 
     // 3. Refs / source typing
     let refs_at_build = collect_refs(worktree, &sha_hex)?;
