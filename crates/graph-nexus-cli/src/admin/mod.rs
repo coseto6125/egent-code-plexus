@@ -52,13 +52,13 @@ fn main_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
     }
 }
 
-pub const MAIN_MENU: &[&str] = &[
-    "Indexes",
-    "Agent Integrations",
-    "Config",
-    "Groups",
-    "Diagnostics",
-    "Exit",
+pub const MAIN_MENU: &[menu::Item<'_>] = &[
+    ("Indexes", "build, inspect, prune, drop indexes"),
+    ("Agent Integrations", "MCP / native / hooks for LLM hosts"),
+    ("Config", "view, edit, validate gnx.toml"),
+    ("Groups", "multi-repo grouping for cross-repo contracts"),
+    ("Diagnostics", "doctor, registry health, env report"),
+    ("Exit", ""),
 ];
 
 #[cfg(test)]
@@ -67,9 +67,10 @@ mod tests {
 
     #[test]
     fn top_level_admin_menu_matches_target_information_architecture() {
+        let labels: Vec<&str> = MAIN_MENU.iter().map(|(label, _)| *label).collect();
         assert_eq!(
-            MAIN_MENU,
-            &[
+            labels,
+            vec![
                 "Indexes",
                 "Agent Integrations",
                 "Config",

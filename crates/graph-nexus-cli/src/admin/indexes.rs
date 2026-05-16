@@ -1,19 +1,19 @@
 //! Index maintenance workflows for `gnx admin`.
 
-use crate::admin::menu::select;
+use crate::admin::menu::{self, select};
 use crate::commands::admin::{drop, index, prune, rename_branch};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use graph_nexus_core::registry::{resolve_home_gnx, Registry, RegistryFile};
 use graph_nexus_core::GnxError;
 use std::path::PathBuf;
 
-const MENU: &[&str] = &[
-    "Build / refresh index",
-    "Inspect indexed repos",
-    "Rename branch index",
-    "Prune stale indexes",
-    "Drop index",
-    "← Back",
+const MENU: &[menu::Item<'_>] = &[
+    ("Build / refresh index", "(re)scan a repo and write graph.bin"),
+    ("Inspect indexed repos", "list every repo + branch in the registry"),
+    ("Rename branch index", "remap an existing index to a new branch name"),
+    ("Prune stale indexes", "delete one branch or all orphan index dirs"),
+    ("Drop index", "remove a repo's index data and registry entry"),
+    ("← Back", ""),
 ];
 
 pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
@@ -169,9 +169,10 @@ mod tests {
 
     #[test]
     fn indexes_menu_matches_target_order() {
+        let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
         assert_eq!(
-            MENU,
-            &[
+            labels,
+            vec![
                 "Build / refresh index",
                 "Inspect indexed repos",
                 "Rename branch index",

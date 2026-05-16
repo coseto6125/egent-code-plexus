@@ -1,17 +1,20 @@
 //! Diagnostic reports for `gnx admin`.
 
-use crate::admin::menu::select;
+use crate::admin::menu::{self, select};
 use graph_nexus_core::registry::{resolve_home_gnx, BranchMeta, RegistryFile};
 use graph_nexus_core::GnxError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const MENU: &[&str] = &[
-    "Doctor",
-    "MCP tool list",
-    "Registry health",
-    "Environment report",
-    "← Back",
+const MENU: &[menu::Item<'_>] = &[
+    ("Doctor", "run env + registry health checks together"),
+    ("MCP tool list", "show the MCP tools `gnx mcp serve` exposes"),
+    ("Registry health", "check index dirs, graphs, meta, orphans"),
+    (
+        "Environment report",
+        "gnx version, paths, $HOME / $GNX_HOME, host CLIs",
+    ),
+    ("← Back", ""),
 ];
 
 pub fn run(theme: &dialoguer::theme::ColorfulTheme) -> Result<(), GnxError> {
@@ -213,9 +216,10 @@ mod tests {
 
     #[test]
     fn diagnostics_menu_matches_target_order() {
+        let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
         assert_eq!(
-            MENU,
-            &[
+            labels,
+            vec![
                 "Doctor",
                 "MCP tool list",
                 "Registry health",

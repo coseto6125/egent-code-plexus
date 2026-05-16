@@ -3,14 +3,23 @@
 pub mod codex;
 pub mod gemini;
 
-use crate::admin::menu::select;
+use crate::admin::menu::{self, select};
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
 use graph_nexus_core::GnxError;
 
-const HOSTS: &[&str] = &["Codex CLI", "Gemini CLI", "← Back"];
+const HOSTS: &[menu::Item<'_>] = &[
+    ("Codex CLI", "register gnx as a native tool in Codex CLI"),
+    ("Gemini CLI", "register gnx as a native tool in Gemini CLI"),
+    ("← Back", ""),
+];
 
-const ACTIONS: &[&str] = &["install", "uninstall", "status", "← Back"];
+const ACTIONS: &[menu::Item<'_>] = &[
+    ("install", "write the native tool registration"),
+    ("uninstall", "remove the native tool registration"),
+    ("status", "show whether the native tool is registered"),
+    ("← Back", ""),
+];
 
 /// Entry point called from `host_integration::run`.
 pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {

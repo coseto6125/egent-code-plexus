@@ -9,23 +9,28 @@ pub mod gemini;
 pub mod generic;
 pub mod windsurf;
 
-use crate::admin::menu::select;
+use crate::admin::menu::{self, select};
 use dialoguer::theme::ColorfulTheme;
 use graph_nexus_core::GnxError;
 
-const HOSTS: &[&str] = &[
-    "Claude Code",
-    "Cursor",
-    "Windsurf",
-    "Cline / Roo Code",
-    "Codex CLI",
-    "Gemini CLI",
-    "Copilot",
-    "Generic (any MCP host)",
-    "← Back",
+const HOSTS: &[menu::Item<'_>] = &[
+    ("Claude Code", "Anthropic CLI — ~/.claude/settings.json"),
+    ("Cursor", "Cursor editor — ~/.cursor/mcp.json"),
+    ("Windsurf", "Windsurf editor — ~/.codeium/windsurf/mcp_config.json"),
+    ("Cline / Roo Code", "VS Code extensions — cline_mcp_settings.json"),
+    ("Codex CLI", "Codex CLI in MCP mode — ~/.codex/config.toml"),
+    ("Gemini CLI", "Gemini CLI in MCP mode — ~/.gemini/settings.json"),
+    ("Copilot", "GitHub Copilot — VS Code settings.json"),
+    ("Generic (any MCP host)", "print stdio command + JSON snippet to paste"),
+    ("← Back", ""),
 ];
 
-const ACTIONS: &[&str] = &["install", "uninstall", "status", "← Back"];
+const ACTIONS: &[menu::Item<'_>] = &[
+    ("install", "write the gnx MCP server entry to host config"),
+    ("uninstall", "remove the gnx MCP entry from host config"),
+    ("status", "show whether gnx is registered with this host"),
+    ("← Back", ""),
+];
 
 /// Entry point called from `host_integration::run`.
 pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
