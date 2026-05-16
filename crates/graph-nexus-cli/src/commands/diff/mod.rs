@@ -11,6 +11,7 @@ pub mod baseline;
 pub mod bindings;
 pub mod contracts;
 pub mod git_guard;
+pub mod output;
 pub mod routes;
 
 /// Section of the graph to diff. `All` = bindings + routes + contracts.
@@ -73,42 +74,22 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
 
     // Fast-path: identical SHAs → nothing could have changed.
     if baseline_sha == current_sha {
-        let mut sections = serde_json::Map::new();
-        if want_bindings {
-            sections.insert(
-                "bindings".into(),
-                serde_json::to_value(bindings::BindingsDiff::default())
-                    .map_err(|e| GnxError::Output(format!("bindings to_value: {e}")))?,
-            );
-        }
-        if want_routes {
-            sections.insert(
-                "routes".into(),
-                serde_json::to_value(routes::RoutesDiff::default())
-                    .map_err(|e| GnxError::Output(format!("routes to_value: {e}")))?,
-            );
-        }
-        if want_contracts {
-            sections.insert(
-                "contracts".into(),
-                serde_json::to_value(contracts::ContractsDiff::default())
-                    .map_err(|e| GnxError::Output(format!("contracts to_value: {e}")))?,
-            );
-        }
-        let envelope = serde_json::json!({
-            "baseline": {"ref": args.baseline, "sha": baseline_sha},
-            "current": {"ref": "HEAD", "sha": current_sha},
-            "sections": sections,
-        });
-        if args.format == "json" {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&envelope)
-                    .map_err(|e| GnxError::Output(format!("json emit: {e}")))?
-            );
-        } else {
-            println!("Bindings diff baseline={} current={} (identical)", baseline_sha, current_sha);
-        }
+        let bindings_empty = want_bindings.then(bindings::BindingsDiff::default);
+        let routes_empty = want_routes.then(routes::RoutesDiff::default);
+        let contracts_empty = want_contracts.then(contracts::ContractsDiff::default);
+        output::emit(
+            &output::DiffEnvelope {
+                baseline_ref: &args.baseline,
+                baseline_sha: &baseline_sha,
+                current_ref: "HEAD",
+                current_sha: &current_sha,
+                bindings: bindings_empty.as_ref(),
+                routes: routes_empty.as_ref(),
+                contracts: contracts_empty.as_ref(),
+                verbose: args.verbose,
+            },
+            &args.format,
+        )?;
         return Ok(());
     }
 
@@ -202,52 +183,18 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
         let _ = std::fs::remove_file(&baseline_graph_tmp);
     }
 
-    let mut sections = serde_json::Map::new();
-    if let Some(bd) = &bindings_diff {
-        sections.insert(
-            "bindings".into(),
-            serde_json::to_value(bd)
-                .map_err(|e| GnxError::Output(format!("bindings to_value: {e}")))?,
-        );
-    }
-    if let Some(rd) = &routes_diff {
-        sections.insert(
-            "routes".into(),
-            serde_json::to_value(rd)
-                .map_err(|e| GnxError::Output(format!("routes to_value: {e}")))?,
-        );
-    }
-    if let Some(cd) = &contracts_diff {
-        sections.insert(
-            "contracts".into(),
-            serde_json::to_value(cd)
-                .map_err(|e| GnxError::Output(format!("contracts to_value: {e}")))?,
-        );
-    }
-    let envelope = serde_json::json!({
-        "baseline": {"ref": args.baseline, "sha": baseline_sha},
-        "current": {"ref": "HEAD", "sha": current_sha},
-        "sections": sections,
-    });
-
-    if args.format == "json" {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&envelope)
-                .map_err(|e| GnxError::Output(format!("json emit: {e}")))?
-        );
-    } else {
-        // Text fallback — proper formatter lands in Task 12.
-        println!(
-            "Bindings diff baseline={} current={}",
-            baseline_sha, current_sha
-        );
-        if let Some(bd) = &bindings_diff {
-            println!("  new_resolutions: {}", bd.new_resolutions.len());
-            println!("  tier_changes:    {}", bd.tier_changes.len());
-            println!("  target_changes:  {}", bd.target_changes.len());
-            println!("  removed:         {}", bd.removed.len());
-        }
-    }
+    output::emit(
+        &output::DiffEnvelope {
+            baseline_ref: &args.baseline,
+            baseline_sha: &baseline_sha,
+            current_ref: "HEAD",
+            current_sha: &current_sha,
+            bindings: bindings_diff.as_ref(),
+            routes: routes_diff.as_ref(),
+            contracts: contracts_diff.as_ref(),
+            verbose: args.verbose,
+        },
+        &args.format,
+    )?;
     Ok(())
 }
