@@ -12,7 +12,6 @@ mod git;
 mod git_state;
 mod graph_path;
 mod hint;
-mod incremental_cache;
 mod output;
 pub mod reanalyze;
 mod repo_selector;

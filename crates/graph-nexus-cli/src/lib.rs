@@ -9,7 +9,6 @@ pub mod git;
 pub mod git_state;
 pub mod graph_path;
 pub mod hint;
-pub mod incremental_cache;
 pub mod output;
 pub mod reanalyze;
 pub mod repo_selector;
