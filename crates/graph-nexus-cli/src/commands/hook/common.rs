@@ -223,3 +223,32 @@ pub fn strip_shell_quotes(cmd: &str) -> String {
     }
     out
 }
+
+/// Drain this session's peer inbox, render to payload, truncate inbox.
+/// Returns `Some(payload_string)` if there was something to inject, `None` otherwise.
+/// Honors `GNX_REPO_ROOT_OVERRIDE` for tests.
+pub fn drain_and_render_peer_payload() -> Option<String> {
+    let me = crate::session::resolver::resolve_session_id(None);
+    let repo_root: std::path::PathBuf = std::env::var("GNX_REPO_ROOT_OVERRIDE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| resolve_home_gnx().join("graph-nexus/main"));
+    let session_dir = repo_root.join("sessions").join(&me);
+    let inbox = session_dir.join("inbox.jsonl");
+    let meta_path = session_dir.join("meta.json");
+    let mut meta = graph_nexus_core::session::SessionMeta::read(&meta_path).ok()?;
+
+    let (entries, _new_offset) =
+        graph_nexus_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let payload = crate::peer::render::render_payload(&entries);
+    if payload.is_empty() {
+        return None;
+    }
+
+    let _ = fs::write(&inbox, "");
+    meta.last_drained_offset = 0;
+    let _ = graph_nexus_core::session::SessionMeta::write_atomic(&meta_path, &meta);
+    Some(payload)
+}

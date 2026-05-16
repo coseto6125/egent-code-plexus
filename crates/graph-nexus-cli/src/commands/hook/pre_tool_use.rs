@@ -21,18 +21,31 @@ fn glob_stem_re() -> &'static regex::Regex {
 }
 
 pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+    // Gnx search path — independent of peer inbox drain below.
+    maybe_emit_search_hits(input);
+
+    // Peer inbox drain fires unconditionally on every PreToolUse so that
+    // messages from peer sessions are never silently dropped even when the
+    // tool invocation doesn't match any gnx search pattern.
+    if let Some(peer) = super::common::drain_and_render_peer_payload() {
+        emit_additional_context("PreToolUse", &peer);
+    }
+    Ok(())
+}
+
+fn maybe_emit_search_hits(input: &HookInput) {
     let pattern = match extract_pattern(&input.tool_name, &input.tool_input) {
         Some(p) if p.len() >= 3 => p,
-        _ => return Ok(()),
+        _ => return,
     };
     let index_dir = match lookup_index_dir(&input.cwd) {
         Some(d) => d,
-        None => return Ok(()),
+        None => return,
     };
     let graph_path = index_dir.join("graph.bin");
     let engine = match Engine::load(&graph_path) {
         Ok(e) => e,
-        Err(_) => return Ok(()),
+        Err(_) => return,
     };
     let args = SearchArgs {
         pattern: Some(pattern),
@@ -44,17 +57,15 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     };
     let hits = match compute_hits(args, &engine) {
         Ok(h) => h,
-        Err(_) => return Ok(()),
+        Err(_) => return,
     };
     if hits.is_empty() {
-        return Ok(());
+        return;
     }
     let lines = format_hits(&hits);
-    if lines.is_empty() {
-        return Ok(());
+    if !lines.is_empty() {
+        emit_additional_context("PreToolUse", &lines);
     }
-    emit_additional_context("PreToolUse", &lines);
-    Ok(())
 }
 
 /// Render hits as a legacy-style multi-line block. Each symbol gets a
