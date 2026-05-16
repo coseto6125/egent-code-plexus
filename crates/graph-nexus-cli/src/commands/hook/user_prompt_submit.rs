@@ -14,41 +14,45 @@ use std::path::Path;
 const LOG_TAIL_WINDOW: u64 = 4096;
 
 pub fn handle(input: &HookInput) -> Result<(), GnxError> {
-    // Markers and logs are hook-local — read from `<cwd>/.gnx/`.
-    let state_dir = match gnx_state_dir(&input.cwd) {
-        Some(d) => d,
-        None => return Ok(()),
-    };
-    let complete = state_dir.join(".rebuild-complete");
-    let failed = state_dir.join(".rebuild-failed");
-    let log = state_dir.join("last-rebuild.log");
+    // Reindex marker check — local to `<cwd>/.gnx/`. Skip when the state
+    // dir doesn't exist; peer inbox drain below fires regardless.
+    if let Some(state_dir) = gnx_state_dir(&input.cwd) {
+        let complete = state_dir.join(".rebuild-complete");
+        let failed = state_dir.join(".rebuild-failed");
+        let log = state_dir.join("last-rebuild.log");
 
-    if failed.exists() {
-        let tail = read_log_tail(&log, 3);
-        let _ = fs::remove_file(&failed);
-        let msg = format!(
-            "gnx background reindex FAILED. {} Run `gnx admin index` manually to retry.",
-            if tail.is_empty() {
-                String::new()
-            } else {
-                format!("Last log lines: {tail}.")
-            }
-        );
-        emit_additional_context("UserPromptSubmit", msg.trim());
-        return Ok(());
+        if failed.exists() {
+            let tail = read_log_tail(&log, 3);
+            let _ = fs::remove_file(&failed);
+            let msg = format!(
+                "gnx background reindex FAILED. {} Run `gnx admin index` manually to retry.",
+                if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("Last log lines: {tail}.")
+                }
+            );
+            emit_additional_context("UserPromptSubmit", msg.trim());
+        } else if complete.exists() {
+            // Stats come from the registered index dir (which holds
+            // `meta.json` after `gnx admin index` finished), not the local
+            // state dir. If the registry doesn't know about this cwd yet,
+            // we still acknowledge the rebuild but skip the count line.
+            let stats = lookup_index_dir(&input.cwd)
+                .map(|d| read_stats(&d))
+                .unwrap_or_else(|| "?".into());
+            let _ = fs::remove_file(&complete);
+            let msg =
+                format!("gnx index rebuild complete ({stats}). gnx tools now return fresh data.");
+            emit_additional_context("UserPromptSubmit", &msg);
+        }
     }
 
-    if complete.exists() {
-        // Stats come from the registered index dir (which holds
-        // `meta.json` after `gnx admin index` finished), not the local
-        // state dir. If the registry doesn't know about this cwd yet,
-        // we still acknowledge the rebuild but skip the count line.
-        let stats = lookup_index_dir(&input.cwd)
-            .map(|d| read_stats(&d))
-            .unwrap_or_else(|| "?".into());
-        let _ = fs::remove_file(&complete);
-        let msg = format!("gnx index rebuild complete ({stats}). gnx tools now return fresh data.");
-        emit_additional_context("UserPromptSubmit", &msg);
+    // Peer inbox drain fires unconditionally on every UserPromptSubmit so
+    // that messages from peer sessions are visible at every LLM-facing
+    // boundary, mirroring the pre_tool_use pattern.
+    if let Some(peer) = super::common::drain_and_render_peer_payload() {
+        emit_additional_context("UserPromptSubmit", &peer);
     }
     Ok(())
 }
