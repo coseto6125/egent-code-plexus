@@ -78,10 +78,7 @@ pub fn run(args: CoverageArgs, _graph_arg: &Path) -> Result<(), GnxError> {
         sections.insert("groups".into(), build_groups_overview(reg));
     }
 
-    let mut value = json!({ "coverage": Value::Object(sections) });
-    if matches!(format, OutputFormat::Llm) {
-        compress_for_llm(&mut value);
-    }
+    let value = json!({ "coverage": Value::Object(sections) });
     emit(&value, format)
 }
 
@@ -346,71 +343,6 @@ fn supported_framework_catalog() -> Vec<Value> {
             })
         })
         .collect()
-}
-
-/// Trim a chrono-style ISO-8601 timestamp into the shortest valid form.
-/// Drops sub-second precision (`.NNNNNN...`) and rewrites `+00:00` to `Z`.
-fn compact_iso(ts: &str) -> String {
-    let trimmed_frac = match ts.find('.') {
-        Some(dot) => {
-            let after_dot = &ts[dot + 1..];
-            let tz_at = after_dot
-                .find(['+', '-', 'Z'])
-                .map(|i| dot + 1 + i)
-                .unwrap_or(ts.len());
-            format!("{}{}", &ts[..dot], &ts[tz_at..])
-        }
-        None => ts.to_string(),
-    };
-    if let Some(stripped) = trimmed_frac.strip_suffix("+00:00") {
-        format!("{stripped}Z")
-    } else {
-        trimmed_frac
-    }
-}
-
-/// Walk a coverage payload and apply LLM-friendly lossy compression:
-/// round f64 confidences to 4 decimals, trim ISO timestamps. Only invoked
-/// for non-`--format=json` output paths (toon and friends). `--format=json`
-/// callers see the full-fidelity payload to stay machine-round-trippable.
-fn compress_for_llm(v: &mut Value) {
-    match v {
-        Value::Object(map) => {
-            for child in map.values_mut() {
-                compress_for_llm(child);
-            }
-        }
-        Value::Array(arr) => {
-            for child in arr.iter_mut() {
-                compress_for_llm(child);
-            }
-        }
-        Value::Number(n) => {
-            // Only round true f64s. `as_f64()` happily upcasts integers too,
-            // and round-tripping them through `from_f64` would silently
-            // promote `4922` to `4922.0` — surprising the consumer.
-            if n.is_f64() {
-                if let Some(f) = n.as_f64() {
-                    let rounded = (f * 10000.0).round() / 10000.0;
-                    if let Some(new_n) = serde_json::Number::from_f64(rounded) {
-                        *n = new_n;
-                    }
-                }
-            }
-        }
-        Value::String(s) => {
-            // Cheap shape gate: only touch strings that look like RFC3339
-            // (`YYYY-MM-DDT...`). Avoids walking unrelated string fields.
-            let bytes = s.as_bytes();
-            if bytes.len() >= 11 && bytes[4] == b'-' && bytes[7] == b'-' && bytes[10] == b'T' {
-                let compact = compact_iso(s);
-                if compact.len() < s.len() {
-                    *s = compact;
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Map an edge `reason` string to the lang_framework it represents. Some
@@ -820,30 +752,6 @@ mod tests {
         assert_eq!(v["files"], json!(0));
         assert_eq!(v["symbols"], json!(0));
         assert_eq!(v["status"], json!("graph_unavailable"));
-    }
-
-    #[test]
-    fn compress_for_llm_rounds_floats_and_trims_iso() {
-        let mut v = json!({
-            "supported": [
-                { "confidence": 0.6000000238418579_f64, "tag": "fastapi-depends" },
-                { "confidence": 0.5_f64, "tag": "reflection-getattr-fanout" }
-            ],
-            "freshness": {
-                "indexed_at": "2026-05-16T15:19:58.224238152+00:00",
-                "current_head_short": "b6343a7"
-            },
-            "integer_kept": 4922,
-            "non_iso_string": "graph-nexus"
-        });
-        compress_for_llm(&mut v);
-        assert_eq!(v["supported"][0]["confidence"], json!(0.6));
-        assert_eq!(v["supported"][1]["confidence"], json!(0.5));
-        assert_eq!(v["freshness"]["indexed_at"], json!("2026-05-16T15:19:58Z"));
-        // Non-ISO strings, integers, and non-timestamp ids stay untouched.
-        assert_eq!(v["freshness"]["current_head_short"], json!("b6343a7"));
-        assert_eq!(v["integer_kept"], json!(4922));
-        assert_eq!(v["non_iso_string"], json!("graph-nexus"));
     }
 
     #[test]

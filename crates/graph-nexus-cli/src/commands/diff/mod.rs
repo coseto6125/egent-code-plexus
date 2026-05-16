@@ -35,7 +35,7 @@ pub struct DiffArgs {
     pub baseline: String,
 
     /// Output format: text (default) | json | toon
-    #[arg(long, default_value = "text")]
+    #[arg(long)]
     pub format: String,
 
     /// List every change (text format only). Default truncates to top-10 per section.

@@ -28,7 +28,7 @@ pub enum McpAction {
     /// List tools that would be exposed by `serve`.
     Tools {
         /// Output format: text (default) | json | toon
-        #[arg(long, default_value = "text")]
+        #[arg(long)]
         format: String,
     },
 }

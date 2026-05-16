@@ -59,7 +59,7 @@ pub struct SearchArgs {
     pub repo: Option<String>,
 
     /// Output format: text (default) | json | toon.
-    #[arg(long, default_value = "text")]
+    #[arg(long)]
     pub format: Option<String>,
 
     /// Read patterns from stdin (one per line, lines starting with `#`

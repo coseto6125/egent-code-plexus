@@ -19,7 +19,7 @@ pub struct InspectArgs {
     pub repo: Option<String>,
 
     /// Output format
-    #[arg(long, default_value = "toon")]
+    #[arg(long)]
     pub format: Option<String>,
 
     /// Comma-separated list of node kinds (lowercase, e.g. `function,method`)

@@ -37,7 +37,7 @@ pub struct CypherArgs {
     pub repo: Option<String>,
 
     /// Output format: `json` (default, column-based) or `toon` (LLM-friendly compact).
-    #[arg(long, default_value = "json")]
+    #[arg(long)]
     pub format: String,
 }
 

@@ -36,7 +36,7 @@ pub struct ShapeCheckArgs {
     pub repo: Option<String>,
 
     /// Output format: text (default) | json | toon
-    #[arg(long, default_value = "text")]
+    #[arg(long)]
     pub format: Option<String>,
 
     /// Filter: only report drift for routes whose path matches this substring.

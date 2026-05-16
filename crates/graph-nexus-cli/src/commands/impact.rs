@@ -85,7 +85,7 @@ pub struct ImpactArgs {
     pub repo: Option<String>,
 
     /// Output format (mostly internal — agent doesn't set this).
-    #[arg(long, default_value = "toon")]
+    #[arg(long)]
     pub format: Option<String>,
 }
 
