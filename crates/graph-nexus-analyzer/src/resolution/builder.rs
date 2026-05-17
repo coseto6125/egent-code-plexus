@@ -304,6 +304,13 @@ impl GraphBuilder {
             // `DocumentBlock` type lands in `graph_nexus_core::graph`.
         }
 
+        // Finalize the basename-stem → file paths view consumed by the
+        // resolver's Tier-4 module-file fallback. Pass 1 is the only writer
+        // of `file_scoped`, so finalizing here gives every subsequent pass
+        // (and the resolver) an O(1) `files_by_stem` lookup instead of an
+        // O(N_files) scan per qualified call.
+        symbol_table.build_stem_index();
+
         if prof { eprintln!("prof build.pass1_register: {:.3}s", _t_pass1.elapsed().as_secs_f32()); }
         let _t_pass15 = std::time::Instant::now();
         // Pass 1.5: Extract Routes

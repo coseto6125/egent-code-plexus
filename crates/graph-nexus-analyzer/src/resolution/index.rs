@@ -247,6 +247,17 @@ pub struct SymbolTable {
     /// File metadata per node (language + vendor flag). Cached so the Tier-3
     /// barrier check is O(1) per candidate. Parallel-indexed with `node_kinds`.
     node_file_meta: Vec<FileMeta>,
+
+    /// Basename-stem → file paths sharing that stem. Populated once after
+    /// Pass 1 via [`SymbolTable::build_stem_index`]; the resolver's Tier-4
+    /// module-file fallback reads it via [`SymbolTable::files_by_stem`].
+    ///
+    /// Without this index, Tier 4 would scan every `file_scoped.keys()`
+    /// per failed-qualifier resolution (~3 k entries on the gitnexus-rs
+    /// index, fires once per unresolved qualified call → millions of
+    /// stem comparisons on cold-index build). The map collapses that to
+    /// an O(1) lookup + O(candidates-per-stem) inner walk.
+    stem_index: FxHashMap<String, Vec<String>>,
 }
 
 impl SymbolTable {
@@ -255,11 +266,38 @@ impl SymbolTable {
         Self::default()
     }
 
-    /// Iterate every file path the table knows about. The resolver's Tier-4
-    /// module-file fallback uses this to find a file whose basename stem
-    /// matches a qualifier (`auto_ensure::ensure_fresh` → `auto_ensure.rs`).
-    pub fn files(&self) -> impl Iterator<Item = &str> {
-        self.file_scoped.keys().map(String::as_str)
+    /// Populate the `stem_index` from the file paths already in
+    /// `file_scoped`. Call exactly once after Pass 1 finishes registering
+    /// nodes, before any resolver tier reads from the index. Idempotent
+    /// (clears before rebuild) so a future caller adding files post-Pass-1
+    /// can re-finalize without leaking stale entries.
+    pub fn build_stem_index(&mut self) {
+        self.stem_index.clear();
+        for path in self.file_scoped.keys() {
+            let Some(stem) = std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+            else {
+                continue;
+            };
+            self.stem_index
+                .entry(stem.to_string())
+                .or_default()
+                .push(path.clone());
+        }
+    }
+
+    /// O(1) lookup of file paths whose basename stem equals `stem`.
+    /// Returns an empty slice when the stem has no match or
+    /// [`SymbolTable::build_stem_index`] hasn't been called. The resolver
+    /// tiers that consume this all fire after the builder has finalized
+    /// the index, so an empty slice in production means "no match" rather
+    /// than "index not built".
+    pub fn files_by_stem(&self, stem: &str) -> &[String] {
+        self.stem_index
+            .get(stem)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Registers a node with the given file path, node name, node ID, and kind.

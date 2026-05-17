@@ -203,3 +203,101 @@ edition = "2021"
         "workspace fs.rs::read must not bind to std::fs::read caller; callers={callers:?}"
     );
 }
+
+#[test]
+fn rust_module_qualified_disambiguates_when_two_crates_share_module_stem() {
+    // Two workspace members each define their own `auto_ensure.rs`. A call
+    // from `crates/a/src/lib.rs` using `auto_ensure::ping` must bind to
+    // `crates/a/src/auto_ensure.rs`, not the sibling crate's version. This
+    // is the same-crate-prefix guard in action when the Tier-4 lookup
+    // happens via the stem→file index (multiple files share the stem; only
+    // the in-crate one survives the prefix filter).
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(
+        repo,
+        "Cargo.toml",
+        r#"[workspace]
+members = ["crates/a", "crates/b"]
+resolver = "2"
+"#,
+    );
+    write(
+        repo,
+        "crates/a/Cargo.toml",
+        r#"[package]
+name = "a"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        repo,
+        "crates/a/src/auto_ensure.rs",
+        "pub fn ping() -> i32 { 1 }\n",
+    );
+    write(
+        repo,
+        "crates/a/src/lib.rs",
+        r#"mod auto_ensure;
+
+pub fn caller_a() -> i32 {
+    auto_ensure::ping()
+}
+"#,
+    );
+    write(
+        repo,
+        "crates/b/Cargo.toml",
+        r#"[package]
+name = "b"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        repo,
+        "crates/b/src/auto_ensure.rs",
+        "pub fn ping() -> i32 { 2 }\n",
+    );
+    write(repo, "crates/b/src/lib.rs", "pub fn unused_b() {}\n");
+    init_and_analyze(repo);
+
+    let result = run_json(repo, &["inspect", "--name", "ping", "--format", "json"]);
+    let blocks: Vec<serde_json::Value> = if result["status"] == "found" {
+        vec![result.clone()]
+    } else {
+        result["matches"].as_array().cloned().unwrap_or_default()
+    };
+
+    let mut crate_a_callers: Vec<String> = Vec::new();
+    let mut crate_b_callers: Vec<String> = Vec::new();
+    for block in &blocks {
+        let symbol_file = block
+            .get("symbol")
+            .and_then(|s| s["filePath"].as_str())
+            .unwrap_or("");
+        let callers = block
+            .get("incoming")
+            .and_then(|i| i["calls"].as_array())
+            .cloned()
+            .unwrap_or_default();
+        for entry in &callers {
+            let name = entry["name"].as_str().unwrap_or("").to_string();
+            if symbol_file.contains("crates/a/") {
+                crate_a_callers.push(name);
+            } else if symbol_file.contains("crates/b/") {
+                crate_b_callers.push(name);
+            }
+        }
+    }
+
+    assert!(
+        crate_a_callers.iter().any(|n| n == "caller_a"),
+        "crate a's ping must list caller_a; crate_a_callers={crate_a_callers:?}"
+    );
+    assert!(
+        !crate_b_callers.iter().any(|n| n == "caller_a"),
+        "crate b's ping must NOT list caller_a; crate_b_callers={crate_b_callers:?}"
+    );
+}

@@ -694,21 +694,17 @@ impl<'a> Resolver<'a> {
             return None;
         }
         let caller_prefix = crate_root_prefix(&source_file_str);
-        let mut hit: Option<String> = None;
-        for fp in self.symbol_table.files() {
-            let stem = std::path::Path::new(fp).file_stem().and_then(|s| s.to_str());
-            if stem != Some(qualifier) {
-                continue;
-            }
+        let mut hit: Option<&str> = None;
+        for fp in self.symbol_table.files_by_stem(qualifier) {
             if crate_root_prefix(fp) != caller_prefix {
                 continue;
             }
             if hit.is_some() {
                 return None;
             }
-            hit = Some(fp.to_string());
+            hit = Some(fp);
         }
-        hit
+        hit.map(str::to_string)
     }
 
     #[allow(clippy::too_many_arguments)]
