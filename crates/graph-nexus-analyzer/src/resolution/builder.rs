@@ -231,12 +231,25 @@ impl GraphBuilder {
 
         // Pass 1: Register all nodes into SymbolTable and StringPool
         let mut current_node_idx = 0;
+        // Reusable UID format buffer — avoids one allocation per
+        // `Node` (~297k nodes on .sample_repo). `format!` always
+        // allocates a fresh `String`; `write!` into a cleared buffer
+        // reuses the underlying capacity.
+        use std::fmt::Write as _;
+        let mut uid_buf = String::with_capacity(128);
 
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
             // Path → string 一律走 forward-slash，讓 UID / lookup / 顯示在 Windows
             // 上與 Linux/macOS 一致（與 resolver.rs / registry/path.rs 既有 idiom 對齊）。
-            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+            // Cow: `to_string_lossy()` returns Cow; `.replace()` always allocates.
+            // Skip the replace + alloc on Linux/macOS where paths use `/` already.
+            let raw_path = local_graph.file_path.to_string_lossy();
+            let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
+                std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
+            } else {
+                raw_path
+            };
             let path_ref = string_pool.add(&path_str);
 
             files.push(File {
@@ -254,8 +267,9 @@ impl GraphBuilder {
                     raw_node.kind,
                 );
 
-                let uid_str = format!("{:?}:{}:{}", raw_node.kind, path_str, raw_node.name);
-                let uid_ref = string_pool.add(&uid_str);
+                uid_buf.clear();
+                let _ = write!(uid_buf, "{:?}:{}:{}", raw_node.kind, path_str, raw_node.name);
+                let uid_ref = string_pool.add(&uid_buf);
                 let name_ref = string_pool.add(&raw_node.name);
 
                 nodes.push(Node {
