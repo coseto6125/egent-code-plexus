@@ -65,8 +65,6 @@ enum Commands {
     Coverage(commands::coverage::CoverageArgs),
     /// List HTTP routes; with path, show handler + caller chain
     Routes(commands::routes::RoutesArgs),
-    /// Verify a file's symbol references exist in the graph
-    Scan(commands::scan::ScanArgs),
     /// Cross-repo API contracts inventory (routes / queue / RPC)
     Contracts(commands::contracts::ContractsArgs),
     /// Edge-level resolver delta — binding tier-degradation (silent break), route / contract changes. For symbol blast-radius, use `gnx impact`.
@@ -162,7 +160,6 @@ fn main() {
         Commands::Rename(args) => args.repo.as_deref(),
         Commands::Cypher(args) => args.repo.as_deref(),
         Commands::Routes(args) => args.repo.as_deref(),
-        Commands::Scan(args) => args.repo.as_deref(),
         Commands::ShapeCheck(args) => args.repo.as_deref(),
         Commands::ToolMap(args) => args.repo.as_deref(),
         Commands::Coverage(_)
@@ -201,7 +198,6 @@ fn main() {
         Commands::Rename(args) => commands::rename::run(args, &engine),
         Commands::Cypher(args) => commands::cypher::run(args, &engine),
         Commands::Routes(args) => commands::routes::run(args, &engine),
-        Commands::Scan(args) => commands::scan::run(args, &engine),
         Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
         Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
         Commands::Coverage(_)

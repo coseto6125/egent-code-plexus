@@ -20,7 +20,6 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | AST-aware multi-file rename | `gnx rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `gnx routes <path?> --repo .` (no path = list all) |
 | Cross-repo API contracts (routes / queue / RPC) | `gnx contracts --repo @all` (needs ≥2 repos in group) |
-| Verify references in a changed file resolve in the graph | `gnx scan <file> --repo . --filter-stdlib` (drops language-builtin / stdlib noise — typically −20% to −54%) |
 | HTTP consumer → Route shape drift detection | `gnx shape_check --route <path>? --repo .` (no `--route` = scan all routes; drift = consumer reads key not in Route's response/error keys) |
 | Binding tier / route / contract delta — edge view | `gnx diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required; accepts branch / tag / SHA / `HEAD~N` / `PR/<n>`. Multi-select via `,`. Formats: text / json / toon. Use `--verbose` for full lists.) |
 | Registry health / freshness / frameworks / blind spots | `gnx coverage` (registry-wide) or `gnx coverage --repo @all --detailed` |
@@ -61,7 +60,7 @@ re-indexes if mtime moved).
 |---|---|---|
 | `inspect / coverage / contracts / routes` | toon | json |
 | `cypher` | json | toon, text |
-| `find / scan / rename / impact` | text | json, toon |
+| `find / rename / impact` | text | json, toon |
 
 Rule of thumb: **toon** for agent → agent piping (compact key:value), **json** for parsing in scripts, **text** for human inspection.
 
@@ -89,8 +88,7 @@ Supports the openCypher read subset commonly used for graph queries: boolean WHE
 2. **`cypher --repo @group` errors** — single-repo only.
 3. **Default `--graph .gitnexus-rs/graph.bin`** is a cwd-relative legacy path. If you don't have a checked-in graph file, pass `--repo` (preferred) or absolute `--graph`.
 4. **Auto-ensure on every agent command** — first query after a source change pays a brief re-index cost. The stderr `✓ Index refreshed` line is informational, not an error.
-5. **`scan` flags push in opposite directions.** `--strict` ADDS noise (also flags language keywords / builtins; off by default). `--filter-stdlib` REMOVES noise (drops stdlib / builtin / common-type names per language; off by default — but agents should default to passing it). The trimmed payload gains a `filtered_count` field so the caller can see how much was suppressed.
-6. **`rename --markdown`** is OFF by default — code-only rename. Add the flag to sweep `.md / .rst / .txt`.
+5. **`rename --markdown`** is OFF by default — code-only rename. Add the flag to sweep `.md / .rst / .txt`.
 
 ## PR-touching workflow
 
@@ -100,9 +98,6 @@ gnx impact Foo --direction upstream --repo .
 
 # After staging a diff: see what changed + downstream/upstream callers
 gnx impact --baseline origin/main --repo .
-
-# After edits: verify changed files' references still resolve
-gnx scan crates/.../changed_file.rs --repo . --filter-stdlib
 
 # Touched HTTP routing / handlers?
 gnx routes /api/foo --repo .
