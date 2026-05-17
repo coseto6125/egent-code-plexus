@@ -290,6 +290,14 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 
     match (args.force, commit_dir) {
         (false, Some(existing)) => {
+            // Self-heal: if commit_dir was published by a pre-fix binary that
+            // wrote per-repo meta but never touched the global registry, an
+            // operator re-running `admin index` should still register the
+            // repo. Reads per-repo meta then upserts; idempotent on the
+            // fixed binary because Registry::upsert_repo skips writes when
+            // nothing changes.
+            ensure_registry_entry(&worktree)
+                .map_err(|e| format!("ensure registry entry: {e}"))?;
             if !args.quiet {
                 let st = detect_source_type(&existing);
                 eprintln!(
@@ -331,6 +339,35 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Read the per-repo meta the build pipeline already published, then upsert
+/// the global registry entry for `worktree`. No-op when no per-repo meta
+/// exists yet (build pipeline owns first-write; this is the recovery path
+/// for already-built commits that pre-date the registry-sync fix).
+///
+/// Fast path: a lock-free read of `registry.json` short-circuits when the
+/// repo is already registered. Every `admin index` re-run on an existing
+/// commit hits this — without the early-out we'd pay a flock + per-repo
+/// meta read + registry read on a path that's supposed to be near-instant.
+fn ensure_registry_entry(worktree: &std::path::Path) -> std::io::Result<()> {
+    use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile, RepoAlias, RepoMeta};
+
+    let home_gnx = resolve_home_gnx();
+    let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree)?;
+    let registry_path = home_gnx.join("registry.json");
+    if let Ok(reg) = RegistryFile::read_or_empty(&registry_path) {
+        if reg.repos.contains_key(&repo_dir_name) {
+            return Ok(());
+        }
+    }
+    let repo_root = home_gnx.join(&repo_dir_name);
+    let meta_path = repo_root.join("meta.json");
+    if !meta_path.exists() {
+        return Ok(());
+    }
+    let rm = RepoMeta::read(&meta_path)?;
+    RegistryFile::upsert_repo_atomic(&home_gnx, RepoAlias::from_repo_meta(repo_dir_name, &rm))
 }
 
 fn locate_commit_dir(

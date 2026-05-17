@@ -60,18 +60,16 @@ impl Registry {
 
     /// Insert or update a repo alias entry. Holds exclusive flock for
     /// the entire read-modify-write cycle.
+    ///
+    /// `groups` on the incoming `entry` is ignored when a record for
+    /// `dir_name` already exists — group membership is owned by
+    /// `admin group add/remove` and must survive a re-index. Build paths
+    /// that auto-register a repo always pass `groups: vec![]`; only the
+    /// group commands ever populate it.
     pub fn upsert_repo(&mut self, entry: RepoAlias) -> std::io::Result<()> {
-        let lock_path = self.home_gnx.join("registry.json.lock");
-        let _lock = FileLock::acquire_exclusive(&lock_path)?;
-
-        // Re-read in case another process changed it
+        RegistryFile::upsert_repo_atomic(&self.home_gnx, entry)?;
         let registry_path = self.home_gnx.join("registry.json");
-        let mut current = RegistryFile::read_or_empty(&registry_path)?;
-
-        current.repos.insert(entry.dir_name.clone(), entry);
-
-        RegistryFile::write_atomic(&registry_path, &current)?;
-        self.in_memory = current;
+        self.in_memory = RegistryFile::read_or_empty(&registry_path)?;
         Ok(())
     }
 }

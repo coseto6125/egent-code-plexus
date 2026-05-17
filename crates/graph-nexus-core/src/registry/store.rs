@@ -36,6 +36,27 @@ pub struct GroupEntry {
     pub members: Vec<String>,
 }
 
+impl RepoAlias {
+    /// Project a per-repo `RepoMeta` (filesystem source of truth) into a
+    /// registry entry. Build paths and the `admin index` self-heal path
+    /// share this — keeping the field mapping in one place ensures any
+    /// future `RepoAlias` field added gets populated from `RepoMeta`
+    /// consistently.
+    ///
+    /// `groups` is left empty; group membership is owned by `admin group
+    /// add/remove` and merged in by [`crate::registry::Registry::upsert_repo`].
+    pub fn from_repo_meta(dir_name: impl Into<String>, rm: &crate::registry::RepoMeta) -> Self {
+        Self {
+            dir_name: dir_name.into(),
+            common_dir: rm.common_dir.clone(),
+            remote_url: rm.remote_url.clone(),
+            aliases: rm.aliases.clone(),
+            last_touched: rm.last_touched.clone(),
+            groups: vec![],
+        }
+    }
+}
+
 impl RegistryFile {
     pub fn empty() -> Self {
         Self {
@@ -47,6 +68,36 @@ impl RegistryFile {
 
     pub fn write_atomic(path: &Path, value: &RegistryFile) -> io::Result<()> {
         atomic_write_json(path, value)
+    }
+
+    /// Lock-coupled upsert that bypasses [`crate::registry::Registry`]. Used
+    /// by write-only callers (build pipeline, `admin index` self-heal) that
+    /// would otherwise pay for `Registry::open`'s eager `registry.json` read
+    /// only to discard it before the in-lock re-read inside `upsert_repo`.
+    ///
+    /// Same semantics as [`crate::registry::Registry::upsert_repo`]: holds
+    /// exclusive flock for the read-modify-write cycle, preserves
+    /// existing `groups` on a known `dir_name`, skips the write when
+    /// nothing changed.
+    pub fn upsert_repo_atomic(home_gnx: &Path, entry: RepoAlias) -> io::Result<()> {
+        let lock_path = home_gnx.join("registry.json.lock");
+        let _lock = super::FileLock::acquire_exclusive(&lock_path)?;
+
+        let registry_path = home_gnx.join("registry.json");
+        let mut current = RegistryFile::read_or_empty(&registry_path)?;
+
+        let merged = match current.repos.get(&entry.dir_name) {
+            Some(existing) => RepoAlias {
+                groups: existing.groups.clone(),
+                ..entry
+            },
+            None => entry,
+        };
+        if current.repos.get(&merged.dir_name) == Some(&merged) {
+            return Ok(());
+        }
+        current.repos.insert(merged.dir_name.clone(), merged);
+        RegistryFile::write_atomic(&registry_path, &current)
     }
 
     pub fn read_or_empty(path: &Path) -> io::Result<Self> {
