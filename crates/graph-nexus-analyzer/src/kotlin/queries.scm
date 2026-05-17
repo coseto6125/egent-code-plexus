@@ -31,6 +31,21 @@
     )*
 ) @class
 
+; Primary constructors — class Foo(val x: Int) form.
+; primary_constructor only appears in the tree when explicit params are present
+; (class Foo without parens has no primary_constructor child), so this pattern
+; does not over-emit for bare class declarations.
+(class_declaration
+  (type_identifier) @constructor.name
+  (primary_constructor) @constructor)
+
+; Secondary constructors — explicit constructor(...) blocks inside class_body.
+; The name is implicit = enclosing class's type_identifier (same as primary).
+(class_declaration
+  (type_identifier) @constructor.name
+  (class_body
+    (secondary_constructor) @constructor))
+
 ; Functions
 (function_declaration
   (modifiers

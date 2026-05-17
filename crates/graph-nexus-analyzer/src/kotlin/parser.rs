@@ -35,6 +35,7 @@ pub struct KotlinProvider {
     query: Query,
     ktor: KtorVerbIndices,
     idx_ktor_path: Option<u32>,
+    idx_constructor: Option<u32>,
     idx_property: Option<u32>,
     idx_variable: Option<u32>,
     /// Capture index → NodeKind mapping, pre-resolved from
@@ -113,6 +114,7 @@ impl KotlinProvider {
             patch: query.capture_index_for_name("ktor.route.patch"),
         };
         let idx_ktor_path = query.capture_index_for_name("ktor.route.path");
+        let idx_constructor = query.capture_index_for_name("constructor");
         let idx_property = query.capture_index_for_name("property");
         let idx_variable = query.capture_index_for_name("variable");
 
@@ -131,6 +133,7 @@ impl KotlinProvider {
             query,
             ktor,
             idx_ktor_path,
+            idx_constructor,
             idx_property,
             idx_variable,
             capture_kind_by_idx,
@@ -259,6 +262,7 @@ impl LanguageProvider for KotlinProvider {
                     import_alias = Some(cap.node);
                 } else if (Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_function
+                    || Some(cap_idx) == self.idx_constructor
                     || Some(cap_idx) == self.idx_property
                     || Some(cap_idx) == self.idx_variable)
                     && root_span_node.is_none()
