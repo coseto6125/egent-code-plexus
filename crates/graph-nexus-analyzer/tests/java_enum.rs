@@ -10,7 +10,7 @@ fn parse(src: &str) -> LocalGraph {
         .expect("parse")
 }
 
-fn find_kind<'a>(graph: &'a LocalGraph, name: &str, kind: NodeKind) -> bool {
+fn find_kind(graph: &LocalGraph, name: &str, kind: NodeKind) -> bool {
     graph
         .nodes
         .iter()

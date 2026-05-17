@@ -13,7 +13,7 @@ fn parse(src: &str) -> LocalGraph {
         .expect("parse")
 }
 
-fn kind_of<'a>(g: &'a LocalGraph, name: &str) -> Option<NodeKind> {
+fn kind_of(g: &LocalGraph, name: &str) -> Option<NodeKind> {
     g.nodes.iter().find(|n| n.name == name).map(|n| n.kind)
 }
 

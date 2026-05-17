@@ -16,7 +16,7 @@ fn count_kind(g: &LocalGraph, kind: NodeKind) -> usize {
     g.nodes.iter().filter(|n| n.kind == kind).count()
 }
 
-fn names_of_kind<'a>(g: &'a LocalGraph, kind: NodeKind) -> Vec<&'a str> {
+fn names_of_kind(g: &LocalGraph, kind: NodeKind) -> Vec<&str> {
     g.nodes
         .iter()
         .filter(|n| n.kind == kind)

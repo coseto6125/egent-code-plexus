@@ -297,7 +297,6 @@ impl<'a> Resolver<'a> {
             // types) not module-path FQNs.
             if symbol_name.contains("::") {
                 if let Some(node_id) = self.try_module_tree_resolve(
-                    source_file,
                     &source_file_str,
                     symbol_name,
                     member,
@@ -779,7 +778,6 @@ impl<'a> Resolver<'a> {
     /// the resolved file.
     fn try_module_tree_resolve(
         &self,
-        source_file: &Path,
         source_file_str: &str,
         symbol_name: &str,
         member: &str,
@@ -788,16 +786,12 @@ impl<'a> Resolver<'a> {
         let tree = self.mod_tree?;
         let workspace_root = self.workspace_root.as_ref()?;
         let resolved = tree.resolve_fqn(symbol_name, source_file_str, workspace_root)?;
-        // Use the resolved file to look up the member in the symbol table.
-        // `resolved.item_name` matches `member` by construction (both are the
-        // last `::` segment), but we use `resolved.item_name` to be explicit.
-        let _ = source_file; // used indirectly via source_file_str
         self.symbol_table
             .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
             .or_else(|| {
-                // Fallback: member name as raw (strip generics e.g. `build_l2::<T>`).
                 let bare = member.split('<').next().unwrap_or(member);
-                self.symbol_table.lookup_in_file_with_kind(&resolved.file, bare, target)
+                self.symbol_table
+                    .lookup_in_file_with_kind(&resolved.file, bare, target)
             })
     }
 

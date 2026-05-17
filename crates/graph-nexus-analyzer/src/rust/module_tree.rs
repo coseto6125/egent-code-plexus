@@ -19,6 +19,7 @@
 //! * Re-export chains (`pub use foo::Bar` transitive walk).
 //! * Macro-expanded `use`s.
 
+use graph_nexus_core::registry::uid_path;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
@@ -76,9 +77,16 @@ type ModTree = FxHashMap<Vec<String>, PathBuf>;
 
 /// Workspace-level Rust module tree: one `ModTree` per crate.
 pub struct RustWorkspaceModTree {
-    /// `crate_name → ModTree`. Includes both dash and underscore variants of
-    /// hyphenated package names (Cargo normalises `-` → `_` in imports).
-    crates: FxHashMap<String, (PathBuf, ModTree)>,
+    /// Canonicalized absolute workspace root, computed once at build to
+    /// keep per-call resolution off the `canonicalize` syscall path.
+    workspace_canon: PathBuf,
+    /// `crate_name → (crate_dir, canonical_crate_dir_string, ModTree)`.
+    /// `canonical_crate_dir_string` is the forward-slash-normalised
+    /// canonical path of the crate directory — cached so `crate_for_file`
+    /// doesn't re-canonicalize N crates on every resolution.
+    /// Includes both dash and underscore variants of hyphenated package
+    /// names (Cargo normalises `-` → `_` in imports).
+    crates: FxHashMap<String, (PathBuf, String, ModTree)>,
     /// Maps an absolute canonical file path back to `(crate_name, mod_path)`.
     file_to_crate: FxHashMap<PathBuf, (String, Vec<String>)>,
 }
@@ -87,7 +95,11 @@ impl RustWorkspaceModTree {
     /// Build the workspace module tree rooted at `workspace_root`.
     /// Silently skips missing / unreadable files.
     pub fn build(workspace_root: &Path) -> Self {
+        let workspace_canon = workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
         let mut out = Self {
+            workspace_canon,
             crates: FxHashMap::default(),
             file_to_crate: FxHashMap::default(),
         };
@@ -98,7 +110,6 @@ impl RustWorkspaceModTree {
 
         let members = parse_workspace_members(&raw, workspace_root);
         let crate_infos: Vec<(String, PathBuf, Option<PathBuf>)> = if members.is_empty() {
-            // Single-crate repo.
             if let Some(name) = parse_package_name(&raw) {
                 let entry = find_crate_entry(workspace_root);
                 vec![(name, workspace_root.to_path_buf(), entry)]
@@ -120,15 +131,28 @@ impl RustWorkspaceModTree {
         for (name, crate_dir, entry) in crate_infos {
             let Some(entry_path) = entry else { continue };
             let tree = build_mod_tree(&entry_path);
-            // Register the canonical name.
             for (mod_path, file) in &tree {
-                out.file_to_crate.insert(file.clone(), (name.clone(), mod_path.clone()));
+                out.file_to_crate
+                    .insert(file.clone(), (name.clone(), mod_path.clone()));
             }
-            out.crates.insert(name.clone(), (crate_dir.clone(), tree.clone()));
-            // Also register the underscore-normalised variant if different.
+            let canon_str = crate_dir
+                .canonicalize()
+                .unwrap_or_else(|_| crate_dir.clone())
+                .to_string_lossy()
+                .replace('\\', "/");
+            // `mod_tree_clone_for_alias`: the underscore-normalised variant
+            // (`-` → `_`) needs its own tree entry because lookups split by
+            // package name first. Cargo allows both spellings at use sites
+            // so both have to resolve. A single clone here is unavoidable;
+            // tree size is bounded by mod-tree depth × crate count.
             let norm = name.replace('-', "_");
-            if norm != name {
-                out.crates.entry(norm).or_insert((crate_dir, tree));
+            let needs_alias = norm != name;
+            let alias_clone = if needs_alias { Some(tree.clone()) } else { None };
+            out.crates.insert(name.clone(), (crate_dir.clone(), canon_str.clone(), tree));
+            if let Some(alias_tree) = alias_clone {
+                out.crates
+                    .entry(norm)
+                    .or_insert((crate_dir, canon_str, alias_tree));
             }
         }
 
@@ -169,7 +193,6 @@ impl RustWorkspaceModTree {
                 (crate_name, &segs[1..])
             }
             "self" | "super" => {
-                // self/super resolution requires knowing the caller's mod path.
                 let crate_name = caller_crate.as_deref()?;
                 let caller_abs = if Path::new(caller_file).is_absolute() {
                     PathBuf::from(caller_file)
@@ -178,25 +201,33 @@ impl RustWorkspaceModTree {
                 };
                 let caller_canon = caller_abs.canonicalize().ok()?;
                 let (_cn, caller_mod_path) = self.file_to_crate.get(&caller_canon)?;
-                let base = if head == "self" {
-                    caller_mod_path.clone()
+                let up = if head == "super" {
+                    segs.iter().take_while(|&&s| s == "super").count()
                 } else {
-                    // Count consecutive `super` segments.
-                    let up = segs.iter().take_while(|&&s| s == "super").count();
+                    0
+                };
+                let (base, rest): (Vec<&str>, &[&str]) = if head == "self" {
+                    (
+                        caller_mod_path.iter().map(String::as_str).collect(),
+                        &segs[1..],
+                    )
+                } else {
                     if up > caller_mod_path.len() {
                         return None;
                     }
-                    caller_mod_path[..caller_mod_path.len() - up].to_vec()
+                    (
+                        caller_mod_path[..caller_mod_path.len() - up]
+                            .iter()
+                            .map(String::as_str)
+                            .collect(),
+                        &segs[up..],
+                    )
                 };
-                let rest: &[&str] = if head == "super" {
-                    let up = segs.iter().take_while(|&&s| s == "super").count();
-                    &segs[up..]
-                } else {
-                    &segs[1..]
-                };
-                // Synthesise a full segment list: base + rest.
-                let combined: Vec<String> =
-                    base.iter().map(String::as_str).chain(rest.iter().copied()).map(str::to_string).collect();
+                let combined: Vec<String> = base
+                    .into_iter()
+                    .chain(rest.iter().copied())
+                    .map(str::to_string)
+                    .collect();
                 return self.resolve_in_crate(crate_name, &combined, workspace_root);
             }
             other => {
@@ -218,11 +249,12 @@ impl RustWorkspaceModTree {
         self.resolve_in_crate(target_crate_name, &combined, workspace_root)
     }
 
-    /// Returns the canonical crate name for a caller file path, searching
-    /// both as repo-relative (caller from the builder) and absolute.
+    /// Returns the canonical crate name for a caller file path.
     ///
     /// Strategy: for each registered crate, check whether the caller's
-    /// absolute path is under the crate's root directory (longest-prefix wins).
+    /// absolute path is under the crate's root directory (longest-prefix
+    /// wins). Uses pre-canonicalized crate strings cached at build time
+    /// so this fires zero filesystem syscalls per resolution.
     fn crate_for_file(&self, caller_file: &str, workspace_root: &Path) -> Option<String> {
         let caller_abs = if Path::new(caller_file).is_absolute() {
             PathBuf::from(caller_file)
@@ -233,11 +265,15 @@ impl RustWorkspaceModTree {
         let caller_str = caller_canon.to_string_lossy().replace('\\', "/");
 
         let mut best: Option<(usize, String)> = None;
-        for (name, (crate_dir, _)) in &self.crates {
-            let cdir_canon = crate_dir.canonicalize().unwrap_or_else(|_| crate_dir.clone());
-            let cdir_str = cdir_canon.to_string_lossy().replace('\\', "/");
-            let prefix = format!("{}/", cdir_str);
-            if caller_str.starts_with(&prefix) || caller_str == cdir_str {
+        for (name, (_crate_dir, cdir_str, _tree)) in &self.crates {
+            let is_match = caller_str == *cdir_str
+                || caller_str
+                    .as_bytes()
+                    .get(cdir_str.len())
+                    .copied()
+                    == Some(b'/')
+                    && caller_str.starts_with(cdir_str);
+            if is_match {
                 let len = cdir_str.len();
                 if best.as_ref().map(|(l, _)| *l < len).unwrap_or(true) {
                     best = Some((len, name.clone()));
@@ -257,28 +293,30 @@ impl RustWorkspaceModTree {
         &self,
         crate_name: &str,
         combined: &[String],
-        workspace_root: &Path,
+        _workspace_root: &Path,
     ) -> Option<ResolvedFqn> {
         if combined.is_empty() {
             return None;
         }
-        let (crate_dir, tree) = self.crates.get(crate_name)?;
+        let (_crate_dir, _cdir_str, tree) = self.crates.get(crate_name)?;
 
-        // Try longest module prefix first (most specific), then shorter.
-        // combined = [m1, m2, ..., item_name]
-        // prefix_len from (combined.len()-1) down to 0.
         for prefix_len in (0..combined.len()).rev() {
-            let prefix: Vec<String> = combined[..prefix_len].to_vec();
-            let Some(file) = tree.get(&prefix) else {
+            let prefix = &combined[..prefix_len];
+            // SAFETY note: tree key is `Vec<String>`. We borrow the slice into
+            // an owned vec only on a miss-cycle's final hit to keep the loop
+            // body alloc-free. `HashMap::get` requires `Borrow<Q>` and `Vec`
+            // doesn't implement `Borrow<[String]>`, so we materialize once
+            // outside the loop body — but only on the matched iteration.
+            let key: Vec<String> = prefix.to_vec();
+            let Some(file) = tree.get(&key) else {
                 continue;
             };
-            // Remaining segments: could be item name directly, or a deeper path
-            // (e.g. sub-module not declared via `mod` — shouldn't happen in
-            // well-formed Rust, but we stop at the first successful file match).
             let item_name = combined.get(prefix_len).map(String::as_str).unwrap_or("");
-            // Make the file repo-relative.
-            let rel = make_repo_rel(file, crate_dir, workspace_root)?;
-            return Some(ResolvedFqn { file: rel, item_name: item_name.to_string() });
+            let rel = uid_path(file, &self.workspace_canon).ok()?;
+            return Some(ResolvedFqn {
+                file: rel,
+                item_name: item_name.to_string(),
+            });
         }
         None
     }
@@ -322,7 +360,7 @@ fn build_mod_tree(entry: &Path) -> ModTree {
         // Collect `#[path = "..."]` attributes so we can honour them.
         // Simple heuristic: scan for `#[path = "..."]` on the line immediately
         // before a `mod NAME;`. We pass them as a map: mod_name → rel_path.
-        let path_attrs = collect_path_attrs(&clean, &src);
+        let path_attrs = collect_path_attrs(&clean);
 
         for cap in mod_decl_re().captures_iter(&clean) {
             let name = cap[1].to_string();
@@ -507,15 +545,15 @@ fn find_crate_entry(crate_dir: &Path) -> Option<PathBuf> {
 
 /// Scan cleaned source for `#[path = "rel"]` immediately before `mod NAME;`
 /// and return a map `mod_name → rel_path`.
-fn collect_path_attrs(clean: &str, _src: &str) -> FxHashMap<String, String> {
+fn collect_path_attrs(clean: &str) -> FxHashMap<String, String> {
     let mut out: FxHashMap<String, String> = FxHashMap::default();
     let lines: Vec<&str> = clean.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         if let Some(caps) = path_attr_re().captures(line) {
             let rel_path = caps[1].to_string();
-            // Look ahead for `mod NAME;` within the next few lines.
-            for j in (i + 1)..=(i + 3).min(lines.len().saturating_sub(1)) {
-                if let Some(mcap) = mod_decl_re().captures(lines[j]) {
+            let lookahead_end = (i + 4).min(lines.len());
+            for next_line in &lines[(i + 1)..lookahead_end] {
+                if let Some(mcap) = mod_decl_re().captures(next_line) {
                     out.insert(mcap[1].to_string(), rel_path.clone());
                     break;
                 }
@@ -531,15 +569,6 @@ fn collect_path_attrs(clean: &str, _src: &str) -> FxHashMap<String, String> {
 
 fn read_file(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
-}
-
-fn make_repo_rel(abs_file: &Path, _crate_dir: &Path, workspace_root: &Path) -> Option<String> {
-    let workspace_canon = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
-    let file_canon = abs_file.canonicalize().unwrap_or_else(|_| abs_file.to_path_buf());
-    let rel = file_canon
-        .strip_prefix(&workspace_canon)
-        .unwrap_or(&file_canon);
-    Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
 // ---------------------------------------------------------------------------
