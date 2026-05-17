@@ -33,6 +33,12 @@ struct JavaCaptureIndices {
     class: Option<u32>,
     interface: Option<u32>,
     method: Option<u32>,
+    constructor_name: Option<u32>,
+    constructor: Option<u32>,
+    property_name: Option<u32>,
+    property: Option<u32>,
+    variable_name: Option<u32>,
+    variable: Option<u32>,
     export: Option<u32>,
     heritage: Option<u32>,
     type_ann: Option<u32>,
@@ -64,6 +70,12 @@ impl JavaProvider {
             class: query.capture_index_for_name("class"),
             interface: query.capture_index_for_name("interface"),
             method: query.capture_index_for_name("method"),
+            constructor_name: query.capture_index_for_name("constructor.name"),
+            constructor: query.capture_index_for_name("constructor"),
+            property_name: query.capture_index_for_name("property.name"),
+            property: query.capture_index_for_name("property"),
+            variable_name: query.capture_index_for_name("variable.name"),
+            variable: query.capture_index_for_name("variable"),
             export: query.capture_index_for_name("export"),
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
@@ -142,13 +154,27 @@ impl LanguageProvider for JavaProvider {
                 } else if cap_idx == idx.method_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if cap_idx == idx.constructor_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Constructor);
+                } else if cap_idx == idx.property_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Property);
+                } else if cap_idx == idx.variable_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Variable);
                 } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx.import_source {
                     import_src = Some(cap.node);
                 } else if cap_idx == idx.import_wildcard {
                     import_wildcard_node = Some(cap.node);
-                } else if cap_idx == idx.class || cap_idx == idx.interface || cap_idx == idx.method
+                } else if cap_idx == idx.class
+                    || cap_idx == idx.interface
+                    || cap_idx == idx.method
+                    || cap_idx == idx.constructor
+                    || cap_idx == idx.property
+                    || cap_idx == idx.variable
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);
@@ -198,7 +224,18 @@ impl LanguageProvider for JavaProvider {
                     let start = root.start_position();
                     let end = root.end_position();
 
-                    let node_id = root.id();
+                    // Multi-declarator declarations (`int x, y, z;` for
+                    // fields OR locals) share one declaration root. Keying
+                    // dedupe on `n.id()` (the per-name identifier node)
+                    // for Property + Variable emits one node per declarator.
+                    // Other kinds (Class/Interface/Method/Constructor) keep
+                    // root-keyed dedupe so multi-decorator captures still
+                    // collapse to one node.
+                    let node_id = if matches!(k, NodeKind::Property | NodeKind::Variable) {
+                        n.id()
+                    } else {
+                        root.id()
+                    };
 
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
                         decorators: vec![],

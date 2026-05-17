@@ -14,6 +14,24 @@ thread_local! {
         parser
     });
 }
+/// True if `name` is a C reserved keyword that tree-sitter-c sometimes
+/// mis-captures as an identifier when error-recovering from preprocessor
+/// macros. Legal C code never names a variable with any of these, so
+/// rejecting them only suppresses parse-recovery noise.
+fn is_c_reserved_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "void" | "char" | "short" | "int" | "long" | "float" | "double"
+        | "signed" | "unsigned" | "_Bool" | "_Complex" | "_Imaginary"
+        | "const" | "volatile" | "restrict" | "_Atomic" | "register"
+        | "static" | "extern" | "auto" | "_Thread_local"
+        | "struct" | "union" | "enum" | "typedef"
+        | "if" | "else" | "for" | "while" | "do" | "switch" | "case"
+        | "default" | "break" | "continue" | "return" | "goto" | "sizeof"
+        | "inline" | "_Static_assert" | "_Alignas" | "_Alignof"
+    )
+}
+
 /// Returns true if `node` (a `function_definition`) has a `static` storage class specifier
 /// among its direct children.
 fn has_static_specifier(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
@@ -408,8 +426,6 @@ impl LanguageProvider for CProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_struct = self.query.capture_index_for_name("struct");
 
-        let idx_param = self.query.capture_index_for_name("param");
-        let idx_param_name = self.query.capture_index_for_name("param.name");
         let idx_field = self.query.capture_index_for_name("field");
         let idx_field_name = self.query.capture_index_for_name("field.name");
         let idx_var = self.query.capture_index_for_name("var");
@@ -425,8 +441,6 @@ impl LanguageProvider for CProvider {
             // Buffers for param / field / var declarations. Each declaration
             // captures both the outer node (for span) and the identifier
             // (for name + type-slice end byte).
-            let mut param_root: Option<tree_sitter::Node<'_>> = None;
-            let mut param_name: Option<tree_sitter::Node<'_>> = None;
             let mut field_root: Option<tree_sitter::Node<'_>> = None;
             let mut field_name: Option<tree_sitter::Node<'_>> = None;
             let mut var_root: Option<tree_sitter::Node<'_>> = None;
@@ -446,10 +460,6 @@ impl LanguageProvider for CProvider {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_function || Some(cap_idx) == idx_struct {
                     root_span_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_param {
-                    param_root = Some(cap.node);
-                } else if Some(cap_idx) == idx_param_name {
-                    param_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_field {
                     field_root = Some(cap.node);
                 } else if Some(cap_idx) == idx_field_name {
@@ -493,31 +503,6 @@ impl LanguageProvider for CProvider {
                 }
             }
 
-            // Parameter declaration → Variable node with type slice.
-            if let (Some(p_root), Some(p_name)) = (param_root, param_name) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[p_name.start_byte()..p_name.end_byte()])
-                {
-                    let start = p_root.start_position();
-                    let end = p_root.end_position();
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: false,
-                        heritage: vec![],
-                        type_annotation: slice_type_before(p_root, p_name, source),
-                        name: name_str.to_string(),
-                        kind: NodeKind::Variable,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                    });
-                }
-            }
-
             // Struct / union field → Property node with type slice.
             if let (Some(f_root), Some(f_name)) = (field_root, field_name) {
                 if let Ok(name_str) =
@@ -550,23 +535,39 @@ impl LanguageProvider for CProvider {
                 if let Ok(name_str) =
                     std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
                 {
-                    let start = v_root.start_position();
-                    let end = v_root.end_position();
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: true,
-                        heritage: vec![],
-                        type_annotation: slice_type_before(v_root, v_name, source),
-                        name: name_str.to_string(),
-                        kind: NodeKind::Variable,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                    });
+                    // tree-sitter-c can mis-parse multi-line preprocessor
+                    // macros (verified on ziplist.c lines 408-443 where the
+                    // `ZIP_DECODE_LENGTH` `do{...}while(0)` macro causes the
+                    // following function decl to be partially re-parsed as
+                    // `(translation_unit (declaration ...))`, capturing
+                    // function parameters AND type keywords as @var.name).
+                    // Two-layer guard:
+                    //   1. v_root.has_error() — the declaration node itself
+                    //      (or any descendant) is an ERROR/MISSING node, so
+                    //      the @var capture is recovery noise. Real var
+                    //      decls in well-formed code have has_error=false.
+                    //   2. C reserved keyword check — defensive even when
+                    //      has_error is somehow false; `unsigned`/`const`/
+                    //      etc. are never legal C variable names.
+                    if !v_root.has_error() && !is_c_reserved_keyword(name_str) {
+                        let start = v_root.start_position();
+                        let end = v_root.end_position();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported: true,
+                            heritage: vec![],
+                            type_annotation: slice_type_before(v_root, v_name, source),
+                            name: name_str.to_string(),
+                            kind: NodeKind::Variable,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                    }
                 }
             }
 

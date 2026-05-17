@@ -33,6 +33,10 @@ pub struct KotlinProvider {
     query: Query,
     ktor: KtorVerbIndices,
     idx_ktor_path: Option<u32>,
+    idx_property_name: Option<u32>,
+    idx_property: Option<u32>,
+    idx_variable_name: Option<u32>,
+    idx_variable: Option<u32>,
 }
 
 impl KotlinProvider {
@@ -52,10 +56,18 @@ impl KotlinProvider {
             patch: query.capture_index_for_name("ktor.route.patch"),
         };
         let idx_ktor_path = query.capture_index_for_name("ktor.route.path");
+        let idx_property_name = query.capture_index_for_name("property.name");
+        let idx_property = query.capture_index_for_name("property");
+        let idx_variable_name = query.capture_index_for_name("variable.name");
+        let idx_variable = query.capture_index_for_name("variable");
         Ok(Self {
             query,
             ktor,
             idx_ktor_path,
+            idx_property_name,
+            idx_property,
+            idx_variable_name,
+            idx_variable,
         })
     }
 }
@@ -137,6 +149,12 @@ impl LanguageProvider for KotlinProvider {
                 } else if Some(cap_idx) == idx_function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
+                } else if Some(cap_idx) == self.idx_property_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Property);
+                } else if Some(cap_idx) == self.idx_variable_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Variable);
                 } else if Some(cap_idx) == idx_export {
                     if let Ok(text) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -167,7 +185,10 @@ impl LanguageProvider for KotlinProvider {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_alias {
                     import_alias = Some(cap.node);
-                } else if (Some(cap_idx) == idx_class || Some(cap_idx) == idx_function)
+                } else if (Some(cap_idx) == idx_class
+                    || Some(cap_idx) == idx_function
+                    || Some(cap_idx) == self.idx_property
+                    || Some(cap_idx) == self.idx_variable)
                     && root_span_node.is_none()
                 {
                     root_span_node = Some(cap.node);
@@ -175,11 +196,19 @@ impl LanguageProvider for KotlinProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+                // No pre-classification filter. The Variable query already
+                // restricts to `(source_file (property_declaration ...))` via
+                // the tree-sitter pattern; broader cases get whatever shape
+                // the grammar offers. Downstream consumers decide.
+
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
 
-                    let node_id = root.id();
+                    // Property dedupe on name-node id so multi-declarator
+                    // patterns each get their own entry; other kinds keep
+                    // root-keyed dedupe (multi-decorator captures collapse).
+                    let node_id = if k == NodeKind::Property { n.id() } else { root.id() };
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
                         decorators: vec![],
                         is_exported,

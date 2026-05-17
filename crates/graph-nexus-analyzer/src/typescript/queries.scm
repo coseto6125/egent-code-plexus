@@ -108,6 +108,16 @@
   ) @interface
 ) @export
 
+;; Properties — class fields (public_field_definition) and interface property
+;; signatures (property_signature). Each emits one Property node.
+(public_field_definition
+  name: (property_identifier) @property.name
+) @property
+
+(property_signature
+  name: (property_identifier) @property.name
+) @property
+
 ;; Imports (Named)
 (import_statement
   (import_clause

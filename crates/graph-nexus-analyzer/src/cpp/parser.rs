@@ -8,6 +8,27 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
 
+/// True if `name` is a C/C++ reserved keyword that tree-sitter sometimes
+/// mis-captures as an identifier during error-recovery from preprocessor
+/// macros. Legal C++ code never names a variable with these.
+fn is_cpp_reserved_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "void" | "char" | "short" | "int" | "long" | "float" | "double"
+        | "signed" | "unsigned" | "bool" | "wchar_t" | "char8_t" | "char16_t" | "char32_t"
+        | "const" | "volatile" | "constexpr" | "consteval" | "constinit" | "mutable"
+        | "static" | "extern" | "auto" | "thread_local" | "register" | "inline"
+        | "struct" | "union" | "enum" | "class" | "typedef" | "namespace" | "using"
+        | "template" | "typename" | "concept" | "requires"
+        | "if" | "else" | "for" | "while" | "do" | "switch" | "case"
+        | "default" | "break" | "continue" | "return" | "goto" | "sizeof"
+        | "new" | "delete" | "throw" | "try" | "catch" | "noexcept"
+        | "public" | "private" | "protected" | "virtual" | "override" | "final"
+        | "this" | "nullptr" | "true" | "false" | "operator"
+        | "and" | "or" | "not" | "xor" | "bitand" | "bitor" | "compl"
+    )
+}
+
 /// Per upstream `c-cpp.ts:414-431` `cppProvider.astFrameworkPatterns`.
 /// Note: upstream's `cProvider` has no `astFrameworkPatterns`, so this is
 /// C++-only.
@@ -107,8 +128,6 @@ impl LanguageProvider for CppProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_import = self.query.capture_index_for_name("import");
 
-        let idx_param = self.query.capture_index_for_name("param");
-        let idx_param_name = self.query.capture_index_for_name("param.name");
         let idx_field = self.query.capture_index_for_name("field");
         let idx_field_name = self.query.capture_index_for_name("field.name");
         let idx_var = self.query.capture_index_for_name("var");
@@ -132,8 +151,6 @@ impl LanguageProvider for CppProvider {
             let mut is_import = false;
 
             // Buffers for param / field / var declarations (D3 type annotations).
-            let mut param_root: Option<tree_sitter::Node<'_>> = None;
-            let mut param_name: Option<tree_sitter::Node<'_>> = None;
             let mut field_root: Option<tree_sitter::Node<'_>> = None;
             let mut field_name: Option<tree_sitter::Node<'_>> = None;
             let mut var_root: Option<tree_sitter::Node<'_>> = None;
@@ -164,10 +181,6 @@ impl LanguageProvider for CppProvider {
                     root_span_node = Some(cap.node);
                 } else if cap_idx == idx_import {
                     is_import = true;
-                } else if cap_idx == idx_param {
-                    param_root = Some(cap.node);
-                } else if cap_idx == idx_param_name {
-                    param_name = Some(cap.node);
                 } else if cap_idx == idx_field {
                     field_root = Some(cap.node);
                 } else if cap_idx == idx_field_name {
@@ -217,31 +230,6 @@ impl LanguageProvider for CppProvider {
                 }
             }
 
-            // Parameter declaration → Variable node with type slice.
-            if let (Some(p_root), Some(p_name)) = (param_root, param_name) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[p_name.start_byte()..p_name.end_byte()])
-                {
-                    let start = p_root.start_position();
-                    let end = p_root.end_position();
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: false,
-                        heritage: vec![],
-                        type_annotation: slice_type_before(p_root, p_name, source),
-                        name: name_str.to_string(),
-                        kind: NodeKind::Variable,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                    });
-                }
-            }
-
             // Class / struct data-member → Property node with type slice.
             if let (Some(f_root), Some(f_name)) = (field_root, field_name) {
                 if let Ok(name_str) =
@@ -268,27 +256,35 @@ impl LanguageProvider for CppProvider {
             }
 
             // Top-level variable / `auto` declaration → Variable node.
+            // Guard with `has_error` + C++ reserved-keyword check: tree-sitter
+            // C/C++ can re-parse function bodies as `(declaration ...)` after
+            // recovering from complex preprocessor macros, capturing function
+            // parameters and type keywords as @var.name. Real var decls in
+            // well-formed code carry has_error=false and never use keywords
+            // as identifier names.
             if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
                 if let Ok(name_str) =
                     std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
                 {
-                    let start = v_root.start_position();
-                    let end = v_root.end_position();
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: is_header || is_exported_by_query,
-                        heritage: vec![],
-                        type_annotation: slice_type_before(v_root, v_name, source),
-                        name: name_str.to_string(),
-                        kind: NodeKind::Variable,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                    });
+                    if !v_root.has_error() && !is_cpp_reserved_keyword(name_str) {
+                        let start = v_root.start_position();
+                        let end = v_root.end_position();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported: is_header || is_exported_by_query,
+                            heritage: vec![],
+                            type_annotation: slice_type_before(v_root, v_name, source),
+                            name: name_str.to_string(),
+                            kind: NodeKind::Variable,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                    }
                 }
             }
 

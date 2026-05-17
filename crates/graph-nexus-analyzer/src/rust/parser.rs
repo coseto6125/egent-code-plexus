@@ -37,6 +37,8 @@ struct RustCaptureIndices {
     heritage: Option<u32>,
     type_ann: Option<u32>,
     decorator: Option<u32>,
+    property_name: Option<u32>,
+    property: Option<u32>,
     axum_handler: Option<u32>,
     actix_method: Option<u32>,
     actix_handler: Option<u32>,
@@ -67,6 +69,8 @@ impl RustProvider {
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
             decorator: query.capture_index_for_name("decorator"),
+            property_name: query.capture_index_for_name("property.name"),
+            property: query.capture_index_for_name("property"),
             axum_handler: query.capture_index_for_name("axum.route.handler"),
             actix_method: query.capture_index_for_name("actix.route.method"),
             actix_handler: query.capture_index_for_name("actix.route.handler"),
@@ -138,6 +142,11 @@ impl LanguageProvider for RustProvider {
                     if kind.is_none() {
                         kind = Some(NodeKind::Function);
                     }
+                } else if cap_idx == idx.property_name {
+                    name_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Property);
+                    }
                 } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx.import_source {
@@ -150,6 +159,9 @@ impl LanguageProvider for RustProvider {
                 } else if cap_idx == idx.class {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
+                } else if cap_idx == idx.property {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Property);
                 } else if cap_idx == idx.method {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Method);

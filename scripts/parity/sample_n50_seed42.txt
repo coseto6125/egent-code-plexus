@@ -1,0 +1,225 @@
+==== 14-LANG RANDOM SAMPLE — N=50 (seed=42) ====
+
+--- TypeScript/Property (total=2,849, SKIP=2,619, N=50) ---
+  stats: distinct_names=45, test_files=5, examples=6, vendor=0, short_names(<=2chars)=0, _prefixed=0
+    connectTimeout                TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    pingTimeout                   TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    pingInterval                  TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    upgradeTimeout                TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    maxHttpBufferSize             TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    allowRequest                  TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    transports                    TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    allowUpgrades                 TypeScript/packages/websockets/interfaces/gateway-metadata.interface.ts
+    ... (38 more) ...
+    age                           TypeScript/sample/01-cats-app/src/cats/dto/create-cat.dto.ts
+    breed                         TypeScript/sample/01-cats-app/src/cats/dto/create-cat.dto.ts
+    name                          TypeScript/sample/01-cats-app/src/cats/interfaces/cat.interface.ts
+    age                           TypeScript/sample/01-cats-app/src/cats/interfaces/cat.interface.ts
+
+--- JavaScript/Variable (total=1,833, SKIP=228, N=50) ---
+  stats: distinct_names=40, test_files=0, examples=0, vendor=0, short_names(<=2chars)=2, _prefixed=0
+    View                          JavaScript/lib/application.js
+    dirs                          JavaScript/lib/application.js
+    err                           JavaScript/lib/application.js
+    server                        JavaScript/lib/application.js
+    args                          JavaScript/lib/application.js
+    done                          JavaScript/lib/application.js
+    bodyParser                    JavaScript/lib/express.js
+    EventEmitter                  JavaScript/lib/express.js
+    ... (38 more) ...
+    index                         JavaScript/lib/request.js
+    method                        JavaScript/lib/request.js
+    res                           JavaScript/lib/request.js
+    status                        JavaScript/lib/request.js
+
+--- Python/Property (total=216, SKIP=6, N=50) ---
+  stats: distinct_names=36, test_files=0, examples=0, vendor=0, short_names(<=2chars)=1, _prefixed=20
+    cli                           Python/src/flask/app.py
+    _got_first_request            Python/src/flask/app.py
+    cli                           Python/src/flask/blueprints.py
+    app_import_path               Python/src/flask/cli.py
+    create_app                    Python/src/flask/cli.py
+    data                          Python/src/flask/cli.py
+    set_debug_flag                Python/src/flask/cli.py
+    load_dotenv_defaults          Python/src/flask/cli.py
+    ... (38 more) ...
+    __slots__                     Python/src/flask/json/tag.py
+    key                           Python/src/flask/json/tag.py
+    __slots__                     Python/src/flask/json/tag.py
+    tag                           Python/src/flask/json/tag.py
+
+--- Java/Variable (total=81,218, SKIP=36,048, N=50) ---
+  stats: distinct_names=24, test_files=50, examples=0, vendor=0, short_names(<=2chars)=15, _prefixed=0
+    spec                          ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    type                          ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    type                          ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    paramType                     ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    returnType                    ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    tester                        ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    sub                           ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    methods                       ...android/guava-tests/test/com/google/common/reflect/SubtypeTester.java
+    ... (38 more) ...
+    methodName                    ...ava-tests/test/com/google/common/reflect/TypeTokenResolutionTest.java
+    methodName                    ...ava-tests/test/com/google/common/reflect/TypeTokenResolutionTest.java
+    parameterized                 ...ava-tests/test/com/google/common/reflect/TypeTokenResolutionTest.java
+    genericArray                  ...ava-tests/test/com/google/common/reflect/TypeTokenResolutionTest.java
+
+--- Kotlin/Property (total=794, SKIP=250, N=50) ---
+  stats: distinct_names=14, test_files=41, examples=0, vendor=0, short_names(<=2chars)=0, _prefixed=0
+    isBody                        .../rxjava/src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapter.java
+    isCompletable                 .../rxjava/src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapter.java
+    scheduler                     .../rxjava/src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapter.java
+    isSingle                      .../rxjava/src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapter.java
+    isResult                      .../rxjava/src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapter.java
+    responseType                  .../rxjava/src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapter.java
+    isAsync                       .../rxjava/src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapter.java
+    isAsync                       .../src/main/java/retrofit2/adapter/rxjava/RxJavaCallAdapterFactory.java
+    ... (38 more) ...
+    server                        ...c/test/java/retrofit2/adapter/rxjava/ObservableWithSchedulerTest.java
+    scheduler                     ...c/test/java/retrofit2/adapter/rxjava/ObservableWithSchedulerTest.java
+    service                       ...c/test/java/retrofit2/adapter/rxjava/ObservableWithSchedulerTest.java
+    subscriberRule                ...c/test/java/retrofit2/adapter/rxjava/ObservableWithSchedulerTest.java
+
+--- CSharp/Variable (total=17,217, SKIP=7,314, N=50) ---
+  stats: distinct_names=29, test_files=50, examples=0, vendor=0, short_names(<=2chars)=17, _prefixed=0
+    d                             CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    e                             CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    objectType                    CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    dt                            CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    types                         CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    serializer                    CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    objectType                    CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    d                             CSharp/Src/Newtonsoft.Json.Tests/Converters/DataTableConverterTests.cs
+    ... (38 more) ...
+    objectType                    .../Newtonsoft.Json.Tests/Converters/DiscriminatedUnionConverterTests.cs
+    serializer                    .../Newtonsoft.Json.Tests/Converters/DiscriminatedUnionConverterTests.cs
+    union                         .../Newtonsoft.Json.Tests/Converters/DiscriminatedUnionConverterTests.cs
+    ts                            .../Newtonsoft.Json.Tests/Converters/DiscriminatedUnionConverterTests.cs
+
+--- Go/Property (total=629, SKIP=142, N=50) ---
+  stats: distinct_names=32, test_files=50, examples=0, vendor=0, short_names(<=2chars)=4, _prefixed=0
+    SliceMulti                    Go/binding/form_mapping_test.go
+    SliceCsv                      Go/binding/form_mapping_test.go
+    SliceSsv                      Go/binding/form_mapping_test.go
+    SliceTsv                      Go/binding/form_mapping_test.go
+    SlicePipes                    Go/binding/form_mapping_test.go
+    ArrayMulti                    Go/binding/form_mapping_test.go
+    ArrayCsv                      Go/binding/form_mapping_test.go
+    ArraySsv                      Go/binding/form_mapping_test.go
+    ... (38 more) ...
+    Field                         Go/binding/form_mapping_test.go
+    Field                         Go/binding/form_mapping_test.go
+    Protocol                      Go/binding/form_mapping_test.go
+    Path                          Go/binding/form_mapping_test.go
+
+--- Rust/Property (total=1,312, SKIP=209, N=50) ---
+  stats: distinct_names=36, test_files=0, examples=0, vendor=0, short_names(<=2chars)=3, _prefixed=3
+    handle                        Rust/tokio/src/runtime/blocking/schedule.rs
+    hooks                         Rust/tokio/src/runtime/blocking/schedule.rs
+    _tx                           Rust/tokio/src/runtime/blocking/shutdown.rs
+    rx                            Rust/tokio/src/runtime/blocking/shutdown.rs
+    func                          Rust/tokio/src/runtime/blocking/task.rs
+    kind                          Rust/tokio/src/runtime/builder.rs
+    name                          Rust/tokio/src/runtime/builder.rs
+    enable_io                     Rust/tokio/src/runtime/builder.rs
+    ... (38 more) ...
+    _p                            Rust/tokio/src/runtime/context/blocking.rs
+    prev                          Rust/tokio/src/runtime/context/current.rs
+    depth                         Rust/tokio/src/runtime/context/current.rs
+    _p                            Rust/tokio/src/runtime/context/current.rs
+
+--- PHP/Property (total=4,977, SKIP=4,467, N=50) ---
+  stats: distinct_names=22, test_files=50, examples=0, vendor=0, short_names(<=2chars)=4, _prefixed=0
+    table                         PHP/tests/Integration/Notifications/SendingMailableNotificationsTest.php
+    timestamps                    PHP/tests/Integration/Notifications/SendingMailableNotificationsTest.php
+    timestamps                    ...ests/Integration/Notifications/SendingNotificationsWithLocaleTest.php
+    table                         ...ests/Integration/Notifications/SendingNotificationsWithLocaleTest.php
+    fillable                      ...ests/Integration/Notifications/SendingNotificationsWithLocaleTest.php
+    deleteWhenMissingModels       PHP/tests/Integration/Queue/CallQueuedHandlerTest.php
+    handled                       PHP/tests/Integration/Queue/CallQueuedHandlerTest.php
+    middlewareCommand             PHP/tests/Integration/Queue/CallQueuedHandlerTest.php
+    ... (38 more) ...
+    catchCallbackRan              PHP/tests/Integration/Queue/JobChainingTest.php
+    ran                           PHP/tests/Integration/Queue/JobChainingTest.php
+    id                            PHP/tests/Integration/Queue/JobChainingTest.php
+    id                            PHP/tests/Integration/Queue/JobChainingTest.php
+
+--- Ruby/Method (total=918, SKIP=89, N=50) ---
+  stats: distinct_names=48, test_files=0, examples=0, vendor=0, short_names(<=2chars)=0, _prefixed=0
+    render                        Ruby/lib/sinatra/base.rb
+    compile_template              Ruby/lib/sinatra/base.rb
+    compile_block_template        Ruby/lib/sinatra/base.rb
+    initialize                    Ruby/lib/sinatra/base.rb
+    fetch                         Ruby/lib/sinatra/base.rb
+    clear                         Ruby/lib/sinatra/base.rb
+    initialize                    Ruby/lib/sinatra/base.rb
+    call                          Ruby/lib/sinatra/base.rb
+    ... (38 more) ...
+    public_dir=                   Ruby/lib/sinatra/base.rb
+    public_dir                    Ruby/lib/sinatra/base.rb
+    get                           Ruby/lib/sinatra/base.rb
+    put                           Ruby/lib/sinatra/base.rb
+
+--- Swift/Property (total=582, SKIP=432, N=50) ---
+  stats: distinct_names=23, test_files=50, examples=0, vendor=0, short_names(<=2chars)=0, _prefixed=0
+    destination                   Swift/Tests/DownloadTests.swift
+    temporaryDirectoryPath        Swift/Tests/FileManager+AlamofireTests.swift
+    temporaryDirectoryURL         Swift/Tests/FileManager+AlamofireTests.swift
+    headersFromDictionaryLiteral  Swift/Tests/HTTPHeadersTests.swift
+    headersFromArrayLiteral       Swift/Tests/HTTPHeadersTests.swift
+    headersFromDictionaryLiteral  Swift/Tests/HTTPHeadersTests.swift
+    headersFromArrayLiteral       Swift/Tests/HTTPHeadersTests.swift
+    headers                       Swift/Tests/HTTPHeadersTests.swift
+    ... (38 more) ...
+    result                        Swift/Tests/RequestInterceptorTests.swift
+    result                        Swift/Tests/RequestInterceptorTests.swift
+    state                         Swift/Tests/RequestInterceptorTests.swift
+    urlRequest                    Swift/Tests/RequestInterceptorTests.swift
+
+--- C/Property (total=4,842, SKIP=260, N=50) ---
+  stats: distinct_names=49, test_files=0, examples=0, vendor=50, short_names(<=2chars)=1, _prefixed=0
+    resp3                         C/deps/hiredis/test.c
+    disconnect                    C/deps/hiredis/test.c
+    ac                            C/deps/hiredis/test.c
+    testno                        C/deps/hiredis/test.c
+    counter                       C/deps/hiredis/test.c
+    connects                      C/deps/hiredis/test.c
+    connect_status                C/deps/hiredis/test.c
+    disconnects                   C/deps/hiredis/test.c
+    ... (38 more) ...
+    cache_bin_array_descriptor_q  C/deps/jemalloc/include/jemalloc/internal/arena_structs.h
+    tcache_ql_mtx                 C/deps/jemalloc/include/jemalloc/internal/arena_structs.h
+    dss_prec                      C/deps/jemalloc/include/jemalloc/internal/arena_structs.h
+    large                         C/deps/jemalloc/include/jemalloc/internal/arena_structs.h
+
+--- Cpp/Property (total=509, SKIP=15, N=50) ---
+  stats: distinct_names=15, test_files=0, examples=37, vendor=0, short_names(<=2chars)=9, _prefixed=0
+    address                       Cpp/docs/mkdocs/docs/examples/nlohmann_define_type_intrusive_macro.cpp
+    age                           Cpp/docs/mkdocs/docs/examples/nlohmann_define_type_intrusive_macro.cpp
+    name                          ...s/examples/nlohmann_define_type_intrusive_only_serialize_explicit.cpp
+    address                       ...s/examples/nlohmann_define_type_intrusive_only_serialize_explicit.cpp
+    age                           ...s/examples/nlohmann_define_type_intrusive_only_serialize_explicit.cpp
+    name                          ...docs/examples/nlohmann_define_type_intrusive_only_serialize_macro.cpp
+    address                       ...docs/examples/nlohmann_define_type_intrusive_only_serialize_macro.cpp
+    age                           ...docs/examples/nlohmann_define_type_intrusive_only_serialize_macro.cpp
+    ... (38 more) ...
+    id                            Cpp/include/nlohmann/detail/exceptions.hpp
+    byte                          Cpp/include/nlohmann/detail/exceptions.hpp
+    is                            Cpp/include/nlohmann/detail/input/input_adapters.hpp
+    sb                            Cpp/include/nlohmann/detail/input/input_adapters.hpp
+
+--- Dart/Property (total=534, SKIP=47, N=50) ---
+  stats: distinct_names=28, test_files=0, examples=50, vendor=0, short_names(<=2chars)=2, _prefixed=12
+    years                         Dart/examples/flutter_dynamic_form/lib/new_car/bloc/new_car_state.dart
+    year                          Dart/examples/flutter_dynamic_form/lib/new_car/bloc/new_car_state.dart
+    _authenticationRepository     Dart/examples/flutter_firebase_login/lib/app/bloc/app_bloc.dart
+    status                        Dart/examples/flutter_firebase_login/lib/app/bloc/app_state.dart
+    user                          Dart/examples/flutter_firebase_login/lib/app/bloc/app_state.dart
+    _authenticationRepository     Dart/examples/flutter_firebase_login/lib/app/view/app.dart
+    photo                         Dart/examples/flutter_firebase_login/lib/home/widgets/avatar.dart
+    _authenticationRepository     Dart/examples/flutter_firebase_login/lib/login/cubit/login_cubit.dart
+    ... (38 more) ...
+    title                         Dart/examples/flutter_infinite_list/lib/posts/models/post.dart
+    body                          Dart/examples/flutter_infinite_list/lib/posts/models/post.dart
+    _scrollController             Dart/examples/flutter_infinite_list/lib/posts/view/posts_list.dart
+    post                          .../examples/flutter_infinite_list/lib/posts/widgets/post_list_item.dart

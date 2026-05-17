@@ -43,6 +43,33 @@
     name: (dotted_name) @import.name
     alias: (identifier) @import.alias)) @import
 
+;; Properties — class-body attributes (plain and type-annotated)
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @property.name) @property)))
+
+;; Properties — instance attributes assigned via self in any method
+(class_definition
+  body: (block
+    (function_definition
+      body: (block
+        (expression_statement
+          (assignment
+            left: (attribute
+              object: (identifier) @_self (#eq? @_self "self")
+              attribute: (identifier) @property.name)) @property)))))
+
+;; Variables — module-level assignments (plain `x = …` and annotated `x: T = …`)
+;; post-filtered in parser via parent-is-module ancestor walk.
+;; Both forms produce an `assignment` node in tree-sitter-python; the annotated
+;; form additionally has a `type:` field, but the `left:` field is present in
+;; both, so a single pattern suffices.
+(expression_statement
+  (assignment
+    left: (identifier) @variable.name) @variable)
+
 ;; Routes
 (call
   function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|route|add_route|add_url_rule|add_api_route|GET|POST|PUT|DELETE|PATCH|ROUTE)$"))

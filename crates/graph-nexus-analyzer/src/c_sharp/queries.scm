@@ -46,12 +46,12 @@
   name: (identifier) @name.method
 ) @method
 
-;; Constructors
+;; Constructors — distinct NodeKind::Constructor
 (constructor_declaration
   (attribute_list)* @decorator
   (modifier)* @export
-  name: (identifier) @name.method
-) @method
+  name: (identifier) @constructor.name
+) @constructor
 
 ;; Local Functions
 (local_function_statement
@@ -60,6 +60,32 @@
   returns: (_) @type
   name: (identifier) @name.function
 ) @function
+
+;; Fields (class-level variables) — one Property per declarator so
+;; `private int x, y;` emits two Property nodes.
+(field_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+  (variable_declaration
+    (variable_declarator
+      name: (identifier) @property.name))
+) @property
+
+;; Auto-properties and expression-bodied properties.
+(property_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+  type: (_) @type
+  name: (identifier) @property.name
+) @property
+
+;; Local variables — `int x = 0;` inside method bodies. Ref gitnexus
+;; emits Variable for these (~4.6k on .sample_repo CSharp corpus).
+(local_declaration_statement
+  (variable_declaration
+    (variable_declarator
+      name: (identifier) @variable.name))
+) @variable
 
 ;; Using directives (Imports). Three patterns:
 ;; - `using X;` / `using X.Y;` — plain

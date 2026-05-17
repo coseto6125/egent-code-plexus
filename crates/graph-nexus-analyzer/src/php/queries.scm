@@ -25,6 +25,19 @@
   name: (name) @name.method
   return_type: (_) @type.method ?) @method
 
+;; Properties — regular class property declarations (`public int $foo;`)
+;; One Property node per property_element so `$x, $y;` emits two nodes.
+(property_declaration
+  (visibility_modifier)? @export
+  (property_element
+    name: (variable_name (name) @name.property))) @property
+
+;; Properties — PHP 8.0+ constructor promotion (`public string $name`)
+;; `visibility` field is always present; the `$` prefix is anonymous.
+(property_promotion_parameter
+  visibility: (visibility_modifier) @export
+  name: (variable_name (name) @name.property)) @property
+
 ;; Namespaces
 (namespace_definition
   name: (namespace_name) @name.namespace) @namespace

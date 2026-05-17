@@ -177,10 +177,13 @@ impl LanguageProvider for PhpProvider {
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
         let idx_import_prefix = self.query.capture_index_for_name("import.prefix");
 
+        let idx_name_property = self.query.capture_index_for_name("name.property");
+
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_method = self.query.capture_index_for_name("method");
+        let idx_property = self.query.capture_index_for_name("property");
 
         let idx_route_call = self.query.capture_index_for_name("route.call");
         let idx_route_scope = self.query.capture_index_for_name("route.scope");
@@ -238,6 +241,9 @@ impl LanguageProvider for PhpProvider {
                 } else if Some(cap_idx) == idx_name_method {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if Some(cap_idx) == idx_name_property {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Property);
                 } else if Some(cap_idx) == idx_type_function || Some(cap_idx) == idx_type_method {
                     if let Ok(t) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -274,6 +280,7 @@ impl LanguageProvider for PhpProvider {
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_interface
                     || Some(cap_idx) == idx_method
+                    || Some(cap_idx) == idx_property
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);
@@ -399,7 +406,9 @@ impl LanguageProvider for PhpProvider {
                     let start = root.start_position();
                     let end = root.end_position();
 
-                    let node_id = root.id();
+                    // Property dedupe on name-node id so multi-declarator
+                    // (`public int $x, $y;`) each gets its own entry.
+                    let node_id = if k == NodeKind::Property { n.id() } else { root.id() };
                     let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
                         decorators: vec![],
                         is_exported,

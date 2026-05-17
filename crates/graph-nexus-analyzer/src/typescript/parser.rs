@@ -43,6 +43,12 @@ struct TypeScriptCaptureIndices {
     /// Named handler argument of `app.METHOD(path, handler)` — used by the
     /// builder to materialize a `HandlesRoute` edge from the handler back
     /// to the Route node. Absent for inline arrow / anonymous handlers.
+    property_name: Option<u32>,
+    property: Option<u32>,
+    const_name: Option<u32>,
+    const_kind: Option<u32>,
+    variable_name: Option<u32>,
+    variable: Option<u32>,
     route_handler: Option<u32>,
     express_handler: Option<u32>,
     nestjs_class: Option<u32>,
@@ -79,6 +85,12 @@ impl TypeScriptProvider {
             route_method: query.capture_index_for_name("route.method"),
             route_path: query.capture_index_for_name("route.path"),
             route_call: query.capture_index_for_name("route.call"),
+            property_name: query.capture_index_for_name("property.name"),
+            property: query.capture_index_for_name("property"),
+            const_name: query.capture_index_for_name("const.name"),
+            const_kind: query.capture_index_for_name("const"),
+            variable_name: query.capture_index_for_name("variable.name"),
+            variable: query.capture_index_for_name("variable"),
             route_handler: query.capture_index_for_name("route.handler"),
             express_handler: query.capture_index_for_name("express.route.handler"),
             nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
@@ -155,6 +167,15 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
+                } else if cap_idx == idx.property_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Property);
+                } else if cap_idx == idx.const_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Const);
+                } else if cap_idx == idx.variable_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Variable);
                 } else if cap_idx == idx.export {
                     is_exported = true;
                 } else if cap_idx == idx.heritage {
@@ -209,6 +230,9 @@ impl LanguageProvider for TypeScriptProvider {
                     || cap_idx == idx.class
                     || cap_idx == idx.method
                     || cap_idx == idx.interface
+                    || cap_idx == idx.property
+                    || cap_idx == idx.const_kind
+                    || cap_idx == idx.variable
                 {
                     root_span_node = Some(cap.node);
                 }

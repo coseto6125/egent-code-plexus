@@ -85,10 +85,6 @@ impl LanguageProvider for GoProvider {
         let idx_field_name = self.query.capture_index_for_name("field.name");
         let idx_field_type = self.query.capture_index_for_name("field.type");
 
-        let idx_param = self.query.capture_index_for_name("param");
-        let idx_param_name = self.query.capture_index_for_name("param.name");
-        let idx_param_type = self.query.capture_index_for_name("param.type");
-
         let idx_var = self.query.capture_index_for_name("var");
         let idx_var_name = self.query.capture_index_for_name("var.name");
         let idx_var_type = self.query.capture_index_for_name("var.type");
@@ -118,17 +114,11 @@ impl LanguageProvider for GoProvider {
             let mut field_name_nodes: Vec<tree_sitter::Node> = Vec::new();
             let mut field_type_text: Option<String> = None;
 
-            // Per-match buffers for parameter / var declarations. Names
-            // are buffered as Vec because Go allows multi-name decls in
-            // one node: `func f(a, b int)` and `var x, y int` both
-            // parse as a single `parameter_declaration` / `var_spec`
-            // with multiple `name:` children. Pre-fix this used
-            // `Option<Node>` and silently dropped all but the last.
-            let mut is_param = false;
-            let mut param_name_nodes: Vec<tree_sitter::Node> = Vec::new();
-            let mut param_type_text: Option<String> = None;
-            let mut param_root_node = None;
-
+            // Per-match buffers for var declarations. Names are buffered as
+            // Vec because Go allows multi-name decls in one node: `var x, y
+            // int` parses as a single `var_spec` with multiple `name:`
+            // children. Pre-fix this used `Option<Node>` and silently
+            // dropped all but the last.
             let mut is_var = false;
             let mut var_name_nodes: Vec<tree_sitter::Node> = Vec::new();
             let mut var_type_text: Option<String> = None;
@@ -198,17 +188,6 @@ impl LanguageProvider for GoProvider {
                     {
                         field_type_text = Some(t_str.to_string());
                     }
-                } else if cap_idx == idx_param {
-                    is_param = true;
-                    param_root_node = Some(cap.node);
-                } else if cap_idx == idx_param_name {
-                    param_name_nodes.push(cap.node);
-                } else if cap_idx == idx_param_type {
-                    if let Ok(t_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        param_type_text = Some(t_str.to_string());
-                    }
                 } else if cap_idx == idx_var {
                     is_var = true;
                     var_root_node = Some(cap.node);
@@ -249,38 +228,6 @@ impl LanguageProvider for GoProvider {
                         ),
                         calls: Vec::new(),
                     });
-                }
-            }
-
-            // Parameter declaration → emit one Variable per param name.
-            // Params are always package-private (locals), so `is_exported=false`.
-            // Span uses the name token (not the shared root) so multi-name
-            // decls like `func f(a, b int)` produce distinct spans.
-            if is_param {
-                if let Some(root) = param_root_node {
-                    for n in &param_name_nodes {
-                        if let Ok(name_str) =
-                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                        {
-                            let start = n.start_position();
-                            let end = root.end_position();
-                            nodes.push(RawNode {
-                                decorators: vec![],
-                                name: name_str.to_string(),
-                                kind: NodeKind::Variable,
-                                is_exported: false,
-                                heritage: vec![],
-                                type_annotation: param_type_text.clone(),
-                                span: (
-                                    start.row as u32,
-                                    start.column as u32,
-                                    end.row as u32,
-                                    end.column as u32,
-                                ),
-                                calls: Vec::new(),
-                            });
-                        }
-                    }
                 }
             }
 

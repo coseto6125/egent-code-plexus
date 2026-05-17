@@ -95,9 +95,6 @@ impl LanguageProvider for DartProvider {
         let idx_property = self.query.capture_index_for_name("property");
         let idx_import = self.query.capture_index_for_name("import");
 
-        let idx_param = self.query.capture_index_for_name("param");
-        let idx_param_name = self.query.capture_index_for_name("param.name");
-        let idx_param_type = self.query.capture_index_for_name("param.type");
         let idx_var = self.query.capture_index_for_name("var");
         let idx_var_name = self.query.capture_index_for_name("var.name");
         let idx_var_type = self.query.capture_index_for_name("var.type");
@@ -113,9 +110,6 @@ impl LanguageProvider for DartProvider {
             let mut import_source = None;
             let mut import_alias = None;
 
-            let mut param_root: Option<tree_sitter::Node<'_>> = None;
-            let mut param_name: Option<tree_sitter::Node<'_>> = None;
-            let mut param_type: Option<tree_sitter::Node<'_>> = None;
             let mut var_root: Option<tree_sitter::Node<'_>> = None;
             let mut var_name: Option<tree_sitter::Node<'_>> = None;
             let mut var_type: Option<tree_sitter::Node<'_>> = None;
@@ -159,12 +153,6 @@ impl LanguageProvider for DartProvider {
                     {
                         decorators.push(d_str.to_string());
                     }
-                } else if Some(cap_idx) == idx_param {
-                    param_root = Some(cap.node);
-                } else if Some(cap_idx) == idx_param_name {
-                    param_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_param_type {
-                    param_type = Some(cap.node);
                 } else if Some(cap_idx) == idx_var {
                     var_root = Some(cap.node);
                 } else if Some(cap_idx) == idx_var_name {
@@ -181,39 +169,6 @@ impl LanguageProvider for DartProvider {
                     || Some(cap_idx) == idx_import
                 {
                     root_span_node = Some(cap.node);
-                }
-            }
-
-            // Dart formal parameter `String name` → Variable node carrying
-            // the declared type. Mirrors C/C++/Swift conventions: each
-            // declared name becomes a separately indexable RawNode.
-            if let (Some(p_root), Some(p_name)) = (param_root, param_name) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[p_name.start_byte()..p_name.end_byte()])
-                {
-                    let name_str = name_str.trim();
-                    let start = p_root.start_position();
-                    let end = p_root.end_position();
-                    let type_ann = param_type.and_then(|t| {
-                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
-                            .ok()
-                            .map(|s| s.trim().to_string())
-                    });
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: !name_str.starts_with('_'),
-                        heritage: vec![],
-                        type_annotation: type_ann,
-                        name: name_str.to_string(),
-                        kind: NodeKind::Variable,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                    });
                 }
             }
 

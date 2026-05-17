@@ -27,6 +27,11 @@
 ;; tree-sitter-swift accepts `name:` field only on `property_declaration`
 ;; (for the bound name), NOT on `type_annotation`, so we descend
 ;; positionally to read the type identifier.
+;; KNOWN GAP: only typed-with-user_type properties get captured. Untyped
+;; (`var z = 0`) and non-user_type (`[Int]`, `Int?`, tuples, function
+;; types) declarations are missed. Relaxing this query to `?` produced
+;; ~3× over-emission via tree-sitter pattern alternation that simple
+;; (root, name) dedupe could not collapse. Dedicated round to follow.
 (property_declaration
   name: (pattern bound_identifier: (simple_identifier) @property.name)
   (type_annotation

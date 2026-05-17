@@ -22,6 +22,11 @@ thread_local! {
 }
 pub struct JavaScriptProvider {
     query: Query,
+    /// Cached new (Variable) capture indices — pre-existing lookups
+    /// stay per parse_file for surgical minimalism.
+    idx_variable_name: Option<u32>,
+    idx_variable: Option<u32>,
+    idx_export_variable: Option<u32>,
 }
 
 impl JavaScriptProvider {
@@ -29,7 +34,15 @@ impl JavaScriptProvider {
         let language = tree_sitter_javascript::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let idx_variable_name = query.capture_index_for_name("variable.name");
+        let idx_variable = query.capture_index_for_name("variable");
+        let idx_export_variable = query.capture_index_for_name("export.variable");
+        Ok(Self {
+            query,
+            idx_variable_name,
+            idx_variable,
+            idx_export_variable,
+        })
     }
 }
 
@@ -47,6 +60,10 @@ impl LanguageProvider for JavaScriptProvider {
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
         let mut nodes: Vec<RawNode> = Vec::new();
+        // Spans of already-emitted nodes — lookup table for the Variable
+        // dedup at L301 (was O(n²) linear scan of `nodes`).
+        let mut emitted_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
 
@@ -65,6 +82,11 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
+
+        // 14-lang-parity Variable captures — use cached indices.
+        let idx_variable_name = self.idx_variable_name;
+        let idx_variable = self.idx_variable;
+        let idx_export_variable = self.idx_export_variable;
 
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
@@ -92,6 +114,10 @@ impl LanguageProvider for JavaScriptProvider {
             let mut import_alias = None;
             let mut is_import_namespace = false;
 
+            let mut variable_name_node: Option<tree_sitter::Node> = None;
+            let mut variable_root_node: Option<tree_sitter::Node> = None;
+            let mut is_exported_variable = false;
+
             let mut route_method = None;
             let mut route_path = None;
             let mut is_route = false;
@@ -107,6 +133,15 @@ impl LanguageProvider for JavaScriptProvider {
                 } else if Some(cap_idx) == idx_name_method {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if Some(cap_idx) == idx_variable_name {
+                    variable_name_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_variable {
+                    variable_root_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_export_variable {
+                    is_exported_variable = true;
+                    if variable_root_node.is_none() {
+                        variable_root_node = Some(cap.node);
+                    }
                 } else if Some(cap_idx) == idx_heritage {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -205,6 +240,7 @@ impl LanguageProvider for JavaScriptProvider {
                     }
 
                     if !existing_found {
+                        emitted_spans.insert(node_span);
                         nodes.push(RawNode {
                             decorators: decorators.clone(),
                             is_exported,
@@ -215,6 +251,84 @@ impl LanguageProvider for JavaScriptProvider {
                             span: node_span,
                             calls: Vec::new(),
                         });
+                    }
+                }
+            }
+
+            // Variable emission — module-level only.
+            // The query captures all lexical_declaration / variable_declaration,
+            // so we walk up to confirm the declaration's parent is `program`.
+            // Arrow-function-assigned declarators are already captured as
+            // `name.function` above and produce a Function node; skip them here
+            // to avoid a duplicate Variable node shadowing the Function node.
+            if let (Some(vn), Some(vr)) = (variable_name_node, variable_root_node) {
+                // `vr` is the lexical_declaration / variable_declaration node itself
+                // (or the export_statement's inner declaration via @variable).
+                // Walk up from vr to confirm `program` is an ancestor before any
+                // function/class/arrow scope boundary — that is the module-level guard.
+                let decl_node = if vr.kind() == "variable_declarator" {
+                    // export_statement pattern binds @variable to variable_declarator;
+                    // we need the parent declaration for the ancestor check.
+                    vr.parent().unwrap_or(vr)
+                } else {
+                    vr
+                };
+                // Find the declarator to check its value kind (skip arrow functions).
+                let mut is_arrow = false;
+                let mut cur = decl_node.child(0);
+                while let Some(child) = cur {
+                    if child.kind() == "variable_declarator" {
+                        // Check if value is an arrow_function — those are already
+                        // emitted as Function nodes by the @name.function capture.
+                        for i in 0..child.child_count() {
+                            if let Some(gc) = child.child(i) {
+                                if gc.kind() == "arrow_function" {
+                                    is_arrow = true;
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    cur = child.next_sibling();
+                }
+
+                if !is_arrow {
+                    // Inclusive emission: no ancestor filter. Capture every
+                    // var/let/const declarator (locals + top-level) so JS
+                    // Variable parity tracks ref-gitnexus which also counts
+                    // function locals. Downstream consumers can filter.
+                    {
+                        if let Ok(name_str) =
+                            std::str::from_utf8(&source[vn.start_byte()..vn.end_byte()])
+                        {
+                            let start = decl_node.start_position();
+                            let end = decl_node.end_position();
+                            let var_span = (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            );
+                            // Dedup: skip if a node already occupies this span (an
+                            // arrow-function const declarator was already pushed as
+                            // Function via the @function.name capture). HashSet
+                            // lookup is O(1) — earlier impl scanned `nodes` linearly
+                            // which is O(k²) per file on declarator-heavy code.
+                            let already_emitted = emitted_spans.contains(&var_span);
+                            if !already_emitted {
+                                nodes.push(RawNode {
+                                    decorators: vec![],
+                                    is_exported: is_exported_variable || is_exported,
+                                    heritage: vec![],
+                                    type_annotation: None,
+                                    name: name_str.to_string(),
+                                    kind: NodeKind::Variable,
+                                    span: var_span,
+                                    calls: Vec::new(),
+                                });
+                            }
+                        }
                     }
                 }
             }

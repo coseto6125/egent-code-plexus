@@ -37,14 +37,27 @@ pub fn determine_category(path: &str) -> FileCategory {
         return FileCategory::Reference;
     }
 
+    // Naming caveat: `is_test` is historical. As of this version it also
+    // covers example / sample / demo directories, because for routing and
+    // coverage purposes those have the same property as tests — not real
+    // production endpoints. See follow-up to split into
+    // `FileCategory::Example` for a cleaner semantic separation.
     let is_test = lower_path.contains(".test.")
         || lower_path.contains(".spec.")
+        || lower_path.contains("-spec.") // NestJS/Angular `.e2e-spec.ts` etc.
         || lower_path.contains("__tests__/")
         || lower_path.contains("__mocks__/")
         || lower_path.contains("/test/")
         || lower_path.contains("/tests/")
         || lower_path.contains("/testing/")
         || lower_path.contains("/fixtures/")
+        || lower_path.contains("/examples/") // framework example apps
+        || lower_path.contains("/example/")
+        || lower_path.contains("/sample/") // NestJS `sample/`, TypeORM `sample/`
+        || lower_path.contains("/samples/")
+        || lower_path.contains("/demo/")
+        || lower_path.contains("/demos/")
+        || lower_path.contains("/e2e/") // Cypress / NestJS / Playwright e2e dirs
         || lower_path.ends_with("_test.go")
         || lower_path.ends_with("_test.py")
         || lower_path.ends_with("_spec.rb")
@@ -254,6 +267,22 @@ impl GraphBuilder {
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
             let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+            // Skip Route emission for non-production files (Test/Reference
+            // categories). Framework example dirs, e2e specs, vendored deps
+            // etc. otherwise flood the graph with thousands of phantom
+            // routes that no LLM consumer should hit. Reads the category
+            // already computed in Pass 1 (line 229) — avoids re-running
+            // `determine_category` (~36 string scans per file) per file.
+            // `current_handler_idx` still advances by the file's node count
+            // so downstream alignment stays correct.
+            let is_non_production = matches!(
+                files[file_idx as usize].category,
+                FileCategory::Test | FileCategory::Reference
+            );
+            if is_non_production {
+                current_handler_idx += local_graph.nodes.len() as u32;
+                continue;
+            }
 
             for raw_node in &local_graph.nodes {
                 let handler_idx = current_handler_idx;
@@ -1258,6 +1287,36 @@ mod determine_category_tests {
         assert_test("app/Http/Controllers/UserControllerTest.php"); // PHPUnit
         assert_test("src/main/scala/com/foo/BarSpec.scala"); // ScalaTest
         assert_test("src/main/scala/com/foo/BarTest.scala"); // ScalaTest alt
+    }
+
+    #[test]
+    fn example_sample_demo_e2e_dirs_classify_as_test() {
+        // Round 1 of 14-language parity work: framework example/demo dirs
+        // were producing the majority of Route noise on `.sample_repo`
+        // (Express 58, Flask 21, Sinatra 5, NestJS 14 — 78% of 108 routes).
+        // Treat them as non-production so `gnx routes` default filter
+        // hides them; users can still surface via --include-tests.
+        assert_test("JavaScript/examples/auth/index.js");
+        assert_test("Ruby/examples/chat.rb");
+        assert_test("Python/examples/flask_basic.py");
+        assert_test("TypeScript/sample/01-cats-app/src/cats.controller.ts");
+        assert_test("packages/demo/index.html");
+        assert_test("apps/foo/e2e/login.spec.ts");
+        assert_test("apps/foo/src/auth.e2e-spec.ts"); // hyphen-spec NestJS pattern
+        assert_test("frontend/cypress/e2e/login.cy.ts");
+    }
+
+    #[test]
+    fn ambiguous_substrings_do_not_classify_as_test() {
+        // Guard against the new patterns becoming false-positive magnets.
+        // `sample`, `example`, `demo`, `e2e` are common nouns and the
+        // path filter must require the literal `/<token>/` segment form,
+        // not bare substring matches.
+        assert_source("src/sampleRate.ts"); // var name, not /sample/
+        assert_source("src/Examples.kt"); // exported public type
+        assert_source("src/demographics/service.py");
+        assert_source("src/e2encoder/utils.go"); // no /e2e/ segment
+        assert_source("src/lib/spec_loader.py"); // _spec at start of basename
     }
 
     #[test]

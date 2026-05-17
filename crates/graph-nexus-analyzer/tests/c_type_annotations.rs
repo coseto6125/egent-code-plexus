@@ -30,27 +30,10 @@ fn find<'a>(nodes: &'a [RawNode], name: &str, kind: NodeKind) -> &'a RawNode {
         .unwrap_or_else(|| panic!("missing {kind:?} `{name}` in {nodes:#?}"))
 }
 
-#[test]
-fn param_primitive() {
-    let nodes = parse("void f(int x);\n");
-    let p = find(&nodes, "x", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("int"));
-}
-
-#[test]
-fn param_pointer() {
-    // Source spelling `char* s` is preserved (no space before `*`).
-    let nodes = parse("void f(char* s);\n");
-    let p = find(&nodes, "s", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("char*"));
-}
-
-#[test]
-fn param_const_pointer() {
-    let nodes = parse("void f(const char* s);\n");
-    let p = find(&nodes, "s", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("const char*"));
-}
+// param_primitive / param_pointer / param_const_pointer removed: formal
+// parameters are no longer emitted as Variable nodes (see commit log on
+// `fix(analyzer): drop formal_parameter Variable emission ...`). Parameter
+// semantics live on the Function node itself, not as separate Variables.
 
 #[test]
 fn return_type_int() {

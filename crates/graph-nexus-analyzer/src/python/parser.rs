@@ -272,6 +272,10 @@ pub struct PythonProvider {
 struct PythonCaptureIndices {
     function_name: Option<u32>,
     class_name: Option<u32>,
+    property_name: Option<u32>,
+    property: Option<u32>,
+    variable_name: Option<u32>,
+    variable: Option<u32>,
     type_ann: Option<u32>,
     heritage: Option<u32>,
     export: Option<u32>,
@@ -315,6 +319,10 @@ impl PythonProvider {
         let indices = PythonCaptureIndices {
             function_name: query.capture_index_for_name("function.name"),
             class_name: query.capture_index_for_name("class.name"),
+            property_name: query.capture_index_for_name("property.name"),
+            property: query.capture_index_for_name("property"),
+            variable_name: query.capture_index_for_name("variable.name"),
+            variable: query.capture_index_for_name("variable"),
             type_ann: query.capture_index_for_name("type"),
             heritage: query.capture_index_for_name("heritage"),
             export: query.capture_index_for_name("export"),
@@ -475,6 +483,12 @@ impl LanguageProvider for PythonProvider {
                 } else if cap_idx == idx.class_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
+                } else if cap_idx == idx.property_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Property);
+                } else if cap_idx == idx.variable_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Variable);
                 } else if cap_idx == idx.type_ann {
                     type_annotation_node = Some(cap.node);
                 } else if cap_idx == idx.heritage {
@@ -504,7 +518,11 @@ impl LanguageProvider for PythonProvider {
                     is_route = true;
                     root_span_node = Some(cap.node);
                     route_call_node = Some(cap.node);
-                } else if cap_idx == idx.function || cap_idx == idx.class {
+                } else if cap_idx == idx.function
+                    || cap_idx == idx.class
+                    || cap_idx == idx.property
+                    || cap_idx == idx.variable
+                {
                     root_span_node = Some(cap.node);
                 } else if cap_idx == idx.fastapi_depends_target {
                     if !has_fastapi {
@@ -652,6 +670,20 @@ impl LanguageProvider for PythonProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+                // Module-level guard: Variable captures fire for every
+                // expression_statement in any scope. Walk the parent chain
+                // from the expression_statement node; only emit when the
+                // immediate parent is `module`. Any intervening
+                // `class_definition`, `function_definition`, `if_statement`,
+                // `with_statement`, `try_statement`, `for_statement`,
+                // `while_statement` — or any other block-introducing node —
+                // means this is NOT a module-level binding.
+                // No ancestor filter: emit every assignment that matches the
+                // query. Lets downstream consumers decide what's a true
+                // module-level vs class-attr vs local — we don't pre-classify.
+                // (Round 2 already split class-attrs into Property via a
+                // distinct query, so this Variable capture mostly fires for
+                // non-class scopes.)
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let span = node_span(&root);
 

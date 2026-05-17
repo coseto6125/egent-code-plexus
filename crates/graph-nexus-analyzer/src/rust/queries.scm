@@ -39,6 +39,14 @@
       name: (identifier) @function_item.name
       return_type: (_) @type) @method))
 
+;; Struct fields (named-field structs only; tuple structs have no field_identifier)
+(struct_item
+  (visibility_modifier)? @export
+  body: (field_declaration_list
+    (field_declaration
+      (visibility_modifier)? @export
+      name: (field_identifier) @property.name) @property))
+
 ;; Imports (use std::collections::HashMap)
 (use_declaration
   argument: (scoped_identifier

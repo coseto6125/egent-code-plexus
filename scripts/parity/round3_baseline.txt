@@ -1,0 +1,235 @@
+
+=== TypeScript  (rs total 10090, ref total 15120, delta -5030) ===
+  kind                  rs      ref    delta  flag
+  Class               1480     1392      +88  
+  Const                 18     4852    -4834  [under]     ← gap
+  EntryPoint            99        0      +99  [rs-only]
+  File                1728     2032     -304  
+  Folder                 0      626     -626  [ref-only]  ← gap
+  Function             587      799     -212  
+  Interface            310      310       +0  
+  Method              3005     3367     -362  
+  Property            2849     1296    +1553  [over]      ← noise?
+  Route                  2       89      -87  [under]     ← gap
+  Section                0      357     -357  [ref-only]  ← gap
+  Variable              12        0      +12  [rs-only]
+
+=== JavaScript  (rs total 750, ref total 1260, delta -510) ===
+  kind                  rs      ref    delta  flag
+  Class                  7        0       +7  [rs-only]
+  Const                  0       13      -13  [ref-only]  ← gap
+  File                 145      183      -38  
+  Folder                 0       58      -58  [ref-only]  ← gap
+  Function             137      126      +11  
+  Route                  0       82      -82  [ref-only]  ← gap
+  Section                0       31      -31  [ref-only]  ← gap
+  Variable             461      767     -306  [under]     ← gap
+
+=== Python  (rs total 3174, ref total 2514, delta +660) ===
+  kind                  rs      ref    delta  flag
+  Class                175      137      +38  
+  Const                  8        0       +8  [rs-only]
+  EntryPoint             1        0       +1  [rs-only]
+  File                  91      207     -116  [under]     ← gap
+  Folder                 0       46      -46  [ref-only]  ← gap
+  Function            1466      859     +607  [over]      ← noise?
+  Method                 0      373     -373  [ref-only]  ← gap
+  Property             216       61     +155  [over]      ← noise?
+  Route                  2      120     -118  [under]     ← gap
+  Section                0       16      -16  [ref-only]  ← gap
+  Variable            1215      695     +520  [over]      ← noise?
+
+=== Java  (rs total 160520, ref total 91818, delta +68702) ===
+  kind                  rs      ref    delta  flag
+  Annotation             0      123     -123  [ref-only]  ← gap
+  Class               6366     5976     +390  
+  Const                  3        0       +3  [rs-only]
+  Constructor         3682     3531     +151  
+  Enum                   0      379     -379  [ref-only]  ← gap
+  File                3237     3183      +54  
+  Folder                 0      314     -314  [ref-only]  ← gap
+  Function               7        0       +7  [rs-only]
+  Interface            448      428      +20  
+  Method             55162    49747    +5415  
+  Property           10397     9700     +697  
+  Section                0       20      -20  [ref-only]  ← gap
+  Variable           81218    18417   +62801  [over]      ← noise?
+
+=== Kotlin  (rs total 9501, ref total 6944, delta +2557) ===
+  kind                  rs      ref    delta  flag
+  Annotation             0       38      -38  [ref-only]  ← gap
+  Class                620      424     +196  [over]      ← noise?
+  Const                  0       63      -63  [ref-only]  ← gap
+  Constructor          221      221       +0  
+  EntryPoint            29        0      +29  [rs-only]
+  Enum                   0        2       -2  [ref-only]  ← gap
+  File                 358     1060     -702  [under]     ← gap
+  Folder                 0      437     -437  [ref-only]  ← gap
+  Function             216      139      +77  [over]      ← noise?
+  Interface            113      121       -8  
+  Method              2527     2233     +294  
+  Property             794      872      -78  
+  Section                0       41      -41  [ref-only]  ← gap
+  Variable            4623     1293    +3330  [over]      ← noise?
+
+=== CSharp  (rs total 31023, ref total 18371, delta +12652) ===
+  kind                  rs      ref    delta  flag
+  Class               1704     1566     +138  
+  Constructor            0      587     -587  [ref-only]  ← gap
+  Delegate               0       14      -14  [ref-only]  ← gap
+  EntryPoint             2        0       +2  [rs-only]
+  Enum                   0      102     -102  [ref-only]  ← gap
+  File                 946     1157     -211  
+  Folder                 0       53      -53  [ref-only]  ← gap
+  Function               0       21      -21  [ref-only]  ← gap
+  Interface             51       50       +1  
+  Method              7277     6612     +665  
+  Namespace              0      942     -942  [ref-only]  ← gap
+  Process                8        0       +8  [rs-only]
+  Property            3818     2605    +1213  [over]      ← noise?
+  Section                0       21      -21  [ref-only]  ← gap
+  Struct                 0       29      -29  [ref-only]  ← gap
+  Variable           17217     4612   +12605  [over]      ← noise?
+
+=== Go  (rs total 4947, ref total 3099, delta +1848) ===
+  kind                  rs      ref    delta  flag
+  Class                161        0     +161  [rs-only]
+  Const                  0       42      -42  [ref-only]  ← gap
+  File                 103      113      -10  
+  Folder                 0       13      -13  [ref-only]  ← gap
+  Function             889      887       +2  
+  Interface             19       19       +0  
+  Method               424      424       +0  
+  Property             629      465     +164  
+  Section                0      121     -121  [ref-only]  ← gap
+  Struct                 0      148     -148  [ref-only]  ← gap
+  Variable            2722      867    +1855  [over]      ← noise?
+
+=== Rust  (rs total 11149, ref total 11608, delta -459) ===
+  kind                  rs      ref    delta  flag
+  Class                862        0     +862  [rs-only]
+  Const                  0      290     -290  [ref-only]  ← gap
+  EntryPoint            37        0      +37  [rs-only]
+  Enum                   0       91      -91  [ref-only]  ← gap
+  File                 785      819      -34  
+  Folder                 0      112     -112  [ref-only]  ← gap
+  Function            7058     6626     +432  
+  Impl                   0      529     -529  [ref-only]  ← gap
+  Interface             65        0      +65  [rs-only]
+  Macro                  0      163     -163  [ref-only]  ← gap
+  Method              1030        0    +1030  [rs-only]
+  Module                 0      473     -473  [ref-only]  ← gap
+  Property            1312     1314       -2  
+  Section                0      100     -100  [ref-only]  ← gap
+  Static                 0       42      -42  [ref-only]  ← gap
+  Struct                 0      693     -693  [ref-only]  ← gap
+  Trait                  0       65      -65  [ref-only]  ← gap
+  TypeAlias              0      291     -291  [ref-only]  ← gap
+
+=== PHP  (rs total 41337, ref total 44140, delta -2803) ===
+  kind                  rs      ref    delta  flag
+  Class               3915     3798     +117  
+  Const                 16       70      -54  [under]     ← gap
+  EntryPoint           249        0     +249  [rs-only]
+  Enum                   0      114     -114  [ref-only]  ← gap
+  File                2962     3007      -45  
+  Folder                 0      475     -475  [ref-only]  ← gap
+  Function             183      127      +56  [over]      ← noise?
+  Interface            201      201       +0  
+  Method             28832    28600     +232  
+  Namespace              0     2639    -2639  [ref-only]  ← gap
+  Property            4977     4885      +92  
+  Route                  1        0       +1  [rs-only]
+  Section                0       21      -21  [ref-only]  ← gap
+  Trait                  0      203     -203  [ref-only]  ← gap
+  Variable               1        0       +1  [rs-only]
+
+=== Ruby  (rs total 1397, ref total 1661, delta -264) ===
+  kind                  rs      ref    delta  flag
+  Class                274      121     +153  [over]      ← noise?
+  Const                  0       50      -50  [ref-only]  ← gap
+  File                 149      275     -126  [under]     ← gap
+  Folder                 0       31      -31  [ref-only]  ← gap
+  Function              15        0      +15  [rs-only]
+  Method               918      856      +62  
+  Property              40       42       -2  
+  Route                  1        0       +1  [rs-only]
+  Section                0      155     -155  [ref-only]  ← gap
+  Trait                  0      131     -131  [ref-only]  ← gap
+
+=== Swift  (rs total 6482, ref total 6503, delta -21) ===
+  kind                  rs      ref    delta  flag
+  Class                622      309     +313  [over]      ← noise?
+  Const                  0        6       -6  [ref-only]  ← gap
+  Constructor            0      109     -109  [ref-only]  ← gap
+  Enum                   0       75      -75  [ref-only]  ← gap
+  File                 109      511     -402  [under]     ← gap
+  Folder                 0      114     -114  [ref-only]  ← gap
+  Function            2083     2117      -34  
+  Interface              0       27      -27  [ref-only]  ← gap
+  Method                 0       71      -71  [ref-only]  ← gap
+  Property             582     2610    -2028  [under]     ← gap
+  Section                0      252     -252  [ref-only]  ← gap
+  Struct                 0      108     -108  [ref-only]  ← gap
+  TypeAlias              0       28      -28  [ref-only]  ← gap
+  Variable            3086      166    +2920  [over]      ← noise?
+
+=== C  (rs total 52385, ref total 33836, delta +18549) ===
+  kind                  rs      ref    delta  flag
+  Class               2427       51    +2376  [over]      ← noise?
+  Const                209        8     +201  [over]      ← noise?
+  EntryPoint           163        0     +163  [rs-only]
+  Enum                   0       44      -44  [ref-only]  ← gap
+  File                 944     1750     -806  [under]     ← gap
+  Folder                 0       94      -94  [ref-only]  ← gap
+  Function           10890    13420    -2530  
+  Macro                  0     5610    -5610  [ref-only]  ← gap
+  Method                20      329     -309  [under]     ← gap
+  Process               57        0      +57  [rs-only]
+  Property            4842     2957    +1885  [over]      ← noise?
+  Section                0      148     -148  [ref-only]  ← gap
+  Struct                 0      911     -911  [ref-only]  ← gap
+  Typedef                0      867     -867  [ref-only]  ← gap
+  Union                  0       19      -19  [ref-only]  ← gap
+  Variable           32833     7628   +25205  [over]      ← noise?
+
+=== Cpp  (rs total 6612, ref total 9283, delta -2671) ===
+  kind                  rs      ref    delta  flag
+  Class                415      116     +299  [over]      ← noise?
+  Const                  5        0       +5  [rs-only]
+  EntryPoint           250        0     +250  [rs-only]
+  Enum                   0       19      -19  [ref-only]  ← gap
+  File                 508     1115     -607  [under]     ← gap
+  Folder                 0       99      -99  [ref-only]  ← gap
+  Function            1420     1012     +408  
+  Macro                  0      496     -496  [ref-only]  ← gap
+  Method               559      996     -437  [under]     ← gap
+  Namespace              0       74      -74  [ref-only]  ← gap
+  Property             509      504       +5  
+  Section                0     2003    -2003  [ref-only]  ← gap
+  Struct                 0      199     -199  [ref-only]  ← gap
+  Template               0      152     -152  [ref-only]  ← gap
+  Typedef                0        7       -7  [ref-only]  ← gap
+  Union                  0        1       -1  [ref-only]  ← gap
+  Variable            2946     2490     +456  
+
+=== Dart  (rs total 6535, ref total 10019, delta -3484) ===
+  kind                  rs      ref    delta  flag
+  Class                868      866       +2  
+  Const                  0      186     -186  [ref-only]  ← gap
+  Constructor            1      254     -253  [under]     ← gap
+  EntryPoint           198        0     +198  [rs-only]
+  Enum                   0       48      -48  [ref-only]  ← gap
+  File                 706     1586     -880  [under]     ← gap
+  Folder                 0      558     -558  [ref-only]  ← gap
+  Function            1738      426    +1312  [over]      ← noise?
+  Impl                   0        1       -1  [ref-only]  ← gap
+  Interface             43        4      +39  [over]      ← noise?
+  Macro                  0        1       -1  [ref-only]  ← gap
+  Method               814      939     -125  
+  Property             534      814     -280  [under]     ← gap
+  Section                0     4240    -4240  [ref-only]  ← gap
+  Struct                 0        1       -1  [ref-only]  ← gap
+  Trait                  0        7       -7  [ref-only]  ← gap
+  TypeAlias              0       23      -23  [ref-only]  ← gap
+  Variable            1633       65    +1568  [over]      ← noise?

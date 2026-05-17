@@ -100,12 +100,20 @@ impl LanguageProvider for SwiftProvider {
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
 
-        let idx_param = self.query.capture_index_for_name("param");
-        let idx_param_name = self.query.capture_index_for_name("param.name");
-        let idx_param_type = self.query.capture_index_for_name("param.type");
         let idx_property = self.query.capture_index_for_name("property");
         let idx_property_name = self.query.capture_index_for_name("property.name");
         let idx_property_type = self.query.capture_index_for_name("property.type");
+
+        // Per (root, name-byte-offset) dedup. tree-sitter-swift fires the
+        // same property_declaration match ~3-4× per declared name when the
+        // optional `(type_annotation ...)?` resolves as both present and
+        // absent alternatives, AND when nested `bound_identifier` re-binds
+        // through pattern matching. Tracking (root_id, name_start_byte)
+        // collapses true duplicates while keeping tuple-pattern
+        // declarations (`let (a, b) = …`) distinct (different name byte
+        // offsets within the same root).
+        let mut seen_properties: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -119,9 +127,6 @@ impl LanguageProvider for SwiftProvider {
             let mut heritage = Vec::new();
             let mut type_annotation = None;
 
-            let mut param_root: Option<tree_sitter::Node<'_>> = None;
-            let mut param_name: Option<tree_sitter::Node<'_>> = None;
-            let mut param_type: Option<tree_sitter::Node<'_>> = None;
             let mut property_root: Option<tree_sitter::Node<'_>> = None;
             let mut property_name: Option<tree_sitter::Node<'_>> = None;
             let mut property_type: Option<tree_sitter::Node<'_>> = None;
@@ -171,12 +176,6 @@ impl LanguageProvider for SwiftProvider {
                     {
                         type_annotation = Some(type_str.to_string());
                     }
-                } else if Some(cap_idx) == idx_param {
-                    param_root = Some(cap.node);
-                } else if Some(cap_idx) == idx_param_name {
-                    param_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_param_type {
-                    param_type = Some(cap.node);
                 } else if Some(cap_idx) == idx_property {
                     property_root = Some(cap.node);
                 } else if Some(cap_idx) == idx_property_name {
@@ -203,43 +202,44 @@ impl LanguageProvider for SwiftProvider {
                 }
             }
 
-            // Swift function parameter `name: Type` → Variable node with the
-            // type as `type_annotation`. Mirrors C/C++/Go convention from
-            // Wave 2: each declared name with a type becomes a separately
-            // indexable node.
-            if let (Some(p_root), Some(p_name)) = (param_root, param_name) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[p_name.start_byte()..p_name.end_byte()])
-                {
-                    let start = p_root.start_position();
-                    let end = p_root.end_position();
-                    let type_ann = param_type.and_then(|t| {
-                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
-                            .ok()
-                            .map(|s| s.to_string())
-                    });
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: false,
-                        heritage: vec![],
-                        type_annotation: type_ann,
-                        name: name_str.to_string(),
-                        kind: NodeKind::Variable,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                    });
-                }
-            }
-
             // Swift property declaration `var x: Int` / `let y: String` →
-            // Property node. Captured separately from `(class ...)` body so
-            // both class properties and top-level lets land here.
+            // Property node ONLY when declared at class/struct/extension/
+            // protocol scope or top-level. tree-sitter-swift uses
+            // `property_declaration` for ALL `let/var`, including
+            // function-body locals (`func foo() { let x = 1 }`). Ref
+            // gitnexus filters those out — they're locals, not properties.
+            // Walk up the AST; if we hit `function_body` / `init_body` /
+            // `getter_specifier` / `setter_specifier` before a class-like
+            // body or the file root, skip the emission.
             if let (Some(pr_root), Some(pr_name)) = (property_root, property_name) {
+                if !seen_properties.insert((pr_root.id(), pr_name.start_byte())) {
+                    // Already emitted this (declaration, name-position) pair.
+                    continue;
+                }
+                // Only filter properties declared INSIDE computed-property
+                // getter/setter bodies, willSet/didSet observers, or
+                // closure literals — those are syntactically lets that the
+                // ref impl excludes. Test/setup function bodies are NOT
+                // filtered; ref captures their lets too as a stand-in for
+                // fixture/state declarations.
+                let mut anc = pr_root.parent();
+                let mut is_local = false;
+                while let Some(a) = anc {
+                    match a.kind() {
+                        "computed_property" | "willset_didset_block" | "lambda_literal" => {
+                            is_local = true;
+                            break;
+                        }
+                        "class_body" | "protocol_body" | "enum_class_body" | "source_file" => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                    anc = a.parent();
+                }
+                if is_local {
+                    continue;
+                }
                 if let Ok(name_str) =
                     std::str::from_utf8(&source[pr_name.start_byte()..pr_name.end_byte()])
                 {

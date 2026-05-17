@@ -38,3 +38,18 @@
   )? @export
   (simple_identifier) @function.name
   (user_type)? @type) @function
+
+; Properties — class-scoped only (val/var inside class_body).
+; Top-level file-scoped `val`/`var` are excluded here (those belong to Variable round).
+(class_body
+  (property_declaration
+    (variable_declaration
+      (simple_identifier) @property.name)
+  ) @property)
+
+; Variables — top-level val/var (direct child of source_file).
+; Broad capture; parser.rs post-filters to exclude class-body and function-local ones.
+(property_declaration
+  (variable_declaration
+    (simple_identifier) @variable.name)
+) @variable

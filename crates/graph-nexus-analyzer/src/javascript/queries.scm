@@ -27,6 +27,36 @@
     name: (identifier) @name.class
     (class_heritage (identifier) @heritage)?) @class) @export
 
+;; Variables — module-level only (var / let / const not assigned to an arrow function).
+;; Direct-child-of-program check is enforced in the parser via ancestor walk.
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @variable.name
+  )
+) @variable
+
+(variable_declaration
+  (variable_declarator
+    name: (identifier) @variable.name
+  )
+) @variable
+
+(export_statement
+  declaration: (lexical_declaration
+    (variable_declarator
+      name: (identifier) @variable.name
+    ) @variable
+  )
+) @export.variable
+
+(export_statement
+  declaration: (variable_declaration
+    (variable_declarator
+      name: (identifier) @variable.name
+    ) @variable
+  )
+) @export.variable
+
 ;; Methods
 (method_definition
   name: (property_identifier) @name.method) @method
