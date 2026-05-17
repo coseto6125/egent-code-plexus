@@ -5,9 +5,11 @@
   (mixins (type (_) @heritage))?
   interfaces: (interfaces (type (_) @heritage))?) @class
 
-;; Enums
+;; Enums — Dart first-class `enum Color { red, green }` and Dart 2.17+
+;; enhanced enums with methods. tree-sitter-dart uses enum_declaration with
+;; a named `name` field (single identifier, never multiple).
 (enum_declaration
-  name: (identifier) @interface.name) @interface
+  name: (identifier) @enum.name) @enum
 
 ;; Mixins — semantically closer to a trait (default-method container) than an
 ;; interface; map to NodeKind::Trait to match Kotlin mixin convention.
@@ -15,14 +17,42 @@
   name: (identifier) @trait.name
   interfaces: (interfaces (type (_) @heritage))?) @trait
 
-;; Constructors — method_declaration whose signature wraps a constructor_signature
-;; (no return type, name matches class name). Named constructors have two
-;; identifier children; we use the first (class name) as the span anchor but
-;; keep the full "Foo.named" text via the last identifier child.
+;; Constructors — four grammar forms in tree-sitter-dart:
+;;
+;;   1. method_declaration > method_signature > constructor_signature
+;;      Covers: `Foo()`, `Foo.named()` (default + named).
+;;
+;;   2. method_declaration > method_signature > factory_constructor_signature
+;;      Covers: `factory Foo.fromJson(...)`, `factory Foo()`.
+;;
+;;   3. declaration > constant_constructor_signature
+;;      Covers: `const Foo()`, `const Foo.named()`. The `const` modifier
+;;      promotes the grammar node out of method_declaration into declaration.
+;;
+;;   4. declaration > constructor_signature
+;;      Covers: abstract/external constructors declared without a body.
+;;
+;; The `name` field is `multiple: true` (dot-separated identifiers for named
+;; constructors). We anchor on the LAST identifier child so that `Foo.named`
+;; captures "named" (the constructor's own name), matching upstream convention.
+;; dedup in parser.rs collapses duplicates by (name, span, kind).
 (method_declaration
   signature: (method_signature
     (constructor_signature
       name: (identifier) @constructor.name))) @constructor
+
+(method_declaration
+  signature: (method_signature
+    (factory_constructor_signature
+      name: (identifier) @constructor.name))) @constructor
+
+(declaration
+  (constant_constructor_signature
+    name: (identifier) @constructor.name)) @constructor
+
+(declaration
+  (constructor_signature
+    name: (identifier) @constructor.name)) @constructor
 
 ;; Methods — capture full method_declaration so the span covers the body,
 ;; otherwise call-extraction can't attach call sites to the enclosing method.
@@ -108,6 +138,15 @@
   type: (type (_) @var.type)?
   (static_final_declaration_list
     (static_final_declaration name: (identifier) @var.name))) @var
+
+;; Annotations — `@override`, `@deprecated`, `@Foo()`, `@meta.visibleForTesting`.
+;; tree-sitter-dart uses an `annotation` node with a `name` field that is
+;; either a bare `identifier` or a `qualified` node. We capture only the
+;; identifier form here; qualified annotations (e.g. `@meta.visibleForTesting`)
+;; bind to the root identifier via the same capture index so the Rust layer
+;; reads the first (and only) identifier child.
+(annotation
+  name: (identifier) @annotation.name) @annotation
 
 ;; Imports — Dart `import 'pkg.dart';`. tree-sitter-dart wraps imports
 ;; three levels deep: `import_or_export > library_import >

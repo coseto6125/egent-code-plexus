@@ -68,7 +68,10 @@ impl DartProvider {
             .iter()
             .map(|name| DartSpec::CAPTURE_KIND.get(name).copied())
             .collect();
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -103,6 +106,8 @@ impl LanguageProvider for DartProvider {
         let idx_trait = self.query.capture_index_for_name("trait");
         let idx_property = self.query.capture_index_for_name("property");
         let idx_import = self.query.capture_index_for_name("import");
+        let idx_enum = self.query.capture_index_for_name("enum");
+        let idx_annotation = self.query.capture_index_for_name("annotation");
 
         let idx_var = self.query.capture_index_for_name("var");
         let idx_var_name = self.query.capture_index_for_name("var.name");
@@ -175,6 +180,8 @@ impl LanguageProvider for DartProvider {
                     || Some(cap_idx) == idx_trait
                     || Some(cap_idx) == idx_property
                     || Some(cap_idx) == idx_import
+                    || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_annotation
                 {
                     root_span_node = Some(cap.node);
                 }

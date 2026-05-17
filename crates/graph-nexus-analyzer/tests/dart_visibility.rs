@@ -81,9 +81,9 @@ fn property_visibility_in_class() {
 
 #[test]
 fn private_enum_is_not_exported() {
-    // Enums map to NodeKind::Interface in the Dart provider.
+    // Enums emit NodeKind::Enum (corrected from the prior Interface mis-mapping).
     let src = "enum _Color { red, blue }";
     let nodes = parse(src);
-    let e = find(&nodes, "_Color", NodeKind::Interface);
+    let e = find(&nodes, "_Color", NodeKind::Enum);
     assert!(!e.is_exported, "enum `_Color` must be private");
 }

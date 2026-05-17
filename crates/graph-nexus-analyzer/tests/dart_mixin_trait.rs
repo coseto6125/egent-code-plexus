@@ -59,12 +59,18 @@ fn private_mixin_is_not_exported() {
 }
 
 #[test]
-fn enum_still_emits_interface() {
-    // Enums must remain NodeKind::Interface — mixin change must not affect them.
+fn enum_emits_enum_not_interface() {
+    // Enums now emit NodeKind::Enum (was incorrectly NodeKind::Interface before
+    // the fix). Mixin-trait refactor must not regress this.
     let g = parse("enum Color { red, green, blue }");
     assert!(
-        has(&g, "Color", NodeKind::Interface),
-        "`Color` enum must remain NodeKind::Interface; nodes: {:#?}",
+        has(&g, "Color", NodeKind::Enum),
+        "`Color` enum must be NodeKind::Enum; nodes: {:#?}",
+        g.nodes
+    );
+    assert!(
+        !has(&g, "Color", NodeKind::Interface),
+        "`Color` enum must not be NodeKind::Interface; nodes: {:#?}",
         g.nodes
     );
 }
