@@ -8,8 +8,8 @@ use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use fs2::FileExt;
 use graph_nexus_core::registry::{
-    resolve_home_gnx, CommitBuildMeta, EmbeddingStatus, RefRecord, RepoMeta, SourceType,
-    BUILDER_FINGERPRINT,
+    resolve_home_gnx, CommitBuildMeta, EmbeddingStatus, RefRecord, RegistryFile, RepoAlias,
+    RepoMeta, SourceType, BUILDER_FINGERPRINT,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -57,6 +57,7 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)?;
     if lock.try_lock_exclusive().is_err() {
         // Another builder owns this dir — wait for completion + return
@@ -304,6 +305,7 @@ pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> 
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)?;
     lock.lock_exclusive()?;
 
@@ -325,6 +327,22 @@ pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> 
     rm.last_touched = chrono::Utc::now().to_rfc3339();
     rm.total_size_bytes = dir_size(repo_root)?;
     RepoMeta::write_atomic(&meta_path, &rm)?;
+
+    // Sync the global registry. Without this, `contracts --repo @all`,
+    // `coverage`, and any other Registry-backed reader is blind to repos
+    // indexed since the registry was last (manually) rebuilt — `rebuild_from_disk`
+    // was the only writer the build path ever touched, and it has zero callers
+    // outside the v2 migration probe. Lock order: caller holds per-repo
+    // `.meta.lock` (above) → we acquire registry lock here. Single-direction
+    // nesting: every other registry writer takes only the registry lock.
+    let repo_dir_name = repo_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::other("repo_root has no final component"))?;
+    let home_gnx = repo_root
+        .parent()
+        .ok_or_else(|| io::Error::other("repo_root has no parent (home_gnx)"))?;
+    RegistryFile::upsert_repo_atomic(home_gnx, RepoAlias::from_repo_meta(repo_dir_name, &rm))?;
     Ok(())
 }
 

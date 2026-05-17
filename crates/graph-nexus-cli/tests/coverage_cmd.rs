@@ -35,35 +35,31 @@ fn run_coverage_empty_registry(extra: &[&str]) -> String {
 }
 
 /// Run `gnx coverage [args]` against a registry that has one registered repo.
-/// The repo is a real temp dir initialised via `gnx admin register`.
+/// The repo is a real temp dir indexed via `gnx admin index`. Indexing now
+/// upserts the global registry (the only writer that does — `admin group`
+/// requires a pre-existing entry, `admin register` doesn't exist as a
+/// subcommand), so this is the canonical setup path.
 fn run_coverage_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempDir) {
     let home_tmp = tempfile::tempdir().unwrap();
     let repo_tmp = tempfile::tempdir().unwrap();
 
-    // Initialise a git repo so the register command is happy.
     init_git_repo(repo_tmp.path());
 
-    // Register the repo so the registry contains it.
-    let reg_out = Command::new(gnx_bin())
-        .args([
-            "admin",
-            "register",
-            "--path",
-            repo_tmp.path().to_str().unwrap(),
-            "--name",
-            "test-repo",
-            "--remote",
-            "git@github.com:test/test-repo.git",
-        ])
+    let idx_out = Command::new(gnx_bin())
+        .args(["admin", "index", "--repo", repo_tmp.path().to_str().unwrap()])
         .env("HOME", home_tmp.path())
         .output()
-        .expect("register failed to spawn");
-    // If register fails, skip silently — just run coverage anyway.
-    let _ = reg_out;
+        .expect("admin index failed to spawn");
+    assert!(
+        idx_out.status.success(),
+        "admin index exited non-zero: stderr={}",
+        String::from_utf8_lossy(&idx_out.stderr)
+    );
 
     let out = Command::new(gnx_bin())
         .args(["coverage"])
         .args(extra)
+        .current_dir(repo_tmp.path())
         .env("HOME", home_tmp.path())
         .output()
         .expect("coverage failed to spawn");
@@ -83,6 +79,25 @@ fn init_git_repo(repo: &Path) {
         .unwrap();
     Command::new("git")
         .args(["remote", "add", "origin", "git@github.com:test/test.git"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ])
         .current_dir(repo)
         .output()
         .unwrap();
@@ -133,12 +148,7 @@ fn coverage_default_format_succeeds() {
 /// (frameworks, freshness, blind_spots) must be present. External-client
 /// usage (HTTP/DB/Redis/queue) is intentionally NOT a coverage section —
 /// see the standalone `gnx tool-map` command.
-///
-/// This test is marked `#[ignore]` because it depends on the `admin register`
-/// sub-command recognising the temp repo path; registration reliability across
-/// environments is not guaranteed in CI. Run with `cargo test -- --ignored`.
 #[test]
-#[ignore = "requires registry registration to succeed (admin register)"]
 fn coverage_with_repo_includes_health_sections() {
     let (stdout, _home) = run_coverage_with_registered_repo(&["--format", "json", "--repo", "."]);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
