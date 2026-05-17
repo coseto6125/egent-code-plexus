@@ -69,9 +69,13 @@
   (type_identifier) @typedef.name) @typedef
 
 ;; Functions — capture full function_declaration (signature + body) so calls
-;; inside the body land in this node's span. The bare function_signature
-;; alternative is kept for top-level signatures without a body
-;; (e.g. abstract / external declarations).
+;; inside the body land in this node's span. The bare `function_signature`
+;; alternative below catches top-level `external` / signature-only
+;; declarations that tree-sitter-dart parses WITHOUT a `function_declaration`
+;; wrapper. Both patterns can match the same function (one fires on the outer
+;; node, the other on its inner signature child) — the parser filters that
+;; case out by skipping any bare-signature emit whose parent is a
+;; `function_declaration` (see parser.rs).
 (function_declaration
   (function_signature
     return_type: (type)? @type
