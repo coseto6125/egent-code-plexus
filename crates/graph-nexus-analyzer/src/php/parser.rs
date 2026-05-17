@@ -424,6 +424,14 @@ impl LanguageProvider for PhpProvider {
                     let start = root.start_position();
                     let end = root.end_position();
 
+                    // PHP's constructor convention is `__construct`; the spec
+                    // table maps it as Method, so promote here.
+                    let k = if k == NodeKind::Method && name_str == "__construct" {
+                        NodeKind::Constructor
+                    } else {
+                        k
+                    };
+
                     // Property dedupe on name-node id so multi-declarator
                     // (`public int $x, $y;`) each gets its own entry.
                     let node_id = if k == NodeKind::Property { n.id() } else { root.id() };

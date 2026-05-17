@@ -382,6 +382,29 @@ impl LanguageProvider for CppProvider {
             a.imported_name == b.imported_name && a.source == b.source && a.alias == b.alias
         });
 
+        // C++ has no reserved constructor name; the convention is that a
+        // method whose name equals its enclosing class name is a constructor.
+        // Inline ctors are already Method (via `is_inline_class_member`);
+        // out-of-line `Foo::Foo()` captures the unqualified `Foo` as @name.method.
+        // Post-process: collect Class/Struct names, then promote any Method
+        // whose name appears in that set to Constructor.
+        // Why: parser has no per-node enclosing-class context at emit time;
+        // file-scope name matching is the cheapest approximation that works
+        // for the common single-class-per-file and multi-class-per-file cases.
+        // False-positive risk: a method that happens to share a name with a
+        // class in the same file (e.g. `class Foo {}; class Bar { void Foo() {} }`)
+        // — this is an edge case and the naming convention itself is the signal.
+        let class_names: std::collections::HashSet<String> = nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct))
+            .map(|n| n.name.clone())
+            .collect();
+        for node in &mut nodes {
+            if node.kind == NodeKind::Method && class_names.contains(&node.name) {
+                node.kind = NodeKind::Constructor;
+            }
+        }
+
         // Extract call sites with receiver-type binding: `this->method()` /
         // `this.method()` → `Class.method`, `Base::method()` → `Base.method`,
         // and typed-var `obj.method()` / `obj->method()` → `Type.method`.

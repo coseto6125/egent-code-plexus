@@ -747,9 +747,19 @@ impl LanguageProvider for PythonProvider {
                     } else {
                         k
                     };
+                    // `__init__` is Python's constructor convention; the spec
+                    // table maps class methods to Method, so promote here.
+                    let final_kind = if final_kind == NodeKind::Method && name_str == "__init__" {
+                        NodeKind::Constructor
+                    } else {
+                        final_kind
+                    };
                     if let Some(existing) = nodes.iter_mut().find(|node| node.span == span) {
                         if existing.kind == NodeKind::Function && final_kind == NodeKind::Method {
                             existing.kind = NodeKind::Method;
+                        }
+                        if final_kind == NodeKind::Constructor {
+                            existing.kind = NodeKind::Constructor;
                         }
                         for h in heritage {
                             if !existing.heritage.contains(&h) {
