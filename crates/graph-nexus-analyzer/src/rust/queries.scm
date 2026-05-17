@@ -108,6 +108,14 @@
   (visibility_modifier)? @export
   name: (identifier) @const_item.name) @const_decl
 
+;; Statics: `static X: T = ...;` / `static mut X: T = ...;` — semantically
+;; another compile-time constant from the LLM's viewpoint. NodeKind::Static
+;; doesn't exist; map to Const (ref-gitnexus uses a `Static` label, so the
+;; per-side parity diff records this as a Const↔Static label_diff).
+(static_item
+  (visibility_modifier)? @export
+  name: (identifier) @const_item.name) @const_decl
+
 ;; Impl blocks: `impl T` / `impl Trait for T`  (inherent and trait impls).
 ;; For `impl Foo<'a>` / `impl<T> Foo<T>` descend into `generic_type` so we
 ;; capture just the bare type_identifier — ref-gitnexus stores the type
