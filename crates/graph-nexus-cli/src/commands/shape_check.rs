@@ -45,8 +45,8 @@ pub struct ShapeCheckArgs {
     pub route: Option<String>,
 }
 
-fn build_payload(
-    args: ShapeCheckArgs,
+pub fn build_payload(
+    args: &ShapeCheckArgs,
     engine: &crate::engine::Engine,
 ) -> Result<serde_json::Value, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
@@ -168,7 +168,7 @@ pub fn run(
     engine: &crate::engine::Engine,
 ) -> Result<(), graph_nexus_core::GnxError> {
     let format = crate::output::OutputFormat::parse(args.format.as_deref());
-    let value = build_payload(args, engine)?;
+    let value = build_payload(&args, engine)?;
     let emit_value = match format {
         OutputFormat::Text => {
             let total = value["total_fetches"].as_u64().unwrap_or(0);
