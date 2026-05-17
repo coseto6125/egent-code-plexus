@@ -85,8 +85,10 @@ impl LanguageProvider for KotlinProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        use std::collections::HashMap;
-        let mut node_map: HashMap<usize, RawNode> = HashMap::new();
+        // Vec + idx-map pattern — see java/parser.rs same-site note.
+        let mut nodes: Vec<RawNode> = Vec::new();
+        let mut node_id_to_idx: rustc_hash::FxHashMap<usize, usize> =
+            rustc_hash::FxHashMap::default();
         let mut imports = Vec::new();
 
         let idx_class_name = self.query.capture_index_for_name("class.name");
@@ -209,21 +211,26 @@ impl LanguageProvider for KotlinProvider {
                     // patterns each get their own entry; other kinds keep
                     // root-keyed dedupe (multi-decorator captures collapse).
                     let node_id = if k == NodeKind::Property { n.id() } else { root.id() };
-                    let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
-                        decorators: vec![],
-                        is_exported,
-                        heritage: Vec::new(),
-                        type_annotation: type_annotation.clone(),
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
+                    let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
+                        let i = nodes.len();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported,
+                            heritage: Vec::new(),
+                            type_annotation: type_annotation.clone(),
+                            name: name_str.to_string(),
+                            kind: k,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                        i
                     });
+                    let entry = &mut nodes[idx];
 
                     if !is_exported {
                         entry.is_exported = false;
@@ -279,7 +286,7 @@ impl LanguageProvider for KotlinProvider {
             }
         }
 
-        let mut nodes: Vec<RawNode> = node_map.into_values().collect();
+        // `nodes` already in source order — Vec + idx-map at parse-loop start.
 
         // Extract call sites with receiver-type binding for `this.foo()`,
         // `super.foo()`, and typed-variable `obj.foo()` patterns.

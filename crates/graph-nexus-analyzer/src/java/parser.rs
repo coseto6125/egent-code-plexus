@@ -4,7 +4,7 @@ use crate::framework_helpers::{has_import_from, node_span};
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
@@ -113,7 +113,12 @@ impl LanguageProvider for JavaProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut node_map: HashMap<usize, RawNode> = HashMap::new();
+        // Vec + idx-map pattern: push to `nodes` in tree-sitter match order
+        // (source-position deterministic). `node_id_to_idx` only acts as a
+        // dedup lookup for multi-capture merge; iteration never visits the
+        // map, so no downstream sort is needed.
+        let mut nodes: Vec<RawNode> = Vec::new();
+        let mut node_id_to_idx: FxHashMap<usize, usize> = FxHashMap::default();
         let mut imports = Vec::new();
         // Buffer Spring refs and emit only if the file imports org.springframework.
         let mut pending_spring_refs: Vec<RawFrameworkRef> = Vec::new();
@@ -237,21 +242,26 @@ impl LanguageProvider for JavaProvider {
                         root.id()
                     };
 
-                    let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
-                        decorators: vec![],
-                        is_exported,
-                        heritage: Vec::new(),
-                        type_annotation: type_annotation.clone(),
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
+                    let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
+                        let i = nodes.len();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported,
+                            heritage: Vec::new(),
+                            type_annotation: type_annotation.clone(),
+                            name: name_str.to_string(),
+                            kind: k,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                        i
                     });
+                    let entry = &mut nodes[idx];
 
                     for h in heritage {
                         if !entry.heritage.contains(&h) {
@@ -382,7 +392,8 @@ impl LanguageProvider for JavaProvider {
             Vec::new()
         };
 
-        let mut nodes: Vec<RawNode> = node_map.into_values().collect();
+        // `nodes` already in tree-sitter match order (= source order) per
+        // the Vec + idx-map pattern at parse-loop start; no sort needed.
 
         // Extract call sites with receiver-type binding for `this.foo()`,
         // `super.foo()`, and typed-variable `obj.foo()` patterns.

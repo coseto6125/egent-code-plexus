@@ -188,6 +188,8 @@ impl GraphBuilder {
     }
 
     pub fn build(mut self) -> ZeroCopyGraph {
+        let prof = std::env::var("GNX_PROF").is_ok();
+        let t_total = std::time::Instant::now();
         // Determinism: sort by file_path so node IDs and edge endpoints are
         // assigned in canonical order regardless of how the producer (scanner,
         // hook, manual add_graph) enumerated files. Without this, the same repo
@@ -197,30 +199,63 @@ impl GraphBuilder {
         // `file_path` is unique across LocalGraph entries (one ingest per file),
         // so unstable sort has no observable tie-breaking concern and avoids
         // the temporary allocation that stable sort needs.
+        let t_sort = std::time::Instant::now();
         self.local_graphs
             .sort_unstable_by(|a, b| a.file_path.cmp(&b.file_path));
+        if prof { eprintln!("prof build.sort: {:.3}s", t_sort.elapsed().as_secs_f32()); }
+        let _t_pass1 = std::time::Instant::now();
 
+        // Pre-size accumulators from known input cardinalities. Each
+        // LocalGraph contributes 1 File node + N symbol nodes. Plus a
+        // small per-graph slack for Pass 1.5 Route nodes (one per
+        // routing decorator). Vec growth from 0 → 297k goes through
+        // ~17 reallocations + memcopies; sizing once avoids that.
+        let total_symbol_nodes: usize = self.local_graphs.iter().map(|g| g.nodes.len()).sum();
+        let total_files = self.local_graphs.len();
+        // 10% slack for Pass 1.5 Route synthetics; over-shoot is cheap
+        // (single tail growth), under-shoot just reverts to default.
         let mut symbol_table = SymbolTable::new();
         let mut string_pool = StringPool::new();
-        let mut nodes = Vec::new();
-        let mut files = Vec::new();
+        let mut nodes = Vec::with_capacity(total_symbol_nodes + total_symbol_nodes / 10);
+        let mut files = Vec::with_capacity(total_files);
         // Maps forward-slashed file_path → File node index. Populated in
         // Pass 1, consumed by `post_process::imports_edges` to wire
         // (File)-[:Imports]->(symbol) edges. File nodes are deliberately
         // NOT registered in SymbolTable — File is metadata, not a symbol,
         // and a SymbolTable hit on a File node would create spurious
         // Calls/Accesses edges in the resolver tiers.
-        let mut file_node_idx: FxHashMap<String, u32> = FxHashMap::default();
+        // Pre-size to one bucket per file — exact, since each file
+        // contributes exactly one entry.
+        let mut file_node_idx: FxHashMap<String, u32> =
+            FxHashMap::with_capacity_and_hasher(total_files, Default::default());
 
         // Pass 1: Register all nodes into SymbolTable and StringPool
         let mut current_node_idx = 0;
+        // Reusable UID buffer — avoids one allocation per `Node` (~297k
+        // nodes on .sample_repo). `push_str` chain over `write!` skips
+        // the fmt dispatch (see `NodeKind::as_str` doc) while reusing
+        // the underlying capacity across clears.
+        let mut uid_buf = String::with_capacity(128);
 
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
             // Path → string 一律走 forward-slash，讓 UID / lookup / 顯示在 Windows
             // 上與 Linux/macOS 一致（與 resolver.rs / registry/path.rs 既有 idiom 對齊）。
-            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+            // Cow: `to_string_lossy()` returns Cow; `.replace()` always allocates.
+            // Skip the replace + alloc on Linux/macOS where paths use `/` already.
+            let raw_path = local_graph.file_path.to_string_lossy();
+            let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
+                std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
+            } else {
+                raw_path
+            };
             let path_ref = string_pool.add(&path_str);
+            // Hoisted once per file. `register_node` would otherwise call
+            // `FileMeta::from_path` per node (~25× redundant on the
+            // .sample_repo distribution), each allocating one `String`
+            // for the `\\` → `/` normalisation. `path_str` is already
+            // forward-slash, so use the `_normalized_path` fast path.
+            let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
 
             files.push(File {
                 path: path_ref,
@@ -230,15 +265,25 @@ impl GraphBuilder {
             });
 
             for raw_node in &local_graph.nodes {
-                symbol_table.register_node(
+                symbol_table.register_node_with_meta(
                     &path_str,
+                    file_meta,
                     &raw_node.name,
                     current_node_idx,
                     raw_node.kind,
                 );
 
-                let uid_str = format!("{:?}:{}:{}", raw_node.kind, path_str, raw_node.name);
-                let uid_ref = string_pool.add(&uid_str);
+                uid_buf.clear();
+                // push_str chain over `write!("{:?}:{}:{}")`: avoids fmt
+                // dispatch (~300k calls × 3 segments). NodeKind::as_str()
+                // returns the same byte-stable variant identifier that
+                // Debug would, so existing UID strings stay binary-compat.
+                uid_buf.push_str(raw_node.kind.as_str());
+                uid_buf.push(':');
+                uid_buf.push_str(&path_str);
+                uid_buf.push(':');
+                uid_buf.push_str(&raw_node.name);
+                let uid_ref = string_pool.add(&uid_buf);
                 let name_ref = string_pool.add(&raw_node.name);
 
                 nodes.push(Node {
@@ -259,6 +304,8 @@ impl GraphBuilder {
             // `DocumentBlock` type lands in `graph_nexus_core::graph`.
         }
 
+        if prof { eprintln!("prof build.pass1_register: {:.3}s", _t_pass1.elapsed().as_secs_f32()); }
+        let _t_pass15 = std::time::Instant::now();
         // Pass 1.5: Extract Routes
         let mut route_edges = Vec::new();
         let mut current_handler_idx = 0;
@@ -354,6 +401,8 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.pass15_routes: {:.3}s", _t_pass15.elapsed().as_secs_f32()); }
+        let _t_pass16 = std::time::Instant::now();
         // Pass 1.6: Fetch-shape extraction.
         //
         // Two sub-passes — both gated on `repo_root` being available (it
@@ -525,6 +574,8 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.pass16_fetch_shape: {:.3}s", _t_pass16.elapsed().as_secs_f32()); }
+        let _t_pass17 = std::time::Instant::now();
         // Pass 1.7: Entry-point scoring (cross-language).
         //
         // Pure consumer of `RawRoute` + `RawFrameworkRef` + `main()`
@@ -583,12 +634,14 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.pass17_entry_points: {:.3}s", _t_pass17.elapsed().as_secs_f32()); }
+        let _t_pass2 = std::time::Instant::now();
         // Pass 2: Resolve imports and build edges
         //
         // Pass 2 strategy: dump-disabled path (production hot path) runs in
         // parallel over `local_graphs` via rayon. Dump-enabled path (oracle
-        // harness, off by default) falls back to serial because
-        // `Resolver.decisions` is `RefCell<Vec<_>>` and not `Sync`.
+        // harness, off by default) stays serial so one resolver owns the
+        // decision stream and preserves deterministic dump order.
         //
         // To enable parallelism we pre-compute two artifacts serially before
         // the par_iter so the inner closure only needs read-only access to
@@ -646,10 +699,10 @@ impl GraphBuilder {
         let dump_enabled = self.resolver_dump_path.is_some();
         let path_aliases = self.path_aliases.clone();
 
-        // Resolver carries decisions: RefCell<...> which is `!Sync`, so when
-        // dumping is enabled we run the serial path. When disabled (the
-        // production case) we create a fresh `Resolver` *inside* each
-        // par_iter worker so each thread owns its own state.
+        // When dumping is enabled we run the serial path so a single resolver
+        // owns the decision stream. When disabled (the production case) we
+        // create a fresh `Resolver` *inside* each par_iter worker so each
+        // thread owns its own state.
         let mut resolver_for_dump = if dump_enabled {
             let mut r = Resolver::new(&symbol_table).with_path_aliases(path_aliases.clone());
             r.enable_dump();
@@ -736,6 +789,8 @@ impl GraphBuilder {
         edges.extend(entry_edges);
         edges.extend(fetches_edges);
 
+        if prof { eprintln!("prof build.pass2_imports_resolve: {:.3}s", _t_pass2.elapsed().as_secs_f32()); }
+        let _t_blind = std::time::Instant::now();
         // Pass: blind spots — pure metadata passthrough, no edges created.
         // Each local_graph's blind_spots are interned and stored in the graph's
         // file-level metadata for `gnx context` / `gnx index` to surface to
@@ -770,6 +825,8 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.blind_spots: {:.3}s", _t_blind.elapsed().as_secs_f32()); }
+        let _t_pass3 = std::time::Instant::now();
         // Pass 3: Community detection (Leiden) over Calls/Extends/Implements edges.
         // Leiden's refinement phase prevents the badly-connected-hub failure
         // mode where Louvain pins a hub to its first-touched chain.
@@ -783,6 +840,8 @@ impl GraphBuilder {
             node.community_id = c;
         }
 
+        if prof { eprintln!("prof build.pass3_community: {:.3}s", _t_pass3.elapsed().as_secs_f32()); }
+        let _t_pass4 = std::time::Instant::now();
         // Pass 4: Process detection (BFS forward via CALLS).
         // Produces traces; each trace becomes a NodeKind::Process node + N
         // StepInProcess edges. Process nodes are appended to `nodes` so they
@@ -889,6 +948,8 @@ impl GraphBuilder {
         // Rust impl bridge that uses the `__impl_target__:` sentinel the
         // Rust parser stamped into heritage. Must run BEFORE the CSR
         // construction below so new edges land in `out_offsets` / `in_offsets`.
+        if prof { eprintln!("prof build.pass4_processes: {:.3}s", _t_pass4.elapsed().as_secs_f32()); }
+        let _t_class_mem = std::time::Instant::now();
         crate::post_process::class_membership::emit_edges(
             &self.local_graphs,
             &symbol_table,
@@ -943,6 +1004,9 @@ impl GraphBuilder {
         // new edges land in `out_offsets` / `in_offsets`.
         let imports_resolver =
             Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        if prof { eprintln!("prof build.class_membership: {:.3}s", _t_class_mem.elapsed().as_secs_f32()); }
+        let _t_imports_edges = std::time::Instant::now();
+        let _track_imports_call = ();
         crate::post_process::imports_edges::emit_edges(
             &self.local_graphs,
             &imports_resolver,
@@ -951,6 +1015,8 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        if prof { eprintln!("prof build.imports_edges: {:.3}s", _t_imports_edges.elapsed().as_secs_f32()); }
+        let _t_csr = std::time::Instant::now();
         // Final pass: Construct CSR (out_offsets and in_offsets)
         // Sort edges by source to build out_offsets easily
         edges.sort_by_key(|e| e.source);
@@ -984,6 +1050,8 @@ impl GraphBuilder {
             in_offsets[i + 1] += in_offsets[i];
         }
 
+        if prof { eprintln!("prof build.csr_assembly: {:.3}s  total_build: {:.3}s",
+            _t_csr.elapsed().as_secs_f32(), t_total.elapsed().as_secs_f32()); }
         ZeroCopyGraph {
             magic: graph_nexus_core::graph::GRAPH_MAGIC,
             version: graph_nexus_core::graph::GRAPH_FORMAT_VERSION,

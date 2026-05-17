@@ -3,8 +3,9 @@
 //! intermediate. The temp sibling must not collide with the target's
 //! own extension (so `graph.bin` ↔ `graph.bin.tmp`, never `graph.tmp`).
 
-use graph_nexus_core::registry::atomic_write_bytes;
+use graph_nexus_core::registry::{atomic_write_bytes, atomic_write_bytes_no_fsync};
 use std::fs;
+use std::thread;
 use tempfile::tempdir;
 
 #[test]
@@ -63,4 +64,26 @@ fn atomic_write_replaces_stale_tmp_sibling() {
     atomic_write_bytes(&path, b"clean").unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"clean");
     assert!(!tmp.exists(), "tmp sibling must be consumed by rename");
+}
+
+#[test]
+fn atomic_write_no_fsync_allows_parallel_same_target_writers() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("cache-entry.rkyv");
+    let handles: Vec<_> = (0..16)
+        .map(|i| {
+            let path = path.clone();
+            thread::spawn(move || {
+                let payload = format!("payload-{i}");
+                atomic_write_bytes_no_fsync(&path, payload.as_bytes()).unwrap();
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.starts_with(b"payload-"));
 }

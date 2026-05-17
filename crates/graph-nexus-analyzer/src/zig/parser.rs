@@ -2,7 +2,7 @@ use crate::calls::extract_calls;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
@@ -73,10 +73,15 @@ impl LanguageProvider for ZigProvider {
 
         // Collect all matches first, keyed by root node start byte.
         // Multiple patterns may match the same variable_declaration (e.g. struct
-        // is also captured by the const fallback). We keep only the highest-priority
-        // match per declaration site.
-        let mut node_map: HashMap<usize, PendingNode> = HashMap::new();
-        let mut import_map: HashMap<usize, PendingImport> = HashMap::new();
+        // is also captured by the const fallback). We keep only the highest-
+        // priority match per declaration site.
+        // Vec + idx-map pattern (see java/parser.rs same-site note) — `nodes` /
+        // `imports` Vecs are populated in tree-sitter match order, so per-file
+        // output is deterministic without a downstream sort.
+        let mut pending_nodes: Vec<PendingNode> = Vec::new();
+        let mut node_idx_by_key: FxHashMap<usize, usize> = FxHashMap::default();
+        let mut pending_imports: Vec<PendingImport> = Vec::new();
+        let mut import_idx_by_key: FxHashMap<usize, usize> = FxHashMap::default();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -122,12 +127,14 @@ impl LanguageProvider for ZigProvider {
                     if let Ok(src_str) =
                         std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
                     {
-                        import_map.insert(
-                            root_start_byte,
-                            PendingImport {
-                                source: src_str.to_string(),
-                            },
-                        );
+                        let import = PendingImport { source: src_str.to_string() };
+                        if let Some(&i) = import_idx_by_key.get(&root_start_byte) {
+                            pending_imports[i] = import;
+                        } else {
+                            let i = pending_imports.len();
+                            pending_imports.push(import);
+                            import_idx_by_key.insert(root_start_byte, i);
+                        }
                     }
                 }
                 continue;
@@ -148,30 +155,32 @@ impl LanguageProvider for ZigProvider {
                             end.column as u32,
                         ),
                     };
-                    // Keep only the highest-priority match for each declaration site
-                    let existing = node_map
-                        .entry(root_start_byte)
-                        .or_insert_with(|| PendingNode {
-                            priority: MatchPriority::Const,
-                            name: String::new(),
-                            kind: NodeKind::Const,
-                            span: (0, 0, 0, 0),
-                        });
-                    if candidate.priority >= existing.priority {
-                        *existing = candidate;
+                    // Keep only the highest-priority match per declaration site.
+                    if let Some(&i) = node_idx_by_key.get(&root_start_byte) {
+                        if candidate.priority >= pending_nodes[i].priority {
+                            pending_nodes[i] = candidate;
+                        }
+                    } else {
+                        let i = pending_nodes.len();
+                        pending_nodes.push(candidate);
+                        node_idx_by_key.insert(root_start_byte, i);
                     }
                 }
             }
         }
 
-        // Also remove const entries that have an import at the same start byte
-        // (the @import pattern fires independently from @const)
-        for key in import_map.keys() {
-            node_map.remove(key);
+        // Suppress const entries that have an import at the same start byte
+        // (the @import pattern fires independently from @const). Mark with
+        // empty name so the filter below drops them — order-preserving vs the
+        // earlier `node_map.remove(key)` set-semantic operation.
+        for key in import_idx_by_key.keys() {
+            if let Some(&i) = node_idx_by_key.get(key) {
+                pending_nodes[i].name.clear();
+            }
         }
 
-        let mut nodes: Vec<RawNode> = node_map
-            .into_values()
+        let mut nodes: Vec<RawNode> = pending_nodes
+            .into_iter()
             .filter(|n| !n.name.is_empty())
             .map(|n| RawNode {
                 decorators: vec![],
@@ -185,8 +194,8 @@ impl LanguageProvider for ZigProvider {
             })
             .collect();
 
-        let imports: Vec<RawImport> = import_map
-            .into_values()
+        let imports: Vec<RawImport> = pending_imports
+            .into_iter()
             .map(|i| RawImport {
                 alias: None,
                 imported_name: "*".to_string(),

@@ -472,7 +472,38 @@ impl LanguageProvider for CProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                // K&R-style multi-line function decl can confuse tree-sitter-c:
+                //   XXH_PUBLIC_API XXH_errorcode
+                //   XXH64_update(int x, int y) { ... }
+                // gets parsed as function_declarator with `XXH_errorcode` as
+                // the first identifier (captured by @function.name) and the
+                // real name `XXH64_update` wrapped in an ERROR sibling.
+                // Walk into the next ERROR sibling for the real identifier.
+                let recovered_name = if matches!(k, NodeKind::Function | NodeKind::Method) {
+                    n.next_sibling().and_then(|err| {
+                        if err.kind() != "ERROR" {
+                            return None;
+                        }
+                        // Two-step extraction: copy out primitive byte offsets
+                        // while cursor is alive, then re-borrow source outside.
+                        let mut cur = err.walk();
+                        let bytes = err
+                            .children(&mut cur)
+                            .find(|c| c.kind() == "identifier")
+                            .map(|id| (id.start_byte(), id.end_byte()));
+                        bytes.and_then(|(s, e)| {
+                            std::str::from_utf8(&source[s..e]).ok().map(String::from)
+                        })
+                    })
+                } else {
+                    None
+                };
+                let name_owned: Option<String> = recovered_name.or_else(|| {
+                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                        .ok()
+                        .map(|s| s.to_string())
+                });
+                if let Some(name_str) = name_owned {
                     let start = root.start_position();
                     let end = root.end_position();
 

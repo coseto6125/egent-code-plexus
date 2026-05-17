@@ -5,6 +5,16 @@
 //! so a reader merging fragments can never see partial state. The manifest
 //! rewrite happens after the fragment rename, in the same `atomic_write_json`
 //! style — readers always see a consistent snapshot.
+//!
+//! Several items below (`OverlayWriter` struct + impl, `PIPELINE` / `pipeline()` /
+//! `map_node_kind` helpers, `relativise`, `extract_symbols`) are the
+//! write-time symbol-extraction surface spec'd by
+//! `docs/superpowers/specs/2026-05-17-multi-agent-peer-sync-design.md:152`
+//! and `docs/superpowers/plans/2026-05-17-multi-agent-peer-sync.md` Task 2.
+//! They are intentionally pre-wired ahead of the watcher integration that
+//! will drive them — `#![allow(dead_code)]` documents that intent.
+
+#![allow(dead_code)]
 
 use graph_nexus_core::analyzer::pipeline::AnalyzerPipeline;
 use graph_nexus_core::graph::NodeKind;

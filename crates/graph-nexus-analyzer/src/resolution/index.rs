@@ -61,7 +61,19 @@ impl Language {
     /// extension routing in `commands/analyze.rs` plus path-based overrides
     /// for `Dockerfile` / `docker-compose.{yml,yaml}` / `.github/workflows/*`.
     pub fn from_path(path: &str) -> Self {
-        let normalized = path.replace('\\', "/");
+        if path.contains('\\') {
+            let normalized = path.replace('\\', "/");
+            Self::from_normalized_path(&normalized)
+        } else {
+            Self::from_normalized_path(path)
+        }
+    }
+
+    /// Fast path for callers that have already converted backslashes (Pass 1
+    /// in `builder.rs` and most repo-rooted paths on Linux/macOS). Skips the
+    /// `replace('\\','/')` allocation entirely.
+    pub fn from_normalized_path(path: &str) -> Self {
+        let normalized = path;
         let basename = normalized.rsplit('/').next().unwrap_or("");
 
         // Path / basename overrides before extension routing.
@@ -172,10 +184,21 @@ pub struct FileMeta {
 
 impl FileMeta {
     pub fn from_path(path: &str) -> Self {
-        let normalized = path.replace('\\', "/");
+        if path.contains('\\') {
+            let normalized = path.replace('\\', "/");
+            Self::from_normalized_path(&normalized)
+        } else {
+            Self::from_normalized_path(path)
+        }
+    }
+
+    /// Fast path for callers that have already normalised separators. Skips
+    /// the `replace('\\','/')` allocation (one per call) — meaningful in Pass
+    /// 1 where this is called per node (~300k on `.sample_repo`).
+    pub fn from_normalized_path(path: &str) -> Self {
         Self {
-            is_vendor: normalized.contains("/vendor/") || normalized.starts_with("vendor/"),
-            language: Language::from_path(path),
+            is_vendor: path.contains("/vendor/") || path.starts_with("vendor/"),
+            language: Language::from_normalized_path(path),
         }
     }
 }
@@ -184,15 +207,24 @@ impl FileMeta {
 /// to their corresponding globally unique node IDs.
 #[derive(Debug, Default)]
 pub struct SymbolTable {
-    /// Maps `file_path` -> `node_name` -> `node_id`.
+    /// Maps `file_path` -> `node_name` -> `Vec<node_id>`.
     ///
-    /// Using a nested map allows us to look up symbols by `&str` without
-    /// needing to allocate a `(String, String)` tuple just for the query key.
+    /// Multi-id-per-name (was single u32 prior to PR #71 round 3): a file
+    /// can hold two same-name nodes of different kinds — e.g. C#'s inner
+    /// class `Foo` next to property `Foo`, Java's `class Foo { Foo() }`
+    /// constructor sharing the class name, Kotlin's property + accessor
+    /// pair both keyed `samples`. The previous `HashMap<name, id>` was
+    /// last-write-wins, so resolver Tier-1 SameFile lookup would return
+    /// the second-registered node regardless of whether the call site
+    /// wanted a Callable or a Type — producing `Constructor -> Property`
+    /// edges that are syntactically nonsense. Storing all node_ids and
+    /// filtering at lookup time via `ResolveTarget` predicate fixes that.
+    ///
     /// `FxHashMap` here: keys are short strings (file paths, identifier
     /// names) where SipHash's avalanche guarantees aren't useful — FxHash
     /// is ~5x faster on this distribution and Build Pass 1's `register_node`
     /// is hot (~14k × 3 inserts on `.sample_repo`).
-    file_scoped: FxHashMap<String, FxHashMap<String, u32>>,
+    file_scoped: FxHashMap<String, FxHashMap<String, Vec<u32>>>,
 
     /// Maps a `node_name` to a list of node IDs across all files.
     ///
@@ -243,7 +275,9 @@ impl SymbolTable {
         self.file_scoped
             .entry(file_path.to_string())
             .or_default()
-            .insert(node_name.to_string(), node_id);
+            .entry(node_name.to_string())
+            .or_default()
+            .push(node_id);
 
         self.global_scoped
             .entry(node_name.to_string())
@@ -257,14 +291,88 @@ impl SymbolTable {
         self.node_file_meta.push(FileMeta::from_path(file_path));
     }
 
+    /// Hot-path variant of `register_node` for callers that already
+    /// computed `FileMeta` for this file (i.e. Pass 1 hoists `FileMeta`
+    /// once per file out of the per-node loop, since 1 file ↔ ~25 nodes
+    /// on `.sample_repo` and `FileMeta::from_path` allocates one `String`
+    /// per call for the `\\` → `/` replace). Semantically identical to
+    /// `register_node` but skips the redundant per-node path parse.
+    ///
+    /// Map inserts use `get_mut` → fall-through `entry(.to_string())` so
+    /// the file_path / node_name keys only allocate on first sight. After
+    /// node #1 of a file lands, the next ~24 nodes hit the get_mut fast
+    /// path and reuse the existing key bucket.
+    pub fn register_node_with_meta(
+        &mut self,
+        file_path: &str,
+        file_meta: FileMeta,
+        node_name: &str,
+        node_id: u32,
+        kind: NodeKind,
+    ) {
+        debug_assert_eq!(
+            node_id as usize,
+            self.node_kinds.len(),
+            "register_node ids must be monotonic and dense for kind-indexing"
+        );
+
+        if let Some(file_map) = self.file_scoped.get_mut(file_path) {
+            file_map
+                .entry(node_name.to_string())
+                .or_default()
+                .push(node_id);
+        } else {
+            let mut m = FxHashMap::default();
+            m.insert(node_name.to_string(), vec![node_id]);
+            self.file_scoped.insert(file_path.to_string(), m);
+        }
+
+        if let Some(list) = self.global_scoped.get_mut(node_name) {
+            list.push(node_id);
+        } else {
+            self.global_scoped.insert(node_name.to_string(), vec![node_id]);
+        }
+
+        self.id_to_file.insert(node_id, file_path.to_string());
+
+        self.node_kinds.push(kind);
+        self.node_file_meta.push(file_meta);
+    }
+
     /// Looks up a node ID by its file path and node name.
     ///
-    /// Returns `Some(node_id)` if found, or `None` if the symbol doesn't exist
-    /// in the specified file.
+    /// Returns the **first** matching node_id (insertion order = source-line
+    /// order via `parser.rs` Vec+idx pattern). Use [`lookup_in_file_with_kind`]
+    /// when the caller knows the target's `ResolveTarget` — same-name nodes of
+    /// other kinds would otherwise be the "winner" here and produce semantic-
+    /// nonsense edges (e.g. `Calls -> Property`).
     pub fn lookup_in_file(&self, file_path: &str, node_name: &str) -> Option<u32> {
         self.file_scoped
             .get(file_path)
-            .and_then(|file_map| file_map.get(node_name).copied())
+            .and_then(|file_map| file_map.get(node_name))
+            .and_then(|ids| ids.first().copied())
+    }
+
+    /// Kind-aware variant of [`lookup_in_file`]: scans the per-name node_id
+    /// list and returns the first whose `node_kinds[id]` matches the target
+    /// predicate (Callable / Type). Skips same-name-different-kind nodes so
+    /// resolver Tier-1 picks the semantically correct target — e.g. a call
+    /// to `Foo()` in a file with both `class Foo` and `property Foo` lands
+    /// on the constructor / method, never the property.
+    pub fn lookup_in_file_with_kind(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        let ids = self.file_scoped.get(file_path)?.get(node_name)?;
+        let predicate: fn(NodeKind) -> bool = match target {
+            ResolveTarget::Callable => NodeKind::is_callable,
+            ResolveTarget::Type => NodeKind::is_type,
+        };
+        ids.iter()
+            .copied()
+            .find(|&id| predicate(self.node_kinds[id as usize]))
     }
 
     /// Tier-3 global lookup: returns the single node id matching `name` whose

@@ -72,7 +72,6 @@ pub fn emit_edges(
     let reason_named = string_pool.add("post_process:imports");
     let reason_module = string_pool.add("post_process:imports:module");
     let mut emitted = 0usize;
-    let mut dedupe: FxHashSet<(u32, u32)> = FxHashSet::default();
 
     // Pre-pass: build a basename → [(full_path, idx)] index so the
     // Step 3c/3d/3e/3f fallbacks can do O(1) hash lookup + bucket-local
@@ -106,23 +105,36 @@ pub fn emit_edges(
         }
     }
 
-    for local_graph in local_graphs {
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
-        let Some(&source_file_idx) = file_node_idx.get(&path_str) else {
-            continue;
-        };
-        if local_graph.imports.is_empty() {
-            continue;
-        }
+    // Parallel per-file: each thread accumulates its own (emitted_count,
+    // local_edges) — dedupe key is (source_file_idx, target_file_idx), and
+    // source_file_idx is unique per file → no cross-file dedupe collisions,
+    // so per-file dedupe is semantically equivalent to the prior global
+    // HashSet. Rayon picks num_cpus workers; no hardcoded thread count.
+    use rayon::prelude::*;
+    let chunk_results: Vec<(usize, Vec<Edge>)> = local_graphs
+        .par_iter()
+        .map(|local_graph| {
+            let mut local_emitted = 0usize;
+            let mut local_edges: Vec<Edge> = Vec::new();
+            let mut dedupe: FxHashSet<(u32, u32)> = FxHashSet::default();
+            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+            let Some(&source_file_idx) = file_node_idx.get(&path_str) else {
+                return (local_emitted, local_edges);
+            };
+            if local_graph.imports.is_empty() {
+                return (local_emitted, local_edges);
+            }
 
-        // Reusable buffer for Step 3b's `./` prefix retry; cleared and
-        // re-filled per import-miss so we don't allocate on every miss.
-        let mut dot_prefix_buf = String::new();
+            // Reusable buffer for Step 3b's `./` prefix retry; cleared and
+            // re-filled per import-miss so we don't allocate on every miss.
+            let mut dot_prefix_buf = String::new();
+            let emitted = &mut local_emitted;
+            let edges_out = &mut local_edges;
 
-        for import in &local_graph.imports {
-            let before = emitted;
+            for import in &local_graph.imports {
+            let before = *emitted;
             // Step 1: named-symbol lookup.
-            emitted += try_named(
+            *emitted += try_named(
                 resolver,
                 local_graph,
                 &import.imported_name,
@@ -133,10 +145,10 @@ pub fn emit_edges(
             );
 
             // Step 2: FQN last-segment retry (Kotlin / Java / PHP qualified imports).
-            if emitted == before && import.imported_name.contains('.') {
+            if *emitted == before && import.imported_name.contains('.') {
                 if let Some(last) = import.imported_name.rsplit('.').next() {
                     if !last.is_empty() && last != import.imported_name {
-                        emitted += try_named(
+                        *emitted += try_named(
                             resolver,
                             local_graph,
                             last,
@@ -152,7 +164,7 @@ pub fn emit_edges(
             // Step 3: module-style fallback (File → File). Strip leading
             // surrounding quotes / angle brackets common in C-family
             // `#include "alpha.h"` / `#include <alpha.h>` source strings.
-            if emitted == before {
+            if *emitted == before {
                 let cleaned = import
                     .source
                     .trim_matches(|c: char| c == '"' || c == '\'' || c == '<' || c == '>');
@@ -301,11 +313,22 @@ pub fn emit_edges(
                             confidence: 0.9,
                             reason: reason_module,
                         });
-                        emitted += 1;
+                        *emitted += 1;
                     }
                 }
             }
         }
+            (local_emitted, local_edges)
+        })
+        .collect();
+
+    // Serial merge: extend the caller's edges_out with each worker's
+    // emissions. Sum the per-worker emitted counts for the return value.
+    let total_new_edges: usize = chunk_results.iter().map(|(_, v)| v.len()).sum();
+    edges_out.reserve(total_new_edges);
+    for (n, edges) in chunk_results {
+        emitted += n;
+        edges_out.extend(edges);
     }
 
     emitted

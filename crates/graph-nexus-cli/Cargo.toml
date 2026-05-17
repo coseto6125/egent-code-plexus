@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 etoon = "0.4"
 ignore = "0.4.25"
 libc = "0.2"
+mimalloc = { version = "0.1", default-features = false }
 rayon = "1.10"
 tantivy = "0.26.1"
 tempfile = "3.27"

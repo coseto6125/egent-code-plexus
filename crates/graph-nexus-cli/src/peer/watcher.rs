@@ -178,6 +178,12 @@ fn log_watcher_error(context: &str, err: &dyn std::fmt::Debug) {
     eprintln!("[watcher] error in {context}: {err:?}\nbacktrace:\n{bt}");
 }
 
+/// Documented API scaffold for the multi-agent peer-sync plan
+/// (`docs/superpowers/plans/2026-05-17-multi-agent-peer-sync.md` §1938).
+/// Not yet wired into the watcher loop — kept as the stable surface that
+/// consumers reach for to ask "which peer sessions are live?" without
+/// reaching into `alive_peers`' raw `PeerInfo` shape.
+#[allow(dead_code)]
 pub fn alive_peer_sessions(repo_root: &Path, exclude_self: &str) -> Vec<String> {
     alive_peers(repo_root, exclude_self)
         .into_iter()

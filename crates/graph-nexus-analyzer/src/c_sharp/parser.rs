@@ -104,8 +104,10 @@ impl LanguageProvider for CSharpProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        use std::collections::HashMap;
-        let mut node_map: HashMap<usize, RawNode> = HashMap::new();
+        // Vec + idx-map pattern — see java/parser.rs same-site note.
+        let mut nodes: Vec<RawNode> = Vec::new();
+        let mut node_id_to_idx: rustc_hash::FxHashMap<usize, usize> =
+            rustc_hash::FxHashMap::default();
         let mut imports = Vec::new();
 
         let idx_name_function = self.query.capture_index_for_name("name.function");
@@ -221,7 +223,38 @@ impl LanguageProvider for CSharpProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                // tree-sitter-c-sharp recovery can bind the wrong identifier
+                // to a type's `name:` field when a preproc directive sits
+                // between the type keyword and the real name:
+                //   class JsonWriter
+                //   #if HAVE_ASYNC_DISPOSABLE
+                //     : IAsyncDisposable
+                // Recovery wraps the real name in an ERROR sibling and binds
+                // the post-`#if` identifier to `name:`. When `name` has a
+                // preceding ERROR sibling AND the kind is type-like, extract
+                // the leading identifier from that ERROR node's text instead.
+                let real_name = if matches!(k, NodeKind::Class | NodeKind::Interface) {
+                    n.prev_sibling().and_then(|s| {
+                        if s.kind() != "ERROR" {
+                            return None;
+                        }
+                        let txt = std::str::from_utf8(
+                            &source[s.start_byte()..s.end_byte()],
+                        ).ok()?;
+                        let id: String = txt
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        if id.is_empty() { None } else { Some(id) }
+                    })
+                } else {
+                    None
+                };
+                let name_bytes = real_name.as_deref().map(str::as_bytes);
+                let name_result = name_bytes
+                    .map(|b| std::str::from_utf8(b))
+                    .unwrap_or_else(|| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]));
+                if let Ok(name_str) = name_result {
                     let start = root.start_position();
                     let end = root.end_position();
 
@@ -233,21 +266,26 @@ impl LanguageProvider for CSharpProvider {
                     } else {
                         root.id()
                     };
-                    let entry = node_map.entry(node_id).or_insert_with(|| RawNode {
-                        decorators: vec![],
-                        is_exported,
-                        heritage: Vec::new(),
-                        type_annotation: type_annotation.clone(),
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
+                    let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
+                        let i = nodes.len();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported,
+                            heritage: Vec::new(),
+                            type_annotation: type_annotation.clone(),
+                            name: name_str.to_string(),
+                            kind: k,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                        i
                     });
+                    let entry = &mut nodes[idx];
 
                     if is_exported {
                         entry.is_exported = true;
@@ -283,7 +321,7 @@ impl LanguageProvider for CSharpProvider {
             }
         }
 
-        let mut nodes: Vec<RawNode> = node_map.into_values().collect();
+        // `nodes` already in source order — Vec + idx-map at parse-loop start.
 
         // Extract call sites with receiver-type binding for `this.Foo()`,
         // `base.Foo()`, and typed-variable `obj.Foo()` patterns.

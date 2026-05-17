@@ -1,6 +1,6 @@
 use graph_nexus_core::analyzer::types::RawImport;
 use serde::Serialize;
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::path::Path;
 
 use crate::resolution::heuristics::ResolutionTier;
@@ -53,9 +53,14 @@ pub struct ResolverDecision {
 pub struct Resolver<'a> {
     symbol_table: &'a SymbolTable,
     /// `None` on the production path → zero-cost (single Option-discriminant
-    /// branch in `record`, no `RefCell` touch). `Some(_)` only when the
+    /// branch in `record`, no `Mutex` touch). `Some(_)` only when the
     /// builder enabled dumping via [`Resolver::enable_dump`].
-    decisions: Option<RefCell<Vec<ResolverDecision>>>,
+    // `Mutex` (not `RefCell`) so the whole `Resolver` is `Sync` and can be
+    // shared across rayon workers. In the production path `decisions` is
+    // `None` and the `Option::Some` guard in `record()` short-circuits
+    // before any lock — Mutex overhead is paid only when --dump-resolver
+    // is on (a debug-only flag, currently no-op in v2 layout).
+    decisions: Option<Mutex<Vec<ResolverDecision>>>,
     /// Module-specifier aliases sourced from project config (TS
     /// `tsconfig.json` `compilerOptions.paths`, etc.). Consulted during
     /// Tier 2 import resolution before the relative-resolution fallback so
@@ -85,13 +90,13 @@ impl<'a> Resolver<'a> {
     /// Turn on the decision recorder. Each subsequent `resolve_symbol` call
     /// pushes a [`ResolverDecision`] into the internal buffer.
     pub fn enable_dump(&mut self) {
-        self.decisions = Some(RefCell::new(Vec::new()));
+        self.decisions = Some(Mutex::new(Vec::new()));
     }
 
     /// Drain the recorded decisions. Returns `None` if dumping was never
     /// enabled.
     pub fn take_decisions(&mut self) -> Option<Vec<ResolverDecision>> {
-        self.decisions.take().map(RefCell::into_inner)
+        self.decisions.take().map(|m| m.into_inner().unwrap_or_default())
     }
 
     /// Enumerate candidate target file paths for an import specifier, walking
@@ -142,10 +147,12 @@ impl<'a> Resolver<'a> {
         let mut results = Vec::new();
         let source_file_str = source_file.to_string_lossy();
 
-        // Tier 1: Try SameFile
+        // Tier 1: Try SameFile (kind-aware so a property named `Foo` doesn't
+        // win the lookup for a constructor call `Foo()` in the same file —
+        // see `SymbolTable::file_scoped` doc).
         if let Some(node_id) = self
             .symbol_table
-            .lookup_in_file(&source_file_str, symbol_name)
+            .lookup_in_file_with_kind(&source_file_str, symbol_name, target)
         {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
             self.record(
@@ -181,7 +188,11 @@ impl<'a> Resolver<'a> {
                     source_file,
                     &import.source,
                     &self.path_aliases,
-                    |candidate| match self.symbol_table.lookup_in_file(candidate, exported_name) {
+                    |candidate| match self.symbol_table.lookup_in_file_with_kind(
+                        candidate,
+                        exported_name,
+                        target,
+                    ) {
                         Some(id) => {
                             hit = Some(id);
                             false // stop enumerating
@@ -230,7 +241,9 @@ impl<'a> Resolver<'a> {
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
             let hit = self
                 .resolve_qualifier_file(source_file, qualifier, raw_imports)
-                .and_then(|qf| self.symbol_table.lookup_in_file(&qf, member));
+                .and_then(|qf| {
+                    self.symbol_table.lookup_in_file_with_kind(&qf, member, target)
+                });
             if let Some(node_id) = hit {
                 let conf = ResolutionTier::QualifierScoped.base_confidence();
                 results.push((node_id, conf));
@@ -268,7 +281,10 @@ impl<'a> Resolver<'a> {
         if !caller_heritage.is_empty() {
             for base in caller_heritage {
                 if let Some(qf) = self.resolve_qualifier_file(source_file, base, raw_imports) {
-                    if let Some(node_id) = self.symbol_table.lookup_in_file(&qf, symbol_name) {
+                    if let Some(node_id) = self
+                        .symbol_table
+                        .lookup_in_file_with_kind(&qf, symbol_name, target)
+                    {
                         let conf = ResolutionTier::HeritageScoped.base_confidence();
                         results.push((node_id, conf));
                         self.record(
@@ -551,11 +567,14 @@ impl<'a> Resolver<'a> {
     ) -> Option<String> {
         let source_file_str = source_file.to_string_lossy();
 
-        // Tier 1: same-file qualifier definition.
-        if let Some(id) = self
-            .symbol_table
-            .lookup_in_file(&source_file_str, qualifier)
-        {
+        // Tier 1: same-file qualifier definition. Qualifiers are class /
+        // interface names, so filter to Type here — avoids a property
+        // named `Logger` winning over `class Logger` in the same file.
+        if let Some(id) = self.symbol_table.lookup_in_file_with_kind(
+            &source_file_str,
+            qualifier,
+            ResolveTarget::Type,
+        ) {
             return self.symbol_table.file_of(id).map(str::to_string);
         }
 
@@ -579,7 +598,7 @@ impl<'a> Resolver<'a> {
                 |candidate| {
                     if self
                         .symbol_table
-                        .lookup_in_file(candidate, exported)
+                        .lookup_in_file_with_kind(candidate, exported, ResolveTarget::Type)
                         .is_some()
                     {
                         hit = Some(candidate.to_string());
@@ -615,11 +634,12 @@ impl<'a> Resolver<'a> {
         confidence: Option<f32>,
     ) {
         // Production path: `self.decisions` is `None` → single
-        // Option-discriminant branch and we're out. No RefCell touch.
+        // Option-discriminant branch and we're out. No Mutex touch.
         let Some(cell) = self.decisions.as_ref() else {
             return;
         };
-        cell.borrow_mut().push(ResolverDecision {
+        let mut guard = cell.lock().expect("resolver dump mutex poisoned");
+        guard.push(ResolverDecision {
             src_file: src_file.to_string(),
             name: name.to_string(),
             specifier: specifier.map(|s| s.to_string()),
@@ -805,10 +825,12 @@ mod tests {
     }
 
     #[test]
-    fn tier1_same_file_still_wins() {
-        // SameFile resolution unaffected by kind filter — Variable in same
-        // file beats global resolution path. Pins that the fix only changes
-        // Tier-3 semantics.
+    fn tier1_same_file_kind_filters_out_non_callable() {
+        // SameFile is now kind-aware: a Variable named `helper` in the same
+        // file no longer "wins" for a Callable target — it would yield the
+        // semantically-nonsense `Calls -> Variable` edge that PR #71 round-3
+        // set out to remove. Falls through to Tier-3 Global, which picks
+        // up the Function in b.rs (unique under the Callable predicate).
         let st = st_with(&[
             ("a.rs", "helper", NodeKind::Variable),
             ("b.rs", "helper", NodeKind::Function),
@@ -820,7 +842,7 @@ mod tests {
             &[],
             ResolveTarget::Callable,
         );
-        assert_eq!(out, vec![(0, ResolutionTier::SameFile.base_confidence())]);
+        assert_eq!(out, vec![(1, ResolutionTier::Global.base_confidence())]);
     }
 
     // ── Layer-1 barriers (language + vendor) ────────────────────────────────
@@ -1124,12 +1146,13 @@ mod tests {
     }
 
     #[test]
-    fn tier2_5_member_kind_unconstrained_within_qualifier_file() {
-        // Inside the qualifier's file we lookup by name only — no kind
-        // filter. A class method, a free function, or even a const at the
-        // same name in that file should all be reachable. This mirrors what
-        // a programmer expects: `A::THING` means "whatever `THING` means in
-        // A's file", not "THING constrained to Callable kinds".
+    fn tier2_5_member_kind_filtered_inside_qualifier_file() {
+        // PR #71 round-3 flipped Tier 2.5 to kind-aware lookup (the
+        // previous "prefer recall" stance was producing `Calls -> Const`
+        // and `Calls -> Variable` edges that have no operational meaning).
+        // `A::FLAG` requesting Callable no longer resolves to the Const —
+        // it falls through to Unresolved (Tier 3 Global filters on
+        // Callable too, and no Callable named FLAG exists).
         let st = st_with(&[
             ("a.rs", "A", NodeKind::Class),
             ("a.rs", "FLAG", NodeKind::Const),
@@ -1141,14 +1164,10 @@ mod tests {
             &[],
             ResolveTarget::Callable,
         );
-        // FLAG is a Const — it's still found because lookup_in_file is kind-
-        // agnostic. The caller chose to ask for Callable; if they want strict
-        // kind enforcement after Tier 2.5 they can filter downstream. For
-        // now: prefer recall here, since the qualifier already scopes the
-        // lookup tightly.
-        assert_eq!(
-            out,
-            vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
+        assert!(
+            out.is_empty(),
+            "FLAG is a Const, must not surface as a Callable target; got {:?}",
+            out
         );
     }
 
