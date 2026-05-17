@@ -240,7 +240,7 @@ impl LanguageProvider for JavaScriptProvider {
                     // are method_definition nodes whose property_identifier is literally
                     // "constructor". Promote them here so the graph emits
                     // NodeKind::Constructor (parity with Java / Dart / C#).
-                    let effective_kind = if k == NodeKind::Method && name_str == "constructor" {
+                    let k = if k == NodeKind::Method && name_str == "constructor" {
                         NodeKind::Constructor
                     } else {
                         k
@@ -279,7 +279,7 @@ impl LanguageProvider for JavaScriptProvider {
                             heritage: heritage.clone(),
                             type_annotation: None,
                             name: name_str.to_string(),
-                            kind: effective_kind,
+                            kind: k,
                             span: node_span,
                             calls: Vec::new(),
                         });
