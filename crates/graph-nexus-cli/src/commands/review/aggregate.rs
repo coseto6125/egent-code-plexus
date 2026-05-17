@@ -204,6 +204,14 @@ fn run_coverage(file_scope: &HashSet<String>, engine: &Engine) -> Vec<Finding> {
 /// scope file (that would fabricate attribution). Production callers should
 /// prefer `run_coverage`, which reads `graph.blind_spots` directly and
 /// preserves file paths.
+///
+/// `run_coverage` (binary path) reads `graph.blind_spots` directly from the
+/// engine, so this `&Value`-based variant has no in-crate caller and `cargo`
+/// flags it as dead. Kept `pub` to mirror the library API surface that the
+/// four sibling constituents expose (`impact_findings`, `tool_map_findings`,
+/// `shape_check_findings`, `resolver_diff_findings`) for future consumers
+/// that hold a serialized coverage payload but no engine.
+#[allow(dead_code)]
 pub fn coverage_blind_spots(v: &Value) -> Vec<Finding> {
     let mut findings = Vec::new();
     let Some(per_repo) = v.pointer("/coverage/per_repo").and_then(|v| v.as_array()) else {
