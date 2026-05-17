@@ -154,6 +154,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)?;
     let lock_guard = if lock.try_lock_exclusive().is_err() {
         wait_for_completion(&building, &commit_dir)?;
@@ -177,6 +178,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         let lock2 = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)?;
         lock2
             .lock_exclusive()
