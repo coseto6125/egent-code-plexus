@@ -1,8 +1,10 @@
 use super::receiver_types::{collect_local_types, extract_ts_calls};
+use super::spec::TypeScriptSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{
     LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
@@ -15,21 +17,30 @@ use tree_sitter::{Parser, Query, QueryCursor};
 pub struct TypeScriptProvider {
     query: Query,
     indices: TypeScriptCaptureIndices,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `TypeScriptSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index (cap.index as usize) — equivalent perf to
+    /// the previous hard-coded if-chain but the source of truth lives in
+    /// `spec.rs` const tables.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 struct TypeScriptCaptureIndices {
-    function_name: Option<u32>,
-    class_name: Option<u32>,
-    method_name: Option<u32>,
-    interface_name: Option<u32>,
+    // Root-span anchors — track outer declaration node for span/dedup.
     function: Option<u32>,
     class: Option<u32>,
     method: Option<u32>,
     interface: Option<u32>,
+    property: Option<u32>,
+    const_kind: Option<u32>,
+    variable: Option<u32>,
+    typedef: Option<u32>,
+    // Metadata-only captures.
     export: Option<u32>,
     heritage: Option<u32>,
     type_ann: Option<u32>,
     decorator: Option<u32>,
+    // Import captures.
     import_name: Option<u32>,
     import_alias: Option<u32>,
     import_source: Option<u32>,
@@ -37,24 +48,18 @@ struct TypeScriptCaptureIndices {
     /// `export * as ns from 'lib'` — captured separately because there's no
     /// `name` identifier; `imported_name` is set to the "*" sentinel.
     import_namespace: Option<u32>,
+    // Route captures.
     route_method: Option<u32>,
     route_path: Option<u32>,
     route_call: Option<u32>,
     /// Named handler argument of `app.METHOD(path, handler)` — used by the
     /// builder to materialize a `HandlesRoute` edge from the handler back
     /// to the Route node. Absent for inline arrow / anonymous handlers.
-    property_name: Option<u32>,
-    property: Option<u32>,
-    const_name: Option<u32>,
-    const_kind: Option<u32>,
-    variable_name: Option<u32>,
-    variable: Option<u32>,
     route_handler: Option<u32>,
+    // Framework captures.
     express_handler: Option<u32>,
     nestjs_class: Option<u32>,
     nestjs_method: Option<u32>,
-    typedef_name: Option<u32>,
-    typedef: Option<u32>,
 }
 
 impl TypeScriptProvider {
@@ -67,14 +72,14 @@ impl TypeScriptProvider {
         );
         let query = Query::new(&language, &query_source)?;
         let indices = TypeScriptCaptureIndices {
-            function_name: query.capture_index_for_name("function.name"),
-            class_name: query.capture_index_for_name("class.name"),
-            method_name: query.capture_index_for_name("method.name"),
-            interface_name: query.capture_index_for_name("interface.name"),
             function: query.capture_index_for_name("function"),
             class: query.capture_index_for_name("class"),
             method: query.capture_index_for_name("method"),
             interface: query.capture_index_for_name("interface"),
+            property: query.capture_index_for_name("property"),
+            const_kind: query.capture_index_for_name("const"),
+            variable: query.capture_index_for_name("variable"),
+            typedef: query.capture_index_for_name("typedef"),
             export: query.capture_index_for_name("export"),
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
@@ -87,20 +92,23 @@ impl TypeScriptProvider {
             route_method: query.capture_index_for_name("route.method"),
             route_path: query.capture_index_for_name("route.path"),
             route_call: query.capture_index_for_name("route.call"),
-            property_name: query.capture_index_for_name("property.name"),
-            property: query.capture_index_for_name("property"),
-            const_name: query.capture_index_for_name("const.name"),
-            const_kind: query.capture_index_for_name("const"),
-            variable_name: query.capture_index_for_name("variable.name"),
-            variable: query.capture_index_for_name("variable"),
             route_handler: query.capture_index_for_name("route.handler"),
             express_handler: query.capture_index_for_name("express.route.handler"),
             nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
             nestjs_method: query.capture_index_for_name("nestjs.method.name"),
-            typedef_name: query.capture_index_for_name("typedef.name"),
-            typedef: query.capture_index_for_name("typedef"),
         };
-        Ok(Self { query, indices })
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string
+        // compare). Capture names not in the spec map yield None and fall
+        // through to the metadata-only branches below.
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| TypeScriptSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, indices, capture_kind_by_idx })
     }
 }
 
@@ -159,30 +167,17 @@ impl LanguageProvider for TypeScriptProvider {
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
 
-                if cap_idx == idx.function_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the eight explicit
+                    // Function/Class/Method/Interface/Typedef/Property/Const/Variable arms.
+                    // Source of truth: TypeScriptSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if cap_idx == idx.class_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if cap_idx == idx.method_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if cap_idx == idx.interface_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
-                } else if cap_idx == idx.typedef_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Typedef);
-                } else if cap_idx == idx.property_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
-                } else if cap_idx == idx.const_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Const);
-                } else if cap_idx == idx.variable_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Variable);
+                    kind = Some(k_from_spec);
                 } else if cap_idx == idx.export {
                     is_exported = true;
                 } else if cap_idx == idx.heritage {
