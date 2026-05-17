@@ -1,6 +1,8 @@
 use super::receiver_types::{collect_bindings, extract_cpp_calls};
+use super::spec::CppSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -108,6 +110,11 @@ fn slice_type_before(
 
 pub struct CppProvider {
     query: Query,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `CppSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — equivalent perf to the previous
+    /// hard-coded if-chain, but source of truth lives in `spec.rs`.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl CppProvider {
@@ -115,7 +122,12 @@ impl CppProvider {
         let language = tree_sitter_cpp::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| CppSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -135,10 +147,6 @@ impl LanguageProvider for CppProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_name_function = self.query.capture_index_for_name("name.function");
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_struct = self.query.capture_index_for_name("name.struct");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_export = self.query.capture_index_for_name("export");
@@ -156,13 +164,9 @@ impl LanguageProvider for CppProvider {
         let idx_var = self.query.capture_index_for_name("var");
         let idx_var_name = self.query.capture_index_for_name("var.name");
 
-        let idx_name_macro = self.query.capture_index_for_name("name.macro");
         let idx_macro = self.query.capture_index_for_name("macro");
-        let idx_name_namespace = self.query.capture_index_for_name("name.namespace");
         let idx_namespace = self.query.capture_index_for_name("namespace");
-        let idx_name_enum = self.query.capture_index_for_name("name.enum");
         let idx_enum_node = self.query.capture_index_for_name("enum_node");
-        let idx_name_typedef = self.query.capture_index_for_name("name.typedef");
         let idx_typedef_node = self.query.capture_index_for_name("typedef_node");
 
         let is_header = path
@@ -190,30 +194,16 @@ impl LanguageProvider for CppProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx_name_function {
+                // Single spec-driven dispatch for name-node captures.
+                // Source of truth: CppSpec::CAPTURE_KIND in spec.rs.
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if cap_idx == idx_name_class {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if cap_idx == idx_name_struct {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Struct);
-                } else if cap_idx == idx_name_method {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if cap_idx == idx_name_macro {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Macro);
-                } else if cap_idx == idx_name_namespace {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Namespace);
-                } else if cap_idx == idx_name_enum {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Enum);
-                } else if cap_idx == idx_name_typedef {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Typedef);
+                    kind = Some(k_from_spec);
                 } else if cap_idx == idx_heritage {
                     heritage_nodes.push(cap.node);
                 } else if cap_idx == idx_type {
