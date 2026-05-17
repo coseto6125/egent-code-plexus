@@ -201,10 +201,11 @@ impl LanguageProvider for DartProvider {
                         .unwrap_or(false)
                 })
                 .unwrap_or(false);
+            if is_typedef_misparse {
+                continue;
+            }
             if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
-                if is_typedef_misparse {
-                    // skip — already handled as Typedef
-                } else if let Ok(name_str) =
+                if let Ok(name_str) =
                     std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
                 {
                     let name_str = name_str.trim();

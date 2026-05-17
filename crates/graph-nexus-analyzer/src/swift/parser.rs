@@ -269,10 +269,7 @@ impl LanguageProvider for SwiftProvider {
                     }
                     anc = a.parent();
                 }
-                let node_kind = match emit_kind {
-                    Some(k) => k,
-                    None => continue,
-                };
+                let Some(node_kind) = emit_kind else { continue };
 
                 // Walk the property_declaration's direct children to find
                 // type_annotation (if any). Text is `: <type>` — drop the colon.
