@@ -47,16 +47,8 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     // fingerprint → reuse without touching the analyzer pipeline.
     // L2 is SHA-pure (v2 layout, PR #55); working-tree drift goes through
     // the L1 session overlay, not here.
-    if commit_dir.join("meta.json").is_file() {
-        if let Ok(meta) = CommitBuildMeta::read(&commit_dir.join("meta.json")) {
-            if meta.builder_fingerprint.as_deref() == Some(BUILDER_FINGERPRINT) {
-                return Ok(BuildResult {
-                    commit_dir,
-                    sha_hex,
-                    source_type: meta.source_type,
-                });
-            }
-        }
+    if let Some(attached) = attach_if_fingerprint_matches(&commit_dir) {
+        return Ok(attached);
     }
 
     // Acquire build lock; attach pattern if locked
@@ -71,38 +63,53 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
         return wait_for_completion(&building, &commit_dir);
     }
 
-    // 1. Source resolution
-    let src_root = if worktree_clean_and_head_matches(worktree, &sha_hex)? {
+    build_inside_locked(worktree, &sha_hex, &repo_root, &building, &commit_dir)
+}
+
+/// Run the analyzer pipeline, write metadata, atomic-publish.
+///
+/// Pre-conditions (caller's responsibility):
+/// - `building` dir exists, `commit_dir` does not yet exist
+/// - exclusive build lock is held by the caller for the full call duration
+/// - `repo_root.join("commits")` exists
+///
+/// Shared between `build_l2` (first build / SHA drift) and
+/// `force_rebuild_l2` (after L1 invalidate + L2 drop). Both paths land in
+/// the same atomic publish + repo_meta update.
+pub(crate) fn build_inside_locked(
+    worktree: &Path,
+    sha_hex: &str,
+    repo_root: &Path,
+    building: &Path,
+    commit_dir: &Path,
+) -> io::Result<BuildResult> {
+    let src_root = if worktree_clean_and_head_matches(worktree, sha_hex)? {
         worktree.to_path_buf()
     } else {
         let src = building.join("_src");
         fs::create_dir_all(&src)?;
-        git_archive_to(worktree, &sha_hex, &src)?;
+        git_archive_to(worktree, sha_hex, &src)?;
         src
     };
 
-    // 2. Build graph.bin + tantivy via analyzer pipeline.
-    // `repo_root` doubles as the persistent parse_cache root — cache
-    // entries live in `<repo_root>/parse_cache/<fp>/` and survive across
-    // L2 commit_dirs as long as the file content (and binary build) is
-    // unchanged. p50 commit on this repo touches ~6 / 3176 files; with
-    // the cache active, the remaining 3170 skip tree-sitter entirely.
+    // Analyzer pipeline. `repo_root` doubles as the persistent parse_cache
+    // root — cache entries live in `<repo_root>/parse_cache/<fp>/` and
+    // survive across L2 commit_dirs as long as the file content (and binary
+    // build) is unchanged.
     let node_count = crate::commands::admin::index::run_analyzer_for_paths(
         &src_root,
-        &building,
-        Some(&repo_root),
+        building,
+        Some(repo_root),
     )?;
 
-    // 3. Refs / source typing
-    let refs_at_build = collect_refs(worktree, &sha_hex)?;
+    let refs_at_build = collect_refs(worktree, sha_hex)?;
     let source_type = source_type_from_refs(&refs_at_build);
     let source_id = source_id_from_refs(&refs_at_build);
-    let parent = parent_sha(worktree, &sha_hex).ok();
+    let parent = parent_sha(worktree, sha_hex).ok();
 
-    // 4. Metadata
     let meta = CommitBuildMeta {
         version: 1,
-        sha: sha_hex.clone(),
+        sha: sha_hex.to_string(),
         source_type,
         source_id,
         built_from_worktree: worktree.to_string_lossy().into(),
@@ -116,31 +123,48 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     };
     CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
 
-    // 5. fsync + atomic publish.
-    // A stale commit_dir from an earlier binary (fingerprint mismatch) is
-    // swept aside before the rename — Linux refuses to rename onto a
-    // non-empty directory. The window between remove and rename is
-    // sub-ms and tolerable: another reader would either see the old dir
-    // or, briefly, nothing; the next call short-circuits via the fast
-    // path once the fresh dir lands.
-    sync_all_files(&building)?;
+    // fsync + atomic publish. A stale commit_dir from an earlier binary
+    // (fingerprint mismatch) is swept aside before the rename — Linux
+    // refuses to rename onto a non-empty directory. force_rebuild_l2 also
+    // does its own drop earlier, so this branch covers both paths.
+    sync_all_files(building)?;
     if commit_dir.exists() {
-        fs::remove_dir_all(&commit_dir)?;
+        fs::remove_dir_all(commit_dir)?;
     }
-    fs::rename(&building, &commit_dir)?;
-    let _ = fs::remove_dir_all(commit_dir.join("_src")); // tolerate absence
+    fs::rename(building, commit_dir)?;
+    let _ = fs::remove_dir_all(commit_dir.join("_src"));
 
-    // 6. Update <repo>/meta.json (RepoMeta)
-    update_repo_meta(&repo_root, worktree, &sha_hex)?;
+    update_repo_meta(repo_root, worktree, sha_hex)?;
 
     Ok(BuildResult {
-        commit_dir,
-        sha_hex,
+        commit_dir: commit_dir.to_path_buf(),
+        sha_hex: sha_hex.to_string(),
         source_type,
     })
 }
 
-fn head_sha_hex(worktree: &Path) -> io::Result<String> {
+/// Cheap pre-build check: if `commit_dir/meta.json` exists and its
+/// `builder_fingerprint` matches the current binary, the published L2 at
+/// this SHA was made by an equivalent build — return it instead of
+/// rebuilding. Shared between `build_l2` (skip-if-exists fast path) and
+/// `force_rebuild_l2` (after `wait_for_completion`, lets N concurrent
+/// `--force` callers attach to one winner instead of each rebuilding).
+pub(crate) fn attach_if_fingerprint_matches(commit_dir: &Path) -> Option<BuildResult> {
+    if !commit_dir.join("meta.json").is_file() {
+        return None;
+    }
+    let meta = CommitBuildMeta::read(&commit_dir.join("meta.json")).ok()?;
+    if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT) {
+        return None;
+    }
+    Some(BuildResult {
+        commit_dir: commit_dir.to_path_buf(),
+        sha_hex: meta.sha,
+        source_type: meta.source_type,
+    })
+}
+
+pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
     let out = safe_exec::git()
         .args(["rev-parse", "HEAD"])
         .current_dir(worktree)
@@ -154,7 +178,7 @@ fn head_sha_hex(worktree: &Path) -> io::Result<String> {
         .to_string())
 }
 
-fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io::Result<bool> {
+pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io::Result<bool> {
     if head_sha_hex(worktree)? != sha {
         return Ok(false);
     }
@@ -165,7 +189,7 @@ fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io::Result<boo
     Ok(out.status.success())
 }
 
-fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
+pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
     let archive = safe_exec::git()
         .args(["archive", "--format=tar", sha])
         .current_dir(worktree)
@@ -186,7 +210,7 @@ fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
+pub(crate) fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
     let out = safe_exec::git()
         .args(["for-each-ref", "--points-at", sha, "--format=%(refname)"])
         .current_dir(worktree)
@@ -207,7 +231,7 @@ fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
         .collect())
 }
 
-fn source_type_from_refs(refs: &[RefRecord]) -> SourceType {
+pub(crate) fn source_type_from_refs(refs: &[RefRecord]) -> SourceType {
     if refs.iter().any(|r| r.ref_name.starts_with("refs/heads/")) {
         return SourceType::Branch;
     }
@@ -222,7 +246,7 @@ fn source_type_from_refs(refs: &[RefRecord]) -> SourceType {
     SourceType::Commit
 }
 
-fn source_id_from_refs(refs: &[RefRecord]) -> Option<String> {
+pub(crate) fn source_id_from_refs(refs: &[RefRecord]) -> Option<String> {
     for r in refs {
         if let Some(b) = r.ref_name.strip_prefix("refs/heads/") {
             return Some(b.to_string());
@@ -247,7 +271,7 @@ fn source_id_from_refs(refs: &[RefRecord]) -> Option<String> {
     None
 }
 
-fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
+pub(crate) fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
     let out = safe_exec::git()
         .args(["rev-parse", &format!("{sha}^")])
         .current_dir(worktree)
@@ -261,7 +285,7 @@ fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
         .to_string())
 }
 
-fn sync_all_files(dir: &Path) -> io::Result<()> {
+pub(crate) fn sync_all_files(dir: &Path) -> io::Result<()> {
     for entry in walkdir::WalkDir::new(dir)
         .into_iter()
         .filter_map(Result::ok)
@@ -274,7 +298,7 @@ fn sync_all_files(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> io::Result<()> {
+pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> io::Result<()> {
     let meta_path = repo_root.join("meta.json");
     let lock_path = repo_root.join(".meta.lock");
     let lock = OpenOptions::new()
@@ -346,7 +370,7 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Result<BuildResult> {
+pub(crate) fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Result<BuildResult> {
     let start = std::time::Instant::now();
     while building.exists() {
         if start.elapsed() > std::time::Duration::from_secs(600) {

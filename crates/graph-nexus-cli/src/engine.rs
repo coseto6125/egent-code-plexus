@@ -11,6 +11,18 @@ pub struct Engine {
     // Phase 3 reserves the slot; Phase 5 will wire L1 overlay merge into query paths.
     #[allow(dead_code)]
     overlay_dir: Option<PathBuf>,
+    view: GraphView,
+}
+
+/// Discriminated view over the L2 graph plus an optional L1 overlay.
+/// `L2Only` is the PureReference fast-path: callers can guarantee no
+/// `graph_overlay/` access (spec invariant F5). `L2WithOverlay` signals
+/// that the session has dirty fragments; the overlay merge implementation
+/// itself is deferred to P2 of the index-layout follow-up tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphView {
+    L2Only,
+    L2WithOverlay,
 }
 
 impl Engine {
@@ -30,7 +42,38 @@ impl Engine {
             mmap,
             graph_path,
             overlay_dir: None,
+            view: GraphView::L2Only,
         })
+    }
+
+    /// SessionState-driven constructor (spec §5.1). Classifies the session and
+    /// picks the right load path: PureReference → L2-only view (no overlay
+    /// touch, satisfies invariant F5); AugmentedReference → L2 + record the
+    /// overlay dir so the (P2) merge layer can find it; Stale → error so the
+    /// caller falls back to a fresh session.
+    pub fn open(repo_root: &Path, sid: &str) -> io::Result<Self> {
+        let state = crate::session::state::classify(repo_root, sid);
+        match state {
+            graph_nexus_core::session::SessionState::PureReference { l2_dirname, .. } => {
+                let l2_dir = repo_root.join("commits").join(&l2_dirname);
+                let mut eng = Self::load(l2_dir.join("graph.bin"))?;
+                eng.view = GraphView::L2Only;
+                Ok(eng)
+            }
+            graph_nexus_core::session::SessionState::AugmentedReference {
+                l2_dirname, ..
+            } => {
+                let l2_dir = repo_root.join("commits").join(&l2_dirname);
+                let overlay_dir = repo_root.join("sessions").join(sid);
+                let mut eng = Self::load(l2_dir.join("graph.bin"))?;
+                eng.overlay_dir = Some(overlay_dir);
+                eng.view = GraphView::L2WithOverlay;
+                Ok(eng)
+            }
+            graph_nexus_core::session::SessionState::Stale { reason } => Err(io::Error::other(
+                format!("session stale: {reason:?}; remove via `gnx admin sessions reset <id>`"),
+            )),
+        }
     }
 
     /// Attach an L1 session overlay dir (`~/.gnx/<repo>/sessions/<sid>/`)
@@ -39,7 +82,14 @@ impl Engine {
     #[allow(dead_code)]
     pub fn with_overlay(mut self, dir: PathBuf) -> Self {
         self.overlay_dir = Some(dir);
+        self.view = GraphView::L2WithOverlay;
         self
+    }
+
+    /// Current view discriminator. PureReference sessions yield `L2Only`;
+    /// AugmentedReference and back-compat `load` callers yield `L2WithOverlay`.
+    pub fn view(&self) -> GraphView {
+        self.view
     }
 
     pub fn graph(&self) -> Result<&ArchivedZeroCopyGraph, Error> {

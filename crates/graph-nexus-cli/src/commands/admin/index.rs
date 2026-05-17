@@ -22,7 +22,11 @@ pub struct IndexArgs {
     #[arg(long)]
     pub repo: String,
 
-    /// Force full analysis even if the graph seems up to date.
+    /// Force-rebuild L2 at the target SHA. Drops the existing L2 dir and any
+    /// orphan `.building/`, invalidates L1 sessions that have overlays for
+    /// this SHA (clean sessions kept), then rebuilds. Without `--force`, an
+    /// existing L2 is reused. Use after analyzer/grammar upgrade or to
+    /// recover from L2 corruption.
     #[arg(long, default_value_t = false)]
     pub force: bool,
 
@@ -31,14 +35,6 @@ pub struct IndexArgs {
     /// Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
     #[arg(long)]
     pub dump_resolver: Option<std::path::PathBuf>,
-
-    /// Bypass the incremental parse cache and force a full re-parse of
-    /// every file. Also honored via `GNX_NO_CACHE=1`. Use when you suspect
-    /// the cache has gone stale in a way the binary fingerprint didn't
-    /// catch (e.g. external grammar update from outside the build) or
-    /// for benchmark baselines.
-    #[arg(long, default_value_t = false)]
-    pub no_cache: bool,
 
     /// Suppress progress output (timings, "Graph saved", etc.). Used by
     /// auto_ensure when an agent command transparently rebuilds; the
@@ -274,10 +270,10 @@ pub fn run_analyzer_for_paths(
 }
 
 pub fn run(args: IndexArgs) -> Result<(), String> {
-    if args.force || args.no_cache || args.dump_resolver.is_some() {
+    if args.dump_resolver.is_some() {
         eprintln!(
-            "warning: --force / --no-cache / --dump-resolver \
-             flags accepted but currently no-op in v2 layout; will be wired in Phase 5+"
+            "warning: --dump-resolver accepted but not yet wired in v2 layout; \
+             will be re-wired alongside `gnx diff` baseline path"
         );
     }
 
@@ -287,14 +283,76 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     }
 
     let start = std::time::Instant::now();
-    let result = crate::build::orchestrator::build_l2(&worktree, None)
-        .map_err(|e| format!("build_l2 failed: {e}"))?;
+    let sha = crate::build::orchestrator::head_sha_hex(&worktree)
+        .map_err(|e| format!("git rev-parse HEAD: {e}"))?;
+    let commit_dir =
+        locate_commit_dir(&worktree, &sha).map_err(|e| format!("locate commit dir: {e}"))?;
 
-    if !args.quiet {
-        let elapsed = start.elapsed().as_secs_f32();
-        eprintln!("l2.built sha={} type={:?} elapsed={:.2}s", &result.sha_hex[..8], result.source_type, elapsed);
+    match (args.force, commit_dir) {
+        (false, Some(existing)) => {
+            if !args.quiet {
+                let st = detect_source_type(&existing);
+                eprintln!(
+                    "l2.exists sha={} type={:?} elapsed={:.2}s (use --force to rebuild)",
+                    &sha[..8.min(sha.len())],
+                    st,
+                    start.elapsed().as_secs_f32(),
+                );
+            }
+            Ok(())
+        }
+        (false, None) => {
+            let r = crate::build::orchestrator::build_l2(&worktree, None)
+                .map_err(|e| format!("build_l2 failed: {e}"))?;
+            if !args.quiet {
+                eprintln!(
+                    "l2.built sha={} type={:?} elapsed={:.2}s",
+                    &r.sha_hex[..8.min(r.sha_hex.len())],
+                    r.source_type,
+                    start.elapsed().as_secs_f32(),
+                );
+            }
+            Ok(())
+        }
+        (true, _) => {
+            let r = crate::build::force::force_rebuild_l2(&worktree, &sha)
+                .map_err(|e| format!("force rebuild failed: {e}"))?;
+            if !args.quiet {
+                eprintln!(
+                    "l2.rebuilt sha={} type={:?} elapsed={:.2}s l1_kept={} l1_invalidated={} l1_stale_skipped={}",
+                    &r.sha_hex[..8.min(r.sha_hex.len())],
+                    r.source_type,
+                    start.elapsed().as_secs_f32(),
+                    r.invalidate_report.kept,
+                    r.invalidate_report.invalidated,
+                    r.invalidate_report.stale_skipped,
+                );
+            }
+            Ok(())
+        }
     }
-    Ok(())
+}
+
+fn locate_commit_dir(
+    worktree: &std::path::Path,
+    sha: &str,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree)?;
+    let commits = home_gnx.join(&repo_dir_name).join("commits");
+    if !commits.exists() {
+        return Ok(None);
+    }
+    let idx = crate::commit_lookup::CommitIndex::scan(&commits)?;
+    let sha_bytes = crate::session::state::sha_hex_to_bytes(sha)
+        .ok_or_else(|| std::io::Error::other("invalid sha hex"))?;
+    Ok(idx.find(&sha_bytes).map(|name| commits.join(name)))
+}
+
+fn detect_source_type(commit_dir: &std::path::Path) -> graph_nexus_core::registry::SourceType {
+    graph_nexus_core::registry::CommitBuildMeta::read(&commit_dir.join("meta.json"))
+        .map(|m| m.source_type)
+        .unwrap_or(graph_nexus_core::registry::SourceType::Commit)
 }
 
 #[derive(Default)]
