@@ -9,8 +9,9 @@ impl LangSpec for VerilogSpec {
     const NAME: &'static str = "verilog";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "class.name"  => NodeKind::Class,
-        "method.name" => NodeKind::Method,
-        "const.name"  => NodeKind::Const,
+        "class.name"       => NodeKind::Class,
+        "method.name"      => NodeKind::Method,
+        "const.name"       => NodeKind::Const,
+        "class_prop.name"  => NodeKind::Property,
     };
 }

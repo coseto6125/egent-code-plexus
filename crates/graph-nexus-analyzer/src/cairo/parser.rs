@@ -64,6 +64,10 @@ impl LanguageProvider for CairoProvider {
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import = self.query.capture_index_for_name("import");
 
+        // tree-sitter-cairo v0.0.1 strips `pub` from the grammar entirely —
+        // detect it via a backward source-text scan instead.
+        use crate::framework_helpers::source_before_node_ends_with;
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -109,7 +113,7 @@ impl LanguageProvider for CairoProvider {
                     let end = root.end_position();
                     nodes.push(RawNode {
                         decorators: vec![],
-                        is_exported: true,
+                        is_exported: source_before_node_ends_with(source, root, b"pub"),
                         heritage,
                         type_annotation: None,
                         name: name_str.to_string(),

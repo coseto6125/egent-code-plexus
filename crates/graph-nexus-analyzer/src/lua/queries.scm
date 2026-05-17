@@ -1,5 +1,7 @@
 ;; Functions — top-level: `function foo()` and `local function foo()`
 ;; (local function foo() is aliased to function_declaration in this grammar)
+;; is_exported discrimination is done in parser.rs by checking whether the
+;; raw source at the node's start byte begins with "local".
 (function_declaration
   name: (identifier) @function.name) @function
 

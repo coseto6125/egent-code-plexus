@@ -53,6 +53,7 @@ struct PendingNode {
     name: String,
     kind: NodeKind,
     span: (u32, u32, u32, u32),
+    start_byte: usize,
 }
 
 struct PendingImport {
@@ -159,6 +160,7 @@ impl LanguageProvider for ZigProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
+                        start_byte: root_start_byte,
                     };
                     // Keep only the highest-priority match per declaration site.
                     if let Some(&i) = node_idx_by_key.get(&root_start_byte) {
@@ -187,15 +189,21 @@ impl LanguageProvider for ZigProvider {
         let mut nodes: Vec<RawNode> = pending_nodes
             .into_iter()
             .filter(|n| !n.name.is_empty())
-            .map(|n| RawNode {
-                decorators: vec![],
-                is_exported: false,
-                heritage: vec![],
-                type_annotation: None,
-                name: n.name,
-                kind: n.kind,
-                span: n.span,
-                calls: Vec::new(),
+            .map(|n| {
+                let is_exported = source
+                    .get(n.start_byte..n.start_byte.saturating_add(4))
+                    .map(|s| s == b"pub ")
+                    .unwrap_or(false);
+                RawNode {
+                    decorators: vec![],
+                    is_exported,
+                    heritage: vec![],
+                    type_annotation: None,
+                    name: n.name,
+                    kind: n.kind,
+                    span: n.span,
+                    calls: Vec::new(),
+                }
             })
             .collect();
 

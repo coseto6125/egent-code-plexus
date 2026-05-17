@@ -2,7 +2,8 @@
 (module_definition
   module_identity: (module_identity) @class.name) @class
 
-;; Function definitions (public fun, entry fun, public entry fun, friend fun — all use function_definition)
+;; Function definitions (public fun, entry fun, public entry fun, friend fun — all use function_definition).
+;; Visibility is resolved in parser.rs by walking the `modifier` named children of the matched node.
 (function_definition
   name: (function_identifier) @function.name) @function
 

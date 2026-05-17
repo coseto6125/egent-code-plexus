@@ -39,10 +39,10 @@
   (string_lit (template_literal) @const.name)
   (#eq? @_block_type5 "variable")) @const
 
-; output "name" { ... }  → const
+; output "name" { ... }  → const (exported: module public interface)
 (block
   (identifier) @_block_type6
-  (string_lit (template_literal) @const.name)
+  (string_lit (template_literal) @output.name)
   (#eq? @_block_type6 "output")) @const
 
 ; locals { key = ... }  → each attribute is a const

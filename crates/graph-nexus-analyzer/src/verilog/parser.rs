@@ -59,12 +59,17 @@ impl LanguageProvider for VerilogProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import = self.query.capture_index_for_name("import");
+        let idx_class_prop = self.query.capture_index_for_name("class_prop");
+        let idx_class_prop_visibility =
+            self.query.capture_index_for_name("class_prop.visibility");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
             let mut import_src = None;
+            let mut class_prop_visibility: Option<&[u8]> = None;
+            let mut is_class_prop = false;
 
             for cap in m.captures {
                 let cap_idx = cap.index as usize;
@@ -76,6 +81,12 @@ impl LanguageProvider for VerilogProvider {
                     }
                 } else if Some(cap_idx as u32) == idx_import_source {
                     import_src = Some(cap.node);
+                } else if Some(cap_idx as u32) == idx_class_prop_visibility {
+                    class_prop_visibility =
+                        Some(&source[cap.node.start_byte()..cap.node.end_byte()]);
+                } else if Some(cap_idx as u32) == idx_class_prop {
+                    root_span_node = Some(cap.node);
+                    is_class_prop = true;
                 } else if Some(cap_idx as u32) == idx_class
                     || Some(cap_idx as u32) == idx_method
                     || Some(cap_idx as u32) == idx_const
@@ -89,9 +100,18 @@ impl LanguageProvider for VerilogProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
+                    // SV class members: `local`/`protected` → private; all else → exported.
+                    let is_exported = if is_class_prop {
+                        !matches!(
+                            class_prop_visibility,
+                            Some(b"local") | Some(b"protected")
+                        )
+                    } else {
+                        true
+                    };
                     nodes.push(RawNode {
                         decorators: vec![],
-                        is_exported: true,
+                        is_exported,
                         heritage: vec![],
                         type_annotation: None,
                         name: name_str.to_string(),

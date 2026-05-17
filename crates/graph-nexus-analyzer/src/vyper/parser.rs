@@ -59,7 +59,6 @@ impl LanguageProvider for VyperProvider {
         let idx_const = self.query.capture_index_for_name("const");
 
         // Metadata-only captures (attach attributes; not NodeKind-producing)
-        let idx_decorator = self.query.capture_index_for_name("decorator");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
         while let Some(m) = matches.next() {
@@ -83,11 +82,27 @@ impl LanguageProvider for VyperProvider {
                     }
                 } else if Some(ci) == idx_function || Some(ci) == idx_const {
                     root_span_node = Some(cap.node);
-                } else if Some(ci) == idx_decorator {
-                    if let Ok(d) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d.to_string());
+                    // Decorator captures arrive in separate match iterations
+                    // (tree-sitter pattern boundaries), so walk children here
+                    // instead of relying on a co-emitted @decorator capture.
+                    if Some(ci) == idx_function {
+                        let mut walker = cap.node.walk();
+                        for child in cap.node.children(&mut walker) {
+                            if child.kind() != "decorator" {
+                                continue;
+                            }
+                            let mut dwalker = child.walk();
+                            for grandchild in child.children(&mut dwalker) {
+                                if grandchild.kind() != "identifier" {
+                                    continue;
+                                }
+                                if let Ok(d) = std::str::from_utf8(
+                                    &source[grandchild.start_byte()..grandchild.end_byte()],
+                                ) {
+                                    decorators.push(d.to_string());
+                                }
+                            }
+                        }
                     }
                 } else if Some(ci) == idx_import_source {
                     import_src = Some(cap.node);
@@ -112,9 +127,12 @@ impl LanguageProvider for VyperProvider {
                             }
                         }
                     } else {
+                        let is_exported = decorators.iter().any(|d| {
+                            matches!(d.trim(), "external" | "view" | "payable")
+                        });
                         nodes.push(RawNode {
                             decorators,
-                            is_exported: true,
+                            is_exported,
                             heritage: vec![],
                             type_annotation: None,
                             name: name_str.to_string(),

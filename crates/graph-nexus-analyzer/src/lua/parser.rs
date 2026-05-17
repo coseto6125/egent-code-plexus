@@ -172,6 +172,16 @@ impl LanguageProvider for LuaProvider {
                     let start = root.start_position();
                     let end = root.end_position();
 
+                    // tree-sitter-lua 0.5.0 aliases `local function foo()` as
+                    // function_declaration, indistinguishable from the global form
+                    // by node type alone. Source-text scan is the only signal.
+                    let is_local_fn = matches!(k, NodeKind::Function)
+                        && crate::framework_helpers::node_source_starts_with(
+                            source,
+                            root,
+                            b"local",
+                        );
+
                     let span_key = (start.row as u32, start.column as u32);
                     // Deduplicate: @struct and @const patterns both fire on `local T = {}`.
                     // If we already saw a node at this span and the new kind has higher priority
@@ -195,7 +205,7 @@ impl LanguageProvider for LuaProvider {
 
                     nodes.push(RawNode {
                         decorators: vec![],
-                        is_exported: true,
+                        is_exported: !is_local_fn,
                         heritage: vec![],
                         type_annotation: None,
                         name: name_str.to_string(),

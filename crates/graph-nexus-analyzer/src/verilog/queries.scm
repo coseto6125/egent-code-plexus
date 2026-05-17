@@ -30,3 +30,14 @@
   (list_of_param_assignments
     (param_assignment
       (parameter_identifier) @const.name))) @const
+
+;; SystemVerilog class properties — capture name and optional qualifier.
+;; class_item_qualifier is "local" or "protected" when present (implicitly
+;; public otherwise).  The parser reads @class_prop.visibility to set
+;; is_exported = false for local/protected members.
+(class_property
+  (class_item_qualifier)? @class_prop.visibility
+  (data_declaration
+    (list_of_variable_decl_assignments
+      (variable_decl_assignment
+        (simple_identifier) @class_prop.name)))) @class_prop

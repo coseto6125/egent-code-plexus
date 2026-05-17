@@ -96,8 +96,10 @@ impl LanguageProvider for NimProvider {
                     let start = root.start_position();
                     let end = root.end_position();
 
-                    // Nim procedures are exported when their name ends with `*`.
-                    let is_exported = name_str.ends_with('*') || !clean_name.starts_with('_');
+                    // Nim procedures are exported iff the name node carries the
+                    // trailing `*` export marker (tree-sitter-nim uses
+                    // `exported_symbol` for that form).
+                    let is_exported = name_str.ends_with('*');
 
                     nodes.push(RawNode {
                         decorators: vec![],

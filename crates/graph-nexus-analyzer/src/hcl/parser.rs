@@ -61,6 +61,8 @@ impl LanguageProvider for HclProvider {
         // Auxiliary label captures for resource/data two-label patterns.
         let idx_res_type = self.query.capture_index_for_name("_res_type");
         let idx_data_type = self.query.capture_index_for_name("_data_type");
+        // Output block capture — these nodes are the module's public interface.
+        let idx_output_name = self.query.capture_index_for_name("output.name");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -69,6 +71,8 @@ impl LanguageProvider for HclProvider {
             let mut import_src = None;
             // For resource/data: accumulate prefix label to build "type.name".
             let mut prefix_node = None;
+            // Track whether this match came from an `output` block.
+            let mut is_output_block = false;
 
             for cap in m.captures {
                 let cap_idx = cap.index as usize;
@@ -76,6 +80,9 @@ impl LanguageProvider for HclProvider {
                     // This is a .name capture with a NodeKind
                     name_node = Some(cap.node);
                     kind = Some(k);
+                    if Some(cap_idx as u32) == idx_output_name {
+                        is_output_block = true;
+                    }
                 } else if Some(cap_idx as u32) == idx_class || Some(cap_idx as u32) == idx_const {
                     root_span_node = Some(cap.node);
                 } else if Some(cap_idx as u32) == idx_import_source {
@@ -107,7 +114,8 @@ impl LanguageProvider for HclProvider {
                     let end = root.end_position();
                     nodes.push(RawNode {
                         decorators: vec![],
-                        is_exported: true,
+                        // Only `output` blocks are the module's public interface.
+                        is_exported: is_output_block,
                         heritage: vec![],
                         type_annotation: None,
                         name: full_name,

@@ -108,9 +108,14 @@ impl LanguageProvider for CrystalProvider {
                     } else {
                         Vec::new()
                     };
+                    // Crystal visibility: `private`/`protected` modifier appears
+                    // as a sibling token immediately before the definition.
+                    use crate::framework_helpers::source_before_node_ends_with;
+                    let is_exported = !(source_before_node_ends_with(source, root, b"private")
+                        || source_before_node_ends_with(source, root, b"protected"));
                     nodes.push(RawNode {
                         decorators: Vec::new(),
-                        is_exported: true,
+                        is_exported,
                         heritage: heritage_for_emit,
                         type_annotation: None,
                         name: name_str.to_string(),

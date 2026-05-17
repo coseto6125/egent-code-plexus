@@ -64,10 +64,26 @@ impl LanguageProvider for MoveProvider {
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
+        // Functions carry `public`/`public(friend)`/`public(package)`/`entry`
+        // as a named `modifier` child. Structs have no `modifier` child in the
+        // grammar — fall back to a source-text prefix scan via the helper.
+        use crate::framework_helpers::node_source_starts_with;
+        let has_modifier_child = |node: tree_sitter::Node| -> bool {
+            // `cursor` must outlive the iterator returned by `named_children`,
+            // so the result has to land in a binding before the closure ends —
+            // otherwise the cursor is dropped while still borrowed (E0597).
+            let mut cursor = node.walk();
+            let has = node
+                .named_children(&mut cursor)
+                .any(|child| child.kind() == "modifier");
+            has
+        };
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
             let mut root_span_node = None;
+            let mut is_struct_root = false;
             let mut import_name = None;
             let mut import_src = None;
 
@@ -87,6 +103,9 @@ impl LanguageProvider for MoveProvider {
                 } else if [idx_class, idx_function, idx_struct, idx_const].contains(&Some(cap_idx))
                 {
                     root_span_node = Some(cap.node);
+                    if Some(cap_idx) == idx_struct {
+                        is_struct_root = true;
+                    }
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
@@ -98,6 +117,11 @@ impl LanguageProvider for MoveProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
+                    let is_exported = if is_struct_root {
+                        node_source_starts_with(source, root, b"public ")
+                    } else {
+                        has_modifier_child(root)
+                    };
                     nodes.push(RawNode {
                         name: name_str.to_string(),
                         kind: k,
@@ -107,7 +131,7 @@ impl LanguageProvider for MoveProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
-                        is_exported: false,
+                        is_exported,
                         heritage: Vec::new(),
                         type_annotation: None,
                         decorators: Vec::new(),
