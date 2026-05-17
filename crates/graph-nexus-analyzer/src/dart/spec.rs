@@ -24,6 +24,8 @@ impl LangSpec for DartSpec {
         "interface.name"   => NodeKind::Interface,
         "trait.name"       => NodeKind::Trait,
         "property.name"    => NodeKind::Property,
+        "enum.name"        => NodeKind::Enum,
+        "annotation.name"  => NodeKind::Annotation,
     };
 
     // Dart grammar scope-anchors via query patterns; no MODULE_SCOPED_CAPTURES
