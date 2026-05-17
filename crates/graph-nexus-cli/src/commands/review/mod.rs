@@ -40,7 +40,7 @@ pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), GnxError> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let files = scope::resolve(&args, &repo_dir)?;
-    let report = aggregate::run(&files, &repo_dir, engine)?;
+    let report = aggregate::run(&files, &repo_dir, engine, args.since.as_deref())?;
     let payload = report.emit(start.elapsed());
     let format = OutputFormat::parse(args.format.as_deref());
     emit(&payload, format)

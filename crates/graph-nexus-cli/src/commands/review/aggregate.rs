@@ -12,38 +12,51 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub fn run(files: &[PathBuf], repo_dir: &Path, engine: &Engine) -> Result<Report, GnxError> {
-    let deferred = vec!["egress_diff", "shape_check", "resolver_diff"];
+const DEFERRED: &[&str] = &["egress_diff", "shape_check", "resolver_diff"];
 
+pub fn run(
+    files: &[PathBuf],
+    repo_dir: &Path,
+    engine: &Engine,
+    since: Option<&str>,
+) -> Result<Report, GnxError> {
     if files.is_empty() {
         return Ok(Report {
             findings: vec![],
             files_reviewed: 0,
-            deferred,
+            deferred: DEFERRED.to_vec(),
         });
     }
 
-    let file_scope: HashSet<&Path> = files.iter().map(|p| p.as_path()).collect();
+    let scope_strs: HashSet<String> = files
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     let mut findings: Vec<Finding> = Vec::new();
 
-    findings.extend(run_impact(&file_scope, repo_dir, engine));
-    findings.extend(run_coverage(&file_scope, engine));
-    findings.extend(run_tool_map(&file_scope, engine));
+    findings.extend(run_impact(&scope_strs, repo_dir, engine, since));
+    findings.extend(run_coverage(&scope_strs, engine));
+    findings.extend(run_tool_map(&scope_strs, engine));
 
     Ok(Report {
         findings,
         files_reviewed: files.len(),
-        deferred,
+        deferred: DEFERRED.to_vec(),
     })
 }
 
 // ── impact helper ────────────────────────────────────────────────────────────
 
-fn run_impact(file_scope: &HashSet<&Path>, repo_dir: &Path, engine: &Engine) -> Vec<Finding> {
+fn run_impact(
+    file_scope: &HashSet<String>,
+    repo_dir: &Path,
+    engine: &Engine,
+    since: Option<&str>,
+) -> Vec<Finding> {
     let args = ImpactArgs {
         name: None,
         target: None,
-        baseline: Some("HEAD~1".into()),
+        baseline: Some(since.unwrap_or("HEAD~1").to_string()),
         file: None,
         kind: None,
         direction: Direction::Up,
@@ -59,11 +72,20 @@ fn run_impact(file_scope: &HashSet<&Path>, repo_dir: &Path, engine: &Engine) -> 
         Ok(v) => v,
         Err(_) => return vec![],
     };
-    let scope_strs: HashSet<String> = file_scope
+    impact_findings(&v, file_scope)
+}
+
+/// True iff `path` (typically an absolute or repo-relative file path from a
+/// graph payload) is in scope. We only accept an exact match OR scope-entry
+/// being a suffix of `path` — the symmetric direction was unsound (would
+/// match `vendor/rs/lib.rs` against scope `src/foo.rs` via `s.ends_with("rs")`).
+fn path_in_scope(path: &str, file_scope: &HashSet<String>) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    file_scope
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    impact_findings(&v, &scope_strs)
+        .any(|s| s == path || path.ends_with(s.as_str()))
 }
 
 /// Extract impact findings, attributing each to the changed symbol's own
@@ -90,16 +112,12 @@ pub fn impact_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> 
                 .collect()
         })
         .unwrap_or_default();
-    let in_scope = |path: &str| -> bool {
-        file_scope
-            .iter()
-            .any(|s| s == path || path.ends_with(s.as_str()) || s.ends_with(path))
-    };
-
     let mut findings = Vec::new();
     for entry in by_sym {
-        let file_path = entry["filePath"].as_str().unwrap_or("");
-        if !in_scope(file_path) {
+        let Some(file_path) = entry["filePath"].as_str() else {
+            continue;
+        };
+        if !path_in_scope(file_path, file_scope) {
             continue;
         }
         let sym = entry["symbol"].as_str().unwrap_or("?");
@@ -132,7 +150,7 @@ pub fn impact_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> 
 
 // ── coverage (BlindSpot) helper ──────────────────────────────────────────────
 
-fn run_coverage(file_scope: &HashSet<&Path>, engine: &Engine) -> Vec<Finding> {
+fn run_coverage(file_scope: &HashSet<String>, engine: &Engine) -> Vec<Finding> {
     // coverage::build_payload with --repo needs a path arg, but for blind-spot
     // extraction we need to read the graph's blind_spots directly.
     // Use the engine's graph to avoid a subprocess round-trip.
@@ -146,10 +164,7 @@ fn run_coverage(file_scope: &HashSet<&Path>, engine: &Engine) -> Vec<Finding> {
         .iter()
         .filter_map(|bs| {
             let file_path = bs.file_path.resolve(&graph.string_pool);
-            let in_scope = file_scope.iter().any(|p| {
-                p.to_string_lossy() == file_path || file_path.ends_with(&*p.to_string_lossy())
-            });
-            if !in_scope {
+            if !path_in_scope(file_path, file_scope) {
                 return None;
             }
             let kind = bs.kind.resolve(&graph.string_pool);
@@ -165,37 +180,39 @@ fn run_coverage(file_scope: &HashSet<&Path>, engine: &Engine) -> Vec<Finding> {
         .collect()
 }
 
-/// Extract coverage BlindSpot findings from a `coverage::build_payload` Value.
-/// Used in unit tests — production path uses `run_coverage` (graph direct).
-pub fn coverage_blind_spots(v: &Value, file_scope: &[&str]) -> Vec<Finding> {
-    let scope_set: HashSet<&str> = file_scope.iter().copied().collect();
+/// Mine the coverage payload's per-repo `blind_spots.by_kind` aggregate.
+/// The aggregate has no file-level granularity, so each (repo, kind) pair
+/// yields ONE finding attributed to the repo's path — never fanned-out per
+/// scope file (that would fabricate attribution). Production callers should
+/// prefer `run_coverage`, which reads `graph.blind_spots` directly and
+/// preserves file paths.
+pub fn coverage_blind_spots(v: &Value, _file_scope: &[&str]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // coverage payload shape: {"coverage": {"per_repo": [{"blind_spots": ...}]}}
-    // or {"coverage": {"indexed_repos": ...}} — mine per_repo if present.
-    if let Some(per_repo) = v.pointer("/coverage/per_repo").and_then(|v| v.as_array()) {
-        for repo in per_repo {
-            if let Some(by_kind) = repo
-                .pointer("/blind_spots/by_kind")
-                .and_then(|v| v.as_object())
-            {
-                for (kind, _count) in by_kind {
-                    // No file info in the aggregated by_kind — emit one finding
-                    // per kind for any file in scope.
-                    for file in file_scope {
-                        if scope_set.contains(file) {
-                            findings.push(Finding {
-                                file: (*file).into(),
-                                line: 0,
-                                kind: "blind_spot",
-                                severity: Severity::Info,
-                                message: format!("blind spot: {kind}"),
-                                source: Source::BlindSpot,
-                            });
-                        }
-                    }
-                }
-            }
+    let Some(per_repo) = v.pointer("/coverage/per_repo").and_then(|v| v.as_array()) else {
+        return findings;
+    };
+    for repo in per_repo {
+        let repo_name = repo
+            .get("repo")
+            .and_then(|v| v.as_str())
+            .or_else(|| repo.get("name").and_then(|v| v.as_str()))
+            .unwrap_or(".");
+        let Some(by_kind) = repo
+            .pointer("/blind_spots/by_kind")
+            .and_then(|v| v.as_object())
+        else {
+            continue;
+        };
+        for kind in by_kind.keys() {
+            findings.push(Finding {
+                file: repo_name.into(),
+                line: 0,
+                kind: "blind_spot",
+                severity: Severity::Info,
+                message: format!("blind spot: {kind}"),
+                source: Source::BlindSpot,
+            });
         }
     }
     findings
@@ -203,7 +220,7 @@ pub fn coverage_blind_spots(v: &Value, file_scope: &[&str]) -> Vec<Finding> {
 
 // ── tool_map (egress) helper ─────────────────────────────────────────────────
 
-fn run_tool_map(file_scope: &HashSet<&Path>, engine: &Engine) -> Vec<Finding> {
+fn run_tool_map(file_scope: &HashSet<String>, engine: &Engine) -> Vec<Finding> {
     let args = ToolMapArgs {
         category: None,
         repo: None,
@@ -213,15 +230,11 @@ fn run_tool_map(file_scope: &HashSet<&Path>, engine: &Engine) -> Vec<Finding> {
         Ok(v) => v,
         Err(_) => return vec![],
     };
-    let file_strs: HashSet<String> = file_scope
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    tool_map_findings(&v, &file_strs)
+    tool_map_findings(&v, file_scope)
 }
 
 /// Extract tool_map findings for call-sites in the given files.
-pub fn tool_map_findings(v: &Value, file_strs: &HashSet<String>) -> Vec<Finding> {
+pub fn tool_map_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let calls = match v.get("calls").and_then(|c| c.as_object()) {
@@ -235,11 +248,10 @@ pub fn tool_map_findings(v: &Value, file_strs: &HashSet<String>) -> Vec<Finding>
             None => continue,
         };
         for entry in entries {
-            let file_path = entry["filePath"].as_str().unwrap_or("");
-            if !file_strs
-                .iter()
-                .any(|f| f == file_path || file_path.ends_with(f.as_str()))
-            {
+            let Some(file_path) = entry["filePath"].as_str() else {
+                continue;
+            };
+            if !path_in_scope(file_path, file_scope) {
                 continue;
             }
             let callee = entry["callee"].as_str().unwrap_or("?");

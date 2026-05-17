@@ -40,30 +40,27 @@ pub struct Report {
 
 impl Report {
     pub fn emit(&self, elapsed: std::time::Duration) -> serde_json::Value {
-        let mut per_file: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
-        for f in &self.findings {
-            per_file.entry(f.file.as_str()).or_default().push(f);
-        }
-        let warn_count = self
-            .findings
-            .iter()
-            .filter(|f| f.severity == Severity::Warn)
-            .count();
-        let info_count = self
-            .findings
-            .iter()
-            .filter(|f| f.severity == Severity::Info)
-            .count();
-        let clean_files = self.files_reviewed.saturating_sub(per_file.len());
-
+        let elapsed_ms = elapsed.as_millis() as u64;
         if self.findings.is_empty() {
             return serde_json::json!({
                 "status": "clean",
                 "files_reviewed": self.files_reviewed,
                 "deferred": self.deferred,
-                "elapsed_ms": elapsed.as_millis() as u64,
+                "elapsed_ms": elapsed_ms,
             });
         }
+
+        let mut per_file: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
+        let mut warn_count = 0usize;
+        let mut info_count = 0usize;
+        for f in &self.findings {
+            per_file.entry(f.file.as_str()).or_default().push(f);
+            match f.severity {
+                Severity::Warn => warn_count += 1,
+                Severity::Info => info_count += 1,
+            }
+        }
+        let clean_files = self.files_reviewed.saturating_sub(per_file.len());
 
         let files: Vec<serde_json::Value> = per_file
             .into_iter()
@@ -84,7 +81,7 @@ impl Report {
                 "info_count": info_count,
                 "clean_files": clean_files,
                 "deferred": self.deferred,
-                "elapsed_ms": elapsed.as_millis() as u64,
+                "elapsed_ms": elapsed_ms,
             }
         })
     }
