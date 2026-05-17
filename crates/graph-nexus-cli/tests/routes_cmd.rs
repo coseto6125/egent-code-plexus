@@ -385,3 +385,139 @@ fn routes_no_path_toon_output_has_route_info() {
         "toon output missing route info:\n{stdout}"
     );
 }
+
+// ── inline-anonymous handler + enclosing scope ──────────────────────────────
+//
+// Regression fixture: a TS file with a *named* handler and an *inline arrow*
+// handler, both registered inside an enclosing setup function. The named
+// case must report `handlerKind: "named"`; the inline case must surface a
+// synthetic handler entry (instead of an empty `handlers[]` array) tagged
+// `handlerKind: "inline_anonymous"`. Both routes must carry an
+// `enclosingScope` pointing back at the registration function.
+
+const INLINE_FIXTURE_SRC: &str = r#"
+import express from "express";
+
+const app = express();
+
+function _build_user_list() {
+    return [];
+}
+
+function list_users(req: any, res: any) {
+    return _build_user_list();
+}
+
+// Mixed-handler registration nested inside an enclosing setup function.
+export function register_routes() {
+    app.get("/api/users", list_users);
+    app.get("/api/health", (_req, res) => {
+        res.json({ status: "ok" });
+    });
+}
+"#;
+
+fn setup_inline_repo(repo: &Path, home: &Path) {
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/main.ts"), INLINE_FIXTURE_SRC).unwrap();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    run_git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:E-NoR/routes-inline-test.git",
+        ],
+    );
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    let out = Command::new(gnx_bin())
+        .args(["admin", "index", "--repo", "."])
+        .current_dir(repo)
+        .env("HOME", home)
+        .output()
+        .expect("admin index spawn failed");
+    assert!(
+        out.status.success(),
+        "admin index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn routes_inline_handler_synthesized() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_inline_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["/api/health"]);
+    assert_eq!(json["status"], "found", "expected status=found: {json}");
+
+    let handlers = json["handlers"].as_array().expect("handlers array missing");
+    assert!(
+        !handlers.is_empty(),
+        "inline-arrow route must surface a synthetic handler — empty handlers[] is the bug we are fixing: {json}"
+    );
+    let kinds: Vec<&str> = handlers
+        .iter()
+        .map(|h| h["handlerKind"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        kinds.contains(&"inline_anonymous"),
+        "expected handlerKind=inline_anonymous, got: {kinds:?}\nfull json: {json}"
+    );
+}
+
+#[test]
+fn routes_named_handler_marked_named() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_inline_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["/api/users"]);
+    assert_eq!(json["status"], "found", "expected status=found: {json}");
+
+    let handlers = json["handlers"].as_array().expect("handlers array missing");
+    let named: Vec<&str> = handlers
+        .iter()
+        .filter(|h| h["handlerKind"].as_str() == Some("named"))
+        .map(|h| h["name"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        named.contains(&"list_users"),
+        "expected list_users as named handler, got: {named:?}\nfull json: {json}"
+    );
+}
+
+#[test]
+fn routes_inline_route_has_enclosing_scope() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_inline_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["/api/health"]);
+    let routes = json["routes"].as_array().expect("routes array missing");
+    assert!(!routes.is_empty(), "expected ≥1 matched route: {json}");
+
+    let scope_names: Vec<&str> = routes
+        .iter()
+        .filter_map(|r| r["enclosingScope"]["name"].as_str())
+        .collect();
+    assert!(
+        scope_names.contains(&"register_routes"),
+        "expected enclosingScope.name=register_routes for /api/health, got: {scope_names:?}\nfull json: {json}"
+    );
+}

@@ -149,6 +149,77 @@ fn split_route_name(name: &str) -> (&str, &str) {
     name.split_once(' ').unwrap_or(("", name))
 }
 
+/// Find the smallest Function/Method/Constructor/Class node in the same
+/// file whose line span encloses `line`. Returns the node index, or `None`
+/// for module-level routes with no enclosing scope. Multi-line `Const`
+/// nodes (arrow-function bound to a const, e.g. `const setup = () => {…}`)
+/// are also considered — TS / JS commonly express scope this way.
+fn find_enclosing_scope(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    file_idx: u32,
+    line: u32,
+) -> Option<usize> {
+    let mut best: Option<(u32, usize)> = None;
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if node.file_idx.to_native() != file_idx {
+            continue;
+        }
+        let is_scope_kind = matches!(
+            &node.kind,
+            ArchivedNodeKind::Function
+                | ArchivedNodeKind::Method
+                | ArchivedNodeKind::Constructor
+                | ArchivedNodeKind::Class
+                | ArchivedNodeKind::Const
+        );
+        if !is_scope_kind {
+            continue;
+        }
+        let start_line = node.span.0.to_native();
+        let end_line = node.span.2.to_native();
+        // Strict containment: a route registered at the same line as the
+        // function's signature shouldn't be claimed by an unrelated sibling.
+        // Inclusive bounds are correct because the function's span covers
+        // its signature line through its closing brace.
+        if start_line > line || end_line < line {
+            continue;
+        }
+        // Const that spans a single line is a plain value binding, not a
+        // scope — skip to avoid matching `const x = 1;` against the route's
+        // own line (which would otherwise be a perfect zero-size match).
+        if matches!(&node.kind, ArchivedNodeKind::Const) && start_line == end_line {
+            continue;
+        }
+        let span_size = end_line.saturating_sub(start_line);
+        match best {
+            None => best = Some((span_size, i)),
+            Some((cur, _)) if span_size < cur => best = Some((span_size, i)),
+            _ => {}
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// Build the `enclosingScope` JSON sub-object for a Route. Returns `null`
+/// when the route sits at module level (no containing function/class).
+fn enclosing_scope_json(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    scope_idx: Option<usize>,
+) -> serde_json::Value {
+    match scope_idx {
+        Some(idx) => {
+            let n = &graph.nodes[idx];
+            serde_json::json!({
+                "uid": n.uid.resolve(&graph.string_pool),
+                "name": n.name.resolve(&graph.string_pool),
+                "kind": kind_to_str(&n.kind),
+                "line": n.span.0.to_native(),
+            })
+        }
+        None => serde_json::Value::Null,
+    }
+}
+
 /// Cheap path-similarity score in [0, 1] for the not-found fallback.
 fn similarity(a: &str, b: &str) -> f32 {
     if a.is_empty() || b.is_empty() {
@@ -235,14 +306,23 @@ fn inspect_route(
         let route_node = &graph.nodes[route_idx];
         let route_name = route_node.name.resolve(&graph.string_pool);
         let (route_method, route_path) = split_route_name(route_name);
-        let route_file = &graph.files[route_node.file_idx.to_native() as usize];
+        let route_file_idx = route_node.file_idx.to_native();
+        let route_file = &graph.files[route_file_idx as usize];
+        let route_line = route_node.span.0.to_native();
+        let route_file_path = route_file.path.resolve(&graph.string_pool);
+
+        // Smallest containing scope of the route registration call. Used
+        // for both the per-route `enclosingScope` field and as the BFS seed
+        // for inline-anonymous handlers (which have no node of their own).
+        let enclosing_idx = find_enclosing_scope(&graph, route_file_idx, route_line);
 
         routes_out.push(serde_json::json!({
             "method": route_method,
             "path": route_path,
             "uid": route_node.uid.resolve(&graph.string_pool),
-            "filePath": route_file.path.resolve(&graph.string_pool),
-            "line": route_node.span.0.to_native(),
+            "filePath": route_file_path,
+            "line": route_line,
+            "enclosingScope": enclosing_scope_json(&graph, enclosing_idx),
         }));
 
         // Handler: incoming HandlesRoute edge on the Route node.
@@ -257,6 +337,35 @@ fn inspect_route(
             }
         }
 
+        // Inline-anonymous fallback: no HandlesRoute edge means the
+        // registration was `app.get(path, (req, res) => …)` — the parser
+        // intentionally does not synthesize a Node for an anonymous arrow.
+        // Surface this explicitly instead of returning an empty array, and
+        // seed the upstream BFS from the enclosing scope so consumers still
+        // get meaningful caller context (who wires up this route).
+        if handler_indices.is_empty() {
+            handlers_out.push(serde_json::json!({
+                "uid": serde_json::Value::Null,
+                "name": "<inline>",
+                "kind": "InlineHandler",
+                "handlerKind": "inline_anonymous",
+                "filePath": route_file_path,
+                "line": route_line,
+                "route": route_name,
+                "enclosingScope": enclosing_scope_json(&graph, enclosing_idx),
+            }));
+            if let Some(scope_idx) = enclosing_idx {
+                bfs_upstream(
+                    &graph,
+                    scope_idx,
+                    depth,
+                    route_node.uid.resolve(&graph.string_pool),
+                    &mut callers_out,
+                );
+            }
+            continue;
+        }
+
         for handler_idx in handler_indices {
             if !seen_handlers.insert(handler_idx) {
                 continue;
@@ -268,65 +377,20 @@ fn inspect_route(
                 "uid": handler_node.uid.resolve(&graph.string_pool),
                 "name": handler_node.name.resolve(&graph.string_pool),
                 "kind": kind_to_str(&handler_node.kind),
+                "handlerKind": "named",
                 "filePath": handler_file.path.resolve(&graph.string_pool),
                 "line": handler_node.span.0.to_native(),
                 "route": route_name,
+                "enclosingScope": enclosing_scope_json(&graph, enclosing_idx),
             }));
 
-            // BFS upstream from the handler.
-            type ViaEdge = Option<(String, f32)>;
-            type Step = (usize, usize, ViaEdge);
-            let mut visited: HashSet<usize> = HashSet::new();
-            let mut queue: VecDeque<Step> = VecDeque::new();
-            queue.push_back((handler_idx, 0, None));
-            visited.insert(handler_idx);
-
-            while let Some((curr_idx, curr_depth, via)) = queue.pop_front() {
-                // Skip the handler itself — it's already in `handlers_out`.
-                if curr_idx != handler_idx {
-                    let curr_node = &graph.nodes[curr_idx];
-                    let file_node = &graph.files[curr_node.file_idx.to_native() as usize];
-                    let (via_reason, via_confidence) = via
-                        .as_ref()
-                        .map(|(r, c)| (r.as_str(), *c))
-                        .unwrap_or(("", 1.0));
-                    callers_out.push(serde_json::json!({
-                        "uid": curr_node.uid.resolve(&graph.string_pool),
-                        "name": curr_node.name.resolve(&graph.string_pool),
-                        "kind": kind_to_str(&curr_node.kind),
-                        "filePath": file_node.path.resolve(&graph.string_pool),
-                        "line": curr_node.span.0.to_native(),
-                        "depth": curr_depth,
-                        "viaReason": via_reason,
-                        "viaConfidence": via_confidence,
-                        "handlerUid": handler_node.uid.resolve(&graph.string_pool),
-                    }));
-                }
-
-                if curr_depth >= depth {
-                    continue;
-                }
-
-                let in_start = graph.in_offsets[curr_idx].to_native() as usize;
-                let in_end = graph.in_offsets[curr_idx + 1].to_native() as usize;
-                for i in in_start..in_end {
-                    let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-                    let edge = &graph.edges[edge_idx];
-                    // Skip HandlesRoute — that's the entry point, not an upstream caller.
-                    if matches!(&edge.rel_type, ArchivedRelType::HandlesRoute) {
-                        continue;
-                    }
-                    let next_idx = edge.source.to_native() as usize;
-                    if visited.insert(next_idx) {
-                        let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
-                        queue.push_back((
-                            next_idx,
-                            curr_depth + 1,
-                            Some((edge_reason, edge.confidence.to_native())),
-                        ));
-                    }
-                }
-            }
+            bfs_upstream(
+                &graph,
+                handler_idx,
+                depth,
+                handler_node.uid.resolve(&graph.string_pool),
+                &mut callers_out,
+            );
         }
     }
 
@@ -339,4 +403,70 @@ fn inspect_route(
         "callers": callers_out,
     });
     emit(&result, fmt)
+}
+
+/// BFS upstream over non-`HandlesRoute` incoming edges from `seed_idx`,
+/// pushing every reached node (except the seed itself) to `out` with
+/// depth + via-edge attribution. `anchor_uid` is recorded on each caller
+/// entry as `handlerUid` so consumers can group callers per registration
+/// site even when multiple are surfaced together.
+fn bfs_upstream(
+    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    seed_idx: usize,
+    depth: usize,
+    anchor_uid: &str,
+    out: &mut Vec<serde_json::Value>,
+) {
+    type ViaEdge = Option<(String, f32)>;
+    type Step = (usize, usize, ViaEdge);
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut queue: VecDeque<Step> = VecDeque::new();
+    queue.push_back((seed_idx, 0, None));
+    visited.insert(seed_idx);
+
+    while let Some((curr_idx, curr_depth, via)) = queue.pop_front() {
+        if curr_idx != seed_idx {
+            let curr_node = &graph.nodes[curr_idx];
+            let file_node = &graph.files[curr_node.file_idx.to_native() as usize];
+            let (via_reason, via_confidence) = via
+                .as_ref()
+                .map(|(r, c)| (r.as_str(), *c))
+                .unwrap_or(("", 1.0));
+            out.push(serde_json::json!({
+                "uid": curr_node.uid.resolve(&graph.string_pool),
+                "name": curr_node.name.resolve(&graph.string_pool),
+                "kind": kind_to_str(&curr_node.kind),
+                "filePath": file_node.path.resolve(&graph.string_pool),
+                "line": curr_node.span.0.to_native(),
+                "depth": curr_depth,
+                "viaReason": via_reason,
+                "viaConfidence": via_confidence,
+                "handlerUid": anchor_uid,
+            }));
+        }
+
+        if curr_depth >= depth {
+            continue;
+        }
+
+        let in_start = graph.in_offsets[curr_idx].to_native() as usize;
+        let in_end = graph.in_offsets[curr_idx + 1].to_native() as usize;
+        for i in in_start..in_end {
+            let edge_idx = graph.in_edge_idx[i].to_native() as usize;
+            let edge = &graph.edges[edge_idx];
+            // Skip HandlesRoute — entry point, not an upstream caller.
+            if matches!(&edge.rel_type, ArchivedRelType::HandlesRoute) {
+                continue;
+            }
+            let next_idx = edge.source.to_native() as usize;
+            if visited.insert(next_idx) {
+                let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
+                queue.push_back((
+                    next_idx,
+                    curr_depth + 1,
+                    Some((edge_reason, edge.confidence.to_native())),
+                ));
+            }
+        }
+    }
 }
