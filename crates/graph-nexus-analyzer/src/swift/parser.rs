@@ -1,6 +1,8 @@
 use super::receiver_types::{collect_bindings, extract_swift_calls};
+use super::spec::SwiftSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -56,6 +58,10 @@ thread_local! {
 }
 pub struct SwiftProvider {
     query: Query,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `SwiftSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — no per-capture string compare.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl SwiftProvider {
@@ -63,7 +69,12 @@ impl SwiftProvider {
         let language = tree_sitter_swift::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| SwiftSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -83,10 +94,6 @@ impl LanguageProvider for SwiftProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_name_function = self.query.capture_index_for_name("function.name");
-        let idx_name_class = self.query.capture_index_for_name("class.name");
-        let idx_name_method = self.query.capture_index_for_name("method.name");
-        let idx_name_interface = self.query.capture_index_for_name("interface.name");
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
@@ -95,8 +102,6 @@ impl LanguageProvider for SwiftProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_typealias = self.query.capture_index_for_name("typealias");
-
-        let idx_name_trait = self.query.capture_index_for_name("trait.name");
         let idx_trait = self.query.capture_index_for_name("trait");
 
         let idx_export = self.query.capture_index_for_name("export");
@@ -137,21 +142,17 @@ impl LanguageProvider for SwiftProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_function {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the five explicit
+                    // Class/Function/Method/Interface/Trait arms.
+                    // Source of truth: SwiftSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_name_class {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_method {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_name_interface {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
-                } else if Some(cap_idx) == idx_name_trait {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Trait);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {

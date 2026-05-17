@@ -1,6 +1,8 @@
 use super::receiver_types::{collect_bindings, extract_dart_calls};
+use super::spec::DartSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -50,6 +52,10 @@ thread_local! {
 }
 pub struct DartProvider {
     query: Query,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `DartSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — no per-capture string compare.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl DartProvider {
@@ -57,7 +63,12 @@ impl DartProvider {
         let language = tree_sitter_dart::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| DartSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -77,14 +88,6 @@ impl LanguageProvider for DartProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_method_name = self.query.capture_index_for_name("method.name");
-        let idx_constructor_name = self.query.capture_index_for_name("constructor.name");
-        let idx_typedef_name = self.query.capture_index_for_name("typedef.name");
-        let idx_interface_name = self.query.capture_index_for_name("interface.name");
-        let idx_trait_name = self.query.capture_index_for_name("trait.name");
-        let idx_property_name = self.query.capture_index_for_name("property.name");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_import_source = self.query.capture_index_for_name("import.source");
@@ -122,30 +125,17 @@ impl LanguageProvider for DartProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_class_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the eight explicit
+                    // Class/Function/Method/Constructor/Typedef/Interface/Trait/Property arms.
+                    // Source of truth: DartSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_function_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_method_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_constructor_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Constructor);
-                } else if Some(cap_idx) == idx_typedef_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Typedef);
-                } else if Some(cap_idx) == idx_interface_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
-                } else if Some(cap_idx) == idx_trait_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Trait);
-                } else if Some(cap_idx) == idx_property_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_heritage {
                     if let Ok(h) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
