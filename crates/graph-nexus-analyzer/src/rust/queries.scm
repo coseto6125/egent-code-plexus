@@ -108,12 +108,16 @@
   (visibility_modifier)? @export
   name: (identifier) @const_item.name) @const_decl
 
-;; Impl blocks: `impl T` / `impl Trait for T`  (inherent and trait impls)
+;; Impl blocks: `impl T` / `impl Trait for T`  (inherent and trait impls).
+;; For `impl Foo<'a>` / `impl<T> Foo<T>` descend into `generic_type` so we
+;; capture just the bare type_identifier — ref-gitnexus stores the type
+;; name without generic parameters, so including `<'a>` here produces
+;; spurious "Impl ref_only" parity drift on every generic impl block.
 (impl_item
   type: [
-    (type_identifier)
-    (generic_type)
-  ] @impl_item.name) @impl_block
+    (type_identifier) @impl_item.name
+    (generic_type type: (type_identifier) @impl_item.name)
+  ]) @impl_block
 
 ;; Imports (use std::collections::HashMap)
 (use_declaration
