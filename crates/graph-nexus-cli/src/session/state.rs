@@ -8,6 +8,19 @@ use std::fs;
 use std::path::Path;
 
 pub fn classify(repo_root: &Path, sid: &str) -> SessionState {
+    let idx = CommitIndex::scan(&repo_root.join("commits")).ok();
+    classify_with_index(repo_root, sid, idx.as_ref())
+}
+
+/// Hot-loop variant: callers that classify multiple sessions for the same
+/// repo can scan `CommitIndex` once and pass it in, avoiding N × readdir.
+/// `None` means "no commits dir / scan failed" — every session becomes
+/// `Stale(L2Missing)`.
+pub(crate) fn classify_with_index(
+    repo_root: &Path,
+    sid: &str,
+    idx: Option<&CommitIndex>,
+) -> SessionState {
     let sid_dir = repo_root.join("sessions").join(sid);
     let sm_path = sid_dir.join("session_meta.json");
     let sm = match SessionMeta::read(&sm_path) {
@@ -15,7 +28,7 @@ pub fn classify(repo_root: &Path, sid: &str) -> SessionState {
         Err(_) => return SessionState::Stale { reason: StaleReason::MetaUnreadable },
     };
 
-    let l2_dirname = match resolve_l2_dirname(repo_root, &sm.base_sha) {
+    let l2_dirname = match resolve_l2_dirname_with(idx, &sm.base_sha) {
         Some(d) => d,
         None => return SessionState::Stale { reason: StaleReason::L2Missing },
     };
@@ -44,11 +57,9 @@ pub fn classify(repo_root: &Path, sid: &str) -> SessionState {
     }
 }
 
-fn resolve_l2_dirname(repo_root: &Path, sha_hex: &str) -> Option<String> {
-    let commits = repo_root.join("commits");
-    let idx = CommitIndex::scan(&commits).ok()?;
+fn resolve_l2_dirname_with(idx: Option<&CommitIndex>, sha_hex: &str) -> Option<String> {
     let sha_bytes = sha_hex_to_bytes(sha_hex)?;
-    idx.find(&sha_bytes).map(|s| s.to_string())
+    idx?.find(&sha_bytes).map(|s| s.to_string())
 }
 
 pub(crate) fn sha_hex_to_bytes(s: &str) -> Option<[u8; 20]> {

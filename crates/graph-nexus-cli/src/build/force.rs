@@ -2,16 +2,12 @@
 //! before re-running the standard build pipeline.
 
 use crate::build::dirname_picker::pick_dirname;
-use crate::build::orchestrator::{
-    collect_refs, git_archive_to, parent_sha, source_id_from_refs, source_type_from_refs,
-    sync_all_files, update_repo_meta, wait_for_completion, worktree_clean_and_head_matches,
-};
+use crate::build::orchestrator::{build_inside_locked, wait_for_completion, BuildResult};
+use crate::commit_lookup::CommitIndex;
 use crate::repo_identity::repo_dir_name_for_cwd;
-use crate::session::state::classify;
+use crate::session::state::classify_with_index;
 use fs2::FileExt;
-use graph_nexus_core::registry::{
-    resolve_home_gnx, CommitBuildMeta, EmbeddingStatus, SourceType,
-};
+use graph_nexus_core::registry::{resolve_home_gnx, SourceType};
 use graph_nexus_core::session::SessionState;
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -37,6 +33,9 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
     }
     let sha8 = target_sha.get(..8).unwrap_or(target_sha);
     let mut report = InvalidateReport::default();
+    // Hoist CommitIndex::scan once — classify_with_index reuses it across all
+    // sessions instead of re-walking commits/ per session.
+    let idx = CommitIndex::scan(&repo_root.join("commits")).ok();
 
     for entry in fs::read_dir(&sessions_dir)? {
         let entry = entry?;
@@ -52,7 +51,7 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
             continue;
         }
 
-        match classify(repo_root, name) {
+        match classify_with_index(repo_root, name, idx.as_ref()) {
             SessionState::PureReference { base_sha, .. } if base_sha == target_sha => {
                 report.kept += 1;
             }
@@ -126,7 +125,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         .join(format!("{dirname}.building"));
 
     // 1. Acquire lock (attach-and-retake pattern if contended).
-    // Hold the lock fd in `_lock_guard` until the function returns — fs2 advisory
+    // Hold the lock fd in `lock_guard` until the function returns — fs2 advisory
     // locks release on fd close, so dropping mid-function would let a concurrent
     // --force race into our drop+rebuild window.
     fs::create_dir_all(&building)?;
@@ -135,8 +134,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         .create(true)
         .write(true)
         .open(&lock_path)?;
-    let _lock_guard;
-    if lock.try_lock_exclusive().is_err() {
+    let lock_guard = if lock.try_lock_exclusive().is_err() {
         wait_for_completion(&building, &commit_dir)?;
         fs::create_dir_all(&building)?;
         let lock2 = OpenOptions::new()
@@ -146,10 +144,10 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         lock2
             .try_lock_exclusive()
             .map_err(|e| io::Error::other(format!("re-lock after attach failed: {e}")))?;
-        _lock_guard = lock2;
+        lock2
     } else {
-        _lock_guard = lock;
-    }
+        lock
+    };
 
     // 2. Invalidate matching L1 BEFORE dropping L2 (spec §4.4)
     let invalidate_report = invalidate_matching_l1(&repo_root, &sha_hex)?;
@@ -159,48 +157,14 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         fs::remove_dir_all(&commit_dir)?;
     }
 
-    // 4. Source resolution
-    let src_root = if worktree_clean_and_head_matches(worktree, &sha_hex)? {
-        worktree.to_path_buf()
-    } else {
-        let src = building.join("_src");
-        fs::create_dir_all(&src)?;
-        git_archive_to(worktree, &sha_hex, &src)?;
-        src
-    };
-
-    // 5. Build graph.bin + tantivy via analyzer pipeline
-    let node_count =
-        crate::commands::admin::index::run_analyzer_for_paths(&src_root, &building)?;
-
-    // 6. Refs / source typing + metadata
-    let refs_at_build = collect_refs(worktree, &sha_hex)?;
-    let source_type = source_type_from_refs(&refs_at_build);
-    let source_id = source_id_from_refs(&refs_at_build);
-    let parent = parent_sha(worktree, &sha_hex).ok();
-
-    let meta = CommitBuildMeta {
-        version: 1,
-        sha: sha_hex.clone(),
+    // 4-8. Shared build pipeline (source → analyzer → meta → atomic publish → repo_meta)
+    let BuildResult {
+        sha_hex,
         source_type,
-        source_id,
-        built_from_worktree: worktree.to_string_lossy().into(),
-        built_at: chrono::Utc::now().to_rfc3339(),
-        parent_sha: parent,
-        node_count: node_count as u32,
-        embedding_status: EmbeddingStatus::None,
-        refs_at_build,
-        refs_seen_since: vec![],
-    };
-    CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
+        commit_dir,
+    } = build_inside_locked(worktree, &sha_hex, &repo_root, &building, &commit_dir)?;
 
-    // 7. Publish (atomic)
-    sync_all_files(&building)?;
-    fs::rename(&building, &commit_dir)?;
-    let _ = fs::remove_dir_all(commit_dir.join("_src"));
-
-    // 8. Update <repo>/meta.json (RepoMeta)
-    update_repo_meta(&repo_root, worktree, &sha_hex)?;
+    drop(lock_guard); // explicit release after publish
 
     Ok(ForceRebuildResult {
         sha_hex,

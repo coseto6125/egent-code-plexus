@@ -319,12 +319,13 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
                 .map_err(|e| format!("force rebuild failed: {e}"))?;
             if !args.quiet {
                 eprintln!(
-                    "l2.rebuilt sha={} type={:?} elapsed={:.2}s l1_kept={} l1_invalidated={}",
+                    "l2.rebuilt sha={} type={:?} elapsed={:.2}s l1_kept={} l1_invalidated={} l1_stale_skipped={}",
                     &r.sha_hex[..8.min(r.sha_hex.len())],
                     r.source_type,
                     start.elapsed().as_secs_f32(),
                     r.invalidate_report.kept,
                     r.invalidate_report.invalidated,
+                    r.invalidate_report.stale_skipped,
                 );
             }
             Ok(())

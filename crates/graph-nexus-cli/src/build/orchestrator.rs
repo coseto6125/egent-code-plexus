@@ -71,38 +71,53 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
         return wait_for_completion(&building, &commit_dir);
     }
 
-    // 1. Source resolution
-    let src_root = if worktree_clean_and_head_matches(worktree, &sha_hex)? {
+    build_inside_locked(worktree, &sha_hex, &repo_root, &building, &commit_dir)
+}
+
+/// Run the analyzer pipeline, write metadata, atomic-publish.
+///
+/// Pre-conditions (caller's responsibility):
+/// - `building` dir exists, `commit_dir` does not yet exist
+/// - exclusive build lock is held by the caller for the full call duration
+/// - `repo_root.join("commits")` exists
+///
+/// Shared between `build_l2` (first build / SHA drift) and
+/// `force_rebuild_l2` (after L1 invalidate + L2 drop). Both paths land in
+/// the same atomic publish + repo_meta update.
+pub(crate) fn build_inside_locked(
+    worktree: &Path,
+    sha_hex: &str,
+    repo_root: &Path,
+    building: &Path,
+    commit_dir: &Path,
+) -> io::Result<BuildResult> {
+    let src_root = if worktree_clean_and_head_matches(worktree, sha_hex)? {
         worktree.to_path_buf()
     } else {
         let src = building.join("_src");
         fs::create_dir_all(&src)?;
-        git_archive_to(worktree, &sha_hex, &src)?;
+        git_archive_to(worktree, sha_hex, &src)?;
         src
     };
 
-    // 2. Build graph.bin + tantivy via analyzer pipeline.
-    // `repo_root` doubles as the persistent parse_cache root — cache
-    // entries live in `<repo_root>/parse_cache/<fp>/` and survive across
-    // L2 commit_dirs as long as the file content (and binary build) is
-    // unchanged. p50 commit on this repo touches ~6 / 3176 files; with
-    // the cache active, the remaining 3170 skip tree-sitter entirely.
+    // Analyzer pipeline. `repo_root` doubles as the persistent parse_cache
+    // root — cache entries live in `<repo_root>/parse_cache/<fp>/` and
+    // survive across L2 commit_dirs as long as the file content (and binary
+    // build) is unchanged.
     let node_count = crate::commands::admin::index::run_analyzer_for_paths(
         &src_root,
-        &building,
-        Some(&repo_root),
+        building,
+        Some(repo_root),
     )?;
 
-    // 3. Refs / source typing
-    let refs_at_build = collect_refs(worktree, &sha_hex)?;
+    let refs_at_build = collect_refs(worktree, sha_hex)?;
     let source_type = source_type_from_refs(&refs_at_build);
     let source_id = source_id_from_refs(&refs_at_build);
-    let parent = parent_sha(worktree, &sha_hex).ok();
+    let parent = parent_sha(worktree, sha_hex).ok();
 
-    // 4. Metadata
     let meta = CommitBuildMeta {
         version: 1,
-        sha: sha_hex.clone(),
+        sha: sha_hex.to_string(),
         source_type,
         source_id,
         built_from_worktree: worktree.to_string_lossy().into(),
@@ -116,26 +131,22 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     };
     CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
 
-    // 5. fsync + atomic publish.
-    // A stale commit_dir from an earlier binary (fingerprint mismatch) is
-    // swept aside before the rename — Linux refuses to rename onto a
-    // non-empty directory. The window between remove and rename is
-    // sub-ms and tolerable: another reader would either see the old dir
-    // or, briefly, nothing; the next call short-circuits via the fast
-    // path once the fresh dir lands.
-    sync_all_files(&building)?;
+    // fsync + atomic publish. A stale commit_dir from an earlier binary
+    // (fingerprint mismatch) is swept aside before the rename — Linux
+    // refuses to rename onto a non-empty directory. force_rebuild_l2 also
+    // does its own drop earlier, so this branch covers both paths.
+    sync_all_files(building)?;
     if commit_dir.exists() {
-        fs::remove_dir_all(&commit_dir)?;
+        fs::remove_dir_all(commit_dir)?;
     }
-    fs::rename(&building, &commit_dir)?;
-    let _ = fs::remove_dir_all(commit_dir.join("_src")); // tolerate absence
+    fs::rename(building, commit_dir)?;
+    let _ = fs::remove_dir_all(commit_dir.join("_src"));
 
-    // 6. Update <repo>/meta.json (RepoMeta)
-    update_repo_meta(&repo_root, worktree, &sha_hex)?;
+    update_repo_meta(repo_root, worktree, sha_hex)?;
 
     Ok(BuildResult {
-        commit_dir,
-        sha_hex,
+        commit_dir: commit_dir.to_path_buf(),
+        sha_hex: sha_hex.to_string(),
         source_type,
     })
 }

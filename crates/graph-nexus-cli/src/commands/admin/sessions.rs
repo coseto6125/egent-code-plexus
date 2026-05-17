@@ -122,6 +122,12 @@ fn collect_rows(home_gnx: &std::path::Path) -> io::Result<Vec<ListRow>> {
             if sid.starts_with('.') || sid.contains(".stale-") || sid.contains(".dead") {
                 continue;
             }
+            // Single SessionMeta::read covers both the Stale-variant base_sha
+            // fallback (classify drops base_sha for Stale) and last_touched
+            // (not carried in any SessionState variant). For non-Stale paths
+            // classify already opened session_meta.json once; this second read
+            // is unavoidable without threading SessionMeta through SessionState.
+            let sm = SessionMeta::read(&s_path.join("session_meta.json")).ok();
             let state = crate::session::state::classify(&repo_dir, sid);
             let (base_sha, state_view) = match &state {
                 SessionState::PureReference { base_sha, l2_dirname } => (
@@ -142,17 +148,15 @@ fn collect_rows(home_gnx: &std::path::Path) -> io::Result<Vec<ListRow>> {
                     },
                 ),
                 SessionState::Stale { reason } => (
-                    SessionMeta::read(&s_path.join("session_meta.json"))
-                        .map(|m| m.base_sha)
-                        .unwrap_or_default(),
+                    sm.as_ref().map(|m| m.base_sha.clone()).unwrap_or_default(),
                     StateView::Stale {
                         reason: reason.short().to_string(),
                     },
                 ),
             };
-            let last_touched = SessionMeta::read(&s_path.join("session_meta.json"))
+            let last_touched = sm
                 .map(|m| m.last_touched)
-                .unwrap_or_else(|_| "?".to_string());
+                .unwrap_or_else(|| "?".to_string());
             out.push(ListRow {
                 session_id: sid.to_string(),
                 repo: repo_name.clone(),
