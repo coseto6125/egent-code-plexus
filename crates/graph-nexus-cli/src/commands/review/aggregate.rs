@@ -13,90 +13,38 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub fn run(files: &[PathBuf], repo_dir: &Path, engine: &Engine) -> Result<Report, GnxError> {
+    let deferred = vec!["egress_diff", "shape_check", "resolver_diff"];
+
     if files.is_empty() {
         return Ok(Report {
             findings: vec![],
             files_reviewed: 0,
+            deferred,
         });
     }
 
     let file_scope: HashSet<&Path> = files.iter().map(|p| p.as_path()).collect();
     let mut findings: Vec<Finding> = Vec::new();
 
-    // ── impact: per-file blast-radius ────────────────────────────────────────
-    findings.extend(run_impact(files, repo_dir, engine));
-
-    // ── coverage: BlindSpot rows for in-scope files ──────────────────────────
+    findings.extend(run_impact(&file_scope, repo_dir, engine));
     findings.extend(run_coverage(&file_scope, engine));
-
-    // ── egress (tool_map): external-call sites — full repo scan, no diff
-    // baseline checkout. Lines added-only filtering requires checking out the
-    // baseline tree which is expensive. Emitting all call-sites in changed
-    // files as BlindSpot-style findings with note; see Phase 2.5 follow-up.
-    findings.push(Finding {
-        file: "aggregator".into(),
-        line: 0,
-        kind: "blind_spot",
-        severity: Severity::Info,
-        message:
-            "egress diff-aware filter (added-only call-sites) deferred — needs baseline checkout (Phase 2.5)"
-                .into(),
-        source: Source::BlindSpot,
-    });
-    // Still surface all tool_map hits for changed files as info findings.
-    findings.extend(run_tool_map(files, engine));
-
-    // ── shape_check: needs cross-file route context not yet assembled ─────────
-    findings.push(Finding {
-        file: "aggregator".into(),
-        line: 0,
-        kind: "blind_spot",
-        severity: Severity::Info,
-        message: "shape_check constituent skipped — needs cross-file route context (Phase 2.5)"
-            .into(),
-        source: Source::BlindSpot,
-    });
-
-    // ── diff (resolver): bindings tier-degradation ────────────────────────────
-    findings.push(Finding {
-        file: "aggregator".into(),
-        line: 0,
-        kind: "blind_spot",
-        severity: Severity::Info,
-        message:
-            "resolver diff constituent skipped — requires --baseline ref from caller (Phase 2.5)"
-                .into(),
-        source: Source::BlindSpot,
-    });
+    findings.extend(run_tool_map(&file_scope, engine));
 
     Ok(Report {
         findings,
         files_reviewed: files.len(),
+        deferred,
     })
 }
 
 // ── impact helper ────────────────────────────────────────────────────────────
 
-/// Run impact with `--baseline` set to origin/HEAD to get changed-symbol
-/// blast radius. Falls back to per-file impact when no baseline is available.
-/// Findings are emitted for risk_level >= medium only.
-fn run_impact(files: &[PathBuf], repo_dir: &Path, engine: &Engine) -> Vec<Finding> {
-    // Build baseline args for each file independently then aggregate.
-    // We use the graph's existing symbol coverage rather than re-parsing git.
-    files
-        .iter()
-        .flat_map(|f| impact_for_file(f, repo_dir, engine))
-        .collect()
-}
-
-fn impact_for_file(file: &PathBuf, repo_dir: &Path, engine: &Engine) -> Vec<Finding> {
-    let file_str = file.to_string_lossy().into_owned();
-    let repo_str = repo_dir.to_string_lossy().into_owned();
+fn run_impact(file_scope: &HashSet<&Path>, repo_dir: &Path, engine: &Engine) -> Vec<Finding> {
     let args = ImpactArgs {
         name: None,
         target: None,
         baseline: Some("HEAD~1".into()),
-        file: Some(file_str.clone()),
+        file: None,
         kind: None,
         direction: Direction::Up,
         depth: 3,
@@ -104,50 +52,80 @@ fn impact_for_file(file: &PathBuf, repo_dir: &Path, engine: &Engine) -> Vec<Find
         min_confidence: None,
         include_tests: false,
         relation_types: None,
-        repo: Some(repo_str),
+        repo: Some(repo_dir.to_string_lossy().into_owned()),
         format: None,
     };
-    match impact::build_payload(&args, engine) {
-        Ok(v) => impact_findings(&v, &file_str),
-        Err(_) => vec![],
-    }
+    let v = match impact::build_payload(&args, engine) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let scope_strs: HashSet<String> = file_scope
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    impact_findings(&v, &scope_strs)
 }
 
-/// Extract findings from an `impact::build_payload` Value.
-/// Keeps only nodes with depth > 0 (callers of the changed symbol),
-/// mapping blast-radius count >= 4 as `medium` risk (info finding).
-pub fn impact_findings(v: &Value, file: &str) -> Vec<Finding> {
-    // Baseline mode: impact_by_symbol[].impact[] contains caller nodes.
-    // Single-symbol mode: impact[].
-    let mut findings = Vec::new();
+/// Extract impact findings, attributing each to the changed symbol's own
+/// filePath (not the requested review scope). Symbols whose filePath isn't
+/// in `file_scope` are skipped. Caller-count >= 4 → `medium` risk → info.
+/// Line numbers come from `changed_symbols[]` (joined on name+filePath)
+/// because `impact_by_symbol[]` does not carry line.
+pub fn impact_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> {
+    let by_sym = match v.get("impact_by_symbol").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return vec![],
+    };
+    let line_lookup: std::collections::HashMap<(String, String), u32> = v
+        .get("changed_symbols")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| {
+                    let name = s["name"].as_str()?.to_string();
+                    let file = s["filePath"].as_str()?.to_string();
+                    let line = s["line"].as_u64()? as u32;
+                    Some(((name, file), line))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let in_scope = |path: &str| -> bool {
+        file_scope
+            .iter()
+            .any(|s| s == path || path.ends_with(s.as_str()) || s.ends_with(path))
+    };
 
-    let process_callers = |callers: &Vec<Value>, sym_name: &str, findings: &mut Vec<Finding>| {
+    let mut findings = Vec::new();
+    for entry in by_sym {
+        let file_path = entry["filePath"].as_str().unwrap_or("");
+        if !in_scope(file_path) {
+            continue;
+        }
+        let sym = entry["symbol"].as_str().unwrap_or("?");
+        let callers = match entry["impact"].as_array() {
+            Some(c) => c,
+            None => continue,
+        };
         let caller_count = callers
             .iter()
             .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
             .count();
-        if caller_count >= 4 {
-            findings.push(Finding {
-                file: file.into(),
-                line: 0,
-                kind: "impact",
-                severity: Severity::Info,
-                message: format!("{sym_name} has {caller_count} callers — review blast radius"),
-                source: Source::Impact,
-            });
+        if caller_count < 4 {
+            continue;
         }
-    };
-
-    if let Some(by_sym) = v.get("impact_by_symbol").and_then(|v| v.as_array()) {
-        for entry in by_sym {
-            let sym = entry["symbol"].as_str().unwrap_or("?");
-            if let Some(callers) = entry["impact"].as_array() {
-                process_callers(callers, sym, &mut findings);
-            }
-        }
-    } else if let Some(callers) = v.get("impact").and_then(|v| v.as_array()) {
-        let sym = v["target"].as_str().unwrap_or("?");
-        process_callers(callers, sym, &mut findings);
+        let line = line_lookup
+            .get(&(sym.to_string(), file_path.to_string()))
+            .copied()
+            .unwrap_or(0);
+        findings.push(Finding {
+            file: file_path.into(),
+            line,
+            kind: "impact",
+            severity: Severity::Info,
+            message: format!("{sym} has {caller_count} callers — review blast radius"),
+            source: Source::Impact,
+        });
     }
     findings
 }
@@ -225,7 +203,7 @@ pub fn coverage_blind_spots(v: &Value, file_scope: &[&str]) -> Vec<Finding> {
 
 // ── tool_map (egress) helper ─────────────────────────────────────────────────
 
-fn run_tool_map(files: &[PathBuf], engine: &Engine) -> Vec<Finding> {
+fn run_tool_map(file_scope: &HashSet<&Path>, engine: &Engine) -> Vec<Finding> {
     let args = ToolMapArgs {
         category: None,
         repo: None,
@@ -235,16 +213,15 @@ fn run_tool_map(files: &[PathBuf], engine: &Engine) -> Vec<Finding> {
         Ok(v) => v,
         Err(_) => return vec![],
     };
-    tool_map_findings(&v, files)
-}
-
-/// Extract tool_map findings for call-sites in the given files.
-pub fn tool_map_findings(v: &Value, files: &[PathBuf]) -> Vec<Finding> {
-    let file_strs: HashSet<String> = files
+    let file_strs: HashSet<String> = file_scope
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
+    tool_map_findings(&v, &file_strs)
+}
 
+/// Extract tool_map findings for call-sites in the given files.
+pub fn tool_map_findings(v: &Value, file_strs: &HashSet<String>) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let calls = match v.get("calls").and_then(|c| c.as_object()) {
@@ -287,9 +264,14 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    fn scope_one(path: &str) -> HashSet<String> {
+        let mut s = HashSet::new();
+        s.insert(path.to_string());
+        s
+    }
+
     #[test]
     fn impact_findings_baseline_mode_below_threshold_emits_nothing() {
-        // impact_by_symbol with 3 callers — below threshold of 4
         let v = json!({
             "status": "success",
             "baseline": "HEAD~1",
@@ -298,6 +280,7 @@ mod tests {
                 {
                     "symbol": "foo",
                     "filePath": "src/foo.rs",
+                    "line": 12,
                     "impact": [
                         {"depth": 0, "name": "foo"},
                         {"depth": 1, "name": "a"},
@@ -307,17 +290,18 @@ mod tests {
                 }
             ]
         });
-        // 3 callers (depth > 0) — below threshold
-        let findings = impact_findings(&v, "src/foo.rs");
+        let findings = impact_findings(&v, &scope_one("src/foo.rs"));
         assert!(findings.is_empty(), "expected no findings for 3 callers");
     }
 
     #[test]
-    fn impact_findings_baseline_mode_at_threshold_emits_finding() {
+    fn impact_findings_baseline_mode_at_threshold_emits_finding_with_correct_file() {
         let v = json!({
             "status": "success",
             "baseline": "HEAD~1",
-            "changed_symbols": [],
+            "changed_symbols": [
+                {"name": "bar", "filePath": "src/bar.rs", "line": 42, "kind": "Function", "change_type": "modified"}
+            ],
             "impact_by_symbol": [
                 {
                     "symbol": "bar",
@@ -332,12 +316,34 @@ mod tests {
                 }
             ]
         });
-        // 4 callers (depth > 0) — meets threshold
-        let findings = impact_findings(&v, "src/bar.rs");
+        let findings = impact_findings(&v, &scope_one("src/bar.rs"));
         assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/bar.rs");
+        assert_eq!(findings[0].line, 42);
         assert_eq!(findings[0].source, Source::Impact);
-        assert_eq!(findings[0].severity, Severity::Info);
         assert!(findings[0].message.contains("4 callers"));
+    }
+
+    #[test]
+    fn impact_findings_skips_symbols_outside_file_scope() {
+        let v = json!({
+            "impact_by_symbol": [
+                {
+                    "symbol": "outside",
+                    "filePath": "src/other.rs",
+                    "line": 1,
+                    "impact": [
+                        {"depth": 0, "name": "outside"},
+                        {"depth": 1, "name": "a"},
+                        {"depth": 1, "name": "b"},
+                        {"depth": 1, "name": "c"},
+                        {"depth": 1, "name": "d"}
+                    ]
+                }
+            ]
+        });
+        let findings = impact_findings(&v, &scope_one("src/in_scope.rs"));
+        assert!(findings.is_empty(), "out-of-scope symbol must not appear");
     }
 
     #[test]
@@ -375,8 +381,7 @@ mod tests {
                 ]
             }
         });
-        let files = vec![PathBuf::from("src/api.ts")];
-        let findings = tool_map_findings(&v, &files);
+        let findings = tool_map_findings(&v, &scope_one("src/api.ts"));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file, "src/api.ts");
         assert_eq!(findings[0].line, 10);
@@ -390,8 +395,7 @@ mod tests {
             "totals": {},
             "calls": {}
         });
-        let files = vec![PathBuf::from("src/any.ts")];
-        let findings = tool_map_findings(&v, &files);
+        let findings = tool_map_findings(&v, &scope_one("src/any.ts"));
         assert!(findings.is_empty());
     }
 }

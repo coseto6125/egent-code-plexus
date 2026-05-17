@@ -32,6 +32,10 @@ pub struct Finding {
 pub struct Report {
     pub findings: Vec<Finding>,
     pub files_reviewed: usize,
+    /// Constituents the aggregator skipped (e.g. needs cross-file context or
+    /// `--baseline` not threaded through). Surfaced in `summary.deferred` so
+    /// the caller knows the report is incomplete by design, not by bug.
+    pub deferred: Vec<&'static str>,
 }
 
 impl Report {
@@ -56,6 +60,7 @@ impl Report {
             return serde_json::json!({
                 "status": "clean",
                 "files_reviewed": self.files_reviewed,
+                "deferred": self.deferred,
                 "elapsed_ms": elapsed.as_millis() as u64,
             });
         }
@@ -78,6 +83,7 @@ impl Report {
                 "warn_count": warn_count,
                 "info_count": info_count,
                 "clean_files": clean_files,
+                "deferred": self.deferred,
                 "elapsed_ms": elapsed.as_millis() as u64,
             }
         })
@@ -93,6 +99,7 @@ mod tests {
         let r = Report {
             findings: vec![],
             files_reviewed: 3,
+            deferred: vec![],
         };
         let v = r.emit(std::time::Duration::from_millis(42));
         assert_eq!(v["status"], "clean");
@@ -130,6 +137,7 @@ mod tests {
                 },
             ],
             files_reviewed: 2,
+            deferred: vec!["egress_diff", "shape_check", "resolver_diff"],
         };
         let v = r.emit(std::time::Duration::from_millis(10));
         let files = v["files"].as_array().unwrap();
@@ -137,5 +145,6 @@ mod tests {
         assert_eq!(v["summary"]["warn_count"], 1);
         assert_eq!(v["summary"]["info_count"], 2);
         assert_eq!(v["summary"]["clean_files"], 0);
+        assert_eq!(v["summary"]["deferred"][0], "egress_diff");
     }
 }
