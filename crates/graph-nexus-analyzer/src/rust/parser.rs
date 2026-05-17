@@ -1,6 +1,8 @@
 use super::receiver_types::{build_impl_map, collect_local_types, extract_rust_calls};
+use super::spec::RustSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span, MODULE_LEVEL_SOURCE};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -19,18 +21,15 @@ thread_local! {
 pub struct RustProvider {
     query: Query,
     indices: RustCaptureIndices,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `RustSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index (cap.index as usize) — equivalent perf
+    /// to the previous hard-coded if-chain, but the source of truth
+    /// lives in `spec.rs` const tables.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 struct RustCaptureIndices {
-    name_struct: Option<u32>,
-    name_enum: Option<u32>,
-    name_trait: Option<u32>,
-    name_function: Option<u32>,
-    name_module: Option<u32>,
-    name_type_alias: Option<u32>,
-    name_const: Option<u32>,
-    name_impl: Option<u32>,
-    name_macro: Option<u32>,
     import_name: Option<u32>,
     import_source: Option<u32>,
     import_alias: Option<u32>,
@@ -48,7 +47,6 @@ struct RustCaptureIndices {
     heritage: Option<u32>,
     type_ann: Option<u32>,
     decorator: Option<u32>,
-    property_name: Option<u32>,
     property: Option<u32>,
     axum_handler: Option<u32>,
     actix_method: Option<u32>,
@@ -65,15 +63,6 @@ impl RustProvider {
         );
         let query = Query::new(&language, &query_source)?;
         let indices = RustCaptureIndices {
-            name_struct: query.capture_index_for_name("struct_item.name"),
-            name_enum: query.capture_index_for_name("enum_item.name"),
-            name_trait: query.capture_index_for_name("trait_item.name"),
-            name_function: query.capture_index_for_name("function_item.name"),
-            name_module: query.capture_index_for_name("module_item.name"),
-            name_type_alias: query.capture_index_for_name("type_alias_item.name"),
-            name_const: query.capture_index_for_name("const_item.name"),
-            name_impl: query.capture_index_for_name("impl_item.name"),
-            name_macro: query.capture_index_for_name("macro_item.name"),
             import_name: query.capture_index_for_name("import.name"),
             import_source: query.capture_index_for_name("import.source"),
             import_alias: query.capture_index_for_name("import.alias"),
@@ -91,13 +80,27 @@ impl RustProvider {
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
             decorator: query.capture_index_for_name("decorator"),
-            property_name: query.capture_index_for_name("property.name"),
             property: query.capture_index_for_name("property"),
             axum_handler: query.capture_index_for_name("axum.route.handler"),
             actix_method: query.capture_index_for_name("actix.route.method"),
             actix_handler: query.capture_index_for_name("actix.route.handler"),
         };
-        Ok(Self { query, indices })
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string
+        // compare). Capture names not in the spec map yield None and
+        // fall through to the metadata-only branches (export, heritage, etc.).
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| RustSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self {
+            query,
+            indices,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -148,55 +151,17 @@ impl LanguageProvider for RustProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx.name_struct {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the ten explicit
+                    // name_struct/name_enum/… arms. Source of truth: RustSpec::CAPTURE_KIND.
                     name_node = Some(cap.node);
                     if kind.is_none() {
-                        kind = Some(NodeKind::Struct);
-                    }
-                } else if cap_idx == idx.name_enum {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Enum);
-                    }
-                } else if cap_idx == idx.name_trait {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Trait);
-                    }
-                } else if cap_idx == idx.name_module {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Module);
-                    }
-                } else if cap_idx == idx.name_type_alias {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Typedef);
-                    }
-                } else if cap_idx == idx.name_const {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Const);
-                    }
-                } else if cap_idx == idx.name_impl {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Impl);
-                    }
-                } else if cap_idx == idx.name_macro {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Macro);
-                    }
-                } else if cap_idx == idx.name_function {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Function);
-                    }
-                } else if cap_idx == idx.property_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Property);
+                        kind = Some(k_from_spec);
                     }
                 } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
