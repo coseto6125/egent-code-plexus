@@ -69,9 +69,13 @@
   (type_identifier) @typedef.name) @typedef
 
 ;; Functions — capture full function_declaration (signature + body) so calls
-;; inside the body land in this node's span. The bare function_signature
-;; alternative is kept for top-level signatures without a body
-;; (e.g. abstract / external declarations).
+;; inside the body land in this node's span. The bare `function_signature`
+;; alternative below catches top-level `external` / signature-only
+;; declarations that tree-sitter-dart parses WITHOUT a `function_declaration`
+;; wrapper. Both patterns can match the same function (one fires on the outer
+;; node, the other on its inner signature child) — the parser filters that
+;; case out by skipping any bare-signature emit whose parent is a
+;; `function_declaration` (see parser.rs).
 (function_declaration
   (function_signature
     return_type: (type)? @type
@@ -141,12 +145,12 @@
 
 ;; Annotations — `@override`, `@deprecated`, `@Foo()`, `@meta.visibleForTesting`.
 ;; tree-sitter-dart uses an `annotation` node with a `name` field that is
-;; either a bare `identifier` or a `qualified` node. We capture only the
-;; identifier form here; qualified annotations (e.g. `@meta.visibleForTesting`)
-;; bind to the root identifier via the same capture index so the Rust layer
-;; reads the first (and only) identifier child.
+;; either a bare `identifier` or a `qualified` node.
 (annotation
   name: (identifier) @annotation.name) @annotation
+
+(annotation
+  name: (qualified (_) (identifier) @annotation.name)) @annotation
 
 ;; Imports — Dart `import 'pkg.dart';`. tree-sitter-dart wraps imports
 ;; three levels deep: `import_or_export > library_import >

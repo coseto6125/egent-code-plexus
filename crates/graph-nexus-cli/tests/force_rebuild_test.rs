@@ -204,6 +204,40 @@ fn force_rebuild_l2_drops_existing_dir_and_rebuilds() {
 }
 
 #[test]
+fn force_rebuild_l2_drops_parse_cache() {
+    // Regression: BUILDER_FINGERPRINT only bumps with CARGO_PKG_VERSION or
+    // schemaN bump, so analyzer / queries.scm edits don't invalidate cache
+    // entries on dev-loop iteration. `--force` must drop parse_cache to
+    // surface analyzer changes immediately.
+    let _g = HOME_LOCK.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let sha = git_init(wt.path());
+    std::env::set_var("HOME", home.path());
+
+    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let repo_root = initial
+        .commit_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    let parse_cache_dir = repo_root.join("parse_cache");
+    fs::create_dir_all(parse_cache_dir.join("fakefp_0")).unwrap();
+    fs::write(parse_cache_dir.join("fakefp_0/aa.rkyv"), b"sentinel").unwrap();
+    assert!(parse_cache_dir.join("fakefp_0/aa.rkyv").exists());
+
+    force_rebuild_l2(wt.path(), &sha).unwrap();
+
+    assert!(
+        !parse_cache_dir.join("fakefp_0").exists(),
+        "old fingerprint subdir under parse_cache should be dropped by --force"
+    );
+}
+
+#[test]
 fn force_rebuild_l2_invalidates_dirty_session_with_same_base_sha() {
     let _g = HOME_LOCK.lock().unwrap();
     let home = tempfile::tempdir().unwrap();

@@ -25,6 +25,16 @@ fn class_method_emits_method() {
         "`bar` inside class Foo must be NodeKind::Method; nodes: {:#?}",
         g.nodes
     );
+    // Regression hardening: the bare `(function_signature ...) @function`
+    // pattern in queries.scm matches the method's inner function_signature
+    // node too — parser.rs filters that case out by checking parent.kind
+    // ∈ {function_declaration, method_signature}. If anyone deletes that
+    // filter, `bar` would silently double-emit as Function + Method.
+    assert!(
+        !find(&g, "bar", NodeKind::Function),
+        "`bar` is a class method and must not also appear as Function; nodes: {:#?}",
+        g.nodes
+    );
 }
 
 #[test]
@@ -69,6 +79,21 @@ fn class_with_method_and_constructor() {
     assert!(
         find(&g, "Foo", NodeKind::Class),
         "class `Foo` must be NodeKind::Class; nodes: {:#?}",
+        g.nodes
+    );
+    // Regression hardening (matches class_method_emits_method): neither
+    // the method `bar` nor the constructor `Foo` should leak through the
+    // bare `function_signature` capture as Function. The parser.rs
+    // parent.kind filter blocks the method path; the constructor uses a
+    // separate `constructor_signature` AST node entirely.
+    assert!(
+        !find(&g, "bar", NodeKind::Function),
+        "`bar` is a class method and must not also appear as Function; nodes: {:#?}",
+        g.nodes
+    );
+    assert!(
+        !find(&g, "Foo", NodeKind::Function),
+        "`Foo` is a constructor and must not also appear as Function; nodes: {:#?}",
         g.nodes
     );
 }

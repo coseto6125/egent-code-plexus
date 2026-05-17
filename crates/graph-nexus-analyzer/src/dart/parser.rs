@@ -232,6 +232,23 @@ impl LanguageProvider for DartProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+                // queries.scm has both `(function_declaration (function_signature …))`
+                // and a bare `(function_signature …)` Function pattern. The bare
+                // pattern is load-bearing for top-level `external`/signature-only
+                // declarations (no function_declaration wrapper), but it ALSO
+                // fires on the inner function_signature child of every regular
+                // function (parent `function_declaration`) and every class method
+                // (parent `method_signature`), duplicating those outer emits.
+                // Skip the inner cases — they're already covered by @function /
+                // @method patterns that anchor on the outer node.
+                if k == NodeKind::Function
+                    && root.kind() == "function_signature"
+                    && root.parent().is_some_and(|p| {
+                        matches!(p.kind(), "function_declaration" | "method_signature")
+                    })
+                {
+                    continue;
+                }
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let name_str = name_str.trim();
                     // Dart visibility convention: identifiers starting with `_` are

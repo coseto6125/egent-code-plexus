@@ -221,13 +221,20 @@ pub fn score_entry_points(
 /// rare in idiomatic Java and the scorer's 0.9 is *not* a guarantee —
 /// it's a heuristic, and LLM consumers see the `reason` for context.
 pub fn is_main_function(node: &RawNode) -> bool {
-    // Swift `@main` attribute on a struct/class — language-level entry
-    // marker independent of the symbol's name.
-    if matches!(node.kind, NodeKind::Class | NodeKind::Function)
-        && node
-            .decorators
-            .iter()
-            .any(|d| d.trim_start_matches('@').trim() == "main")
+    // Swift `@main` attribute on a struct/class/enum — language-level entry
+    // marker independent of the symbol's name. Per Swift Evolution SE-0281
+    // and the apple/swift-argument-parser examples, `@main` attaches to types
+    // declared with `struct` / `class` / `enum`; tree-sitter-swift emits these
+    // as NodeKind::Struct / Class / Enum respectively. Previously only Class
+    // and Function were checked, so `@main struct Foo` (the idiomatic form in
+    // every swift-argument-parser example) silently dropped its entry score.
+    if matches!(
+        node.kind,
+        NodeKind::Class | NodeKind::Function | NodeKind::Struct | NodeKind::Enum
+    ) && node
+        .decorators
+        .iter()
+        .any(|d| d.trim_start_matches('@').trim() == "main")
     {
         return true;
     }
@@ -354,6 +361,30 @@ mod tests {
         assert_eq!(eps.len(), 1);
         assert_eq!(eps[0].kind, EntryKind::MainFunction);
         assert_eq!(eps[0].uid, "MyApp");
+    }
+
+    /// Swift `@main struct Foo { … }` — the idiomatic form in every
+    /// apple/swift-argument-parser example. Tree-sitter-swift emits Foo as
+    /// NodeKind::Struct (not Class), so `is_main_function` must accept Struct.
+    #[test]
+    fn swift_at_main_struct_kind_detected() {
+        let mut node = mk_node("Repeat", NodeKind::Struct);
+        node.decorators.push("@main".into());
+        let eps = score_entry_points(&[], &[], &[node]);
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].kind, EntryKind::MainFunction);
+        assert_eq!(eps[0].uid, "Repeat");
+    }
+
+    /// Swift `@main enum Foo { static func main() {…} }` — less common
+    /// than struct but a documented `@main` form (SE-0281).
+    #[test]
+    fn swift_at_main_enum_kind_detected() {
+        let mut node = mk_node("AppMain", NodeKind::Enum);
+        node.decorators.push("@main".into());
+        let eps = score_entry_points(&[], &[], &[node]);
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].kind, EntryKind::MainFunction);
     }
 
     /// FastAPI `@app.get("/items")` — emitted by the Python parser as a

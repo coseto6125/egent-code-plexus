@@ -236,6 +236,15 @@ impl LanguageProvider for JavaScriptProvider {
                         end.row as u32,
                         end.column as u32,
                     );
+                    // JS has no separate constructor_declaration node — constructors
+                    // are method_definition nodes whose property_identifier is literally
+                    // "constructor". Promote them here so the graph emits
+                    // NodeKind::Constructor (parity with Java / Dart / C#).
+                    let k = if k == NodeKind::Method && name_str == "constructor" {
+                        NodeKind::Constructor
+                    } else {
+                        k
+                    };
 
                     let mut existing_found = false;
                     for node in &mut nodes {
@@ -278,20 +287,18 @@ impl LanguageProvider for JavaScriptProvider {
                 }
             }
 
-            // Variable emission — module-level only.
-            // The query captures all lexical_declaration / variable_declaration,
-            // so we walk up to confirm the declaration's parent is `program`.
-            // Arrow-function-assigned declarators are already captured as
-            // `name.function` above and produce a Function node; skip them here
-            // to avoid a duplicate Variable node shadowing the Function node.
+            // Variable / Const emission — module-level only via queries.scm's
+            // `(program …)` anchor on the bare `lexical_declaration` /
+            // `variable_declaration` patterns. Arrow-function-assigned
+            // declarators are already captured as `name.function` above and
+            // produce a Function node; skip them here so we don't shadow it
+            // with a duplicate Variable.
             if let (Some(vn), Some(vr)) = (variable_name_node, variable_root_node) {
-                // `vr` is the lexical_declaration / variable_declaration node itself
-                // (or the export_statement's inner declaration via @variable).
-                // Walk up from vr to confirm `program` is an ancestor before any
-                // function/class/arrow scope boundary — that is the module-level guard.
+                // `vr` is the lexical_declaration / variable_declaration node
+                // itself, except for the `export_statement` wrapper which binds
+                // `@variable` to the inner `variable_declarator` — in that case
+                // we walk up one step to get the declaration for kind detection.
                 let decl_node = if vr.kind() == "variable_declarator" {
-                    // export_statement pattern binds @variable to variable_declarator;
-                    // we need the parent declaration for the ancestor check.
                     vr.parent().unwrap_or(vr)
                 } else {
                     vr
@@ -317,10 +324,6 @@ impl LanguageProvider for JavaScriptProvider {
                 }
 
                 if !is_arrow {
-                    // Inclusive emission: no ancestor filter. Capture every
-                    // var/let/const declarator (locals + top-level) so JS
-                    // Variable parity tracks ref-gitnexus which also counts
-                    // function locals. Downstream consumers can filter.
                     {
                         if let Ok(name_str) =
                             std::str::from_utf8(&source[vn.start_byte()..vn.end_byte()])

@@ -19,6 +19,40 @@ LANGS = [
     "Swift", "C", "Cpp", "Dart",
 ]
 
+# Per-lang source file extensions. Used to filter out cross-category
+# pollution (e.g., GitHub Actions workflow `.yml` files inside `Rust/`
+# add 62 Class nodes to the Rust count, inflating the apparent delta;
+# Kotlin `build.gradle.kts` inside `Java/` adds Variable nodes).
+# The filter is applied to BOTH gnx-rs and ref-gitnexus queries so the
+# per-lang totals reflect only nodes from real source files in that
+# language's grammar.
+EXTS: dict[str, list[str]] = {
+    "TypeScript": [".ts", ".tsx"],
+    "JavaScript": [".js", ".jsx", ".mjs", ".cjs"],
+    "Python": [".py", ".pyi"],
+    "Java": [".java"],
+    "Kotlin": [".kt", ".kts"],
+    "CSharp": [".cs", ".csx"],
+    "Go": [".go"],
+    "Rust": [".rs"],
+    "PHP": [".php", ".phtml"],
+    "Ruby": [".rb"],
+    "Swift": [".swift"],
+    "C": [".c", ".h"],
+    "Cpp": [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".cppm"],
+    "Dart": [".dart"],
+}
+
+
+def _ext_filter_clause(lang: str) -> str:
+    """Cypher `AND (...)` clause limiting nodes to real source-file
+    extensions for `lang`. Empty string if lang has no entry."""
+    exts = EXTS.get(lang)
+    if not exts:
+        return ""
+    ored = " OR ".join(f"n.filePath ENDS WITH '{e}'" for e in exts)
+    return f" AND ({ored})"
+
 ROW_RE = re.compile(r"\|\s*([A-Za-z][A-Za-z0-9_]*)\s*\|\s*(\d+)\s*\|")
 
 
@@ -73,7 +107,8 @@ def parse_ref(out: str) -> dict[str, int]:
 
 def cypher_rs_per_lang(lang: str) -> dict[str, int]:
     q = (
-        f"MATCH (n) WHERE n.filePath STARTS WITH '{lang}/' "
+        f"MATCH (n) WHERE n.filePath STARTS WITH '{lang}/'"
+        f"{_ext_filter_clause(lang)} "
         "RETURN n.kind AS kind, count(*) AS c ORDER BY c DESC"
     )
     return parse_rs(run(["gnx", "cypher", "--repo", REPO, q, "--format", "json"]))
@@ -81,7 +116,8 @@ def cypher_rs_per_lang(lang: str) -> dict[str, int]:
 
 def cypher_ref_per_lang(lang: str) -> dict[str, int]:
     q = (
-        f"MATCH (n) WHERE n.filePath STARTS WITH '{lang}/' "
+        f"MATCH (n) WHERE n.filePath STARTS WITH '{lang}/'"
+        f"{_ext_filter_clause(lang)} "
         "RETURN labels(n) AS l, count(*) AS c ORDER BY c DESC LIMIT 50"
     )
     return parse_ref(run(["gitnexus", "cypher", "--repo", REPO, q]))

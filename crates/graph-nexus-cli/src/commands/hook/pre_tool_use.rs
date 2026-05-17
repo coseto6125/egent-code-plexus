@@ -3,7 +3,7 @@
 //! the top-K hits into the conversation as `additionalContext`. Capped
 //! at 5 hits or ~2 KB serialized to keep the token cost bounded.
 
-use super::common::{emit_additional_context, lookup_index_dir, strip_shell_quotes, HookInput};
+use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
 use graph_nexus_core::GnxError;
@@ -112,8 +112,14 @@ fn extract_pattern(tool: &str, tool_input: &serde_json::Value) -> Option<String>
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let stripped = strip_shell_quotes(cmd);
-            extract_from_shell(&stripped)
+            // Do NOT pass through `strip_shell_quotes` here — it deletes the
+            // entire quoted block, which is precisely where the grep / rg
+            // pattern lives (e.g. `rg "coverage_blind_spots"`). The downstream
+            // token-level `cleaned` filter in `extract_from_shell` peels the
+            // surviving quote characters off each token. `strip_shell_quotes`
+            // is still the right tool for `post_tool_use` git-mutation
+            // detection (where ignoring `echo "git commit"` is a feature).
+            extract_from_shell(cmd)
         }
         _ => None,
     }
@@ -163,4 +169,41 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_from_shell;
+
+    #[test]
+    fn grep_double_quoted_pattern_extracted() {
+        // Regression: `strip_shell_quotes` used to delete the entire quoted
+        // block, leaving the hook to pick up the next non-flag token (often
+        // a pipe-side `head` / `tail`) and surface unrelated graph noise.
+        let cmd = r#"git show abc:foo.rs | grep -nE "coverage_blind_spots" | head -20"#;
+        assert_eq!(
+            extract_from_shell(cmd),
+            Some("coverage_blind_spots".to_string())
+        );
+    }
+
+    #[test]
+    fn grep_single_quoted_pattern_extracted() {
+        let cmd = "rg -n 'validateUser' src/";
+        assert_eq!(extract_from_shell(cmd), Some("validateUser".to_string()));
+    }
+
+    #[test]
+    fn grep_regex_metachars_preserved() {
+        let cmd = r#"grep -E "(compute_single|score|bm25)" file.rs"#;
+        assert_eq!(
+            extract_from_shell(cmd),
+            Some("(compute_single|score|bm25)".to_string())
+        );
+    }
+
+    #[test]
+    fn no_grep_returns_none() {
+        assert_eq!(extract_from_shell("cat foo.txt | head -20"), None);
+    }
 }

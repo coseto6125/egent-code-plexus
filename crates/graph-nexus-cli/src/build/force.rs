@@ -154,6 +154,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)?;
     let lock_guard = if lock.try_lock_exclusive().is_err() {
         wait_for_completion(&building, &commit_dir)?;
@@ -177,6 +178,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         let lock2 = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)?;
         lock2
             .lock_exclusive()
@@ -192,6 +194,22 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
     // 3. Drop existing L2
     if commit_dir.exists() {
         fs::remove_dir_all(&commit_dir)?;
+    }
+
+    // 3.5. Drop per-file parse_cache too.
+    //
+    // The cache at `<repo_root>/parse_cache/<fingerprint>/<content_hash>.rkyv`
+    // keys entries by (BUILDER_FINGERPRINT, file content). Fingerprint only
+    // bumps with `CARGO_PKG_VERSION` or the `+schemaN` literal, so dev-loop
+    // analyzer / queries.scm edits don't invalidate cache entries — `--force`
+    // rebuilt L2 but reused stale parser outputs for unchanged-content files.
+    // For `--force` (the "I want a fresh build" lever), drop the whole cache
+    // dir so the next build re-parses every file with the current binary.
+    // Stale-fingerprint orphan subdirs disappear with this too, which is OK
+    // since they were unreachable already.
+    let parse_cache_dir = repo_root.join("parse_cache");
+    if parse_cache_dir.exists() {
+        fs::remove_dir_all(&parse_cache_dir)?;
     }
 
     // 4-8. Shared build pipeline (source → analyzer → meta → atomic publish → repo_meta)

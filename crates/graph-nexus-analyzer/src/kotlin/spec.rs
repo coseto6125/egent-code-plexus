@@ -22,10 +22,11 @@ impl LangSpec for KotlinSpec {
     const NAME: &'static str = "kotlin";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "class.name"    => NodeKind::Class,
-        "function.name" => NodeKind::Function,
-        "property.name" => NodeKind::Property,
-        "variable.name" => NodeKind::Variable,
+        "class.name"       => NodeKind::Class,
+        "constructor.name" => NodeKind::Constructor,
+        "function.name"    => NodeKind::Function,
+        "property.name"    => NodeKind::Property,
+        "variable.name"    => NodeKind::Variable,
     };
 
     // Kotlin uses query-level scope anchoring; no runtime scope gate needed.

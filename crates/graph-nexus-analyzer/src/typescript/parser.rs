@@ -30,6 +30,7 @@ struct TypeScriptCaptureIndices {
     function: Option<u32>,
     class: Option<u32>,
     method: Option<u32>,
+    constructor: Option<u32>,
     interface: Option<u32>,
     property: Option<u32>,
     const_kind: Option<u32>,
@@ -76,6 +77,7 @@ impl TypeScriptProvider {
             function: query.capture_index_for_name("function"),
             class: query.capture_index_for_name("class"),
             method: query.capture_index_for_name("method"),
+            constructor: query.capture_index_for_name("constructor"),
             interface: query.capture_index_for_name("interface"),
             property: query.capture_index_for_name("property"),
             const_kind: query.capture_index_for_name("const"),
@@ -237,6 +239,7 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.function
                     || cap_idx == idx.class
                     || cap_idx == idx.method
+                    || cap_idx == idx.constructor
                     || cap_idx == idx.interface
                     || cap_idx == idx.property
                     || cap_idx == idx.const_kind

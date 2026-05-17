@@ -44,12 +44,16 @@
   )
 ) @export
 
-;; Constants
-(lexical_declaration
-  (variable_declarator
-    name: (identifier) @const.name
-  )
-) @const
+;; Constants — module-level only. Anchored to direct children of `program`;
+;; function-body / block-scope `const x = …` declarations are intentionally
+;; dropped (they bloat Const counts without LLM-disambiguation value).
+;; The `export_statement` wrapper below already implies module scope.
+(program
+  (lexical_declaration
+    (variable_declarator
+      name: (identifier) @const.name
+    )
+  ) @const)
 
 (export_statement
   declaration: (lexical_declaration
@@ -59,12 +63,13 @@
   )
 ) @export
 
-;; Variables
-(variable_declaration
-  (variable_declarator
-    name: (identifier) @variable.name
-  )
-) @variable
+;; Variables — module-level only (parallel to `lexical_declaration` above).
+(program
+  (variable_declaration
+    (variable_declarator
+      name: (identifier) @variable.name
+    )
+  ) @variable)
 
 (export_statement
   declaration: (variable_declaration
@@ -74,20 +79,32 @@
   )
 ) @export
 
-;; Classes
+;; Classes — heritage lives inside class_heritage, not directly on class_declaration.
+;; extends_clause carries `value: identifier`; implements_clause lists type_identifiers.
+;; Both extend and implements are optional and can coexist in one class_heritage block.
 (class_declaration
   (decorator)* @decorator
   name: (type_identifier) @class.name
-  (extends_clause value: (identifier) @heritage)?
+  (class_heritage (extends_clause value: (identifier) @heritage))?
+  (class_heritage (implements_clause (type_identifier) @heritage))?
 ) @class
 
 (export_statement
   (class_declaration
     (decorator)* @decorator
     name: (type_identifier) @class.name
-    (extends_clause value: (identifier) @heritage)?
+    (class_heritage (extends_clause value: (identifier) @heritage))?
+    (class_heritage (implements_clause (type_identifier) @heritage))?
   ) @class
 ) @export
+
+;; Constructors — method_definition named "constructor" is a distinct semantic.
+;; Must come before the generic @method pattern so the span node is set to @constructor,
+;; which maps to NodeKind::Constructor via spec.rs CAPTURE_KIND.
+(method_definition
+  name: (property_identifier) @constructor.name
+  (#eq? @constructor.name "constructor")
+) @constructor
 
 ;; Methods — class methods, interface method signatures, abstract method signatures
 (method_definition
@@ -103,16 +120,16 @@
   name: (property_identifier) @method.name
 ) @method
 
-;; Interfaces
+;; Interfaces — extends uses extends_type_clause with repeated `type:` children.
 (interface_declaration
   name: (type_identifier) @interface.name
-  (extends_clause value: (identifier) @heritage)?
+  (extends_type_clause (type_identifier) @heritage)?
 ) @interface
 
 (export_statement
   (interface_declaration
     name: (type_identifier) @interface.name
-    (extends_clause value: (identifier) @heritage)?
+    (extends_type_clause (type_identifier) @heritage)?
   ) @interface
 ) @export
 

@@ -216,20 +216,20 @@ This matrix is *not* a parity scorecard against any other tool. We took design i
 - ☐ &nbsp;**feasible, not implemented yet** — the language has this concept; we could add it. Treat as a roadmap marker.
 - — &nbsp;**not applicable** — the language doesn't have this concept (e.g. Dockerfile has no `Frameworks`).
 
-> Below the divider, `—` means *not applicable* (markup/config formats without that concept, e.g. Dockerfile has no `Frameworks`, YAML has no renameable identifiers). The matrix is fully resolved — no `☐` (feasible-but-not-implemented) cells remain anywhere.
+> `—` is used wherever the language doesn't have the concept — predominantly below the divider (markup/config formats without that concept, e.g. Dockerfile has no `Frameworks`, YAML has no renameable identifiers), but also a handful of cells above the divider where the language genuinely lacks the concept (Go/Rust Ctor, JavaScript/Ruby Entry; see the per-cell notes below the table for the rationale). The matrix is fully resolved — no `☐` (feasible-but-not-implemented) cells remain anywhere.
 
 | Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call | Rename |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ |
 | Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Go | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Go | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ |
 | PHP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Ruby | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Ruby | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ |
 | Swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | C | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | ✓ | ✓ | ✓ |
 | C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -254,7 +254,7 @@ This matrix is *not* a parity scorecard against any other tool. We took design i
 | YAML | n/a | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | n/a |
 
 **Per-cell notes** (where the cell shape needs context):
-Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Ruby Named = `alias` keyword + `alias_method` + constant assignment (`MyConst = Other::Constant`) + `def_delegator`/`def_delegators`/`delegate` (with Forwardable mixin detection; cross-file `include Foo` propagation resolved via resolver Tier 2.75 HeritageScoped); Solidity Heritage = `is X, Y, Z`; SQL Heritage = FK `REFERENCES` clauses (inline, table-level, and named-constraint forms); GitHub Actions Imports = `uses:` directives (public tag/SHA refs, local composites, reusable workflows, cross-repo workflows); Dockerfile Imports = `FROM <base>`; C Named = `typedef` + `#define` / `preproc_function_def` + `extern` declarations (include-guard macros filtered; classified as Alias/Constant/Macro/Flag); Swift Named = `typealias` declarations + `@objc(extName)` rename attributes. Rename `n/a` on the 5 markup/config rows (Markdown, GitHub Actions, Docker Compose, Dockerfile, YAML) reflects that these formats carry keys/literal strings rather than re-bindable code identifiers — `gnx rename` would have nothing to rewrite. **Cell legend**: `✓` implemented · `—` concept exists in the language but not yet implemented · `n/a` language linguistically lacks this concept (e.g., Bash has no class system, so Heritage/Ctor/Types are n/a). Exports: Lua `function foo()` (top-level non-`local`); Crystal default-public minus `private`/`protected` modifier; Nim trailing `*` marker; Cairo / Zig / Move `pub`/`public`/`entry` keyword; HCL `output` block; Vyper `@external`/`@view`/`@payable` decorators; Verilog SystemVerilog `class_property` minus `local`/`protected` qualifier; GitHub Actions `jobs.*.outputs` + `on.workflow_call.outputs`.
+Bash Imports `source`/`.`; Lua Imports `require` + binding alias; Lua Heritage = `setmetatable(...,{__index=Parent})` heuristic; Ruby Named = `alias` keyword + `alias_method` + constant assignment (`MyConst = Other::Constant`) + `def_delegator`/`def_delegators`/`delegate` (with Forwardable mixin detection; cross-file `include Foo` propagation resolved via resolver Tier 2.75 HeritageScoped); Solidity Heritage = `is X, Y, Z`; SQL Heritage = FK `REFERENCES` clauses (inline, table-level, and named-constraint forms); GitHub Actions Imports = `uses:` directives (public tag/SHA refs, local composites, reusable workflows, cross-repo workflows); Dockerfile Imports = `FROM <base>`; C Named = `typedef` + `#define` / `preproc_function_def` + `extern` declarations (include-guard macros filtered; classified as Alias/Constant/Macro/Flag); Swift Named = `typealias` declarations + `@objc(extName)` rename attributes. Rename `n/a` on the 5 markup/config rows (Markdown, GitHub Actions, Docker Compose, Dockerfile, YAML) reflects that these formats carry keys/literal strings rather than re-bindable code identifiers — `gnx rename` would have nothing to rewrite. Ctor `—` on Go and Rust reflects that neither language has a language-level constructor — Go uses factory functions (`NewFoo()`) and Rust uses associated functions (`Foo::new()`) as idiomatic substitutes, but the cross-language Ctor extractor only emits `NodeKind::Constructor` for languages with a reserved ctor name (`__init__`, `initialize`, `__construct`, `constructor`, `Class::Class`). Entry `—` on JavaScript and Ruby reflects the absence of a language-level `main` convention (per `entry_points.rs` coverage table) — entry points still surface for these languages via route handlers and framework decorators, just not via a `main()` symbol. **Cell legend**: `✓` implemented · `—` concept exists in the language but not yet implemented · `n/a` language linguistically lacks this concept (e.g., Bash has no class system, so Heritage/Ctor/Types are n/a). Exports: Lua `function foo()` (top-level non-`local`); Crystal default-public minus `private`/`protected` modifier; Nim trailing `*` marker; Cairo / Zig / Move `pub`/`public`/`entry` keyword; HCL `output` block; Vyper `@external`/`@view`/`@payable` decorators; Verilog SystemVerilog `class_property` minus `local`/`protected` qualifier; GitHub Actions `jobs.*.outputs` + `on.workflow_call.outputs`.
 
 **Roadmap** — the matrix is now fully resolved to `✓` / `—` / `n/a`. No `☐` (feasible-but-not-implemented) cells remain — every `—` is a concrete gap, every `n/a` is a non-target.
 

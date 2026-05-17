@@ -61,14 +61,17 @@
               object: (identifier) @_self (#eq? @_self "self")
               attribute: (identifier) @property.name)) @property)))))
 
-;; Variables — module-level assignments (plain `x = …` and annotated `x: T = …`)
-;; post-filtered in parser via parent-is-module ancestor walk.
+;; Variables — module-level assignments (plain `x = …` and annotated `x: T = …`).
+;; Anchored to direct children of `module`; function-body and class-body locals
+;; are intentionally dropped (they bloat symbol counts without LLM-disambiguation
+;; value; locals lack stable cross-file identity).
 ;; Both forms produce an `assignment` node in tree-sitter-python; the annotated
 ;; form additionally has a `type:` field, but the `left:` field is present in
 ;; both, so a single pattern suffices.
-(expression_statement
-  (assignment
-    left: (identifier) @variable.name) @variable)
+(module
+  (expression_statement
+    (assignment
+      left: (identifier) @variable.name) @variable))
 
 ;; Routes
 (call

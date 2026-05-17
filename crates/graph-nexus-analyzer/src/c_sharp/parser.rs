@@ -231,7 +231,10 @@ impl LanguageProvider for CSharpProvider {
                 // the post-`#if` identifier to `name:`. When `name` has a
                 // preceding ERROR sibling AND the kind is type-like, extract
                 // the leading identifier from that ERROR node's text instead.
-                let real_name = if matches!(k, NodeKind::Class | NodeKind::Interface) {
+                let real_name = if matches!(
+                    k,
+                    NodeKind::Class | NodeKind::Interface | NodeKind::Annotation
+                ) {
                     n.prev_sibling().and_then(|s| {
                         if s.kind() != "ERROR" {
                             return None;

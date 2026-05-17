@@ -17,7 +17,12 @@ clone_if_missing() {
         log "${lang}: already cloned — skipping"
         return 0
     fi
-    log "${lang}: cloning $1 ..."
+    # URL is conventionally the last arg of each caller; the old `$1`
+    # form after `shift` would print the first flag (e.g. `--depth`)
+    # instead, so logs read "lua: cloning --depth ..." rather than the
+    # actual repo URL.
+    local url="${*: -1}"
+    log "${lang}: cloning ${url} ..."
     git clone "$@" "${dest}"
     log "${lang}: done"
 }
@@ -62,6 +67,44 @@ else
         "${MOVE_DEST}"
     git -C "${MOVE_DEST}" sparse-checkout set aptos-move/framework
     log "move: done"
+fi
+
+# ── Entry-point fixtures ──────────────────────────────────────────────────────
+# The Wave 1 Go / Swift clones above are libraries (no `func main()` / `@main`),
+# so `gnx cypher` returns 0 EntryPoint nodes for these langs and the
+# `readme_verifier.py` (ext-scoping) drift report flags them as ☐ on cells the
+# parser actually supports. These two clones add a Go binary + a Swift example
+# repo with @main so the verifier sees real EntryPoint emissions.
+
+# Go binary: mvdan/sh provides cmd/shfmt/main.go and cmd/gosh/main.go.
+# Sparse checkout to the `cmd/` directory keeps disk footprint small.
+GO_BIN_DEST="${SAMPLE_DIR}/Go-binary"
+if [[ -d "${GO_BIN_DEST}/.git" ]]; then
+    log "Go-binary: already cloned — skipping"
+else
+    log "Go-binary: sparse-cloning mvdan/sh (cmd/ only) ..."
+    git clone \
+        --depth 1 \
+        --filter=blob:none \
+        --sparse \
+        https://github.com/mvdan/sh.git \
+        "${GO_BIN_DEST}"
+    git -C "${GO_BIN_DEST}" sparse-checkout set cmd
+    log "Go-binary: done"
+fi
+
+# Swift CLI examples: apple/swift-argument-parser ships 8+ examples each with
+# `@main`. Full clone (no sparse) because the entire Examples/ tree is small.
+SWIFT_CLI_DEST="${SAMPLE_DIR}/Swift-cli"
+if [[ -d "${SWIFT_CLI_DEST}/.git" ]]; then
+    log "Swift-cli: already cloned — skipping"
+else
+    log "Swift-cli: cloning apple/swift-argument-parser ..."
+    git clone \
+        --depth 1 \
+        https://github.com/apple/swift-argument-parser.git \
+        "${SWIFT_CLI_DEST}"
+    log "Swift-cli: done"
 fi
 
 # ── Disk usage summary ────────────────────────────────────────────────────────

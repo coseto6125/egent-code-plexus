@@ -53,6 +53,14 @@ struct ShapeCheckHints {
     unmatched_route_filter: Option<String>,
 }
 
+/// Library API: returns the JSON payload only, dropping stderr hints.
+///
+/// `run` (binary path) calls `build_payload_with_hints` directly so it can
+/// print the `unmatched_route_filter` hint to stderr, which means this thin
+/// wrapper has no in-crate caller and `cargo` flags it as dead. Kept `pub` to
+/// mirror the 5-command `build_payload` surface introduced in PR #88 for
+/// future library consumers.
+#[allow(dead_code)]
 pub fn build_payload(
     args: &ShapeCheckArgs,
     engine: &crate::engine::Engine,

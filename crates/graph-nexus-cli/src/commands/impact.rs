@@ -121,6 +121,13 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     emit(&payload, format)
 }
 
+/// Library API: returns the JSON payload only, dropping stderr hints.
+///
+/// `run` (binary path) calls `build_payload_with_hints` directly so it can
+/// print the hints to stderr, which means this thin wrapper has no in-crate
+/// caller and `cargo` flags it as dead. Kept `pub` to mirror the 5-command
+/// `build_payload` surface introduced in PR #88 for future library consumers.
+#[allow(dead_code)]
 pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
     build_payload_with_hints(args, engine).map(|(v, _)| v)
 }
