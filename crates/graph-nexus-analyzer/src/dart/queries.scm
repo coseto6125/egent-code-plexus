@@ -141,12 +141,12 @@
 
 ;; Annotations — `@override`, `@deprecated`, `@Foo()`, `@meta.visibleForTesting`.
 ;; tree-sitter-dart uses an `annotation` node with a `name` field that is
-;; either a bare `identifier` or a `qualified` node. We capture only the
-;; identifier form here; qualified annotations (e.g. `@meta.visibleForTesting`)
-;; bind to the root identifier via the same capture index so the Rust layer
-;; reads the first (and only) identifier child.
+;; either a bare `identifier` or a `qualified` node.
 (annotation
   name: (identifier) @annotation.name) @annotation
+
+(annotation
+  name: (qualified (_) (identifier) @annotation.name)) @annotation
 
 ;; Imports — Dart `import 'pkg.dart';`. tree-sitter-dart wraps imports
 ;; three levels deep: `import_or_export > library_import >

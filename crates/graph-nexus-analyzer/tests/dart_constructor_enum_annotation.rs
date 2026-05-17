@@ -198,6 +198,23 @@ class Config {
     );
 }
 
+/// Qualified annotation `@meta.visibleForTesting` on a method.
+#[test]
+fn annotation_qualified_emits_leaf_name() {
+    let src = r#"
+class Foo {
+  @meta.visibleForTesting
+  void doWork() {}
+}
+"#;
+    let g = parse(src);
+    assert!(
+        has(&g, "visibleForTesting", NodeKind::Annotation),
+        "@meta.visibleForTesting must emit leaf annotation name; nodes: {:#?}",
+        g.nodes
+    );
+}
+
 /// Multiple annotations on one declaration.
 #[test]
 fn annotation_multiple_on_decl_emit() {
