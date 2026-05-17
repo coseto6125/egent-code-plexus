@@ -14,6 +14,16 @@ pub mod git_guard;
 pub mod output;
 pub mod routes;
 
+pub struct DiffPayload {
+    pub bindings: Option<bindings::BindingsDiff>,
+    pub routes: Option<routes::RoutesDiff>,
+    pub contracts: Option<contracts::ContractsDiff>,
+    pub baseline_ref: String,
+    pub baseline_sha: String,
+    pub current_sha: String,
+    pub verbose: bool,
+}
+
 /// Section of the graph to diff. `All` = bindings + routes + contracts.
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq, Hash)]
 #[value(rename_all = "lowercase")]
@@ -49,6 +59,12 @@ pub struct DiffArgs {
 }
 
 pub fn run(args: DiffArgs) -> Result<(), GnxError> {
+    let payload = build_payload(&args)?;
+    let format = args.format.as_deref().unwrap_or("");
+    output::emit(&payload, format)
+}
+
+pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, GnxError> {
     let repo_dir = match args.repo.as_deref() {
         Some(p) => std::path::PathBuf::from(p),
         None => std::env::current_dir().map_err(|e| GnxError::Output(format!("cwd: {e}")))?,
@@ -74,23 +90,15 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
 
     // Fast-path: identical SHAs → nothing could have changed.
     if baseline_sha == current_sha {
-        let bindings_empty = want_bindings.then(bindings::BindingsDiff::default);
-        let routes_empty = want_routes.then(routes::RoutesDiff::default);
-        let contracts_empty = want_contracts.then(contracts::ContractsDiff::default);
-        output::emit(
-            &output::DiffEnvelope {
-                baseline_ref: &args.baseline,
-                baseline_sha: &baseline_sha,
-                current_ref: "HEAD",
-                current_sha: &current_sha,
-                bindings: bindings_empty.as_ref(),
-                routes: routes_empty.as_ref(),
-                contracts: contracts_empty.as_ref(),
-                verbose: args.verbose,
-            },
-            args.format.as_deref().unwrap_or(""),
-        )?;
-        return Ok(());
+        return Ok(DiffPayload {
+            bindings: want_bindings.then(bindings::BindingsDiff::default),
+            routes: want_routes.then(routes::RoutesDiff::default),
+            contracts: want_contracts.then(contracts::ContractsDiff::default),
+            baseline_ref: args.baseline.clone(),
+            baseline_sha,
+            current_sha,
+            verbose: args.verbose,
+        });
     }
 
     let mut bindings_diff: Option<bindings::BindingsDiff> = None;
@@ -146,18 +154,13 @@ pub fn run(args: DiffArgs) -> Result<(), GnxError> {
     let _ = std::fs::remove_file(&baseline_jsonl);
     let _ = std::fs::remove_file(&baseline_graph_tmp);
 
-    output::emit(
-        &output::DiffEnvelope {
-            baseline_ref: &args.baseline,
-            baseline_sha: &baseline_sha,
-            current_ref: "HEAD",
-            current_sha: &current_sha,
-            bindings: bindings_diff.as_ref(),
-            routes: routes_diff.as_ref(),
-            contracts: contracts_diff.as_ref(),
-            verbose: args.verbose,
-        },
-        args.format.as_deref().unwrap_or(""),
-    )?;
-    Ok(())
+    Ok(DiffPayload {
+        bindings: bindings_diff,
+        routes: routes_diff,
+        contracts: contracts_diff,
+        baseline_ref: args.baseline.clone(),
+        baseline_sha,
+        current_sha,
+        verbose: args.verbose,
+    })
 }

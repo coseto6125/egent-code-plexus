@@ -5,51 +5,38 @@
 //! `text` keeps a custom renderer because the diff envelope's per-section
 //! structure doesn't map onto the generic `results`-array text path.
 
-use crate::commands::diff::bindings::BindingsDiff;
-use crate::commands::diff::contracts::ContractsDiff;
-use crate::commands::diff::routes::RoutesDiff;
+use crate::commands::diff::DiffPayload;
 use crate::output::{emit_to_string, OutputFormat};
 use graph_nexus_core::GnxError;
 use serde_json::Value;
 
-pub struct DiffEnvelope<'a> {
-    pub baseline_ref: &'a str,
-    pub baseline_sha: &'a str,
-    pub current_ref: &'a str,
-    pub current_sha: &'a str,
-    pub bindings: Option<&'a BindingsDiff>,
-    pub routes: Option<&'a RoutesDiff>,
-    pub contracts: Option<&'a ContractsDiff>,
-    pub verbose: bool,
-}
-
-pub fn emit(envelope: &DiffEnvelope, format: &str) -> Result<(), GnxError> {
+pub fn emit(payload: &DiffPayload, format: &str) -> Result<(), GnxError> {
     let fmt = OutputFormat::parse(Some(format));
     match fmt {
         OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
-            let json_value = build_json(envelope);
+            let json_value = build_json(payload);
             println!("{}", emit_to_string(&json_value, fmt)?);
         }
-        OutputFormat::Text => emit_text(envelope),
+        OutputFormat::Text => emit_text(payload),
     }
     Ok(())
 }
 
-fn build_json(env: &DiffEnvelope) -> Value {
+fn build_json(env: &DiffPayload) -> Value {
     let mut sections = serde_json::Map::new();
-    if let Some(b) = env.bindings {
+    if let Some(b) = &env.bindings {
         sections.insert(
             "bindings".into(),
             serde_json::to_value(b).unwrap_or(Value::Null),
         );
     }
-    if let Some(r) = env.routes {
+    if let Some(r) = &env.routes {
         sections.insert(
             "routes".into(),
             serde_json::to_value(r).unwrap_or(Value::Null),
         );
     }
-    if let Some(c) = env.contracts {
+    if let Some(c) = &env.contracts {
         sections.insert(
             "contracts".into(),
             serde_json::to_value(c).unwrap_or(Value::Null),
@@ -57,22 +44,22 @@ fn build_json(env: &DiffEnvelope) -> Value {
     }
     serde_json::json!({
         "baseline": {"ref": env.baseline_ref, "sha": env.baseline_sha},
-        "current":  {"ref": env.current_ref,  "sha": env.current_sha},
+        "current":  {"ref": "HEAD",  "sha": env.current_sha},
         "sections": sections,
     })
 }
 
-fn emit_text(env: &DiffEnvelope) {
+fn emit_text(env: &DiffPayload) {
     let bsha = &env.baseline_sha[..env.baseline_sha.len().min(7)];
     let csha = &env.current_sha[..env.current_sha.len().min(7)];
     println!(
         "═══ Graph Δ ({} {}→{} {}) ═══",
-        env.baseline_ref, bsha, env.current_ref, csha,
+        env.baseline_ref, bsha, "HEAD", csha,
     );
 
     let limit = if env.verbose { usize::MAX } else { 10 };
 
-    if let Some(b) = env.bindings {
+    if let Some(b) = &env.bindings {
         println!("\n─ Section: bindings ─");
         println!("  new_resolutions: {}", b.new_resolutions.len());
         println!("  tier_changes:    {}", b.tier_changes.len());
@@ -105,7 +92,7 @@ fn emit_text(env: &DiffEnvelope) {
         }
     }
 
-    if let Some(r) = env.routes {
+    if let Some(r) = &env.routes {
         println!("\n─ Section: routes ─");
         println!("  added:    {}", r.added.len());
         println!("  removed:  {}", r.removed.len());
@@ -124,7 +111,7 @@ fn emit_text(env: &DiffEnvelope) {
         }
     }
 
-    if let Some(c) = env.contracts {
+    if let Some(c) = &env.contracts {
         println!("\n─ Section: contracts ─");
         println!("  added:    {}", c.added.len());
         println!("  removed:  {}", c.removed.len());
