@@ -94,6 +94,21 @@ fn attribute_class_emits_annotation_kind() {
 }
 
 #[test]
+fn attribute_class_with_preprocessor_recovery_keeps_real_name() {
+    let src = r#"
+public class MyAttribute
+#if NET8_0_OR_GREATER
+    : Attribute
+#endif
+{
+}
+"#;
+    let g = parse(src);
+    let annos = names_of_kind(&g, NodeKind::Annotation);
+    assert_eq!(annos, vec!["MyAttribute"], "nodes: {:?}", g.nodes);
+}
+
+#[test]
 fn mixed_declarations_all_emit_correct_kinds() {
     let src = r#"
         namespace App {
