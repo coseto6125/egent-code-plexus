@@ -25,6 +25,16 @@ fn class_method_emits_method() {
         "`bar` inside class Foo must be NodeKind::Method; nodes: {:#?}",
         g.nodes
     );
+    // Regression hardening: the bare `(function_signature ...) @function`
+    // pattern in queries.scm matches the method's inner function_signature
+    // node too — parser.rs filters that case out by checking parent.kind
+    // ∈ {function_declaration, method_signature}. If anyone deletes that
+    // filter, `bar` would silently double-emit as Function + Method.
+    assert!(
+        !find(&g, "bar", NodeKind::Function),
+        "`bar` is a class method and must not also appear as Function; nodes: {:#?}",
+        g.nodes
+    );
 }
 
 #[test]
