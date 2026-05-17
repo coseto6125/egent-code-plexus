@@ -6,13 +6,14 @@
   (base_list (_)* @heritage)?
 ) @class
 
-;; Structs
+;; Structs — emitted as NodeKind::Struct (value-type aggregate, distinct
+;; from Class because runtime semantics differ: value-copy, no inheritance).
 (struct_declaration
   (attribute_list)* @decorator
   (modifier)* @export
-  name: (identifier) @name.class
+  name: (identifier) @struct.name
   (base_list (_)* @heritage)?
-) @class
+) @struct
 
 ;; Interfaces
 (interface_declaration

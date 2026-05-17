@@ -18,5 +18,6 @@ impl LangSpec for CSharpSpec {
         "constructor.name" => NodeKind::Constructor,
         "namespace.name"   => NodeKind::Namespace,
         "enum.name"        => NodeKind::Enum,
+        "struct.name"      => NodeKind::Struct,
     };
 }

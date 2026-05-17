@@ -127,6 +127,7 @@ impl LanguageProvider for CSharpProvider {
         let idx_constructor = self.query.capture_index_for_name("constructor");
         let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_enum = self.query.capture_index_for_name("enum");
+        let idx_struct = self.query.capture_index_for_name("struct");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -200,11 +201,23 @@ impl LanguageProvider for CSharpProvider {
                     || Some(cap_idx) == idx_variable
                     || Some(cap_idx) == idx_constructor
                     || Some(cap_idx) == idx_namespace
-                    || Some(cap_idx) == idx_enum)
+                    || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_struct)
                     && root_span_node.is_none()
                 {
                     root_span_node = Some(cap.node);
                 }
+            }
+
+            // Reclassify class declarations inheriting from `Attribute` (or any
+            // base whose name ends in `Attribute`) as NodeKind::Annotation —
+            // C# attribute-class convention. Heritage check alone is sufficient
+            // because `Attribute` suffix in a base type is the load-bearing
+            // signal; regular classes don't inherit from `*Attribute` types.
+            if kind == Some(NodeKind::Class)
+                && heritage_list.iter().any(|h| h.ends_with("Attribute"))
+            {
+                kind = Some(NodeKind::Annotation);
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
@@ -223,14 +236,17 @@ impl LanguageProvider for CSharpProvider {
                         if s.kind() != "ERROR" {
                             return None;
                         }
-                        let txt = std::str::from_utf8(
-                            &source[s.start_byte()..s.end_byte()],
-                        ).ok()?;
+                        let txt =
+                            std::str::from_utf8(&source[s.start_byte()..s.end_byte()]).ok()?;
                         let id: String = txt
                             .chars()
                             .take_while(|c| c.is_alphanumeric() || *c == '_')
                             .collect();
-                        if id.is_empty() { None } else { Some(id) }
+                        if id.is_empty() {
+                            None
+                        } else {
+                            Some(id)
+                        }
                     })
                 } else {
                     None
