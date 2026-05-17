@@ -188,6 +188,8 @@ impl GraphBuilder {
     }
 
     pub fn build(mut self) -> ZeroCopyGraph {
+        let prof = std::env::var("GNX_PROF").is_ok();
+        let t_total = std::time::Instant::now();
         // Determinism: sort by file_path so node IDs and edge endpoints are
         // assigned in canonical order regardless of how the producer (scanner,
         // hook, manual add_graph) enumerated files. Without this, the same repo
@@ -197,8 +199,11 @@ impl GraphBuilder {
         // `file_path` is unique across LocalGraph entries (one ingest per file),
         // so unstable sort has no observable tie-breaking concern and avoids
         // the temporary allocation that stable sort needs.
+        let t_sort = std::time::Instant::now();
         self.local_graphs
             .sort_unstable_by(|a, b| a.file_path.cmp(&b.file_path));
+        if prof { eprintln!("prof build.sort: {:.3}s", t_sort.elapsed().as_secs_f32()); }
+        let _t_pass1 = std::time::Instant::now();
 
         let mut symbol_table = SymbolTable::new();
         let mut string_pool = StringPool::new();
@@ -259,6 +264,8 @@ impl GraphBuilder {
             // `DocumentBlock` type lands in `graph_nexus_core::graph`.
         }
 
+        if prof { eprintln!("prof build.pass1_register: {:.3}s", _t_pass1.elapsed().as_secs_f32()); }
+        let _t_pass15 = std::time::Instant::now();
         // Pass 1.5: Extract Routes
         let mut route_edges = Vec::new();
         let mut current_handler_idx = 0;
@@ -354,6 +361,8 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.pass15_routes: {:.3}s", _t_pass15.elapsed().as_secs_f32()); }
+        let _t_pass16 = std::time::Instant::now();
         // Pass 1.6: Fetch-shape extraction.
         //
         // Two sub-passes — both gated on `repo_root` being available (it
@@ -525,6 +534,8 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.pass16_fetch_shape: {:.3}s", _t_pass16.elapsed().as_secs_f32()); }
+        let _t_pass17 = std::time::Instant::now();
         // Pass 1.7: Entry-point scoring (cross-language).
         //
         // Pure consumer of `RawRoute` + `RawFrameworkRef` + `main()`
@@ -583,6 +594,8 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.pass17_entry_points: {:.3}s", _t_pass17.elapsed().as_secs_f32()); }
+        let _t_pass2 = std::time::Instant::now();
         // Pass 2: Resolve imports and build edges
         //
         // Pass 2 strategy: dump-disabled path (production hot path) runs in
@@ -736,6 +749,8 @@ impl GraphBuilder {
         edges.extend(entry_edges);
         edges.extend(fetches_edges);
 
+        if prof { eprintln!("prof build.pass2_imports_resolve: {:.3}s", _t_pass2.elapsed().as_secs_f32()); }
+        let _t_blind = std::time::Instant::now();
         // Pass: blind spots — pure metadata passthrough, no edges created.
         // Each local_graph's blind_spots are interned and stored in the graph's
         // file-level metadata for `gnx context` / `gnx index` to surface to
@@ -770,6 +785,8 @@ impl GraphBuilder {
             }
         }
 
+        if prof { eprintln!("prof build.blind_spots: {:.3}s", _t_blind.elapsed().as_secs_f32()); }
+        let _t_pass3 = std::time::Instant::now();
         // Pass 3: Community detection (Leiden) over Calls/Extends/Implements edges.
         // Leiden's refinement phase prevents the badly-connected-hub failure
         // mode where Louvain pins a hub to its first-touched chain.
@@ -783,6 +800,8 @@ impl GraphBuilder {
             node.community_id = c;
         }
 
+        if prof { eprintln!("prof build.pass3_community: {:.3}s", _t_pass3.elapsed().as_secs_f32()); }
+        let _t_pass4 = std::time::Instant::now();
         // Pass 4: Process detection (BFS forward via CALLS).
         // Produces traces; each trace becomes a NodeKind::Process node + N
         // StepInProcess edges. Process nodes are appended to `nodes` so they
@@ -889,6 +908,8 @@ impl GraphBuilder {
         // Rust impl bridge that uses the `__impl_target__:` sentinel the
         // Rust parser stamped into heritage. Must run BEFORE the CSR
         // construction below so new edges land in `out_offsets` / `in_offsets`.
+        if prof { eprintln!("prof build.pass4_processes: {:.3}s", _t_pass4.elapsed().as_secs_f32()); }
+        let _t_class_mem = std::time::Instant::now();
         crate::post_process::class_membership::emit_edges(
             &self.local_graphs,
             &symbol_table,
@@ -943,6 +964,9 @@ impl GraphBuilder {
         // new edges land in `out_offsets` / `in_offsets`.
         let imports_resolver =
             Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        if prof { eprintln!("prof build.class_membership: {:.3}s", _t_class_mem.elapsed().as_secs_f32()); }
+        let _t_imports_edges = std::time::Instant::now();
+        let _track_imports_call = ();
         crate::post_process::imports_edges::emit_edges(
             &self.local_graphs,
             &imports_resolver,
@@ -951,6 +975,8 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        if prof { eprintln!("prof build.imports_edges: {:.3}s", _t_imports_edges.elapsed().as_secs_f32()); }
+        let _t_csr = std::time::Instant::now();
         // Final pass: Construct CSR (out_offsets and in_offsets)
         // Sort edges by source to build out_offsets easily
         edges.sort_by_key(|e| e.source);
@@ -984,6 +1010,8 @@ impl GraphBuilder {
             in_offsets[i + 1] += in_offsets[i];
         }
 
+        if prof { eprintln!("prof build.csr_assembly: {:.3}s  total_build: {:.3}s",
+            _t_csr.elapsed().as_secs_f32(), t_total.elapsed().as_secs_f32()); }
         ZeroCopyGraph {
             magic: graph_nexus_core::graph::GRAPH_MAGIC,
             version: graph_nexus_core::graph::GRAPH_FORMAT_VERSION,
