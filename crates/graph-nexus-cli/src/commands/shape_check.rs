@@ -45,10 +45,25 @@ pub struct ShapeCheckArgs {
     pub route: Option<String>,
 }
 
+#[derive(Default)]
+struct ShapeCheckHints {
+    /// Set when `--route <filter>` was given but no Fetches edge resolved
+    /// to a Route whose path matched. CLI emits this to stderr from `run`;
+    /// library callers ignore it.
+    unmatched_route_filter: Option<String>,
+}
+
 pub fn build_payload(
     args: &ShapeCheckArgs,
     engine: &crate::engine::Engine,
 ) -> Result<serde_json::Value, GnxError> {
+    build_payload_with_hints(args, engine).map(|(v, _)| v)
+}
+
+fn build_payload_with_hints(
+    args: &ShapeCheckArgs,
+    engine: &crate::engine::Engine,
+) -> Result<(serde_json::Value, ShapeCheckHints), GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Lookup: route node_idx → (known_keys set, response_keys list, error_keys list).
@@ -148,19 +163,20 @@ pub fn build_payload(
         }));
     }
 
-    // Emit no-match message if route filter was provided but no routes matched.
-    if let Some(filter) = &args.route {
-        if filter_matched_count == 0 {
-            eprintln!("No routes match `{filter}` in the graph.");
-        }
-    }
-
-    Ok(serde_json::json!({
+    let hints = ShapeCheckHints {
+        unmatched_route_filter: args
+            .route
+            .as_ref()
+            .filter(|_| filter_matched_count == 0)
+            .cloned(),
+    };
+    let value = serde_json::json!({
         "status": "success",
         "total_fetches": total_fetches,
         "drift_count": drift_count,
         "drift": report_entries,
-    }))
+    });
+    Ok((value, hints))
 }
 
 fn render_text(value: &serde_json::Value) -> serde_json::Value {
@@ -205,7 +221,14 @@ pub fn run(
     engine: &crate::engine::Engine,
 ) -> Result<(), graph_nexus_core::GnxError> {
     let format = crate::output::OutputFormat::parse(args.format.as_deref());
-    let value = build_payload(&args, engine)?;
-    let emit_value = if matches!(format, OutputFormat::Text) { render_text(&value) } else { value };
+    let (value, hints) = build_payload_with_hints(&args, engine)?;
+    if let Some(filter) = &hints.unmatched_route_filter {
+        eprintln!("No routes match `{filter}` in the graph.");
+    }
+    let emit_value = if matches!(format, OutputFormat::Text) {
+        render_text(&value)
+    } else {
+        value
+    };
     emit(&emit_value, format)
 }
