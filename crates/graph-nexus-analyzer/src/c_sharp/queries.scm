@@ -79,14 +79,6 @@
   name: (identifier) @property.name
 ) @property
 
-;; Local variables — `int x = 0;` inside method bodies. Ref gitnexus
-;; emits Variable for these (~4.6k on .sample_repo CSharp corpus).
-(local_declaration_statement
-  (variable_declaration
-    (variable_declarator
-      name: (identifier) @variable.name))
-) @variable
-
 ;; Using directives (Imports). Three patterns:
 ;; - `using X;` / `using X.Y;` — plain
 ;; - `using static X.Alpha;` — static-member import (the `static` modifier

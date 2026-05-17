@@ -107,21 +107,6 @@
   ]
 ) @method
 
-;; Local variables inside function bodies.
-;; Covers three declarator forms:
-;;   init_declarator: `int x = 5;` / `auto s = "hi";`
-;;   function_declarator: `json j(args);`  (constructor-call syntax)
-;;   bare identifier: `int n;`
-(compound_statement
-  (declaration
-    declarator: [
-      (init_declarator declarator: (identifier) @var.name)
-      (init_declarator declarator: (pointer_declarator (identifier) @var.name))
-      (init_declarator declarator: (reference_declarator (identifier) @var.name))
-      (function_declarator declarator: (identifier) @var.name)
-      (identifier) @var.name
-      (pointer_declarator (identifier) @var.name)
-    ]) @var)
 
 ;; Preprocessor Includes
 (preproc_include

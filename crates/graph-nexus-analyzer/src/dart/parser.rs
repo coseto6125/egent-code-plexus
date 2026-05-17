@@ -83,6 +83,7 @@ impl LanguageProvider for DartProvider {
         let idx_constructor_name = self.query.capture_index_for_name("constructor.name");
         let idx_typedef_name = self.query.capture_index_for_name("typedef.name");
         let idx_interface_name = self.query.capture_index_for_name("interface.name");
+        let idx_trait_name = self.query.capture_index_for_name("trait.name");
         let idx_property_name = self.query.capture_index_for_name("property.name");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
@@ -96,6 +97,7 @@ impl LanguageProvider for DartProvider {
         let idx_constructor = self.query.capture_index_for_name("constructor");
         let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_interface = self.query.capture_index_for_name("interface");
+        let idx_trait = self.query.capture_index_for_name("trait");
         let idx_property = self.query.capture_index_for_name("property");
         let idx_import = self.query.capture_index_for_name("import");
 
@@ -138,6 +140,9 @@ impl LanguageProvider for DartProvider {
                 } else if Some(cap_idx) == idx_interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
+                } else if Some(cap_idx) == idx_trait_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Trait);
                 } else if Some(cap_idx) == idx_property_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Property);
@@ -177,6 +182,7 @@ impl LanguageProvider for DartProvider {
                     || Some(cap_idx) == idx_constructor
                     || Some(cap_idx) == idx_typedef
                     || Some(cap_idx) == idx_interface
+                    || Some(cap_idx) == idx_trait
                     || Some(cap_idx) == idx_property
                     || Some(cap_idx) == idx_import
                 {
@@ -185,6 +191,19 @@ impl LanguageProvider for DartProvider {
             }
 
             // Dart top-level variable `double pi = 3.14` → Variable node.
+            // tree-sitter-dart mis-parses `typedef Foo = ...` as a
+            // top_level_variable_declaration with type text "typedef"; skip those
+            // — they are already captured by the type_alias / @typedef pattern.
+            let is_typedef_misparse = var_type
+                .map(|t| {
+                    std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                        .map(|s| s.trim() == "typedef")
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if is_typedef_misparse {
+                continue;
+            }
             if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
                 if let Ok(name_str) =
                     std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])

@@ -53,15 +53,6 @@
     name: (identifier) @property.name)
 ) @property
 
-;; Local variables — `int x = 0;` inside method/constructor bodies. Ref
-;; gitnexus emits Variable for these (~18k on .sample_repo Java corpus).
-;; Per-declarator capture mirrors Property handling.
-(local_variable_declaration
-  type: (_) @type
-  declarator: (variable_declarator
-    name: (identifier) @variable.name)
-) @variable
-
 ;; Imports — regular named import
 (import_declaration
   [

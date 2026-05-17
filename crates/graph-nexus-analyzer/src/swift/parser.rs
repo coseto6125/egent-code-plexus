@@ -237,24 +237,39 @@ impl LanguageProvider for SwiftProvider {
             // willset_didset_block, and lambda_literal.
             if let (Some(pr_root), Some(pat_node)) = (property_root, property_name) {
                 // Locality check: walk up from property_declaration.
+                // Stops at the first scope boundary and records which one:
+                //   source_file        → top-level Variable
+                //   class/struct/etc.  → member Property
+                //   function_body / computed_property / lambda / control-flow
+                //                      → local, skip entirely
                 let mut anc = pr_root.parent();
-                let mut is_local = false;
+                let mut emit_kind: Option<NodeKind> = None;
                 while let Some(a) = anc {
                     match a.kind() {
-                        "computed_property" | "willset_didset_block" | "lambda_literal" => {
-                            is_local = true;
+                        "function_body"
+                        | "computed_property"
+                        | "willset_didset_block"
+                        | "lambda_literal"
+                        | "if_statement"
+                        | "guard_statement"
+                        | "for_statement"
+                        | "while_statement" => {
+                            // local binding — skip
                             break;
                         }
-                        "class_body" | "protocol_body" | "enum_class_body" | "source_file" => {
+                        "class_body" | "protocol_body" | "enum_class_body" => {
+                            emit_kind = Some(NodeKind::Property);
+                            break;
+                        }
+                        "source_file" => {
+                            emit_kind = Some(NodeKind::Variable);
                             break;
                         }
                         _ => {}
                     }
                     anc = a.parent();
                 }
-                if is_local {
-                    continue;
-                }
+                let Some(node_kind) = emit_kind else { continue };
 
                 // Walk the property_declaration's direct children to find
                 // type_annotation (if any). Text is `: <type>` — drop the colon.
@@ -283,7 +298,7 @@ impl LanguageProvider for SwiftProvider {
                         heritage: vec![],
                         type_annotation: type_ann.clone(),
                         name: name_str,
-                        kind: NodeKind::Property,
+                        kind: node_kind,
                         span,
                         calls: Vec::new(),
                     });
