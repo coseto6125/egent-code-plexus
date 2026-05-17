@@ -1,4 +1,6 @@
+use super::spec::VyperSpec;
 use crate::calls::extract_calls;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct VyperProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl VyperProvider {
@@ -23,7 +26,15 @@ impl VyperProvider {
         let language = tree_sitter_vyper::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| VyperSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -43,15 +54,11 @@ impl LanguageProvider for VyperProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
 
-        // Name captures
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
-
-        // Span captures
+        // Span captures (root-span anchors — kind dispatch is via spec table below)
         let idx_function = self.query.capture_index_for_name("function");
         let idx_const = self.query.capture_index_for_name("const");
 
-        // Decorator and import captures
+        // Metadata-only captures (attach attributes; not NodeKind-producing)
         let idx_decorator = self.query.capture_index_for_name("decorator");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
@@ -64,15 +71,15 @@ impl LanguageProvider for VyperProvider {
 
             for cap in m.captures {
                 let ci = cap.index;
-                if Some(ci) == idx_function_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(ci as usize)
+                    .copied()
+                    .flatten()
+                {
                     name_node = Some(cap.node);
                     if kind.is_none() {
-                        kind = Some(NodeKind::Function);
-                    }
-                } else if Some(ci) == idx_const_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Const);
+                        kind = Some(k_from_spec);
                     }
                 } else if Some(ci) == idx_function || Some(ci) == idx_const {
                     root_span_node = Some(cap.node);

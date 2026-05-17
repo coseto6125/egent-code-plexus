@@ -1,4 +1,6 @@
+use super::spec::CrystalSpec;
 use crate::calls::extract_calls;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct CrystalProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl CrystalProvider {
@@ -23,7 +26,15 @@ impl CrystalProvider {
         let language = tree_sitter_crystal::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| CrystalSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -44,87 +55,66 @@ impl LanguageProvider for CrystalProvider {
         let mut imports: Vec<RawImport> = Vec::new();
         let routes: Vec<RawRoute> = Vec::new();
 
-        let idx_class_name = self.query.capture_index_for_name("class.name");
+        // Root-span anchors (kind dispatch is via spec table)
         let idx_class = self.query.capture_index_for_name("class");
-        let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_method_name = self.query.capture_index_for_name("method.name");
         let idx_method = self.query.capture_index_for_name("method");
-        let idx_import_source = self.query.capture_index_for_name("import.source");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_const = self.query.capture_index_for_name("const");
+        // Metadata captures
+        let idx_heritage = self.query.capture_index_for_name("heritage");
+        let idx_import_source = self.query.capture_index_for_name("import.source");
 
         while let Some(m) = matches.next() {
-            let mut class_name_node = None;
-            let mut class_root = None;
-            let mut method_name_node = None;
-            let mut method_root = None;
+            let mut name_node = None;
+            let mut root_span_node = None;
+            let mut kind = None;
             let mut heritage = Vec::new();
             let mut import_source_node = None;
-            let mut const_name_node = None;
-            let mut const_root = None;
 
             for cap in m.captures {
-                let cap_idx = Some(cap.index);
-                if cap_idx == idx_class_name {
-                    class_name_node = Some(cap.node);
-                } else if cap_idx == idx_class {
-                    class_root = Some(cap.node);
-                } else if cap_idx == idx_heritage {
+                let ci = cap.index;
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(ci as usize)
+                    .copied()
+                    .flatten()
+                {
+                    name_node = Some(cap.node);
+                    kind = Some(k_from_spec);
+                } else if Some(ci) == idx_class
+                    || Some(ci) == idx_method
+                    || Some(ci) == idx_const
+                {
+                    root_span_node = Some(cap.node);
+                } else if Some(ci) == idx_heritage {
                     if let Ok(h) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         heritage.push(h.to_string());
                     }
-                } else if cap_idx == idx_method_name {
-                    method_name_node = Some(cap.node);
-                } else if cap_idx == idx_method {
-                    method_root = Some(cap.node);
-                } else if cap_idx == idx_import_source {
+                } else if Some(ci) == idx_import_source {
                     import_source_node = Some(cap.node);
-                } else if cap_idx == idx_const_name {
-                    const_name_node = Some(cap.node);
-                } else if cap_idx == idx_const {
-                    const_root = Some(cap.node);
                 }
             }
 
-            if let (Some(name_node), Some(root)) = (class_name_node, class_root) {
+            if let (Some(n), Some(root), Some(k)) = (name_node, root_span_node, kind) {
                 if let Ok(name_str) =
-                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
                 {
                     let start = root.start_position();
                     let end = root.end_position();
+                    // Heritage only meaningful for Class; other kinds get empty.
+                    let heritage_for_emit = if matches!(k, NodeKind::Class) {
+                        std::mem::take(&mut heritage)
+                    } else {
+                        Vec::new()
+                    };
                     nodes.push(RawNode {
                         decorators: Vec::new(),
                         is_exported: true,
-                        heritage,
+                        heritage: heritage_for_emit,
                         type_annotation: None,
                         name: name_str.to_string(),
-                        kind: NodeKind::Class,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                    });
-                }
-            }
-
-            if let (Some(name_node), Some(root)) = (method_name_node, method_root) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                {
-                    let start = root.start_position();
-                    let end = root.end_position();
-                    nodes.push(RawNode {
-                        decorators: Vec::new(),
-                        is_exported: true,
-                        heritage: Vec::new(),
-                        type_annotation: None,
-                        name: name_str.to_string(),
-                        kind: NodeKind::Method,
+                        kind: k,
                         span: (
                             start.row as u32,
                             start.column as u32,
@@ -145,30 +135,6 @@ impl LanguageProvider for CrystalProvider {
                         imported_name: src_str.to_string(),
                         source: src_str.to_string(),
                         binding_kind: None,
-                    });
-                }
-            }
-
-            if let (Some(name_node), Some(root)) = (const_name_node, const_root) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                {
-                    let start = root.start_position();
-                    let end = root.end_position();
-                    nodes.push(RawNode {
-                        decorators: Vec::new(),
-                        is_exported: true,
-                        heritage: Vec::new(),
-                        type_annotation: None,
-                        name: name_str.to_string(),
-                        kind: NodeKind::Const,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
                     });
                 }
             }
