@@ -1,6 +1,6 @@
 use graph_nexus_core::analyzer::types::RawImport;
 use serde::Serialize;
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::path::Path;
 
 use crate::resolution::heuristics::ResolutionTier;
@@ -53,9 +53,14 @@ pub struct ResolverDecision {
 pub struct Resolver<'a> {
     symbol_table: &'a SymbolTable,
     /// `None` on the production path → zero-cost (single Option-discriminant
-    /// branch in `record`, no `RefCell` touch). `Some(_)` only when the
+    /// branch in `record`, no `Mutex` touch). `Some(_)` only when the
     /// builder enabled dumping via [`Resolver::enable_dump`].
-    decisions: Option<RefCell<Vec<ResolverDecision>>>,
+    // `Mutex` (not `RefCell`) so the whole `Resolver` is `Sync` and can be
+    // shared across rayon workers. In the production path `decisions` is
+    // `None` and the `Option::Some` guard in `record()` short-circuits
+    // before any lock — Mutex overhead is paid only when --dump-resolver
+    // is on (a debug-only flag, currently no-op in v2 layout).
+    decisions: Option<Mutex<Vec<ResolverDecision>>>,
     /// Module-specifier aliases sourced from project config (TS
     /// `tsconfig.json` `compilerOptions.paths`, etc.). Consulted during
     /// Tier 2 import resolution before the relative-resolution fallback so
@@ -85,13 +90,13 @@ impl<'a> Resolver<'a> {
     /// Turn on the decision recorder. Each subsequent `resolve_symbol` call
     /// pushes a [`ResolverDecision`] into the internal buffer.
     pub fn enable_dump(&mut self) {
-        self.decisions = Some(RefCell::new(Vec::new()));
+        self.decisions = Some(Mutex::new(Vec::new()));
     }
 
     /// Drain the recorded decisions. Returns `None` if dumping was never
     /// enabled.
     pub fn take_decisions(&mut self) -> Option<Vec<ResolverDecision>> {
-        self.decisions.take().map(RefCell::into_inner)
+        self.decisions.take().map(|m| m.into_inner().unwrap_or_default())
     }
 
     /// Enumerate candidate target file paths for an import specifier, walking
@@ -615,11 +620,12 @@ impl<'a> Resolver<'a> {
         confidence: Option<f32>,
     ) {
         // Production path: `self.decisions` is `None` → single
-        // Option-discriminant branch and we're out. No RefCell touch.
+        // Option-discriminant branch and we're out. No Mutex touch.
         let Some(cell) = self.decisions.as_ref() else {
             return;
         };
-        cell.borrow_mut().push(ResolverDecision {
+        let mut guard = cell.lock().expect("resolver dump mutex poisoned");
+        guard.push(ResolverDecision {
             src_file: src_file.to_string(),
             name: name.to_string(),
             specifier: specifier.map(|s| s.to_string()),

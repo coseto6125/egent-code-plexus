@@ -205,17 +205,29 @@ impl GraphBuilder {
         if prof { eprintln!("prof build.sort: {:.3}s", t_sort.elapsed().as_secs_f32()); }
         let _t_pass1 = std::time::Instant::now();
 
+        // Pre-size accumulators from known input cardinalities. Each
+        // LocalGraph contributes 1 File node + N symbol nodes. Plus a
+        // small per-graph slack for Pass 1.5 Route nodes (one per
+        // routing decorator). Vec growth from 0 → 297k goes through
+        // ~17 reallocations + memcopies; sizing once avoids that.
+        let total_symbol_nodes: usize = self.local_graphs.iter().map(|g| g.nodes.len()).sum();
+        let total_files = self.local_graphs.len();
+        // 10% slack for Pass 1.5 Route synthetics; over-shoot is cheap
+        // (single tail growth), under-shoot just reverts to default.
         let mut symbol_table = SymbolTable::new();
         let mut string_pool = StringPool::new();
-        let mut nodes = Vec::new();
-        let mut files = Vec::new();
+        let mut nodes = Vec::with_capacity(total_symbol_nodes + total_symbol_nodes / 10);
+        let mut files = Vec::with_capacity(total_files);
         // Maps forward-slashed file_path → File node index. Populated in
         // Pass 1, consumed by `post_process::imports_edges` to wire
         // (File)-[:Imports]->(symbol) edges. File nodes are deliberately
         // NOT registered in SymbolTable — File is metadata, not a symbol,
         // and a SymbolTable hit on a File node would create spurious
         // Calls/Accesses edges in the resolver tiers.
-        let mut file_node_idx: FxHashMap<String, u32> = FxHashMap::default();
+        // Pre-size to one bucket per file — exact, since each file
+        // contributes exactly one entry.
+        let mut file_node_idx: FxHashMap<String, u32> =
+            FxHashMap::with_capacity_and_hasher(total_files, Default::default());
 
         // Pass 1: Register all nodes into SymbolTable and StringPool
         let mut current_node_idx = 0;
