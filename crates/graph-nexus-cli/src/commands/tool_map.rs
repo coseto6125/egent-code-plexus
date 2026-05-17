@@ -148,8 +148,13 @@ pub struct ToolMapArgs {
 }
 
 pub fn run(args: ToolMapArgs, engine: &Engine) -> Result<(), GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
+    let payload = build_payload(&args, engine)?;
+    emit(&payload, format)
+}
+
+pub fn build_payload(args: &ToolMapArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
+    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     let filter: Option<Vec<Category>> = match args.category.as_deref() {
         None => None,
@@ -249,13 +254,11 @@ pub fn run(args: ToolMapArgs, engine: &Engine) -> Result<(), GnxError> {
         }
     }
 
-    let result = serde_json::json!({
+    Ok(serde_json::json!({
         "status": "success",
         "totals": totals,
         "calls": calls,
-    });
-
-    emit(&result, format)
+    }))
 }
 
 /// Per-file binding: name as it appears in source → (category, package
@@ -768,7 +771,10 @@ mod tests {
         // domain vocab (graph node fetch, HashMap accessor, …) and must
         // not be tagged HTTP without an explicit reqwest/surf/ureq import.
         let b = bindings("a.rs", "// no imports\n");
-        assert!(b.get("fetch").is_none(), "fetch leaked into Rust bindings: {b:?}");
+        assert!(
+            b.get("fetch").is_none(),
+            "fetch leaked into Rust bindings: {b:?}"
+        );
         assert!(
             b.get("XMLHttpRequest").is_none(),
             "XMLHttpRequest leaked into Rust bindings: {b:?}",
@@ -778,13 +784,19 @@ mod tests {
     #[test]
     fn fetch_is_not_http_in_python_files() {
         let b = bindings("a.py", "# no imports\n");
-        assert!(b.get("fetch").is_none(), "fetch leaked into Python bindings: {b:?}");
+        assert!(
+            b.get("fetch").is_none(),
+            "fetch leaked into Python bindings: {b:?}"
+        );
     }
 
     #[test]
     fn fetch_is_not_http_in_go_files() {
         let b = bindings("a.go", "// no imports\n");
-        assert!(b.get("fetch").is_none(), "fetch leaked into Go bindings: {b:?}");
+        assert!(
+            b.get("fetch").is_none(),
+            "fetch leaked into Go bindings: {b:?}"
+        );
     }
 
     #[test]
