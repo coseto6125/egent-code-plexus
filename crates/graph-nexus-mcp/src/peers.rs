@@ -28,17 +28,10 @@ fn tool_peers() -> DerivedTool {
     DerivedTool {
         name: "gnx_peers".into(),
         subcommand: "peers".into(),
-        description: concat!(
-            "[multi-agent peer-sync only — single-session has no peers] ",
-            "Inspect / talk to other gnx watch sessions on this repo. ",
-            "subcmd=status: list alive peers. ",
-            "subcmd=diff (peer, [symbol]): peer's symbol-level dirty surface. ",
-            "subcmd=log ([since/peer/direction/limit]): tail this session's Ƀ msg log. ",
-            "subcmd=say (body, [to/reply]): Ƀ send a message (fire-and-forget). ",
-            "subcmd=inbox ([limit]): peek inbox without draining. ",
-            "subcmd=thread (msg_id): print a Ƀ message thread."
-        )
-        .into(),
+        description: "[multi-agent peer-sync only — single-session has no peers] \
+            Inspect / talk to other gnx watch sessions on this repo. \
+            Pick `subcmd`; see each arg's [tag] for which subcmd uses it."
+            .into(),
         schema: Arc::new(json!({
             "type": "object",
             "properties": {

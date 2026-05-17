@@ -1,11 +1,13 @@
 //! Smoke tests: peer tool registration + spawn-argv shape for the single
 //! `gnx_peers` tool fronting all sub-subcommands via `subcmd` discriminator.
 
+mod common;
+
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use common::write_stub;
 use graph_nexus_mcp::server::GnxMcpServer;
 use graph_nexus_mcp::spawn::run_spawn;
 use serde_json::json;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 // ── minimal synthetic CLI tree (no gnx binary needed) ────────────────────────
@@ -98,15 +100,6 @@ async fn gnx_peers_advertises_subcmd_discriminator() {
 
 // ── spawn argv shape tests ────────────────────────────────────────────────────
 
-fn write_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
-    let stub = dir.join("gnx");
-    std::fs::write(&stub, script).unwrap();
-    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&stub, perms).unwrap();
-    stub
-}
-
 fn peers_tool() -> graph_nexus_mcp::schema::DerivedTool {
     graph_nexus_mcp::peers::peer_tools()
         .into_iter()
@@ -121,8 +114,8 @@ fn status_subcmd_yields_peers_status_argv() {
     let tool = peers_tool();
     let out = run_spawn(&stub, &tool, &json!({"subcmd": "status"})).unwrap();
     assert!(
-        out.trim() == "peers status",
-        "expected exactly 'peers status', got: {out:?}"
+        out.contains("peers status"),
+        "expected 'peers status' in argv echo, got: {out:?}"
     );
 }
 

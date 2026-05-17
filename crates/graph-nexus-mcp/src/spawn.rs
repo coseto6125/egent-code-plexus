@@ -12,12 +12,12 @@ use std::path::Path;
 pub fn run_spawn(binary: &Path, tool: &DerivedTool, args: &Value) -> Result<String> {
     let (peeled_subcmd, json_args) = peel_subcmd(tool, args)?;
     let json_argv = crate::argv::json_to_argv(&json_args, &tool.flag_args, &tool.positional_args)?;
-    let mut argv: Vec<&str> = Vec::new();
-    if let Some(ref s) = peeled_subcmd {
-        argv.push(s);
-    }
-    argv.extend(tool.prefix_args.iter().map(String::as_str));
-    argv.extend(json_argv.iter().map(String::as_str));
+    let argv: Vec<&str> = peeled_subcmd
+        .as_deref()
+        .into_iter()
+        .chain(tool.prefix_args.iter().map(String::as_str))
+        .chain(json_argv.iter().map(String::as_str))
+        .collect();
     let output = std::process::Command::new(binary)
         .arg(&tool.subcommand)
         .args(&argv)

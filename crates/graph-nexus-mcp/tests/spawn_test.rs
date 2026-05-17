@@ -2,22 +2,15 @@
 //! echoes its arguments back, then verifies dispatch wrapped it
 //! correctly. Avoids depending on a built gnx binary for this layer.
 
+mod common;
+
+use common::write_stub;
 use graph_nexus_mcp::schema::DerivedTool;
 use graph_nexus_mcp::spawn::run_spawn;
 use serde_json::json;
 use std::collections::HashSet;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use tempfile::TempDir;
-
-fn write_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
-    let stub = dir.join("gnx");
-    std::fs::write(&stub, script).unwrap();
-    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&stub, perms).unwrap();
-    stub
-}
 
 fn dummy_tool(subcommand: &str) -> DerivedTool {
     DerivedTool {

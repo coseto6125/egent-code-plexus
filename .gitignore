@@ -15,6 +15,7 @@ CLAUDE.md
 
 # Local index
 .gitnexus-rs/
+.gnx/
 
 # Vendored 3rd-party grammar repos: keep src/queries/bindings, drop bloat
 crates/vendor/*/node_modules/
