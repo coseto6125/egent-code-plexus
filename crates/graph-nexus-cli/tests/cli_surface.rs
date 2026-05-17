@@ -25,7 +25,7 @@ fn gnx_admin_prune_help() -> String {
 }
 
 #[test]
-fn top_level_lists_nine_agent_commands() {
+fn top_level_lists_agent_commands() {
     let help = gnx_help();
     for cmd in [
         "inspect",
@@ -37,6 +37,7 @@ fn top_level_lists_nine_agent_commands() {
         "routes",
         "contracts",
         "tool-map",
+        "review",
     ] {
         assert!(help.contains(cmd), "missing {cmd} in --help:\n{help}");
     }
