@@ -1,8 +1,10 @@
 use super::receiver_types::extract_js_calls;
+use super::spec::JavaScriptSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{
     LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
@@ -22,8 +24,14 @@ thread_local! {
 }
 pub struct JavaScriptProvider {
     query: Query,
-    /// Cached new (Variable) capture indices — pre-existing lookups
-    /// stay per parse_file for surgical minimalism.
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `JavaScriptSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index (cap.index as usize) — no per-capture string
+    /// compare. Source of truth: `spec.rs` const tables.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
+    /// Cached variable capture indices — variable emission has special
+    /// post-processing (arrow dedup, const/let/var kind split) that stays in
+    /// parser.rs; indices are pre-resolved here to avoid per-call string lookup.
     idx_variable_name: Option<u32>,
     idx_variable: Option<u32>,
     idx_export_variable: Option<u32>,
@@ -34,11 +42,24 @@ impl JavaScriptProvider {
         let language = tree_sitter_javascript::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string compare).
+        // Variable has special post-processing so its name capture is also in
+        // the spec table for completeness, but variable emission is handled
+        // via the separate idx_variable_name path below.
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| JavaScriptSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
         let idx_variable_name = query.capture_index_for_name("variable.name");
         let idx_variable = query.capture_index_for_name("variable");
         let idx_export_variable = query.capture_index_for_name("export.variable");
         Ok(Self {
             query,
+            capture_kind_by_idx,
             idx_variable_name,
             idx_variable,
             idx_export_variable,
@@ -67,9 +88,6 @@ impl LanguageProvider for JavaScriptProvider {
         let mut imports: Vec<RawImport> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
 
-        let idx_name_function = self.query.capture_index_for_name("name.function");
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_export = self.query.capture_index_for_name("export");
         let idx_decorator = self.query.capture_index_for_name("decorator");
@@ -124,16 +142,10 @@ impl LanguageProvider for JavaScriptProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_function {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_name_class {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_method {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_variable_name {
+                if Some(cap_idx) == idx_variable_name {
+                    // Variable emission has dedicated post-processing (arrow
+                    // dedup, const/let/var kind split, span dedup) — handled
+                    // via the separate variable_name_node path below.
                     variable_name_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_variable {
                     variable_root_node = Some(cap.node);
@@ -142,6 +154,17 @@ impl LanguageProvider for JavaScriptProvider {
                     if variable_root_node.is_none() {
                         variable_root_node = Some(cap.node);
                     }
+                } else if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the three explicit
+                    // Function/Class/Method name arms. Source of truth:
+                    // JavaScriptSpec::CAPTURE_KIND in spec.rs.
+                    name_node = Some(cap.node);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_heritage {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
