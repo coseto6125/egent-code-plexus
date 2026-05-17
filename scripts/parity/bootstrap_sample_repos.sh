@@ -17,7 +17,12 @@ clone_if_missing() {
         log "${lang}: already cloned — skipping"
         return 0
     fi
-    log "${lang}: cloning $1 ..."
+    # URL is conventionally the last arg of each caller; the old `$1`
+    # form after `shift` would print the first flag (e.g. `--depth`)
+    # instead, so logs read "lua: cloning --depth ..." rather than the
+    # actual repo URL.
+    local url="${*: -1}"
+    log "${lang}: cloning ${url} ..."
     git clone "$@" "${dest}"
     log "${lang}: done"
 }
