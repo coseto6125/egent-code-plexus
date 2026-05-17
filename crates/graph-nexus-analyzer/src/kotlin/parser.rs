@@ -1,6 +1,8 @@
 use super::receiver_types::extract_kotlin_calls;
+use super::spec::KotlinSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span, MODULE_LEVEL_SOURCE};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -33,10 +35,14 @@ pub struct KotlinProvider {
     query: Query,
     ktor: KtorVerbIndices,
     idx_ktor_path: Option<u32>,
-    idx_property_name: Option<u32>,
     idx_property: Option<u32>,
-    idx_variable_name: Option<u32>,
     idx_variable: Option<u32>,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `KotlinSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index (cap.index as usize) — equivalent perf
+    /// to the previous hard-coded if-chain, but the source of truth
+    /// lives in `spec.rs` const tables.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 /// True when `func` is a Kotlin `fun` declared directly inside a class body
@@ -94,18 +100,27 @@ impl KotlinProvider {
             patch: query.capture_index_for_name("ktor.route.patch"),
         };
         let idx_ktor_path = query.capture_index_for_name("ktor.route.path");
-        let idx_property_name = query.capture_index_for_name("property.name");
         let idx_property = query.capture_index_for_name("property");
-        let idx_variable_name = query.capture_index_for_name("variable.name");
         let idx_variable = query.capture_index_for_name("variable");
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string
+        // compare). Capture names not in the spec map yield None and
+        // fall through to the metadata-only branches below (heritage,
+        // decorator, etc.).
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| KotlinSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
         Ok(Self {
             query,
             ktor,
             idx_ktor_path,
-            idx_property_name,
             idx_property,
-            idx_variable_name,
             idx_variable,
+            capture_kind_by_idx,
         })
     }
 }
@@ -129,8 +144,9 @@ impl LanguageProvider for KotlinProvider {
             rustc_hash::FxHashMap::default();
         let mut imports = Vec::new();
 
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_function_name = self.query.capture_index_for_name("function.name");
+        // Metadata-only capture indices — these don't carry a NodeKind
+        // (handled in capture_kind_by_idx); they attach attributes to
+        // the in-flight symbol. Kept as local indices for cheap compare.
         let idx_export = self.query.capture_index_for_name("export");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
@@ -138,6 +154,10 @@ impl LanguageProvider for KotlinProvider {
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_decorator = self.query.capture_index_for_name("decorator");
 
+        // Root-span anchors (the @class / @function / @property / @variable
+        // captures, not the .name variants). Their NodeKind is set via
+        // capture_kind_by_idx for the .name captures; here we just track
+        // the outer node so span/dedup keys point to the full declaration.
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
 
@@ -183,18 +203,17 @@ impl LanguageProvider for KotlinProvider {
                     ktor_route_span = Some(node_span(&cap.node));
                 } else if Some(cap_idx) == self.idx_ktor_path {
                     ktor_path_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_class_name {
+                } else if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the four
+                    // explicit Class/Function/Property/Variable arms.
+                    // Source of truth: KotlinSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_function_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == self.idx_property_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
-                } else if Some(cap_idx) == self.idx_variable_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Variable);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_export {
                     if let Ok(text) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
