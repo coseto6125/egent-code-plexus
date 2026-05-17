@@ -98,6 +98,10 @@ enum Commands {
     Watch(commands::watch::WatchArgs),
     /// Multi-session peer collaboration (status / diff / log / gc + Ƀ messaging)
     Peers(commands::peers::PeersArgs),
+    /// LLM-workflow audit aggregator — runs impact, coverage (blind-spot),
+    /// egress (tool-map), shape-check, and resolver-diff over changed files in
+    /// one shot, filtered to high-confidence signals only.
+    Review(commands::review::ReviewArgs),
 }
 
 fn main() {
@@ -162,6 +166,7 @@ fn main() {
         Commands::Routes(args) => args.repo.as_deref(),
         Commands::ShapeCheck(args) => args.repo.as_deref(),
         Commands::ToolMap(args) => args.repo.as_deref(),
+        Commands::Review(args) => args.repo.as_deref(),
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -200,6 +205,7 @@ fn main() {
         Commands::Routes(args) => commands::routes::run(args, &engine),
         Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
         Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
+        Commands::Review(args) => commands::review::run(args, &engine),
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)

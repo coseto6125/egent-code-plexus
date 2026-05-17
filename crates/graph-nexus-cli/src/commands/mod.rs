@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod peers;
 pub mod peers_msg;
 pub mod rename;
+pub mod review;
 pub mod routes;
 pub mod shape_check;
 pub mod tool_map;
