@@ -51,6 +51,11 @@ impl Engine {
     /// touch, satisfies invariant F5); AugmentedReference → L2 + record the
     /// overlay dir so the (P2) merge layer can find it; Stale → error so the
     /// caller falls back to a fresh session.
+    ///
+    /// Exercised by `tests/engine_session_state_test.rs`; bin paths still
+    /// reach the graph via `Engine::load`. Will become reachable from bin
+    /// once the P5 session-aware query path lands.
+    #[allow(dead_code)]
     pub fn open(repo_root: &Path, sid: &str) -> io::Result<Self> {
         let state = crate::session::state::classify(repo_root, sid);
         match state {
@@ -88,6 +93,11 @@ impl Engine {
 
     /// Current view discriminator. PureReference sessions yield `L2Only`;
     /// AugmentedReference and back-compat `load` callers yield `L2WithOverlay`.
+    ///
+    /// Asserted by `tests/engine_session_state_test.rs` to verify the
+    /// `Engine::open` view-selection invariant; becomes a bin-level concern
+    /// once the P5 session-aware merge layer reads it on every query.
+    #[allow(dead_code)]
     pub fn view(&self) -> GraphView {
         self.view
     }

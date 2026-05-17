@@ -108,7 +108,15 @@ fn spawn_delayed_rm_rf(path: PathBuf, delay: Duration) {
 pub struct ForceRebuildResult {
     pub sha_hex: String,
     pub source_type: SourceType,
+    /// Asserted by `tests/build_orchestrator.rs` and `tests/force_rebuild_test.rs`
+    /// to verify the published `graph.bin` / `meta.json` location. Bin caller
+    /// (`admin/index.rs::run`) prints summary fields only.
+    #[allow(dead_code)]
     pub commit_dir: PathBuf,
+    /// Asserted by `tests/force_rebuild_test.rs` to distinguish a real
+    /// rebuild from a fingerprint-match attach. Bin caller does not branch
+    /// on it.
+    #[allow(dead_code)]
     pub rebuilt: bool,
     pub invalidate_report: InvalidateReport,
 }
