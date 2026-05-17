@@ -3,7 +3,7 @@
 
 pub mod peer_harness;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Run a `git` invocation and panic with stderr if it fails. Used by every
@@ -22,4 +22,14 @@ pub fn run_git(repo: &Path, args: &[&str]) {
         "git {args:?} failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+pub fn gnx_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_gnx")
+}
+
+pub fn write_graph(dir: &Path, bytes: &[u8]) -> PathBuf {
+    let path = dir.join("graph.bin");
+    std::fs::write(&path, bytes).unwrap();
+    path
 }

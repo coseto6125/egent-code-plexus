@@ -12,12 +12,10 @@ use graph_nexus_core::graph::{
 use graph_nexus_core::pool::StringPool;
 use rkyv::rancor::Error;
 use serde_json::Value;
-use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
-}
+mod common;
+use common::{gnx_bin, write_graph};
 
 fn build_empty_graph() -> Vec<u8> {
     let pool = StringPool::new();
@@ -98,12 +96,6 @@ fn build_graph_with_calls_edge() -> Vec<u8> {
         route_shapes: vec![],
     };
     rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
-}
-
-fn write_graph(dir: &Path, bytes: &[u8]) -> std::path::PathBuf {
-    let p = dir.join("graph.bin");
-    std::fs::write(&p, bytes).unwrap();
-    p
 }
 
 #[test]

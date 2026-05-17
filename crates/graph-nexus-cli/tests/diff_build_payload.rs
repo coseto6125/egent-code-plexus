@@ -12,24 +12,16 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
-}
+mod common;
+use common::{gnx_bin, run_git};
 
 fn init_repo(repo: &Path) {
     std::fs::write(repo.join("README.md"), "hello").unwrap();
-    let _ = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    let _ = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    let _ = Command::new("git")
-        .args([
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
             "-c",
             "user.email=t@t",
             "-c",
@@ -38,10 +30,8 @@ fn init_repo(repo: &Path) {
             "-q",
             "-m",
             "init",
-        ])
-        .current_dir(repo)
-        .output()
-        .unwrap();
+        ],
+    );
 }
 
 #[test]

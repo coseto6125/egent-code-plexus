@@ -6,9 +6,8 @@
 
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
-}
+mod common;
+use common::gnx_bin;
 
 #[test]
 fn coverage_build_payload_returns_coverage_key() {

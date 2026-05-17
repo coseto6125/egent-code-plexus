@@ -9,9 +9,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
-}
+mod common;
+use common::{gnx_bin, run_git};
 
 fn init_repo_with_ts(repo: &Path) {
     let src = r#"
@@ -25,18 +24,11 @@ export async function fetchUser(id: string) {
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src/main.ts"), src).unwrap();
 
-    let _ = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    let _ = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    let _ = Command::new("git")
-        .args([
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
             "-c",
             "user.email=t@t",
             "-c",
@@ -45,10 +37,8 @@ export async function fetchUser(id: string) {
             "-q",
             "-m",
             "init",
-        ])
-        .current_dir(repo)
-        .output()
-        .unwrap();
+        ],
+    );
 
     let out = Command::new(gnx_bin())
         .args(["admin", "index", "--repo", "."])
