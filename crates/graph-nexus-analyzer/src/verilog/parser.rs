@@ -1,4 +1,6 @@
 use crate::calls::extract_calls;
+use super::spec::VerilogSpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct VerilogProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl VerilogProvider {
@@ -23,7 +26,14 @@ impl VerilogProvider {
         let language = tree_sitter_verilog::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| VerilogSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -43,9 +53,6 @@ impl LanguageProvider for VerilogProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
 
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_method_name = self.query.capture_index_for_name("method.name");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
         let idx_class = self.query.capture_index_for_name("class");
@@ -60,24 +67,19 @@ impl LanguageProvider for VerilogProvider {
             let mut import_src = None;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_class_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_method_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_const_name {
+                let cap_idx = cap.index as usize;
+                if let Some(k) = self.capture_kind_by_idx.get(cap_idx).and_then(|opt| *opt) {
+                    // This is a .name capture with a NodeKind
                     if name_node.is_none() {
                         name_node = Some(cap.node);
-                        kind = Some(NodeKind::Const);
+                        kind = Some(k);
                     }
-                } else if Some(cap_idx) == idx_import_source {
+                } else if Some(cap_idx as u32) == idx_import_source {
                     import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_const
-                    || Some(cap_idx) == idx_import
+                } else if Some(cap_idx as u32) == idx_class
+                    || Some(cap_idx as u32) == idx_method
+                    || Some(cap_idx as u32) == idx_const
+                    || Some(cap_idx as u32) == idx_import
                 {
                     root_span_node = Some(cap.node);
                 }

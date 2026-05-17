@@ -1,4 +1,6 @@
 use crate::calls::extract_calls;
+use super::spec::BashSpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct BashProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl BashProvider {
@@ -23,7 +26,14 @@ impl BashProvider {
         let language = tree_sitter_bash::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| BashSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -43,9 +53,7 @@ impl LanguageProvider for BashProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_function_name = self.query.capture_index_for_name("function.name");
         let idx_function = self.query.capture_index_for_name("function");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
@@ -57,12 +65,14 @@ impl LanguageProvider for BashProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_function_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_const_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Const);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_function || Some(cap_idx) == idx_const {

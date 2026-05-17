@@ -1,4 +1,6 @@
 use crate::calls::extract_calls;
+use super::spec::ZigSpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -17,6 +19,7 @@ thread_local! {
 }
 pub struct ZigProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl ZigProvider {
@@ -24,7 +27,14 @@ impl ZigProvider {
         let language = tree_sitter_zig::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| ZigSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -65,11 +75,8 @@ impl LanguageProvider for ZigProvider {
         let idx_import = self.query.capture_index_for_name("import");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_function = self.query.capture_index_for_name("function");
-        let idx_function_name = self.query.capture_index_for_name("function.name");
         let idx_struct = self.query.capture_index_for_name("struct");
-        let idx_struct_name = self.query.capture_index_for_name("struct.name");
         let idx_const = self.query.capture_index_for_name("const");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
 
         // Collect all matches first, keyed by root node start byte.
         // Multiple patterns may match the same variable_declaration (e.g. struct
@@ -93,29 +100,27 @@ impl LanguageProvider for ZigProvider {
             let mut is_import = false;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_function_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                    priority = MatchPriority::Function;
-                } else if Some(cap_idx) == idx_struct_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                    priority = MatchPriority::Struct;
-                } else if Some(cap_idx) == idx_const_name {
+                let cap_idx = cap.index as usize;
+                if let Some(k) = self.capture_kind_by_idx.get(cap_idx).and_then(|opt| *opt) {
+                    // This is a .name capture with a NodeKind
                     if kind.is_none() {
                         name_node = Some(cap.node);
-                        kind = Some(NodeKind::Const);
-                        priority = MatchPriority::Const;
+                        kind = Some(k);
+                        priority = match k {
+                            NodeKind::Function => MatchPriority::Function,
+                            NodeKind::Class => MatchPriority::Struct,
+                            NodeKind::Const => MatchPriority::Const,
+                            _ => MatchPriority::Const,
+                        };
                     }
-                } else if Some(cap_idx) == idx_import_source {
+                } else if Some(cap_idx as u32) == idx_import_source {
                     import_src = Some(cap.node);
                     is_import = true;
                     priority = MatchPriority::Import;
-                } else if Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_struct
-                    || Some(cap_idx) == idx_import
-                    || Some(cap_idx) == idx_const
+                } else if Some(cap_idx as u32) == idx_function
+                    || Some(cap_idx as u32) == idx_struct
+                    || Some(cap_idx as u32) == idx_import
+                    || Some(cap_idx as u32) == idx_const
                 {
                     root_span_node = Some(cap.node);
                     root_start_byte = cap.node.start_byte();
