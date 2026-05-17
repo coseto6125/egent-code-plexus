@@ -1,6 +1,8 @@
 use super::receiver_types::extract_java_calls;
+use super::spec::JavaSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -20,12 +22,14 @@ thread_local! {
 pub struct JavaProvider {
     query: Query,
     indices: JavaCaptureIndices,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `JavaSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — equivalent perf to the previous
+    /// hard-coded if-chain, but the source of truth lives in `spec.rs`.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 struct JavaCaptureIndices {
-    class_name: Option<u32>,
-    interface_name: Option<u32>,
-    method_name: Option<u32>,
     import_name: Option<u32>,
     import_source: Option<u32>,
     /// Captured `asterisk` node present when the import is a wildcard (`.*`).
@@ -33,19 +37,14 @@ struct JavaCaptureIndices {
     class: Option<u32>,
     interface: Option<u32>,
     method: Option<u32>,
-    constructor_name: Option<u32>,
     constructor: Option<u32>,
-    property_name: Option<u32>,
     property: Option<u32>,
-    variable_name: Option<u32>,
     variable: Option<u32>,
     export: Option<u32>,
     heritage: Option<u32>,
     type_ann: Option<u32>,
     decorator: Option<u32>,
-    enum_name: Option<u32>,
     enum_: Option<u32>,
-    annotation_name: Option<u32>,
     annotation: Option<u32>,
     // Spring @Autowired field injection.
     spring_autowired_class: Option<u32>,
@@ -65,35 +64,39 @@ impl JavaProvider {
         );
         let query = Query::new(&language, &query_source)?;
         let indices = JavaCaptureIndices {
-            class_name: query.capture_index_for_name("class.name"),
-            interface_name: query.capture_index_for_name("interface.name"),
-            method_name: query.capture_index_for_name("method.name"),
             import_name: query.capture_index_for_name("import.name"),
             import_source: query.capture_index_for_name("import.source"),
             import_wildcard: query.capture_index_for_name("import.wildcard"),
             class: query.capture_index_for_name("class"),
             interface: query.capture_index_for_name("interface"),
             method: query.capture_index_for_name("method"),
-            constructor_name: query.capture_index_for_name("constructor.name"),
             constructor: query.capture_index_for_name("constructor"),
-            property_name: query.capture_index_for_name("property.name"),
             property: query.capture_index_for_name("property"),
-            variable_name: query.capture_index_for_name("variable.name"),
             variable: query.capture_index_for_name("variable"),
             export: query.capture_index_for_name("export"),
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
             decorator: query.capture_index_for_name("decorator"),
-            enum_name: query.capture_index_for_name("enum.name"),
             enum_: query.capture_index_for_name("enum"),
-            annotation_name: query.capture_index_for_name("annotation.name"),
             annotation: query.capture_index_for_name("annotation"),
             spring_autowired_class: query.capture_index_for_name("spring.autowired.class"),
             spring_autowired_target: query.capture_index_for_name("spring.autowired.target"),
             spring_route_class: query.capture_index_for_name("spring.route.class"),
             spring_route_handler: query.capture_index_for_name("spring.route.handler"),
         };
-        Ok(Self { query, indices })
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string
+        // compare). Capture names not in the spec map yield None and
+        // fall through to the metadata-only branches (heritage, decorator,
+        // spring, etc.).
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| JavaSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, indices, capture_kind_by_idx })
     }
 }
 
@@ -158,30 +161,17 @@ impl LanguageProvider for JavaProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx.class_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single table-driven dispatch replaces the eight explicit
+                    // Class/Interface/Method/Constructor/Property/Variable/Enum/Annotation arms.
+                    // Source of truth: JavaSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if cap_idx == idx.interface_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
-                } else if cap_idx == idx.method_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if cap_idx == idx.constructor_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Constructor);
-                } else if cap_idx == idx.property_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
-                } else if cap_idx == idx.variable_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Variable);
-                } else if cap_idx == idx.enum_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Enum);
-                } else if cap_idx == idx.annotation_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Annotation);
+                    kind = Some(k_from_spec);
                 } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx.import_source {

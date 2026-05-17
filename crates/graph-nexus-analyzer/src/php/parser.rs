@@ -1,8 +1,10 @@
 use super::receiver_types::extract_php_calls;
+use super::spec::PhpSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -129,6 +131,11 @@ fn extract_controller_action(arr_node: tree_sitter::Node, source: &[u8]) -> Opti
 
 pub struct PhpProvider {
     query: Query,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `PhpSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — equivalent perf to the previous
+    /// hard-coded if-chain, but the source of truth lives in `spec.rs`.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl PhpProvider {
@@ -136,7 +143,19 @@ impl PhpProvider {
         let language = tree_sitter_php::LANGUAGE_PHP.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string
+        // compare). Capture names not in the spec map yield None and
+        // fall through to the metadata-only branches (heritage, decorator,
+        // route, etc.).
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| PhpSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -165,10 +184,6 @@ impl LanguageProvider for PhpProvider {
         let mut imports = Vec::new();
         let mut routes = Vec::new();
 
-        let idx_name_function = self.query.capture_index_for_name("name.function");
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_interface = self.query.capture_index_for_name("name.interface");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
         let idx_type_function = self.query.capture_index_for_name("type.function");
         let idx_type_method = self.query.capture_index_for_name("type.method");
         let idx_export = self.query.capture_index_for_name("export");
@@ -179,17 +194,12 @@ impl LanguageProvider for PhpProvider {
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
         let idx_import_prefix = self.query.capture_index_for_name("import.prefix");
 
-        let idx_name_property = self.query.capture_index_for_name("name.property");
-
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_property = self.query.capture_index_for_name("property");
 
-        let idx_name_namespace = self.query.capture_index_for_name("name.namespace");
-        let idx_name_trait = self.query.capture_index_for_name("name.trait");
-        let idx_name_enum = self.query.capture_index_for_name("name.enum");
         let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_trait = self.query.capture_index_for_name("trait");
         let idx_enum = self.query.capture_index_for_name("enum");
@@ -238,30 +248,17 @@ impl LanguageProvider for PhpProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_function {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single table-driven dispatch replaces the eight explicit
+                    // Function/Class/Interface/Method/Property/Namespace/Trait/Enum arms.
+                    // Source of truth: PhpSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_name_class {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_interface {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
-                } else if Some(cap_idx) == idx_name_method {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_name_property {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
-                } else if Some(cap_idx) == idx_name_namespace {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Namespace);
-                } else if Some(cap_idx) == idx_name_trait {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Trait);
-                } else if Some(cap_idx) == idx_name_enum {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Enum);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_type_function || Some(cap_idx) == idx_type_method {
                     if let Ok(t) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
