@@ -459,10 +459,7 @@ impl LanguageProvider for CProvider {
                 if Some(cap_idx) == idx_function_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_struct_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Struct);
-                } else if Some(cap_idx) == idx_union_name {
+                } else if Some(cap_idx) == idx_struct_name || Some(cap_idx) == idx_union_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Struct);
                 } else if Some(cap_idx) == idx_enum_name {
