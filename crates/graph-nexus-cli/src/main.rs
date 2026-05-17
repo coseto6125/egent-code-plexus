@@ -36,7 +36,7 @@ use engine::Engine;
 #[derive(Parser)]
 #[command(
     name = "graph-nexus",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "GitNexus stateless query engine (mmap)"
 )]
 struct Cli {

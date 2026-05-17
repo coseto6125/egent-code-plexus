@@ -34,11 +34,12 @@ pub struct ReviewArgs {
 
 pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), GnxError> {
     let start = std::time::Instant::now();
-    let repo_dir = args
-        .repo
-        .as_deref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let repo_dir = match args.repo.as_deref() {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            std::env::current_dir().map_err(|e| GnxError::Output(format!("resolve cwd: {e}")))?
+        }
+    };
     let files = scope::resolve(&args, &repo_dir)?;
     let report = aggregate::run(&files, &repo_dir, engine, args.since.as_deref())?;
     let payload = report.emit(start.elapsed());
