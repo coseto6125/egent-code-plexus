@@ -28,18 +28,22 @@
     (class_heritage (identifier) @heritage)?) @class) @export
 
 ;; Variables — module-level only (var / let / const not assigned to an arrow function).
-;; Direct-child-of-program check is enforced in the parser via ancestor walk.
-(lexical_declaration
-  (variable_declarator
-    name: (identifier) @variable.name
-  )
-) @variable
+;; Anchored to direct children of `program`; function-body / block-scope locals
+;; are intentionally dropped (they bloat symbol counts without LLM-disambiguation
+;; value). The export_statement patterns below already imply module scope.
+(program
+  (lexical_declaration
+    (variable_declarator
+      name: (identifier) @variable.name
+    )
+  ) @variable)
 
-(variable_declaration
-  (variable_declarator
-    name: (identifier) @variable.name
-  )
-) @variable
+(program
+  (variable_declaration
+    (variable_declarator
+      name: (identifier) @variable.name
+    )
+  ) @variable)
 
 (export_statement
   declaration: (lexical_declaration
