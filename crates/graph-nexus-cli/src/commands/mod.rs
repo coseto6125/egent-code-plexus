@@ -17,7 +17,6 @@ pub mod rename;
 pub mod routes;
 pub mod scan;
 pub mod scan_filters;
-pub mod search;
 pub mod shape_check;
 pub mod tool_map;
 pub mod verify_resolver;

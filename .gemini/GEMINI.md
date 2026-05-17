@@ -149,4 +149,4 @@ After saving the plan, offer execution choice:
 </available_skills>
 
 ## GitNexus Specific Rules
-- **ALWAYS use `gnx` CLI commands (e.g., `gnx inspect`, `gnx impact`, `gnx search`) to analyze and understand code across the workspace before writing or refactoring code.**
+- **ALWAYS use `gnx` CLI commands (e.g., `gnx inspect`, `gnx impact`, `gnx find`) to analyze and understand code across the workspace before writing or refactoring code.**

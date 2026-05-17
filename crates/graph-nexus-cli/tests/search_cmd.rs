@@ -1,4 +1,4 @@
-//! Integration tests for `gnx search`.
+//! Integration tests for `gnx find --mode bm25` (formerly `gnx search`).
 //!
 //! Exercises:
 //! - Single-repo BM25 search (positional pattern, replaces old `--query` flag)
@@ -145,30 +145,34 @@ fn two_repo_fixture() -> Fixture {
     }
 }
 
-// ── Helper: run `gnx search` pointing at a specific graph ────────────────────
+// ── Helper: run `gnx find --mode bm25` pointing at a specific graph ──────────
 
 fn run_search(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output {
     Command::new(gnx_bin())
-        .arg("search")
+        .arg("find")
+        .arg("--mode")
+        .arg("bm25")
         .args(args)
         .arg("--graph")
         .arg(graph)
         .env("HOME", home)
         .output()
-        .expect("gnx search spawn")
+        .expect("gnx find spawn")
 }
 
 fn run_search_multi(home: &Path, args: &[&str]) -> std::process::Output {
     let alpha_graph = home
         .join(".gnx/alpha__aabbccdd/commits/sha_alpha0001/graph.bin");
     Command::new(gnx_bin())
-        .arg("search")
+        .arg("find")
+        .arg("--mode")
+        .arg("bm25")
         .args(args)
         .arg("--graph")
         .arg(&alpha_graph)
         .env("HOME", home)
         .output()
-        .expect("gnx search spawn")
+        .expect("gnx find spawn")
 }
 
 // ── Single-repo tests ─────────────────────────────────────────────────────────
@@ -199,10 +203,25 @@ fn search_positional_pattern_finds_match() {
     assert!(total > 0, "expected hits for 'fetch': {json}");
 }
 
+/// Direct-invocation helper for tests that exercise the `--mode` flag
+/// surface itself (the standard `run_search` helper pins `--mode bm25`
+/// to keep BM25-shape assertions stable, which would conflict with
+/// explicit `--mode` values supplied by the test body).
+fn run_find_raw(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(gnx_bin())
+        .arg("find")
+        .args(args)
+        .arg("--graph")
+        .arg(graph)
+        .env("HOME", home)
+        .output()
+        .expect("gnx find spawn")
+}
+
 #[test]
-fn search_accepts_mode_bm25() {
+fn find_accepts_mode_bm25() {
     let f = two_repo_fixture();
-    let out = run_search(
+    let out = run_find_raw(
         &f.home_path,
         &f.alpha_graph,
         &["fetch_user", "--mode", "bm25", "--format", "json"],
@@ -215,13 +234,14 @@ fn search_accepts_mode_bm25() {
     assert!(!String::from_utf8_lossy(&out.stderr).contains("error: "));
 }
 
-/// clap must reject any `--mode` value other than `bm25` with
-/// `invalid value … possible values: [bm25]`.
+/// clap must reject any `--mode` value outside the supported enum
+/// (`exact` / `fuzzy` / `bm25`) with `invalid value …`. The legacy
+/// `vector` / `hybrid` / `auto` placeholders are gone for good.
 #[test]
-fn search_rejects_removed_modes() {
+fn find_rejects_removed_modes() {
     let f = two_repo_fixture();
     for mode in &["vector", "hybrid", "auto"] {
-        let out = run_search(
+        let out = run_find_raw(
             &f.home_path,
             &f.alpha_graph,
             &["fetch_user", "--mode", mode, "--format", "json"],

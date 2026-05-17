@@ -89,8 +89,8 @@ GitNexus 採用為 LLM agent 設計的**雙層 CLI**：
 # 1. 為當前專案建立程式碼圖譜 (極速，低於 1 秒)
 gnx admin index --repo .
 
-# 2. BM25 關鍵字搜尋（建好索引後走 Tantivy）
-gnx search "DatabaseConnection"
+# 2. 定位符號 — 預設精準名稱比對；`--mode bm25` 改走 Tantivy BM25 排序
+gnx find "DatabaseConnection"
 
 # 3. 一鍵萃取微服務中所有的 API 路由
 gnx routes --repo .
@@ -102,7 +102,7 @@ gnx impact validateUser --direction upstream
 gnx inspect validateUser
 ```
 
-每個讀取端命令都接受 `--format text|json|toon`。預設值為各命令最省 token 的表示：多數命令採 `toon`、`search` 採 `text`、`cypher`/`coverage` 採 `json`/`compact`。
+每個讀取端命令都接受 `--format text|json|toon`。預設值為各命令最省 token 的表示：多數命令採 `toon`、`find` 採 `text`、`cypher`/`coverage` 採 `json`/`compact`。
 
 ### 任務 → 命令對照
 
@@ -110,7 +110,7 @@ gnx inspect validateUser
 |---|---|
 | 為全新專案建立索引 | `gnx admin index --repo .`（第一次查詢也會自動建索引） |
 | 修改檔案後更新 | 同上 — `admin index` 走 SHA-256 內容雜湊增量 |
-| 符號是否存在？在哪？ | `gnx search <name>` |
+| 符號是否存在？在哪？ | `gnx find <name>`（精準名稱），或 `gnx find <fragment> --mode bm25`（排序） |
 | 取得符號的 metadata、呼叫者、被呼叫者 | `gnx inspect <name>` |
 | 編輯 X 會壞掉什麼？ | `gnx impact <name> --direction upstream` |
 | X 依賴了什麼？ | `gnx impact <name> --direction downstream` |

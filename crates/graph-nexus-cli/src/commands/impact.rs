@@ -156,7 +156,7 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     if matches.is_empty() {
         let result = json!({
             "error": format!("No symbol named '{name}' found in graph"),
-            "hint": "Try `gnx search --query <name>` to find candidates, or check --file / --kind filters"
+            "hint": "Try `gnx find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
         });
         return emit(&result, format);
     }

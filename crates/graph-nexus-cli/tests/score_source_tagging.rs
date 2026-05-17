@@ -1,7 +1,7 @@
 //! `Hit.score_source` must reflect which ranker produced the score:
 //! substring (no tantivy index on disk) vs BM25 (tantivy built).
 
-use graph_nexus_cli::commands::search::{compute_hits, ScoreSource, SearchArgs, SearchMode};
+use graph_nexus_cli::commands::find::{compute_hits, FindArgs, FindMode, ScoreSource};
 use graph_nexus_cli::engine::Engine;
 use graph_nexus_cli::search::TantivyEngine;
 use graph_nexus_core::graph::{
@@ -72,9 +72,12 @@ fn substring_path_emits_substring_source_tag() {
     let engine = Engine::load(dir.path().join("graph.bin")).unwrap();
 
     // No tantivy index on disk → bm25 path falls through to substring_hits.
-    let args = SearchArgs {
+    let args = FindArgs {
         pattern: Some("config".into()),
-        mode: SearchMode::Bm25,
+        mode: FindMode::Bm25,
+        fuzzy: false,
+        all: false,
+        include_tests: false,
         kind: None,
         repo: None,
         format: None,
@@ -98,9 +101,12 @@ fn tantivy_path_emits_bm25_source_tag() {
     TantivyEngine::build_index(dir.path(), &graph).unwrap();
     let engine = Engine::load(dir.path().join("graph.bin")).unwrap();
 
-    let args = SearchArgs {
+    let args = FindArgs {
         pattern: Some("config".into()),
-        mode: SearchMode::Bm25,
+        mode: FindMode::Bm25,
+        fuzzy: false,
+        all: false,
+        include_tests: false,
         kind: None,
         repo: None,
         format: None,

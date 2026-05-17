@@ -3,7 +3,7 @@
 //! scoring in `bm25_hits_from_graph`. Drives B+ step 1 (tantivy wireup).
 
 use graph_nexus_cli::commands::hook::pre_tool_use::format_hits;
-use graph_nexus_cli::commands::search::{compute_hits, Hit, ScoreSource, SearchArgs, SearchMode};
+use graph_nexus_cli::commands::find::{compute_hits, FindArgs, FindMode, Hit, ScoreSource};
 use graph_nexus_cli::engine::Engine;
 use graph_nexus_cli::search::TantivyEngine;
 use graph_nexus_core::graph::{
@@ -139,9 +139,12 @@ fn compute_hits_uses_tantivy_not_substring_scoring() {
 
     let engine = Engine::load(index_dir.join("graph.bin")).expect("engine load");
 
-    let args = SearchArgs {
+    let args = FindArgs {
         pattern: Some("config".to_string()),
-        mode: SearchMode::Bm25,
+        mode: FindMode::Bm25,
+        fuzzy: false,
+        all: false,
+        include_tests: false,
         kind: None,
         repo: None,
         format: None,
@@ -190,9 +193,12 @@ fn compute_hits_populates_one_hop_callers_and_callees() {
     TantivyEngine::build_index(index_dir, &graph).expect("tantivy build");
     let engine = Engine::load(index_dir.join("graph.bin")).expect("engine load");
 
-    let args = SearchArgs {
+    let args = FindArgs {
         pattern: Some("parseConfig".to_string()),
-        mode: SearchMode::Bm25,
+        mode: FindMode::Bm25,
+        fuzzy: false,
+        all: false,
+        include_tests: false,
         kind: None,
         repo: None,
         format: None,

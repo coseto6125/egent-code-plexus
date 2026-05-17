@@ -2,10 +2,10 @@ use graph_nexus_cli::hint::{collision_warning, empty_result, error_with_cause, f
 
 #[test]
 fn empty_result_format() {
-    let msg = empty_result("foo", "symbol", "gnx search foo --mode bm25");
+    let msg = empty_result("foo", "symbol", "gnx find foo --mode bm25");
     assert!(msg.contains("No"));
     assert!(msg.contains("foo"));
-    assert!(msg.contains("gnx search"));
+    assert!(msg.contains("gnx find"));
     assert!(msg.lines().count() <= 3);
 }
 
