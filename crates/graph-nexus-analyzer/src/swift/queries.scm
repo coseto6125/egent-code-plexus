@@ -1,7 +1,12 @@
 ;; Declarations — class/struct/enum share `class_declaration` in tree-sitter-swift;
 ;; kind is disambiguated in parser.rs via swift_decl_keyword().
 (class_declaration
-  (modifiers (visibility_modifier) @export)?
+  (modifiers
+    [
+      (visibility_modifier) @export
+      (attribute) @decorator
+    ]*
+  )?
   name: [
     (type_identifier)
     (user_type (type_identifier))
