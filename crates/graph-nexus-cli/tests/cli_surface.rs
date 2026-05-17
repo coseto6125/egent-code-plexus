@@ -35,7 +35,6 @@ fn top_level_lists_nine_agent_commands() {
         "cypher",
         "coverage",
         "routes",
-        "scan",
         "contracts",
         "tool-map",
     ] {
@@ -72,6 +71,19 @@ fn admin_prune_help_keeps_orphan_sweep_mode() {
         help.contains("--orphans"),
         "missing --orphans in prune help:\n{help}"
     );
+}
+
+#[test]
+fn top_level_does_not_list_scan() {
+    let help = gnx_help();
+    for line in help.lines() {
+        let t = line.trim_start();
+        // scan is removed; allow the word "scan" in unrelated descriptions
+        // but not as a subcommand entry (line starts with "scan " or "scan\t").
+        if t.starts_with("scan ") || t.starts_with("scan\t") {
+            panic!("scan command leaked into --help: {line}");
+        }
+    }
 }
 
 #[test]

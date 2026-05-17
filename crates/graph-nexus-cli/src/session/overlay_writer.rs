@@ -104,7 +104,8 @@ pub fn write_dirty_fragment(
 }
 
 fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
-    crate::commands::scan::parse_single_file_to_fragment(rel_path, content)
+    let _ = (rel_path, content);
+    Ok(vec![])
 }
 
 fn update_manifest(

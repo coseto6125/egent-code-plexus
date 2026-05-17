@@ -109,17 +109,17 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     .unwrap();
 
     // ── 4. Run a query — triggers auto_ensure → Stale → write_dirty_fragment
-    // `scan` is the lightest agent command that goes through the graph-load path
+    // `find` is a lightweight agent command that goes through the graph-load path
     // in main.rs, which unconditionally calls ensure_fresh before loading graph.
-    // The scan itself may succeed or produce "unresolved" output; either is fine
+    // The find itself may succeed or produce no results; either is fine
     // — we only care about the L1 side effect.
     let _ = Command::new(gnx_bin())
-        .args(["scan", "main.rs", "--repo", repo.to_str().unwrap()])
+        .args(["find", "main", "--repo", repo.to_str().unwrap()])
         .env("HOME", &home)
         // Supply a stable session-id so the session dir is predictable.
         .env("CLAUDE_CODE_SESSION_ID", "test-l1-sid")
         .output()
-        .expect("gnx scan spawn failed");
+        .expect("gnx find spawn failed");
 
     // ── 5. Assert L1 fragment exists ──────────────────────────────────────
     let fragments: Vec<_> = WalkDir::new(&gnx_root)

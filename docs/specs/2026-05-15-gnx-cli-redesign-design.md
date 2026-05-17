@@ -248,24 +248,7 @@ With `<path>`: full route detail (handler symbol + signature + caller chain).
 
 **Multi-repo**: yes.
 
-#### 3.2.8 `gnx scan <file>`
-
-File-level hallucination check — verify all symbol references in a file actually exist in the graph.
-
-| Arg / Flag | Type | Default | Purpose |
-|---|---|---|---|
-| `<file>` positional | path | — | File to scan |
-| `--strict` | bool | false | Also flag uncertain references (heuristic-resolved) |
-
-**Output**: list of unresolved references with location + fuzzy suggestions.
-
-**Composed (P1)**: each unresolved reference is paired with up to 3 near-match suggestions ("did you mean ...?").
-
-**Empty (P5)**: `File OK, 0 unresolved references ✓`
-
-**Multi-repo**: no (file is in a specific repo).
-
-#### 3.2.9 `gnx contracts`
+#### 3.2.8 `gnx contracts`
 
 Cross-repo API contracts inventory: producer (server-side route / queue producer / RPC endpoint) ↔ consumer (HTTP client / queue consumer / RPC caller).
 
