@@ -30,6 +30,39 @@ LANGS = [
     "Swift", "C", "Cpp", "Dart",
 ]
 
+# Per-lang file extensions for cypher scoping. The previous dir-prefix
+# scheme (cwd=REPO/lang for rs; STARTS WITH 'lang/' for ref) had two
+# defects:
+#   1. cwd-based rs queries hit a per-lang partial index (gnx treated
+#      sub-dirs as separate repos), returning only a fraction of the
+#      true rs-side emissions and inflating ref_only counts.
+#   2. dir-prefix collides (`Java/` ↔ `JavaScript/`), and Kotlin sample
+#      = mixed-Kotlin/Java repo, so STARTS WITH 'Kotlin/' double-counts
+#      Java files as Kotlin.
+# Switch both sides to file-extension scoping against the root index.
+LANG_EXTS: dict[str, list[str]] = {
+    "TypeScript": [".ts", ".tsx"],
+    "JavaScript": [".js", ".mjs", ".cjs", ".jsx"],
+    "Python":     [".py", ".pyi"],
+    "Java":       [".java"],
+    "Kotlin":     [".kt", ".kts"],
+    "CSharp":     [".cs"],
+    "Go":         [".go"],
+    "Rust":       [".rs"],
+    "PHP":        [".php"],
+    "Ruby":       [".rb"],
+    "Swift":      [".swift"],
+    "C":          [".c", ".h"],
+    "Cpp":        [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
+    "Dart":       [".dart"],
+}
+
+
+def _ext_clause(exts: list[str], var: str = "n") -> str:
+    inner = " OR ".join(f"{var}.filePath ENDS WITH '{ext}'" for ext in exts)
+    return f"({inner})"
+
+
 # Auxiliary node types that don't represent user-authored symbols.
 DROP_KINDS = {"Folder", "File", "CodeElement", "Community", "CodeEmbedding"}
 
@@ -53,18 +86,32 @@ def run(cmd: list[str], cwd: Path | None = None) -> str:
 
 
 def dump_rs(lang: str) -> set[tuple[str, str, str]]:
-    """Run cypher inside the per-lang repo; gnx-rs uses cwd registry lookup."""
-    q = "MATCH (n) RETURN n.kind, n.filePath, n.name"
-    out = run(["gnx", "cypher", q, "--format", "json"], cwd=REPO / lang)
+    """Cypher the root index with file-extension scoping for this lang.
+
+    Returns paths with the `<Lang>/` corpus-dir prefix stripped so they
+    align with ref-side paths (which also have the prefix stripped in
+    `_parse_ref_md`).
+    """
+    exts = LANG_EXTS.get(lang, [])
+    if not exts:
+        return set()
+    where = _ext_clause(exts, "n")
+    q = f"MATCH (n) WHERE {where} RETURN n.kind, n.filePath, n.name"
+    out = run(["gnx", "cypher", "--repo", str(REPO), q, "--format", "json"])
     try:
         obj = json.loads(out)
     except json.JSONDecodeError:
         return set()
-    return {
-        (row[0], row[1], row[2])
-        for row in obj.get("rows", [])
-        if row[0] not in DROP_KINDS and not is_anon(row[2])
-    }
+    prefix = f"{lang}/"
+    sink: set[tuple[str, str, str]] = set()
+    for row in obj.get("rows", []):
+        kind, fp, name = row[0], row[1], row[2]
+        if kind in DROP_KINDS or is_anon(name):
+            continue
+        if fp.startswith(prefix):
+            fp = fp[len(prefix):]
+        sink.add((kind, fp, name))
+    return sink
 
 
 REF_PAGE = 200  # ref-gitnexus stdout truncates at 64 KB; keep pages well under.
@@ -95,13 +142,25 @@ def _parse_ref_md(md: str, prefix: str, sink: set[tuple[str, str, str]]) -> int:
 
 
 def dump_ref(lang: str) -> set[tuple[str, str, str]]:
-    """ref-gitnexus markdown table, paged via SKIP/LIMIT (64KB stdout cap)."""
+    """ref-gitnexus markdown table, paged via SKIP/LIMIT (64KB stdout cap).
+
+    Scopes with file-extension WHERE clause to match `dump_rs` semantics —
+    `STARTS WITH 'Java/'` would prefix-collide with `JavaScript/` paths.
+    Path prefix `<Lang>/` is still stripped post-fetch so cross-side keys
+    align (rs-side may include hits under `Kotlin/` for `.java` files in
+    the mixed Kotlin+Java sample; we strip just the leading-corpus-dir
+    segment matching the requested lang).
+    """
+    exts = LANG_EXTS.get(lang, [])
+    if not exts:
+        return set()
     prefix = f"{lang}/"
+    where = _ext_clause(exts, "n")
     sink: set[tuple[str, str, str]] = set()
     skip = 0
     while True:
         q = (
-            f"MATCH (n) WHERE n.filePath STARTS WITH '{lang}/' "
+            f"MATCH (n) WHERE {where} "
             f"RETURN labels(n), n.filePath, n.name "
             f"SKIP {skip} LIMIT {REF_PAGE}"
         )
