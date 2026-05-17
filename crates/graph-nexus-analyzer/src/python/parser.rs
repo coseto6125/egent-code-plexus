@@ -1,10 +1,12 @@
 use super::receiver_types::{collect_local_types, extract_python_calls};
+use super::spec::PythonSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_class, enclosing_function_name, enumerate_class_methods, has_import_from, node_span,
     Span, MODULE_LEVEL_SOURCE,
 };
 use graph_nexus_core::algorithms::process_trace::is_test_path;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode, RawRoute,
@@ -295,14 +297,15 @@ thread_local! {
 pub struct PythonProvider {
     query: Query,
     indices: PythonCaptureIndices,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `PythonSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — equivalent perf to the previous
+    /// if-chain, but the source of truth lives in `spec.rs`.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 struct PythonCaptureIndices {
-    function_name: Option<u32>,
-    class_name: Option<u32>,
-    property_name: Option<u32>,
     property: Option<u32>,
-    variable_name: Option<u32>,
     variable: Option<u32>,
     type_ann: Option<u32>,
     heritage: Option<u32>,
@@ -361,12 +364,14 @@ impl PythonProvider {
             include_str!("frameworks.scm"),
         );
         let query = Query::new(&language, &query_source)?;
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| PythonSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
         let indices = PythonCaptureIndices {
-            function_name: query.capture_index_for_name("function.name"),
-            class_name: query.capture_index_for_name("class.name"),
-            property_name: query.capture_index_for_name("property.name"),
             property: query.capture_index_for_name("property"),
-            variable_name: query.capture_index_for_name("variable.name"),
             variable: query.capture_index_for_name("variable"),
             type_ann: query.capture_index_for_name("type"),
             heritage: query.capture_index_for_name("heritage"),
@@ -401,7 +406,7 @@ impl PythonProvider {
             blind_builtin_import: query.capture_index_for_name("blind.builtin_import"),
             blind_cross_getattr: query.capture_index_for_name("blind.cross_getattr"),
         };
-        Ok(Self { query, indices })
+        Ok(Self { query, indices, capture_kind_by_idx })
     }
 }
 
@@ -522,18 +527,17 @@ impl LanguageProvider for PythonProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx.function_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single spec-driven dispatch replaces the four explicit
+                    // Function/Class/Property/Variable name-capture arms.
+                    // Source of truth: PythonSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if cap_idx == idx.class_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if cap_idx == idx.property_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
-                } else if cap_idx == idx.variable_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Variable);
+                    kind = Some(k_from_spec);
                 } else if cap_idx == idx.type_ann {
                     type_annotation_node = Some(cap.node);
                 } else if cap_idx == idx.heritage {

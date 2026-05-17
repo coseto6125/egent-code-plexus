@@ -1,6 +1,8 @@
 use super::receiver_types::extract_ruby_calls;
+use super::spec::RubySpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
 use graph_nexus_core::graph::NodeKind;
@@ -121,6 +123,11 @@ fn strip_symbol_prefix(s: &str) -> &str {
 
 pub struct RubyProvider {
     query: Query,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `RubySpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — equivalent perf to the previous
+    /// if-chain, but the source of truth lives in `spec.rs`.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl RubyProvider {
@@ -128,7 +135,12 @@ impl RubyProvider {
         let language = tree_sitter_ruby::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| RubySpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -159,9 +171,6 @@ impl LanguageProvider for RubyProvider {
 
         let idx_name = self.query.capture_index_for_name("name");
         let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_class = self.query.capture_index_for_name("class");
-        let idx_module = self.query.capture_index_for_name("module");
-        let idx_method = self.query.capture_index_for_name("method");
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_decorator = self.query.capture_index_for_name("decorator");
         let idx_route_method = self.query.capture_index_for_name("route.method");
@@ -217,16 +226,17 @@ impl LanguageProvider for RubyProvider {
                     {
                         heritage.push(h_str.to_string());
                     }
-                } else if cap_idx == idx_class {
-                    kind = Some(NodeKind::Class);
-                    root_node = Some(cap.node);
-                } else if cap_idx == idx_module {
-                    // Ruby modules are mixin targets, not classes — Trait matches
-                    // ref-gitnexus semantics (closer to Rust/Scala trait than Java class).
-                    kind = Some(NodeKind::Trait);
-                    root_node = Some(cap.node);
-                } else if cap_idx == idx_method {
-                    kind = Some(NodeKind::Method);
+                } else if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single spec-driven dispatch replaces the three explicit
+                    // Class/Trait/Method root-capture arms.
+                    // Source of truth: RubySpec::CAPTURE_KIND in spec.rs.
+                    // (`module` → Trait matches ref-gitnexus semantics.)
+                    kind = Some(k_from_spec);
                     root_node = Some(cap.node);
                 } else if cap_idx == idx_import_name {
                     import_name = Some(cap.node);
