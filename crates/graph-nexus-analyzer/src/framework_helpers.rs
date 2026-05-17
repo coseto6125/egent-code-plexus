@@ -65,6 +65,42 @@ pub fn span_area(s: Span) -> u64 {
     dr * 10_000 + dc
 }
 
+/// True iff the raw source bytes at `node`'s start_byte begin with `prefix`.
+///
+/// Used by parsers whose grammars don't expose a visibility-modifier AST node —
+/// the keyword sits in the source-text span but not in the parsed tree (e.g.
+/// Zig `pub fn`, Move `public struct`). Forward direction: keyword is the
+/// first token of the captured node.
+#[inline]
+pub fn node_source_starts_with(source: &[u8], node: tree_sitter::Node, prefix: &[u8]) -> bool {
+    let start = node.start_byte();
+    source
+        .get(start..start.saturating_add(prefix.len()))
+        .is_some_and(|s| s == prefix)
+}
+
+/// True iff the source bytes immediately preceding `node`'s start_byte —
+/// after trimming trailing whitespace — end with `suffix`.
+///
+/// For grammars that don't tokenize the visibility keyword at all (e.g.
+/// tree-sitter-cairo v0.0.1 strips `pub`), the keyword's bytes live BEFORE
+/// the captured declaration's start_byte. The trim short-circuits at the
+/// first non-whitespace from the end, so the scan cost is O(trailing-ws),
+/// not O(file-prefix). Window size is `suffix.len() + 4` (slack for one or
+/// two whitespace chars).
+#[inline]
+pub fn source_before_node_ends_with(
+    source: &[u8],
+    node: tree_sitter::Node,
+    suffix: &[u8],
+) -> bool {
+    let start = node.start_byte();
+    let window = start.saturating_sub(suffix.len() + 4);
+    source
+        .get(window..start)
+        .is_some_and(|s| s.trim_ascii_end().ends_with(suffix))
+}
+
 /// Find the innermost `Function`/`Method` `RawNode` that contains `inner_span`.
 /// Returns the node's `name` clone, or `None` if no enclosing fn (module-level).
 pub fn enclosing_function_name(nodes: &[RawNode], inner_span: Span) -> Option<String> {

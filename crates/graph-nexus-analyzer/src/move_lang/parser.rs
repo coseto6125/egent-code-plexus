@@ -64,24 +64,19 @@ impl LanguageProvider for MoveProvider {
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
-        // Functions: exported when the `function_definition` node has a named `modifier`
-        // child (tree-sitter-move grammar: `modifier` carries `public`, `public(friend)`,
-        // `public(package)`, or `entry`). Walk children once per match — no extra capture needed.
-        //
-        // Structs: the grammar has no `modifier` child on `struct_definition`; detect
-        // "public struct …" via source-text prefix scan instead.
+        // Functions carry `public`/`public(friend)`/`public(package)`/`entry`
+        // as a named `modifier` child. Structs have no `modifier` child in the
+        // grammar — fall back to a source-text prefix scan via the helper.
+        use crate::framework_helpers::node_source_starts_with;
         let has_modifier_child = |node: tree_sitter::Node| -> bool {
+            // `cursor` must outlive the iterator returned by `named_children`,
+            // so the result has to land in a binding before the closure ends —
+            // otherwise the cursor is dropped while still borrowed (E0597).
             let mut cursor = node.walk();
             let has = node
                 .named_children(&mut cursor)
                 .any(|child| child.kind() == "modifier");
             has
-        };
-        let is_pub_prefix = |node: tree_sitter::Node| -> bool {
-            source
-                .get(node.start_byte()..node.start_byte().saturating_add(7))
-                .map(|s| s == b"public ")
-                .unwrap_or(false)
         };
 
         while let Some(m) = matches.next() {
@@ -122,11 +117,8 @@ impl LanguageProvider for MoveProvider {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
-                    // Functions: exported when the AST node has a named `modifier` child.
-                    // Structs: no `modifier` child in the grammar; fall back to source-text
-                    // prefix scan for "public ".
                     let is_exported = if is_struct_root {
-                        is_pub_prefix(root)
+                        node_source_starts_with(source, root, b"public ")
                     } else {
                         has_modifier_child(root)
                     };

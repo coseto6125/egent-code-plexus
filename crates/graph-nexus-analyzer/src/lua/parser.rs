@@ -172,14 +172,15 @@ impl LanguageProvider for LuaProvider {
                     let start = root.start_position();
                     let end = root.end_position();
 
-                    // Determine export status for function_declaration nodes.
                     // tree-sitter-lua 0.5.0 aliases `local function foo()` as
                     // function_declaration, indistinguishable from the global form
-                    // by node type alone.  Both forms are aliased to the same type
-                    // so we inspect the raw source: local form starts with "local",
-                    // global form starts with "function".
+                    // by node type alone. Source-text scan is the only signal.
                     let is_local_fn = matches!(k, NodeKind::Function)
-                        && source[root.start_byte()..].starts_with(b"local");
+                        && crate::framework_helpers::node_source_starts_with(
+                            source,
+                            root,
+                            b"local",
+                        );
 
                     let span_key = (start.row as u32, start.column as u32);
                     // Deduplicate: @struct and @const patterns both fire on `local T = {}`.

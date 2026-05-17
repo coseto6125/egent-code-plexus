@@ -59,7 +59,6 @@ impl LanguageProvider for VyperProvider {
         let idx_const = self.query.capture_index_for_name("const");
 
         // Metadata-only captures (attach attributes; not NodeKind-producing)
-        let idx_decorator = self.query.capture_index_for_name("decorator");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
         while let Some(m) = matches.next() {
@@ -83,11 +82,9 @@ impl LanguageProvider for VyperProvider {
                     }
                 } else if Some(ci) == idx_function || Some(ci) == idx_const {
                     root_span_node = Some(cap.node);
-                    // The `(decorator (identifier) @decorator)` query pattern
-                    // matches independently of the @function span pattern, so
-                    // the captures arrive in separate `m` iterations and can't
-                    // be merged on the parser side. Walk the function node's
-                    // children here to collect decorators inline.
+                    // Decorator captures arrive in separate match iterations
+                    // (tree-sitter pattern boundaries), so walk children here
+                    // instead of relying on a co-emitted @decorator capture.
                     if Some(ci) == idx_function {
                         let mut walker = cap.node.walk();
                         for child in cap.node.children(&mut walker) {
@@ -107,10 +104,6 @@ impl LanguageProvider for VyperProvider {
                             }
                         }
                     }
-                } else if Some(ci) == idx_decorator {
-                    // Legacy pattern — kept harmless; the inline walk above is
-                    // the authoritative source for decorators on emitted nodes.
-                    let _ = cap.node;
                 } else if Some(ci) == idx_import_source {
                     import_src = Some(cap.node);
                 }

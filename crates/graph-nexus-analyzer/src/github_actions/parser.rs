@@ -248,6 +248,24 @@ impl LanguageProvider for GitHubActionsProvider {
             }
         }
 
+        // Exported-output emission: workflow_call outputs + per-job outputs
+        // both produce a Property node tagged with a decorator describing the
+        // source (`workflow_call.output` or `job.output`). Shared shape.
+        let emit_output = |nodes: &mut Vec<RawNode>, name: String, decorator: &str, node: tree_sitter::Node| {
+            let s = node.start_position();
+            let e = node.end_position();
+            nodes.push(RawNode {
+                name,
+                kind: NodeKind::Property,
+                span: (s.row as u32, s.column as u32, e.row as u32, e.column as u32),
+                is_exported: true,
+                heritage: vec![],
+                type_annotation: None,
+                decorators: vec![decorator.to_string()],
+                calls: vec![],
+            });
+        };
+
         // Extract workflow_call outputs from `on.workflow_call.outputs` — these
         // are consumed by reusable-workflow callers and are the workflow's public API.
         if let Some(on_val) = mapping_value(top_mapping, "on", source) {
@@ -259,23 +277,12 @@ impl LanguageProvider for GitHubActionsProvider {
                                 for (out_key, out_val_node) in
                                     mapping_pairs(outputs_mapping, source)
                                 {
-                                    let start = out_val_node.start_position();
-                                    let end = out_val_node.end_position();
-                                    nodes.push(RawNode {
-                                        name: out_key.to_string(),
-                                        kind: NodeKind::Property,
-                                        span: (
-                                            start.row as u32,
-                                            start.column as u32,
-                                            end.row as u32,
-                                            end.column as u32,
-                                        ),
-                                        is_exported: true,
-                                        heritage: vec![],
-                                        type_annotation: None,
-                                        decorators: vec!["workflow_call.output".to_string()],
-                                        calls: vec![],
-                                    });
+                                    emit_output(
+                                        &mut nodes,
+                                        out_key.to_string(),
+                                        "workflow_call.output",
+                                        out_val_node,
+                                    );
                                 }
                             }
                         }
@@ -326,23 +333,12 @@ impl LanguageProvider for GitHubActionsProvider {
                     if let Some(outputs_val) = mapping_value(jm, "outputs", source) {
                         if let Some(outputs_mapping) = unwrap_block_mapping(outputs_val) {
                             for (out_key, out_val_node) in mapping_pairs(outputs_mapping, source) {
-                                let ostart = out_val_node.start_position();
-                                let oend = out_val_node.end_position();
-                                nodes.push(RawNode {
-                                    name: format!("{}/{}", job_key, out_key),
-                                    kind: NodeKind::Property,
-                                    span: (
-                                        ostart.row as u32,
-                                        ostart.column as u32,
-                                        oend.row as u32,
-                                        oend.column as u32,
-                                    ),
-                                    is_exported: true,
-                                    heritage: vec![],
-                                    type_annotation: None,
-                                    decorators: vec!["job.output".to_string()],
-                                    calls: vec![],
-                                });
+                                emit_output(
+                                    &mut nodes,
+                                    format!("{}/{}", job_key, out_key),
+                                    "job.output",
+                                    out_val_node,
+                                );
                             }
                         }
                     }
