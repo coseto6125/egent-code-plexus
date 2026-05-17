@@ -21,11 +21,14 @@
 //!
 //! ## Hot-path performance
 //!
-//! `KIND_MAP.get(node.kind())` compiles to a perfect-hash branch +
-//! pointer load — `~3-5 ns` per call. The previous `if/else` chain in
-//! `parser.rs` was ~1-5 ns (jump table). For the typical 25k-file / 5s
-//! cold index, the difference is `<100 ms` aggregate — well inside the
-//! per-query <30 ms budget. See `benches/lang_spec_phf.rs`.
+//! Providers pre-resolve `CAPTURE_KIND` into a
+//! `Vec<Option<NodeKind>>` indexed by tree-sitter capture index at
+//! construction time (see `kotlin/parser.rs::KotlinProvider::new` for
+//! the reference). The hot parse loop then dispatches by integer
+//! index — identical machine code to the previous hard-coded
+//! if/else chain (~1-5 ns per capture). The const `phf::Map` itself
+//! is only consulted once per provider lifetime, not per node, so
+//! its perfect-hash cost (~3-5 ns) is amortised to zero.
 
 use crate::graph::NodeKind;
 
