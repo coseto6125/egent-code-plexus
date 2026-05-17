@@ -521,3 +521,123 @@ fn routes_inline_route_has_enclosing_scope() {
         "expected enclosingScope.name=register_routes for /api/health, got: {scope_names:?}\nfull json: {json}"
     );
 }
+
+// ── Python decorator-route handler resolution ──────────────────────────────
+//
+// PR #76 follow-up regression: FastAPI / Flask / Sanic-style decorator routes
+// (`@router.post("/x")\ndef handler(): ...`) must resolve the handler to the
+// decorated function — not fall through to `inline_anonymous`. The Python
+// parser previously hard-coded `RawRoute.handler = None` for every route it
+// detected, so the builder never emitted a `HandlesRoute` edge and PR #76's
+// inline-anonymous fallback fired incorrectly.
+
+const PY_DECORATOR_FIXTURE_SRC: &str = r#"
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.post("/chat")
+def chat_endpoint(req):
+    return {"reply": "hi"}
+
+@router.get("/health")
+def health_check():
+    return {"status": "ok"}
+"#;
+
+fn setup_py_decorator_repo(repo: &Path, home: &Path) {
+    std::fs::create_dir_all(repo.join("app")).unwrap();
+    std::fs::write(repo.join("app/main.py"), PY_DECORATOR_FIXTURE_SRC).unwrap();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    run_git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:E-NoR/routes-py-decorator-test.git",
+        ],
+    );
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    let out = Command::new(gnx_bin())
+        .args(["admin", "index", "--repo", "."])
+        .current_dir(repo)
+        .env("HOME", home)
+        .output()
+        .expect("admin index spawn failed");
+    assert!(
+        out.status.success(),
+        "admin index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn routes_python_decorator_resolves_named_handler() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_py_decorator_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["/chat"]);
+    assert_eq!(json["status"], "found", "expected status=found: {json}");
+
+    let handlers = json["handlers"].as_array().expect("handlers array missing");
+    assert!(
+        !handlers.is_empty(),
+        "decorator route must surface a handler: {json}"
+    );
+    let kinds_and_names: Vec<(&str, &str)> = handlers
+        .iter()
+        .map(|h| {
+            (
+                h["handlerKind"].as_str().unwrap_or(""),
+                h["name"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert!(
+        kinds_and_names
+            .iter()
+            .any(|(k, n)| *k == "named" && *n == "chat_endpoint"),
+        "expected (handlerKind=named, name=chat_endpoint) for @router.post(\"/chat\") — \
+         decorator route must NOT fall through to inline_anonymous. got: {kinds_and_names:?}\nfull json: {json}"
+    );
+    assert!(
+        !kinds_and_names
+            .iter()
+            .any(|(k, _)| *k == "inline_anonymous"),
+        "decorator-style route was misclassified as inline_anonymous: {kinds_and_names:?}\nfull json: {json}"
+    );
+}
+
+#[test]
+fn routes_python_decorator_get_method_resolved() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_py_decorator_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["/health"]);
+    let handlers = json["handlers"].as_array().expect("handlers array missing");
+    let names: Vec<&str> = handlers
+        .iter()
+        .filter(|h| h["handlerKind"].as_str() == Some("named"))
+        .map(|h| h["name"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        names.contains(&"health_check"),
+        "expected health_check as named handler for /health, got: {names:?}\nfull json: {json}"
+    );
+}

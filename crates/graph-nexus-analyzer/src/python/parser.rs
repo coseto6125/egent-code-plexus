@@ -232,6 +232,34 @@ fn extract_methods_kwarg(call_node: Node, source: &[u8]) -> Option<Vec<String>> 
     None
 }
 
+/// When `call_node` is the call inside a route decorator
+/// (`@router.post("/x")` style), resolve the decorated function/class name
+/// so it can be carried on `RawRoute.handler`. Returns `None` if the call
+/// isn't decorator-wrapped — the caller treats that as the imperative
+/// `app.add_url_rule(path, handler)` shape (handler resolution happens
+/// later in the builder).
+///
+/// Walk: `call → decorator → decorated_definition →
+/// child_by_field_name("definition") → child_by_field_name("name")`.
+/// `decorated_definition.definition` is either a `function_definition` or
+/// a `class_definition` per tree-sitter-python grammar — both expose a
+/// `name` field, so a single lookup suffices.
+fn resolve_decorator_handler(call_node: Node, source: &[u8]) -> Option<String> {
+    let dec = call_node.parent()?;
+    if dec.kind() != "decorator" {
+        return None;
+    }
+    let decorated = dec.parent()?;
+    if decorated.kind() != "decorated_definition" {
+        return None;
+    }
+    let definition = decorated.child_by_field_name("definition")?;
+    let name = definition.child_by_field_name("name")?;
+    std::str::from_utf8(&source[name.start_byte()..name.end_byte()])
+        .ok()
+        .map(str::to_string)
+}
+
 /// Push a Django signal RawFrameworkRef when both `sig_node` (signal name) and
 /// `handler_node` (handler identifier) decode as UTF-8. Shared by `@receiver`
 /// decorator and `signal.connect(handler)` capture sites — only `reason` differs.
@@ -839,11 +867,20 @@ impl LanguageProvider for PythonProvider {
                             } else {
                                 vec![method_str.to_string()]
                             };
+                            // Decorator-style routes (`@router.post("/x")`)
+                            // carry the handler one parent up — the decorated
+                            // function/class name. Imperative-style routes
+                            // (`app.add_url_rule(path, handler)`) leave this
+                            // as `None`; builder-side symbol-table lookup
+                            // takes over there if/when the parser captures
+                            // the handler arg.
+                            let decorator_handler = route_call_node
+                                .and_then(|n| resolve_decorator_handler(n, source));
                             for method in methods_to_emit {
                                 routes.push(RawRoute {
                                     method,
                                     path: clean_path.clone(),
-                                    handler: None,
+                                    handler: decorator_handler.clone(),
                                     span: node_span(&root),
                                 });
                             }
