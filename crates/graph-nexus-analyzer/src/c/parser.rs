@@ -1,4 +1,6 @@
 use super::receiver_types::{collect_receiver_methods, extract_c_calls};
+use super::spec::CSpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{BindingKind, LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -391,6 +393,11 @@ fn emit_extern_binding(decl: Node<'_>, source: &[u8], imports: &mut Vec<RawImpor
 
 pub struct CProvider {
     query: Query,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `CSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index — equivalent perf to the previous
+    /// hard-coded if-chain, but source of truth lives in `spec.rs`.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl CProvider {
@@ -398,7 +405,12 @@ impl CProvider {
         let language = tree_sitter_c::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| CSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -418,12 +430,6 @@ impl LanguageProvider for CProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_struct_name = self.query.capture_index_for_name("struct.name");
-        let idx_union_name = self.query.capture_index_for_name("union.name");
-        let idx_enum_name = self.query.capture_index_for_name("enum.name");
-        let idx_typedef_name = self.query.capture_index_for_name("typedef.name");
-        let idx_macro_name = self.query.capture_index_for_name("macro.name");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
@@ -456,21 +462,16 @@ impl LanguageProvider for CProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_function_name {
+                // Single spec-driven dispatch for name-node captures.
+                // Source of truth: CSpec::CAPTURE_KIND in spec.rs.
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_struct_name || Some(cap_idx) == idx_union_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Struct);
-                } else if Some(cap_idx) == idx_enum_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Enum);
-                } else if Some(cap_idx) == idx_typedef_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Typedef);
-                } else if Some(cap_idx) == idx_macro_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Macro);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_type {
                     type_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
