@@ -91,6 +91,30 @@
   type: _ @var.type
 ) @var
 
+;; File-scope `var X T = ...` (single declaration, with or without explicit type).
+;; Anchored to source_file so function-local `var` blocks are not captured here.
+(source_file
+  (var_declaration
+    (var_spec
+      name: (identifier) @variable.name))) @variable
+
+;; File-scope `var ( X T; Y T )` (grouped declaration block).
+(source_file
+  (var_declaration
+    (var_spec_list
+      (var_spec
+        name: (identifier) @variable.name)))) @variable
+
+;; Short variable declarations — `x := expr` and `x, y := a, b`.
+;; The `left:` side is an expression_list; we capture identifiers on the left.
+;; Parent check in parser.rs ensures only direct children of expression_list
+;; are kept (not identifiers inside selector_expression sub-nodes).
+;; No type field exists in the grammar — type_annotation will be None.
+(short_var_declaration
+  left: (expression_list
+    (identifier) @local.name)
+) @local
+
 ;; Routes — `r.GET("/path", handler)`-style HTTP router method invocations.
 ;; Matches gin / echo / chi / fiber etc. (they all share this shape).
 ;; Ported from upstream gitnexus

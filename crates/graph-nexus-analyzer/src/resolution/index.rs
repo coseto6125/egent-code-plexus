@@ -240,10 +240,17 @@ impl SymbolTable {
             self.node_kinds.len(),
             "register_node ids must be monotonic and dense for kind-indexing"
         );
-        self.file_scoped
-            .entry(file_path.to_string())
-            .or_default()
-            .insert(node_name.to_string(), node_id);
+        // Primary-type priority: don't overwrite a Struct/Class/Enum/Trait/Interface
+        // entry with an Impl node. Rust emits both `struct Foo` (Struct) and
+        // `impl Foo` (Impl) with the same name; Pass-2 class_membership needs
+        // `lookup_in_file("Foo")` to return the Struct so `HasMethod` edges
+        // attach to the right node.
+        let file_map = self.file_scoped.entry(file_path.to_string()).or_default();
+        if kind == NodeKind::Impl {
+            file_map.entry(node_name.to_string()).or_insert(node_id);
+        } else {
+            file_map.insert(node_name.to_string(), node_id);
+        }
 
         self.global_scoped
             .entry(node_name.to_string())

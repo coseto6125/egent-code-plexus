@@ -20,6 +20,15 @@ pub fn kind_to_str(kind: &ArchivedNodeKind) -> &'static str {
         ArchivedNodeKind::Document => "Document",
         ArchivedNodeKind::Section => "Section",
         ArchivedNodeKind::EntryPoint => "EntryPoint",
+        ArchivedNodeKind::Struct => "Struct",
+        ArchivedNodeKind::Enum => "Enum",
+        ArchivedNodeKind::Typedef => "Typedef",
+        ArchivedNodeKind::Namespace => "Namespace",
+        ArchivedNodeKind::Module => "Module",
+        ArchivedNodeKind::Macro => "Macro",
+        ArchivedNodeKind::Annotation => "Annotation",
+        ArchivedNodeKind::Trait => "Trait",
+        ArchivedNodeKind::Impl => "Impl",
     }
 }
 

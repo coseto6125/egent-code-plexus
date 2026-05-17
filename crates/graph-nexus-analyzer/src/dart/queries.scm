@@ -14,6 +14,15 @@
   name: (identifier) @interface.name
   interfaces: (interfaces (type (_) @heritage))?) @interface
 
+;; Constructors — method_declaration whose signature wraps a constructor_signature
+;; (no return type, name matches class name). Named constructors have two
+;; identifier children; we use the first (class name) as the span anchor but
+;; keep the full "Foo.named" text via the last identifier child.
+(method_declaration
+  signature: (method_signature
+    (constructor_signature
+      name: (identifier) @constructor.name))) @constructor
+
 ;; Methods — capture full method_declaration so the span covers the body,
 ;; otherwise call-extraction can't attach call sites to the enclosing method.
 (method_declaration
@@ -21,6 +30,12 @@
     (function_signature
       return_type: (type)? @type
       name: (identifier) @method.name))) @method
+
+;; Typedefs — new-style: `typedef Callback = void Function(int);`
+;; and old-style: `typedef int Compare(int a, int b);`.
+;; In both cases the first (type_identifier) child of type_alias is the name.
+(type_alias
+  (type_identifier) @typedef.name) @typedef
 
 ;; Functions — capture full function_declaration (signature + body) so calls
 ;; inside the body land in this node's span. The bare function_signature
@@ -43,6 +58,33 @@
   (type (_) @type)?
   (initialized_identifier_list
     (initialized_identifier name: (identifier) @property.name))) @property
+
+;; Getters inside a class — `Type get name => ...` / `Type get name { ... }`
+;; method_signature wraps getter_signature when the getter is a class member.
+(method_declaration
+  signature: (method_signature
+    (getter_signature
+      return_type: (type)? @type
+      name: (identifier) @property.name))) @property
+
+;; Setters inside a class — `set name(Type v) { ... }`
+(method_declaration
+  signature: (method_signature
+    (setter_signature
+      return_type: (type)? @type
+      name: (identifier) @property.name))) @property
+
+;; Top-level getters — `Type get name => ...` outside any class.
+(getter_declaration
+  signature: (getter_signature
+    return_type: (type)? @type
+    name: (identifier) @property.name)) @property
+
+;; Top-level setters — `set name(Type v) { ... }` outside any class.
+(setter_declaration
+  signature: (setter_signature
+    return_type: (type)? @type
+    name: (identifier) @property.name)) @property
 
 ;; Function / method parameters — `String name`, `int age`. tree-sitter-dart
 ;; exposes the type as an unlabeled `(type ...)` child of `formal_parameter`,

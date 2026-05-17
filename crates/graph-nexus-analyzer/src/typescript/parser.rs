@@ -53,6 +53,8 @@ struct TypeScriptCaptureIndices {
     express_handler: Option<u32>,
     nestjs_class: Option<u32>,
     nestjs_method: Option<u32>,
+    typedef_name: Option<u32>,
+    typedef: Option<u32>,
 }
 
 impl TypeScriptProvider {
@@ -95,6 +97,8 @@ impl TypeScriptProvider {
             express_handler: query.capture_index_for_name("express.route.handler"),
             nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
             nestjs_method: query.capture_index_for_name("nestjs.method.name"),
+            typedef_name: query.capture_index_for_name("typedef.name"),
+            typedef: query.capture_index_for_name("typedef"),
         };
         Ok(Self { query, indices })
     }
@@ -167,6 +171,9 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
+                } else if cap_idx == idx.typedef_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Typedef);
                 } else if cap_idx == idx.property_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Property);
@@ -233,6 +240,7 @@ impl LanguageProvider for TypeScriptProvider {
                     || cap_idx == idx.property
                     || cap_idx == idx.const_kind
                     || cap_idx == idx.variable
+                    || cap_idx == idx.typedef
                 {
                     root_span_node = Some(cap.node);
                 }
@@ -246,6 +254,16 @@ impl LanguageProvider for TypeScriptProvider {
                     let mut existing_found = false;
                     for node in &mut nodes {
                         if node.span == span && node.name == name_str {
+                            // Function is more specific than Const/Variable: an
+                            // arrow-function assigned to a const matches both the
+                            // @function and @const patterns; the @const pattern fires
+                            // first in tree-sitter's match order, so we upgrade the
+                            // kind here when the later Function match arrives.
+                            if k == NodeKind::Function
+                                && matches!(node.kind, NodeKind::Const | NodeKind::Variable)
+                            {
+                                node.kind = NodeKind::Function;
+                            }
                             if is_exported {
                                 node.is_exported = true;
                             }

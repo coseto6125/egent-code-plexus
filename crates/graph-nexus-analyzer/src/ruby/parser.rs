@@ -221,7 +221,9 @@ impl LanguageProvider for RubyProvider {
                     kind = Some(NodeKind::Class);
                     root_node = Some(cap.node);
                 } else if cap_idx == idx_module {
-                    kind = Some(NodeKind::Class); // Modules are treated as Class for graph
+                    // Ruby modules are mixin targets, not classes — Trait matches
+                    // ref-gitnexus semantics (closer to Rust/Scala trait than Java class).
+                    kind = Some(NodeKind::Trait);
                     root_node = Some(cap.node);
                 } else if cap_idx == idx_method {
                     kind = Some(NodeKind::Method);
@@ -271,6 +273,7 @@ impl LanguageProvider for RubyProvider {
                     let is_exported = if k == NodeKind::Method {
                         *visibility_map.get(&(start.row as u32)).unwrap_or(&true)
                     } else {
+                        // Classes and Traits (modules) are always exported.
                         true
                     };
                     nodes.push(RawNode {
@@ -515,7 +518,7 @@ impl LanguageProvider for RubyProvider {
             let mut best: Option<usize> = None;
             let mut best_span: u32 = u32::MAX;
             for (i, n) in nodes.iter().enumerate() {
-                if n.kind != NodeKind::Class {
+                if n.kind != NodeKind::Class && n.kind != NodeKind::Trait {
                     continue;
                 }
                 if n.span.0 <= line && n.span.2 >= line {

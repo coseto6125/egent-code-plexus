@@ -2,7 +2,9 @@ use graph_nexus_analyzer::rust::parser::RustProvider;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use std::path::Path;
 
-/// Helper: run the Rust parser and return the `calls` vec of the named node.
+/// Helper: run the Rust parser and return the union of `calls` from every
+/// node named `fn_name`. Multiple same-name nodes can exist (trait
+/// declaration + impl definition); we want call edges from any of them.
 fn calls_for(source: &str, fn_name: &str) -> Vec<String> {
     let provider = RustProvider::new().expect("RustProvider::new");
     let graph = provider
@@ -11,9 +13,9 @@ fn calls_for(source: &str, fn_name: &str) -> Vec<String> {
     graph
         .nodes
         .iter()
-        .find(|n| n.name == fn_name)
-        .map(|n| n.calls.clone())
-        .unwrap_or_default()
+        .filter(|n| n.name == fn_name)
+        .flat_map(|n| n.calls.iter().cloned())
+        .collect()
 }
 
 /// `self.method()` inside an inherent impl resolves to `Type.method`.

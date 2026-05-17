@@ -89,10 +89,18 @@
   ) @class
 ) @export
 
-;; Methods
+;; Methods — class methods, interface method signatures, abstract method signatures
 (method_definition
   name: (property_identifier) @method.name
   return_type: (type_annotation (type_identifier) @type)?
+) @method
+
+(method_signature
+  name: (property_identifier) @method.name
+) @method
+
+(abstract_method_signature
+  name: (property_identifier) @method.name
 ) @method
 
 ;; Interfaces
@@ -108,14 +116,22 @@
   ) @interface
 ) @export
 
-;; Properties — class fields (public_field_definition) and interface property
-;; signatures (property_signature). Each emits one Property node.
+;; Properties — class fields (public_field_definition) and constructor parameter
+;; properties (required_parameter / optional_parameter with accessibility modifier).
+;; Interface property_signature is intentionally omitted: ref-gitnexus does not
+;; emit those as Property nodes.
 (public_field_definition
   name: (property_identifier) @property.name
 ) @property
 
-(property_signature
-  name: (property_identifier) @property.name
+(required_parameter
+  (accessibility_modifier)
+  pattern: (identifier) @property.name
+) @property
+
+(optional_parameter
+  (accessibility_modifier)
+  pattern: (identifier) @property.name
 ) @property
 
 ;; Imports (Named)
@@ -156,6 +172,17 @@
   (namespace_export
     (identifier) @import.alias)
   source: (string (string_fragment) @import.source)) @import.namespace
+
+;; Type aliases
+(type_alias_declaration
+  name: (type_identifier) @typedef.name
+) @typedef
+
+(export_statement
+  declaration: (type_alias_declaration
+    name: (type_identifier) @typedef.name
+  ) @typedef
+) @export
 
 ;; Routes — `app.METHOD(path, handler)` form.
 ;; `route.handler` captures the named handler argument when present so the

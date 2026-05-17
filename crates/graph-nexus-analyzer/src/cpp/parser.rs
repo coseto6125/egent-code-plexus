@@ -8,6 +8,26 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
 
+/// True if `node` (a `function_definition`) is defined inside a
+/// `field_declaration_list`, which means it is an inline class/struct member
+/// function. Tree-sitter aliases `constructor_or_destructor_definition` to
+/// `function_definition`, so this check also covers constructors and
+/// destructors defined inline.
+fn is_inline_class_member(node: tree_sitter::Node<'_>) -> bool {
+    let mut cursor = node.parent();
+    while let Some(p) = cursor {
+        match p.kind() {
+            "field_declaration_list" => return true,
+            // Stop at translation-unit scope or namespace/linkage boundaries.
+            "translation_unit" | "namespace_definition" | "linkage_specification" => {
+                return false
+            }
+            _ => cursor = p.parent(),
+        }
+    }
+    false
+}
+
 /// True if `name` is a C/C++ reserved keyword that tree-sitter sometimes
 /// mis-captures as an identifier during error-recovery from preprocessor
 /// macros. Legal C++ code never names a variable with these.
@@ -116,6 +136,7 @@ impl LanguageProvider for CppProvider {
 
         let idx_name_function = self.query.capture_index_for_name("name.function");
         let idx_name_class = self.query.capture_index_for_name("name.class");
+        let idx_name_struct = self.query.capture_index_for_name("name.struct");
         let idx_name_method = self.query.capture_index_for_name("name.method");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
@@ -125,6 +146,7 @@ impl LanguageProvider for CppProvider {
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
+        let idx_struct = self.query.capture_index_for_name("struct");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_import = self.query.capture_index_for_name("import");
 
@@ -132,6 +154,15 @@ impl LanguageProvider for CppProvider {
         let idx_field_name = self.query.capture_index_for_name("field.name");
         let idx_var = self.query.capture_index_for_name("var");
         let idx_var_name = self.query.capture_index_for_name("var.name");
+
+        let idx_name_macro = self.query.capture_index_for_name("name.macro");
+        let idx_macro = self.query.capture_index_for_name("macro");
+        let idx_name_namespace = self.query.capture_index_for_name("name.namespace");
+        let idx_namespace = self.query.capture_index_for_name("namespace");
+        let idx_name_enum = self.query.capture_index_for_name("name.enum");
+        let idx_enum_node = self.query.capture_index_for_name("enum_node");
+        let idx_name_typedef = self.query.capture_index_for_name("name.typedef");
+        let idx_typedef_node = self.query.capture_index_for_name("typedef_node");
 
         let is_header = path
             .extension()
@@ -164,9 +195,24 @@ impl LanguageProvider for CppProvider {
                 } else if cap_idx == idx_name_class {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Class);
+                } else if cap_idx == idx_name_struct {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Struct);
                 } else if cap_idx == idx_name_method {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if cap_idx == idx_name_macro {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Macro);
+                } else if cap_idx == idx_name_namespace {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Namespace);
+                } else if cap_idx == idx_name_enum {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Enum);
+                } else if cap_idx == idx_name_typedef {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Typedef);
                 } else if cap_idx == idx_heritage {
                     heritage_nodes.push(cap.node);
                 } else if cap_idx == idx_type {
@@ -177,7 +223,15 @@ impl LanguageProvider for CppProvider {
                     import_alias_node = Some(cap.node);
                 } else if cap_idx == idx_import_source {
                     import_src_node = Some(cap.node);
-                } else if cap_idx == idx_function || cap_idx == idx_class || cap_idx == idx_method {
+                } else if cap_idx == idx_function
+                    || cap_idx == idx_class
+                    || cap_idx == idx_struct
+                    || cap_idx == idx_method
+                    || cap_idx == idx_macro
+                    || cap_idx == idx_namespace
+                    || cap_idx == idx_enum_node
+                    || cap_idx == idx_typedef_node
+                {
                     root_span_node = Some(cap.node);
                 } else if cap_idx == idx_import {
                     is_import = true;
@@ -194,6 +248,14 @@ impl LanguageProvider for CppProvider {
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                    // Promote free-function to Method when the definition is
+                    // lexically inside a class/struct body.
+                    let k = if k == NodeKind::Function && is_inline_class_member(root) {
+                        NodeKind::Method
+                    } else {
+                        k
+                    };
+
                     let start = root.start_position();
                     let end = root.end_position();
 

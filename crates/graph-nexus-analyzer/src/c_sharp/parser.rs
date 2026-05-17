@@ -66,6 +66,10 @@ pub struct CSharpProvider {
     idx_variable: Option<u32>,
     idx_constructor_name: Option<u32>,
     idx_constructor: Option<u32>,
+    idx_namespace_name: Option<u32>,
+    idx_namespace: Option<u32>,
+    idx_enum_name: Option<u32>,
+    idx_enum: Option<u32>,
 }
 
 impl CSharpProvider {
@@ -79,6 +83,10 @@ impl CSharpProvider {
         let idx_variable = query.capture_index_for_name("variable");
         let idx_constructor_name = query.capture_index_for_name("constructor.name");
         let idx_constructor = query.capture_index_for_name("constructor");
+        let idx_namespace_name = query.capture_index_for_name("namespace.name");
+        let idx_namespace = query.capture_index_for_name("namespace");
+        let idx_enum_name = query.capture_index_for_name("enum.name");
+        let idx_enum = query.capture_index_for_name("enum");
         Ok(Self {
             query,
             idx_property_name,
@@ -87,6 +95,10 @@ impl CSharpProvider {
             idx_variable,
             idx_constructor_name,
             idx_constructor,
+            idx_namespace_name,
+            idx_namespace,
+            idx_enum_name,
+            idx_enum,
         })
     }
 }
@@ -133,6 +145,10 @@ impl LanguageProvider for CSharpProvider {
         let idx_variable = self.idx_variable;
         let idx_constructor_name = self.idx_constructor_name;
         let idx_constructor = self.idx_constructor;
+        let idx_namespace_name = self.idx_namespace_name;
+        let idx_namespace = self.idx_namespace;
+        let idx_enum_name = self.idx_enum_name;
+        let idx_enum = self.idx_enum;
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -171,6 +187,12 @@ impl LanguageProvider for CSharpProvider {
                 } else if Some(cap_idx) == idx_constructor_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Constructor);
+                } else if Some(cap_idx) == idx_namespace_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Namespace);
+                } else if Some(cap_idx) == idx_enum_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Enum);
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
@@ -213,7 +235,9 @@ impl LanguageProvider for CSharpProvider {
                     || Some(cap_idx) == idx_interface
                     || Some(cap_idx) == idx_property
                     || Some(cap_idx) == idx_variable
-                    || Some(cap_idx) == idx_constructor)
+                    || Some(cap_idx) == idx_constructor
+                    || Some(cap_idx) == idx_namespace
+                    || Some(cap_idx) == idx_enum)
                     && root_span_node.is_none()
                 {
                     root_span_node = Some(cap.node);

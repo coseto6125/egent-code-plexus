@@ -50,15 +50,20 @@ pub fn emit_edges(
     for local_graph in local_graphs {
         let raws = &local_graph.nodes;
 
-        // Pre-pass: collect Class nodes + group by name. Both passes hot-loop
+        // Pre-pass: collect Class-like nodes + group by name. Both passes hot-loop
         // over this O(N) once-per-file index instead of re-scanning `raws`
         // for kind=Class on every member lookup. Typical K = #classes/file
         // is 1-10, so this drops both passes from O(N²) to O(N·K) and lets
         // class-free files short-circuit cleanly.
+        // Includes Struct/Trait/Interface so Rust `struct Foo` + `impl Foo`
+        // bridge correctly now that structs no longer emit as Class.
         let mut classes: Vec<(&str, Span)> = Vec::new();
         let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
         for n in raws {
-            if matches!(n.kind, NodeKind::Class) {
+            if matches!(
+                n.kind,
+                NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
+            ) {
                 classes.push((n.name.as_str(), n.span));
                 classes_by_name
                     .entry(n.name.as_str())
@@ -173,7 +178,10 @@ fn emit_pass2_rust_impl(
     let mut emitted = 0usize;
 
     for member in raws {
-        if !matches!(member.kind, NodeKind::Function | NodeKind::Method | NodeKind::Constructor) {
+        if !matches!(
+            member.kind,
+            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+        ) {
             continue;
         }
         for tag in &member.heritage {
@@ -347,7 +355,9 @@ mod tests {
         ];
         let edges = run(vec![lg("bag.ts", nodes)]);
         assert_eq!(edges.len(), 2);
-        assert!(edges.iter().all(|e| matches!(e.rel_type, RelType::HasProperty)));
+        assert!(edges
+            .iter()
+            .all(|e| matches!(e.rel_type, RelType::HasProperty)));
     }
 
     #[test]

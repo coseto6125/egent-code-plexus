@@ -185,6 +185,13 @@ impl LanguageProvider for PhpProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_property = self.query.capture_index_for_name("property");
 
+        let idx_name_namespace = self.query.capture_index_for_name("name.namespace");
+        let idx_name_trait = self.query.capture_index_for_name("name.trait");
+        let idx_name_enum = self.query.capture_index_for_name("name.enum");
+        let idx_namespace = self.query.capture_index_for_name("namespace");
+        let idx_trait = self.query.capture_index_for_name("trait");
+        let idx_enum = self.query.capture_index_for_name("enum");
+
         let idx_route_call = self.query.capture_index_for_name("route.call");
         let idx_route_scope = self.query.capture_index_for_name("route.scope");
         let idx_route_method = self.query.capture_index_for_name("route.method");
@@ -244,6 +251,15 @@ impl LanguageProvider for PhpProvider {
                 } else if Some(cap_idx) == idx_name_property {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Property);
+                } else if Some(cap_idx) == idx_name_namespace {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Namespace);
+                } else if Some(cap_idx) == idx_name_trait {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Trait);
+                } else if Some(cap_idx) == idx_name_enum {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Enum);
                 } else if Some(cap_idx) == idx_type_function || Some(cap_idx) == idx_type_method {
                     if let Ok(t) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -281,6 +297,9 @@ impl LanguageProvider for PhpProvider {
                     || Some(cap_idx) == idx_interface
                     || Some(cap_idx) == idx_method
                     || Some(cap_idx) == idx_property
+                    || Some(cap_idx) == idx_namespace
+                    || Some(cap_idx) == idx_trait
+                    || Some(cap_idx) == idx_enum
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);

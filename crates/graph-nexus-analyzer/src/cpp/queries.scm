@@ -1,4 +1,4 @@
-;; Classes and Structs
+;; Classes
 (class_specifier
   name: [
     (type_identifier)
@@ -8,14 +8,15 @@
     (_ (type_identifier) @heritage))?
 ) @class
 
+;; Structs — emitted as NodeKind::Struct (distinct from Class)
 (struct_specifier
   name: [
     (type_identifier)
     (template_type)
-  ] @name.class
+  ] @name.struct
   (base_class_clause
     (_ (type_identifier) @heritage))?
-) @class
+) @struct
 
 ;; Functions
 (function_definition
@@ -79,6 +80,49 @@
   )
 ) @method
 
+;; Deleted / defaulted / bodied operator= and destructor methods.
+;; Tree-sitter represents `operator=(T&) = delete;` and `~Foo() = default;`
+;; as `function_definition` whose declarator chain ends at `operator_name` or
+;; `destructor_name`.  The common pattern is:
+;;   function_definition
+;;     (reference_declarator          ← `T& operator=`
+;;       (function_declarator
+;;         declarator: (operator_name)))
+;;   function_definition
+;;     (function_declarator           ← `~Foo()`
+;;       declarator: (destructor_name))
+(function_definition
+  declarator: [
+    (function_declarator
+      declarator: [
+        (operator_name) @name.method
+        (destructor_name) @name.method
+      ])
+    (reference_declarator
+      (function_declarator
+        declarator: (operator_name) @name.method))
+    (pointer_declarator
+      (function_declarator
+        declarator: (operator_name) @name.method))
+  ]
+) @method
+
+;; Local variables inside function bodies.
+;; Covers three declarator forms:
+;;   init_declarator: `int x = 5;` / `auto s = "hi";`
+;;   function_declarator: `json j(args);`  (constructor-call syntax)
+;;   bare identifier: `int n;`
+(compound_statement
+  (declaration
+    declarator: [
+      (init_declarator declarator: (identifier) @var.name)
+      (init_declarator declarator: (pointer_declarator (identifier) @var.name))
+      (init_declarator declarator: (reference_declarator (identifier) @var.name))
+      (function_declarator declarator: (identifier) @var.name)
+      (identifier) @var.name
+      (pointer_declarator (identifier) @var.name)
+    ]) @var)
+
 ;; Preprocessor Includes
 (preproc_include
   path: [
@@ -132,3 +176,34 @@
       (identifier) @var.name
       (pointer_declarator (identifier) @var.name)
     ]) @var)
+
+;; Preprocessor macro definitions — `#define NAME ...` and `#define F(x) ...`
+(preproc_def
+  name: (identifier) @name.macro
+) @macro
+
+(preproc_function_def
+  name: (identifier) @name.macro
+) @macro
+
+;; Namespace definitions — `namespace foo { ... }`
+(namespace_definition
+  name: [
+    (namespace_identifier) @name.namespace
+    (nested_namespace_specifier) @name.namespace
+  ]
+) @namespace
+
+;; Enum definitions — `enum class Color { ... }` and `enum OldEnum { ... }`
+(enum_specifier
+  name: (type_identifier) @name.enum
+) @enum_node
+
+;; Type aliases — `using Foo = Bar;`  and  `typedef int MyInt;`
+(alias_declaration
+  name: (type_identifier) @name.typedef
+) @typedef_node
+
+(type_definition
+  declarator: (type_identifier) @name.typedef
+) @typedef_node

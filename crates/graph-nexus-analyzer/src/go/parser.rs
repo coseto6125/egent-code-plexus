@@ -89,7 +89,21 @@ impl LanguageProvider for GoProvider {
         let idx_var_name = self.query.capture_index_for_name("var.name");
         let idx_var_type = self.query.capture_index_for_name("var.type");
 
+        // File-scope var declarations (with or without explicit type annotation).
+        // `@variable` anchors to the source_file so function-local vars are excluded.
+        let idx_variable = self.query.capture_index_for_name("variable");
+        let idx_variable_name = self.query.capture_index_for_name("variable.name");
+
+        // Short var declarations: `x := expr`, `x, y := a, b`.
+        let idx_local = self.query.capture_index_for_name("local");
+        let idx_local_name = self.query.capture_index_for_name("local.name");
+
         let mut routes = Vec::new();
+        // Buffer for file-scope `@variable` path emissions. Merged into `nodes`
+        // after the match loop so the typed `@var` path (which runs within the
+        // same loop) takes precedence: if `@var` already emitted a Variable with
+        // a type annotation, the `@variable` entry for the same name is dropped.
+        let mut file_var_pending: Vec<RawNode> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -124,11 +138,22 @@ impl LanguageProvider for GoProvider {
             let mut var_type_text: Option<String> = None;
             let mut var_root_node = None;
 
+            // File-scope `var X [T] = ...` — typed or untyped. Anchored at
+            // source_file so body-local `var` blocks don't match here.
+            let mut is_file_var = false;
+            let mut file_var_name_nodes: Vec<tree_sitter::Node> = Vec::new();
+            let mut file_var_root_node = None;
+
+            // Short-var `x := expr` — no type field in the grammar.
+            let mut is_local = false;
+            let mut local_name_nodes: Vec<tree_sitter::Node> = Vec::new();
+            let mut local_root_node = None;
+
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
                 if cap_idx == idx_struct_name {
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
+                    kind = Some(NodeKind::Struct);
                 } else if cap_idx == idx_interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
@@ -199,6 +224,22 @@ impl LanguageProvider for GoProvider {
                     {
                         var_type_text = Some(t_str.to_string());
                     }
+                } else if cap_idx == idx_variable {
+                    is_file_var = true;
+                    file_var_root_node = Some(cap.node);
+                } else if cap_idx == idx_variable_name {
+                    file_var_name_nodes.push(cap.node);
+                } else if cap_idx == idx_local {
+                    is_local = true;
+                    local_root_node = Some(cap.node);
+                } else if cap_idx == idx_local_name {
+                    // Only accept identifiers whose direct parent is the
+                    // expression_list (left side of the declaration). The
+                    // tree-sitter query descends into sub-expressions (e.g.
+                    // `n` in `n.children`), so we guard here.
+                    if cap.node.parent().is_some_and(|p| p.kind() == "expression_list") {
+                        local_name_nodes.push(cap.node);
+                    }
                 }
             }
 
@@ -239,6 +280,9 @@ impl LanguageProvider for GoProvider {
                         if let Ok(name_str) =
                             std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
                         {
+                            if name_str == "_" {
+                                continue;
+                            }
                             let name = name_str.to_string();
                             let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
                             let start = n.start_position();
@@ -250,6 +294,78 @@ impl LanguageProvider for GoProvider {
                                 is_exported,
                                 heritage: vec![],
                                 type_annotation: var_type_text.clone(),
+                                span: (
+                                    start.row as u32,
+                                    start.column as u32,
+                                    end.row as u32,
+                                    end.column as u32,
+                                ),
+                                calls: Vec::new(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // File-scope `var X [T] = ...` — buffer one Variable per name.
+            // Pushed to `file_var_pending` here; merged into `nodes` after the
+            // match loop so the typed `@var` path (which runs in the same loop
+            // but as a separate match) always takes precedence over this path.
+            if is_file_var {
+                if let Some(root) = file_var_root_node {
+                    for n in &file_var_name_nodes {
+                        if let Ok(name_str) =
+                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                        {
+                            if name_str == "_" {
+                                continue;
+                            }
+                            let name = name_str.to_string();
+                            let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
+                            let start = n.start_position();
+                            let end = root.end_position();
+                            file_var_pending.push(RawNode {
+                                decorators: vec![],
+                                name,
+                                kind: NodeKind::Variable,
+                                is_exported,
+                                heritage: vec![],
+                                type_annotation: None,
+                                span: (
+                                    start.row as u32,
+                                    start.column as u32,
+                                    end.row as u32,
+                                    end.column as u32,
+                                ),
+                                calls: Vec::new(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Short-var `x := expr` — emit one Variable per identifier on the left.
+            // type_annotation is always None (no type field in the grammar).
+            if is_local {
+                if let Some(root) = local_root_node {
+                    for n in &local_name_nodes {
+                        if let Ok(name_str) =
+                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                        {
+                            if name_str == "_" {
+                                continue;
+                            }
+                            let name = name_str.to_string();
+                            let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
+                            let start = n.start_position();
+                            let end = root.end_position();
+                            nodes.push(RawNode {
+                                decorators: vec![],
+                                name,
+                                kind: NodeKind::Variable,
+                                is_exported,
+                                heritage: vec![],
+                                type_annotation: None,
                                 span: (
                                     start.row as u32,
                                     start.column as u32,
@@ -366,6 +482,17 @@ impl LanguageProvider for GoProvider {
                         });
                     }
                 }
+            }
+        }
+
+        // Merge file-scope var candidates: only add names not already covered by
+        // the typed `@var` path (which emits Variable nodes with type_annotation).
+        for pending in file_var_pending {
+            if !nodes
+                .iter()
+                .any(|n| n.name == pending.name && n.kind == NodeKind::Variable)
+            {
+                nodes.push(pending);
             }
         }
 

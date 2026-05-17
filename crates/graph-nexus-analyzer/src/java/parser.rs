@@ -43,6 +43,10 @@ struct JavaCaptureIndices {
     heritage: Option<u32>,
     type_ann: Option<u32>,
     decorator: Option<u32>,
+    enum_name: Option<u32>,
+    enum_: Option<u32>,
+    annotation_name: Option<u32>,
+    annotation: Option<u32>,
     // Spring @Autowired field injection.
     spring_autowired_class: Option<u32>,
     spring_autowired_target: Option<u32>,
@@ -80,6 +84,10 @@ impl JavaProvider {
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
             decorator: query.capture_index_for_name("decorator"),
+            enum_name: query.capture_index_for_name("enum.name"),
+            enum_: query.capture_index_for_name("enum"),
+            annotation_name: query.capture_index_for_name("annotation.name"),
+            annotation: query.capture_index_for_name("annotation"),
             spring_autowired_class: query.capture_index_for_name("spring.autowired.class"),
             spring_autowired_target: query.capture_index_for_name("spring.autowired.target"),
             spring_route_class: query.capture_index_for_name("spring.route.class"),
@@ -163,6 +171,12 @@ impl LanguageProvider for JavaProvider {
                 } else if cap_idx == idx.variable_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Variable);
+                } else if cap_idx == idx.enum_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Enum);
+                } else if cap_idx == idx.annotation_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Annotation);
                 } else if cap_idx == idx.import_name {
                     import_name = Some(cap.node);
                 } else if cap_idx == idx.import_source {
@@ -175,6 +189,8 @@ impl LanguageProvider for JavaProvider {
                     || cap_idx == idx.constructor
                     || cap_idx == idx.property
                     || cap_idx == idx.variable
+                    || cap_idx == idx.enum_
+                    || cap_idx == idx.annotation
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);

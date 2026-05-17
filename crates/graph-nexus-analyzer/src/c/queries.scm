@@ -1,4 +1,4 @@
-;; Functions
+;; Functions — definitions (with body)
 (function_definition
   type: (_) @type
   declarator: [
@@ -9,12 +9,41 @@
         declarator: (identifier) @function.name))
   ]) @function
 
-;; Structs & Enums
+;; Functions — declarations (prototypes / forward-decls, no body)
+;; Anchored to translation_unit to avoid capturing local `extern` re-declarations.
+(translation_unit
+  (declaration
+    declarator: [
+      (function_declarator
+        declarator: (identifier) @function.name)
+      (pointer_declarator
+        declarator: (function_declarator
+          declarator: (identifier) @function.name))
+    ]) @function)
+
+;; Structs
 (struct_specifier
   name: (type_identifier) @struct.name) @struct
 
+;; Unions (no separate NodeKind — emitted as Struct)
+(union_specifier
+  name: (type_identifier) @union.name) @union
+
+;; Enums
 (enum_specifier
-  name: (type_identifier) @struct.name) @struct
+  name: (type_identifier) @enum.name) @enum
+
+;; Typedefs
+(type_definition
+  declarator: (type_identifier) @typedef.name) @typedef
+
+;; Macros — object-like `#define X val`
+(preproc_def
+  name: (identifier) @macro.name) @macro
+
+;; Macros — function-like `#define M(a) ...`
+(preproc_function_def
+  name: (identifier) @macro.name) @macro
 
 ;; Includes
 (preproc_include

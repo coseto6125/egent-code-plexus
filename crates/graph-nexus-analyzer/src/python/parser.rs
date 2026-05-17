@@ -307,6 +307,23 @@ struct PythonCaptureIndices {
     blind_cross_getattr: Option<u32>,
 }
 
+/// True when `func_def` is a `def`/`async def` defined directly inside a
+/// `class` body (vs free-standing or nested inside another function).
+/// Walks: function_definition → [decorated_definition] → block → class_definition.
+fn is_class_method(func_def: Node) -> bool {
+    let outer = match func_def.parent() {
+        Some(p) if p.kind() == "decorated_definition" => p.parent(),
+        other => other,
+    };
+    let Some(block) = outer else { return false };
+    if block.kind() != "block" {
+        return false;
+    }
+    block
+        .parent()
+        .is_some_and(|p| p.kind() == "class_definition")
+}
+
 impl PythonProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_python::LANGUAGE.into();
@@ -693,7 +710,15 @@ impl LanguageProvider for PythonProvider {
                             .map(|s| s.to_string())
                     });
 
+                    let final_kind = if k == NodeKind::Function && is_class_method(root) {
+                        NodeKind::Method
+                    } else {
+                        k
+                    };
                     if let Some(existing) = nodes.iter_mut().find(|node| node.span == span) {
+                        if existing.kind == NodeKind::Function && final_kind == NodeKind::Method {
+                            existing.kind = NodeKind::Method;
+                        }
                         for h in heritage {
                             if !existing.heritage.contains(&h) {
                                 existing.heritage.push(h);
@@ -716,7 +741,7 @@ impl LanguageProvider for PythonProvider {
                             heritage,
                             type_annotation: type_str,
                             name: name_str.to_string(),
-                            kind: k,
+                            kind: final_kind,
                             span,
                             calls: Vec::new(),
                         });

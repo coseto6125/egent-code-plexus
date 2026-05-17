@@ -79,6 +79,23 @@
   (asterisk) @import.wildcard
 ) @import
 
+;; Enums
+(enum_declaration
+  name: (identifier) @enum.name
+) @enum
+
+;; Annotation types (@interface)
+(annotation_type_declaration
+  name: (identifier) @annotation.name
+) @annotation
+
+;; Annotation element declarations (String value() default ""; inside @interface)
+;; Emitted as Method — same role as interface abstract methods.
+(annotation_type_element_declaration
+  type: (_) @type
+  name: (identifier) @method.name
+) @method
+
 ;; Decorators
 (class_declaration
   (modifiers [

@@ -676,6 +676,15 @@ fn node_kind_to_str(kind: &NodeKind) -> &'static str {
         NodeKind::Document => "Document",
         NodeKind::Section => "Section",
         NodeKind::EntryPoint => "EntryPoint",
+        NodeKind::Struct => "Struct",
+        NodeKind::Enum => "Enum",
+        NodeKind::Typedef => "Typedef",
+        NodeKind::Namespace => "Namespace",
+        NodeKind::Module => "Module",
+        NodeKind::Macro => "Macro",
+        NodeKind::Annotation => "Annotation",
+        NodeKind::Trait => "Trait",
+        NodeKind::Impl => "Impl",
     }
 }
 

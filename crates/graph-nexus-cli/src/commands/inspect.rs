@@ -180,12 +180,17 @@ fn build_inspect_block(
     // into compact member lists. Kept per-entry `kind` so callers can still
     // distinguish Method (true method) vs Function (Python `def` / Rust assoc
     // fn) — B.1 emission unifies them but doesn't hide the underlying kind.
-    let (contained_methods, contained_properties) =
-        if matches!(node.kind, graph_nexus_core::graph::ArchivedNodeKind::Class) {
-            collect_contained_members(graph, node_idx)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+    let (contained_methods, contained_properties) = if matches!(
+        node.kind,
+        graph_nexus_core::graph::ArchivedNodeKind::Class
+            | graph_nexus_core::graph::ArchivedNodeKind::Struct
+            | graph_nexus_core::graph::ArchivedNodeKind::Trait
+            | graph_nexus_core::graph::ArchivedNodeKind::Interface
+    ) {
+        collect_contained_members(graph, node_idx)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     serde_json::json!({
         "symbol": {
@@ -293,6 +298,29 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         });
         return emit(&result, format);
     }
+
+    // When the only ambiguity is Impl vs a primary type declaration (Struct /
+    // Class / Enum / Trait) sharing the same name, suppress the Impl nodes so
+    // `inspect --name Foo` returns the struct, not "ambiguous".  This is the
+    // canonical Rust pattern: `struct Foo` + `impl Foo { ... }`.
+    let has_primary_type = matching_nodes.iter().any(|(_, n)| {
+        matches!(
+            n.kind,
+            graph_nexus_core::graph::ArchivedNodeKind::Struct
+                | graph_nexus_core::graph::ArchivedNodeKind::Class
+                | graph_nexus_core::graph::ArchivedNodeKind::Enum
+                | graph_nexus_core::graph::ArchivedNodeKind::Trait
+                | graph_nexus_core::graph::ArchivedNodeKind::Interface
+        )
+    });
+    let matching_nodes: Vec<(usize, _)> = if has_primary_type {
+        matching_nodes
+            .into_iter()
+            .filter(|(_, n)| !matches!(n.kind, graph_nexus_core::graph::ArchivedNodeKind::Impl))
+            .collect()
+    } else {
+        matching_nodes
+    };
 
     // Pre-parse filters once.
     let kind_filter = parse_csv_lower(args.kind.as_deref());

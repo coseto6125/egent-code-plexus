@@ -58,11 +58,13 @@ fn alias_specifier_resolves_to_aliased_file_e2e() {
     let util_id = graph
         .nodes
         .iter()
-        .position(|n| {
+        .enumerate()
+        .find(|(idx, n)| {
             name_of(n.name) == "utilFn"
                 && matches!(n.kind, NodeKind::Function | NodeKind::Method)
-                && file_of(0) == "src/utils.ts"
+                && file_of(*idx as u32) == "src/utils.ts"
         })
+        .map(|(idx, _)| idx)
         .expect("utilFn (src/utils.ts) missing");
 
     let calls_edges: Vec<_> = graph

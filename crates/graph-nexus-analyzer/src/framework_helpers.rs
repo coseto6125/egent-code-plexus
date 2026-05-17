@@ -76,13 +76,19 @@ pub fn enclosing_function_name(nodes: &[RawNode], inner_span: Span) -> Option<St
         .map(|n| n.name.clone())
 }
 
-/// Find the innermost `Class` `RawNode` containing `inner_span`.
+/// Find the innermost class-like `RawNode` containing `inner_span`.
 /// Returns `(class_name, class_span)`, or `None` if no enclosing class
-/// (module-level fn/call).
+/// (module-level fn/call). Accepts `Class | Struct | Trait | Interface`
+/// since the parity-14-langs work split Rust `struct` into its own variant.
 pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, Span)> {
     nodes
         .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Class))
+        .filter(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
+            )
+        })
         .filter(|n| span_contains(n.span, inner_span))
         .min_by_key(|n| span_area(n.span))
         .map(|n| (n.name.clone(), n.span))

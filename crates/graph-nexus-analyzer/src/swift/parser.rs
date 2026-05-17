@@ -96,22 +96,20 @@ impl LanguageProvider for SwiftProvider {
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_typealias = self.query.capture_index_for_name("typealias");
 
+        let idx_name_trait = self.query.capture_index_for_name("trait.name");
+        let idx_trait = self.query.capture_index_for_name("trait");
+
         let idx_export = self.query.capture_index_for_name("export");
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
 
         let idx_property = self.query.capture_index_for_name("property");
-        let idx_property_name = self.query.capture_index_for_name("property.name");
-        let idx_property_type = self.query.capture_index_for_name("property.type");
+        let idx_property_name_pat = self.query.capture_index_for_name("property.name.pat");
+        let idx_constructor = self.query.capture_index_for_name("constructor");
 
-        // Per (root, name-byte-offset) dedup. tree-sitter-swift fires the
-        // same property_declaration match ~3-4× per declared name when the
-        // optional `(type_annotation ...)?` resolves as both present and
-        // absent alternatives, AND when nested `bound_identifier` re-binds
-        // through pattern matching. Tracking (root_id, name_start_byte)
-        // collapses true duplicates while keeping tuple-pattern
-        // declarations (`let (a, b) = …`) distinct (different name byte
-        // offsets within the same root).
+        // Per (root_id, name_start_byte) dedup. Two query patterns fire for
+        // every property_declaration (typed + untyped alternatives); dedup
+        // collapses duplicate matches while keeping tuple-pattern names distinct.
         let mut seen_properties: std::collections::HashSet<(usize, usize)> =
             std::collections::HashSet::new();
 
@@ -129,7 +127,7 @@ impl LanguageProvider for SwiftProvider {
 
             let mut property_root: Option<tree_sitter::Node<'_>> = None;
             let mut property_name: Option<tree_sitter::Node<'_>> = None;
-            let mut property_type: Option<tree_sitter::Node<'_>> = None;
+            let mut constructor_node: Option<tree_sitter::Node<'_>> = None;
             let mut typealias_node: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
@@ -146,6 +144,9 @@ impl LanguageProvider for SwiftProvider {
                 } else if Some(cap_idx) == idx_name_interface {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
+                } else if Some(cap_idx) == idx_name_trait {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Trait);
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
@@ -154,6 +155,7 @@ impl LanguageProvider for SwiftProvider {
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
                     || Some(cap_idx) == idx_interface
+                    || Some(cap_idx) == idx_trait
                 {
                     root_span_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_export {
@@ -178,10 +180,10 @@ impl LanguageProvider for SwiftProvider {
                     }
                 } else if Some(cap_idx) == idx_property {
                     property_root = Some(cap.node);
-                } else if Some(cap_idx) == idx_property_name {
+                } else if Some(cap_idx) == idx_property_name_pat {
                     property_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_property_type {
-                    property_type = Some(cap.node);
+                } else if Some(cap_idx) == idx_constructor {
+                    constructor_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_typealias {
                     typealias_node = Some(cap.node);
                 }
@@ -202,26 +204,34 @@ impl LanguageProvider for SwiftProvider {
                 }
             }
 
-            // Swift property declaration `var x: Int` / `let y: String` →
-            // Property node ONLY when declared at class/struct/extension/
-            // protocol scope or top-level. tree-sitter-swift uses
-            // `property_declaration` for ALL `let/var`, including
-            // function-body locals (`func foo() { let x = 1 }`). Ref
-            // gitnexus filters those out — they're locals, not properties.
-            // Walk up the AST; if we hit `function_body` / `init_body` /
-            // `getter_specifier` / `setter_specifier` before a class-like
-            // body or the file root, skip the emission.
-            if let (Some(pr_root), Some(pr_name)) = (property_root, property_name) {
-                if !seen_properties.insert((pr_root.id(), pr_name.start_byte())) {
-                    // Already emitted this (declaration, name-position) pair.
-                    continue;
-                }
-                // Only filter properties declared INSIDE computed-property
-                // getter/setter bodies, willSet/didSet observers, or
-                // closure literals — those are syntactically lets that the
-                // ref impl excludes. Test/setup function bodies are NOT
-                // filtered; ref captures their lets too as a stand-in for
-                // fixture/state declarations.
+            // Swift `init(...)` → Constructor. Emitted here before the
+            // function_declaration path so `init` never falls through to Function.
+            if let Some(ctor_node) = constructor_node {
+                let start = ctor_node.start_position();
+                let end = ctor_node.end_position();
+                nodes.push(RawNode {
+                    decorators: vec![],
+                    is_exported,
+                    heritage: vec![],
+                    type_annotation: None,
+                    name: "init".to_string(),
+                    kind: NodeKind::Constructor,
+                    span: (
+                        start.row as u32,
+                        start.column as u32,
+                        end.row as u32,
+                        end.column as u32,
+                    ),
+                    calls: Vec::new(),
+                });
+            }
+
+            // Swift property: `var x: Int` / `var x = 0` / `let (a,b) = ...`.
+            // Emitted only at class/struct/protocol/extension/top-level scope —
+            // filter out locals inside function_body, computed_property,
+            // willset_didset_block, and lambda_literal.
+            if let (Some(pr_root), Some(pat_node)) = (property_root, property_name) {
+                // Locality check: walk up from property_declaration.
                 let mut anc = pr_root.parent();
                 let mut is_local = false;
                 while let Some(a) = anc {
@@ -240,35 +250,54 @@ impl LanguageProvider for SwiftProvider {
                 if is_local {
                     continue;
                 }
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[pr_name.start_byte()..pr_name.end_byte()])
-                {
-                    let start = pr_root.start_position();
-                    let end = pr_root.end_position();
-                    let type_ann = property_type.and_then(|t| {
-                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
-                            .ok()
-                            .map(|s| s.to_string())
-                    });
+
+                // Walk the property_declaration's direct children to find
+                // type_annotation (if any). Text is `: <type>` — drop the colon.
+                let type_ann = property_type_from_decl(pr_root, source);
+
+                // Collect (name, byte_offset) pairs from the pattern node.
+                // Handles both `var x` (one leaf) and `let (a, b)` (multiple).
+                let names = collect_pattern_names(pat_node, source);
+
+                let start = pr_root.start_position();
+                let end = pr_root.end_position();
+                let span = (
+                    start.row as u32,
+                    start.column as u32,
+                    end.row as u32,
+                    end.column as u32,
+                );
+
+                for (name_str, name_byte) in names {
+                    if !seen_properties.insert((pr_root.id(), name_byte)) {
+                        continue;
+                    }
                     nodes.push(RawNode {
                         decorators: vec![],
                         is_exported: true,
                         heritage: vec![],
-                        type_annotation: type_ann,
-                        name: name_str.to_string(),
+                        type_annotation: type_ann.clone(),
+                        name: name_str,
                         kind: NodeKind::Property,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
+                        span,
                         calls: Vec::new(),
                     });
                 }
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+                // Disambiguate class_declaration into Class/Struct/Enum via leading keyword.
+                let k = if k == NodeKind::Class {
+                    match swift_decl_keyword(root) {
+                        "struct" => NodeKind::Struct,
+                        "enum" => NodeKind::Enum,
+                        _ => NodeKind::Class,
+                    }
+                } else if k == NodeKind::Function && is_class_method(root) {
+                    NodeKind::Method
+                } else {
+                    k
+                };
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
@@ -278,7 +307,7 @@ impl LanguageProvider for SwiftProvider {
                     // alongside Java static-import aliases. The attribute node
                     // is nested under `(modifiers)` (not a direct
                     // `function_declaration` child), so walk the subtree.
-                    if k == NodeKind::Function {
+                    if k == NodeKind::Function || k == NodeKind::Method {
                         if let Some(ext) = find_objc_rename_attribute(root, source) {
                             imports.push(RawImport {
                                 alias: Some(ext.clone()),
@@ -342,6 +371,42 @@ impl LanguageProvider for SwiftProvider {
             blind_spots: vec![],
         })
     }
+}
+
+/// Return the leading keyword of a `class_declaration` node ("class", "struct", or "enum").
+/// tree-sitter-swift uses `class_declaration` for all three; the first non-modifier
+/// child is the literal keyword token.
+fn swift_decl_keyword(class_decl: tree_sitter::Node<'_>) -> &'static str {
+    for i in 0..class_decl.child_count() {
+        if let Some(c) = class_decl.child(i) {
+            match c.kind() {
+                "class" => return "class",
+                "struct" => return "struct",
+                "enum" => return "enum",
+                _ => {}
+            }
+        }
+    }
+    "class"
+}
+
+/// Return true when `func_node` (a `function_declaration`) is directly nested inside
+/// a class-like body (`class_body`, `enum_class_body`, `protocol_body`, or struct body).
+/// Mirrors the python `is_class_method` parent-chain walk.
+fn is_class_method(func_node: tree_sitter::Node<'_>) -> bool {
+    let mut anc = func_node.parent();
+    while let Some(a) = anc {
+        match a.kind() {
+            "class_body" | "enum_class_body" | "protocol_body" => return true,
+            // Stop at file root or a function body — don't ascend further.
+            "source_file" | "function_body" | "computed_property" | "lambda_literal" => {
+                return false
+            }
+            _ => {}
+        }
+        anc = a.parent();
+    }
+    false
 }
 
 /// Pull (lhs name, rhs type text) from a `typealias_declaration` node.
@@ -428,5 +493,47 @@ fn attribute_objc_external_name(attr: tree_sitter::Node<'_>, source: &[u8]) -> O
         external
     } else {
         None
+    }
+}
+
+/// Walk a `property_declaration` node's direct children for a `type_annotation`
+/// child and return its type text (stripping the leading ": ").
+fn property_type_from_decl(decl: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cur = decl.walk();
+    for child in decl.children(&mut cur) {
+        if child.kind() == "type_annotation" {
+            let raw = std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok()?;
+            return Some(raw.trim_start_matches(':').trim_start().to_string());
+        }
+    }
+    None
+}
+
+/// Collect all `simple_identifier` leaf names from a `pattern` node.
+/// Returns `(name_text, start_byte)` pairs — start_byte used for dedup.
+/// Handles simple `var x` (one leaf) and tuple `let (a, b)` (multiple).
+fn collect_pattern_names(pat: tree_sitter::Node<'_>, source: &[u8]) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    collect_pattern_names_rec(pat, source, &mut out);
+    out
+}
+
+fn collect_pattern_names_rec(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    out: &mut Vec<(String, usize)>,
+) {
+    if node.kind() == "simple_identifier" && node.child_count() == 0 {
+        if let Ok(s) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+            // Skip `_` wildcards — they're not named bindings.
+            if s != "_" {
+                out.push((s.to_string(), node.start_byte()));
+            }
+        }
+        return;
+    }
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        collect_pattern_names_rec(child, source, out);
     }
 }

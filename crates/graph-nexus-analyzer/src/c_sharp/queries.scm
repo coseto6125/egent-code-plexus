@@ -26,9 +26,9 @@
 (enum_declaration
   (attribute_list)* @decorator
   (modifier)* @export
-  name: (identifier) @name.class
+  name: (identifier) @enum.name
   (base_list (_)* @heritage)?
-) @class
+) @enum
 
 ;; Records
 (record_declaration
@@ -108,3 +108,12 @@
   name: (identifier) @import.alias
   (_) @import.name @import.source
 ) @import
+
+;; Namespaces (block-scoped and file-scoped / C# 10+)
+(namespace_declaration
+  name: (_) @namespace.name
+) @namespace
+
+(file_scoped_namespace_declaration
+  name: (_) @namespace.name
+) @namespace

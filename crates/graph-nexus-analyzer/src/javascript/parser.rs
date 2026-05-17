@@ -317,13 +317,36 @@ impl LanguageProvider for JavaScriptProvider {
                             // which is O(k²) per file on declarator-heavy code.
                             let already_emitted = emitted_spans.contains(&var_span);
                             if !already_emitted {
+                                // `const` declarations map to NodeKind::Const so
+                                // parity with ref-gitnexus is maintained; var/let → Variable.
+                                let var_kind = if decl_node.kind() == "lexical_declaration" {
+                                    // lexical_declaration covers both `let` and `const`.
+                                    // Inspect the first token to distinguish them.
+                                    let is_const = decl_node
+                                        .child(0)
+                                        .and_then(|t| {
+                                            std::str::from_utf8(
+                                                &source[t.start_byte()..t.end_byte()],
+                                            )
+                                            .ok()
+                                            .map(|s| s == "const")
+                                        })
+                                        .unwrap_or(false);
+                                    if is_const {
+                                        NodeKind::Const
+                                    } else {
+                                        NodeKind::Variable
+                                    }
+                                } else {
+                                    NodeKind::Variable
+                                };
                                 nodes.push(RawNode {
                                     decorators: vec![],
                                     is_exported: is_exported_variable || is_exported,
                                     heritage: vec![],
                                     type_annotation: None,
                                     name: name_str.to_string(),
-                                    kind: NodeKind::Variable,
+                                    kind: var_kind,
                                     span: var_span,
                                     calls: Vec::new(),
                                 });

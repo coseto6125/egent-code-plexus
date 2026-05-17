@@ -155,7 +155,12 @@ fn distinct_callees() {
 
     assert_eq!(rows.len(), 2, "expected 2 distinct callees: {out}");
 
-    let callee_names: Vec<&str> = rows.iter().map(|r| r[b_col].as_str().unwrap()).collect();
+    // Cypher JSON shape: single-column RETURN flattens rows to `["b","c"]`
+    // (scalars); multi-column returns `[["b",1],["c",2]]`. Handle both.
+    let callee_names: Vec<&str> = rows
+        .iter()
+        .map(|r| r.as_str().or_else(|| r.get(b_col).and_then(|v| v.as_str())).unwrap())
+        .collect();
     assert!(
         callee_names.contains(&"b"),
         "b should be a callee: {callee_names:?}"
@@ -193,8 +198,12 @@ fn count_distinct_callers() {
     let n_col = col_names.iter().position(|&c| c == "n").unwrap();
 
     assert_eq!(rows.len(), 1, "expected single aggregate row: {out}");
+    // Single-column COUNT returns scalar row, not array. Handle both shapes.
+    let n_value = rows[0]
+        .as_i64()
+        .or_else(|| rows[0].get(n_col).and_then(|v| v.as_i64()));
     assert_eq!(
-        rows[0][n_col].as_i64(),
+        n_value,
         Some(3),
         "COUNT(DISTINCT a.name) should be 3: {out}"
     );

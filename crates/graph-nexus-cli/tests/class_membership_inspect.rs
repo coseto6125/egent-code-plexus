@@ -178,10 +178,10 @@ fn ruby_class_emits_methods() {
     );
 }
 
-// ── Python class — B.1: `def` emits as Function, HasMethod edge still fires ─
+// ── Python class — B.1: `def` inside class emits as Method (parity-14-langs) ─
 
 #[test]
-fn python_class_def_emits_as_function_kind() {
+fn python_class_def_emits_as_method_kind() {
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),
@@ -203,8 +203,8 @@ fn python_class_def_emits_as_function_kind() {
         .unwrap_or_else(|| panic!("expected 'bar' in contained_methods, got {methods:?}"));
     assert_eq!(
         bar["kind"].as_str(),
-        Some("Function"),
-        "Python def must preserve kind=Function (B.1 design — no kind rewriting)"
+        Some("Method"),
+        "Python class-internal `def` must classify as Method (parity-14-langs fix)",
     );
 }
 

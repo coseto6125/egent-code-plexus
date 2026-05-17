@@ -1,25 +1,35 @@
 ;; Structs
 (struct_item
   (visibility_modifier)? @export
-  name: (type_identifier) @struct_item.name) @class
+  name: (type_identifier) @struct_item.name) @struct
 
 ;; Enums
 (enum_item
   (visibility_modifier)? @export
-  name: (type_identifier) @enum_item.name) @class
+  name: (type_identifier) @enum_item.name) @enum
 
 ;; Traits
 (trait_item
   (visibility_modifier)? @export
-  name: (type_identifier) @trait_item.name) @interface
+  name: (type_identifier) @trait_item.name) @trait
 
-;; Functions
-(function_item
-  (visibility_modifier)? @export
-  name: (identifier) @function_item.name
-  return_type: (_)? @type) @function
+;; Free-standing functions (top-level or nested in mod). Restricted to
+;; `source_file` / `mod_item` parents so impl-internal function_items don't
+;; double-fire (they're separately captured below as `@method`).
+(source_file
+  (function_item
+    (visibility_modifier)? @export
+    name: (identifier) @function_item.name
+    return_type: (_)? @type) @function)
+(mod_item
+  body: (declaration_list
+    (function_item
+      (visibility_modifier)? @export
+      name: (identifier) @function_item.name
+      return_type: (_)? @type) @function))
 
-;; Methods in impl
+;; Trait-impl methods: `impl Trait for Type { fn m(&self) { ... } }`.
+;; return_type is optional — `fn m()` with no `-> T` was previously skipped.
 (impl_item
   trait: [
     (type_identifier)
@@ -29,15 +39,51 @@
     (function_item
       (visibility_modifier)? @export
       name: (identifier) @function_item.name
-      return_type: (_) @type) @method))
+      return_type: (_)? @type) @method))
 
-;; Methods in trait
+;; Inherent-impl methods: `impl Type { fn m(&self) { ... } }`. Tree-sitter
+;; has no negative-predicate so we list this as a separate pattern that
+;; matches when `trait:` is absent — both fire for trait impls but the
+;; parser-side dedup keeps the higher-priority Method kind.
+(impl_item
+  body: (declaration_list
+    (function_item
+      (visibility_modifier)? @export
+      name: (identifier) @function_item.name
+      return_type: (_)? @type) @method))
+
+;; Trait body methods — both abstract declarations (`fn m(&self);`) and
+;; default implementations (`fn m(&self) { ... }`). Two patterns because
+;; tree-sitter-rust uses distinct node kinds for body-less signatures
+;; (`function_signature_item`) vs concrete defs (`function_item`).
 (trait_item
   body: (declaration_list
     (function_signature_item
       (visibility_modifier)? @export
       name: (identifier) @function_item.name
-      return_type: (_) @type) @method))
+      return_type: (_)? @type) @method))
+(trait_item
+  body: (declaration_list
+    (function_item
+      (visibility_modifier)? @export
+      name: (identifier) @function_item.name
+      return_type: (_)? @type) @method))
+
+;; Associated types inside impl blocks: `type Item = T::Item;`
+(impl_item
+  body: (declaration_list
+    (associated_type
+      name: (type_identifier) @type_alias_item.name) @type_alias))
+
+;; Associated types inside trait definitions: `type Item;`
+(trait_item
+  body: (declaration_list
+    (associated_type
+      name: (type_identifier) @type_alias_item.name) @type_alias))
+
+;; macro_rules! definitions
+(macro_definition
+  name: (identifier) @macro_item.name) @macro_def
 
 ;; Struct fields (named-field structs only; tuple structs have no field_identifier)
 (struct_item
@@ -46,6 +92,28 @@
     (field_declaration
       (visibility_modifier)? @export
       name: (field_identifier) @property.name) @property))
+
+;; Modules (both inline `mod foo { }` and declaration `mod foo;`)
+(mod_item
+  (visibility_modifier)? @export
+  name: (identifier) @module_item.name) @module
+
+;; Type aliases: `type Foo = Bar;`
+(type_item
+  (visibility_modifier)? @export
+  name: (type_identifier) @type_alias_item.name) @type_alias
+
+;; Constants: `const X: T = ...;`
+(const_item
+  (visibility_modifier)? @export
+  name: (identifier) @const_item.name) @const_decl
+
+;; Impl blocks: `impl T` / `impl Trait for T`  (inherent and trait impls)
+(impl_item
+  type: [
+    (type_identifier)
+    (generic_type)
+  ] @impl_item.name) @impl_block
 
 ;; Imports (use std::collections::HashMap)
 (use_declaration

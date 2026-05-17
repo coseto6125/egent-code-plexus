@@ -42,6 +42,14 @@
 (namespace_definition
   name: (namespace_name) @name.namespace) @namespace
 
+;; Traits (PHP 5.4+)
+(trait_declaration
+  name: (name) @name.trait) @trait
+
+;; Enums (PHP 8.1+)
+(enum_declaration
+  name: (name) @name.enum) @enum
+
 ;; Imports
 (namespace_use_clause
   (_) @import.source

@@ -420,11 +420,19 @@ impl LanguageProvider for CProvider {
 
         let idx_function_name = self.query.capture_index_for_name("function.name");
         let idx_struct_name = self.query.capture_index_for_name("struct.name");
+        let idx_union_name = self.query.capture_index_for_name("union.name");
+        let idx_enum_name = self.query.capture_index_for_name("enum.name");
+        let idx_typedef_name = self.query.capture_index_for_name("typedef.name");
+        let idx_macro_name = self.query.capture_index_for_name("macro.name");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_struct = self.query.capture_index_for_name("struct");
+        let idx_union = self.query.capture_index_for_name("union");
+        let idx_enum = self.query.capture_index_for_name("enum");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
+        let idx_macro = self.query.capture_index_for_name("macro");
 
         let idx_field = self.query.capture_index_for_name("field");
         let idx_field_name = self.query.capture_index_for_name("field.name");
@@ -453,12 +461,30 @@ impl LanguageProvider for CProvider {
                     kind = Some(NodeKind::Function);
                 } else if Some(cap_idx) == idx_struct_name {
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
+                    kind = Some(NodeKind::Struct);
+                } else if Some(cap_idx) == idx_union_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Struct);
+                } else if Some(cap_idx) == idx_enum_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Enum);
+                } else if Some(cap_idx) == idx_typedef_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Typedef);
+                } else if Some(cap_idx) == idx_macro_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Macro);
                 } else if Some(cap_idx) == idx_type {
                     type_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_function || Some(cap_idx) == idx_struct {
+                } else if Some(cap_idx) == idx_function
+                    || Some(cap_idx) == idx_struct
+                    || Some(cap_idx) == idx_union
+                    || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_typedef
+                    || Some(cap_idx) == idx_macro
+                {
                     root_span_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_field {
                     field_root = Some(cap.node);

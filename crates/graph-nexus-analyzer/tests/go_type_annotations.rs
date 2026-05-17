@@ -80,21 +80,18 @@ fn var_declaration_explicit() {
 
 #[test]
 fn var_declaration_inferred_no_annotation() {
-    // Short declarations have no `type:` field in the grammar — the
-    // provider must NOT invent one. Inside a function body, `n := 1` is
-    // a `short_var_declaration`; the contract is: NO Variable node with
-    // that name is emitted via the `var` capture path. (If a future
-    // patch chooses to also emit short-decl vars, this test must be
-    // updated to assert `type_annotation.is_none()` instead — but the
-    // current contract is silent, not "emit with no type".)
+    // Short declarations have no `type:` field — provider emits Variable
+    // with type_annotation=None (parity with ref gitnexus oracle).
     let src = "package p\nfunc f() { n := 1; _ = n }\n";
     let nodes = parse(src);
     let n_var = nodes
         .iter()
-        .find(|n| n.name == "n" && n.kind == NodeKind::Variable);
+        .find(|n| n.name == "n" && n.kind == NodeKind::Variable)
+        .expect("short-decl `n := 1` must emit a Variable node");
     assert!(
-        n_var.is_none(),
-        "short-decl `n := 1` must NOT emit a Variable via the type-annotated path; got {n_var:?}",
+        n_var.type_annotation.is_none(),
+        "short-decl Variable must have type_annotation=None; got {:?}",
+        n_var.type_annotation,
     );
 }
 

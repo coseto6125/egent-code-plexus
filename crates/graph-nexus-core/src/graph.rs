@@ -33,6 +33,15 @@ impl std::str::FromStr for NodeKind {
             "document" => Ok(NodeKind::Document),
             "section" => Ok(NodeKind::Section),
             "entrypoint" | "entry_point" | "entry point" => Ok(NodeKind::EntryPoint),
+            "struct" => Ok(NodeKind::Struct),
+            "enum" => Ok(NodeKind::Enum),
+            "typedef" | "typealias" | "type_alias" | "type alias" => Ok(NodeKind::Typedef),
+            "namespace" => Ok(NodeKind::Namespace),
+            "module" | "mod" => Ok(NodeKind::Module),
+            "macro" => Ok(NodeKind::Macro),
+            "annotation" => Ok(NodeKind::Annotation),
+            "trait" | "protocol" => Ok(NodeKind::Trait),
+            "impl" => Ok(NodeKind::Impl),
             _ => Err(()),
         }
     }
@@ -84,6 +93,43 @@ pub enum NodeKind {
     /// the edge's `reason` carries the scoring provenance (e.g. `main:0.9`,
     /// `route:1.0`, `framework_ref:0.8`).
     EntryPoint,
+    // ── Parity expansion (parity-14-langs) ──────────────────────────────
+    // Appended at the END to keep rkyv discriminants stable for existing
+    // graph.bin files. Variants prioritised by LLM-utility delta vs the
+    // previous `Class` / `Interface` / `Function` catch-alls (see
+    // `scripts/parity/symbol_diffs/summary.md`).
+    /// Value-type aggregate: C `struct`, Rust `struct`, Swift `struct`,
+    /// Dart `class` with value-semantics. Distinct from `Class` because
+    /// runtime semantics differ (no vtable, value-copy, no inheritance for C).
+    Struct,
+    /// Discriminated union / sum type: Rust `enum`, Swift `enum`, Java
+    /// `enum`, C# `enum`, TS `enum`. Distinguished from `Class` so LLMs
+    /// don't pattern-match against OO conventions.
+    Enum,
+    /// Pure type alias with no member surface: C `typedef`, Rust
+    /// `type X = Y`, Swift `typealias`, TS `type X = ...`. Lookups treat
+    /// it as a forwarding pointer.
+    Typedef,
+    /// Lexical scope container: C# `namespace`, PHP `namespace`,
+    /// C++ `namespace`. Holds qualifier-resolution context.
+    Namespace,
+    /// Mod-tree node: Rust `mod foo`, Python file-as-module, Kotlin
+    /// `package`. Drives import resolution.
+    Module,
+    /// Preprocessor symbol: C/C++ `#define`. Different binding semantics
+    /// from `Function` / `Const` because expansion is textual.
+    Macro,
+    /// Declarative metadata: Java/Kotlin `@interface` and `annotation
+    /// class`, C# attributes. Drives framework behavior detection.
+    Annotation,
+    /// Protocol/trait: Rust `trait`, PHP `trait`, Swift `protocol`,
+    /// Scala `trait`. Distinct from `Interface` (Java/C#) — different
+    /// dispatch + default-method semantics.
+    Trait,
+    /// Rust `impl` block: associates methods with a concrete type. Not
+    /// a symbol callers reach for directly, but `gnx inspect` needs it
+    /// to enumerate associated functions per type.
+    Impl,
 }
 
 impl NodeKind {
@@ -93,9 +139,14 @@ impl NodeKind {
     }
 
     /// True when the node represents an extendable / type-binding target
-    /// (EXTENDS edges, type annotations).
+    /// (EXTENDS edges, type annotations). Includes the parity-14-langs
+    /// value-type variants so Rust `struct Foo` / `type Foo = Bar` / `trait
+    /// Foo` remain reachable by the qualifier-scoped resolver (Tier 2.5).
     pub const fn is_type(self) -> bool {
-        matches!(self, Self::Class | Self::Interface)
+        matches!(
+            self,
+            Self::Class | Self::Interface | Self::Struct | Self::Enum | Self::Typedef | Self::Trait
+        )
     }
 }
 

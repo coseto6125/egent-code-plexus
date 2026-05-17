@@ -26,13 +26,24 @@ struct RustCaptureIndices {
     name_enum: Option<u32>,
     name_trait: Option<u32>,
     name_function: Option<u32>,
+    name_module: Option<u32>,
+    name_type_alias: Option<u32>,
+    name_const: Option<u32>,
+    name_impl: Option<u32>,
+    name_macro: Option<u32>,
     import_name: Option<u32>,
     import_source: Option<u32>,
     import_alias: Option<u32>,
     function: Option<u32>,
-    class: Option<u32>,
+    struct_root: Option<u32>,
+    enum_root: Option<u32>,
+    trait_root: Option<u32>,
     method: Option<u32>,
-    interface: Option<u32>,
+    module_root: Option<u32>,
+    type_alias_root: Option<u32>,
+    const_root: Option<u32>,
+    impl_root: Option<u32>,
+    macro_root: Option<u32>,
     export: Option<u32>,
     heritage: Option<u32>,
     type_ann: Option<u32>,
@@ -58,13 +69,24 @@ impl RustProvider {
             name_enum: query.capture_index_for_name("enum_item.name"),
             name_trait: query.capture_index_for_name("trait_item.name"),
             name_function: query.capture_index_for_name("function_item.name"),
+            name_module: query.capture_index_for_name("module_item.name"),
+            name_type_alias: query.capture_index_for_name("type_alias_item.name"),
+            name_const: query.capture_index_for_name("const_item.name"),
+            name_impl: query.capture_index_for_name("impl_item.name"),
+            name_macro: query.capture_index_for_name("macro_item.name"),
             import_name: query.capture_index_for_name("import.name"),
             import_source: query.capture_index_for_name("import.source"),
             import_alias: query.capture_index_for_name("import.alias"),
             function: query.capture_index_for_name("function"),
-            class: query.capture_index_for_name("class"),
+            struct_root: query.capture_index_for_name("struct"),
+            enum_root: query.capture_index_for_name("enum"),
+            trait_root: query.capture_index_for_name("trait"),
             method: query.capture_index_for_name("method"),
-            interface: query.capture_index_for_name("interface"),
+            module_root: query.capture_index_for_name("module"),
+            type_alias_root: query.capture_index_for_name("type_alias"),
+            const_root: query.capture_index_for_name("const_decl"),
+            impl_root: query.capture_index_for_name("impl_block"),
+            macro_root: query.capture_index_for_name("macro_def"),
             export: query.capture_index_for_name("export"),
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
@@ -92,8 +114,8 @@ impl LanguageProvider for RustProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut nodes = Vec::new();
-        let mut imports = Vec::new();
+        let mut nodes: Vec<RawNode> = Vec::new();
+        let mut imports: Vec<RawImport> = Vec::new();
 
         let idx = &self.indices;
 
@@ -126,16 +148,45 @@ impl LanguageProvider for RustProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx.name_struct || cap_idx == idx.name_enum {
-                    // struct 與 enum 在 gnx NodeKind 統一映射為 Class。
+                if cap_idx == idx.name_struct {
                     name_node = Some(cap.node);
                     if kind.is_none() {
-                        kind = Some(NodeKind::Class);
+                        kind = Some(NodeKind::Struct);
+                    }
+                } else if cap_idx == idx.name_enum {
+                    name_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Enum);
                     }
                 } else if cap_idx == idx.name_trait {
                     name_node = Some(cap.node);
                     if kind.is_none() {
-                        kind = Some(NodeKind::Interface);
+                        kind = Some(NodeKind::Trait);
+                    }
+                } else if cap_idx == idx.name_module {
+                    name_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Module);
+                    }
+                } else if cap_idx == idx.name_type_alias {
+                    name_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Typedef);
+                    }
+                } else if cap_idx == idx.name_const {
+                    name_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Const);
+                    }
+                } else if cap_idx == idx.name_impl {
+                    name_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Impl);
+                    }
+                } else if cap_idx == idx.name_macro {
+                    name_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Macro);
                     }
                 } else if cap_idx == idx.name_function {
                     name_node = Some(cap.node);
@@ -156,18 +207,36 @@ impl LanguageProvider for RustProvider {
                 } else if cap_idx == idx.function {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Function);
-                } else if cap_idx == idx.class {
+                } else if cap_idx == idx.struct_root {
                     root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
+                    kind = Some(NodeKind::Struct);
+                } else if cap_idx == idx.enum_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Enum);
+                } else if cap_idx == idx.trait_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Trait);
+                } else if cap_idx == idx.module_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Module);
+                } else if cap_idx == idx.type_alias_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Typedef);
+                } else if cap_idx == idx.const_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Const);
+                } else if cap_idx == idx.impl_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Impl);
+                } else if cap_idx == idx.macro_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::Macro);
                 } else if cap_idx == idx.property {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Property);
                 } else if cap_idx == idx.method {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
-                } else if cap_idx == idx.interface {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
                 } else if cap_idx == idx.export {
                     is_exported = true;
                 } else if cap_idx == idx.heritage {
@@ -226,16 +295,48 @@ impl LanguageProvider for RustProvider {
                     if matches!(k, NodeKind::Function | NodeKind::Method) {
                         fn_spans.push((name_str.to_string(), root.start_byte()..root.end_byte()));
                     }
-                    nodes.push(RawNode {
-                        decorators,
-                        is_exported,
-                        heritage,
-                        type_annotation,
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: node_span(&root),
-                        calls: Vec::new(),
-                    });
+                    // Dedup by (name, span): inherent-impl + trait-impl queries
+                    // both fire on `impl Trait for Type { fn m() {} }`. Keep the
+                    // higher-priority kind (Method/Constructor > Function).
+                    let span = node_span(&root);
+                    let new_priority = match k {
+                        NodeKind::Constructor => 3,
+                        NodeKind::Method => 2,
+                        NodeKind::Function => 1,
+                        _ => 0,
+                    };
+                    let mut merged = false;
+                    if new_priority > 0 {
+                        for existing in nodes.iter_mut() {
+                            if existing.name == name_str && existing.span == span {
+                                let existing_priority = match existing.kind {
+                                    NodeKind::Constructor => 3,
+                                    NodeKind::Method => 2,
+                                    NodeKind::Function => 1,
+                                    _ => 0,
+                                };
+                                if existing_priority > 0 && new_priority > existing_priority {
+                                    existing.kind = k;
+                                }
+                                if existing_priority > 0 {
+                                    merged = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if !merged {
+                        nodes.push(RawNode {
+                            decorators,
+                            is_exported,
+                            heritage,
+                            type_annotation,
+                            name: name_str.to_string(),
+                            kind: k,
+                            span,
+                            calls: Vec::new(),
+                        });
+                    }
                 }
             }
 

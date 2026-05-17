@@ -80,6 +80,8 @@ impl LanguageProvider for DartProvider {
         let idx_class_name = self.query.capture_index_for_name("class.name");
         let idx_function_name = self.query.capture_index_for_name("function.name");
         let idx_method_name = self.query.capture_index_for_name("method.name");
+        let idx_constructor_name = self.query.capture_index_for_name("constructor.name");
+        let idx_typedef_name = self.query.capture_index_for_name("typedef.name");
         let idx_interface_name = self.query.capture_index_for_name("interface.name");
         let idx_property_name = self.query.capture_index_for_name("property.name");
         let idx_heritage = self.query.capture_index_for_name("heritage");
@@ -91,6 +93,8 @@ impl LanguageProvider for DartProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
         let idx_method = self.query.capture_index_for_name("method");
+        let idx_constructor = self.query.capture_index_for_name("constructor");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_property = self.query.capture_index_for_name("property");
         let idx_import = self.query.capture_index_for_name("import");
@@ -125,6 +129,12 @@ impl LanguageProvider for DartProvider {
                 } else if Some(cap_idx) == idx_method_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Method);
+                } else if Some(cap_idx) == idx_constructor_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Constructor);
+                } else if Some(cap_idx) == idx_typedef_name {
+                    name_node = Some(cap.node);
+                    kind = Some(NodeKind::Typedef);
                 } else if Some(cap_idx) == idx_interface_name {
                     name_node = Some(cap.node);
                     kind = Some(NodeKind::Interface);
@@ -164,6 +174,8 @@ impl LanguageProvider for DartProvider {
                 if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
+                    || Some(cap_idx) == idx_constructor
+                    || Some(cap_idx) == idx_typedef
                     || Some(cap_idx) == idx_interface
                     || Some(cap_idx) == idx_property
                     || Some(cap_idx) == idx_import

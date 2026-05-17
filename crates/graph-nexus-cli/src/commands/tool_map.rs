@@ -264,12 +264,18 @@ pub fn run(args: ToolMapArgs, engine: &Engine) -> Result<(), GnxError> {
 fn collect_tool_bindings(path: &str, src: &str) -> HashMap<String, (Category, String)> {
     let mut out: HashMap<String, (Category, String)> = HashMap::new();
 
-    // Globals always available (browser / Deno / modern Node).
-    for &g in GLOBAL_HTTP_BINDINGS {
-        out.insert(g.to_string(), (Category::Http, g.to_string()));
+    let ext = path.rsplit('.').next().unwrap_or("");
+    let is_js_family = matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs");
+
+    // `fetch` / `XMLHttpRequest` are JS/browser/Deno globals — `.rs` `.py` `.go`
+    // each have their own `fetch` vocabulary (graph node fetch, dict.fetch, …)
+    // that must NOT be tagged HTTP. Gate on the JS family before inserting.
+    if is_js_family {
+        for &g in GLOBAL_HTTP_BINDINGS {
+            out.insert(g.to_string(), (Category::Http, g.to_string()));
+        }
     }
 
-    let ext = path.rsplit('.').next().unwrap_or("");
     match ext {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => parse_js_imports(src, &mut out),
         "py" => parse_python_imports(src, &mut out),
@@ -754,6 +760,31 @@ mod tests {
     fn global_fetch_always_present() {
         let b = bindings("a.ts", "// no imports\n");
         assert_eq!(b.get("fetch").map(|(c, _)| *c), Some(Category::Http));
+    }
+
+    #[test]
+    fn fetch_is_not_http_in_rust_files() {
+        // Regression: `fetch` is a JS/browser/Deno global. In Rust it's
+        // domain vocab (graph node fetch, HashMap accessor, …) and must
+        // not be tagged HTTP without an explicit reqwest/surf/ureq import.
+        let b = bindings("a.rs", "// no imports\n");
+        assert!(b.get("fetch").is_none(), "fetch leaked into Rust bindings: {b:?}");
+        assert!(
+            b.get("XMLHttpRequest").is_none(),
+            "XMLHttpRequest leaked into Rust bindings: {b:?}",
+        );
+    }
+
+    #[test]
+    fn fetch_is_not_http_in_python_files() {
+        let b = bindings("a.py", "# no imports\n");
+        assert!(b.get("fetch").is_none(), "fetch leaked into Python bindings: {b:?}");
+    }
+
+    #[test]
+    fn fetch_is_not_http_in_go_files() {
+        let b = bindings("a.go", "// no imports\n");
+        assert!(b.get("fetch").is_none(), "fetch leaked into Go bindings: {b:?}");
     }
 
     #[test]

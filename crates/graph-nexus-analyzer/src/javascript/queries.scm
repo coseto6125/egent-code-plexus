@@ -57,6 +57,13 @@
   )
 ) @export.variable
 
+;; Object property functions — { key: function(){} } style
+;; Captures named function values inside object literals (e.g. res.format({html: fn}),
+;; Express resource controllers, route handlers).
+(pair
+  key: [(property_identifier) (string (string_fragment))] @name.function
+  value: [(function_expression) (arrow_function)] @function)
+
 ;; Methods
 (method_definition
   name: (property_identifier) @name.method) @method
@@ -91,9 +98,12 @@
     (identifier) @import.alias)
   source: (string (string_fragment) @import.source)) @import.namespace
 
-;; Routes
+;; Routes — generic method-call shape (.get/.post/... and .use with path-shaped string).
+;; `use` is included here because router.use('/path', ...) and app.use('/path', ...)
+;; register mount-point routes captured by ref-gitnexus. The path-shape filter in the
+;; parser (clean_route_path) strips non-route strings so Map.get("key") is suppressed.
 (call_expression
-  function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))
+  function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|use|GET|POST|PUT|DELETE|PATCH)$"))
   arguments: (arguments (string (string_fragment) @route.path))
 ) @route.call
 
