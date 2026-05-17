@@ -160,23 +160,19 @@ Delete both lines. Verify no other internal callers (analyzer crate doesn't depe
 rg -n 'use crate::commands::scan' crates/graph-nexus-cli/src/
 ```
 
-### Task 0.6: Decide on `identifier_finder/python.rs` POC
+### Task 0.6: `identifier_finder` — keep (verified consumer: `gnx rename`)
 
-**Context:** The original spec said "Python POC import-aware code stays in the tree as a reference implementation." This POC currently has no callers (scan was its only consumer). It is dead code.
+**Context:** Original plan assumed scan was the only consumer. Verification (`rg -n 'identifier_finder' crates/`) shows `crates/graph-nexus-cli/src/commands/rename.rs:22` calls `find_identifier_occurrences`. The module stays.
 
-- [ ] **Step 1: Check whether anything still uses it**
+- [ ] **Step 1: Verify the only consumer is rename** (no edits)
 
 ```bash
 rg -n 'identifier_finder' crates/ --type rust
 ```
 
-If only `crates/graph-nexus-analyzer/src/lib.rs` exports it and `crates/graph-nexus-cli/src/commands/scan.rs` consumed it, the entire module becomes orphaned by Phase 0.
+Expected: hits in `analyzer/src/lib.rs` (mod decl), `cli/src/commands/rename.rs` (use), and `analyzer/build.rs` (codegen comment). Nothing else.
 
-- [ ] **Step 2: Resolution (per CLAUDE.md "no dead code" rule overrides spec's "keep as reference")**
-
-Action: delete `crates/graph-nexus-analyzer/src/identifier_finder/` directory and its `pub mod identifier_finder;` line in the analyzer crate's `lib.rs`. The git history is the reference; tree-bloat is not.
-
-If anything outside scan/scan_filters does reference it, keep the module and only delete what's truly orphaned.
+No file edits in this task.
 
 ### Task 0.7: Sweep docs / skills / README
 
