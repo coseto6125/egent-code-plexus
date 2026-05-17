@@ -31,16 +31,6 @@ export async function fetchUser(id: string) {
         .output()
         .unwrap();
     let _ = Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:E-NoR/tool-map-payload-test.git",
-        ])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    let _ = Command::new("git")
         .args(["add", "-A"])
         .current_dir(repo)
         .output()
