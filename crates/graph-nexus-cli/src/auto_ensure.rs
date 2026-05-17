@@ -180,26 +180,15 @@ fn git_head_sha(worktree: &Path) -> io::Result<String> {
         .to_string())
 }
 
-/// Build artifacts, vendor dirs, and language-specific caches: walking
-/// these is wasted work, and their mtimes are noisy (touched by tools,
-/// not source changes), so excluding them avoids false-positive Stale.
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    "target",
-    "node_modules",
-    ".gnx",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    ".cache",
-];
+/// gnx-owned cache dirs that callers can't be expected to list in their
+/// own `.gitignore`. Everything else — `target/`, `node_modules/`,
+/// `__pycache__/`, `dist/`, `.venv/`, etc — is honoured via `.git_ignore(true)`
+/// on the `WalkBuilder`, so the project's own `.gitignore` is the source
+/// of truth for what counts as a "source change". `.git` stays here as a
+/// belt-and-suspenders guard: `WalkBuilder` already filters it, but
+/// `filter_entry` runs before that, and a project with no `.gitignore` at
+/// all would otherwise walk `.git/` mtimes (noisy as hell).
+const SKIP_DIRS: &[&str] = &[".git", ".gnx", ".gitnexus-rs"];
 
 /// Short-circuits on the first source file newer than `graph_mtime`.
 /// Walking the full tree only happens when the graph is genuinely
@@ -213,7 +202,8 @@ fn any_source_newer_than(
 
     for entry in WalkBuilder::new(root)
         .hidden(false)
-        .git_ignore(false)
+        .git_ignore(true)
+        .require_git(false)
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
             !SKIP_DIRS.contains(&name.as_ref())
@@ -253,7 +243,8 @@ fn collect_dirty_files(
 
     for entry in WalkBuilder::new(root)
         .hidden(false)
-        .git_ignore(false)
+        .git_ignore(true)
+        .require_git(false)
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
             !SKIP_DIRS.contains(&name.as_ref())
