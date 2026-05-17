@@ -184,6 +184,19 @@
   ) @typedef
 ) @export
 
+;; Enums — plain `enum X`, `const enum X`, and `declare enum X` all share
+;; `enum_declaration` as the parent node. The capture span is the inner
+;; enum_declaration regardless of any `export`/`declare` wrapper.
+(enum_declaration
+  name: (identifier) @enum.name
+) @enum
+
+(export_statement
+  (enum_declaration
+    name: (identifier) @enum.name
+  ) @enum
+) @export
+
 ;; Routes — `app.METHOD(path, handler)` form.
 ;; `route.handler` captures the named handler argument when present so the
 ;; builder can emit a `HandlesRoute` edge from the handler function back

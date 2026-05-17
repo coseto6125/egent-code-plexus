@@ -22,6 +22,7 @@ impl LangSpec for TypeScriptSpec {
         "property.name"  => NodeKind::Property,
         "const.name"     => NodeKind::Const,
         "variable.name"  => NodeKind::Variable,
+        "enum.name"      => NodeKind::Enum,
     };
 
     // TypeScript uses query-level scope anchoring for most kinds; no runtime
