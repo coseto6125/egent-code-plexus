@@ -44,23 +44,49 @@ DEFAULT_SAMPLE_REPO = REPO_ROOT / ".sample_repo"
 DEFAULT_README = REPO_ROOT / "README.md"
 ANALYZER_SRC = REPO_ROOT / "crates" / "graph-nexus-analyzer" / "src"
 
-# README lang name → spec/parser dir name + sample_repo path prefix.
-LANG_DIRS: dict[str, tuple[str, str]] = {
-    "TypeScript": ("typescript", "TypeScript"),
-    "JavaScript": ("javascript", "JavaScript"),
-    "Python": ("python", "Python"),
-    "Java": ("java", "Java"),
-    "Kotlin": ("kotlin", "Kotlin"),
-    "C#": ("c_sharp", "CSharp"),
-    "Go": ("go", "Go"),
-    "Rust": ("rust", "Rust"),
-    "PHP": ("php", "PHP"),
-    "Ruby": ("ruby", "Ruby"),
-    "Swift": ("swift", "Swift"),
-    "C": ("c", "C"),
-    "C++": ("cpp", "Cpp"),
-    "Dart": ("dart", "Dart"),
+# README lang name → (spec/parser dir name, list of file extensions).
+#
+# Extensions scope cypher counts to files the parser actually handles, not
+# the bootstrap-clone directory the corpus was checked into. The previous
+# `STARTS WITH '<dir>/'` scoping had two failure modes:
+#   1. `JavaScript/` corpus (Express) is CommonJS-only → JS Heritage / Imports
+#      counts read 0 even though the parser handles ES modules correctly
+#      (proven by .js files in `TypeScript/sample/` and `solidity/test/`).
+#   2. `STARTS WITH 'Java/'` would prefix-collide with `JavaScript/` paths,
+#      double-counting Java's `*.java` against the JS row in pathological
+#      sample layouts.
+# Extension-based scoping treats `.js` as JavaScript wherever it lives,
+# which is what the parser dispatch actually does.
+LANG_DIRS: dict[str, tuple[str, list[str]]] = {
+    "TypeScript": ("typescript", [".ts", ".tsx"]),
+    "JavaScript": ("javascript", [".js", ".mjs", ".cjs", ".jsx"]),
+    "Python":     ("python",     [".py", ".pyi"]),
+    "Java":       ("java",       [".java"]),
+    "Kotlin":     ("kotlin",     [".kt", ".kts"]),
+    "C#":         ("c_sharp",    [".cs"]),
+    "Go":         ("go",         [".go"]),
+    "Rust":       ("rust",       [".rs"]),
+    "PHP":        ("php",        [".php"]),
+    "Ruby":       ("ruby",       [".rb"]),
+    "Swift":      ("swift",      [".swift"]),
+    # `.h` is ambiguous (C or C++); the C row claims it via tree-sitter-c
+    # being the parser dispatch default. C++ takes the cpp-specific
+    # variants so the count is mutually exclusive enough.
+    "C":          ("c",          [".c", ".h"]),
+    "C++":        ("cpp",        [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"]),
+    "Dart":       ("dart",       [".dart"]),
 }
+
+
+def _ext_clause(file_exts: list[str], var: str = "a") -> str:
+    """Build a parenthesized OR clause matching any of the extensions.
+
+    Returns e.g. `(a.filePath ENDS WITH '.js' OR a.filePath ENDS WITH '.mjs')`
+    — always parenthesized so it can be AND-combined with other WHERE
+    conditions without operator-precedence surprises.
+    """
+    inner = " OR ".join(f"{var}.filePath ENDS WITH '{ext}'" for ext in file_exts)
+    return f"({inner})"
 
 
 class Cell(Enum):
@@ -111,20 +137,20 @@ class AuditCtx:
 # ───────── per-dimension predicates ─────────
 
 
-# All predicates share the (lang_path, lang_dir, ctx) signature so the
+# All predicates share the (file_exts, lang_dir, ctx) signature so the
 # PREDICATES dispatch table can hold function references directly — no
 # bespoke lambdas, no per-entry signature drift. Predicates that don't
 # need a particular arg take `_` for it.
-def dim_imports(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
-    """'Imports' = ≥1 `Imports` edge originating in this lang's corpus.
+def dim_imports(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
+    """'Imports' = ≥1 `Imports` edge originating in a file of this lang.
 
     Imports are tracked as edges (file -[:Imports]-> module), not as a
     standalone `NodeKind::Import`. ref-gitnexus emits `Import` nodes
     but gnx-rs models them as relationships.
     """
+    where = _ext_clause(file_exts, "a")
     n = ctx.cypher_count(
-        f"MATCH (a)-[:Imports]->(b) WHERE a.filePath STARTS WITH '{lang_path}/' "
-        "RETURN count(*)"
+        f"MATCH (a)-[:Imports]->(b) WHERE {where} RETURN count(*)"
     )
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} Imports edges")
 
@@ -136,58 +162,58 @@ SYMBOL_KINDS = [
 ]
 
 
-def dim_named(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
-    """'Named' = ≥1 symbol-kind node in this lang's corpus.
+def dim_named(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
+    """'Named' = ≥1 symbol-kind node in a file of this lang.
 
     Symbol kinds = Function / Class / Method / … (excludes File / Import /
     Route / EntryPoint / Process — those have their own dimensions or
     aren't "named symbols").
     """
     kinds_q = ", ".join(f"'{k}'" for k in SYMBOL_KINDS)
+    where = _ext_clause(file_exts, "n")
     n = ctx.cypher_count(
-        f"MATCH (n) WHERE n.kind IN [{kinds_q}] AND n.filePath STARTS WITH '{lang_path}/' "
-        "RETURN count(*)"
+        f"MATCH (n) WHERE n.kind IN [{kinds_q}] AND {where} RETURN count(*)"
     )
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} named-symbol nodes")
 
 
-def dim_heritage(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
+def dim_heritage(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Heritage' = ≥1 Extends or Implements edge originating in this lang."""
+    where = _ext_clause(file_exts, "a")
     n = ctx.cypher_count(
-        f"MATCH (a)-[:Extends|Implements]->(b) WHERE a.filePath STARTS WITH '{lang_path}/' "
-        "RETURN count(*)"
+        f"MATCH (a)-[:Extends|Implements]->(b) WHERE {where} RETURN count(*)"
     )
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} Extends/Implements edges")
 
 
-def dim_ctor(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
-    """'Ctor' = ≥1 node with kind=Constructor in this lang's corpus."""
+def dim_ctor(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
+    """'Ctor' = ≥1 node with kind=Constructor in a file of this lang."""
+    where = _ext_clause(file_exts, "n")
     n = ctx.cypher_count(
-        f"MATCH (n) WHERE n.kind='Constructor' AND n.filePath STARTS WITH '{lang_path}/' "
-        "RETURN count(*)"
+        f"MATCH (n) WHERE n.kind='Constructor' AND {where} RETURN count(*)"
     )
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} Constructor nodes")
 
 
-def dim_entry(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
-    """'Entry' = ≥1 node with kind=EntryPoint in this lang's corpus."""
+def dim_entry(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
+    """'Entry' = ≥1 node with kind=EntryPoint in a file of this lang."""
+    where = _ext_clause(file_exts, "n")
     n = ctx.cypher_count(
-        f"MATCH (n) WHERE n.kind='EntryPoint' AND n.filePath STARTS WITH '{lang_path}/' "
-        "RETURN count(*)"
+        f"MATCH (n) WHERE n.kind='EntryPoint' AND {where} RETURN count(*)"
     )
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} EntryPoint nodes")
 
 
-def dim_call(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
+def dim_call(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Call' = ≥1 Calls edge originating in this lang."""
+    where = _ext_clause(file_exts, "a")
     n = ctx.cypher_count(
-        f"MATCH (a)-[:Calls]->(b) WHERE a.filePath STARTS WITH '{lang_path}/' "
-        "RETURN count(*)"
+        f"MATCH (a)-[:Calls]->(b) WHERE {where} RETURN count(*)"
     )
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} Calls edges")
 
 
-def dim_rename(_lang_path: str, lang_dir: str, _ctx: AuditCtx) -> Verdict:
+def dim_rename(_file_exts: list[str], lang_dir: str, _ctx: AuditCtx) -> Verdict:
     """'Rename' = identifier_finder module exists for this lang.
 
     Code-level check: `gnx rename` dispatches per-lang via the
@@ -208,7 +234,7 @@ def dim_rename(_lang_path: str, lang_dir: str, _ctx: AuditCtx) -> Verdict:
 # `Config` / `Frameworks` lack a canonical NodeKind / edge type. Return
 # MANUAL — the verifier flags drift but doesn't auto-fail.
 def dim_manual(reason: str):
-    def predicate(_lang_path: str, _lang_dir: str, _ctx: AuditCtx) -> Verdict:
+    def predicate(_file_exts: list[str], _lang_dir: str, _ctx: AuditCtx) -> Verdict:
         return Verdict(Cell.MANUAL, reason)
     return predicate
 
@@ -317,8 +343,8 @@ def main() -> int:
         print("| Language | " + " | ".join(PREDICATES.keys()) + " |")
         print("| :--- | " + " | ".join([":---:"] * len(PREDICATES)) + " |")
         for lang in langs:
-            lang_dir, lang_path = LANG_DIRS[lang]
-            cells = [pred(lang_path, lang_dir, ctx).cell.value
+            lang_dir, file_exts = LANG_DIRS[lang]
+            cells = [pred(file_exts, lang_dir, ctx).cell.value
                      for pred in PREDICATES.values()]
             print(f"| {lang} | " + " | ".join(cells) + " |")
         return 0
@@ -329,13 +355,19 @@ def main() -> int:
     drift = 0
     manual = 0
     for lang in langs:
-        lang_dir, lang_path = LANG_DIRS[lang]
+        lang_dir, file_exts = LANG_DIRS[lang]
         claims = readme_claims.get(lang, {})
         for dim, pred in PREDICATES.items():
-            v = pred(lang_path, lang_dir, ctx)
+            v = pred(file_exts, lang_dir, ctx)
             claim = claims.get(dim, Cell.MANUAL)
             if v.cell == Cell.MANUAL:
                 manual += 1
+                continue
+            # README `—` (NA) means "this language doesn't have the concept";
+            # the expected emission count is zero. A `NO` (☐) verdict from the
+            # predicate IS the proof of NA — not a drift. Only flag NA-vs-YES
+            # (unexpected emission) as drift on this row.
+            if claim == Cell.NA and v.cell == Cell.NO:
                 continue
             if claim != v.cell:
                 drift += 1
