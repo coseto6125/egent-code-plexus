@@ -1,6 +1,8 @@
 use super::receiver_types::extract_csharp_calls;
+use super::spec::CSharpSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -56,20 +58,12 @@ thread_local! {
 }
 pub struct CSharpProvider {
     query: Query,
-    /// Cached capture indices for new (Property/Variable/Constructor)
-    /// captures added by the 14-lang parity work. Pre-existing captures
-    /// (name.function / name.class / etc.) still look up per parse_file
-    /// — left untouched per surgical-change convention.
-    idx_property_name: Option<u32>,
-    idx_property: Option<u32>,
-    idx_variable_name: Option<u32>,
-    idx_variable: Option<u32>,
-    idx_constructor_name: Option<u32>,
-    idx_constructor: Option<u32>,
-    idx_namespace_name: Option<u32>,
-    idx_namespace: Option<u32>,
-    idx_enum_name: Option<u32>,
-    idx_enum: Option<u32>,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `CSharpSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index (cap.index as usize) — equivalent perf
+    /// to the previous hard-coded if-chain, but the source of truth
+    /// lives in `spec.rs` const tables.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl CSharpProvider {
@@ -77,28 +71,21 @@ impl CSharpProvider {
         let language = tree_sitter_c_sharp::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        let idx_property_name = query.capture_index_for_name("property.name");
-        let idx_property = query.capture_index_for_name("property");
-        let idx_variable_name = query.capture_index_for_name("variable.name");
-        let idx_variable = query.capture_index_for_name("variable");
-        let idx_constructor_name = query.capture_index_for_name("constructor.name");
-        let idx_constructor = query.capture_index_for_name("constructor");
-        let idx_namespace_name = query.capture_index_for_name("namespace.name");
-        let idx_namespace = query.capture_index_for_name("namespace");
-        let idx_enum_name = query.capture_index_for_name("enum.name");
-        let idx_enum = query.capture_index_for_name("enum");
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string
+        // compare). Capture names not in the spec map yield None and
+        // fall through to the metadata-only branches below (heritage,
+        // decorator, etc.).
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| CSharpSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
         Ok(Self {
             query,
-            idx_property_name,
-            idx_property,
-            idx_variable_name,
-            idx_variable,
-            idx_constructor_name,
-            idx_constructor,
-            idx_namespace_name,
-            idx_namespace,
-            idx_enum_name,
-            idx_enum,
+            capture_kind_by_idx,
         })
     }
 }
@@ -122,10 +109,6 @@ impl LanguageProvider for CSharpProvider {
             rustc_hash::FxHashMap::default();
         let mut imports = Vec::new();
 
-        let idx_name_function = self.query.capture_index_for_name("name.function");
-        let idx_name_class = self.query.capture_index_for_name("name.class");
-        let idx_name_method = self.query.capture_index_for_name("name.method");
-        let idx_name_interface = self.query.capture_index_for_name("name.interface");
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
@@ -139,18 +122,11 @@ impl LanguageProvider for CSharpProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
-        // New 14-lang-parity captures: read cached indices (computed once
-        // in `new()`) instead of looking up by name per file.
-        let idx_property_name = self.idx_property_name;
-        let idx_property = self.idx_property;
-        let idx_variable_name = self.idx_variable_name;
-        let idx_variable = self.idx_variable;
-        let idx_constructor_name = self.idx_constructor_name;
-        let idx_constructor = self.idx_constructor;
-        let idx_namespace_name = self.idx_namespace_name;
-        let idx_namespace = self.idx_namespace;
-        let idx_enum_name = self.idx_enum_name;
-        let idx_enum = self.idx_enum;
+        let idx_property = self.query.capture_index_for_name("property");
+        let idx_variable = self.query.capture_index_for_name("variable");
+        let idx_constructor = self.query.capture_index_for_name("constructor");
+        let idx_namespace = self.query.capture_index_for_name("namespace");
+        let idx_enum = self.query.capture_index_for_name("enum");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -168,33 +144,18 @@ impl LanguageProvider for CSharpProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_name_function {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the nine
+                    // explicit Class/Method/Interface/Function/Property/
+                    // Variable/Constructor/Namespace/Enum arms.
+                    // Source of truth: CSharpSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_name_class {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_name_method {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if Some(cap_idx) == idx_name_interface {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
-                } else if Some(cap_idx) == idx_property_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
-                } else if Some(cap_idx) == idx_variable_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Variable);
-                } else if Some(cap_idx) == idx_constructor_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Constructor);
-                } else if Some(cap_idx) == idx_namespace_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Namespace);
-                } else if Some(cap_idx) == idx_enum_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Enum);
+                    kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {

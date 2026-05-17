@@ -1,8 +1,10 @@
 use super::receiver_types::{build_receiver_map, collect_local_types, extract_go_calls};
+use super::spec::GoSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -27,6 +29,12 @@ thread_local! {
 }
 pub struct GoProvider {
     query: Query,
+    /// Capture index → NodeKind mapping, pre-resolved from
+    /// `GoSpec::CAPTURE_KIND` at provider construction. The hot loop
+    /// looks up by integer index (cap.index as usize) — equivalent perf
+    /// to the previous hard-coded if-chain, but the source of truth
+    /// lives in `spec.rs` const tables.
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl GoProvider {
@@ -34,7 +42,22 @@ impl GoProvider {
         let language = tree_sitter_go::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        // Pre-resolve capture-name → NodeKind from the spec table so the
+        // hot loop stays an integer-index lookup (no per-capture string
+        // compare). Capture names not in the spec map yield None and
+        // fall through to the metadata-only branches below (heritage,
+        // route, field, var, etc.).
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| GoSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -53,11 +76,6 @@ impl LanguageProvider for GoProvider {
 
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
-
-        let idx_struct_name = self.query.capture_index_for_name("struct.name");
-        let idx_interface_name = self.query.capture_index_for_name("interface.name");
-        let idx_method_name = self.query.capture_index_for_name("method.name");
-        let idx_function_name = self.query.capture_index_for_name("function.name");
 
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
@@ -151,18 +169,17 @@ impl LanguageProvider for GoProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx_struct_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Single config-driven dispatch replaces the four
+                    // explicit Struct/Interface/Method/Function arms.
+                    // Source of truth: GoSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Struct);
-                } else if cap_idx == idx_interface_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Interface);
-                } else if cap_idx == idx_method_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if cap_idx == idx_function_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
+                    kind = Some(k_from_spec);
                 } else if cap_idx == idx_struct
                     || cap_idx == idx_interface
                     || cap_idx == idx_method
