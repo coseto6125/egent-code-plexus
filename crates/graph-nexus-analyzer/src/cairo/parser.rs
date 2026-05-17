@@ -1,4 +1,6 @@
+use super::spec::CairoSpec;
 use crate::calls::extract_calls;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct CairoProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl CairoProvider {
@@ -23,7 +26,15 @@ impl CairoProvider {
         let language = tree_sitter_cairo::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| CairoSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -43,10 +54,7 @@ impl LanguageProvider for CairoProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_struct_name = self.query.capture_index_for_name("struct.name");
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
+        // Metadata-only captures (kind dispatch is via spec table below)
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_heritage = self.query.capture_index_for_name("heritage");
 
@@ -65,21 +73,16 @@ impl LanguageProvider for CairoProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_function_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // struct/class both map to Class via the spec table.
                     name_node = Some(cap.node);
                     if kind.is_none() {
-                        kind = Some(NodeKind::Function);
-                    }
-                } else if Some(cap_idx) == idx_struct_name || Some(cap_idx) == idx_class_name {
-                    // struct 與 class 在 gnx NodeKind 統一映射為 Class。
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Class);
-                    }
-                } else if Some(cap_idx) == idx_const_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Const);
+                        kind = Some(k_from_spec);
                     }
                 } else if Some(cap_idx) == idx_heritage {
                     if let Ok(h) =

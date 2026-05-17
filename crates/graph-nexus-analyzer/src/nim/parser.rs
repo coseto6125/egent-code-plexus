@@ -1,4 +1,6 @@
+use super::spec::NimSpec;
 use crate::calls::extract_calls;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -8,6 +10,7 @@ use tree_sitter::{Parser, Query, QueryCursor};
 
 pub struct NimProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl NimProvider {
@@ -17,7 +20,15 @@ impl NimProvider {
         let language = tree_sitter_nim::language();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| NimSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -41,11 +52,11 @@ impl LanguageProvider for NimProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
 
-        let idx_function_name = self.query.capture_index_for_name("function.name");
+        // Span captures (root anchors) and metadata-only captures.
+        // Kind dispatch is via spec table below; the *.name index fields
+        // are no longer needed.
         let idx_function = self.query.capture_index_for_name("function");
-        let idx_class_name = self.query.capture_index_for_name("class.name");
         let idx_class = self.query.capture_index_for_name("class");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import = self.query.capture_index_for_name("import");
         let idx_import_source = self.query.capture_index_for_name("import.source");
@@ -59,15 +70,14 @@ impl LanguageProvider for NimProvider {
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
-                if cap_idx == idx_function_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap.index as usize)
+                    .copied()
+                    .flatten()
+                {
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if cap_idx == idx_class_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if cap_idx == idx_const_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Const);
+                    kind = Some(k_from_spec);
                 } else if cap_idx == idx_import_source {
                     import_src_node = Some(cap.node);
                 } else if cap_idx == idx_import {

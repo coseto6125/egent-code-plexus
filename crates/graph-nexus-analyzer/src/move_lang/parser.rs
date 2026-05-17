@@ -1,4 +1,6 @@
+use super::spec::MoveSpec;
 use crate::calls::extract_calls;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct MoveProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl MoveProvider {
@@ -23,7 +26,15 @@ impl MoveProvider {
         let language = tree_sitter_move::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
+            .capture_names()
+            .iter()
+            .map(|name| MoveSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -43,16 +54,13 @@ impl LanguageProvider for MoveProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_struct_name = self.query.capture_index_for_name("struct.name");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
-
+        // Root-span anchors (kind dispatch is via spec table)
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_const = self.query.capture_index_for_name("const");
 
+        // Metadata captures
         let idx_import_name = self.query.capture_index_for_name("import.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
@@ -65,25 +73,16 @@ impl LanguageProvider for MoveProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_class_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // struct/class both map to Class via the spec table.
                     name_node = Some(cap.node);
                     if kind.is_none() {
-                        kind = Some(NodeKind::Class);
-                    }
-                } else if Some(cap_idx) == idx_function_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Function);
-                    }
-                } else if Some(cap_idx) == idx_struct_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Class);
-                    }
-                } else if Some(cap_idx) == idx_const_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Const);
+                        kind = Some(k_from_spec);
                     }
                 } else if [idx_class, idx_function, idx_struct, idx_const].contains(&Some(cap_idx))
                 {
