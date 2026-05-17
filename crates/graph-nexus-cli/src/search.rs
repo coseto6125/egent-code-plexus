@@ -94,7 +94,10 @@ impl TantivyEngine {
 
         let mut schema_builder = Schema::builder();
         let uid_field = schema_builder.add_text_field("uid", STRING | STORED);
-        let name_field = schema_builder.add_text_field("name", TEXT | STORED);
+        // name is query-only (QueryParser parses against it); search()
+        // only fetches uid_field. STORED here would write the doc store
+        // for every node, with no reader ever calling get_first(name).
+        let name_field = schema_builder.add_text_field("name", TEXT);
         let schema = schema_builder.build();
 
         let index = Index::create_in_dir(&index_dir, schema.clone())

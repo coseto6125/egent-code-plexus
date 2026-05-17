@@ -69,37 +69,41 @@ pub fn run_analyzer_for_paths(
 ) -> std::io::Result<usize> {
     let prof = std::env::var("GNX_PROF").is_ok();
     let t_step1 = std::time::Instant::now();
-    // ── Step 1: Scan files ────────────────────────────────────────────────
-    let mut files_to_analyze: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    let mut skipped_large_files: u64 = 0;
+    // ── Step 1: Scan files (parallel walker) ──────────────────────────────
+    // `WalkBuilder::build_parallel()` fans the directory traversal across
+    // rayon-style worker threads. Each visitor pushes accepted paths into
+    // an MPSC channel; the main thread drains into the analysis list.
+    // Sequential `.build()` was ~100ms on .sample_repo's 22.7k entries —
+    // parallel cuts the syscall-bound stat/readdir tax.
     const MAX_FILE_SIZE: u64 = 512 * 1024; // 512 KB
-
-    let walker = WalkBuilder::new(src_root).hidden(false).build();
-
-    for result in walker {
-        match result {
-            Ok(entry) => {
+    let (file_tx, file_rx) =
+        std::sync::mpsc::channel::<(std::path::PathBuf, std::path::PathBuf)>();
+    let skipped_large = std::sync::atomic::AtomicU64::new(0);
+    let skipped_large_ref = &skipped_large;
+    let src_root_ref = src_root;
+    WalkBuilder::new(src_root).hidden(false).build_parallel().run(|| {
+        let tx = file_tx.clone();
+        Box::new(move |result| {
+            if let Ok(entry) = result {
                 let path = entry.path();
-                if path.is_file() {
-                    if !should_analyze_path(path) {
-                        continue;
-                    }
+                if path.is_file() && should_analyze_path(path) {
                     if let Ok(metadata) = entry.metadata() {
                         if metadata.len() > MAX_FILE_SIZE {
-                            skipped_large_files += 1;
-                            continue;
+                            skipped_large_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return ignore::WalkState::Continue;
                         }
                     }
-
-                    let rel_path = path.strip_prefix(src_root).unwrap_or(path);
-                    files_to_analyze.push((path.to_path_buf(), rel_path.to_path_buf()));
+                    let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
+                    let _ = tx.send((path.to_path_buf(), rel_path.to_path_buf()));
                 }
             }
-            Err(err) => {
-                tracing::warn!("Error accessing path during scan: {}", err);
-            }
-        }
-    }
+            ignore::WalkState::Continue
+        })
+    });
+    drop(file_tx);
+    let files_to_analyze: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+        file_rx.into_iter().collect();
+    let skipped_large_files = skipped_large.load(std::sync::atomic::Ordering::Relaxed);
 
     if skipped_large_files > 0 {
         tracing::warn!(

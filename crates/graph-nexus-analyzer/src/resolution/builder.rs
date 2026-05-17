@@ -231,11 +231,10 @@ impl GraphBuilder {
 
         // Pass 1: Register all nodes into SymbolTable and StringPool
         let mut current_node_idx = 0;
-        // Reusable UID format buffer — avoids one allocation per
-        // `Node` (~297k nodes on .sample_repo). `format!` always
-        // allocates a fresh `String`; `write!` into a cleared buffer
-        // reuses the underlying capacity.
-        use std::fmt::Write as _;
+        // Reusable UID buffer — avoids one allocation per `Node` (~297k
+        // nodes on .sample_repo). `push_str` chain over `write!` skips
+        // the fmt dispatch (see `NodeKind::as_str` doc) while reusing
+        // the underlying capacity across clears.
         let mut uid_buf = String::with_capacity(128);
 
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
@@ -251,6 +250,12 @@ impl GraphBuilder {
                 raw_path
             };
             let path_ref = string_pool.add(&path_str);
+            // Hoisted once per file. `register_node` would otherwise call
+            // `FileMeta::from_path` per node (~25× redundant on the
+            // .sample_repo distribution), each allocating one `String`
+            // for the `\\` → `/` normalisation. `path_str` is already
+            // forward-slash, so use the `_normalized_path` fast path.
+            let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
 
             files.push(File {
                 path: path_ref,
@@ -260,15 +265,24 @@ impl GraphBuilder {
             });
 
             for raw_node in &local_graph.nodes {
-                symbol_table.register_node(
+                symbol_table.register_node_with_meta(
                     &path_str,
+                    file_meta,
                     &raw_node.name,
                     current_node_idx,
                     raw_node.kind,
                 );
 
                 uid_buf.clear();
-                let _ = write!(uid_buf, "{:?}:{}:{}", raw_node.kind, path_str, raw_node.name);
+                // push_str chain over `write!("{:?}:{}:{}")`: avoids fmt
+                // dispatch (~300k calls × 3 segments). NodeKind::as_str()
+                // returns the same byte-stable variant identifier that
+                // Debug would, so existing UID strings stay binary-compat.
+                uid_buf.push_str(raw_node.kind.as_str());
+                uid_buf.push(':');
+                uid_buf.push_str(&path_str);
+                uid_buf.push(':');
+                uid_buf.push_str(&raw_node.name);
                 let uid_ref = string_pool.add(&uid_buf);
                 let name_ref = string_pool.add(&raw_node.name);
 

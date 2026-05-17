@@ -273,9 +273,12 @@ impl AnalyzerPipeline {
                 files
                     .into_par_iter()
                     .for_each_with(tx, |sender, (abs_path, rel_path)| {
-                        if self.find_provider(&rel_path).is_none() {
+                        // Single `find_provider` lookup, reused below — avoids
+                        // the double-lookup the original `is_none()` gate +
+                        // re-`match` pattern paid per file.
+                        let Some(provider) = self.find_provider(&rel_path) else {
                             return;
-                        }
+                        };
                         // Skip oversized files before `fs::read` to keep the
                         // worker thread from materialising a multi-GiB blob
                         // into memory. metadata() is one fstat — cheap.
@@ -302,15 +305,7 @@ impl AnalyzerPipeline {
                             return;
                         }
 
-                        // Cache miss / no cache: regular parse path. The
-                        // provider lookup ran already and returned Some,
-                        // so unwrap is safe; re-run it to keep the borrow
-                        // checker happy without restructuring the outer
-                        // control flow.
-                        let provider = match self.find_provider(&rel_path) {
-                            Some(p) => p,
-                            None => return,
-                        };
+                        // Cache miss / no cache: regular parse path.
                         let t_parse = std::time::Instant::now();
                         let result = provider.parse_file(&rel_path, &source);
                         let parse_ns = t_parse.elapsed().as_nanos() as u64;

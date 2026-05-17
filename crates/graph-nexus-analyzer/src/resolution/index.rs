@@ -61,7 +61,19 @@ impl Language {
     /// extension routing in `commands/analyze.rs` plus path-based overrides
     /// for `Dockerfile` / `docker-compose.{yml,yaml}` / `.github/workflows/*`.
     pub fn from_path(path: &str) -> Self {
-        let normalized = path.replace('\\', "/");
+        if path.contains('\\') {
+            let normalized = path.replace('\\', "/");
+            Self::from_normalized_path(&normalized)
+        } else {
+            Self::from_normalized_path(path)
+        }
+    }
+
+    /// Fast path for callers that have already converted backslashes (Pass 1
+    /// in `builder.rs` and most repo-rooted paths on Linux/macOS). Skips the
+    /// `replace('\\','/')` allocation entirely.
+    pub fn from_normalized_path(path: &str) -> Self {
+        let normalized = path;
         let basename = normalized.rsplit('/').next().unwrap_or("");
 
         // Path / basename overrides before extension routing.
@@ -172,10 +184,21 @@ pub struct FileMeta {
 
 impl FileMeta {
     pub fn from_path(path: &str) -> Self {
-        let normalized = path.replace('\\', "/");
+        if path.contains('\\') {
+            let normalized = path.replace('\\', "/");
+            Self::from_normalized_path(&normalized)
+        } else {
+            Self::from_normalized_path(path)
+        }
+    }
+
+    /// Fast path for callers that have already normalised separators. Skips
+    /// the `replace('\\','/')` allocation (one per call) — meaningful in Pass
+    /// 1 where this is called per node (~300k on `.sample_repo`).
+    pub fn from_normalized_path(path: &str) -> Self {
         Self {
-            is_vendor: normalized.contains("/vendor/") || normalized.starts_with("vendor/"),
-            language: Language::from_path(path),
+            is_vendor: path.contains("/vendor/") || path.starts_with("vendor/"),
+            language: Language::from_normalized_path(path),
         }
     }
 }
@@ -255,6 +278,51 @@ impl SymbolTable {
 
         self.node_kinds.push(kind);
         self.node_file_meta.push(FileMeta::from_path(file_path));
+    }
+
+    /// Hot-path variant of `register_node` for callers that already
+    /// computed `FileMeta` for this file (i.e. Pass 1 hoists `FileMeta`
+    /// once per file out of the per-node loop, since 1 file ↔ ~25 nodes
+    /// on `.sample_repo` and `FileMeta::from_path` allocates one `String`
+    /// per call for the `\\` → `/` replace). Semantically identical to
+    /// `register_node` but skips the redundant per-node path parse.
+    ///
+    /// Map inserts use `get_mut` → fall-through `entry(.to_string())` so
+    /// the file_path / node_name keys only allocate on first sight. After
+    /// node #1 of a file lands, the next ~24 nodes hit the get_mut fast
+    /// path and reuse the existing key bucket.
+    pub fn register_node_with_meta(
+        &mut self,
+        file_path: &str,
+        file_meta: FileMeta,
+        node_name: &str,
+        node_id: u32,
+        kind: NodeKind,
+    ) {
+        debug_assert_eq!(
+            node_id as usize,
+            self.node_kinds.len(),
+            "register_node ids must be monotonic and dense for kind-indexing"
+        );
+
+        if let Some(file_map) = self.file_scoped.get_mut(file_path) {
+            file_map.insert(node_name.to_string(), node_id);
+        } else {
+            let mut m = FxHashMap::default();
+            m.insert(node_name.to_string(), node_id);
+            self.file_scoped.insert(file_path.to_string(), m);
+        }
+
+        if let Some(list) = self.global_scoped.get_mut(node_name) {
+            list.push(node_id);
+        } else {
+            self.global_scoped.insert(node_name.to_string(), vec![node_id]);
+        }
+
+        self.id_to_file.insert(node_id, file_path.to_string());
+
+        self.node_kinds.push(kind);
+        self.node_file_meta.push(file_meta);
     }
 
     /// Looks up a node ID by its file path and node name.
