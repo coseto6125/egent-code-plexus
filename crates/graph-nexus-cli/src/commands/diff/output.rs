@@ -44,7 +44,7 @@ fn build_json(env: &DiffPayload) -> Value {
     }
     serde_json::json!({
         "baseline": {"ref": env.baseline_ref, "sha": env.baseline_sha},
-        "current":  {"ref": "HEAD",  "sha": env.current_sha},
+        "current":  {"ref": env.current_ref, "sha": env.current_sha},
         "sections": sections,
     })
 }
@@ -54,7 +54,7 @@ fn emit_text(env: &DiffPayload) {
     let csha = &env.current_sha[..env.current_sha.len().min(7)];
     println!(
         "═══ Graph Δ ({} {}→{} {}) ═══",
-        env.baseline_ref, bsha, "HEAD", csha,
+        env.baseline_ref, bsha, env.current_ref, csha,
     );
 
     let limit = if env.verbose { usize::MAX } else { 10 };

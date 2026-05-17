@@ -14,12 +14,14 @@ pub mod git_guard;
 pub mod output;
 pub mod routes;
 
+#[derive(Debug)]
 pub struct DiffPayload {
     pub bindings: Option<bindings::BindingsDiff>,
     pub routes: Option<routes::RoutesDiff>,
     pub contracts: Option<contracts::ContractsDiff>,
     pub baseline_ref: String,
     pub baseline_sha: String,
+    pub current_ref: String,
     pub current_sha: String,
     pub verbose: bool,
 }
@@ -96,6 +98,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, GnxError> {
             contracts: want_contracts.then(contracts::ContractsDiff::default),
             baseline_ref: args.baseline.clone(),
             baseline_sha,
+            current_ref: "HEAD".to_string(),
             current_sha,
             verbose: args.verbose,
         });
@@ -160,6 +163,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, GnxError> {
         contracts: contracts_diff,
         baseline_ref: args.baseline.clone(),
         baseline_sha,
+        current_ref: "HEAD".to_string(),
         current_sha,
         verbose: args.verbose,
     })
