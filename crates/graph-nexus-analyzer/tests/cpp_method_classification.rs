@@ -58,11 +58,13 @@ fn inline_struct_member_function_is_method() {
 }
 
 #[test]
-fn inline_constructor_is_method() {
+fn inline_constructor_is_constructor() {
     // Constructor defined inline: tree-sitter aliases it as function_definition
-    // inside the class body → must become Method.
+    // inside the class body → becomes Method via is_inline_class_member, then
+    // promoted to Constructor because name == enclosing struct name.
     let nodes = parse("struct person { person(int x) {} };\n");
-    find(&nodes, "person", NodeKind::Method);
+    find(&nodes, "person", NodeKind::Constructor);
+    absent(&nodes, "person", NodeKind::Method);
 }
 
 #[test]
@@ -109,6 +111,7 @@ fn nested_class_inline_method_is_method() {
 fn method_inside_namespace_class() {
     let src = "namespace ns { struct person { person(int x) {} }; }\n";
     let nodes = parse(src);
-    find(&nodes, "person", NodeKind::Method);
+    // `person` matches the struct name → promoted to Constructor.
+    find(&nodes, "person", NodeKind::Constructor);
     absent(&nodes, "person", NodeKind::Function);
 }

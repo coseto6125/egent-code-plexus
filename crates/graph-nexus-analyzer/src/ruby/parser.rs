@@ -286,6 +286,13 @@ impl LanguageProvider for RubyProvider {
                         // Classes and Traits (modules) are always exported.
                         true
                     };
+                    // Ruby's constructor convention is `initialize`; the spec
+                    // table maps it as Method, so promote here.
+                    let k = if k == NodeKind::Method && name_str == "initialize" {
+                        NodeKind::Constructor
+                    } else {
+                        k
+                    };
                     nodes.push(RawNode {
                         decorators: decorators.clone(),
                         is_exported,
