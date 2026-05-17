@@ -40,9 +40,8 @@ from enum import Enum
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SAMPLE_REPO = "/home/enor/gitnexus-rs/.sample_repo"
-GNX = "/home/enor/.cargo/bin/gnx"
-README = REPO_ROOT / "README.md"
+DEFAULT_SAMPLE_REPO = REPO_ROOT / ".sample_repo"
+DEFAULT_README = REPO_ROOT / "README.md"
 ANALYZER_SRC = REPO_ROOT / "crates" / "graph-nexus-analyzer" / "src"
 
 # README lang name → spec/parser dir name + sample_repo path prefix.
@@ -112,7 +111,11 @@ class AuditCtx:
 # ───────── per-dimension predicates ─────────
 
 
-def dim_imports(lang_path: str, ctx: AuditCtx) -> Verdict:
+# All predicates share the (lang_path, lang_dir, ctx) signature so the
+# PREDICATES dispatch table can hold function references directly — no
+# bespoke lambdas, no per-entry signature drift. Predicates that don't
+# need a particular arg take `_` for it.
+def dim_imports(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Imports' = ≥1 `Imports` edge originating in this lang's corpus.
 
     Imports are tracked as edges (file -[:Imports]-> module), not as a
@@ -133,7 +136,7 @@ SYMBOL_KINDS = [
 ]
 
 
-def dim_named(lang_path: str, ctx: AuditCtx) -> Verdict:
+def dim_named(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Named' = ≥1 symbol-kind node in this lang's corpus.
 
     Symbol kinds = Function / Class / Method / … (excludes File / Import /
@@ -148,7 +151,7 @@ def dim_named(lang_path: str, ctx: AuditCtx) -> Verdict:
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} named-symbol nodes")
 
 
-def dim_heritage(lang_path: str, ctx: AuditCtx) -> Verdict:
+def dim_heritage(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Heritage' = ≥1 Extends or Implements edge originating in this lang."""
     n = ctx.cypher_count(
         f"MATCH (a)-[:Extends|Implements]->(b) WHERE a.filePath STARTS WITH '{lang_path}/' "
@@ -157,7 +160,7 @@ def dim_heritage(lang_path: str, ctx: AuditCtx) -> Verdict:
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} Extends/Implements edges")
 
 
-def dim_ctor(lang_path: str, ctx: AuditCtx) -> Verdict:
+def dim_ctor(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Ctor' = ≥1 node with kind=Constructor in this lang's corpus."""
     n = ctx.cypher_count(
         f"MATCH (n) WHERE n.kind='Constructor' AND n.filePath STARTS WITH '{lang_path}/' "
@@ -166,7 +169,7 @@ def dim_ctor(lang_path: str, ctx: AuditCtx) -> Verdict:
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} Constructor nodes")
 
 
-def dim_entry(lang_path: str, ctx: AuditCtx) -> Verdict:
+def dim_entry(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Entry' = ≥1 node with kind=EntryPoint in this lang's corpus."""
     n = ctx.cypher_count(
         f"MATCH (n) WHERE n.kind='EntryPoint' AND n.filePath STARTS WITH '{lang_path}/' "
@@ -175,7 +178,7 @@ def dim_entry(lang_path: str, ctx: AuditCtx) -> Verdict:
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} EntryPoint nodes")
 
 
-def dim_call(lang_path: str, ctx: AuditCtx) -> Verdict:
+def dim_call(lang_path: str, _lang_dir: str, ctx: AuditCtx) -> Verdict:
     """'Call' = ≥1 Calls edge originating in this lang."""
     n = ctx.cypher_count(
         f"MATCH (a)-[:Calls]->(b) WHERE a.filePath STARTS WITH '{lang_path}/' "
@@ -184,7 +187,7 @@ def dim_call(lang_path: str, ctx: AuditCtx) -> Verdict:
     return Verdict(Cell.YES if n > 0 else Cell.NO, f"{n} Calls edges")
 
 
-def dim_rename(lang_dir: str) -> Verdict:
+def dim_rename(_lang_path: str, lang_dir: str, _ctx: AuditCtx) -> Verdict:
     """'Rename' = identifier_finder module exists for this lang.
 
     Code-level check: `gnx rename` dispatches per-lang via the
@@ -193,9 +196,10 @@ def dim_rename(lang_dir: str) -> Verdict:
     lang-specific identifier-range table and exits no-op.
     """
     p = ANALYZER_SRC / "identifier_finder" / f"{lang_dir}.rs"
+    exists = p.exists()
     return Verdict(
-        Cell.YES if p.exists() else Cell.NO,
-        f"identifier_finder/{lang_dir}.rs {'exists' if p.exists() else 'missing'}",
+        Cell.YES if exists else Cell.NO,
+        f"identifier_finder/{lang_dir}.rs {'exists' if exists else 'missing'}",
     )
 
 
@@ -204,23 +208,23 @@ def dim_rename(lang_dir: str) -> Verdict:
 # `Config` / `Frameworks` lack a canonical NodeKind / edge type. Return
 # MANUAL — the verifier flags drift but doesn't auto-fail.
 def dim_manual(reason: str):
-    def predicate(lang_path: str, ctx: AuditCtx) -> Verdict:
+    def predicate(_lang_path: str, _lang_dir: str, _ctx: AuditCtx) -> Verdict:
         return Verdict(Cell.MANUAL, reason)
     return predicate
 
 
 PREDICATES = {
-    "Imports": lambda lp, lr, ctx: dim_imports(lp, ctx),
-    "Named":   lambda lp, lr, ctx: dim_named(lp, ctx),
-    "Exports": lambda lp, lr, ctx: dim_manual("cypher can't read n.is_exported")(lp, ctx),
-    "Heritage": lambda lp, lr, ctx: dim_heritage(lp, ctx),
-    "Types":   lambda lp, lr, ctx: dim_manual("cypher can't read n.type_annotation")(lp, ctx),
-    "Ctor":    lambda lp, lr, ctx: dim_ctor(lp, ctx),
-    "Config":  lambda lp, lr, ctx: dim_manual("no canonical Config NodeKind")(lp, ctx),
-    "Frameworks": lambda lp, lr, ctx: dim_manual("framework_refs not exposed via cypher")(lp, ctx),
-    "Entry":   lambda lp, lr, ctx: dim_entry(lp, ctx),
-    "Call":    lambda lp, lr, ctx: dim_call(lp, ctx),
-    "Rename":  lambda lp, lr, ctx: dim_rename(lr),
+    "Imports":    dim_imports,
+    "Named":      dim_named,
+    "Exports":    dim_manual("cypher can't read n.is_exported"),
+    "Heritage":   dim_heritage,
+    "Types":      dim_manual("cypher can't read n.type_annotation"),
+    "Ctor":       dim_ctor,
+    "Config":     dim_manual("no canonical Config NodeKind"),
+    "Frameworks": dim_manual("framework_refs not exposed via cypher"),
+    "Entry":      dim_entry,
+    "Call":       dim_call,
+    "Rename":     dim_rename,
 }
 
 
@@ -234,21 +238,18 @@ README_ROW_RE = re.compile(
 )
 
 
-def parse_readme_claims() -> dict[str, dict[str, Cell]]:
+def parse_readme_claims(readme: Path) -> dict[str, dict[str, Cell]]:
     """Parse `## Language Matrix` table → {lang: {dim: Cell}}."""
-    if not README.exists():
+    if not readme.exists():
         return {}
-    text = README.read_text()
-    lines = text.split("\n")
-    # Find header line
-    header_idx = None
-    for i, line in enumerate(lines):
-        if line.startswith("| Language | Imports | Named"):
-            header_idx = i
-            break
+    lines = readme.read_text().splitlines()
+    header_idx = next(
+        (i for i, line in enumerate(lines)
+         if line.startswith("| Language | Imports | Named")),
+        None,
+    )
     if header_idx is None:
         return {}
-    # Extract column names
     cols = [c.strip() for c in lines[header_idx].split("|")[1:-1]]
     dim_cols = cols[1:]  # drop "Language"
     claims: dict[str, dict[str, Cell]] = {}
@@ -261,17 +262,26 @@ def parse_readme_claims() -> dict[str, dict[str, Cell]]:
         lang = cells[0]
         if not lang or lang.startswith("─"):
             continue
-        claims[lang] = {}
-        for dim, val in zip(dim_cols, cells[1:]):
-            if val == "✓":
-                claims[lang][dim] = Cell.YES
-            elif val == "☐":
-                claims[lang][dim] = Cell.NO
-            elif val == "—":
-                claims[lang][dim] = Cell.NA
-            else:
-                claims[lang][dim] = Cell.MANUAL
+        # zip(strict=True) is redundant given the length check above but
+        # documents that header / row column counts MUST agree — a defence
+        # against the length check ever being weakened in a refactor.
+        claims[lang] = {
+            dim: _cell_from_str(val)
+            for dim, val in zip(dim_cols, cells[1:], strict=True)
+        }
     return claims
+
+
+def _cell_from_str(val: str) -> Cell:
+    match val:
+        case "✓":
+            return Cell.YES
+        case "☐":
+            return Cell.NO
+        case "—":
+            return Cell.NA
+        case _:
+            return Cell.MANUAL
 
 
 # ───────── main ─────────
@@ -283,13 +293,19 @@ def main() -> int:
                     help="Comma-separated README lang names to limit output (e.g. 'Rust,Kotlin')")
     ap.add_argument("--generate", action="store_true",
                     help="Emit a fresh markdown table from verified facts")
-    ap.add_argument("--sample-repo", type=str, default=SAMPLE_REPO)
+    ap.add_argument("--sample-repo", type=Path, default=DEFAULT_SAMPLE_REPO,
+                    help="Path to .sample_repo (default: <repo>/.sample_repo)")
+    ap.add_argument("--gnx-bin", type=str, default="gnx",
+                    help="gnx binary (default: 'gnx' from PATH)")
+    ap.add_argument("--readme", type=Path, default=DEFAULT_README,
+                    help="README to verify (default: <repo>/README.md; "
+                         "use README_zh-TW.md to check the zh-TW variant)")
     args = ap.parse_args()
 
-    ctx = AuditCtx(sample_repo=args.sample_repo, gnx_bin=GNX)
-    readme_claims = parse_readme_claims()
+    ctx = AuditCtx(sample_repo=str(args.sample_repo), gnx_bin=args.gnx_bin)
+    readme_claims = parse_readme_claims(args.readme)
     if not readme_claims:
-        sys.stderr.write(f"!! could not parse README Language Matrix from {README}\n")
+        sys.stderr.write(f"!! could not parse README Language Matrix from {args.readme}\n")
         return 2
 
     only = {s.strip() for s in args.only.split(",") if s.strip()}
@@ -302,10 +318,8 @@ def main() -> int:
         print("| :--- | " + " | ".join([":---:"] * len(PREDICATES)) + " |")
         for lang in langs:
             lang_dir, lang_path = LANG_DIRS[lang]
-            cells = []
-            for dim, pred in PREDICATES.items():
-                v = pred(lang_path, lang_dir, ctx)
-                cells.append(v.cell.value)
+            cells = [pred(lang_path, lang_dir, ctx).cell.value
+                     for pred in PREDICATES.values()]
             print(f"| {lang} | " + " | ".join(cells) + " |")
         return 0
 
