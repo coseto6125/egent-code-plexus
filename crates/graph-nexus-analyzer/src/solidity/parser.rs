@@ -1,4 +1,6 @@
 use crate::calls::extract_calls;
+use super::spec::SoliditySpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct SolidityProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl SolidityProvider {
@@ -23,7 +26,14 @@ impl SolidityProvider {
         let language = tree_sitter_solidity::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| SoliditySpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -43,19 +53,15 @@ impl LanguageProvider for SolidityProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
 
-        // Name captures
-        let idx_class_name = self.query.capture_index_for_name("class.name");
-        let idx_method_name = self.query.capture_index_for_name("method.name");
-        let idx_function_name = self.query.capture_index_for_name("function.name");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
-        let idx_state_var_name = self.query.capture_index_for_name("state_var.name");
-
         // Span captures
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_function = self.query.capture_index_for_name("function");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_state_var = self.query.capture_index_for_name("state_var");
+
+        // Name captures that need special state tracking
+        let idx_state_var_name = self.query.capture_index_for_name("state_var.name");
 
         // State variable visibility
         let idx_state_var_visibility = self.query.capture_index_for_name("state_var.visibility");
@@ -74,69 +80,56 @@ impl LanguageProvider for SolidityProvider {
             let mut state_var_visibility: Option<&[u8]> = None;
 
             for cap in m.captures {
-                let ci = cap.index;
-                if Some(ci) == idx_class_name {
+                let cap_idx = cap.index;
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
                     name_node = Some(cap.node);
                     if kind.is_none() {
-                        kind = Some(NodeKind::Class);
+                        kind = Some(k_from_spec);
                     }
-                } else if Some(ci) == idx_method_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Method);
+                    if Some(cap_idx) == idx_state_var_name {
+                        is_state_var = true;
                     }
-                } else if Some(ci) == idx_function_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Function);
-                    }
-                } else if Some(ci) == idx_const_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Const);
-                    }
-                } else if Some(ci) == idx_state_var_name {
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(NodeKind::Const);
-                    }
-                    is_state_var = true;
-                } else if Some(ci) == idx_class {
+                } else if Some(cap_idx) == idx_class {
                     root_span_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Class);
                     }
-                } else if Some(ci) == idx_method {
+                } else if Some(cap_idx) == idx_method {
                     root_span_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Method);
                     }
-                } else if Some(ci) == idx_function {
+                } else if Some(cap_idx) == idx_function {
                     root_span_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Function);
                     }
-                } else if Some(ci) == idx_const {
+                } else if Some(cap_idx) == idx_const {
                     root_span_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Const);
                     }
-                } else if Some(ci) == idx_state_var {
+                } else if Some(cap_idx) == idx_state_var {
                     root_span_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Const);
                     }
                     is_state_var = true;
-                } else if Some(ci) == idx_state_var_visibility {
+                } else if Some(cap_idx) == idx_state_var_visibility {
                     state_var_visibility =
                         Some(&source[cap.node.start_byte()..cap.node.end_byte()]);
-                } else if Some(ci) == idx_heritage {
+                } else if Some(cap_idx) == idx_heritage {
                     if let Ok(h) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
                         heritage.push(h.to_string());
                     }
-                } else if Some(ci) == idx_import_source {
+                } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
                 }
             }

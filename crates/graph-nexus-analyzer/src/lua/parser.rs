@@ -1,4 +1,6 @@
 use crate::calls::extract_calls;
+use super::spec::LuaSpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct LuaProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl LuaProvider {
@@ -23,7 +26,14 @@ impl LuaProvider {
         let language = tree_sitter_lua::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| LuaSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -58,10 +68,8 @@ impl LanguageProvider for LuaProvider {
         // regardless of capture ordering.
         let mut pending_meta: Vec<(String, String)> = Vec::new();
 
-        let idx_function_name = self.query.capture_index_for_name("function.name");
+        // Metadata-only captures
         let idx_function_table = self.query.capture_index_for_name("function.table");
-        let idx_struct_name = self.query.capture_index_for_name("struct.name");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
         let idx_import_alias_source = self.query.capture_index_for_name("import.alias.source");
@@ -69,6 +77,10 @@ impl LanguageProvider for LuaProvider {
         let idx_meta_child = self.query.capture_index_for_name("meta.child");
         let idx_meta_parent = self.query.capture_index_for_name("meta.parent");
 
+        // Name captures handled via spec
+        let idx_struct_name = self.query.capture_index_for_name("struct.name");
+
+        // Span captures
         let idx_function = self.query.capture_index_for_name("function");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_const = self.query.capture_index_for_name("const");
@@ -89,20 +101,22 @@ impl LanguageProvider for LuaProvider {
 
             for cap in m.captures {
                 let cap_idx = cap.index;
-                if Some(cap_idx) == idx_function_name {
+                if let Some(k_from_spec) = self
+                    .capture_kind_by_idx
+                    .get(cap_idx as usize)
+                    .copied()
+                    .flatten()
+                {
+                    // Spec-based dispatch for function.name, struct.name, const.name
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
+                    if kind.is_none() {
+                        kind = Some(k_from_spec);
+                    }
+                    if Some(cap_idx) == idx_struct_name {
+                        is_struct = true;
+                    }
                 } else if Some(cap_idx) == idx_function_table {
                     function_table_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_struct_name {
-                    name_node = Some(cap.node);
-                    is_struct = true;
-                } else if Some(cap_idx) == idx_const_name {
-                    // Only set if we don't already have a more specific kind
-                    if name_node.is_none() {
-                        name_node = Some(cap.node);
-                        kind = Some(NodeKind::Const);
-                    }
                 } else if Some(cap_idx) == idx_import_source
                     || Some(cap_idx) == idx_import_alias_source
                 {
