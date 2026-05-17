@@ -125,25 +125,37 @@ pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     emit(&payload, format)
 }
 
-#[allow(dead_code)]
 pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
     build_payload_with_hints(args, engine).map(|(v, _)| v)
 }
 
-fn build_payload_with_hints(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactStderrHints), GnxError> {
-    match (args.name.as_ref(), args.baseline.as_ref()) {
-        (Some(_), None) => impact_by_name(args, engine),
-        (None, Some(_)) => impact_with_baseline(args, engine).map(|v| (v, ImpactStderrHints::default())),
-        (None, None) => Err(GnxError::InvalidArgument(
+fn build_payload_with_hints(
+    args: &ImpactArgs,
+    engine: &Engine,
+) -> Result<(Value, ImpactStderrHints), GnxError> {
+    let has_name = args.name.is_some() || args.target.is_some();
+    match (has_name, args.baseline.as_ref()) {
+        (true, None) => impact_by_name(args, engine),
+        (false, Some(_)) => {
+            impact_with_baseline(args, engine).map(|v| (v, ImpactStderrHints::default()))
+        }
+        (false, None) => Err(GnxError::InvalidArgument(
             "impact requires a symbol (positional <name> or --target <name>) or --baseline <ref>"
                 .into(),
         )),
-        (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
+        (true, Some(_)) => unreachable!("clap conflicts_with prevents this"),
     }
 }
 
-fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactStderrHints), GnxError> {
-    let name = args.name.as_deref().unwrap();
+fn impact_by_name(
+    args: &ImpactArgs,
+    engine: &Engine,
+) -> Result<(Value, ImpactStderrHints), GnxError> {
+    let name = args
+        .name
+        .as_deref()
+        .or(args.target.as_deref())
+        .expect("build_payload_with_hints gates on name||target");
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Resolve name → matching node indices, with optional --file / --kind disambiguation.
@@ -178,10 +190,13 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactSt
         .collect();
 
     if matches.is_empty() {
-        return Ok((json!({
-            "error": format!("No symbol named '{name}' found in graph"),
-            "hint": "Try `gnx find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
-        }), ImpactStderrHints::default()));
+        return Ok((
+            json!({
+                "error": format!("No symbol named '{name}' found in graph"),
+                "hint": "Try `gnx find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
+            }),
+            ImpactStderrHints::default(),
+        ));
     }
 
     // Multiple matches without disambiguation → report candidates then fail.
@@ -200,10 +215,13 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactSt
                 })
             })
             .collect();
-        return Ok((json!({
-            "error": format!("'{name}' is ambiguous ({} candidates) — add --file or --kind to disambiguate", matches.len()),
-            "candidates": candidates,
-        }), ImpactStderrHints::default()));
+        return Ok((
+            json!({
+                "error": format!("'{name}' is ambiguous ({} candidates) — add --file or --kind to disambiguate", matches.len()),
+                "candidates": candidates,
+            }),
+            ImpactStderrHints::default(),
+        ));
     }
 
     let min_conf = resolve_min_conf(&args);
@@ -278,10 +296,13 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactSt
         });
     }
 
-    Ok((result_obj, ImpactStderrHints {
-        empty_hint_name: emit_empty_hint.then(|| name.to_string()),
-        hidden_edges: hidden_edges_total,
-    }))
+    Ok((
+        result_obj,
+        ImpactStderrHints {
+            empty_hint_name: emit_empty_hint.then(|| name.to_string()),
+            hidden_edges: hidden_edges_total,
+        },
+    ))
 }
 
 fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
