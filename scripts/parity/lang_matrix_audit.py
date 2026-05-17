@@ -91,7 +91,7 @@ def scan_runtime(dump_path: Path) -> dict[str, dict[str, int]]:
     text = dump_path.read_text()
     result: dict[str, dict[str, int]] = {}
     current_lang: str | None = None
-    for line in text.split("\n"):
+    for line in text.splitlines():
         h = RUNTIME_HEADER_RE.match(line)
         if h:
             current_lang = h.group(1)
@@ -117,9 +117,7 @@ LANG_DIR_TO_RUNTIME = {
 
 
 def runtime_lang_name(dir_name: str) -> str:
-    if dir_name in LANG_DIR_TO_RUNTIME:
-        return LANG_DIR_TO_RUNTIME[dir_name]
-    return dir_name.capitalize()
+    return LANG_DIR_TO_RUNTIME.get(dir_name, dir_name.capitalize())
 
 
 def main() -> int:
@@ -200,24 +198,25 @@ def _diagnose(triple: tuple[bool, bool, bool], rt_count: int) -> str:
     drift. Only NYY (spec doesn't list, parser refs directly, runtime
     emits) marks a hidden post-process kind.
     """
-    in_spec, in_parser, in_runtime = triple
-    if triple == (False, True, True):
-        return "drift: hidden (parser post-process emits, spec doesn't list)"
-    if triple == (True, True, False):
-        return "drift: dead spec entry (listed but no emit on this corpus)"
-    if triple == (False, False, True):
-        return "drift: emit without spec or parser ref (impossible — check)"
-    if triple == (True, False, True):
-        return "aligned (spec-dispatched)"
-    if triple == (True, True, True):
-        return "aligned (spec + parser-ref)"
-    if triple == (False, False, False):
-        return "lang doesn't have this kind"
-    if triple == (True, False, False):
-        return "spec-only (listed, parser doesn't ref) — unused"
-    if triple == (False, True, False):
-        return "parser-ref-only (match arm, no emit)"
-    return "unknown"
+    match triple:
+        case (False, True, True):
+            return "drift: hidden (parser post-process emits, spec doesn't list)"
+        case (True, True, False):
+            return "drift: dead spec entry (listed but no emit on this corpus)"
+        case (False, False, True):
+            return "drift: emit without spec or parser ref (impossible — check)"
+        case (True, False, True):
+            return "aligned (spec-dispatched)"
+        case (True, True, True):
+            return "aligned (spec + parser-ref)"
+        case (False, False, False):
+            return "lang doesn't have this kind"
+        case (True, False, False):
+            return "spec-only (listed, parser doesn't ref) — unused"
+        case (False, True, False):
+            return "parser-ref-only (match arm, no emit)"
+        case _:
+            return "unknown"
 
 
 if __name__ == "__main__":
