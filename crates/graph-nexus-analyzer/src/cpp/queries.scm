@@ -19,15 +19,33 @@
 ) @struct
 
 ;; Functions
+;;
+;; Two outer shapes for return type:
+;;   `int foo()`               → declarator = function_declarator(...)
+;;   `int* foo()` / `int& foo()` → declarator = pointer/reference_declarator
+;;                                            wrapping function_declarator
+;; Tree-sitter-cpp folds the `*` / `&` into the declarator chain rather than
+;; the type, so the outer wrapper must be matched explicitly.
 (function_definition
   type: (_)? @type
-  declarator: (function_declarator
-    declarator: [
-      (identifier) @name.function
-      (reference_declarator (identifier) @name.function)
-      (pointer_declarator (identifier) @name.function)
-    ]
-  )
+  declarator: [
+    (function_declarator
+      declarator: [
+        (identifier) @name.function
+        (reference_declarator (identifier) @name.function)
+        (pointer_declarator (identifier) @name.function)
+      ])
+    (pointer_declarator
+      (function_declarator
+        declarator: (identifier) @name.function))
+    (reference_declarator
+      (function_declarator
+        declarator: (identifier) @name.function))
+    (pointer_declarator
+      (pointer_declarator
+        (function_declarator
+          declarator: (identifier) @name.function)))
+  ]
 ) @function
 
 ;; Free function declarations (no body) at translation-unit scope.
@@ -37,33 +55,67 @@
 (translation_unit
   (declaration
     type: (_) @type
-    declarator: (function_declarator
-      declarator: [
-        (identifier) @name.function
-        (reference_declarator (identifier) @name.function)
-        (pointer_declarator (identifier) @name.function)
-      ]
-    )
+    declarator: [
+      (function_declarator
+        declarator: [
+          (identifier) @name.function
+          (reference_declarator (identifier) @name.function)
+          (pointer_declarator (identifier) @name.function)
+        ])
+      (pointer_declarator
+        (function_declarator
+          declarator: (identifier) @name.function))
+      (reference_declarator
+        (function_declarator
+          declarator: (identifier) @name.function))
+      (pointer_declarator
+        (pointer_declarator
+          (function_declarator
+            declarator: (identifier) @name.function)))
+    ]
   ) @function)
 
 ;; Methods
+;;
+;; Same outer-wrapper expansion as Functions, plus the qualified_identifier
+;; branch for out-of-class definitions like `int* Foo::bar() { ... }`.
 (function_definition
   type: (_)? @type
-  declarator: (function_declarator
-    declarator: [
-      (field_identifier) @name.method
-      (reference_declarator (field_identifier) @name.method)
-      (pointer_declarator (field_identifier) @name.method)
-      (qualified_identifier
-        name: [
-          (identifier)
-          (field_identifier)
-        ] @name.method
-      )
-      (reference_declarator (qualified_identifier name: (_) @name.method))
-      (pointer_declarator (qualified_identifier name: (_) @name.method))
-    ]
-  )
+  declarator: [
+    (function_declarator
+      declarator: [
+        (field_identifier) @name.method
+        (reference_declarator (field_identifier) @name.method)
+        (pointer_declarator (field_identifier) @name.method)
+        (qualified_identifier
+          name: [
+            (identifier)
+            (field_identifier)
+          ] @name.method
+        )
+        (reference_declarator (qualified_identifier name: (_) @name.method))
+        (pointer_declarator (qualified_identifier name: (_) @name.method))
+      ])
+    (pointer_declarator
+      (function_declarator
+        declarator: [
+          (field_identifier) @name.method
+          (qualified_identifier name: (_) @name.method)
+        ]))
+    (reference_declarator
+      (function_declarator
+        declarator: [
+          (field_identifier) @name.method
+          (qualified_identifier name: (_) @name.method)
+        ]))
+    (pointer_declarator
+      (pointer_declarator
+        (function_declarator
+          declarator: [
+            (field_identifier) @name.method
+            (qualified_identifier name: (_) @name.method)
+          ])))
+  ]
 ) @method
 
 ;; Member function declarations inside a class / struct body — `int sum();`.
@@ -71,13 +123,24 @@
 ;; Method node with the return-type capture.
 (field_declaration
   type: (_) @type
-  declarator: (function_declarator
-    declarator: [
-      (field_identifier) @name.method
-      (pointer_declarator (field_identifier) @name.method)
-      (reference_declarator (field_identifier) @name.method)
-    ]
-  )
+  declarator: [
+    (function_declarator
+      declarator: [
+        (field_identifier) @name.method
+        (pointer_declarator (field_identifier) @name.method)
+        (reference_declarator (field_identifier) @name.method)
+      ])
+    (pointer_declarator
+      (function_declarator
+        declarator: (field_identifier) @name.method))
+    (reference_declarator
+      (function_declarator
+        declarator: (field_identifier) @name.method))
+    (pointer_declarator
+      (pointer_declarator
+        (function_declarator
+          declarator: (field_identifier) @name.method)))
+  ]
 ) @method
 
 ;; Deleted / defaulted / bodied operator= and destructor methods.
