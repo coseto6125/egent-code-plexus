@@ -1,7 +1,13 @@
-use graph_nexus_cli::build::force::invalidate_matching_l1;
+use graph_nexus_cli::build::force::{force_rebuild_l2, invalidate_matching_l1};
 use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+use std::sync::Mutex;
+
+/// Serialize tests that mutate `HOME`. Tests using set_var("HOME", ...) MUST
+/// hold this lock for the duration of the test.
+static HOME_LOCK: Mutex<()> = Mutex::new(());
 
 const SHA: &str = "abc123def456789012345678901234567890abcd";
 const SHA2: &str = "11ee22dd33cc44bb55aa66998877665544332211";
@@ -108,6 +114,114 @@ fn invalidate_skips_already_stale_dirs() {
     let report = invalidate_matching_l1(tmp.path(), SHA).unwrap();
     assert_eq!(report.kept, 0);
     assert_eq!(report.invalidated, 0);
+}
+
+fn git_init(p: &Path) -> String {
+    Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["config", "user.email", "t@t"])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["config", "user.name", "t"])
+        .status()
+        .unwrap();
+    fs::write(p.join("hello.rs"), "fn hello() {}").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["add", "."])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["commit", "-qm", "init"])
+        .status()
+        .unwrap();
+    let o = Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8(o.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn force_rebuild_l2_when_l2_absent_builds_fresh() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let sha = git_init(wt.path());
+    std::env::set_var("HOME", home.path());
+
+    let r = force_rebuild_l2(wt.path(), &sha).unwrap();
+    assert_eq!(r.sha_hex, sha);
+    assert!(r.rebuilt);
+    assert!(r.commit_dir.join("graph.bin").exists());
+    assert!(r.commit_dir.join("meta.json").exists());
+}
+
+#[test]
+fn force_rebuild_l2_drops_existing_dir_and_rebuilds() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let sha = git_init(wt.path());
+    std::env::set_var("HOME", home.path());
+
+    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let first_mtime = fs::metadata(initial.commit_dir.join("graph.bin"))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let r = force_rebuild_l2(wt.path(), &sha).unwrap();
+    let second_mtime = fs::metadata(r.commit_dir.join("graph.bin"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(
+        second_mtime > first_mtime,
+        "graph.bin should have newer mtime after force rebuild"
+    );
+}
+
+#[test]
+fn force_rebuild_l2_invalidates_dirty_session_with_same_base_sha() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let sha = git_init(wt.path());
+    std::env::set_var("HOME", home.path());
+
+    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let repo_root = initial.commit_dir.parent().unwrap().parent().unwrap().to_path_buf();
+    add_session(&repo_root, "sid_dirty", &sha, true);
+    add_session(&repo_root, "sid_clean", &sha, false);
+
+    force_rebuild_l2(wt.path(), &sha).unwrap();
+
+    assert!(
+        !repo_root.join("sessions/sid_dirty").exists(),
+        "dirty session should be renamed .stale-*"
+    );
+    assert!(
+        repo_root.join("sessions/sid_clean").exists(),
+        "clean session should be kept"
+    );
 }
 
 #[test]

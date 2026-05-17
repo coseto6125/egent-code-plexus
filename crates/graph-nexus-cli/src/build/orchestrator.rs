@@ -140,7 +140,7 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     })
 }
 
-fn head_sha_hex(worktree: &Path) -> io::Result<String> {
+pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
     let out = safe_exec::git()
         .args(["rev-parse", "HEAD"])
         .current_dir(worktree)
@@ -154,7 +154,7 @@ fn head_sha_hex(worktree: &Path) -> io::Result<String> {
         .to_string())
 }
 
-fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io::Result<bool> {
+pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io::Result<bool> {
     if head_sha_hex(worktree)? != sha {
         return Ok(false);
     }
@@ -165,7 +165,7 @@ fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io::Result<boo
     Ok(out.status.success())
 }
 
-fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
+pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
     let archive = safe_exec::git()
         .args(["archive", "--format=tar", sha])
         .current_dir(worktree)
@@ -186,7 +186,7 @@ fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
+pub(crate) fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
     let out = safe_exec::git()
         .args(["for-each-ref", "--points-at", sha, "--format=%(refname)"])
         .current_dir(worktree)
@@ -207,7 +207,7 @@ fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
         .collect())
 }
 
-fn source_type_from_refs(refs: &[RefRecord]) -> SourceType {
+pub(crate) fn source_type_from_refs(refs: &[RefRecord]) -> SourceType {
     if refs.iter().any(|r| r.ref_name.starts_with("refs/heads/")) {
         return SourceType::Branch;
     }
@@ -222,7 +222,7 @@ fn source_type_from_refs(refs: &[RefRecord]) -> SourceType {
     SourceType::Commit
 }
 
-fn source_id_from_refs(refs: &[RefRecord]) -> Option<String> {
+pub(crate) fn source_id_from_refs(refs: &[RefRecord]) -> Option<String> {
     for r in refs {
         if let Some(b) = r.ref_name.strip_prefix("refs/heads/") {
             return Some(b.to_string());
@@ -247,7 +247,7 @@ fn source_id_from_refs(refs: &[RefRecord]) -> Option<String> {
     None
 }
 
-fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
+pub(crate) fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
     let out = safe_exec::git()
         .args(["rev-parse", &format!("{sha}^")])
         .current_dir(worktree)
@@ -261,7 +261,7 @@ fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
         .to_string())
 }
 
-fn sync_all_files(dir: &Path) -> io::Result<()> {
+pub(crate) fn sync_all_files(dir: &Path) -> io::Result<()> {
     for entry in walkdir::WalkDir::new(dir)
         .into_iter()
         .filter_map(Result::ok)
@@ -274,7 +274,7 @@ fn sync_all_files(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> io::Result<()> {
+pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> io::Result<()> {
     let meta_path = repo_root.join("meta.json");
     let lock_path = repo_root.join(".meta.lock");
     let lock = OpenOptions::new()
@@ -346,7 +346,7 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Result<BuildResult> {
+pub(crate) fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Result<BuildResult> {
     let start = std::time::Instant::now();
     while building.exists() {
         if start.elapsed() > std::time::Duration::from_secs(600) {

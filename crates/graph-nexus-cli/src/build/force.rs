@@ -1,9 +1,19 @@
 //! Force rebuild orchestration: drop existing L2 + selective L1 invalidation
 //! before re-running the standard build pipeline.
 
+use crate::build::dirname_picker::pick_dirname;
+use crate::build::orchestrator::{
+    collect_refs, git_archive_to, parent_sha, source_id_from_refs, source_type_from_refs,
+    sync_all_files, update_repo_meta, wait_for_completion, worktree_clean_and_head_matches,
+};
+use crate::repo_identity::repo_dir_name_for_cwd;
 use crate::session::state::classify;
+use fs2::FileExt;
+use graph_nexus_core::registry::{
+    resolve_home_gnx, CommitBuildMeta, EmbeddingStatus, SourceType,
+};
 use graph_nexus_core::session::SessionState;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -82,4 +92,114 @@ fn spawn_delayed_rm_rf(path: PathBuf, delay: Duration) {
         thread::sleep(delay);
         let _ = fs::remove_dir_all(&path);
     });
+}
+
+#[derive(Debug)]
+pub struct ForceRebuildResult {
+    pub sha_hex: String,
+    pub source_type: SourceType,
+    pub commit_dir: PathBuf,
+    pub rebuilt: bool,
+    pub invalidate_report: InvalidateReport,
+}
+
+/// --force orchestration. See spec §4.2.
+///
+/// Order: acquire lock (attach-and-retake if contended) → invalidate matching
+/// L1 sessions → drop existing L2 → re-run build pipeline → atomic publish.
+/// L1-before-L2 keeps crash recovery self-consistent.
+pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRebuildResult> {
+    let sha_hex = target_sha.to_string();
+    if sha_hex.len() != 40 || !sha_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
+    }
+
+    let home_gnx = resolve_home_gnx();
+    let repo_dir_name = repo_dir_name_for_cwd(worktree)?;
+    let repo_root = home_gnx.join(&repo_dir_name);
+    fs::create_dir_all(repo_root.join("commits"))?;
+
+    let dirname = pick_dirname(worktree, &sha_hex)?;
+    let commit_dir = repo_root.join("commits").join(&dirname);
+    let building = repo_root
+        .join("commits")
+        .join(format!("{dirname}.building"));
+
+    // 1. Acquire lock (attach-and-retake pattern if contended)
+    fs::create_dir_all(&building)?;
+    let lock_path = building.join(".build.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)?;
+    if lock.try_lock_exclusive().is_err() {
+        wait_for_completion(&building, &commit_dir)?;
+        fs::create_dir_all(&building)?;
+        let lock2 = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock2
+            .try_lock_exclusive()
+            .map_err(|e| io::Error::other(format!("re-lock after attach failed: {e}")))?;
+    }
+
+    // 2. Invalidate matching L1 BEFORE dropping L2 (spec §4.4)
+    let invalidate_report = invalidate_matching_l1(&repo_root, &sha_hex)?;
+
+    // 3. Drop existing L2
+    if commit_dir.exists() {
+        fs::remove_dir_all(&commit_dir)?;
+    }
+
+    // 4. Source resolution
+    let src_root = if worktree_clean_and_head_matches(worktree, &sha_hex)? {
+        worktree.to_path_buf()
+    } else {
+        let src = building.join("_src");
+        fs::create_dir_all(&src)?;
+        git_archive_to(worktree, &sha_hex, &src)?;
+        src
+    };
+
+    // 5. Build graph.bin + tantivy via analyzer pipeline
+    let node_count =
+        crate::commands::admin::index::run_analyzer_for_paths(&src_root, &building)?;
+
+    // 6. Refs / source typing + metadata
+    let refs_at_build = collect_refs(worktree, &sha_hex)?;
+    let source_type = source_type_from_refs(&refs_at_build);
+    let source_id = source_id_from_refs(&refs_at_build);
+    let parent = parent_sha(worktree, &sha_hex).ok();
+
+    let meta = CommitBuildMeta {
+        version: 1,
+        sha: sha_hex.clone(),
+        source_type,
+        source_id,
+        built_from_worktree: worktree.to_string_lossy().into(),
+        built_at: chrono::Utc::now().to_rfc3339(),
+        parent_sha: parent,
+        node_count: node_count as u32,
+        embedding_status: EmbeddingStatus::None,
+        refs_at_build,
+        refs_seen_since: vec![],
+    };
+    CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
+
+    // 7. Publish (atomic)
+    sync_all_files(&building)?;
+    fs::rename(&building, &commit_dir)?;
+    let _ = fs::remove_dir_all(commit_dir.join("_src"));
+
+    // 8. Update <repo>/meta.json (RepoMeta)
+    update_repo_meta(&repo_root, worktree, &sha_hex)?;
+
+    Ok(ForceRebuildResult {
+        sha_hex,
+        source_type,
+        commit_dir,
+        rebuilt: true,
+        invalidate_report,
+    })
 }
