@@ -54,8 +54,9 @@ fn class_let_property_type() {
 
 #[test]
 fn top_level_let_with_type() {
+    // Top-level `let` is a Variable, not a Property (which is class/struct scope).
     let nodes = parse("let pi: Double = 3.14\n");
-    let p = find(&nodes, "pi", NodeKind::Property);
+    let p = find(&nodes, "pi", NodeKind::Variable);
     assert_eq!(p.type_annotation.as_deref(), Some("Double"));
 }
 
