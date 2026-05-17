@@ -33,6 +33,44 @@ fn finds_existing_commit_dir_by_sha() {
 }
 
 #[test]
+fn scan_cached_matches_uncached_scan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir(&commits).unwrap();
+    let dir = "branch_main__abc123def4567890abc123def4567890abc123de";
+    std::fs::create_dir(commits.join(dir)).unwrap();
+    let cached = CommitIndex::scan_cached(&commits).unwrap();
+    let uncached = CommitIndex::scan(&commits).unwrap();
+    let mut sha = [0u8; 20];
+    hex::decode_to_slice("abc123def4567890abc123def4567890abc123de", &mut sha).unwrap();
+    assert_eq!(cached.find(&sha), uncached.find(&sha));
+    assert_eq!(cached.len(), uncached.len());
+}
+
+#[test]
+fn scan_cached_invalidates_on_mtime_bump() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir(&commits).unwrap();
+    let dir_a = "branch_a__abc123def4567890abc123def4567890abc123de";
+    std::fs::create_dir(commits.join(dir_a)).unwrap();
+    let first = CommitIndex::scan_cached(&commits).unwrap();
+    assert_eq!(first.len(), 1);
+    // Sleep so the dir mtime can roundtrip past filesystem timestamp granularity
+    // (most filesystems carry second-resolution mtime; some sub-second).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let dir_b = "branch_b__11ee22dd33cc44bb55aa66998877665544332211";
+    std::fs::create_dir(commits.join(dir_b)).unwrap();
+    let second = CommitIndex::scan_cached(&commits).unwrap();
+    assert_eq!(
+        second.len(),
+        2,
+        "scan_cached must re-scan after mtime bump; got {} entries",
+        second.len()
+    );
+}
+
+#[test]
 fn skips_unparseable_and_inflight_dirs() {
     let tmp = tempfile::tempdir().unwrap();
     let commits = tmp.path().join("commits");

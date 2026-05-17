@@ -10,6 +10,7 @@ pub mod group;
 pub mod index;
 pub mod install_hook;
 pub mod prune;
+pub mod sessions;
 #[derive(Subcommand, Debug)]
 pub enum AdminCommands {
     /// Install git ref-transaction hook for branch tracking (or Claude Code hooks with --claude-code)
@@ -31,6 +32,11 @@ pub enum AdminCommands {
     },
     /// Build or refresh the graph (explicit / bulk)
     Index(index::IndexArgs),
+    /// List / inspect L1 sessions
+    Sessions {
+        #[command(subcommand)]
+        command: sessions::SessionsCommand,
+    },
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
     /// Diff resolver dump against language oracle (gnx-dev QA)
@@ -47,6 +53,9 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexu
         AdminCommands::Config(args) => config::run(args),
         AdminCommands::Group { command } => group::run(command),
         AdminCommands::Index(args) => index::run(args).map_err(graph_nexus_core::GnxError::Output),
+        AdminCommands::Sessions { command } => {
+            sessions::run(command).map_err(graph_nexus_core::GnxError::Output)
+        }
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),
         AdminCommands::VerifyResolver(args) => crate::commands::verify_resolver::run(args),
     }

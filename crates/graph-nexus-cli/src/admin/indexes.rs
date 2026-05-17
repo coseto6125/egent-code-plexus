@@ -41,7 +41,6 @@ fn build_refresh_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
         repo,
         force,
         dump_resolver: None,
-        no_cache: false,
         quiet: false,
     })
     .map_err(GnxError::Output)
