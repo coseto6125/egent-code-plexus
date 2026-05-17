@@ -142,12 +142,14 @@ fn setup_fixture() -> (TempDir, PathBuf) {
 
 fn run_search(graph: &Path, args: &[&str]) -> std::process::Output {
     Command::new(gnx_bin())
-        .arg("search")
+        .arg("find")
+        .arg("--mode")
+        .arg("bm25")
         .args(args)
         .arg("--graph")
         .arg(graph)
         .output()
-        .expect("gnx search spawn")
+        .expect("gnx find spawn")
 }
 
 fn parse_json_output(out: &std::process::Output) -> Value {

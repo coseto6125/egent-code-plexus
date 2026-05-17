@@ -1,8 +1,8 @@
-//! `gnx search --batch` reads patterns from stdin (one per line, `#`
-//! comments and empty lines skipped) and emits a per-query block
-//! prefixed by `=== pattern: <pattern> ===`. The point is to amortise
-//! Engine load + mmap setup + tantivy open across N queries inside a
-//! single process.
+//! `gnx find --batch --mode bm25` reads patterns from stdin (one per
+//! line, `#` comments and empty lines skipped) and emits a per-query
+//! block prefixed by `=== pattern: <pattern> ===`. The point is to
+//! amortise Engine load + mmap setup + tantivy open across N queries
+//! inside a single process.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -12,7 +12,7 @@ fn gnx_bin() -> &'static str {
 }
 
 fn run_batch_with_stdin(stdin_payload: &str, extra_args: &[&str]) -> std::process::Output {
-    let mut args = vec!["search", "--batch", "--mode", "bm25"];
+    let mut args = vec!["find", "--batch", "--mode", "bm25"];
     args.extend_from_slice(extra_args);
     let mut child = Command::new(gnx_bin())
         .args(args)

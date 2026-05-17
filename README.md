@@ -100,8 +100,8 @@ for the full design.
 # 1. Build a code graph for the current repo (Extremely fast, < 1s)
 gnx admin index --repo .
 
-# 2. BM25 keyword search (uses Tantivy when the index is present)
-gnx search "loginUser"
+# 2. Locate a symbol — exact-name lookup by default, `--mode bm25` for ranked BM25 search
+gnx find "loginUser"
 
 # 3. Extract all API Routes across the Microservice
 gnx routes --repo .
@@ -113,7 +113,7 @@ gnx impact validateUser --direction upstream
 gnx inspect validateUser
 ```
 
-Every read-side command accepts `--format text|json|toon`. The default is the token-cheapest representation per command (most: `toon`; `search`: `text`; `cypher`/`coverage`: `json`; `coverage`: `md`/`compact`).
+Every read-side command accepts `--format text|json|toon`. The default is the token-cheapest representation per command (most: `toon`; `find`: `text`; `cypher`/`coverage`: `json`; `coverage`: `md`/`compact`).
 
 ### Task → command
 
@@ -121,7 +121,7 @@ Every read-side command accepts `--format text|json|toon`. The default is the to
 |---|---|
 | Index a fresh repo | `gnx admin index --repo .` (first query also auto-indexes) |
 | Re-index after edits | Same — `admin index` is incremental (SHA-256 content hash per file) |
-| Symbol exists? Where? | `gnx search <name>` (BM25) |
+| Symbol exists? Where? | `gnx find <name>` (exact match) or `gnx find <fragment> --mode bm25` (ranked) |
 | One symbol → metadata, callers, callees | `gnx inspect <name>` |
 | If I edit X, what breaks? | `gnx impact <name> --direction upstream` |
 | What does X depend on? | `gnx impact <name> --direction downstream` |

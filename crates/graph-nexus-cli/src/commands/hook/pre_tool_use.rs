@@ -1,10 +1,10 @@
 //! PreToolUse handler: extract a search pattern from Grep / Glob / Bash
-//! invocations, run an in-process gnx search, and inject the top-K
-//! hits into the conversation as `additionalContext`. Capped at 5 hits
-//! or ~2 KB serialized to keep the token cost bounded.
+//! invocations, run an in-process `gnx find --mode bm25`, and inject
+//! the top-K hits into the conversation as `additionalContext`. Capped
+//! at 5 hits or ~2 KB serialized to keep the token cost bounded.
 
 use super::common::{emit_additional_context, lookup_index_dir, strip_shell_quotes, HookInput};
-use crate::commands::search::{compute_hits, Hit, SearchArgs, SearchMode};
+use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
 use graph_nexus_core::GnxError;
 use std::sync::OnceLock;
@@ -26,7 +26,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
 
     // Peer inbox drain fires unconditionally on every PreToolUse so that
     // messages from peer sessions are never silently dropped even when the
-    // tool invocation doesn't match any gnx search pattern.
+    // tool invocation doesn't match any gnx find pattern.
     if let Some(peer) = super::common::drain_and_render_peer_payload() {
         emit_additional_context("PreToolUse", &peer);
     }
@@ -47,9 +47,12 @@ fn maybe_emit_search_hits(input: &HookInput) {
         Ok(e) => e,
         Err(_) => return,
     };
-    let args = SearchArgs {
+    let args = FindArgs {
         pattern: Some(pattern),
-        mode: SearchMode::Bm25,
+        mode: FindMode::Bm25,
+        fuzzy: false,
+        all: false,
+        include_tests: false,
         kind: None,
         repo: None,
         format: None,

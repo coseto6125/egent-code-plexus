@@ -2,9 +2,7 @@
 //! (`compute_multi_with_engines`) returns merged hits from every repo
 //! and degrades gracefully when one engine fails to load.
 
-use graph_nexus_cli::commands::search::{
-    compute_multi_with_engines, load_engines_lossy, SearchMode,
-};
+use graph_nexus_cli::commands::find::{compute_multi_with_engines, load_engines_lossy, FindMode};
 use graph_nexus_cli::engine::Engine;
 use graph_nexus_core::graph::{
     File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
@@ -88,7 +86,7 @@ fn compute_multi_with_engines_merges_hits_from_both_repos() {
         ),
     ];
 
-    let (hits, summary) = compute_multi_with_engines("shared", &SearchMode::Bm25, None, &loaded);
+    let (hits, summary) = compute_multi_with_engines("shared", &FindMode::Bm25, None, &loaded);
 
     let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
     assert!(
@@ -129,7 +127,7 @@ fn compute_multi_with_engines_tolerates_failed_engine_load() {
         ),
     ];
 
-    let (hits, summary) = compute_multi_with_engines("shared", &SearchMode::Bm25, None, &loaded);
+    let (hits, summary) = compute_multi_with_engines("shared", &FindMode::Bm25, None, &loaded);
 
     assert!(
         hits.iter().any(|h| h.name == "alpha_shared"),

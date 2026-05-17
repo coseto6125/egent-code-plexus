@@ -127,7 +127,7 @@ impl Language {
         }
     }
 
-    /// Canonical display name. Used by `gnx search` to emit the `language`
+    /// Canonical display name. Used by `gnx find --mode bm25` to emit the `language`
     /// field on each Hit. Overrides Debug formatting for `Php` ("PHP") and
     /// `Cpp` ("C++") where the conventional name differs from the variant
     /// identifier.

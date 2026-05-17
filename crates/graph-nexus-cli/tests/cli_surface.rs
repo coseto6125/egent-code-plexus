@@ -29,7 +29,7 @@ fn top_level_lists_nine_agent_commands() {
     let help = gnx_help();
     for cmd in [
         "inspect",
-        "search",
+        "find",
         "impact",
         "rename",
         "cypher",

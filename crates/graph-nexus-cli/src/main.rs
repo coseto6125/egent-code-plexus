@@ -52,9 +52,7 @@ struct Cli {
 enum Commands {
     /// Show symbol's full context: signature, body, edges, callers, overrides, and 1-hop upstream impact
     Inspect(commands::inspect::InspectArgs),
-    /// Find symbols by name (BM25 lexical search)
-    Search(commands::search::SearchArgs),
-    /// Find a symbol's definition by exact or fuzzy name match — returns the single most-likely definition, not all occurrences
+    /// Locate symbols by exact name (default), substring (`--mode fuzzy`), or BM25 lexical ranking (`--mode bm25`). Exact / fuzzy return a single most-likely definition (or all via `--all`); bm25 returns top-K partitioned into source / tests / reference / document / config buckets and supports stdin `--batch`.
     Find(commands::find::FindArgs),
     /// Symbol blast radius — affected callers + risk_level. For binding tier-degradation or resolver delta, use `gnx diff`.
     Impact(commands::impact::ImpactArgs),
@@ -159,7 +157,6 @@ fn main() {
     // Agent commands + ShapeCheck (hidden internal) — need graph
     let repo_opt = match &cli.command {
         Commands::Inspect(args) => args.repo.as_deref(),
-        Commands::Search(args) => args.repo.as_deref(),
         Commands::Find(args) => args.repo.as_deref(),
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::Rename(args) => args.repo.as_deref(),
@@ -199,7 +196,6 @@ fn main() {
 
     let result: Result<(), graph_nexus_core::GnxError> = match cli.command {
         Commands::Inspect(args) => commands::inspect::run(args, &engine, &graph_path),
-        Commands::Search(args) => commands::search::run(args, &engine),
         Commands::Find(args) => commands::find::run(args, &engine),
         Commands::Impact(args) => commands::impact::run(args, &engine),
         Commands::Rename(args) => commands::rename::run(args, &engine),

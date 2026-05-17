@@ -14,7 +14,8 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | ONE symbol → signature + body + 1-hop edges + callers + 1-hop impact | `gnx inspect --name X --repo .` |
 | ONE symbol → blast radius | `gnx impact X --direction upstream --repo .` (positional; `--target X` alias works too. `--direction` accepts `up`/`down`/`both` or `upstream`/`downstream`. Filters: `--kind --file_path --relation_types --depth --min-confidence --include-tests`) |
 | PR blast radius — symbol view (who breaks) | `gnx impact --baseline origin/main --repo .` |
-| Find symbol by name | `gnx search "term" --repo .` (BM25 via tantivy; substring fallback when index absent. Output partitioned into 5 buckets: `source` / `tests` / `reference` / `document` / `config`. Read `.source` for production-code hits.) |
+| Find symbol by exact name | `gnx find "name" --repo .` (default mode = exact match; returns single top-ranked definition by category priority + caller count. `--all` for every exact match, `--include-tests` to include test files.) |
+| Find symbol by name fragment / ranked search | `gnx find "fragment" --mode bm25 --repo .` (BM25 via tantivy; substring fallback when index absent. Output partitioned into 5 buckets: `source` / `tests` / `reference` / `document` / `config`. Read `.source` for production-code hits.) `--mode fuzzy` is a lighter alternative that shares the exact-mode flat output shape. |
 | Arbitrary graph query / source body via Cypher | `gnx cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query "..."` alias works. Single-repo only. Minimal grammar — see Cypher subset below) |
 | AST-aware multi-file rename | `gnx rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `gnx routes <path?> --repo .` (no path = list all) |
@@ -32,7 +33,7 @@ Two access paths; pick one per command:
 
 - **`--repo <abs-or-rel-path>`** → registry lookup → reads `~/.gnx/graph-nexus-<hash>/<branch-slug>/graph.bin`. Branch slug = current HEAD with `/` → `__`. **Preferred** day-to-day.
 - **`--graph <abs-path-to-graph.bin>`** → bypass registry. Use when registry slug mismatch or testing a snapshot.
-- **`--repo @<group> / @all / csv` (`name1,name2`)** → multi-repo. Works for `search / impact / contracts / coverage`. `cypher / inspect` are single-repo (will error on multi).
+- **`--repo @<group> / @all / csv` (`name1,name2`)** → multi-repo. Works for `find --mode bm25 / impact / contracts / coverage`. `cypher / inspect` are single-repo (will error on multi).
 
 ### Indexing is automatic
 
@@ -47,9 +48,10 @@ for human-driven workflows (full re-index, `--force`).
 ### "Not found" but `grep` shows the symbol
 
 Almost always stale — auto-ensure should have rebuilt. If it didn't, the
-symbol genuinely isn't in the graph: check for typos, try `gnx search`
-for fuzzy matches, or re-run the same command (auto-ensure walks the
-tree on each call and re-indexes if mtime moved).
+symbol genuinely isn't in the graph: check for typos, try `gnx find
+<fragment> --mode fuzzy` (or `--mode bm25` for ranked variants), or
+re-run the same command (auto-ensure walks the tree on each call and
+re-indexes if mtime moved).
 
 ## Output formats
 
@@ -59,7 +61,7 @@ tree on each call and re-indexes if mtime moved).
 |---|---|---|
 | `inspect / coverage / contracts / routes` | toon | json |
 | `cypher` | json | toon, text |
-| `search / scan / rename / impact` | text | json, toon |
+| `find / scan / rename / impact` | text | json, toon |
 
 Rule of thumb: **toon** for agent → agent piping (compact key:value), **json** for parsing in scripts, **text** for human inspection.
 
@@ -69,7 +71,7 @@ Rule of thumb: **toon** for agent → agent piping (compact key:value), **json**
 MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE ...] RETURN ...
 ```
 
-Supports the openCypher read subset commonly used for graph queries: boolean WHERE (`AND / OR / NOT`), comparisons (`= != < <= > >=`), string ops (`STARTS WITH / ENDS WITH / CONTAINS / =~ / IN [...]`), aggregations (`COUNT(*)`, etc.), `DISTINCT`, `ORDER BY / SKIP / LIMIT`, `WITH`, `UNION`, variable-length paths (`[:Rel*1..2]`), and reverse arrows (`<-[r:Rel]-`). Convention: **keep queries minimal** — for richer needs use `gnx search` / `gnx inspect` / post-process JSON.
+Supports the openCypher read subset commonly used for graph queries: boolean WHERE (`AND / OR / NOT`), comparisons (`= != < <= > >=`), string ops (`STARTS WITH / ENDS WITH / CONTAINS / =~ / IN [...]`), aggregations (`COUNT(*)`, etc.), `DISTINCT`, `ORDER BY / SKIP / LIMIT`, `WITH`, `UNION`, variable-length paths (`[:Rel*1..2]`), and reverse arrows (`<-[r:Rel]-`). Convention: **keep queries minimal** — for richer needs use `gnx find` / `gnx inspect` / post-process JSON.
 
 **NodeKind** (case-sensitive labels): `Function / Method / Class / Property / Constructor / Interface / Const / Variable / Import / Route / Process / Document / Section / EntryPoint / File`.
 
