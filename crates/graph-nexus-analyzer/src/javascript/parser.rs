@@ -236,6 +236,15 @@ impl LanguageProvider for JavaScriptProvider {
                         end.row as u32,
                         end.column as u32,
                     );
+                    // JS has no separate constructor_declaration node — constructors
+                    // are method_definition nodes whose property_identifier is literally
+                    // "constructor". Promote them here so the graph emits
+                    // NodeKind::Constructor (parity with Java / Dart / C#).
+                    let k = if k == NodeKind::Method && name_str == "constructor" {
+                        NodeKind::Constructor
+                    } else {
+                        k
+                    };
 
                     let mut existing_found = false;
                     for node in &mut nodes {
