@@ -27,36 +27,9 @@ fn find<'a>(nodes: &'a [RawNode], name: &str, kind: NodeKind) -> &'a RawNode {
         .unwrap_or_else(|| panic!("missing {kind:?} `{name}` in {nodes:#?}"))
 }
 
-#[test]
-fn param_primitive_type() {
-    let nodes = parse("bool f(int age) => true;\n");
-    let p = find(&nodes, "age", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("int"));
-}
-
-#[test]
-fn param_object_type() {
-    let nodes = parse("bool f(String name) => true;\n");
-    let p = find(&nodes, "name", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("String"));
-}
-
-#[test]
-fn multiple_params_all_typed() {
-    let nodes = parse("bool f(String name, int age) => true;\n");
-    assert_eq!(
-        find(&nodes, "name", NodeKind::Variable)
-            .type_annotation
-            .as_deref(),
-        Some("String")
-    );
-    assert_eq!(
-        find(&nodes, "age", NodeKind::Variable)
-            .type_annotation
-            .as_deref(),
-        Some("int")
-    );
-}
+// param_* tests removed: formal parameters are no longer emitted as
+// Variable nodes (see `fix(analyzer): drop formal_parameter Variable
+// emission ...`).
 
 #[test]
 fn class_field_int() {

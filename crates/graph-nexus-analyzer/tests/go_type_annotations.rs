@@ -33,37 +33,9 @@ fn find<'a>(nodes: &'a [RawNode], name: &str, kind: NodeKind) -> &'a RawNode {
         .unwrap_or_else(|| panic!("missing {kind:?} `{name}` in {nodes:#?}"))
 }
 
-#[test]
-fn param_type_int() {
-    let src = "package p\nfunc f(x int) {}\n";
-    let nodes = parse(src);
-    let x = find(&nodes, "x", NodeKind::Variable);
-    assert_eq!(x.type_annotation.as_deref(), Some("int"));
-}
-
-#[test]
-fn param_type_slice() {
-    let src = "package p\nfunc f(s []string) {}\n";
-    let nodes = parse(src);
-    let s = find(&nodes, "s", NodeKind::Variable);
-    assert_eq!(s.type_annotation.as_deref(), Some("[]string"));
-}
-
-#[test]
-fn param_type_pointer() {
-    let src = "package p\ntype User struct{}\nfunc f(u *User) {}\n";
-    let nodes = parse(src);
-    let u = find(&nodes, "u", NodeKind::Variable);
-    assert_eq!(u.type_annotation.as_deref(), Some("*User"));
-}
-
-#[test]
-fn param_type_map() {
-    let src = "package p\nfunc f(m map[string]int) {}\n";
-    let nodes = parse(src);
-    let m = find(&nodes, "m", NodeKind::Variable);
-    assert_eq!(m.type_annotation.as_deref(), Some("map[string]int"));
-}
+// param_type_* tests removed: formal parameters are no longer emitted as
+// Variable nodes (see `fix(analyzer): drop formal_parameter Variable
+// emission ...`).
 
 #[test]
 fn field_type_basic() {
@@ -133,15 +105,9 @@ fn var_declaration_inferred_no_annotation() {
 // emitted a Variable node. These tests pin the contract that EVERY name in
 // a multi-name decl produces its own Variable carrying the shared type.
 
-#[test]
-fn multi_name_param_emits_one_variable_per_name() {
-    let src = "package p\nfunc f(a, b int) {}\n";
-    let nodes = parse(src);
-    let a = find(&nodes, "a", NodeKind::Variable);
-    let b = find(&nodes, "b", NodeKind::Variable);
-    assert_eq!(a.type_annotation.as_deref(), Some("int"));
-    assert_eq!(b.type_annotation.as_deref(), Some("int"));
-}
+// multi_name_param_emits_one_variable_per_name removed (params no longer
+// emit Variable nodes); multi_name_var_decl_emits_one_variable_per_name
+// kept — that case (`var X, Y int`) still emits two Variables.
 
 #[test]
 fn multi_name_var_decl_emits_one_variable_per_name() {

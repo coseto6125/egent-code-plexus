@@ -32,22 +32,9 @@ fn find<'a>(nodes: &'a [RawNode], name: &str, kind: NodeKind) -> &'a RawNode {
         .unwrap_or_else(|| panic!("missing {kind:?} `{name}` in {nodes:#?}"))
 }
 
-#[test]
-fn param_template() {
-    let nodes = parse("void f(std::vector<int> v);\n");
-    let p = find(&nodes, "v", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("std::vector<int>"));
-}
-
-#[test]
-fn param_reference() {
-    // Source spelling `const std::string& s` is preserved — the `&` lives
-    // in the declarator wrapper but the source-slice approach captures
-    // everything before the identifier name.
-    let nodes = parse("void f(const std::string& s);\n");
-    let p = find(&nodes, "s", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("const std::string&"));
-}
+// param_template / param_reference removed: formal parameters are no
+// longer emitted as Variable nodes (see `fix(analyzer): drop
+// formal_parameter Variable emission ...`).
 
 #[test]
 fn return_type_template() {
@@ -84,12 +71,7 @@ fn member_function_return() {
     assert_eq!(m.type_annotation.as_deref(), Some("int"));
 }
 
-#[test]
-fn param_primitive() {
-    let nodes = parse("void f(int x);\n");
-    let p = find(&nodes, "x", NodeKind::Variable);
-    assert_eq!(p.type_annotation.as_deref(), Some("int"));
-}
+// param_primitive removed (see above).
 
 #[test]
 fn class_field_template() {
