@@ -20,6 +20,11 @@ pub enum Source {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
+    /// Source-file attribution. Kept as a plain field for grouping in
+    /// `Report::emit` (the output schema groups findings under `path`),
+    /// but skipped from per-finding serialization so the row doesn't
+    /// duplicate its enclosing `path`.
+    #[serde(skip)]
     pub file: String,
     pub line: u32,
     pub kind: &'static str,
