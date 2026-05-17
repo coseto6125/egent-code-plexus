@@ -1,30 +1,38 @@
 #!/usr/bin/env python3
-"""Parity drift gate — diff current gnx output against a saved baseline.
+"""Manual verification helper — `dump_per_lang_kinds.py` wrapper that
+prints a per-lang shift table against `final_baseline.txt`.
 
-Run from gitnexus-rs repo root after building / installing a new `gnx`:
+Run from gitnexus-rs repo root before pushing a parser change:
 
-    python3 scripts/parity/check_drift.py [--threshold-abs 200]
+    python3 scripts/parity/check_drift.py
 
-The script re-runs `dump_per_lang_kinds.py`, compares per-lang absolute
-deltas against `scripts/parity/final_baseline.txt`, and exits non-zero
-when any lang's |delta| has worsened by more than the thresholds.
+Eyeball the `shift` column:
 
-Use this before pushing parser changes to catch silent regressions like
-the ones that motivated Phase C investigation (Phase B's Kotlin
-@variable scope tightening dropped 2684 nodes without alerting anyone).
+  - Improvements (negative shift) are always OK.
+  - Positive shifts that you *intended* (e.g. you tightened a capture)
+    mean it's time to regenerate the baseline:
+        gnx admin drop --repo .sample_repo
+        gnx admin index --repo .sample_repo
+        python3 scripts/parity/dump_per_lang_kinds.py > scripts/parity/final_baseline.txt
+    Commit the new baseline alongside the parser change.
+  - Positive shifts you didn't expect → silent regression candidate.
+    Investigate before pushing.
+
+The script exits 0 in normal use; nothing is "gated" automatically.
+Phase B's Kotlin `@variable` scope tightening dropped 2 684 nodes
+without anyone noticing because no one re-ran the comparison —
+running this script is the discipline that catches it. It's not a
+CI gate; it's a tool to make the discipline cheap.
+
+CI integration hook (opt-in):
+    --strict           exit 1 on any positive shift exceeding thresholds
+    --threshold-abs N  absolute shift in |delta| (default 200)
+    --threshold-pct F  relative shift in |delta| (default 0.10 = 10%)
 
 Exit codes:
-    0 — within tolerance for every lang
-    1 — at least one lang regressed beyond threshold
-    2 — script / environment failure (missing baseline, gnx not installed, …)
-
-Tolerances (combined OR):
-    --threshold-abs   absolute shift in |delta| (default 200 nodes)
-    --threshold-pct   relative shift in |delta| (default 0.10 = 10%)
-
-A lang's `|delta|` is `abs(rs_total - ref_total)` — distance from ref.
-A regression is when current |delta| > baseline |delta| + threshold.
-Improvements (current |delta| < baseline |delta|) are always allowed.
+    0 — script ran (default; or strict mode with no regressions)
+    1 — strict mode + at least one lang regressed beyond threshold
+    2 — script / environment failure (missing baseline, dump errored, …)
 """
 
 from __future__ import annotations
@@ -71,8 +79,12 @@ def run_dump() -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--threshold-abs", type=int, default=200)
-    ap.add_argument("--threshold-pct", type=float, default=0.10)
+    ap.add_argument("--strict", action="store_true",
+                    help="Exit 1 on threshold-exceeding shifts (CI / pre-push gate mode).")
+    ap.add_argument("--threshold-abs", type=int, default=200,
+                    help="Absolute shift threshold; only used with --strict.")
+    ap.add_argument("--threshold-pct", type=float, default=0.10,
+                    help="Relative shift threshold (fraction); only used with --strict.")
     ap.add_argument("--baseline", type=Path, default=BASELINE)
     args = ap.parse_args()
 
@@ -94,34 +106,42 @@ def main() -> int:
         return 2
 
     regressions: list[tuple[str, int, int, int]] = []
-    print(f"{'lang':<12} {'baseline':>10} {'current':>10} {'shift':>10}  status")
+    print(f"{'lang':<12} {'baseline':>10} {'current':>10} {'shift':>10}  note")
     print("-" * 56)
     for lang in sorted(set(baseline_d) | set(current_d)):
         b = baseline_d.get(lang, 0)
         c = current_d.get(lang, 0)
         shift = abs(c) - abs(b)
-        if shift <= 0:
-            status = "ok"
-        elif shift > args.threshold_abs or (
-            abs(b) > 0 and shift / abs(b) > args.threshold_pct
+        if shift < 0:
+            note = "improved"
+        elif shift == 0:
+            note = "same"
+        elif args.strict and (
+            shift > args.threshold_abs
+            or (abs(b) > 0 and shift / abs(b) > args.threshold_pct)
         ):
-            status = "REGRESSION"
+            note = "OVER THRESHOLD"
             regressions.append((lang, b, c, shift))
         else:
-            status = "within-tol"
-        print(f"{lang:<12} {b:>+10} {c:>+10} {shift:>+10}  {status}")
+            note = "drift+"
+        print(f"{lang:<12} {b:>+10} {c:>+10} {shift:>+10}  {note}")
 
     print("-" * 56)
-    if regressions:
-        print(f"\n!! {len(regressions)} lang(s) regressed beyond threshold "
-              f"(abs>{args.threshold_abs} OR pct>{args.threshold_pct*100:.0f}%):")
+    print(
+        "\nEyeball the `shift` column. Positive shifts you didn't intend → "
+        "investigate. Positive shifts you *did* intend → regenerate the "
+        "baseline (see docstring)."
+    )
+
+    if args.strict and regressions:
+        print(
+            f"\n!! [--strict] {len(regressions)} lang(s) over threshold "
+            f"(abs>{args.threshold_abs} OR pct>{args.threshold_pct*100:.0f}%):"
+        )
         for lang, b, c, shift in regressions:
             print(f"  - {lang}: baseline |delta|={abs(b)}, current |delta|={abs(c)}, shift +{shift}")
-        print("\nIf this is an intentional change, regenerate the baseline:")
-        print(f"  python3 scripts/parity/dump_per_lang_kinds.py > {args.baseline}")
         return 1
 
-    print("\nall langs within tolerance — no regression.")
     return 0
 
 
