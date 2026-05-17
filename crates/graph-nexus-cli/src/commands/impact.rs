@@ -101,11 +101,15 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
 }
 
 pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
-    // `--target X` is a habit-form alias for the positional <name>. Fold
-    // it into `name` so downstream paths only check one field.
     if args.name.is_none() && args.target.is_some() {
         args.name = args.target.take();
     }
+    let format = OutputFormat::parse(args.format.as_deref());
+    let payload = build_payload(&args, engine)?;
+    emit(&payload, format)
+}
+
+pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
     match (args.name.as_ref(), args.baseline.as_ref()) {
         (Some(_), None) => impact_by_name(args, engine),
         (None, Some(_)) => impact_with_baseline(args, engine),
@@ -117,9 +121,8 @@ pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     }
 }
 
-fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
+fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
     let name = args.name.as_deref().unwrap();
-    let format = OutputFormat::parse(args.format.as_deref());
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Resolve name → matching node indices, with optional --file / --kind disambiguation.
@@ -154,11 +157,10 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
         .collect();
 
     if matches.is_empty() {
-        let result = json!({
+        return Ok(json!({
             "error": format!("No symbol named '{name}' found in graph"),
             "hint": "Try `gnx find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
-        });
-        return emit(&result, format);
+        }));
     }
 
     // Multiple matches without disambiguation → report candidates then fail.
@@ -177,11 +179,10 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
                 })
             })
             .collect();
-        let result = json!({
+        return Ok(json!({
             "error": format!("'{name}' is ambiguous ({} candidates) — add --file or --kind to disambiguate", matches.len()),
             "candidates": candidates,
-        });
-        return emit(&result, format);
+        }));
     }
 
     let min_conf = resolve_min_conf(&args);
@@ -256,8 +257,6 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
         });
     }
 
-    emit(&result_obj, format)?;
-
     if emit_empty_hint {
         eprintln!(
             "→ \"{name}\" exists but has 0 incoming references. Possible: entry point, dead code, or recent rename. Try --direction both / --include-tests"
@@ -265,27 +264,25 @@ fn impact_by_name(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
     }
     emit_hidden_edges_footer(hidden_edges_total);
 
-    Ok(())
+    Ok(result_obj)
 }
 
-fn impact_with_baseline(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
+fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
     let baseline_ref = args.baseline.as_deref().unwrap();
     let repo_path = PathBuf::from(args.repo.as_deref().unwrap_or("."));
-    let format = OutputFormat::parse(args.format.as_deref());
 
     let scope = DiffScope::Compare(baseline_ref.to_string());
     let provider = ShellGitProvider;
     let file_diffs = provider.diff(&repo_path, &scope)?;
 
     if file_diffs.is_empty() {
-        let result = json!({
+        return Ok(json!({
             "status": "success",
             "baseline": baseline_ref,
             "message": "0 changes detected — no symbols to assess",
             "changed_symbols": [],
             "impact_by_symbol": [],
-        });
-        return emit(&result, format);
+        }));
     }
 
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
@@ -442,9 +439,8 @@ fn impact_with_baseline(args: ImpactArgs, engine: &Engine) -> Result<(), GnxErro
         "impact_by_symbol": impact_by_symbol,
     });
     attach_hidden_edges(&mut result, hidden_edges_total);
-    emit(&result, format)?;
     emit_hidden_edges_footer(hidden_edges_total);
-    Ok(())
+    Ok(result)
 }
 
 /// Attach the hidden-edge count to the JSON result when filtering actually
