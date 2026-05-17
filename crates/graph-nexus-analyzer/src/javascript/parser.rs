@@ -22,6 +22,11 @@ thread_local! {
 }
 pub struct JavaScriptProvider {
     query: Query,
+    /// Cached new (Variable) capture indices — pre-existing lookups
+    /// stay per parse_file for surgical minimalism.
+    idx_variable_name: Option<u32>,
+    idx_variable: Option<u32>,
+    idx_export_variable: Option<u32>,
 }
 
 impl JavaScriptProvider {
@@ -29,7 +34,15 @@ impl JavaScriptProvider {
         let language = tree_sitter_javascript::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let idx_variable_name = query.capture_index_for_name("variable.name");
+        let idx_variable = query.capture_index_for_name("variable");
+        let idx_export_variable = query.capture_index_for_name("export.variable");
+        Ok(Self {
+            query,
+            idx_variable_name,
+            idx_variable,
+            idx_export_variable,
+        })
     }
 }
 
@@ -47,6 +60,10 @@ impl LanguageProvider for JavaScriptProvider {
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
         let mut nodes: Vec<RawNode> = Vec::new();
+        // Spans of already-emitted nodes — lookup table for the Variable
+        // dedup at L301 (was O(n²) linear scan of `nodes`).
+        let mut emitted_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
 
@@ -66,9 +83,10 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
 
-        let idx_variable_name = self.query.capture_index_for_name("variable.name");
-        let idx_variable = self.query.capture_index_for_name("variable");
-        let idx_export_variable = self.query.capture_index_for_name("export.variable");
+        // 14-lang-parity Variable captures — use cached indices.
+        let idx_variable_name = self.idx_variable_name;
+        let idx_variable = self.idx_variable;
+        let idx_export_variable = self.idx_export_variable;
 
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
@@ -222,6 +240,7 @@ impl LanguageProvider for JavaScriptProvider {
                     }
 
                     if !existing_found {
+                        emitted_spans.insert(node_span);
                         nodes.push(RawNode {
                             decorators: decorators.clone(),
                             is_exported,
@@ -291,11 +310,12 @@ impl LanguageProvider for JavaScriptProvider {
                                 end.row as u32,
                                 end.column as u32,
                             );
-                            // Dedup: skip if a Function node already occupies this span+name
-                            // (arrow-function assigned to const — already emitted as Function).
-                            let already_emitted = nodes
-                                .iter()
-                                .any(|n| n.name == name_str && n.span == var_span);
+                            // Dedup: skip if a node already occupies this span (an
+                            // arrow-function const declarator was already pushed as
+                            // Function via the @function.name capture). HashSet
+                            // lookup is O(1) — earlier impl scanned `nodes` linearly
+                            // which is O(k²) per file on declarator-heavy code.
+                            let already_emitted = emitted_spans.contains(&var_span);
                             if !already_emitted {
                                 nodes.push(RawNode {
                                     decorators: vec![],

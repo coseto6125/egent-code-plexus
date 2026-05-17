@@ -270,50 +270,50 @@ impl GraphBuilder {
             // Skip Route emission for non-production files (Test/Reference
             // categories). Framework example dirs, e2e specs, vendored deps
             // etc. otherwise flood the graph with thousands of phantom
-            // routes that no LLM consumer should hit. The category sweep
-            // mirrors what `gnx routes` already filters at query time;
-            // doing it at emit time keeps raw `cypher MATCH (:Route)` honest.
+            // routes that no LLM consumer should hit. Reads the category
+            // already computed in Pass 1 (line 229) — avoids re-running
+            // `determine_category` (~36 string scans per file) per file.
+            // `current_handler_idx` still advances by the file's node count
+            // so downstream alignment stays correct.
             let is_non_production = matches!(
-                determine_category(&path_str),
+                files[file_idx as usize].category,
                 FileCategory::Test | FileCategory::Reference
             );
+            if is_non_production {
+                current_handler_idx += local_graph.nodes.len() as u32;
+                continue;
+            }
 
             for raw_node in &local_graph.nodes {
                 let handler_idx = current_handler_idx;
 
-                if !is_non_production {
-                    for dec in &raw_node.decorators {
-                        if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
-                            let route_name = format!("{} {}", detected.method, detected.path);
-                            let uid_str = format!("Route:{}:{}", path_str, route_name);
+                for dec in &raw_node.decorators {
+                    if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
+                        let route_name = format!("{} {}", detected.method, detected.path);
+                        let uid_str = format!("Route:{}:{}", path_str, route_name);
 
-                            let route_idx = nodes.len() as u32;
-                            nodes.push(Node {
-                                uid: string_pool.add(&uid_str),
-                                name: string_pool.add(&route_name),
-                                file_idx,
-                                kind: graph_nexus_core::graph::NodeKind::Route,
-                                span: raw_node.span,
-                                community_id: 0,
-                            });
+                        let route_idx = nodes.len() as u32;
+                        nodes.push(Node {
+                            uid: string_pool.add(&uid_str),
+                            name: string_pool.add(&route_name),
+                            file_idx,
+                            kind: graph_nexus_core::graph::NodeKind::Route,
+                            span: raw_node.span,
+                            community_id: 0,
+                        });
 
-                            route_edges.push(Edge {
-                                source: handler_idx,
-                                target: route_idx,
-                                rel_type: RelType::HandlesRoute,
-                                confidence: 1.0,
-                                reason: string_pool.add("decorator"),
-                            });
+                        route_edges.push(Edge {
+                            source: handler_idx,
+                            target: route_idx,
+                            rel_type: RelType::HandlesRoute,
+                            confidence: 1.0,
+                            reason: string_pool.add("decorator"),
+                        });
 
-                            emitted_routes.push((route_idx, file_idx, detected.path.clone()));
-                        }
+                        emitted_routes.push((route_idx, file_idx, detected.path.clone()));
                     }
                 }
                 current_handler_idx += 1;
-            }
-
-            if is_non_production {
-                continue;
             }
 
             for raw_route in &local_graph.routes {

@@ -56,6 +56,16 @@ thread_local! {
 }
 pub struct CSharpProvider {
     query: Query,
+    /// Cached capture indices for new (Property/Variable/Constructor)
+    /// captures added by the 14-lang parity work. Pre-existing captures
+    /// (name.function / name.class / etc.) still look up per parse_file
+    /// — left untouched per surgical-change convention.
+    idx_property_name: Option<u32>,
+    idx_property: Option<u32>,
+    idx_variable_name: Option<u32>,
+    idx_variable: Option<u32>,
+    idx_constructor_name: Option<u32>,
+    idx_constructor: Option<u32>,
 }
 
 impl CSharpProvider {
@@ -63,7 +73,21 @@ impl CSharpProvider {
         let language = tree_sitter_c_sharp::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+        let idx_property_name = query.capture_index_for_name("property.name");
+        let idx_property = query.capture_index_for_name("property");
+        let idx_variable_name = query.capture_index_for_name("variable.name");
+        let idx_variable = query.capture_index_for_name("variable");
+        let idx_constructor_name = query.capture_index_for_name("constructor.name");
+        let idx_constructor = query.capture_index_for_name("constructor");
+        Ok(Self {
+            query,
+            idx_property_name,
+            idx_property,
+            idx_variable_name,
+            idx_variable,
+            idx_constructor_name,
+            idx_constructor,
+        })
     }
 }
 
@@ -101,12 +125,14 @@ impl LanguageProvider for CSharpProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
-        let idx_property_name = self.query.capture_index_for_name("property.name");
-        let idx_property = self.query.capture_index_for_name("property");
-        let idx_variable_name = self.query.capture_index_for_name("variable.name");
-        let idx_variable = self.query.capture_index_for_name("variable");
-        let idx_constructor_name = self.query.capture_index_for_name("constructor.name");
-        let idx_constructor = self.query.capture_index_for_name("constructor");
+        // New 14-lang-parity captures: read cached indices (computed once
+        // in `new()`) instead of looking up by name per file.
+        let idx_property_name = self.idx_property_name;
+        let idx_property = self.idx_property;
+        let idx_variable_name = self.idx_variable_name;
+        let idx_variable = self.idx_variable;
+        let idx_constructor_name = self.idx_constructor_name;
+        let idx_constructor = self.idx_constructor;
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
