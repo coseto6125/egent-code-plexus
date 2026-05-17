@@ -60,18 +60,31 @@ fn is_class_method(func: tree_sitter::Node) -> bool {
         .is_some_and(|p| p.kind() == "class_declaration")
 }
 
+/// True when the `class_declaration` is an `enum class Foo` — detected by the
+/// presence of a direct `enum` keyword child (kind == `"enum"`). The grammar
+/// places the `enum` token as a sibling of `class`, not inside `modifiers`.
+fn is_enum_class(class_decl: tree_sitter::Node) -> bool {
+    let mut cursor = class_decl.walk();
+    for child in class_decl.children(&mut cursor) {
+        if child.kind() == "enum" {
+            return true;
+        }
+    }
+    false
+}
+
 /// True when the `class_declaration` carries an `annotation` modifier — i.e.
 /// `annotation class Foo`. Distinct from plain `class Foo`.
 fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
     for i in 0..class_decl.child_count() {
-        let Some(c) = class_decl.child(i) else { continue };
+        let Some(c) = class_decl.child(i) else {
+            continue;
+        };
         if c.kind() == "modifiers" {
             for j in 0..c.child_count() {
                 let Some(m) = c.child(j) else { continue };
                 if m.kind() == "class_modifier" || m.kind() == "modifier" {
-                    if let Ok(t) =
-                        std::str::from_utf8(&source[m.start_byte()..m.end_byte()])
-                    {
+                    if let Ok(t) = std::str::from_utf8(&source[m.start_byte()..m.end_byte()]) {
                         if t == "annotation" {
                             return true;
                         }
@@ -262,6 +275,7 @@ impl LanguageProvider for KotlinProvider {
             if let (Some(k_val), Some(root)) = (kind, root_span_node) {
                 let new_kind = match k_val {
                     NodeKind::Function if is_class_method(root) => Some(NodeKind::Method),
+                    NodeKind::Class if is_enum_class(root) => Some(NodeKind::Enum),
                     NodeKind::Class if is_annotation_class(root, source) => {
                         Some(NodeKind::Annotation)
                     }
@@ -285,7 +299,11 @@ impl LanguageProvider for KotlinProvider {
                     // Property dedupe on name-node id so multi-declarator
                     // patterns each get their own entry; other kinds keep
                     // root-keyed dedupe (multi-decorator captures collapse).
-                    let node_id = if k == NodeKind::Property { n.id() } else { root.id() };
+                    let node_id = if k == NodeKind::Property {
+                        n.id()
+                    } else {
+                        root.id()
+                    };
                     let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
                         let i = nodes.len();
                         nodes.push(RawNode {
