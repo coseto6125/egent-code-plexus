@@ -1,4 +1,5 @@
-//! Smoke tests: peer tool registration and spawn-argv shape.
+//! Smoke tests: peer tool registration + spawn-argv shape for the single
+//! `gnx_peers` tool fronting all sub-subcommands via `subcmd` discriminator.
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use graph_nexus_mcp::server::GnxMcpServer;
@@ -46,7 +47,7 @@ enum PeersCmd {
 // ── registration tests ────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn peer_tools_registered_by_name() {
+async fn single_gnx_peers_tool_registered() {
     let server = GnxMcpServer::new(&Cli::command()).expect("init");
     let names: Vec<&str> = server
         .list_tools()
@@ -55,30 +56,43 @@ async fn peer_tools_registered_by_name() {
         .collect();
 
     assert!(
-        names.contains(&"gnx_peers_status"),
-        "missing gnx_peers_status; got {names:?}"
+        names.contains(&"gnx_peers"),
+        "missing gnx_peers; got {names:?}"
     );
-    assert!(
-        names.contains(&"gnx_peers_log"),
-        "missing gnx_peers_log; got {names:?}"
-    );
-    assert!(
-        names.contains(&"gnx_peers_say"),
-        "missing gnx_peers_say; got {names:?}"
-    );
+    for stale in ["gnx_peers_status", "gnx_peers_log", "gnx_peers_say"] {
+        assert!(
+            !names.contains(&stale),
+            "split-form `{stale}` must not appear; got {names:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn opaque_gnx_peers_not_registered() {
+async fn gnx_peers_advertises_subcmd_discriminator() {
     let server = GnxMcpServer::new(&Cli::command()).expect("init");
-    let names: Vec<&str> = server
+    let tool = server
         .list_tools()
         .iter()
-        .map(|t| t.name.as_str())
-        .collect();
+        .find(|t| t.name == "gnx_peers")
+        .expect("gnx_peers tool")
+        .clone();
+    assert_eq!(tool.subcmd_arg.as_deref(), Some("subcmd"));
+    let allowed = tool
+        .schema
+        .get("properties")
+        .and_then(|p| p.get("subcmd"))
+        .and_then(|s| s.get("enum"))
+        .and_then(|e| e.as_array())
+        .expect("subcmd enum")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    for sub in ["status", "diff", "log", "say", "inbox", "thread"] {
+        assert!(allowed.iter().any(|s| s == sub), "subcmd `{sub}` missing");
+    }
     assert!(
-        !names.contains(&"gnx_peers"),
-        "opaque gnx_peers must not appear; got {names:?}"
+        !allowed.iter().any(|s| s == "gc"),
+        "`gc` is maintenance-only and must not appear in subcmd enum"
     );
 }
 
@@ -93,50 +107,99 @@ fn write_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
     stub
 }
 
+fn peers_tool() -> graph_nexus_mcp::schema::DerivedTool {
+    graph_nexus_mcp::peers::peer_tools()
+        .into_iter()
+        .find(|t| t.name == "gnx_peers")
+        .expect("gnx_peers tool")
+}
+
 #[test]
-fn status_spawn_argv_contains_peers_status() {
+fn status_subcmd_yields_peers_status_argv() {
     let dir = TempDir::new().unwrap();
     let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
-    let tool = graph_nexus_mcp::peers::peer_tools()
-        .into_iter()
-        .find(|t| t.name == "gnx_peers_status")
-        .unwrap();
-    let out = run_spawn(&stub, &tool, &json!({})).unwrap();
-    // Stub echoes all args; expect "peers status" as first two tokens.
+    let tool = peers_tool();
+    let out = run_spawn(&stub, &tool, &json!({"subcmd": "status"})).unwrap();
     assert!(
-        out.contains("status"),
-        "expected 'status' in argv echo: {out:?}"
+        out.trim() == "peers status",
+        "expected exactly 'peers status', got: {out:?}"
     );
 }
 
 #[test]
-fn log_spawn_argv_contains_peers_log_with_options() {
+fn log_subcmd_passes_limit_flag() {
     let dir = TempDir::new().unwrap();
     let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
-    let tool = graph_nexus_mcp::peers::peer_tools()
-        .into_iter()
-        .find(|t| t.name == "gnx_peers_log")
-        .unwrap();
-    let out = run_spawn(&stub, &tool, &json!({"limit": 10})).unwrap();
-    assert!(out.contains("log"), "expected 'log' in argv echo: {out:?}");
-    assert!(
-        out.contains("--limit"),
-        "expected '--limit' in argv echo: {out:?}"
-    );
+    let tool = peers_tool();
+    let out = run_spawn(&stub, &tool, &json!({"subcmd": "log", "limit": 10})).unwrap();
+    assert!(out.contains("peers log"), "got: {out:?}");
+    assert!(out.contains("--limit"), "got: {out:?}");
+    assert!(out.contains(" 10"), "got: {out:?}");
 }
 
 #[test]
-fn say_spawn_argv_positional_body_after_say() {
+fn say_subcmd_emits_body_as_positional() {
     let dir = TempDir::new().unwrap();
     let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
-    let tool = graph_nexus_mcp::peers::peer_tools()
-        .into_iter()
-        .find(|t| t.name == "gnx_peers_say")
-        .unwrap();
-    let out = run_spawn(&stub, &tool, &json!({"body": "hello"})).unwrap();
-    assert!(out.contains("say"), "expected 'say' in argv echo: {out:?}");
+    let tool = peers_tool();
+    let out = run_spawn(&stub, &tool, &json!({"subcmd": "say", "body": "hello"})).unwrap();
+    assert!(out.contains("peers say"), "got: {out:?}");
+    assert!(out.contains("hello"), "got: {out:?}");
+    // body must come before any flags (positional ordering)
+    let say_pos = out.find("say").unwrap();
+    let hello_pos = out.find("hello").unwrap();
+    assert!(hello_pos > say_pos, "body must follow `say`: {out:?}");
+}
+
+#[test]
+fn diff_subcmd_emits_peer_then_optional_symbol() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
+    let tool = peers_tool();
+    let out = run_spawn(
+        &stub,
+        &tool,
+        &json!({"subcmd": "diff", "peer": "sess-x", "symbol": "Foo"}),
+    )
+    .unwrap();
+    assert!(out.contains("peers diff"), "got: {out:?}");
+    let peer_pos = out.find("sess-x").expect("peer in out");
+    let sym_pos = out.find("Foo").expect("symbol in out");
+    assert!(peer_pos < sym_pos, "peer must precede symbol: {out:?}");
+}
+
+#[test]
+fn thread_subcmd_emits_msg_id_positional() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
+    let tool = peers_tool();
+    let out = run_spawn(
+        &stub,
+        &tool,
+        &json!({"subcmd": "thread", "msg_id": "abc123"}),
+    )
+    .unwrap();
+    assert!(out.contains("peers thread"), "got: {out:?}");
+    assert!(out.contains("abc123"), "got: {out:?}");
+}
+
+#[test]
+fn missing_subcmd_returns_err() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
+    let tool = peers_tool();
+    let err = run_spawn(&stub, &tool, &json!({})).unwrap_err();
+    assert!(err.to_string().contains("missing required `subcmd`"));
+}
+
+#[test]
+fn invalid_subcmd_returns_err_without_spawning() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
+    let tool = peers_tool();
+    let err = run_spawn(&stub, &tool, &json!({"subcmd": "gc"})).unwrap_err();
     assert!(
-        out.contains("hello"),
-        "expected message body 'hello' in argv echo: {out:?}"
+        err.to_string().contains("must be one of"),
+        "got: {err:?}"
     );
 }

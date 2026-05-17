@@ -28,6 +28,7 @@ fn dummy_tool(subcommand: &str) -> DerivedTool {
         flag_args: HashSet::new(),
         positional_args: Vec::new(),
         prefix_args: Vec::new(),
+        subcmd_arg: None,
     }
 }
 
@@ -49,4 +50,61 @@ fn spawn_subprocess_failure_returns_err_with_stderr() {
     let tool = dummy_tool("inspect");
     let err = run_spawn(&stub, &tool, &json!({})).unwrap_err();
     assert!(err.to_string().contains("boom"));
+}
+
+#[test]
+fn spawn_peels_subcmd_arg_as_first_prefix() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(
+        dir.path(),
+        "#!/bin/sh\necho \"sub=$1 a1=$2 a2=$3 a3=$4\"\n",
+    );
+    let mut tool = dummy_tool("peers");
+    tool.subcmd_arg = Some("subcmd".into());
+    tool.schema = Arc::new(json!({
+        "properties": {
+            "subcmd": { "type": "string", "enum": ["status", "diff"] }
+        }
+    }));
+    tool.positional_args = vec!["peer".into()];
+    let out = run_spawn(
+        &stub,
+        &tool,
+        &json!({"subcmd": "diff", "peer": "sess-x"}),
+    )
+    .unwrap();
+    assert!(out.contains("sub=peers"), "got: {out}");
+    assert!(out.contains("a1=diff"), "got: {out}");
+    assert!(out.contains("a2=sess-x"), "got: {out}");
+}
+
+#[test]
+fn spawn_rejects_invalid_subcmd_value() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(dir.path(), "#!/bin/sh\necho ok\n");
+    let mut tool = dummy_tool("peers");
+    tool.subcmd_arg = Some("subcmd".into());
+    tool.schema = Arc::new(json!({
+        "properties": {
+            "subcmd": { "type": "string", "enum": ["status"] }
+        }
+    }));
+    let err = run_spawn(&stub, &tool, &json!({"subcmd": "evil"})).unwrap_err();
+    assert!(
+        err.to_string().contains("must be one of"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn spawn_errors_when_subcmd_missing() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(dir.path(), "#!/bin/sh\necho ok\n");
+    let mut tool = dummy_tool("peers");
+    tool.subcmd_arg = Some("subcmd".into());
+    let err = run_spawn(&stub, &tool, &json!({})).unwrap_err();
+    assert!(
+        err.to_string().contains("missing required `subcmd`"),
+        "got: {err}"
+    );
 }

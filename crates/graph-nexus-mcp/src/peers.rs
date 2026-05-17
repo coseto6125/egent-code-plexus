@@ -1,109 +1,108 @@
-//! Manually-constructed MCP tools for `gnx peers` sub-subcommands.
+//! Manually-constructed MCP tool for `gnx peers` sub-subcommands.
 //!
-//! The general `enumerate_tools` path walks one level of clap subcommands,
-//! so `gnx peers` appears as a single opaque tool. These three tools expand
-//! the `peers` namespace into distinct MCP-callable entries that map to
-//! `gnx peers status`, `gnx peers log`, and `gnx peers say` respectively.
-//! Dispatch uses `DerivedTool::prefix_args` to insert the sub-subcommand
-//! name between the top-level subcommand and the JSON-derived argv.
+//! `enumerate_tools` would surface `gnx peers` as a single opaque tool with
+//! no usable args (the sub-subcommand sits one clap level below the visible
+//! root). We replace that with a hand-rolled `gnx_peers` tool that carries
+//! a `subcmd` discriminator (`status` / `diff` / `log` / `say` / `inbox` /
+//! `thread`); `gnx peers gc` is intentionally omitted — it's a maintenance
+//! op, not an agent action.
+//!
+//! Dispatch path: `spawn::peel_subcmd` lifts the JSON `subcmd` field out and
+//! prepends it as the first arg, yielding `gnx peers <subcmd> [flags...]`.
+//!
+//! The whole feature is only useful when ≥2 LLM sessions are running with
+//! peer-sync; the tool description leads with that constraint so single-
+//! agent sessions don't reach for it.
 
 use crate::schema::DerivedTool;
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Return the three peer MCP tools: status, log, say.
+/// Return the single `gnx_peers` MCP tool fronting all peer sub-subcommands.
 pub fn peer_tools() -> Vec<DerivedTool> {
-    vec![tool_status(), tool_log(), tool_say()]
+    vec![tool_peers()]
 }
 
-fn tool_status() -> DerivedTool {
+fn tool_peers() -> DerivedTool {
     DerivedTool {
-        name: "gnx_peers_status".into(),
+        name: "gnx_peers".into(),
         subcommand: "peers".into(),
-        description: "List alive peer sessions for the current repo.".into(),
+        description: concat!(
+            "[multi-agent peer-sync only — single-session has no peers] ",
+            "Inspect / talk to other gnx watch sessions on this repo. ",
+            "subcmd=status: list alive peers. ",
+            "subcmd=diff (peer, [symbol]): peer's symbol-level dirty surface. ",
+            "subcmd=log ([since/peer/direction/limit]): tail this session's Ƀ msg log. ",
+            "subcmd=say (body, [to/reply]): Ƀ send a message (fire-and-forget). ",
+            "subcmd=inbox ([limit]): peek inbox without draining. ",
+            "subcmd=thread (msg_id): print a Ƀ message thread."
+        )
+        .into(),
         schema: Arc::new(json!({
             "type": "object",
             "properties": {
-                "repo": {
+                "subcmd": {
                     "type": "string",
-                    "description": "Path to the repo root (optional; defaults to cwd)"
-                }
-            },
-            "required": [],
-            "additionalProperties": false
-        })),
-        flag_args: HashSet::new(),
-        positional_args: Vec::new(),
-        prefix_args: vec!["status".into()],
-    }
-}
-
-fn tool_log() -> DerivedTool {
-    DerivedTool {
-        name: "gnx_peers_log".into(),
-        subcommand: "peers".into(),
-        description: "Tail this session's Ƀ message log (optionally filtered by peer / direction)."
-            .into(),
-        schema: Arc::new(json!({
-            "type": "object",
-            "properties": {
+                    "enum": ["status", "diff", "log", "say", "inbox", "thread"],
+                    "description": "Which peer operation to run. Each subcmd uses a disjoint subset of the args below."
+                },
                 "peer": {
                     "type": "string",
-                    "description": "Show only messages to/from this peer session ID"
+                    "description": "[diff] Peer session ID (from subcmd=status). [log] Filter messages to/from this peer."
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "[diff] If set, only show dirty entries touching this symbol name."
+                },
+                "since": {
+                    "type": "string",
+                    "description": "[log] RFC3339 timestamp — only show messages after this."
                 },
                 "direction": {
                     "type": "string",
-                    "description": "Filter by direction: 'in' or 'out'"
+                    "description": "[log] Filter: 'in' or 'out'."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of messages to return (default 50)"
+                    "description": "[log / inbox] Maximum entries to return (default 50)."
                 },
-                "repo": {
-                    "type": "string",
-                    "description": "Path to the repo root (optional; defaults to cwd)"
-                }
-            },
-            "required": [],
-            "additionalProperties": false
-        })),
-        flag_args: HashSet::new(),
-        positional_args: Vec::new(),
-        prefix_args: vec!["log".into()],
-    }
-}
-
-fn tool_say() -> DerivedTool {
-    DerivedTool {
-        name: "gnx_peers_say".into(),
-        subcommand: "peers".into(),
-        description: "Ƀ Send a message to all peers or a specific peer (fire-and-forget).".into(),
-        schema: Arc::new(json!({
-            "type": "object",
-            "properties": {
                 "body": {
                     "type": "string",
-                    "description": "Message body to send"
+                    "description": "[say] Message body."
                 },
                 "to": {
                     "type": "string",
-                    "description": "Target peer session ID (omit to broadcast)"
+                    "description": "[say] Target peer session ID. Omit to broadcast."
                 },
                 "reply": {
                     "type": "string",
-                    "description": "msg_id this message is replying to"
+                    "description": "[say] msg_id this message is replying to."
+                },
+                "msg_id": {
+                    "type": "string",
+                    "description": "[thread] msg_id returned by say or seen in log."
                 },
                 "repo": {
                     "type": "string",
-                    "description": "Path to the repo root (optional; defaults to cwd)"
+                    "description": "Path to the repo root (optional; defaults to cwd)."
                 }
             },
-            "required": ["body"],
+            "required": ["subcmd"],
             "additionalProperties": false
         })),
         flag_args: HashSet::new(),
-        positional_args: vec!["body".into()],
-        prefix_args: vec!["say".into()],
+        // Union of positional sets across subcmds; each subcmd uses a disjoint
+        // subset, so the LLM's JSON object will only carry the relevant keys.
+        // Order matters within a subcmd (diff: peer→symbol); across subcmds
+        // it's irrelevant since no two share a positional name.
+        positional_args: vec![
+            "peer".into(),
+            "symbol".into(),
+            "body".into(),
+            "msg_id".into(),
+        ],
+        prefix_args: Vec::new(),
+        subcmd_arg: Some("subcmd".into()),
     }
 }

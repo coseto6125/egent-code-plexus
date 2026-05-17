@@ -24,8 +24,6 @@ pub struct WatchArgs {
     pub status: bool,
     #[arg(long)]
     pub foreground: bool,
-    #[arg(long, default_value = "touched")]
-    pub concern: String,
     #[arg(long)]
     pub repo: Option<PathBuf>,
 }

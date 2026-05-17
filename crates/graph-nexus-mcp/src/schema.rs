@@ -51,6 +51,10 @@ pub struct DerivedTool {
     /// Fixed argv tokens prepended before JSON-derived args. Used for
     /// sub-subcommand dispatch (e.g. `["status"]` → `gnx peers status`).
     pub prefix_args: Vec<String>,
+    /// If `Some(key)`, the JSON arg with this key is peeled out, validated,
+    /// and prepended as the first prefix arg at dispatch time. Lets one
+    /// MCP tool front many sub-subcommands via a `subcmd` discriminator.
+    pub subcmd_arg: Option<String>,
 }
 
 /// Enumerate every visible subcommand of `root` as an MCP tool.
@@ -110,6 +114,7 @@ fn derive_tool(cmd: &Command) -> DerivedTool {
         flag_args,
         positional_args,
         prefix_args: Vec::new(),
+        subcmd_arg: None,
     }
 }
 
