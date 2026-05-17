@@ -1,4 +1,6 @@
 use crate::calls::extract_calls;
+use super::spec::HclSpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -16,6 +18,7 @@ thread_local! {
 }
 pub struct HclProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl HclProvider {
@@ -23,7 +26,14 @@ impl HclProvider {
         let language = tree_sitter_hcl::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| HclSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -44,9 +54,7 @@ impl LanguageProvider for HclProvider {
         let mut imports = Vec::new();
 
         // Capture index pairs — resolve once before the loop.
-        let idx_class_name = self.query.capture_index_for_name("class.name");
         let idx_class = self.query.capture_index_for_name("class");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_import = self.query.capture_index_for_name("import");
@@ -63,20 +71,18 @@ impl LanguageProvider for HclProvider {
             let mut prefix_node = None;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_class_name {
+                let cap_idx = cap.index as usize;
+                if let Some(k) = self.capture_kind_by_idx.get(cap_idx).and_then(|opt| *opt) {
+                    // This is a .name capture with a NodeKind
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_const_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Const);
-                } else if Some(cap_idx) == idx_class || Some(cap_idx) == idx_const {
+                    kind = Some(k);
+                } else if Some(cap_idx as u32) == idx_class || Some(cap_idx as u32) == idx_const {
                     root_span_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_source {
+                } else if Some(cap_idx as u32) == idx_import_source {
                     import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_import {
+                } else if Some(cap_idx as u32) == idx_import {
                     root_span_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_res_type || Some(cap_idx) == idx_data_type {
+                } else if Some(cap_idx as u32) == idx_res_type || Some(cap_idx as u32) == idx_data_type {
                     prefix_node = Some(cap.node);
                 }
             }

@@ -6,6 +6,8 @@
 //     identifiers inside REFERENCES(...) clauses
 //   - Foreign key REFERENCES become import-style edges
 use crate::calls::extract_calls;
+use super::spec::SqlSpec;
+use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use graph_nexus_core::graph::NodeKind;
@@ -24,6 +26,7 @@ thread_local! {
 }
 pub struct SqlProvider {
     query: Query,
+    capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
 impl SqlProvider {
@@ -31,7 +34,14 @@ impl SqlProvider {
         let language = tree_sitter_sequel::LANGUAGE.into();
         let query_source = include_str!("queries.scm");
         let query = Query::new(&language, query_source)?;
-        Ok(Self { query })
+
+        let capture_names = query.capture_names();
+        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
+            .iter()
+            .map(|name| SqlSpec::CAPTURE_KIND.get(name).copied())
+            .collect();
+
+        Ok(Self { query, capture_kind_by_idx })
     }
 }
 
@@ -55,11 +65,8 @@ impl LanguageProvider for SqlProvider {
         // into each table's `RawNode.heritage` after the main loop.
         let mut fk_heritage: HashMap<String, Vec<String>> = HashMap::new();
 
-        let idx_class_name = self.query.capture_index_for_name("class.name");
         let idx_class = self.query.capture_index_for_name("class");
-        let idx_function_name = self.query.capture_index_for_name("function.name");
         let idx_function = self.query.capture_index_for_name("function");
-        let idx_const_name = self.query.capture_index_for_name("const.name");
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_heritage_table = self.query.capture_index_for_name("heritage.table");
@@ -74,25 +81,20 @@ impl LanguageProvider for SqlProvider {
             let mut fk_target_node = None;
 
             for cap in m.captures {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == idx_class_name {
+                let cap_idx = cap.index as usize;
+                if let Some(k) = self.capture_kind_by_idx.get(cap_idx).and_then(|opt| *opt) {
+                    // This is a .name capture with a NodeKind
                     name_node = Some(cap.node);
-                    kind = Some(NodeKind::Class);
-                } else if Some(cap_idx) == idx_function_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if Some(cap_idx) == idx_const_name {
-                    name_node = Some(cap.node);
-                    kind = Some(NodeKind::Const);
-                } else if Some(cap_idx) == idx_import_source {
+                    kind = Some(k);
+                } else if Some(cap_idx as u32) == idx_import_source {
                     import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_heritage_table {
+                } else if Some(cap_idx as u32) == idx_heritage_table {
                     fk_table_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_heritage_target {
+                } else if Some(cap_idx as u32) == idx_heritage_target {
                     fk_target_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_const
+                } else if Some(cap_idx as u32) == idx_class
+                    || Some(cap_idx as u32) == idx_function
+                    || Some(cap_idx as u32) == idx_const
                 {
                     root_span_node = Some(cap.node);
                 }
