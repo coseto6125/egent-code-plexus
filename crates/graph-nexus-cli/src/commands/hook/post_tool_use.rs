@@ -23,25 +23,38 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     if input.tool_name != "Bash" {
         return Ok(());
     }
+    // Both signals (orphan-prune notice + reindex notice) merge into one
+    // additionalContext payload — Claude Code parses one JSON object on
+    // stdout, so two println!s would drop the second silently.
+    let mut sections: Vec<String> = Vec::new();
 
     // Orphan-registry sweep is registry-level; not gated on git/index
     // state so it actually fires on idle Edit-only sessions too. The
     // 1-hour throttle keeps the per-call stat negligible.
     let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
     if should_run_orphan_prune(&home_gnx) && spawn_background_prune(&home_gnx) {
-        emit_additional_context(
-            "PostToolUse",
-            "gnx orphan-registry sweep started in background. Stale ~/.gnx/<repo>/<branch>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.",
+        sections.push(
+            "gnx orphan-registry sweep started in background. Stale ~/.gnx/<repo>__<hash>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.".to_string(),
         );
     }
 
+    if let Some(msg) = maybe_reindex_notice(input) {
+        sections.push(msg);
+    }
+    if !sections.is_empty() {
+        emit_additional_context("PostToolUse", &sections.join("\n\n"));
+    }
+    Ok(())
+}
+
+fn maybe_reindex_notice(input: &HookInput) -> Option<String> {
     let cmd = input
         .tool_input
         .get("command")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if !is_git_mutation(cmd) {
-        return Ok(());
+        return None;
     }
     let exit = input
         .tool_output
@@ -49,43 +62,31 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     if exit != 0 {
-        return Ok(());
+        return None;
     }
 
     // No index registered for this worktree → nothing to refresh; the
     // SessionStart hint already nagged the user to run `gnx admin index`.
-    let index_dir = match lookup_index_dir(&input.cwd) {
-        Some(d) => d,
-        None => return Ok(()),
-    };
+    let index_dir = lookup_index_dir(&input.cwd)?;
     let repo_root = Path::new(&input.cwd);
     let graph_path = index_dir.join("graph.bin");
 
     let result = ensure_index(&graph_path, repo_root).unwrap_or(EnsureResult::Missing);
     let age = match result {
         EnsureResult::Stale { age_seconds } => age_seconds,
-        _ => return Ok(()),
+        _ => return None,
     };
 
     // Marker/log/lock live in the hook-local state dir so they're
-    // scoped to the worktree, not shared across all branches that
-    // happen to share a `~/.gnx/<repo>/<branch>/` directory.
-    let state_dir = match gnx_state_dir_ensure(&input.cwd) {
-        Some(d) => d,
-        None => return Ok(()),
-    };
-
+    // scoped to the worktree, not shared across all worktrees that
+    // happen to point at the same `~/.gnx/<repo>__<hash>/commits/<sha>/`.
+    let state_dir = gnx_state_dir_ensure(&input.cwd)?;
     if !spawn_background_reindex(repo_root, &state_dir) {
-        return Ok(());
+        return None;
     }
-
-    emit_additional_context(
-        "PostToolUse",
-        &format!(
-            "gnx reindex started in background (index stale ~{age}s). Subsequent gnx tools may use stale data until completion (~30-120s). If it appears stuck, run `gnx admin index` manually."
-        ),
-    );
-    Ok(())
+    Some(format!(
+        "gnx reindex started in background (index stale ~{age}s). Subsequent gnx tools may use stale data until completion (~30-120s). If it appears stuck, run `gnx admin index` manually."
+    ))
 }
 
 fn is_git_mutation(cmd: &str) -> bool {

@@ -14,8 +14,11 @@ use std::path::Path;
 const LOG_TAIL_WINDOW: u64 = 4096;
 
 pub fn handle(input: &HookInput) -> Result<(), GnxError> {
-    // Reindex marker check — local to `<cwd>/.gnx/`. Skip when the state
-    // dir doesn't exist; peer inbox drain below fires regardless.
+    // All signals (rebuild marker + peer drain) merge into one
+    // additionalContext payload — Claude Code parses one JSON object on
+    // stdout, so two println!s would drop the second silently.
+    let mut sections: Vec<String> = Vec::new();
+
     if let Some(state_dir) = gnx_state_dir(&input.cwd) {
         let complete = state_dir.join(".rebuild-complete");
         let failed = state_dir.join(".rebuild-failed");
@@ -32,27 +35,23 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
                     format!("Last log lines: {tail}.")
                 }
             );
-            emit_additional_context("UserPromptSubmit", msg.trim());
+            sections.push(msg.trim().to_string());
         } else if complete.exists() {
-            // Stats come from the registered index dir (which holds
-            // `meta.json` after `gnx admin index` finished), not the local
-            // state dir. If the registry doesn't know about this cwd yet,
-            // we still acknowledge the rebuild but skip the count line.
             let stats = lookup_index_dir(&input.cwd)
                 .map(|d| read_stats(&d))
                 .unwrap_or_else(|| "?".into());
             let _ = fs::remove_file(&complete);
-            let msg =
-                format!("gnx index rebuild complete ({stats}). gnx tools now return fresh data.");
-            emit_additional_context("UserPromptSubmit", &msg);
+            sections.push(format!(
+                "gnx index rebuild complete ({stats}). gnx tools now return fresh data."
+            ));
         }
     }
 
-    // Peer inbox drain fires unconditionally on every UserPromptSubmit so
-    // that messages from peer sessions are visible at every LLM-facing
-    // boundary, mirroring the pre_tool_use pattern.
     if let Some(peer) = super::common::drain_and_render_peer_payload() {
-        emit_additional_context("UserPromptSubmit", &peer);
+        sections.push(peer);
+    }
+    if !sections.is_empty() {
+        emit_additional_context("UserPromptSubmit", &sections.join("\n\n"));
     }
     Ok(())
 }

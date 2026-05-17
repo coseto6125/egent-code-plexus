@@ -14,33 +14,41 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     if input.cwd.is_empty() {
         return Ok(());
     }
-    let index_dir = match lookup_index_dir(&input.cwd) {
-        Some(d) => d,
+    // All signals (rules template / index hint + peer drain) merge into
+    // one additionalContext payload — Claude Code parses one JSON object
+    // on stdout, so two println!s would drop the second silently.
+    let mut sections: Vec<String> = Vec::new();
+    let index_dir_opt = lookup_index_dir(&input.cwd);
+    match &index_dir_opt {
+        Some(dir) => {
+            let rendered = render_rules(Path::new(&input.cwd), dir);
+            if !rendered.trim().is_empty() {
+                sections.push(rendered);
+            }
+        }
         None => {
             if let Some(hint) = detect_worktree_needing_index(Path::new(&input.cwd)) {
-                emit_additional_context("SessionStart", &hint);
+                sections.push(hint);
             }
-            return Ok(());
         }
-    };
-
-    let rendered = render_rules(Path::new(&input.cwd), &index_dir);
-    if !rendered.trim().is_empty() {
-        emit_additional_context("SessionStart", &rendered);
     }
-    // Auto-spawn peer watcher if opt-in marker present.
-    // Fire-and-forget — failures don't block session_start.
-    if std::path::Path::new(&input.cwd)
-        .join(".gnx/auto-watch")
-        .exists()
-    {
+    // Peer inbox drain at SessionStart mirrors pre_tool_use / user_prompt_submit;
+    // a session that resumes with queued peer messages must see them on first turn.
+    if let Some(peer) = super::common::drain_and_render_peer_payload() {
+        sections.push(peer);
+    }
+    if !sections.is_empty() {
+        emit_additional_context("SessionStart", &sections.join("\n\n"));
+    }
+
+    // Auto-spawn peer watcher if opt-in marker present and the worktree is indexed
+    // (un-indexed worktrees have nothing to watch). Fire-and-forget — failures
+    // don't block session_start. `daemon::spawn_detached` calls setsid() so the
+    // watcher survives terminal SIGHUP and the hook subprocess exiting.
+    if index_dir_opt.is_some() && Path::new(&input.cwd).join(".gnx/auto-watch").exists() {
         if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new(exe)
-                .args(["watch", "--start"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            let exe_str = exe.to_string_lossy();
+            let _ = graph_nexus_core::daemon::spawn_detached(&[&exe_str, "watch", "--start"]);
         }
     }
     Ok(())

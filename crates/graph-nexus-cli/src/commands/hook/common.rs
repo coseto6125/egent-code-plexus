@@ -65,7 +65,7 @@ pub fn emit_additional_context(event: &str, context: &str) {
 /// Hook-local state dir at `<cwd>/.gnx/`. Used only for marker files
 /// (`.rebuild-complete`, `.rebuild-failed`), the rebuild log, and the
 /// `.analyze.lock` — things tied to *this* worktree, not the shared
-/// index in `~/.gnx/<repo>/<branch>/`.
+/// index in `~/.gnx/<repo>__<hash>/commits/<sha>/`.
 ///
 /// Read-side: returns `Some` iff cwd is absolute AND `<cwd>/.gnx/`
 /// already exists. Hooks must not block tool execution on missing

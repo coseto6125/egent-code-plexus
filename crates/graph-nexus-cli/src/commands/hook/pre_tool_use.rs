@@ -21,32 +21,30 @@ fn glob_stem_re() -> &'static regex::Regex {
 }
 
 pub fn handle(input: &HookInput) -> Result<(), GnxError> {
-    // Gnx search path — independent of peer inbox drain below.
-    maybe_emit_search_hits(input);
-
-    // Peer inbox drain fires unconditionally on every PreToolUse so that
-    // messages from peer sessions are never silently dropped even when the
-    // tool invocation doesn't match any gnx find pattern.
+    // Both signals (graph hits + peer drain) must be merged into a single
+    // additionalContext payload — Claude Code parses one JSON object on
+    // stdout, so two separate println!s would drop the second silently.
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(hits) = compute_search_hits(input) {
+        sections.push(hits);
+    }
     if let Some(peer) = super::common::drain_and_render_peer_payload() {
-        emit_additional_context("PreToolUse", &peer);
+        sections.push(peer);
+    }
+    if !sections.is_empty() {
+        emit_additional_context("PreToolUse", &sections.join("\n\n"));
     }
     Ok(())
 }
 
-fn maybe_emit_search_hits(input: &HookInput) {
+fn compute_search_hits(input: &HookInput) -> Option<String> {
     let pattern = match extract_pattern(&input.tool_name, &input.tool_input) {
         Some(p) if p.len() >= 3 => p,
-        _ => return,
+        _ => return None,
     };
-    let index_dir = match lookup_index_dir(&input.cwd) {
-        Some(d) => d,
-        None => return,
-    };
+    let index_dir = lookup_index_dir(&input.cwd)?;
     let graph_path = index_dir.join("graph.bin");
-    let engine = match Engine::load(&graph_path) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let engine = Engine::load(&graph_path).ok()?;
     let args = FindArgs {
         pattern: Some(pattern),
         mode: FindMode::Bm25,
@@ -58,17 +56,12 @@ fn maybe_emit_search_hits(input: &HookInput) {
         format: None,
         batch: false,
     };
-    let hits = match compute_hits(args, &engine) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let hits = compute_hits(args, &engine).ok()?;
     if hits.is_empty() {
-        return;
+        return None;
     }
     let lines = format_hits(&hits);
-    if !lines.is_empty() {
-        emit_additional_context("PreToolUse", &lines);
-    }
+    (!lines.is_empty()).then_some(lines)
 }
 
 /// Render hits as a legacy-style multi-line block. Each symbol gets a
