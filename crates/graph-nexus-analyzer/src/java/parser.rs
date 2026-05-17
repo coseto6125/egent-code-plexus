@@ -382,7 +382,14 @@ impl LanguageProvider for JavaProvider {
             Vec::new()
         };
 
+        // `HashMap::into_values` iterates in random hash order — emits same
+        // node SET but different ORDER per run. Pass 1's SymbolTable insert
+        // is last-write-wins on `(file_path, name)`, so a file containing
+        // two same-name nodes of different kinds would surface as run-to-
+        // run drift in resolver outputs. Sort by source-span to pin a
+        // canonical, stable, source-order traversal.
         let mut nodes: Vec<RawNode> = node_map.into_values().collect();
+        nodes.sort_by_key(|n| n.span);
 
         // Extract call sites with receiver-type binding for `this.foo()`,
         // `super.foo()`, and typed-variable `obj.foo()` patterns.

@@ -314,7 +314,11 @@ impl LanguageProvider for CSharpProvider {
             }
         }
 
+        // See java/parser.rs node ordering note — HashMap iteration drift
+        // surfaces as Calls-edge run-to-run variance via Pass 1 last-write-
+        // wins on (file_path, name). Pin canonical source-span order.
         let mut nodes: Vec<RawNode> = node_map.into_values().collect();
+        nodes.sort_by_key(|n| n.span);
 
         // Extract call sites with receiver-type binding for `this.Foo()`,
         // `base.Foo()`, and typed-variable `obj.Foo()` patterns.

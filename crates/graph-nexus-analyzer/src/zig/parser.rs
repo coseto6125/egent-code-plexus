@@ -170,6 +170,9 @@ impl LanguageProvider for ZigProvider {
             node_map.remove(key);
         }
 
+        // See java/parser.rs node ordering note — HashMap iteration drift
+        // surfaces as Calls-edge run-to-run variance via Pass 1 last-write-
+        // wins on (file_path, name). Pin canonical source-span order.
         let mut nodes: Vec<RawNode> = node_map
             .into_values()
             .filter(|n| !n.name.is_empty())
@@ -184,6 +187,7 @@ impl LanguageProvider for ZigProvider {
                 calls: Vec::new(),
             })
             .collect();
+        nodes.sort_by_key(|n| n.span);
 
         let imports: Vec<RawImport> = import_map
             .into_values()
