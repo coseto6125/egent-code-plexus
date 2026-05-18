@@ -108,6 +108,42 @@ def _build_equiv_map() -> dict[str, frozenset[str]]:
 EQUIV = _build_equiv_map()
 
 
+# Mirror parity_aggregate.py — keep in sync. Pairs ref `Route /<path>` with
+# rs `EntryPoint route@<func>` per file (Python Blueprint / FastAPI shorthand
+# `@bp.get("/path") def func():` captured as different kind+name on each side,
+# so EQUIV `(path, name)` lookup can't pair them). Per-file count match is the
+# deterministic alias; scope is intentionally narrow (`route@` prefix only).
+def _pair_route_aliases(
+    rs_only: set[tuple[str, str, str]],
+    ref_only: set[tuple[str, str, str]],
+) -> tuple[
+    set[tuple[str, str, str]],
+    set[tuple[str, str, str]],
+    list[tuple[tuple[str, str, str], tuple[str, str, str]]],
+]:
+    rs_by_file: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    ref_by_file: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    for row in rs_only:
+        if row[0] == "EntryPoint" and row[2].startswith("route@"):
+            rs_by_file[row[1]].append(row)
+    for row in ref_only:
+        if row[0] == "Route":
+            ref_by_file[row[1]].append(row)
+    pairs: list[tuple[tuple[str, str, str], tuple[str, str, str]]] = []
+    drop_rs: set[tuple[str, str, str]] = set()
+    drop_ref: set[tuple[str, str, str]] = set()
+    for fp, ref_rows in ref_by_file.items():
+        rs_rows = rs_by_file.get(fp, [])
+        n = min(len(ref_rows), len(rs_rows))
+        if n == 0:
+            continue
+        for ref_row, rs_row in zip(ref_rows[:n], rs_rows[:n], strict=True):
+            pairs.append((rs_row, ref_row))
+        drop_rs.update(rs_rows[:n])
+        drop_ref.update(ref_rows[:n])
+    return rs_only - drop_rs, ref_only - drop_ref, pairs
+
+
 def read_rows(path: Path) -> list[tuple[str, str, str]]:
     if not path.exists():
         return []
@@ -146,10 +182,26 @@ def classify_lang(lang: str) -> dict[str, list[dict]]:
     ref_set = set(ref_all)
     rs_only = rs_set - ref_set
     ref_only = ref_set - rs_set
+    rs_only, ref_only, route_pairs = _pair_route_aliases(rs_only, ref_only)
 
     buckets: dict[str, list[dict]] = {
         "label": [], "model": [], "real_rs": [], "real_ref": [],
     }
+
+    # Render route aliases as label entries keyed on the ref-side Route row
+    # (URL path is what the reviewer wants to verify); annotate `rs_kinds`
+    # with the paired EntryPoint name so the cross-side mapping is visible
+    # without a separate report section.
+    for rs_row, ref_row in route_pairs:
+        _, p, ref_name = ref_row
+        _, _, rs_name = rs_row
+        buckets["label"].append({
+            "kind": "Route",
+            "path": p,
+            "name": ref_name,
+            "rs_kinds": [f"EntryPoint[{rs_name}]"],
+            "ref_kinds": ["Route"],
+        })
 
     def entry(kind: str, path: str, name: str) -> dict:
         return {
