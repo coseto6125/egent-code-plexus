@@ -195,6 +195,15 @@ def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
     (OUT_DIR / f"{lang}_ref_only.txt").write_text(
         "\n".join(f"{k}\t{f}\t{n}" for k, f, n in sorted(ref_only)) + "\n"
     )
+    # Full sets enable aggregator cross-side pairing: a ref-only row at
+    # `(Template, p, name)` should pair with a rs-side `(Function, p, name)`
+    # that's in `common` (and therefore missing from `rs_only.txt`).
+    (OUT_DIR / f"{lang}_rs_all.txt").write_text(
+        "\n".join(f"{k}\t{f}\t{n}" for k, f, n in sorted(rs)) + "\n"
+    )
+    (OUT_DIR / f"{lang}_ref_all.txt").write_text(
+        "\n".join(f"{k}\t{f}\t{n}" for k, f, n in sorted(ref)) + "\n"
+    )
     return len(rs), len(ref), len(rs_only), len(ref_only), common
 
 

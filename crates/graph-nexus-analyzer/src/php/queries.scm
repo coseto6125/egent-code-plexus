@@ -50,6 +50,15 @@
 (enum_declaration
   name: (name) @name.enum) @enum
 
+;; Class / interface / module constants — `const NAME = ...`. The capture
+;; anchors on the inner `const_element` (one per declared name) so
+;; `const A = 1, B = 2;` emits two Const nodes rather than one for the
+;; whole declaration. Covers both class-body constants (the common case —
+;; Laravel `CREATED_AT`, `INVALID_TOKEN`, etc.) and module-level
+;; `const X = ...` outside any class.
+(const_declaration
+  (const_element (name) @name.const) @const)
+
 ;; Imports
 (namespace_use_clause
   (_) @import.source

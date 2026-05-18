@@ -98,6 +98,26 @@
   ) @class
 ) @export
 
+;; Abstract classes — tree-sitter-typescript uses a separate `abstract_class_declaration`
+;; node (not a subclass of `class_declaration`), so the patterns above don't fire.
+;; Capture explicitly so abstract base classes (NestJS AbstractHttpAdapter,
+;; ClientProxy, ContextCreator, etc.) emit as Class nodes.
+(abstract_class_declaration
+  (decorator)* @decorator
+  name: (type_identifier) @class.name
+  (class_heritage (extends_clause value: (identifier) @heritage))?
+  (class_heritage (implements_clause (type_identifier) @heritage))?
+) @class
+
+(export_statement
+  (abstract_class_declaration
+    (decorator)* @decorator
+    name: (type_identifier) @class.name
+    (class_heritage (extends_clause value: (identifier) @heritage))?
+    (class_heritage (implements_clause (type_identifier) @heritage))?
+  ) @class
+) @export
+
 ;; Constructors — method_definition named "constructor" is a distinct semantic.
 ;; Must come before the generic @method pattern so the span node is set to @constructor,
 ;; which maps to NodeKind::Constructor via spec.rs CAPTURE_KIND.

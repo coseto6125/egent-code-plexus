@@ -203,6 +203,7 @@ impl LanguageProvider for PhpProvider {
         let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_trait = self.query.capture_index_for_name("trait");
         let idx_enum = self.query.capture_index_for_name("enum");
+        let idx_const = self.query.capture_index_for_name("const");
 
         let idx_route_call = self.query.capture_index_for_name("route.call");
         let idx_route_scope = self.query.capture_index_for_name("route.scope");
@@ -299,6 +300,7 @@ impl LanguageProvider for PhpProvider {
                     || Some(cap_idx) == idx_namespace
                     || Some(cap_idx) == idx_trait
                     || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_const
                 {
                     if root_span_node.is_none() {
                         root_span_node = Some(cap.node);

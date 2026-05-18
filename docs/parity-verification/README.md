@@ -68,6 +68,14 @@ ref_only.txt: Function benches/copy.rs  poll_flush
 
 工具：`scripts/parity/parity_aggregate.py`
 
+> **重要陷阱 — aggregator 必須讀 full set，不能只讀 `_only.txt`**：
+> 如果 rs 邊有 `(Function, p, at)` 在 common（兩邊都是 Function），ref 邊額外
+> 有 `(Template, p, at)` 在 ref_only，那 rs_only 不含 `at` 任何條目。
+> aggregator 若只看 `_only.txt` 就會看不到 rs 邊的 Function row，誤判
+> `(Template, p, at)` 為 real ref_over。dump script 必須額外輸出
+> `<Lang>_rs_all.txt` / `<Lang>_ref_all.txt`（完整 set），aggregator 用 full
+> set 跨 kind pair，才能正確扣除 label_diff。
+
 aggregator 用 **EQUIV class 等價類**做 cross-side pairing：
 
 ```python

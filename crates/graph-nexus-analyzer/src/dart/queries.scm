@@ -17,6 +17,15 @@
   name: (identifier) @trait.name
   interfaces: (interfaces (type (_) @heritage))?) @trait
 
+;; Extensions — `extension Foo on T { ... }` and Dart 3 `extension type Foo(...)`.
+;; Both are type-level constructs that add named members (functions / methods)
+;; reachable as `T.fooMethod(...)`. ref-gitnexus emits these as Class; semantically
+;; they're closer to a Trait (extend an existing type's behaviour without
+;; subclassing), so we map to NodeKind::Trait and rely on the aggregator's
+;; {Interface, Struct, Enum, Annotation, Class, Trait} EQUIV class for parity.
+(extension_declaration
+  name: (identifier) @trait.name) @trait
+
 ;; Constructors — four grammar forms in tree-sitter-dart:
 ;;
 ;;   1. method_declaration > method_signature > constructor_signature
