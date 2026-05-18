@@ -204,27 +204,8 @@ impl LanguageProvider for DartProvider {
                 .unwrap_or(false);
             if is_typedef_misparse {
                 if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
-                    if let Ok(name_str) =
-                        std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
-                    {
-                        let name_str = name_str.trim();
-                        let start = v_root.start_position();
-                        let end = v_root.end_position();
-                        nodes.push(RawNode {
-                            decorators: vec![],
-                            is_exported: !name_str.starts_with('_'),
-                            heritage: vec![],
-                            type_annotation: None,
-                            name: name_str.to_string(),
-                            kind: NodeKind::Typedef,
-                            span: (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
-                            calls: Vec::new(),
-                        });
+                    if let Some(node) = synth_typedef_from_misparse(v_root, v_name, source) {
+                        nodes.push(node);
                     }
                 }
                 continue;
@@ -357,4 +338,36 @@ impl LanguageProvider for DartProvider {
             blind_spots: vec![],
         })
     }
+}
+
+/// Synthesize a Typedef RawNode from a tree-sitter-dart misparse:
+/// new-style `typedef Foo = void Function(...)` lands as a
+/// `top_level_variable_declaration` with type text "typedef". Returns None
+/// if the name slice isn't valid UTF-8 (defensive — won't happen on
+/// well-formed Dart source).
+fn synth_typedef_from_misparse(
+    v_root: tree_sitter::Node<'_>,
+    v_name: tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Option<RawNode> {
+    let name_str = std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
+        .ok()?
+        .trim();
+    let start = v_root.start_position();
+    let end = v_root.end_position();
+    Some(RawNode {
+        decorators: vec![],
+        is_exported: !name_str.starts_with('_'),
+        heritage: vec![],
+        type_annotation: None,
+        name: name_str.to_string(),
+        kind: NodeKind::Typedef,
+        span: (
+            start.row as u32,
+            start.column as u32,
+            end.row as u32,
+            end.column as u32,
+        ),
+        calls: Vec::new(),
+    })
 }
