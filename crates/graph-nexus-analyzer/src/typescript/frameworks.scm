@@ -48,3 +48,19 @@
       .
       (method_definition
         name: (property_identifier) @nestjs.method.name))))
+
+;; NestJS / generic decorator-route: `@Get('users')` / `@Post('users/:id')` /
+;; `@Put('audio/transcode')`. Captures the decorator verb AND the bare path
+;; argument. Independent of `@Controller` context — gated in parser.rs by
+;; `has_nestjs` (only imports of `@nestjs/*` flip the flag), so user-defined
+;; `@Get(...)` decorators in non-NestJS code don't surface false routes.
+;;
+;; Verb list mirrors NestJS's HTTP routing decorators (omits `@All` which
+;; tree-sitter captures via its own grammar path and routes to the generic
+;; `app.METHOD()` matcher above).
+(decorator
+  (call_expression
+    function: (identifier) @nestjs.decorator.verb
+    (#match? @nestjs.decorator.verb "^(Get|Post|Put|Delete|Patch|Options|Head|All)$")
+    arguments: (arguments
+      (string (string_fragment) @nestjs.decorator.path))))

@@ -62,7 +62,7 @@ _EQUIV_CLASSES: list[set[str]] = [
     {"Method", "Function", "Template", "Constructor"},
     {"Typedef", "TypeAlias"},
     {"Const", "Variable", "Property", "Static"},
-    {"Interface", "Struct", "Enum", "Annotation", "Class", "Trait"},
+    {"Interface", "Struct", "Enum", "Annotation", "Class", "Trait", "Union"},
     {"Delegate", "Function"},
 ]
 
@@ -189,10 +189,124 @@ def classify_lang(lang: str) -> dict[str, list[dict]]:
     rs_only = rs_set - ref_set
     ref_only = ref_set - rs_set
     rs_only, ref_only, route_pairs = _pair_route_aliases(rs_only, ref_only)
+    # Mirror of parity_aggregate `_pair_route_method_prefix`: gnx-rs emits
+    # Route names as `"METHOD path"` (e.g., `"GET /users"`) while ref emits
+    # the bare path. Strip method prefix to surface as label_diff instead of
+    # appearing as both rs_over (METHOD-prefixed) and ref_over (bare path).
+    HTTP_METHOD_PREFIXES = (
+        "GET ", "POST ", "PUT ", "DELETE ", "PATCH ",
+        "OPTIONS ", "HEAD ", "CONNECT ", "TRACE ", "ALL ", "USE ",
+    )
+
+    def _strip_method(n: str) -> str:
+        for m in HTTP_METHOD_PREFIXES:
+            if n.startswith(m):
+                return n[len(m):]
+        return n
+
+    ref_route_pn: set[tuple[str, str]] = set()
+    for fk, p, n in ref_only:
+        if fk == "Route":
+            ref_route_pn.add((p, n))
+    drop_rs_route: set[tuple[str, str, str]] = set()
+    method_prefix_pairs: list[tuple[tuple[str, str, str], tuple[str, str, str]]] = []
+    paired_ref_route_pn: set[tuple[str, str]] = set()
+    for row in rs_only:
+        if row[0] != "Route":
+            continue
+        normalized = _strip_method(row[2])
+        if normalized == row[2]:
+            continue
+        key = (row[1], normalized)
+        if key in ref_route_pn and key not in paired_ref_route_pn:
+            drop_rs_route.add(row)
+            paired_ref_route_pn.add(key)
+            method_prefix_pairs.append((row, ("Route", key[0], key[1])))
+    drop_ref_route: set[tuple[str, str, str]] = set()
+    for row in ref_only:
+        if row[0] == "Route" and (row[1], row[2]) in paired_ref_route_pn:
+            drop_ref_route.add(row)
+    rs_only -= drop_rs_route
+    ref_only -= drop_ref_route
+    # Mirror of parity_aggregate `_pair_ref_const_function_double_emit`:
+    # ref-gitnexus double-emits `Const` + `Function` for TS/JS arrow-fn
+    # bindings (`export const fn = (...) => ...`); gnx-rs emits only
+    # `Function`. The Const-side leftover is a label mismatch, not a
+    # missing symbol. Narrow scope — requires ref-side AND rs-side
+    # Function at same `(p, n)` so plain `const x = 42; function x() {}`
+    # collisions don't pair.
+    const_fn_pairs: list[tuple[str, str]] = []
+    drop_ref_const: set[tuple[str, str, str]] = set()
+    for row in ref_only:
+        if row[0] != "Const":
+            continue
+        ref_kinds = ref_by_pn.get((row[1], row[2]), [])
+        rs_kinds = rs_by_pn.get((row[1], row[2]), [])
+        if "Function" in ref_kinds and "Function" in rs_kinds:
+            drop_ref_const.add(row)
+            const_fn_pairs.append((row[1], row[2]))
+    ref_only -= drop_ref_const
+
+    # Mirror of parity_aggregate `_pair_ref_template_class_double_emit`:
+    # ref-gitnexus double-emits `Class` + `Template` for Cpp
+    # `template<typename T> class Foo`; gnx-rs emits only `Class`. The
+    # Template-side leftover is a label mismatch, not a missing symbol.
+    # Same shape as Const/Function: require ref-side type-family kind AND
+    # rs-side type-family kind at same `(p, n)` so we only pair true
+    # double-emits.
+    TEMPLATE_TYPE_PAIR_KINDS = {
+        "Class", "Struct", "Interface", "Enum", "Trait", "Union",
+    }
+    template_class_pairs: list[tuple[str, str]] = []
+    drop_ref_template: set[tuple[str, str, str]] = set()
+    for row in ref_only:
+        if row[0] != "Template":
+            continue
+        ref_kinds = ref_by_pn.get((row[1], row[2]), [])
+        rs_kinds = rs_by_pn.get((row[1], row[2]), [])
+        if any(rk in TEMPLATE_TYPE_PAIR_KINDS for rk in ref_kinds) and any(
+            rk in TEMPLATE_TYPE_PAIR_KINDS for rk in rs_kinds
+        ):
+            drop_ref_template.add(row)
+            template_class_pairs.append((row[1], row[2]))
+    ref_only -= drop_ref_template
 
     buckets: dict[str, list[dict]] = {
         "label": [], "model": [], "real_rs": [], "real_ref": [],
     }
+    # Surface METHOD-prefix route pairings so the markdown shows both sides.
+    for rs_row, ref_row in method_prefix_pairs:
+        _, p, rs_name = rs_row
+        _, _, ref_name = ref_row
+        buckets["label"].append({
+            "kind": "Route",
+            "path": p,
+            "name": ref_name,
+            "rs_kinds": [f"Route[{rs_name}]"],
+            "ref_kinds": ["Route"],
+        })
+    # Surface paired Template↔Class double-emits as label entries.
+    for p, n in template_class_pairs:
+        rs_kinds = sorted(set(rs_by_pn.get((p, n), [])))
+        ref_kinds = sorted(set(ref_by_pn.get((p, n), [])))
+        buckets["label"].append({
+            "kind": "Template",
+            "path": p,
+            "name": n,
+            "rs_kinds": rs_kinds,
+            "ref_kinds": ref_kinds,
+        })
+    # Surface paired Const↔Function double-emits as label entries so the
+    # review markdown still shows the cross-side mapping the reviewer
+    # would otherwise have to discover manually.
+    for p, n in const_fn_pairs:
+        buckets["label"].append({
+            "kind": "Const",
+            "path": p,
+            "name": n,
+            "rs_kinds": ["Function"],
+            "ref_kinds": ["Const", "Function"],
+        })
 
     # Render route aliases as label entries keyed on the ref-side Route row
     # (URL path is what the reviewer wants to verify); annotate `rs_kinds`
