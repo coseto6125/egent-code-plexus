@@ -64,8 +64,10 @@ pub fn find_identifier_occurrences(
         "php" => php::find_identifier_occurrences(source, target_name),
         "rb" => ruby::find_identifier_occurrences(source, target_name),
         "swift" => swift::find_identifier_occurrences(source, target_name),
-        "c" | "h" => c::find_identifier_occurrences(source, target_name),
-        "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => {
+        "c" => c::find_identifier_occurrences(source, target_name),
+        // `.h` routes to C++ — see `resolution::index::Language::from_normalized_path`
+        // for rationale (C++ is a near-superset of C; `.h` headers commonly hold C++).
+        "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => {
             cpp::find_identifier_occurrences(source, target_name)
         }
         "dart" => dart::find_identifier_occurrences(source, target_name),
