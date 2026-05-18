@@ -9,8 +9,9 @@ impl LangSpec for NimSpec {
     const NAME: &'static str = "nim";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "function.name" => NodeKind::Function,
-        "class.name"    => NodeKind::Class,
-        "const.name"    => NodeKind::Const,
+        "function.name"  => NodeKind::Function,
+        "class.name"     => NodeKind::Class,
+        "const.name"     => NodeKind::Const,
+        "typedef.name"   => NodeKind::Typedef,
     };
 }

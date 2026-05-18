@@ -11,5 +11,6 @@ impl LangSpec for BashSpec {
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
         "function.name" => NodeKind::Function,
         "const.name"    => NodeKind::Const,
+        "typedef.raw"   => NodeKind::Typedef,
     };
 }

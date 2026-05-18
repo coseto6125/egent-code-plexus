@@ -35,3 +35,12 @@
 ;; Imports
 (import_declaration
   path: (path) @import.source) @import
+
+;; Typedef: aliased use-import — `use path::to::Item as Alias;`
+;; The `alias:` field is only present when `as Alias` appears; plain `use X;` is skipped.
+(import_declaration
+  alias: (name) @typedef.name) @typedef
+
+;; Typedef: type alias — `type X = Y;`
+(typealias_declaration
+  name: (name) @typedef.name) @typedef

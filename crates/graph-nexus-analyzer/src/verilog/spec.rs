@@ -13,5 +13,6 @@ impl LangSpec for VerilogSpec {
         "method.name"      => NodeKind::Method,
         "const.name"       => NodeKind::Const,
         "class_prop.name"  => NodeKind::Property,
+        "typedef.name"     => NodeKind::Typedef,
     };
 }

@@ -12,5 +12,6 @@ impl LangSpec for SqlSpec {
         "class.name"    => NodeKind::Class,
         "function.name" => NodeKind::Function,
         "const.name"    => NodeKind::Const,
+        "typedef.name"  => NodeKind::Typedef,
     };
 }

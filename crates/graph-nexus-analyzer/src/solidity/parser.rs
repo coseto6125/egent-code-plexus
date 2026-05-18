@@ -58,6 +58,7 @@ impl LanguageProvider for SolidityProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_function = self.query.capture_index_for_name("function");
         let idx_const = self.query.capture_index_for_name("const");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_state_var = self.query.capture_index_for_name("state_var");
 
         // Name captures that need special state tracking
@@ -113,6 +114,11 @@ impl LanguageProvider for SolidityProvider {
                     root_span_node = Some(cap.node);
                     if kind.is_none() {
                         kind = Some(NodeKind::Const);
+                    }
+                } else if Some(cap_idx) == idx_typedef {
+                    root_span_node = Some(cap.node);
+                    if kind.is_none() {
+                        kind = Some(NodeKind::Typedef);
                     }
                 } else if Some(cap_idx) == idx_state_var {
                     root_span_node = Some(cap.node);

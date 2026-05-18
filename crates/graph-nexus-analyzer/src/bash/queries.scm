@@ -25,3 +25,20 @@
 ;; Top-level variable assignments
 (variable_assignment
   name: (variable_name) @const.name) @const
+
+;; Shell aliases: `alias NAME=...`
+;; Two forms:
+;;   1. Quoted/mixed RHS: argument is a `concatenation` whose first word holds "NAME=".
+;;   2. Unquoted RHS: argument is a bare `word` with text "NAME=value".
+;; In both cases @typedef.raw captures the word containing "NAME="; parser.rs strips
+;; everything from `=` onward (including the value) to extract just the alias name.
+(command
+  name: (command_name) @_alias_cmd
+  argument: (concatenation
+    (word) @typedef.raw)
+  (#eq? @_alias_cmd "alias")) @typedef
+
+(command
+  name: (command_name) @_alias_cmd2
+  argument: (word) @typedef.raw
+  (#eq? @_alias_cmd2 "alias")) @typedef

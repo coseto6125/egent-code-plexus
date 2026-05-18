@@ -21,3 +21,4 @@
 ;; Processed in Rust: skipped when the same declaration matches @import or @struct
 (variable_declaration
   (identifier) @const.name) @const
+

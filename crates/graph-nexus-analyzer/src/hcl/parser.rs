@@ -63,6 +63,7 @@ impl LanguageProvider for HclProvider {
         let idx_data_type = self.query.capture_index_for_name("_data_type");
         // Output block capture — these nodes are the module's public interface.
         let idx_output_name = self.query.capture_index_for_name("output.name");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -83,7 +84,10 @@ impl LanguageProvider for HclProvider {
                     if Some(cap_idx as u32) == idx_output_name {
                         is_output_block = true;
                     }
-                } else if Some(cap_idx as u32) == idx_class || Some(cap_idx as u32) == idx_const {
+                } else if Some(cap_idx as u32) == idx_class
+                    || Some(cap_idx as u32) == idx_const
+                    || Some(cap_idx as u32) == idx_typedef
+                {
                     root_span_node = Some(cap.node);
                 } else if Some(cap_idx as u32) == idx_import_source {
                     import_src = Some(cap.node);

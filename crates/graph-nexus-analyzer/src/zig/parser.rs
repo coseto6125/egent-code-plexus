@@ -7,7 +7,45 @@ use graph_nexus_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, QueryCursor};
+
+/// Walk a `variable_declaration` node's named children to find the RHS
+/// expression (the child after the `=` token).  Returns the tree-sitter kind
+/// string of that expression child, or `""` if there is no initializer.
+///
+/// Zig grammar: `optional(pub/export/extern/threadlocal), const/var, identifier,
+///              optional(: type), optional(= expression), ;`
+///
+/// The `=` is an anonymous (unnamed) token, so we iterate named children and
+/// pick the one whose kind is neither `identifier` (the variable name) nor a
+/// type_expression / type annotation marker.  The heuristic: the second named
+/// child that is NOT part of the header (i.e., not the var-name identifier and
+/// not a type that appears right after `:`).
+///
+/// Simpler approach: walk all named children and return the last one that is not
+/// the `identifier` at the head of the declaration.
+fn zig_typedef_rhs_kind(decl: Node<'_>) -> &'static str {
+    // Named children of variable_declaration:
+    //   [identifier(name), optional(type_expression), optional(expr-rhs)]
+    // The first named child is always the variable name (identifier).
+    // The last named child (if different from the first) is the RHS expression.
+    let mut cursor = decl.walk();
+    let named: Vec<Node<'_>> = decl.named_children(&mut cursor).collect();
+    // Find the RHS: last named child that is not at position 0 (the var name).
+    // In practice: if there are 2+ named children, the last one is the RHS.
+    // If there is only 1 named child (no initializer or no type annotation),
+    // return "" — no RHS.
+    if named.len() < 2 {
+        return "";
+    }
+    // The second named child could be a type annotation or the RHS expression.
+    // We want the last named child.
+    match named.last().map(|n| n.kind()) {
+        Some("identifier") => "identifier",
+        Some("field_expression") => "field_expression",
+        _ => "",
+    }
+}
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -39,13 +77,18 @@ impl ZigProvider {
 }
 
 /// Priority of a match for the same variable_declaration byte range.
-/// Higher value wins.
+/// Higher value wins.  Typedef (promoted from Const in parser.rs) is set to
+/// priority 1 so it beats a plain Const match at the same byte offset when
+/// two `identifier` children of the same variable_declaration both match the
+/// `@const.name` pattern — the var-name match is promoted to Typedef (1) and
+/// the RHS-identifier match stays Const (0), so the var-name wins.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 enum MatchPriority {
     Const = 0,
-    Struct = 1,
-    Import = 2,
-    Function = 3,
+    Typedef = 1,
+    Struct = 2,
+    Import = 3,
+    Function = 4,
 }
 
 struct PendingNode {
@@ -146,7 +189,26 @@ impl LanguageProvider for ZigProvider {
                 continue;
             }
 
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+            if let (Some(n), Some(mut k), Some(root)) = (name_node, kind, root_span_node) {
+                // Promote `const X = SomeType` to Typedef when:
+                //   1. The captured name node is the declaration's variable name
+                //      (first named child of variable_declaration — not the RHS).
+                //   2. The RHS expression child is a pure identifier or
+                //      field_expression (not a literal, struct, or builtin).
+                if k == NodeKind::Const {
+                    let mut wc = root.walk();
+                    let first_named = root.named_children(&mut wc).next();
+                    let is_var_name = first_named
+                        .map(|fc| fc.start_byte() == n.start_byte())
+                        .unwrap_or(false);
+                    if is_var_name {
+                        let rhs_kind = zig_typedef_rhs_kind(root);
+                        if rhs_kind == "identifier" || rhs_kind == "field_expression" {
+                            k = NodeKind::Typedef;
+                            priority = MatchPriority::Typedef;
+                        }
+                    }
+                }
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();

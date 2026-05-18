@@ -62,6 +62,7 @@ impl LanguageProvider for CairoProvider {
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_const = self.query.capture_index_for_name("const");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_import = self.query.capture_index_for_name("import");
 
         // tree-sitter-cairo v0.0.1 strips `pub` from the grammar entirely —
@@ -100,6 +101,7 @@ impl LanguageProvider for CairoProvider {
                     || Some(cap_idx) == idx_struct
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_const
+                    || Some(cap_idx) == idx_typedef
                     || Some(cap_idx) == idx_import
                 {
                     root_span_node = Some(cap.node);

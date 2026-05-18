@@ -59,6 +59,7 @@ impl LanguageProvider for MoveProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_const = self.query.capture_index_for_name("const");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
 
         // Metadata captures
         let idx_import_name = self.query.capture_index_for_name("import.name");
@@ -100,7 +101,8 @@ impl LanguageProvider for MoveProvider {
                     if kind.is_none() {
                         kind = Some(k_from_spec);
                     }
-                } else if [idx_class, idx_function, idx_struct, idx_const].contains(&Some(cap_idx))
+                } else if [idx_class, idx_function, idx_struct, idx_const, idx_typedef]
+                    .contains(&Some(cap_idx))
                 {
                     root_span_node = Some(cap.node);
                     if Some(cap_idx) == idx_struct {

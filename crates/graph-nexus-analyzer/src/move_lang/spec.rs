@@ -13,5 +13,6 @@ impl LangSpec for MoveSpec {
         "function.name" => NodeKind::Function,
         "struct.name"   => NodeKind::Class,
         "const.name"    => NodeKind::Const,
+        "typedef.name"  => NodeKind::Typedef,
     };
 }

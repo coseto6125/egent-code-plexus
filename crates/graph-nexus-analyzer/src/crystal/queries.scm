@@ -28,3 +28,8 @@
 (const_assign
   lhs: (constant) @const.name
 ) @const
+
+;; Type aliases (alias X = Y)
+(alias
+  name: (constant) @typedef.name
+) @typedef

@@ -9,7 +9,8 @@ impl LangSpec for VyperSpec {
     const NAME: &'static str = "vyper";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "function.name" => NodeKind::Function,
-        "const.name"    => NodeKind::Const,
+        "function.name"  => NodeKind::Function,
+        "const.name"     => NodeKind::Const,
+        "typedef.name"   => NodeKind::Typedef,
     };
 }
