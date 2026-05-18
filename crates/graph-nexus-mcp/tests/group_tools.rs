@@ -87,17 +87,15 @@ async fn gnx_group_advertises_all_subcmds() {
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    for sub in [
-        "sync",
-        "status",
-        "contracts",
-        "impact",
-        "search",
-        "find",
-        "coverage",
-    ] {
+    for sub in ["sync", "status", "contracts", "impact", "find", "coverage"] {
         assert!(allowed.iter().any(|s| s == sub), "subcmd `{sub}` missing");
     }
+    // `search` was folded into `find` (post-PR-146 consolidation); guard
+    // against re-introduction.
+    assert!(
+        !allowed.iter().any(|s| s == "search"),
+        "subcmd `search` must not reappear; merge/limit/batch live on `find`"
+    );
 }
 
 // ── spawn argv shape tests ───────────────────────────────────────────────────
@@ -147,23 +145,46 @@ fn find_emits_group_find_with_name_then_pattern() {
 }
 
 #[test]
-fn search_emits_group_search_with_name_then_query() {
+fn find_with_merge_rrf_and_limit_emits_unified_topk_flags() {
     let dir = TempDir::new().unwrap();
     let stub = echo_stub(dir.path());
     let tool = group_tool();
     let out = run_spawn(
         &stub,
         &tool,
-        &json!({"subcmd": "search", "name": "demo", "query": "auth handler", "limit": 10}),
+        &json!({
+            "subcmd": "find",
+            "name": "demo",
+            "pattern": "auth_handler",
+            "merge": "rrf",
+            "limit": 10,
+        }),
     )
     .unwrap();
-    assert!(out.contains("group search"), "got: {out:?}");
+    assert!(out.contains("group find"), "got: {out:?}");
+    assert!(out.contains("--merge"), "got: {out:?}");
+    assert!(out.contains(" rrf"), "got: {out:?}");
     assert!(out.contains("--limit"), "got: {out:?}");
     assert!(out.contains(" 10"), "got: {out:?}");
-    // query is a positional and must precede flags
-    let query_pos = out.find("auth handler").expect("query in out");
+    // pattern is positional and must precede flags
+    let pat_pos = out.find("auth_handler").expect("pattern in out");
     let limit_pos = out.find("--limit").unwrap();
-    assert!(query_pos < limit_pos, "query must precede flags: {out:?}");
+    assert!(pat_pos < limit_pos, "pattern must precede flags: {out:?}");
+}
+
+#[test]
+fn find_with_batch_emits_bare_flag_no_pattern_needed() {
+    let dir = TempDir::new().unwrap();
+    let stub = echo_stub(dir.path());
+    let tool = group_tool();
+    let out = run_spawn(
+        &stub,
+        &tool,
+        &json!({"subcmd": "find", "name": "demo", "batch": true}),
+    )
+    .unwrap();
+    assert!(out.contains("group find"), "got: {out:?}");
+    assert!(out.contains("--batch"), "got: {out:?}");
 }
 
 #[test]

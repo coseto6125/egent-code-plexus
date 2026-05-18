@@ -3334,7 +3334,7 @@ Using the mapping:
 | `gnx route_map` / `gnx route-map` | `gnx routes` |
 | `gnx api_impact /path` / `gnx api-impact /path` | `gnx routes /path` |
 | `gnx detect_changes` / `gnx detect-changes` | `gnx impact --since HEAD~1` |
-| `gnx multi_query` / `gnx multi-query` | `gnx group search <name> <query>` (post-PR-146; previously `gnx search ... --repo @group`) |
+| `gnx multi_query` / `gnx multi-query` | `gnx find --batch` (single repo, BM25; reads patterns from stdin) or `gnx group find --batch` (multi-repo). Batch is a flag on the existing verb, not a separate CLI. |
 | `gnx cluster` / `gnx process` | `gnx cypher` |
 
 - [ ] **Step 3: Add a "What's New" section near the top**

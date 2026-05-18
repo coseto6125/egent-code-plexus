@@ -8,9 +8,9 @@
 //!
 //! Mirrors the `peers.rs` pattern: one tool fronts every sub-subcommand via
 //! a `subcmd` discriminator (`sync` / `status` / `contracts` / `impact` /
-//! `search` / `find` / `coverage`). `spawn::peel_subcmd` lifts `subcmd` off
-//! the JSON object and prepends it as the first argv token, yielding
-//! `gnx group <subcmd> <name> [<query>|<pattern>] [--flags...]`.
+//! `find` / `coverage`). `spawn::peel_subcmd` lifts `subcmd` off the JSON
+//! object and prepends it as the first argv token, yielding
+//! `gnx group <subcmd> <name> [<pattern>] [--flags...]`.
 
 use crate::schema::DerivedTool;
 use serde_json::json;
@@ -27,29 +27,38 @@ fn tool_group() -> DerivedTool {
         name: "gnx_group".into(),
         subcommand: "group".into(),
         description: "Multi-repo group operations: extract contracts, query \
-            cross-repo impact, search across all members. Pick `subcmd`; see \
-            each arg's [tag] for which subcmd uses it. Groups are managed \
-            via `gnx admin group add/remove`."
+            cross-repo impact, find / batch-find across all members. Pick \
+            `subcmd`; see each arg's [tag] for which subcmd uses it. \
+            Groups are managed via `gnx admin group add/remove`."
             .into(),
         schema: Arc::new(json!({
             "type": "object",
             "properties": {
                 "subcmd": {
                     "type": "string",
-                    "enum": ["sync", "status", "contracts", "impact", "search", "find", "coverage"],
+                    "enum": ["sync", "status", "contracts", "impact", "find", "coverage"],
                     "description": "Which group operation to run. Each subcmd uses a disjoint subset of the args below."
                 },
                 "name": {
                     "type": "string",
                     "description": "[all] Group name (must exist in registry; add members via `gnx admin group add <repo> <group>`)."
                 },
-                "query": {
-                    "type": "string",
-                    "description": "[search] BM25 query string."
-                },
                 "pattern": {
                     "type": "string",
-                    "description": "[find] BM25 symbol pattern (name or fragment)."
+                    "description": "[find] BM25 symbol pattern (name or fragment). Required unless `batch` is true."
+                },
+                "merge": {
+                    "type": "string",
+                    "enum": ["none", "rrf"],
+                    "description": "[find] Result assembly: `none` = per-repo bucketed concat (default); `rrf` = Reciprocal Rank Fusion → unified top-K."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "[find] Top-K results — requires `merge=rrf`. Default 5."
+                },
+                "batch": {
+                    "type": "boolean",
+                    "description": "[find] Read patterns from stdin (one per line, `#` for comments). The active `merge` mode is re-applied per pattern."
                 },
                 "target": {
                     "type": "string",
@@ -92,14 +101,6 @@ fn tool_group() -> DerivedTool {
                     "type": "boolean",
                     "description": "[impact] Include test files in local traversal."
                 },
-                "limit": {
-                    "type": "integer",
-                    "description": "[search] Maximum results to return (merged mode only). Default 5."
-                },
-                "no_merge": {
-                    "type": "boolean",
-                    "description": "[search] Emit per-repo streams instead of merging (disables RRF)."
-                },
                 "exact_only": {
                     "type": "boolean",
                     "description": "[sync] Skip BM25 stage; exact match only."
@@ -125,7 +126,7 @@ fn tool_group() -> DerivedTool {
             [
                 "unmatched",
                 "include_tests",
-                "no_merge",
+                "batch",
                 "exact_only",
                 "allow_stale",
                 "json",
@@ -134,10 +135,8 @@ fn tool_group() -> DerivedTool {
             .into_iter()
             .map(String::from),
         ),
-        // Positional order: `name` (all subcmds), then `query` (search) OR
-        // `pattern` (find). Listing both is safe — only one fires per call
-        // since search/find are disjoint subcmds.
-        positional_args: vec!["name".into(), "query".into(), "pattern".into()],
+        // Positional order: `name` (all subcmds), then `pattern` (find only).
+        positional_args: vec!["name".into(), "pattern".into()],
         prefix_args: Vec::new(),
         subcmd_arg: Some("subcmd".into()),
     }

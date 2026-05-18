@@ -5,6 +5,16 @@
 **Author**: Iteration with brainstorming skill
 **Reference**: upstream `gitnexus` (`.source_code/gitnexus/src/cli/group.ts`, `src/core/group/`)
 
+> **Amendment (2026-05-18, post-merge):** `gnx group search` was folded into
+> `gnx group find` with `--merge none|rrf` + `--limit N` + `--batch`. The
+> `search` verb no longer exists at the `group` level. Sections below that
+> mention `gnx group search` should be read as `gnx group find --merge rrf`
+> (RRF-merged top-K) or `gnx group find --merge none` (per-repo concat).
+> Rationale: `find` is the noun-first verb at top-level (`gnx find`) and the
+> two `group` verbs differed only in default merge mode — exposing that as a
+> flag eliminated a duplicate CLI surface. Multi-query (batch) is `--batch`
+> on `find`, never a new verb.
+
 ## Motivation
 
 `gnx` already has the **selector layer** for groups (`@<group>` / `@all` in

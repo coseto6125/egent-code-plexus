@@ -117,8 +117,7 @@ Cross-repo queries live under `gnx group <verb>`. Management commands
 | `gnx group status <name>` | Per-member staleness (OK / STALE / MISSING / NO_META / NO_SNAPSHOT) via `git rev-parse` diff vs stored snapshot | Text/TOON |
 | `gnx group contracts <name> [--type T] [--repo R] [--unmatched]` | Inspect contract registry with filters | Text/JSON |
 | `gnx group impact <name> --target <sym> --repo <member>` | Local impact + cross-repo fan-out (cross_depth clamped to 1 first wave) | TOON/JSON |
-| `gnx group search <name> <query> [--no-merge]` | RRF-merged fan-out (default). `--no-merge` returns per-repo streams | Text/JSON |
-| `gnx group find <name> <pattern>` | Parallel concat | Text/JSON |
+| `gnx group find <name> <pattern> [--merge none\|rrf] [--limit N] [--batch]` | Default per-repo bucketed concat (`--merge none`). `--merge rrf --limit N` → unified top-K via RRF. `--batch` reads patterns from stdin (one per line, `#` for comments) and re-applies the merge mode per pattern. | Text/JSON |
 | `gnx group coverage <name>` | Per-member health concat | Text/JSON |
 
 **Selector layer**: `--repo @<group>` on top-level commands (`gnx search/find/contracts/coverage`) returns an error pointing at `gnx group <verb>` — the noun-first surface is canonical. `--repo @all` and single-repo selectors are unchanged.

@@ -4,7 +4,6 @@ pub mod extractors;
 pub mod find;
 pub mod impact;
 pub mod matching;
-pub mod search;
 pub mod status;
 pub mod storage;
 pub mod sync;
@@ -29,9 +28,10 @@ pub enum GroupCommands {
     Contracts(contracts::ContractsArgs),
     /// Local blast-radius for one member, fanned out via cross-repo links
     Impact(impact::ImpactArgs),
-    /// BM25 search across all group members with RRF merge (or --no-merge for per-repo streams)
-    Search(search::SearchArgs),
-    /// BM25 symbol lookup across all group members (per-repo bucketed concat)
+    /// BM25 symbol lookup across all group members. `--merge none` (default)
+    /// emits per-repo bucketed concat; `--merge rrf --limit N` returns a
+    /// unified top-K via Reciprocal Rank Fusion. `--batch` reads patterns
+    /// from stdin and re-applies the merge mode per pattern.
     Find(find::FindArgs),
     /// Health report for all group members (per-repo concat)
     Coverage(coverage::CoverageArgs),
@@ -43,7 +43,6 @@ pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
         GroupCommands::Status(args) => status::run(args),
         GroupCommands::Contracts(args) => contracts::run(args),
         GroupCommands::Impact(args) => impact::run(args),
-        GroupCommands::Search(args) => search::run(args),
         GroupCommands::Find(args) => find::run(args),
         GroupCommands::Coverage(args) => coverage::run(args),
     }
