@@ -5,6 +5,7 @@
 //!   `module` — the `(module ...)` root node → `Trait`
 //!             (modules are mixin targets; `Trait` matches ref-gitnexus semantics)
 //!   `method` — `(method ...)` and `(singleton_method ...)` root nodes → `Method`
+//!   `const`  — `(assignment left: (constant) ...)` → `Const`
 //!
 //! All other captures (`name`, `heritage`, `import.name`, `decorator`,
 //! `route.*`, `attr_args`, `mixin_module`, `alias.*`, `delegator_*`, etc.)
@@ -24,5 +25,6 @@ impl LangSpec for RubySpec {
         "class"  => NodeKind::Class,
         "module" => NodeKind::Trait,
         "method" => NodeKind::Method,
+        "const"  => NodeKind::Const,
     };
 }

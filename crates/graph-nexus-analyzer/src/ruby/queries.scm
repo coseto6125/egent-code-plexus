@@ -87,6 +87,20 @@
   left: (constant) @const_alias.new
   right: [ (constant) (scope_resolution) ] @const_alias.source)
 
+;; Constant declarations — any `UPPERCASE_NAME = <value>` assignment. lhs
+;; must be `(constant)` (uppercase Ruby identifier); rhs is unconstrained,
+;; so this catches every form: hash literals (`DEFAULT_OPTIONS = {...}`),
+;; integers (`TOKEN_LENGTH = 32`), regex (`PORT_REGEXP = /:\d+\z/.freeze`),
+;; strings, arrays of symbols (`DIRECTIVES = %i[...]`), etc. Real class-body
+;; constants in Rails-style projects (CSRF tokens, dispatcher tables, …).
+;;
+;; This query overlaps with `const_alias` above when rhs is also a
+;; constant — that's intentional: const_alias emits an alias binding for
+;; FQN resolution, this emits the Const node itself. Different graph
+;; purposes, no double-emit risk.
+(assignment
+  left: (constant) @name) @const
+
 ;; `def_delegator :target, :method` / `def_delegators :target, :m1, :m2, ...` /
 ;; `delegate :m1, :m2, to: :target` metaprogramming — each delegated method
 ;; becomes a named binding `<host>.<method>` aliased to `<target>.<method>`.
