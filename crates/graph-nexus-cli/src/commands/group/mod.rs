@@ -1,5 +1,6 @@
 pub mod extractors;
 pub mod matching;
+pub mod status;
 pub mod storage;
 pub mod sync;
 pub mod types;
@@ -12,11 +13,14 @@ use graph_nexus_core::registry::{RegistryFile, RepoAlias};
 pub enum GroupCommands {
     /// Extract contracts + run matching cascade for all group members
     Sync(sync::SyncArgs),
+    /// Show staleness of each member against the last-synced meta snapshot
+    Status(status::StatusArgs),
 }
 
 pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
     match cmd {
         GroupCommands::Sync(args) => sync::run(args),
+        GroupCommands::Status(args) => status::run(args),
     }
 }
 
