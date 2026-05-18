@@ -129,8 +129,8 @@ pub fn write_dirty_fragments_batch(
     let mut pending: Vec<(String, DirtyEntry)> = Vec::with_capacity(inputs.len());
 
     for input in inputs {
-        let content_hash = sha256_hex(&input.content);
-        let fragment_id = content_hash[..16].to_string();
+        let content_hash = content_hash_hex(&input.content);
+        let fragment_id = content_hash.clone();
         let fragment_path = overlay_dir.join(format!("{fragment_id}.bin"));
 
         let parse_failed = match parse_to_fragment(&input.rel_path, &input.content) {
