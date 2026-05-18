@@ -140,12 +140,19 @@ impl AnalyzerPipeline {
                 .iter()
                 .find(|p| p.name() == "c_sharp")
                 .map(|p| p.as_ref()),
-            "c" | "h" => self
+            "c" => self
                 .providers
                 .iter()
                 .find(|p| p.name() == "c")
                 .map(|p| p.as_ref()),
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => self
+            // `.h` is genuinely ambiguous between C and C++ headers; route to
+            // C++ (mirrors `Language::from_normalized_path`, identifier_finder
+            // dispatch, and admin index provider detection). C++ parsing is a
+            // near-superset of C, while C parsing produces ERROR nodes on any
+            // C++ construct in shared `.h` files (nlohmann/json, doctest, LLVM
+            // Fuzzer, Catch2). This is the load-bearing dispatch — find_provider
+            // is what the indexing pipeline actually calls per file.
+            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => self
                 .providers
                 .iter()
                 .find(|p| p.name() == "cpp")
