@@ -1,5 +1,6 @@
 pub mod contracts;
 pub mod extractors;
+pub mod impact;
 pub mod matching;
 pub mod status;
 pub mod storage;
@@ -18,6 +19,8 @@ pub enum GroupCommands {
     Status(status::StatusArgs),
     /// List contracts with optional filtering
     Contracts(contracts::ContractsArgs),
+    /// Local blast-radius for one member, fanned out via cross-repo links
+    Impact(impact::ImpactArgs),
 }
 
 pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
@@ -25,6 +28,7 @@ pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
         GroupCommands::Sync(args) => sync::run(args),
         GroupCommands::Status(args) => status::run(args),
         GroupCommands::Contracts(args) => contracts::run(args),
+        GroupCommands::Impact(args) => impact::run(args),
     }
 }
 
