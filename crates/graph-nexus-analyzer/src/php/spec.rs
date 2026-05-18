@@ -17,5 +17,6 @@ impl LangSpec for PhpSpec {
         "name.namespace" => NodeKind::Namespace,
         "name.trait"     => NodeKind::Trait,
         "name.enum"      => NodeKind::Enum,
+        "name.const"     => NodeKind::Const,
     };
 }
