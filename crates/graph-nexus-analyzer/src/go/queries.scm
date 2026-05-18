@@ -98,6 +98,18 @@
     (var_spec
       name: (identifier) @variable.name))) @variable
 
+;; File-scope `const X = value` (single) and `const ( A = 1; B = 2 )` (grouped).
+;; Both forms share the same nested shape: source_file > const_declaration >
+;; const_spec > name. Anchored at source_file so function-local const
+;; blocks (rare, but allowed) are not captured. ref-gitnexus emits these as
+;; `Const`; without this query gnx-rs dropped 42 top-level Go consts on
+;; `.sample_repo` (`auth.go` AuthUserKey/AuthProxyUserKey,
+;; `codec/json/*.go` Package, `binding/binding.go` MIME constants, etc.).
+(source_file
+  (const_declaration
+    (const_spec
+      name: (identifier) @const.name))) @const
+
 ;; File-scope `var ( X T; Y T )` (grouped declaration block).
 (source_file
   (var_declaration
