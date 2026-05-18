@@ -226,6 +226,8 @@ Without `--repo`: registry-level overview (indexed repos, groups, global health)
 With `--repo`: per-repo health.
 With `--repo @group`: aggregated group health.
 
+> **Status (2026-05-18, PR #146):** `--repo @<group>` on top-level commands now returns an error pointing at `gnx group coverage <name>`; the noun-first surface is canonical for group-scoped reads. `--repo @all` (registry-wide) is unchanged.
+
 **Empty**: never (always reports framework coverage; if 0 frameworks detected, says so + suggests `gnx admin index --reembed`).
 
 **Multi-repo**: yes.
@@ -256,6 +258,8 @@ Cross-repo API contracts inventory: producer (server-side route / queue producer
 | `--unmatched-only` | bool | false | Only contracts without a paired consumer/producer |
 
 **Multi-repo**: yes (core use case). Designed primarily for `--repo @group` / `@all`.
+
+> **Status (2026-05-18, PR #146):** The group-scoped flow moved to `gnx group contracts <name>`; top-level `--repo @<group>` is rejected with a hint pointing there. `--repo @all` (registry-wide) still works on `gnx contracts`.
 
 **Empty (P5)**:
 - Group has only 1 repo → `Group "<g>" has 1 member; cross-repo contracts need ≥2 repos`

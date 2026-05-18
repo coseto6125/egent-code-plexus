@@ -1,7 +1,7 @@
 [package]
 name = "graph-nexus-analyzer"
 description = "Graph Nexus for LLM — multi-language tree-sitter parser and route detector (Rust, TypeScript, Python, Go, Java, Swift, etc.)"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license.workspace = true
 repository.workspace = true

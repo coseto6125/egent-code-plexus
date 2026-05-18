@@ -19,7 +19,7 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | Arbitrary graph query / source body via Cypher | `gnx cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query "..."` alias works. Single-repo only. Minimal grammar — see Cypher subset below) |
 | AST-aware multi-file rename | `gnx rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `gnx routes <path?> --repo .` (no path = list all) |
-| Cross-repo API contracts (routes / queue / RPC) | `gnx contracts --repo @all` (needs ≥2 repos in group) |
+| Cross-repo API contracts (routes / queue / RPC) | `gnx group contracts <name>` for a named group; `gnx contracts --repo @all` for every registered repo |
 | HTTP consumer → Route shape drift detection | `gnx shape_check --route <path>? --repo .` (no `--route` = scan all routes; drift = consumer reads key not in Route's response/error keys) |
 | Binding tier / route / contract delta — edge view | `gnx diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required; accepts branch / tag / SHA / `HEAD~N` / `PR/<n>`. Multi-select via `,`. Formats: text / json / toon. Use `--verbose` for full lists.) |
 | Registry health / freshness / frameworks / blind spots | `gnx coverage` (registry-wide) or `gnx coverage --repo @all --detailed` |
@@ -32,7 +32,8 @@ Two access paths; pick one per command:
 
 - **`--repo <abs-or-rel-path>`** → registry lookup → reads `~/.gnx/graph-nexus-<hash>/<branch-slug>/graph.bin`. Branch slug = current HEAD with `/` → `__`. **Preferred** day-to-day.
 - **`--graph <abs-path-to-graph.bin>`** → bypass registry. Use when registry slug mismatch or testing a snapshot.
-- **`--repo @<group> / @all / csv` (`name1,name2`)** → multi-repo. Works for `find --mode bm25 / impact / contracts / coverage`. `cypher / inspect` are single-repo (will error on multi).
+- **`--repo @all / csv` (`name1,name2`)** → multi-repo. Works for `find --mode bm25 / contracts / coverage`. `cypher / inspect` are single-repo (will error on multi).
+- **`--repo @<group>` on top-level commands is rejected** with a hint pointing at `gnx group <verb>` — group queries are noun-first under the `gnx group` namespace (see §Multi-repo workflow).
 
 ### Indexing is automatic
 
@@ -85,7 +86,7 @@ Supports the openCypher read subset commonly used for graph queries: boolean WHE
 ## Common pitfalls
 
 1. **`--repo` is required for cross-repo modes**. `@group / @all / csv` only work when explicit.
-2. **`cypher --repo @group` errors** — single-repo only.
+2. **Top-level commands reject `--repo @<group>`** — the error points at the matching `gnx group <verb>`. `cypher / inspect / rename` have no group analog; group queries live under `gnx group <verb>` only.
 3. **Default `--graph .gitnexus-rs/graph.bin`** is a cwd-relative legacy path. If you don't have a checked-in graph file, pass `--repo` (preferred) or absolute `--graph`.
 4. **Auto-ensure on every agent command** — first query after a source change pays a brief re-index cost. The stderr `✓ Index refreshed` line is informational, not an error.
 5. **`rename --markdown`** is OFF by default — code-only rename. Add the flag to sweep `.md / .rst / .txt`.
@@ -103,7 +104,7 @@ gnx impact --baseline origin/main --repo .
 gnx routes /api/foo --repo .
 ```
 
-HIGH / CRITICAL risk_level in impact output → **stop + confirm with user** before pushing. Cross-repo contract changes → check `gnx contracts --repo @all --unmatched-only` for orphaned consumers.
+HIGH / CRITICAL risk_level in impact output → **stop + confirm with user** before pushing. Cross-repo contract changes → check `gnx group contracts <name> --unmatched` for orphaned consumers in a known group, or `gnx contracts --repo @all --unmatched-only` registry-wide.
 
 ## Multi-repo workflow
 
@@ -116,8 +117,7 @@ Cross-repo queries live under `gnx group <verb>`. Management commands
 | `gnx group status <name>` | Per-member staleness (OK / STALE / MISSING / NO_META / NO_SNAPSHOT) via `git rev-parse` diff vs stored snapshot | Text/TOON |
 | `gnx group contracts <name> [--type T] [--repo R] [--unmatched]` | Inspect contract registry with filters | Text/JSON |
 | `gnx group impact <name> --target <sym> --repo <member>` | Local impact + cross-repo fan-out (cross_depth clamped to 1 first wave) | TOON/JSON |
-| `gnx group search <name> <query> [--no-merge]` | RRF-merged fan-out (default). `--no-merge` returns per-repo streams | Text/JSON |
-| `gnx group find <name> <pattern>` | Parallel concat | Text/JSON |
+| `gnx group find <name> <pattern> [--merge none\|rrf] [--limit N] [--batch]` | Default per-repo bucketed concat (`--merge none`). `--merge rrf --limit N` → unified top-K via RRF. `--batch` reads patterns from stdin (one per line, `#` for comments) and re-applies the merge mode per pattern. | Text/JSON |
 | `gnx group coverage <name>` | Per-member health concat | Text/JSON |
 
 **Selector layer**: `--repo @<group>` on top-level commands (`gnx search/find/contracts/coverage`) returns an error pointing at `gnx group <verb>` — the noun-first surface is canonical. `--repo @all` and single-repo selectors are unchanged.

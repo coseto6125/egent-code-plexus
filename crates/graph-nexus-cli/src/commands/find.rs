@@ -94,7 +94,8 @@ pub struct FindArgs {
     #[arg(long)]
     pub kind: Option<String>,
 
-    /// Repository selector (path | name | @group | @all | csv mix). Defaults to cwd.
+    /// Repository selector (path | name | @all | csv mix). Defaults to cwd.
+    /// `@<group>` is rejected at the top level — use `gnx group find` instead.
     #[arg(long)]
     pub repo: Option<String>,
 

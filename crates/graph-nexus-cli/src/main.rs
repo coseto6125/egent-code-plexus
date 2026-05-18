@@ -124,6 +124,13 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Gatekeeper: any top-level command with `--repo @<group>` exits early
+    // with a migration hint pointing at `gnx group …`. Runs before all
+    // dispatch so the message is identical regardless of graph-free vs
+    // graph-loading path. `@all` is unaffected (still resolves to the
+    // registered repo set).
+    check_group_atom(&cli);
+
     // Admin: subcommand → run the admin operation; no subcommand → launch TUI.
     if let Commands::Admin { command } = cli.command {
         let err = match command {
@@ -161,24 +168,6 @@ fn main() {
         Commands::Peers(args) => run_no_graph!(commands::peers::run(args.clone())),
         Commands::Group { cmd } => run_no_graph!(commands::group::run(cmd.clone())),
         _ => {} // fall through to graph-loading path
-    }
-
-    // Reject `@<group>` on top-level `find` before auto_ensure uses it as
-    // cwd. `@all` is fine — it resolves to the registered repo set, not a
-    // group. This mirrors the equivalent check inside `find::resolve_targets`
-    // but must happen here because main.rs feeds `args.repo` to auto_ensure
-    // before `find::run` is called.
-    if let Commands::Find(args) = &cli.command {
-        if let Some(sel) = args.repo.as_deref() {
-            if let Some(group_name) = sel.strip_prefix('@') {
-                if group_name != "all" {
-                    eprintln!(
-                        "error: `@{group_name}` cannot be used at the top level — use `gnx group find` instead"
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
     }
 
     // Agent commands + ShapeCheck (hidden internal) — need graph
@@ -247,6 +236,53 @@ fn main() {
         eprintln!("Command failed: {e}");
         std::process::exit(1);
     }
+}
+
+/// Top-level `--repo @<group>` rejection. The atom is meaningful only inside
+/// `gnx group <verb>`; on every other command it is either a path-not-found
+/// (auto_ensure) or a single-repo selector that silently expands and fails
+/// later with an opaque message. Catch it here and exit with a clear hint.
+///
+/// The `hint` is the `gnx group <verb>` migration target. Commands without a
+/// group analog (inspect / rename / cypher / routes / shape-check / tool-map
+/// / review / diff) carry `None` and get redirected to `gnx group --help`.
+fn check_group_atom(cli: &Cli) {
+    // The `repo: Option<String>` accessor lives on each variant's args struct,
+    // so the match has to enumerate them. Pull the value out first; bail
+    // fast for commands without a `--repo` field (contracts/coverage are
+    // already protected via resolve_top_level; peers/admin/hooks don't expose
+    // a group-aware selector).
+    let (repo_opt, hint): (Option<&str>, Option<&str>) = match &cli.command {
+        Commands::Find(a) => (a.repo.as_deref(), Some("find")),
+        Commands::Impact(a) => (a.repo.as_deref(), Some("impact")),
+        Commands::Inspect(a) => (a.repo.as_deref(), None),
+        Commands::Rename(a) => (a.repo.as_deref(), None),
+        Commands::Cypher(a) => (a.repo.as_deref(), None),
+        Commands::Routes(a) => (a.repo.as_deref(), None),
+        Commands::ShapeCheck(a) => (a.repo.as_deref(), None),
+        Commands::ToolMap(a) => (a.repo.as_deref(), None),
+        Commands::Review(a) => (a.repo.as_deref(), None),
+        Commands::Diff(a) => (a.repo.as_deref(), None),
+        _ => return,
+    };
+    // The vast majority of invocations don't pass `--repo` at all, so the
+    // two early returns below fire before any further work.
+    let Some(sel) = repo_opt else { return };
+    let Some(group_name) = sel.strip_prefix('@') else {
+        return;
+    };
+    if group_name == "all" {
+        return;
+    }
+    match hint {
+        Some(verb) => eprintln!(
+            "error: `@{group_name}` cannot be used at the top level — use `gnx group {verb}` instead"
+        ),
+        None => eprintln!(
+            "error: `@{group_name}` cannot be used at the top level — this command is single-repo; see `gnx group --help` for cross-repo workflows"
+        ),
+    }
+    std::process::exit(1);
 }
 
 /// Auto-trigger background GC when the home heartbeat stamp is missing

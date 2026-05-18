@@ -149,7 +149,7 @@ graph.bin mmap + 一次線性掃 nodes + edges 即可，O(N+E)。對 POC repo（
 
 - TOON 格式輸出（先 markdown / json 兩個）
 - 自動寫到 `CLAUDE.md` / `AGENTS.md`（item #1 防雷的功能）── 等本指令穩定後另案
-- 跨 repo 摘要 (`--repo @group`)
+- 跨 repo 摘要 (`--repo @group`) — *Status (2026-05-18, PR #146): 改由 `gnx group coverage <name>` 提供；top-level `--repo @<group>` 拒收。*
 - 含 embeddings semantic clustering 取代 Louvain community
 
 ## Acceptance Criteria

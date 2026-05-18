@@ -29,6 +29,10 @@ impl GnxMcpServer {
         // with the three explicit peer sub-subcommand tools.
         tools.retain(|t| t.name != "gnx_peers");
         tools.extend(crate::peers::peer_tools());
+        // `gnx group` is `#[command(hide = true)]` so enumerate_tools skips
+        // it — without this manual injection, LLM clients cannot reach the
+        // sub-subcommands at all. Discriminator: `subcmd`.
+        tools.extend(crate::group::group_tools());
         let rmcp_tools = build_rmcp_tools(&tools);
         Ok(Self {
             self_exe,

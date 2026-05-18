@@ -423,6 +423,7 @@ modified: N           # signature / schema 改
 3. **Edges section 未來引入時的 grouping 策略**：50-200 edges/PR 噪音多。grouping by `(source_file, target_file)` 還是 by enclosing module？需獨立評估再加。
 4. **Symbols section 未來引入時的 modified 定義**：body 改算 modified？signature 改算 modified？rename 跨 file 算什麼？需 identity tracking 設計。
 5. **`gnx diff` 對 monorepo 多 sub-graph**：當前 `gnx diff` 假設單一 graph；多 repo（`--repo @group`）需獨立評估。
+   - *Status (2026-05-18, PR #146):* `gnx diff` 仍只支援單一 graph；top-level `--repo @<group>` 已被 `check_group_atom` 拒收（hint 指向 `gnx group --help`），未列入 PR-146 的 group verb 範圍。多 repo diff 留作後續獨立 spec。
 
 ---
 

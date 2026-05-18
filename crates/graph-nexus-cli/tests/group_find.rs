@@ -163,3 +163,81 @@ fn group_find_json_shape_two_repos() {
         assert!(entry.get("hits").is_some(), "entry missing `hits`");
     }
 }
+
+// ── --merge rrf (consolidated from former `gnx group search`) ─────────────────
+
+/// `--merge rrf` returns a unified top-K via Reciprocal Rank Fusion. JSON
+/// shape: `{results: [...], per_repo: [{repo, count}, ...]}`.
+#[test]
+fn group_find_merge_rrf_json_shape_two_repos() {
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repos_tmp = tempfile::tempdir().unwrap();
+    let home = home_tmp.path();
+    let home_gnx = home.join(".gnx");
+
+    for name in ["repo_a_rrf", "repo_b_rrf"] {
+        let repo = repos_tmp.path().join(name);
+        init_git_repo_with_rs(&repo);
+        let out = run_gnx(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
+        assert!(
+            out.status.success(),
+            "{name} admin index failed:\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let dir_names = read_dir_names(&home_gnx);
+    for dn in &dir_names {
+        let out = run_gnx(&["admin", "group", "add", dn, "rrfgrp"], home);
+        assert!(
+            out.status.success(),
+            "admin group add failed for {dn}:\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let out = run_gnx(
+        &[
+            "group", "find", "rrfgrp", "hello",
+            "--merge", "rrf",
+            "--limit", "3",
+            "--json",
+        ],
+        home,
+    );
+    assert!(
+        out.status.success(),
+        "group find --merge rrf failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).expect("output must be valid JSON");
+    assert!(v.get("results").is_some(), "`results` missing:\n{stdout}");
+    assert!(v.get("per_repo").is_some(), "`per_repo` missing:\n{stdout}");
+    let per_repo = v["per_repo"].as_array().unwrap();
+    assert_eq!(per_repo.len(), 2, "expected 2 per_repo entries:\n{stdout}");
+}
+
+/// `--limit` without `--merge rrf` is rejected — per-repo concat has no
+/// global top-K. Guards against silent semantic drift if a future change
+/// drops the validation in `group::find::run`.
+#[test]
+fn group_find_limit_without_merge_rrf_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_gnx(
+        &["group", "find", "anygrp", "hello", "--limit", "5"],
+        tmp.path(),
+    );
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for --limit without --merge rrf"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--limit") && stderr.contains("merge rrf"),
+        "stderr should mention the flag combo: {stderr}"
+    );
+}

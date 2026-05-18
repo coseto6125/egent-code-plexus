@@ -21,6 +21,8 @@ pub enum ExtractorKind { Http, Grpc }
 
 pub struct ExtractorEntry {
     pub lang: &'static str,
+    /// Read only by integration tests (group_extractor_registry.rs); release build sees it as dead.
+    #[allow(dead_code)]
     pub kind: ExtractorKind,
     pub extract: fn(&Path, &[u8]) -> Vec<ExtractedContract>,
 }

@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "graph-nexus"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "clap",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "graph-nexus-analyzer"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "graph-nexus-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "bytecheck",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "graph-nexus-mcp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
