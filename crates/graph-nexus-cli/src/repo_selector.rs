@@ -87,6 +87,30 @@ pub enum ResolveError {
     GroupNotFound(String),
     #[error("path not in registry: {0}")]
     PathNotRegistered(String),
+    #[error("`@{group}` cannot be used at the top level — use `gnx group {hint}` instead")]
+    GroupAtTopLevel { group: String, hint: String },
+}
+
+/// Thin wrapper around `resolve` that rejects `@<group>` atoms before
+/// expansion. Top-level commands (`search` / `find` / `contracts` /
+/// `coverage`) call this so users get a clear migration hint pointing at
+/// `gnx group <verb>`. `@all` and single-repo selectors pass through
+/// unchanged.
+pub fn resolve_top_level(
+    sel: &Selector,
+    registry: &RegistryFile,
+    cwd: &str,
+    verb_hint: &str,
+) -> Result<Vec<ResolvedRepo>, ResolveError> {
+    for atom in &sel.0 {
+        if let Atom::Group(g) = atom {
+            return Err(ResolveError::GroupAtTopLevel {
+                group: g.clone(),
+                hint: verb_hint.to_string(),
+            });
+        }
+    }
+    resolve(sel, registry, cwd)
 }
 
 /// Resolve a selector to a deduplicated list of repos. Preserves first

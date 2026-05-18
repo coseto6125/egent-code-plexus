@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod contracts;
+pub mod group;
 pub mod coverage;
 pub mod cypher;
 pub mod diff;

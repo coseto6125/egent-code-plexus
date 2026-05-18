@@ -305,34 +305,6 @@ fn search_rejects_query_flag() {
 // ── Multi-repo tests ──────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "result JSON 'repo' field used v1 name; v2 returns dir_name (alpha__hash) — fixture/asserts need v2 update"]
-fn search_multi_repo_at_group_both_repos() {
-    let f = two_repo_fixture();
-    let out = run_search_multi(
-        &f.home_path,
-        &["fetch", "--repo", "@g1", "--format", "json"],
-    );
-    assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout
-        .find('{')
-        .unwrap_or_else(|| panic!("no JSON: {stdout}"));
-    let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
-    // Collect all hits across all 5 buckets.
-    let all_hits: Vec<&Value> = ["source", "tests", "reference", "document", "config"]
-        .iter()
-        .flat_map(|k| json[k].as_array().into_iter().flatten())
-        .collect();
-    let repos: Vec<&str> = all_hits.iter().filter_map(|r| r["repo"].as_str()).collect();
-    assert!(repos.contains(&"alpha"), "alpha missing: {repos:?}");
-    assert!(repos.contains(&"beta"), "beta missing: {repos:?}");
-}
-
-#[test]
 fn search_multi_repo_at_all() {
     let f = two_repo_fixture();
     let out = run_search_multi(
@@ -348,52 +320,6 @@ fn search_multi_repo_at_all() {
     assert!(
         stdout.contains("fetch"),
         "expected 'fetch' in results: {stdout}"
-    );
-}
-
-#[test]
-#[ignore = "same v1 name expectation as search_multi_repo_at_group_both_repos — needs v2 fixture/asserts"]
-fn search_multi_repo_csv_single() {
-    let f = two_repo_fixture();
-    let out = run_search_multi(
-        &f.home_path,
-        &["user", "--repo", "alpha", "--format", "json"],
-    );
-    assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout
-        .find('{')
-        .unwrap_or_else(|| panic!("no JSON: {stdout}"));
-    let json: Value = serde_json::from_str(&stdout[json_start..]).unwrap();
-    let all_hits: Vec<&Value> = ["source", "tests", "reference", "document", "config"]
-        .iter()
-        .flat_map(|k| json[k].as_array().into_iter().flatten())
-        .collect();
-    assert!(
-        !all_hits.is_empty(),
-        "alpha has fetch_user/save_user: {json}"
-    );
-    for r in &all_hits {
-        assert_eq!(r["repo"].as_str(), Some("alpha"), "unexpected repo: {r}");
-    }
-}
-
-#[test]
-fn search_multi_repo_unknown_group_errors() {
-    let f = two_repo_fixture();
-    let out = run_search_multi(
-        &f.home_path,
-        &["foo", "--repo", "@nonexistent_group", "--format", "json"],
-    );
-    assert!(!out.status.success(), "should fail for unknown group");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("nonexistent_group") || stderr.contains("unknown group"),
-        "stderr should mention the unknown group: {stderr}"
     );
 }
 

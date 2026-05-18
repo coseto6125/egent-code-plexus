@@ -101,3 +101,43 @@ fn spawn_errors_when_subcmd_missing() {
         "got: {err}"
     );
 }
+
+// ─── @<group> rejection (T15) ────────────────────────────────────────────────
+
+/// Stub that rejects `@<group>` exactly as the real gnx binary does after T14:
+/// exits non-zero and emits the "gnx group find" hint to stderr.
+fn write_group_rejecting_stub(dir: &std::path::Path) -> std::path::PathBuf {
+    write_stub(
+        dir,
+        r#"#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    @all) ;;
+    @*) echo "error: cannot be used at the top level — use \`gnx group find\` instead" >&2; exit 1 ;;
+  esac
+done
+echo ok
+"#,
+    )
+}
+
+#[test]
+fn mcp_find_at_group_rejects_with_hint() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_group_rejecting_stub(dir.path());
+    let tool = dummy_tool("find");
+    let err = run_spawn(&stub, &tool, &json!({"repo": "@demo", "pattern": "x"})).unwrap_err();
+    assert!(
+        err.to_string().contains("gnx group find"),
+        "expected hint in error; got: {err}"
+    );
+}
+
+#[test]
+fn mcp_find_at_all_still_works() {
+    let dir = TempDir::new().unwrap();
+    let stub = write_group_rejecting_stub(dir.path());
+    let tool = dummy_tool("find");
+    let out = run_spawn(&stub, &tool, &json!({"repo": "@all", "pattern": "x"})).unwrap();
+    assert_eq!(out.trim(), "ok");
+}

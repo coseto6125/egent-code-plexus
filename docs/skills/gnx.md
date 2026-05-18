@@ -105,9 +105,25 @@ gnx routes /api/foo --repo .
 
 HIGH / CRITICAL risk_level in impact output → **stop + confirm with user** before pushing. Cross-repo contract changes → check `gnx contracts --repo @all --unmatched-only` for orphaned consumers.
 
-## Group / multi-repo
+## Multi-repo workflow
 
-- Membership: `gnx admin group add <name> --repo <path>` / `gnx admin group list`.
-- Query across group: `--repo @<group-name>` on supported commands.
-- `--repo @all` = all registered repos.
-- gnx-rs has no standalone `group_status / group_query / group_impact` commands — use `--repo @group` on the relevant agent command.
+Cross-repo queries live under `gnx group <verb>`. Management commands
+(`add/remove/list`) stay under `gnx admin group`.
+
+| Command | Purpose | Output (default) |
+|---|---|---|
+| `gnx group sync <name>` | Extract HTTP/gRPC contracts, build exact + BM25 cross-links, write `~/.gnx/groups/<name>/{contracts.rkyv, meta.json}` | TOON summary |
+| `gnx group status <name>` | Per-member staleness (OK / STALE / MISSING / NO_META / NO_SNAPSHOT) via `git rev-parse` diff vs stored snapshot | Text/TOON |
+| `gnx group contracts <name> [--type T] [--repo R] [--unmatched]` | Inspect contract registry with filters | Text/JSON |
+| `gnx group impact <name> --target <sym> --repo <member>` | Local impact + cross-repo fan-out (cross_depth clamped to 1 first wave) | TOON/JSON |
+| `gnx group search <name> <query> [--no-merge]` | RRF-merged fan-out (default). `--no-merge` returns per-repo streams | Text/JSON |
+| `gnx group find <name> <pattern>` | Parallel concat | Text/JSON |
+| `gnx group coverage <name>` | Per-member health concat | Text/JSON |
+
+**Selector layer**: `--repo @<group>` on top-level commands (`gnx search/find/contracts/coverage`) returns an error pointing at `gnx group <verb>` — the noun-first surface is canonical. `--repo @all` and single-repo selectors are unchanged.
+
+First-wave extractors: Go / Python / Node / Java / Rust × HTTP + gRPC. Other 9 mainstream languages emit nothing (BlindSpot stubs).
+
+Config knobs live in `~/.gnx/config.toml` under `[group]` (`bm25_threshold`, `max_candidates_per_step`, `exclude_links_paths`, `exclude_links_param_only_paths`, `cross_depth`, `local_impact_timeout_ms`).
+
+See [spec](../specs/2026-05-18-gnx-group-multirepo-design.md) for the full design.

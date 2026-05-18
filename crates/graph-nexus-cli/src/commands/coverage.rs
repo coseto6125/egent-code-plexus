@@ -11,7 +11,7 @@
 //! folded here — that requires per-callsite binding analysis whose granularity
 //! sits beyond a health summary. See the standalone `gnx tool-map` command.
 
-use crate::commit_lookup::CommitIndex;
+use crate::commit_lookup::find_latest_by_mtime;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
@@ -64,12 +64,9 @@ pub fn build_payload(args: &CoverageArgs, _graph_arg: &Path) -> Result<Value, Gn
         let selector = crate::repo_selector::parse(repo_sel)
             .map_err(|e| GnxError::Output(format!("selector: {e}")))?;
         let cwd_str = cwd.to_string_lossy();
-        let resolved = crate::repo_selector::resolve(&selector, reg, &cwd_str).map_err(|e| {
-            // For unknown group/name: emit graceful empty result rather than
-            // a hard error, so `--repo @test-group` on a fresh machine
-            // doesn't blow up integration tests.
-            GnxError::Output(format!("selector: {e}"))
-        })?;
+        let resolved =
+            crate::repo_selector::resolve_top_level(&selector, reg, &cwd_str, "coverage")
+                .map_err(|e| GnxError::Output(format!("selector: {e}")))?;
         let per_repo: Vec<Value> = resolved
             .iter()
             .map(|r| build_repo_health(r, args.detailed))
@@ -122,7 +119,7 @@ fn build_groups_overview(reg: &RegistryFile) -> Value {
 
 // ── Per-repo health ──────────────────────────────────────────────────────────
 
-fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Value {
+pub fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Value {
     // Load the graph once per repo and share it between framework + blind-spot
     // sections. Without this, each section would mmap+validate independently
     // — wasteful when `--repo @all` spans many repos.
@@ -147,26 +144,12 @@ fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> 
 
 /// Find the most-recently-modified graph.bin under `<home_gnx>/<dir_name>/commits/`.
 /// v2 is content-addressed per commit; we pick the newest one for coverage
-/// reporting (the HEAD commit's build, if present).
+/// reporting (the HEAD commit's build, if present). Delegates to
+/// `commit_lookup::find_latest_by_mtime` (handles `.building` / `.stale-*`
+/// filtering); we append `graph.bin` since that helper returns the commit dir.
 fn latest_graph_path(r: &crate::repo_selector::ResolvedRepo) -> Option<PathBuf> {
-    let home_gnx = resolve_home_gnx();
-    let commits_dir = home_gnx.join(&r.dir_name).join("commits");
-    let idx = CommitIndex::scan(&commits_dir).ok()?;
-    if idx.is_empty() {
-        return None;
-    }
-    // Pick the commit dir with the most recent graph.bin mtime.
-    std::fs::read_dir(&commits_dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| {
-            let g = e.path().join("graph.bin");
-            let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
-            Some((mtime, g))
-        })
-        .max_by_key(|(mtime, _)| *mtime)
-        .map(|(_, path)| path)
+    let commits_dir = resolve_home_gnx().join(&r.dir_name).join("commits");
+    find_latest_by_mtime(&commits_dir).map(|dir| dir.join("graph.bin"))
 }
 
 /// Open the repo's graph for read. Returns `None` for any failure — caller

@@ -58,6 +58,13 @@ fs2 = "0.4"
 notify = "6"
 walkdir = "2"
 uuid = { version = "1", features = ["v7"] }
+tree-sitter = "0.25"
+tree-sitter-go = "*"
+tree-sitter-python = "*"
+tree-sitter-typescript = "*"
+tree-sitter-java = "*"
+tree-sitter-rust = "*"
+streaming-iterator = "0.1.9"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["process", "signal"] }

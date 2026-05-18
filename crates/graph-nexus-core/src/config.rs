@@ -15,6 +15,8 @@ pub struct Config {
     pub output: OutputConfig,
     #[serde(default)]
     pub confidence: ConfidenceConfig,
+    #[serde(default)]
+    pub group: GroupConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,6 +59,52 @@ fn default_output_format() -> String {
 }
 fn default_high_trust_threshold() -> f32 {
     crate::HIGH_TRUST_CONFIDENCE
+}
+
+/// **stored** — values consumed by `gnx group sync / impact` when
+/// CLI flags do not override. See
+/// `docs/specs/2026-05-18-gnx-group-multirepo-design.md` §Configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GroupConfig {
+    #[serde(default = "default_group_bm25_threshold")]
+    pub bm25_threshold: f32,
+    #[serde(default = "default_group_max_candidates")]
+    pub max_candidates_per_step: u32,
+    #[serde(default)]
+    pub exclude_links_paths: Vec<String>,
+    #[serde(default)]
+    pub exclude_links_param_only_paths: bool,
+    #[serde(default = "default_group_cross_depth")]
+    pub cross_depth: u32,
+    /// 0 disables the timeout (impact runs to completion).
+    #[serde(default = "default_group_timeout_ms")]
+    pub local_impact_timeout_ms: u64,
+}
+
+impl Default for GroupConfig {
+    fn default() -> Self {
+        Self {
+            bm25_threshold: default_group_bm25_threshold(),
+            max_candidates_per_step: default_group_max_candidates(),
+            exclude_links_paths: Vec::new(),
+            exclude_links_param_only_paths: false,
+            cross_depth: default_group_cross_depth(),
+            local_impact_timeout_ms: default_group_timeout_ms(),
+        }
+    }
+}
+
+fn default_group_bm25_threshold() -> f32 {
+    0.6
+}
+fn default_group_max_candidates() -> u32 {
+    16
+}
+fn default_group_cross_depth() -> u32 {
+    1
+}
+fn default_group_timeout_ms() -> u64 {
+    5000
 }
 
 /// Repo-relative config path. `.gnx/config.toml` is hook-local state
