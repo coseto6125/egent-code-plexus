@@ -1,0 +1,153 @@
+name: Release (ARM64)
+
+# ARM64-only build & release pipeline, parallel to release.yml.
+#
+# Why separate from release.yml:
+#   - 可單獨 trigger ARM64 build,不需重跑 x86_64/Windows
+#   - tag prefix `arm64-v*` 不與 release.yml 的 `v*` 衝突
+#     (`v*` glob 不會 match `arm64-vX.Y.Z`,反之亦然)
+#   - 產出標記為 prerelease,避免污染主 release channel
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch/tag/commit to build (default: current ref)'
+        required: false
+        default: ''
+      publish_release:
+        description: 'Create GitHub Release after build (only when triggered manually on a tag-like ref)'
+        required: false
+        default: 'false'
+  push:
+    tags:
+      - 'arm64-v*'
+
+permissions:
+  contents: write       # GitHub Release 上傳
+  id-token: write       # SLSA OIDC token
+  attestations: write   # actions/attest-build-provenance
+
+concurrency:
+  group: release-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  BIN_NAME: gnx
+
+jobs:
+  # ==================== ARM64 Binary Builds ====================
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # 手動 trigger 時可指定 ref;tag push 時走預設 github.ref
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 與 release.yml 共用 cache key (同 target/profile,可重用)
+          shared-key: release-${{ matrix.target }}
+          # release-dist build 動輒 3-4min,失敗也保存已編譯 deps 避免下次從零
+          cache-on-failure: "true"
+          # 只在 tag push / 顯式 publish 時寫 cache,避免 manual dry-run 污染 tag 路徑
+          save-if: ${{ startsWith(github.ref, 'refs/tags/arm64-v') || inputs.publish_release == 'true' }}
+
+      - name: Build release binary
+        # release-dist profile (LTO fat + codegen-units = 1) 與 release.yml 對齊,
+        # 確保 ARM64 binary 與其他平台同樣品質。
+        run: cargo build --profile release-dist --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
+
+      - name: Package (tar.gz)
+        shell: bash
+        run: |
+          # tag push 時 GITHUB_REF_NAME 即 tag 名;manual dispatch fallback "dev"
+          name="${BIN_NAME}-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release-dist/${BIN_NAME}" "dist/${name}/"
+          cp README.md LICENSE NOTICE "dist/${name}/" 2>/dev/null || true
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.tar.gz'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  # ==================== GitHub Release (ARM64 prerelease) ====================
+  github-release:
+    name: GitHub Release (ARM64)
+    needs: [build]
+    runs-on: ubuntu-latest
+    # 只在 tag push 或 manual trigger 顯式要求 publish 時跑
+    if: |
+      (startsWith(github.ref, 'refs/tags/arm64-v') && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release == 'true')
+
+    steps:
+      - name: Checkout (for install scripts)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List dist contents
+        run: ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # tag_name 預設取 github.ref_name (tag push 路徑);manual dispatch
+          # 在 non-tag ref 上 publish_release=true 時會自動失敗,提示需先打 tag。
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+          body: |
+            **ARM64-only build** for `${{ github.ref_name }}`.
+
+            Targets:
+            - `aarch64-unknown-linux-gnu`
+            - `aarch64-apple-darwin`
+
+            ### Manual download
+            Pick a `.tar.gz` matching your platform from Assets below.
+            Each has a `.sha256` for integrity. Verify build provenance with:
+            ```
+            gh attestation verify ./gnx --owner coseto6125
+            ```
