@@ -345,13 +345,20 @@ Four ways to use it:
 Paste into your agent chat:
 
 ```
-Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/gnx-onboard/SKILL.md
+Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/gnx-onboard/ONBOARDING.md
 and follow it as my onboarding wizard for graph-nexus.
 ```
 
-The agent reads `SKILL.md`, probes your system, and walks you through
-install + first-index + group + MCP setup, tailored to the prompts /
-preferences already in its context.
+`ONBOARDING.md` is a pre-built aggregate of `SKILL.md` plus the 5 phase
+guides (one fetch, ~570 lines). The agent probes your system, derives a
+persona, and walks you through install + first-index + group + MCP
+setup. Layer 3 `_shared/refs/*` and `_shared/cli/*` files are pulled
+lazily only when a phase needs them.
+
+> **Note:** Earlier docs pointed at `SKILL.md`. That version is the
+> Layer 1 entry only and forces the agent to make 5+ extra round-trips
+> to fetch the guides. Prefer `ONBOARDING.md` for URL bootstrap; reach
+> for `SKILL.md` only when iterating on the SKILL itself.
 
 ### (b) ShareOnboardingGuide — Claude Code (lowest friction)
 
