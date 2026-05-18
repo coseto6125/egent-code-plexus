@@ -10,7 +10,8 @@ impl LangSpec for LuaSpec {
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
         "function.name" => NodeKind::Function,
-        "struct.name" => NodeKind::Class,
-        "const.name" => NodeKind::Const,
+        "struct.name"   => NodeKind::Class,
+        "const.name"    => NodeKind::Const,
+        "typedef.name"  => NodeKind::Typedef,
     };
 }

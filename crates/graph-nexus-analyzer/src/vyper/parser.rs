@@ -16,6 +16,20 @@ thread_local! {
         parser
     });
 }
+
+/// Extract the alias identifier from `X as Y` or `X as Y  # comment`.
+/// Returns `Some("Y")` when an `as` clause is present, `None` otherwise.
+fn extract_as_alias(s: &str) -> Option<&str> {
+    // Find ` as ` (with surrounding spaces) to distinguish from names
+    // that happen to contain "as" (e.g. "class", "base").
+    let as_pos = s.find(" as ")?;
+    // Strip inline comment first — works whether or not there's a space
+    // before `#` (`as m # c` and `as m#c` both yield "m").
+    let before_comment = s[as_pos + 4..].split('#').next().unwrap_or("");
+    let alias = before_comment.split_whitespace().next()?;
+    if alias.is_empty() { None } else { Some(alias) }
+}
+
 pub struct VyperProvider {
     query: Query,
     capture_kind_by_idx: Vec<Option<NodeKind>>,
@@ -154,6 +168,53 @@ impl LanguageProvider for VyperProvider {
                         source: src_str.to_string(),
                         binding_kind: None,
                     });
+                }
+            }
+        }
+
+        // Vyper's grammar is minimal and does not parse `import X as Y` or
+        // `from X import Y as Z` — those produce ERROR nodes.  Detect aliases
+        // by scanning source text lines directly.
+        //
+        // Patterns handled:
+        //   import math as m              → alias "m"
+        //   from vyper.interfaces import ERC20 as Token  → alias "Token"
+        for (row, line) in std::str::from_utf8(source)
+            .unwrap_or("")
+            .lines()
+            .enumerate()
+        {
+            let trimmed = line.trim();
+            // `import X as Y`
+            if let Some(rest) = trimmed.strip_prefix("import ") {
+                if let Some(alias) = extract_as_alias(rest) {
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported: false,
+                        heritage: vec![],
+                        type_annotation: None,
+                        name: alias.to_string(),
+                        kind: NodeKind::Typedef,
+                        span: (row as u32, 0, row as u32, line.len() as u32),
+                        calls: Vec::new(),
+                    });
+                }
+            }
+            // `from X import Y as Z`
+            if let Some(rest) = trimmed.strip_prefix("from ") {
+                if let Some(after_import) = rest.find(" import ").map(|i| &rest[i + 8..]) {
+                    if let Some(alias) = extract_as_alias(after_import) {
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported: false,
+                            heritage: vec![],
+                            type_annotation: None,
+                            name: alias.to_string(),
+                            kind: NodeKind::Typedef,
+                            span: (row as u32, 0, row as u32, line.len() as u32),
+                            calls: Vec::new(),
+                        });
+                    }
                 }
             }
         }

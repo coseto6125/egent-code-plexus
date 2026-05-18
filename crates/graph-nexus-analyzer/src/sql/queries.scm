@@ -1,10 +1,11 @@
-; Tables and views captured as class-like entities.
+; Tables captured as class-like entities.
 ; CREATE PROCEDURE is not supported by tree-sitter-sequel grammar (PostgreSQL/ANSI dialect).
 (create_table
   (object_reference (identifier) @class.name)) @class
 
+; Views are named aliases for queries — emit as Typedef.
 (create_view
-  (object_reference (identifier) @class.name)) @class
+  (object_reference (identifier) @typedef.name)) @typedef
 
 ; Functions
 (create_function

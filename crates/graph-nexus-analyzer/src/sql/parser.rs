@@ -68,6 +68,7 @@ impl LanguageProvider for SqlProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
         let idx_const = self.query.capture_index_for_name("const");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_heritage_table = self.query.capture_index_for_name("heritage.table");
         let idx_heritage_target = self.query.capture_index_for_name("heritage.target");
@@ -95,6 +96,7 @@ impl LanguageProvider for SqlProvider {
                 } else if Some(cap_idx as u32) == idx_class
                     || Some(cap_idx as u32) == idx_function
                     || Some(cap_idx as u32) == idx_const
+                    || Some(cap_idx as u32) == idx_typedef
                 {
                     root_span_node = Some(cap.node);
                 }

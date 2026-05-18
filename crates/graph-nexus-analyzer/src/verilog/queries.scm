@@ -41,3 +41,8 @@
     (list_of_variable_decl_assignments
       (variable_decl_assignment
         (simple_identifier) @class_prop.name)))) @class_prop
+
+;; SystemVerilog typedef declarations — alias name is the last simple_identifier
+;; e.g. `typedef logic [7:0] byte_t;` captures "byte_t"
+(type_declaration
+  (simple_identifier) @typedef.name) @typedef

@@ -9,8 +9,9 @@ impl LangSpec for HclSpec {
     const NAME: &'static str = "hcl";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "class.name" => NodeKind::Class,
-        "const.name" => NodeKind::Const,
-        "output.name" => NodeKind::Const,
+        "class.name"   => NodeKind::Class,
+        "const.name"   => NodeKind::Const,
+        "output.name"  => NodeKind::Const,
+        "typedef.name" => NodeKind::Typedef,
     };
 }

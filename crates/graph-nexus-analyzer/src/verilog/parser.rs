@@ -62,6 +62,7 @@ impl LanguageProvider for VerilogProvider {
         let idx_class_prop = self.query.capture_index_for_name("class_prop");
         let idx_class_prop_visibility =
             self.query.capture_index_for_name("class_prop.visibility");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -91,6 +92,7 @@ impl LanguageProvider for VerilogProvider {
                     || Some(cap_idx as u32) == idx_method
                     || Some(cap_idx as u32) == idx_const
                     || Some(cap_idx as u32) == idx_import
+                    || Some(cap_idx as u32) == idx_typedef
                 {
                     root_span_node = Some(cap.node);
                 }

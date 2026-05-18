@@ -13,5 +13,6 @@ impl LangSpec for CairoSpec {
         "struct.name"   => NodeKind::Class,
         "class.name"    => NodeKind::Class,
         "const.name"    => NodeKind::Const,
+        "typedef.name"  => NodeKind::Typedef,
     };
 }

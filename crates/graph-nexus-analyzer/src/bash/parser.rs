@@ -55,6 +55,7 @@ impl LanguageProvider for BashProvider {
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_const = self.query.capture_index_for_name("const");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_import_source = self.query.capture_index_for_name("import.source");
 
         while let Some(m) = matches.next() {
@@ -75,13 +76,23 @@ impl LanguageProvider for BashProvider {
                     kind = Some(k_from_spec);
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_function || Some(cap_idx) == idx_const {
+                } else if Some(cap_idx) == idx_function
+                    || Some(cap_idx) == idx_const
+                    || Some(cap_idx) == idx_typedef
+                {
                     root_span_node = Some(cap.node);
                 }
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                if let Ok(raw_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                    // For alias captures the word node contains either "NAME=" (concatenation form)
+                    // or "NAME=value" (bare word form). Split on `=` and take the part before it.
+                    let name_str = if k == NodeKind::Typedef {
+                        raw_str.split('=').next().unwrap_or(raw_str)
+                    } else {
+                        raw_str
+                    };
                     let start = root.start_position();
                     let end = root.end_position();
 
@@ -90,7 +101,7 @@ impl LanguageProvider for BashProvider {
                         is_exported: true,
                         heritage: vec![],
                         type_annotation: None,
-                        name: name_str.to_string(),
+                        name: name_str.to_owned(),
                         kind: k,
                         span: (
                             start.row as u32,

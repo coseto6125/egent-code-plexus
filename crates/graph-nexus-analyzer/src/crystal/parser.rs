@@ -59,6 +59,7 @@ impl LanguageProvider for CrystalProvider {
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_const = self.query.capture_index_for_name("const");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         // Metadata captures
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_import_source = self.query.capture_index_for_name("import.source");
@@ -83,6 +84,7 @@ impl LanguageProvider for CrystalProvider {
                 } else if Some(ci) == idx_class
                     || Some(ci) == idx_method
                     || Some(ci) == idx_const
+                    || Some(ci) == idx_typedef
                 {
                     root_span_node = Some(cap.node);
                 } else if Some(ci) == idx_heritage {

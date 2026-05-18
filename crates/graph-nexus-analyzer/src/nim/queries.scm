@@ -15,6 +15,13 @@
     (type_symbol_declaration name: _ @class.name)
     (object_declaration) @class))
 
+;; Type aliases: `type Foo = int`, `type Cb = proc(...)`, `type Pair = tuple[...]`
+;; Fires on ALL type_symbol_declarations; parser.rs demotes to Typedef only when
+;; the parent type_declaration has no object_declaration/distinct_type/ref_type child.
+(type_section
+  (type_declaration
+    (type_symbol_declaration name: _ @typedef.name) @typedef))
+
 ;; Import statements: `import foo`, `import foo, bar`
 (import_statement) @import
 

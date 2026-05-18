@@ -45,11 +45,11 @@
   (string_lit (template_literal) @output.name)
   (#eq? @_block_type6 "output")) @const
 
-; locals { key = ... }  → each attribute is a const
+; locals { key = ... }  → each attribute is a typedef (named alias for an expression)
 (block
   (identifier) @_block_type7
   (#eq? @_block_type7 "locals")
   (block_start)
   (body
     (attribute
-      (identifier) @const.name))) @const
+      (identifier) @typedef.name))) @typedef

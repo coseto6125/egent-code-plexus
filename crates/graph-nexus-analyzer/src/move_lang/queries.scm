@@ -27,3 +27,20 @@
     (module_identity) @import.source
     use_member: (use_member
       member: (identifier) @import.name))) @import
+
+;; Alias — use <addr>::<module> as Alias  (module alias)
+(use_declaration
+  (use_module
+    alias: (module_identifier) @typedef.name)) @typedef
+
+;; Alias — use <addr>::<module>::Item as Alias  (single-member alias, no braces)
+(use_declaration
+  (use_module_member
+    use_member: (use_member
+      alias: (identifier) @typedef.name))) @typedef
+
+;; Alias — use <addr>::<module>::{Item as Alias, ...}  (brace-grouped aliases)
+(use_declaration
+  (use_module_members
+    use_member: (use_member
+      alias: (identifier) @typedef.name))) @typedef

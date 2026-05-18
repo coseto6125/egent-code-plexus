@@ -71,6 +71,32 @@
             content: (string_content) @import.alias.source))) @import.inner)
     (#eq? @_req_a "require"))) @import.aliased
 
+;; Typedef / alias bindings:
+;;
+;; 1. `local M = require("foo")` — module alias (RHS is a require() call).
+;;    The import side is already handled by the @import.aliased pattern above;
+;;    here we emit a Typedef *node* so the symbol appears in the graph.
+(variable_declaration
+  (assignment_statement
+    (variable_list
+      name: (identifier) @typedef.name)
+    (expression_list
+      value: (function_call
+        name: (variable) @_td_req
+        arguments: (arguments
+          (string))))
+    (#eq? @_td_req "require"))) @typedef
+
+;; 2. `local Alias = SomeTable.Nested.Type` — dotted-path alias.
+;;    Only fires when the RHS is a dot_index_expression (multi-segment path),
+;;    not a plain identifier or literal, so plain vars are not captured.
+(variable_declaration
+  (assignment_statement
+    (variable_list
+      name: (identifier) @typedef.name)
+    (expression_list
+      value: (dot_index_expression)))) @typedef
+
 ;; Metatable inheritance: `setmetatable(obj, {__index = Parent})`
 ;; `meta.child` is the table getting a metatable; `meta.parent` is the class
 ;; it inherits from. The parser appends `Parent` to `obj`'s heritage list.

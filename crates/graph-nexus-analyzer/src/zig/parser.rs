@@ -7,7 +7,28 @@ use graph_nexus_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, QueryCursor};
+
+/// Returns the tree-sitter kind of the RHS expression in a
+/// `variable_declaration`, used to distinguish `const X = SomeType` (alias →
+/// Typedef) from `const x = 42` (value → Const). Empty when the declaration
+/// has only a name (no initializer).
+fn zig_typedef_rhs_kind(decl: Node<'_>) -> &'static str {
+    let mut cursor = decl.walk();
+    let mut iter = decl.named_children(&mut cursor);
+    let Some(first) = iter.next() else {
+        return "";
+    };
+    let last = iter.last().unwrap_or(first);
+    if last.start_byte() == first.start_byte() {
+        return "";
+    }
+    match last.kind() {
+        "identifier" => "identifier",
+        "field_expression" => "field_expression",
+        _ => "",
+    }
+}
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -39,13 +60,18 @@ impl ZigProvider {
 }
 
 /// Priority of a match for the same variable_declaration byte range.
-/// Higher value wins.
+/// Higher value wins.  Typedef (promoted from Const in parser.rs) is set to
+/// priority 1 so it beats a plain Const match at the same byte offset when
+/// two `identifier` children of the same variable_declaration both match the
+/// `@const.name` pattern — the var-name match is promoted to Typedef (1) and
+/// the RHS-identifier match stays Const (0), so the var-name wins.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 enum MatchPriority {
     Const = 0,
-    Struct = 1,
-    Import = 2,
-    Function = 3,
+    Typedef = 1,
+    Struct = 2,
+    Import = 3,
+    Function = 4,
 }
 
 struct PendingNode {
@@ -146,7 +172,26 @@ impl LanguageProvider for ZigProvider {
                 continue;
             }
 
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+            if let (Some(n), Some(mut k), Some(root)) = (name_node, kind, root_span_node) {
+                // Promote `const X = SomeType` to Typedef when:
+                //   1. The captured name node is the declaration's variable name
+                //      (first named child of variable_declaration — not the RHS).
+                //   2. The RHS expression child is a pure identifier or
+                //      field_expression (not a literal, struct, or builtin).
+                if k == NodeKind::Const {
+                    let mut wc = root.walk();
+                    let first_named = root.named_children(&mut wc).next();
+                    let is_var_name = first_named
+                        .map(|fc| fc.start_byte() == n.start_byte())
+                        .unwrap_or(false);
+                    if is_var_name {
+                        let rhs_kind = zig_typedef_rhs_kind(root);
+                        if rhs_kind == "identifier" || rhs_kind == "field_expression" {
+                            k = NodeKind::Typedef;
+                            priority = MatchPriority::Typedef;
+                        }
+                    }
+                }
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();

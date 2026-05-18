@@ -48,3 +48,12 @@
 ;; Import directives: import "./IToken.sol"
 (import_directive
   source: (string) @import.source) @import
+
+;; using LibraryName for TypeName; — the type_alias child holds the library identifier
+(using_directive
+  (type_alias
+    (identifier) @typedef.name)) @typedef
+
+;; type Currency is uint256;
+(user_defined_type_definition
+  name: (identifier) @typedef.name) @typedef

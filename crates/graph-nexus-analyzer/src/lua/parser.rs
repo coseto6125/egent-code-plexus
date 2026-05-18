@@ -84,6 +84,7 @@ impl LanguageProvider for LuaProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_const = self.query.capture_index_for_name("const");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_import = self.query.capture_index_for_name("import");
         let idx_import_aliased = self.query.capture_index_for_name("import.aliased");
 
@@ -135,6 +136,7 @@ impl LanguageProvider for LuaProvider {
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_struct
                     || Some(cap_idx) == idx_const
+                    || Some(cap_idx) == idx_typedef
                     || Some(cap_idx) == idx_import
                     || Some(cap_idx) == idx_import_aliased
                 {
@@ -188,8 +190,9 @@ impl LanguageProvider for LuaProvider {
                     // (Class > Function > Const), upgrade the existing node's kind in place.
                     if let Some(&existing_idx) = span_to_node_idx.get(&span_key) {
                         let existing_kind = &nodes[existing_idx].kind;
-                        let new_has_priority = matches!(k, NodeKind::Class | NodeKind::Function)
-                            && matches!(existing_kind, NodeKind::Const);
+                        let new_has_priority =
+                            matches!(k, NodeKind::Class | NodeKind::Function | NodeKind::Typedef)
+                                && matches!(existing_kind, NodeKind::Const);
                         if new_has_priority {
                             nodes[existing_idx].kind = k;
                             if matches!(k, NodeKind::Class) {
