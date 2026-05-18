@@ -52,8 +52,13 @@ LANG_EXTS: dict[str, list[str]] = {
     "PHP":        [".php"],
     "Ruby":       [".rb"],
     "Swift":      [".swift"],
-    "C":          [".c", ".h"],
-    "Cpp":        [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
+    "C":          [".c"],
+    # `.h` belongs to Cpp here — both gnx-rs and ref-gitnexus route `.h` through
+    # the C++ parser (gnx-rs `Language::from_normalized_path`, ref-gitnexus
+    # `language-detection.ts` EXTENSION_MAP). Routing through C would silently
+    # drop every class/template/method declaration in C++ headers that ship
+    # with `.h`.
+    "Cpp":        [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"],
     "Dart":       [".dart"],
 }
 

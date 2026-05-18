@@ -462,8 +462,9 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
             "rb" => n.ruby = true,
             "kt" | "kts" => n.kotlin = true,
             "cs" => n.csharp = true,
-            "c" | "h" => n.c = true,
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => n.cpp = true,
+            "c" => n.c = true,
+            // `.h` routes to C++ — matches `Language::from_normalized_path` dispatch.
+            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => n.cpp = true,
             "swift" => n.swift = true,
             "dart" => n.dart = true,
             "md" | "txt" | "rst" => n.markdown = true,
