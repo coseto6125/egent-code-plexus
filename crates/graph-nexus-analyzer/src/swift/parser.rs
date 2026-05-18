@@ -204,11 +204,33 @@ impl LanguageProvider for SwiftProvider {
             }
 
             // Swift `typealias MyInt = Int` / `typealias R<T> = Swift.Result<T, Error>`.
-            // Emit a RawImport with alias = Some(lhs) so the binding surfaces
-            // through the same downstream path as Java static-import aliases.
+            // Emit twice:
+            //   1. A Typedef RawNode so graph queries by NodeKind find it (parity
+            //      with Rust `type_item` and TS `type_alias_declaration`, both of
+            //      which map to NodeKind::Typedef). The aggregator's EQUIV class
+            //      `{Typedef, TypeAlias}` pairs this with ref's TypeAlias label.
+            //   2. A RawImport with alias = Some(lhs) so the binding still surfaces
+            //      through the alias-resolution path used by Java static-import.
             // rhs text covers the full type expression (including generics).
             if let Some(ta_node) = typealias_node {
                 if let Some((lhs, rhs)) = extract_typealias_parts(ta_node, source) {
+                    let start = ta_node.start_position();
+                    let end = ta_node.end_position();
+                    nodes.push(RawNode {
+                        decorators: vec![],
+                        is_exported,
+                        heritage: vec![],
+                        type_annotation: None,
+                        name: lhs.clone(),
+                        kind: NodeKind::Typedef,
+                        span: (
+                            start.row as u32,
+                            start.column as u32,
+                            end.row as u32,
+                            end.column as u32,
+                        ),
+                        calls: Vec::new(),
+                    });
                     imports.push(RawImport {
                         alias: Some(lhs.clone()),
                         imported_name: lhs,
