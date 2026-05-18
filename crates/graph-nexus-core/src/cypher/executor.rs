@@ -1280,7 +1280,7 @@ mod tests {
             files: vec![File {
                 path: file_path,
                 mtime: 0,
-                content_hash: [0u8; 32],
+                content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
             nodes: vec![
@@ -1350,7 +1350,7 @@ mod tests {
             files: vec![File {
                 path: fp,
                 mtime: 0,
-                content_hash: [0u8; 32],
+                content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
             nodes: vec![
@@ -1433,7 +1433,7 @@ mod tests {
             files: vec![File {
                 path: fp,
                 mtime: 0,
-                content_hash: [0u8; 32],
+                content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
             nodes: (0..4u32)
@@ -1719,7 +1719,7 @@ mod tests {
             files: vec![File {
                 path: fp,
                 mtime: 0,
-                content_hash: [0u8; 32],
+                content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
             nodes: vec![Node {
@@ -1795,7 +1795,7 @@ mod tests {
             files: vec![File {
                 path: fp,
                 mtime: 0,
-                content_hash: [0u8; 32],
+                content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
             nodes: vec![
@@ -2135,7 +2135,7 @@ mod tests {
             files: vec![File {
                 path: fp,
                 mtime: 0,
-                content_hash: [0u8; 32],
+                content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
             nodes: vec![
@@ -2265,7 +2265,7 @@ mod tests {
             files: vec![File {
                 path: fp,
                 mtime: 0,
-                content_hash: [0u8; 32],
+                content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
             nodes: vec![Node {

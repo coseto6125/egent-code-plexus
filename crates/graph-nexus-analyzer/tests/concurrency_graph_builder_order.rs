@@ -70,7 +70,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
     (0..8u8)
         .map(|i| LocalGraph {
             file_path: format!("src/mod_{i}.rs").into(),
-            content_hash: [i; 32],
+            content_hash: [i; 8],
             nodes: vec![
                 RawNode {
                     name: format!("Cls{i}"),

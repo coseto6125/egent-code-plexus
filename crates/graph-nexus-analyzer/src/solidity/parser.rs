@@ -189,7 +189,7 @@ impl LanguageProvider for SolidityProvider {
         extract_calls(tree.root_node(), source, &mut nodes, &["call_expression"]);
 
         Ok(LocalGraph {
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             routes: vec![],
             file_path: path.to_path_buf(),
             nodes,

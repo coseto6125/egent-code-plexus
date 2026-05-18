@@ -561,7 +561,7 @@ mod tests {
         g.files = vec![File {
             path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         }];
         g.nodes = vec![
@@ -654,7 +654,7 @@ mod tests {
         g.files = vec![File {
             path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         }];
         // Three nodes: one symbol-eligible (Function), one symbol-eligible

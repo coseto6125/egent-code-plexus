@@ -258,7 +258,7 @@ impl AnalyzerPipeline {
         cache_lookup: F,
     ) -> Vec<LocalGraph>
     where
-        F: Fn(&std::path::Path, &[u8; 32]) -> Option<LocalGraph> + Send + Sync,
+        F: Fn(&std::path::Path, &[u8; 8]) -> Option<LocalGraph> + Send + Sync,
     {
         let (tx, rx) = crossbeam_channel::unbounded::<LocalGraph>();
         let cache_lookup = &cache_lookup;
@@ -299,10 +299,8 @@ impl AnalyzerPipeline {
                             Err(_) => return,
                         };
 
-                        use sha2::{Digest, Sha256};
-                        let mut hasher = Sha256::new();
-                        hasher.update(&source);
-                        let content_hash: [u8; 32] = hasher.finalize().into();
+                        let content_hash: [u8; 8] =
+                            xxhash_rust::xxh3::xxh3_64(&source).to_le_bytes();
 
                         // Cache fast-path: skip parse if a hit comes back
                         // with the exact same content hash. Path is the

@@ -41,7 +41,7 @@ fn mk_local_graph(
 ) -> LocalGraph {
     LocalGraph {
         file_path: file_path.into(),
-        content_hash: [0; 32],
+        content_hash: [0; 8],
         nodes,
         documents: vec![],
         imports: vec![],

@@ -1016,7 +1016,7 @@ impl LanguageProvider for PythonProvider {
         routes.dedup_by(|a, b| a.method == b.method && a.path == b.path && a.span == b.span);
 
         Ok(LocalGraph {
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             routes,
             file_path: path.to_path_buf(),
             nodes,

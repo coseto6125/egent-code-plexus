@@ -76,31 +76,31 @@ fn make_bucket_graph() -> ZeroCopyGraph {
         File {
             path: src_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         },
         File {
             path: test_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Test,
         },
         File {
             path: ref_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Reference,
         },
         File {
             path: doc_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Document,
         },
         File {
             path: cfg_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Config,
         },
     ];
@@ -291,7 +291,7 @@ fn empty_buckets_emit_empty_array_in_json() {
         files: vec![File {
             path: src_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         }],
         nodes: vec![Node {
@@ -383,7 +383,7 @@ fn text_format_empty_bucket_shows_none() {
         files: vec![File {
             path: src_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         }],
         nodes: vec![Node {
@@ -463,7 +463,7 @@ fn each_bucket_independently_capped_at_top_k() {
         files: vec![File {
             path: src_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         }],
         nodes,

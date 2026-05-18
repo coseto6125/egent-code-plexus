@@ -25,7 +25,7 @@ fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
         files: vec![File {
             path: name_ref,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: graph_nexus_core::graph::FileCategory::Source,
         }],
         nodes: vec![Node {

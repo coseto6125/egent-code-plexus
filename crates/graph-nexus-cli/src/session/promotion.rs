@@ -6,7 +6,6 @@
 use crate::git::safe_exec;
 use graph_nexus_core::registry::atomic_write_json;
 use graph_nexus_core::session::{DirtyFiles, SessionMeta};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -55,7 +54,7 @@ pub fn promote_case_a(
     let mut dropped = 0usize;
     let mut kept = 0usize;
     for (rel_path, entry) in entries_snapshot {
-        let l2_hash = match git_cat_file_sha256(worktree, new_sha, &rel_path) {
+        let l2_hash = match git_cat_file_hash(worktree, new_sha, &rel_path) {
             Ok(h) => h,
             Err(_) => {
                 // File doesn't exist at new_sha (e.g. deleted in commit) —
@@ -152,7 +151,7 @@ fn merge_base(a: &str, b: &str, worktree: &Path) -> Option<String> {
     Some(std::str::from_utf8(&out.stdout).ok()?.trim().to_string())
 }
 
-fn git_cat_file_sha256(worktree: &Path, sha: &str, rel_path: &str) -> io::Result<String> {
+fn git_cat_file_hash(worktree: &Path, sha: &str, rel_path: &str) -> io::Result<String> {
     let spec = format!("{sha}:{rel_path}");
     let out = safe_exec::git()
         .args(["cat-file", "blob", &spec])
@@ -161,5 +160,5 @@ fn git_cat_file_sha256(worktree: &Path, sha: &str, rel_path: &str) -> io::Result
     if !out.status.success() {
         return Err(io::Error::other(format!("git cat-file failed for {spec}")));
     }
-    Ok(hex::encode(Sha256::digest(&out.stdout)))
+    Ok(crate::repo_identity::xxh3_hex16(&out.stdout))
 }

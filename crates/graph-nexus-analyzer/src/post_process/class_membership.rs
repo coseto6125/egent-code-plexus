@@ -284,7 +284,7 @@ mod tests {
     fn lg(path: &str, nodes: Vec<RawNode>) -> LocalGraph {
         LocalGraph {
             file_path: PathBuf::from(path),
-            content_hash: [0u8; 32],
+            content_hash: [0u8; 8],
             nodes,
             documents: Vec::new(),
             imports: Vec::new(),

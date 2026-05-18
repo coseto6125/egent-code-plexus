@@ -150,7 +150,7 @@ impl LanguageProvider for CrystalProvider {
         extract_calls(tree.root_node(), source, &mut nodes, &["call"]);
 
         Ok(LocalGraph {
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             routes,
             file_path: path.to_path_buf(),
             nodes,
