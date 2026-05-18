@@ -11,9 +11,10 @@ skill="$ROOT/SKILL.md"
 [[ -f "$skill" ]] || { echo "aggregate: SKILL.md missing at $skill" >&2; exit 1; }
 
 # Strip leading frontmatter (between first '---' and second '---' on their own lines).
+# Tolerate CRLF line endings.
 awk '
     BEGIN { in_fm = 0; done_fm = 0 }
-    /^---$/ {
+    /^---\r?$/ {
         if (!done_fm) {
             if (in_fm) { in_fm = 0; done_fm = 1; next }
             else { in_fm = 1; next }

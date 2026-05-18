@@ -47,17 +47,18 @@ declare -a SUB=(
 
 for cmd in "${TOPLEVEL[@]}"; do
     out="$OUT/$VER/$cmd.md"
-    "$GNX" "$cmd" --help > "$out" 2>/dev/null || { echo "warn: $cmd has no --help; skipped" >&2; rm -f "$out"; }
+    timeout 10 "$GNX" "$cmd" --help > "$out" 2>/dev/null || { echo "warn: $cmd has no --help; skipped" >&2; rm -f "$out"; }
 done
 
 for entry in "${SUB[@]}"; do
     parent="${entry%%:*}"
     child="${entry##*:}"
     out="$OUT/$VER/${parent}-${child}.md"
-    "$GNX" "$parent" "$child" --help > "$out" 2>/dev/null || { echo "warn: $parent $child has no --help; skipped" >&2; rm -f "$out"; }
+    timeout 10 "$GNX" "$parent" "$child" --help > "$out" 2>/dev/null || { echo "warn: $parent $child has no --help; skipped" >&2; rm -f "$out"; }
 done
 
-# Build/update manifest.json
+# Build/update manifest.json. No `generated_at` field — git history tracks
+# regen events; embedding a timestamp produces a spurious diff on every run.
 manifest="$OUT/manifest.json"
 if [[ -f "$manifest" ]]; then
     versions=$(jq -r --arg v "$VER" '(.versions // []) + [$v] | unique' "$manifest")
@@ -67,8 +68,7 @@ fi
 jq -n \
     --arg v "$VER" \
     --argjson vs "$versions" \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{latest: $v, versions: $vs, generated_at: $ts}' \
+    '{latest: $v, versions: $vs}' \
     > "$manifest"
 
 echo "gen-cli-ref: wrote $OUT/$VER/ + manifest"

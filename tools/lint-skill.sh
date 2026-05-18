@@ -13,8 +13,8 @@ fail() { echo "lint FAIL: $1" >&2; exit 1; }
 skill="$ROOT/SKILL.md"
 [[ -f "$skill" ]] || fail "SKILL.md missing at $skill"
 
-# Extract frontmatter block (between leading --- and next ---)
-fm=$(awk '/^---$/{c++; next} c==1' "$skill")
+# Extract frontmatter block (between leading --- and next ---). Tolerate CRLF.
+fm=$(awk '/^---\r?$/{c++; next} c==1' "$skill")
 [[ -n "$fm" ]] || fail "SKILL.md has no frontmatter"
 
 for key in name description when-to-use; do
@@ -24,7 +24,7 @@ done
 # --- Check 2: guides/*.md have NO frontmatter ---
 if [[ -d "$ROOT/guides" ]]; then
     while IFS= read -r -d '' g; do
-        if head -1 "$g" | grep -q "^---$"; then
+        if head -1 "$g" | grep -qE "^---\r?$"; then
             fail "$g has frontmatter (only SKILL.md should)"
         fi
     done < <(find "$ROOT/guides" -maxdepth 1 -name '*.md' -print0)
