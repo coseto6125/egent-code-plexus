@@ -103,6 +103,87 @@ pub fn write_dirty_fragment(
     })
 }
 
+/// Batched variant of `write_dirty_fragment`: writes N per-file fragments
+/// and coalesces the manifest + overlay-version updates into one each.
+///
+/// Per-file fragment writes still go through atomic tmp → fsync → rename
+/// against unique `<content_hash>.bin` paths (no inter-input collision).
+/// The single trailing manifest + version write replaces N read-modify-write
+/// cycles in the L1 refresh path — the dominant cost on small dirty sets
+/// (each `atomic_write_json` is a write + fsync + rename).
+///
+/// `overlay_version` is bumped by `inputs.len()` to preserve the
+/// "increment per write" semantics that single-call sites + existing tests
+/// rely on.
+pub fn write_dirty_fragments_batch(
+    session_dir: &Path,
+    inputs: &[FragmentInput],
+) -> io::Result<Vec<FragmentOutcome>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let overlay_dir = session_dir.join("graph_overlay");
+    fs::create_dir_all(&overlay_dir)?;
+
+    let mut outcomes: Vec<FragmentOutcome> = Vec::with_capacity(inputs.len());
+    let mut pending: Vec<(String, DirtyEntry)> = Vec::with_capacity(inputs.len());
+
+    for input in inputs {
+        let content_hash = sha256_hex(&input.content);
+        let fragment_id = content_hash[..16].to_string();
+        let fragment_path = overlay_dir.join(format!("{fragment_id}.bin"));
+
+        let parse_failed = match parse_to_fragment(&input.rel_path, &input.content) {
+            Ok(archive_bytes) => {
+                let tmp = overlay_dir.join(format!("{fragment_id}.tmp"));
+                fs::write(&tmp, &archive_bytes)?;
+                let f = fs::File::open(&tmp)?;
+                f.sync_all()?;
+                drop(f);
+                fs::rename(&tmp, &fragment_path)?;
+                false
+            }
+            Err(_) => true,
+        };
+
+        pending.push((
+            input.rel_path.clone(),
+            DirtyEntry {
+                mtime_ns: input.mtime_ns,
+                content_hash: content_hash.clone(),
+                fragment_id: fragment_id.clone(),
+                tantivy_delta_segment: None,
+                parse_failed,
+                dirty_symbols: vec![],
+            },
+        ));
+        outcomes.push(FragmentOutcome {
+            fragment_id,
+            parse_failed,
+        });
+    }
+
+    let manifest_path = session_dir.join("dirty_files.json");
+    let mut df = if manifest_path.exists() {
+        DirtyFiles::read(&manifest_path)?
+    } else {
+        DirtyFiles::empty()
+    };
+    for (rel, entry) in pending {
+        df.entries.insert(rel, entry);
+    }
+    atomic_write_json(&manifest_path, &df)?;
+
+    let sm_path = session_dir.join("session_meta.json");
+    let mut sm = SessionMeta::read(&sm_path)?;
+    sm.overlay_version += inputs.len() as u32;
+    sm.last_touched = chrono::Utc::now().to_rfc3339();
+    atomic_write_json(&sm_path, &sm)?;
+
+    Ok(outcomes)
+}
+
 fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
     let _ = (rel_path, content);
     Ok(vec![])
