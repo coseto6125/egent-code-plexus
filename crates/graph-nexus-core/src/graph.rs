@@ -236,6 +236,14 @@ pub enum FileCategory {
     Reference,
     Document,
     Config,
+    /// Framework example / sample / demo app. Distinct from `Test` because
+    /// examples are canonical "how to use this framework" content that LLM
+    /// queries (and route surfaces) should reach, while tests are meta —
+    /// they test other code. Splitting unblocks route/tool emission for
+    /// `/examples/` / `/sample/` / `/demo/` dirs that the historical
+    /// `is_test` blanket-skipped. Appended at the END to preserve rkyv
+    /// discriminants for existing graph.bin files.
+    Example,
 }
 
 impl From<&ArchivedFileCategory> for FileCategory {
@@ -246,6 +254,7 @@ impl From<&ArchivedFileCategory> for FileCategory {
             ArchivedFileCategory::Reference => FileCategory::Reference,
             ArchivedFileCategory::Document => FileCategory::Document,
             ArchivedFileCategory::Config => FileCategory::Config,
+            ArchivedFileCategory::Example => FileCategory::Example,
         }
     }
 }

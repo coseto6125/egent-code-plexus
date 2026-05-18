@@ -205,16 +205,18 @@ pub struct FindResult {
 fn category_priority(cat: &ArchivedFileCategory) -> u8 {
     match cat {
         ArchivedFileCategory::Source => 0,
-        ArchivedFileCategory::Document => 1,
-        ArchivedFileCategory::Config => 2,
-        ArchivedFileCategory::Test => 3,
-        ArchivedFileCategory::Reference => 4,
+        ArchivedFileCategory::Example => 1,
+        ArchivedFileCategory::Document => 2,
+        ArchivedFileCategory::Config => 3,
+        ArchivedFileCategory::Test => 4,
+        ArchivedFileCategory::Reference => 5,
     }
 }
 
 fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
     match cat {
         ArchivedFileCategory::Source => "Source",
+        ArchivedFileCategory::Example => "Example",
         ArchivedFileCategory::Test => "Test",
         ArchivedFileCategory::Document => "Document",
         ArchivedFileCategory::Config => "Config",
@@ -507,10 +509,14 @@ impl OrderedHit {
     }
 }
 
-/// Five-bucket output — one per `FileCategory`. Empty buckets emit `[]` in
+/// Six-bucket output — one per `FileCategory`. Empty buckets emit `[]` in
 /// JSON and `(none)` in text; each bucket independently capped at `TOP_K`.
+/// `Example` (framework demo / sample / `examples/` apps) buckets separately
+/// from `tests` because canonical framework references and test fixtures
+/// answer different LLM questions ("how do I use X" vs "how is X tested").
 struct BucketedResults {
     source: Vec<Hit>,
+    examples: Vec<Hit>,
     tests: Vec<Hit>,
     reference: Vec<Hit>,
     document: Vec<Hit>,
@@ -528,6 +534,7 @@ impl BucketedResults {
         });
 
         let mut source = Vec::new();
+        let mut examples = Vec::new();
         let mut tests = Vec::new();
         let mut reference = Vec::new();
         let mut document = Vec::new();
@@ -536,6 +543,7 @@ impl BucketedResults {
         for h in hits {
             let bucket = match h.category {
                 FileCategory::Source => &mut source,
+                FileCategory::Example => &mut examples,
                 FileCategory::Test => &mut tests,
                 FileCategory::Reference => &mut reference,
                 FileCategory::Document => &mut document,
@@ -548,6 +556,7 @@ impl BucketedResults {
 
         Self {
             source,
+            examples,
             tests,
             reference,
             document,
@@ -1075,6 +1084,7 @@ fn emit_bucketed(
     summary: Option<String>,
 ) -> Result<(), GnxError> {
     let all_empty = buckets.source.is_empty()
+        && buckets.examples.is_empty()
         && buckets.tests.is_empty()
         && buckets.reference.is_empty()
         && buckets.document.is_empty()
@@ -1095,6 +1105,7 @@ fn emit_bucketed(
                     &serde_json::json!({
                         "status": "success",
                         "source": [],
+                        "examples": [],
                         "tests": [],
                         "reference": [],
                         "document": [],
@@ -1115,6 +1126,7 @@ fn emit_bucketed(
             }
             for (label, bucket) in [
                 ("source", &buckets.source),
+                ("examples", &buckets.examples),
                 ("tests", &buckets.tests),
                 ("reference", &buckets.reference),
                 ("document", &buckets.document),
@@ -1138,6 +1150,7 @@ fn emit_bucketed(
             let mut payload = serde_json::json!({
                 "status": "success",
                 "source": bucket_json(&buckets.source),
+                "examples": bucket_json(&buckets.examples),
                 "tests": bucket_json(&buckets.tests),
                 "reference": bucket_json(&buckets.reference),
                 "document": bucket_json(&buckets.document),
