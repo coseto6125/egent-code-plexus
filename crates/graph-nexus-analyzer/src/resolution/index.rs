@@ -109,8 +109,15 @@ impl Language {
             "dart" => Self::Dart,
             "sol" => Self::Solidity,
             "sql" => Self::Sql,
-            "c" | "h" => Self::C,
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => Self::Cpp,
+            "c" => Self::C,
+            // `.h` routes to C++ (matches ref-gitnexus dispatch). `.h` is genuinely
+            // ambiguous — C headers and C++ headers share the extension — but C++
+            // parsing is a near-superset of C, while C parsing produces ERROR
+            // nodes on any C++-only construct (class, template, namespace, &,
+            // operator overload). Real codebases ship C++ libraries with `.h`
+            // headers (nlohmann/json, doctest, LLVM Fuzzer, Catch2, …); routing
+            // them to the C parser silently drops every class/method/template.
+            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => Self::Cpp,
             "move" => Self::Move,
             "nim" => Self::Nim,
             "cairo" => Self::Cairo,
@@ -546,7 +553,10 @@ mod tests {
         assert_eq!(Language::from_path("a/b.tsx"), Language::TypeScript);
         assert_eq!(Language::from_path("a/b.js"), Language::JavaScript);
         assert_eq!(Language::from_path("a/b.mjs"), Language::JavaScript);
-        assert_eq!(Language::from_path("a/b.h"), Language::C);
+        // `.h` is genuinely ambiguous between C and C++ headers; we route to
+        // C++ because C++ parsing handles C as a near-subset, while C parsing
+        // produces ERROR nodes on any C++ construct. See `from_normalized_path`.
+        assert_eq!(Language::from_path("a/b.h"), Language::Cpp);
         assert_eq!(Language::from_path("a/b.hpp"), Language::Cpp);
         assert_eq!(Language::from_path("a/b.move"), Language::Move);
     }
@@ -564,6 +574,28 @@ mod tests {
         );
         // Plain yml outside .github/workflows stays as Yaml
         assert_eq!(Language::from_path("config/app.yml"), Language::Yaml);
+    }
+
+    #[test]
+    fn dot_h_routes_to_cpp_not_c() {
+        // Regression for ref-gitnexus parity: real codebases ship C++ headers
+        // with `.h` extension (nlohmann/json, doctest, LLVM Fuzzer, Catch2,
+        // most game engines). Routing them through the C parser silently
+        // drops every class / template / namespace / method declaration.
+        // Pure C compilation units stay with `.c`; only the ambiguous `.h`
+        // moves to Cpp.
+        assert_eq!(Language::from_path("foo.h"), Language::Cpp);
+        assert_eq!(Language::from_path("path/to/header.h"), Language::Cpp);
+        assert_eq!(Language::from_path("foo.c"), Language::C);
+        // Backslash-normalised path takes the fast path; still routes correctly.
+        assert_eq!(
+            Language::from_normalized_path("Cpp/include/foo.h"),
+            Language::Cpp
+        );
+        assert_eq!(
+            Language::from_normalized_path("C/src/impl.c"),
+            Language::C
+        );
     }
 
     #[test]
