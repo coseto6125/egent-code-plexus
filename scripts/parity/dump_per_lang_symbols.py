@@ -11,12 +11,21 @@ ref-gitnexus uses a single `.sample_repo/` registration with `<Lang>/` path
 prefix filtering.
 
 Run from any cwd:
-    python3 scripts/parity/dump_per_lang_symbols.py            # all 14 langs
+    python3 scripts/parity/dump_per_lang_symbols.py            # all 14 langs (ref cached)
     python3 scripts/parity/dump_per_lang_symbols.py Python     # one lang
+    PARITY_REFRESH_REF=1 python3 .../dump_per_lang_symbols.py  # force re-dump ref
+
+ref-gitnexus dumps are deterministic over `.sample_repo` (its index never
+changes between iterations) and account for ~60% of the runtime due to ref-
+gitnexus's paginated cypher API. By default this script re-uses the previously
+written `<Lang>_ref_all.txt` when present; set PARITY_REFRESH_REF=1 to force a
+re-dump (needed when `.sample_repo` corpus is rebuilt or ref-gitnexus is
+upgraded).
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -24,6 +33,7 @@ from pathlib import Path
 
 REPO = Path("/home/enor/gitnexus-rs/.sample_repo")
 OUT_DIR = Path(__file__).parent / "symbol_diffs"
+REFRESH_REF = os.environ.get("PARITY_REFRESH_REF", "").strip().lower() in {"1", "true", "yes"}
 LANGS = [
     "TypeScript", "JavaScript", "Python", "Java", "Kotlin",
     "CSharp", "Go", "Rust", "PHP", "Ruby",
@@ -155,6 +165,17 @@ def dump_ref(lang: str) -> set[tuple[str, str, str]]:
     align (rs-side may include hits under `Kotlin/` for `.java` files in
     the mixed Kotlin+Java sample; we strip just the leading-corpus-dir
     segment matching the requested lang).
+
+    ORDER BY is mandatory: cypher SKIP/LIMIT without ORDER BY is undefined,
+    and ref-gitnexus's executor returns rows in a hash-table iteration
+    order that changes between pages — that caused inconsistent ref totals
+    across consecutive runs (observed 3032 vs 2625 vs 3323 for the same
+    corpus). Ordering by `(filePath, name, head(labels))` makes pages
+    stable; we use `head(labels(n))` rather than bare `labels(n)` because
+    Cypher list-as-sort-key comparison is engine-defined (some engines
+    sort element-wise stably, some don't), while `head(...)` always
+    returns a scalar string — matches the kind the downstream parser
+    extracts via `.split(',')[0]`.
     """
     exts = LANG_EXTS.get(lang, [])
     if not exts:
@@ -167,6 +188,7 @@ def dump_ref(lang: str) -> set[tuple[str, str, str]]:
         q = (
             f"MATCH (n) WHERE {where} "
             f"RETURN labels(n), n.filePath, n.name "
+            f"ORDER BY n.filePath, n.name, head(labels(n)) "
             f"SKIP {skip} LIMIT {REF_PAGE}"
         )
         out = run(["gitnexus", "cypher", "--repo", str(REPO), q])
@@ -187,9 +209,26 @@ def dump_ref(lang: str) -> set[tuple[str, str, str]]:
     return sink
 
 
+def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
+    """Re-read previously dumped `<Lang>_ref_all.txt` so we can skip the
+    expensive paginated cypher round-trip. Returns None if the cache file
+    doesn't exist or is empty; the caller falls back to `dump_ref`.
+    """
+    path = OUT_DIR / f"{lang}_ref_all.txt"
+    if not path.exists():
+        return None
+    rows: set[tuple[str, str, str]] = set()
+    for line in path.read_text(errors="replace").splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3 and parts[2]:
+            rows.add((parts[0], parts[1], parts[2]))
+    return rows if rows else None
+
+
 def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
     rs = dump_rs(lang)
-    ref = dump_ref(lang)
+    cached_ref = None if REFRESH_REF else _read_cached_ref(lang)
+    ref = cached_ref if cached_ref is not None else dump_ref(lang)
     rs_only = rs - ref
     ref_only = ref - rs
     common = len(rs & ref)

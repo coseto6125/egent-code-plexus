@@ -9,21 +9,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Atomic write: tmp → fsync → rename. The temp path is `<path>.tmp`
-/// (appended, not extension-replaced) so any failure mode — `Ctrl+C`,
-/// crash, OOM kill — leaves either the previous file intact or a
-/// recognizable `.tmp` sibling, never a half-written target.
+/// Atomic write: tmp → fsync → rename. Temp path is per-writer unique
+/// (`<path>.<pid>.<counter>.tmp`) so two concurrent writers — common in
+/// the multi-agent setup where pre-tool-use hook, MCP background indexer,
+/// and CLI all race to refresh the same `dirty_files.json` / metadata
+/// JSON — cannot truncate the same tmp inode and produce a final file
+/// with one writer's prefix glued onto another's tail (the corruption
+/// shape that broke search_batch tests with "trailing characters at line
+/// 15741 column 2" — two valid JSON documents concatenated). The unique
+/// suffix also avoids ENOENT races where two writers both call rename on
+/// the same `<path>.tmp` and the second one fails because the first
+/// already consumed the source.
 ///
-/// `parent_dir` is created if missing. The temp file is `truncate=true,
-/// create=true` so a stale `.tmp` from a prior abort is overwritten
-/// cleanly.
+/// `parent_dir` is created if missing. Each tmp file is `truncate=true,
+/// create=true`. Stale `.tmp` siblings from aborted writes are still
+/// recognizable via the `.tmp` suffix and can be swept by cleanup tools.
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    let tmp = tmp_sibling(path);
+    let tmp = unique_tmp_sibling(path);
     {
         let mut f = fs::OpenOptions::new()
             .create(true)
@@ -74,16 +81,14 @@ pub fn atomic_write_bytes_no_fsync(path: &Path, bytes: &[u8]) -> io::Result<()> 
     Ok(())
 }
 
-/// Append `.tmp` to the path's last component. Unlike `with_extension`,
-/// this preserves the original extension — `graph.bin` → `graph.bin.tmp`
-/// (not `graph.tmp`) — so two writers targeting different file types in
-/// the same directory cannot collide on the same temp name.
-fn tmp_sibling(path: &Path) -> PathBuf {
-    let mut buf: OsString = path.as_os_str().to_owned();
-    buf.push(".tmp");
-    PathBuf::from(buf)
-}
-
+/// Append `<pid>.<counter>.tmp` to the path's last component. Unlike
+/// `with_extension`, this preserves the original extension — `graph.bin`
+/// → `graph.bin.<pid>.<n>.tmp` — so two writers targeting different file
+/// types in the same directory cannot collide on the same temp name, AND
+/// two writers targeting the SAME file from concurrent processes get
+/// disjoint inodes (Round 81 fix: the previous shared-`.tmp` design let
+/// concurrent writers truncate the same inode and produce stacked-JSON
+/// corruption).
 fn unique_tmp_sibling(path: &Path) -> PathBuf {
     let mut buf: OsString = path.as_os_str().to_owned();
     buf.push(format!(

@@ -112,6 +112,29 @@ const TEST_FILE_DIRECT_RECEIVERS: &[&str] = &[
     "sync_client",
 ];
 
+/// True when `call_node` sits inside a `(decorator ...)` parent. Flask
+/// Blueprint shorthand `@bp.get("/path")` / `.post(...)` etc. is a
+/// decorator-only call — the `.get`/`.post`/`.put` method names overlap
+/// with `dict.get(key)` / `requests.get(url)` semantically, so we can't
+/// gate on the method name alone; but `@expr(...)` decorators always wrap
+/// callables that are about to register a route handler, never dict access.
+/// This lets the route emitter recognize Blueprint shorthand even when
+/// the file lacks an explicit `from flask import` (transitive imports via
+/// conftest fixtures, blueprint re-exports, etc).
+fn is_in_decorator(call_node: Node) -> bool {
+    let mut anc = call_node.parent();
+    while let Some(a) = anc {
+        match a.kind() {
+            "decorator" => return true,
+            // Don't ascend out of a decorator's scope by accident.
+            "function_definition" | "class_definition" | "module" => return false,
+            _ => {}
+        }
+        anc = a.parent();
+    }
+    false
+}
+
 /// True when `call_node`'s function chain's immediate receiver is a bare
 /// identifier matching one of `TEST_FILE_DIRECT_RECEIVERS`. Used only in
 /// combination with a test-file path check (caller responsibility).
@@ -817,6 +840,20 @@ impl LanguageProvider for PythonProvider {
                 .map(|s| REGISTRATION_METHOD_NAMES.contains(&s.to_ascii_lowercase().as_str()))
                 .unwrap_or(false)
                 && !imports.is_empty();
+            // Decorator context: `@bp.get("/path")` / `@router.post(...)` —
+            // Flask Blueprint shorthand and FastAPI's APIRouter shorthand both
+            // expose HTTP-verb methods directly on the route-registration
+            // object. The method names (`get`/`post`/`put`/...) collide with
+            // `dict.get` and `requests.post` so we can't gate by method alone;
+            // but a `@expr(...)` decorator never wraps a dict access, so this
+            // is a safe disambiguator. Required for test files like
+            // `tests/test_apps/blueprintapp/apps/admin/__init__.py` that
+            // import the blueprint via `from . import bp` without a direct
+            // `from flask import` — `has_any_http_framework` returns false
+            // there even though the decorator is unambiguously a route.
+            let route_is_decorator_call = route_call_node
+                .map(is_in_decorator)
+                .unwrap_or(false);
             // Drop `<receiver>.test_client.X(...)` patterns up-front: these
             // are test-client REQUESTS, not route definitions. Tree-sitter
             // can't distinguish them by call shape; the `.test_client.`
@@ -838,7 +875,7 @@ impl LanguageProvider for PythonProvider {
                     continue;
                 }
             }
-            if is_route && (has_any_http_framework || route_method_is_framework_specific) {
+            if is_route && (has_any_http_framework || route_method_is_framework_specific || route_is_decorator_call) {
                 if let (Some(r_method), Some(r_path), Some(root)) =
                     (route_method, route_path, root_span_node)
                 {

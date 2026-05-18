@@ -211,6 +211,12 @@ pub fn build_payload(args: &ToolMapArgs, engine: &Engine) -> Result<serde_json::
         .unwrap_or_else(|| PathBuf::from("."));
 
     for file in graph.files.iter() {
+        // `Example` is intentionally NOT skipped: framework example apps
+        // (NestJS `sample/`, Flask `examples/tutorial/`) demonstrate the
+        // canonical tool / handler shapes a user would copy from. Only
+        // `Test` (test fixtures) and `Reference` (vendor / node_modules)
+        // are filtered. Symmetric with the routes.rs and builder.rs
+        // route-emission filters.
         if matches!(
             file.category,
             ArchivedFileCategory::Test | ArchivedFileCategory::Reference

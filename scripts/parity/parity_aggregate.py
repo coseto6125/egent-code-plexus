@@ -92,6 +92,43 @@ def _build_equiv_map() -> dict[str, frozenset[str]]:
 EQUIV = _build_equiv_map()
 
 
+# Cross-kind, cross-name alias: ref `Route /<path>` ↔ rs `EntryPoint route@<func>`.
+# Same Python Blueprint / FastAPI shorthand (`@bp.get("/path") def func():`)
+# captured differently per side:
+#   ref Route row → name = URL path (`/block`)
+#   rs EntryPoint row → name = `route@<funcname>` (Blueprint shorthand emit)
+# `(path, name)` never overlaps so EQUIV can't pair them. Per-file count
+# match is the deterministic alias: pair `min(R, E)` per file as label_diff
+# and remove the paired rows from rs_only/ref_only. Only `route@` prefix is
+# safe — `main@*` is `if __name__ == "__main__":` blocks, not routes, and
+# TS `framework_ref@*` is a NestJS Controller class (1:N to Route methods,
+# not a 1:1 alias). Keep scope narrow until additional shapes are verified.
+def _pair_route_aliases(
+    rs_only: set[tuple[str, str, str]],
+    ref_only: set[tuple[str, str, str]],
+) -> tuple[set[tuple[str, str, str]], set[tuple[str, str, str]], int]:
+    rs_by_file: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    ref_by_file: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    for row in rs_only:
+        if row[0] == "EntryPoint" and row[2].startswith("route@"):
+            rs_by_file[row[1]].append(row)
+    for row in ref_only:
+        if row[0] == "Route":
+            ref_by_file[row[1]].append(row)
+    drop_rs: set[tuple[str, str, str]] = set()
+    drop_ref: set[tuple[str, str, str]] = set()
+    pairs = 0
+    for fp, ref_rows in ref_by_file.items():
+        rs_rows = rs_by_file.get(fp, [])
+        n = min(len(ref_rows), len(rs_rows))
+        if n == 0:
+            continue
+        pairs += n
+        drop_rs.update(rs_rows[:n])
+        drop_ref.update(ref_rows[:n])
+    return rs_only - drop_rs, ref_only - drop_ref, pairs
+
+
 def read_rows(path: Path) -> list[tuple[str, str, str]]:
     if not path.exists():
         return []
@@ -137,8 +174,9 @@ def lang_summary(lang: str) -> dict:
     ref_set = set(ref_all)
     rs_only = rs_set - ref_set
     ref_only = ref_set - rs_set
+    rs_only, ref_only, route_alias_pairs = _pair_route_aliases(rs_only, ref_only)
 
-    buckets = {"model": 0, "label": 0, "real_rs": 0, "real_ref": 0}
+    buckets = {"model": 0, "label": route_alias_pairs, "real_rs": 0, "real_ref": 0}
     real_rs: dict[str, int] = defaultdict(int)
     real_ref: dict[str, int] = defaultdict(int)
 
