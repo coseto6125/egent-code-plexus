@@ -122,7 +122,7 @@ fn build_groups_overview(reg: &RegistryFile) -> Value {
 
 // ── Per-repo health ──────────────────────────────────────────────────────────
 
-fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Value {
+pub fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Value {
     // Load the graph once per repo and share it between framework + blind-spot
     // sections. Without this, each section would mmap+validate independently
     // — wasteful when `--repo @all` spans many repos.

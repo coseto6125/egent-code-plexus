@@ -921,6 +921,18 @@ fn compute_multi(
     ))
 }
 
+/// Per-repo BM25 entry point for `gnx group search` and `gnx group find`.
+/// Loads the engine internally from a pre-resolved graph path.
+/// Returns raw `Hit` rows without emitting anything.
+pub fn run_for_repo(
+    engine: &Engine,
+    member: &str,
+    pattern: &str,
+    kind: Option<&str>,
+) -> Result<Vec<Hit>, GnxError> {
+    compute_single(pattern, &FindMode::Bm25, kind, engine, Some(member.to_string()))
+}
+
 /// In-process BM25 entry point for hooks and other internal consumers.
 /// Returns owned `Hit` rows without going through stdout / OutputFormat.
 /// BM25-only — `mode` is honoured at the CLI surface (`run`) but the

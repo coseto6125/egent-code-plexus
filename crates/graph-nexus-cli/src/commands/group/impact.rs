@@ -218,9 +218,9 @@ fn emit_json(
 }
 
 /// Resolve the latest graph.bin for a given repo, mirroring
-/// `commands::coverage::latest_graph_path` — duplicated here to avoid a
-/// pub-fn cross-command dependency.
-fn latest_graph_path_for(
+/// `commands::coverage::latest_graph_path` — shared by group search / find /
+/// coverage siblings.
+pub fn latest_graph_path_for(
     r: &ResolvedRepo,
     home_gnx: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
