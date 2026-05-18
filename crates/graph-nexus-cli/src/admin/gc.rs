@@ -8,7 +8,7 @@
 use crate::git::safe_exec;
 use graph_nexus_core::registry::{CommitBuildMeta, CommitDirName};
 use graph_nexus_core::session::SessionMeta;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -29,8 +29,8 @@ pub struct SweepStats {
 
 /// SHAs that must be retained: branch/tag/ref objects from the worktree
 /// plus pinned `base_sha` of active sessions (last_touched within 24h).
-pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<HashSet<String>> {
-    let mut set = HashSet::new();
+pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<FxHashSet<String>> {
+    let mut set = FxHashSet::default();
 
     // Branch / tag / ref objects from the live worktree
     if let Ok(out) = safe_exec::git()

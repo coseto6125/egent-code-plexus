@@ -1,6 +1,6 @@
 use graph_nexus_core::peer::concern::{classify, ConcernKind, ConcernResult, ImpactCache};
 use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 fn sym(name: &str, file: &str) -> SymbolRef {
     SymbolRef {
@@ -16,7 +16,7 @@ fn sym(name: &str, file: &str) -> SymbolRef {
 fn hard_when_same_symbol_modified() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
     let peer = vec![sym("verify_token", "src/auth.rs")];
-    let cache = ImpactCache::from_set(HashSet::new());
+    let cache = ImpactCache::from_set(FxHashSet::default());
     let r = classify(&peer, &mine, &cache);
     assert!(matches!(
         r,
@@ -31,7 +31,7 @@ fn hard_when_same_symbol_modified() {
 fn soft_when_peer_is_one_hop_neighbor() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
     let peer = vec![sym("login_handler", "src/handlers/login.rs")];
-    let mut impacted = HashSet::new();
+    let mut impacted = FxHashSet::default();
     impacted.insert("login_handler".to_string());
     let cache = ImpactCache::from_set(impacted);
     let r = classify(&peer, &mine, &cache);
@@ -48,7 +48,7 @@ fn soft_when_peer_is_one_hop_neighbor() {
 fn ignore_when_unrelated() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
     let peer = vec![sym("format_money", "src/utils/money.rs")];
-    let cache = ImpactCache::from_set(HashSet::new());
+    let cache = ImpactCache::from_set(FxHashSet::default());
     let r = classify(&peer, &mine, &cache);
     assert!(matches!(r, ConcernResult::Ignore));
 }
@@ -60,7 +60,7 @@ fn hard_takes_precedence_over_soft() {
         sym("verify_token", "src/auth.rs"),
         sym("login_handler", "src/login.rs"),
     ];
-    let mut impacted = HashSet::new();
+    let mut impacted = FxHashSet::default();
     impacted.insert("login_handler".into());
     let cache = ImpactCache::from_set(impacted);
     let r = classify(&peer, &mine, &cache);
@@ -80,7 +80,7 @@ fn hard_takes_precedence_over_soft() {
 fn empty_my_dirty_yields_ignore() {
     let mine = vec![];
     let peer = vec![sym("anything", "src/x.rs")];
-    let cache = ImpactCache::from_set(HashSet::new());
+    let cache = ImpactCache::from_set(FxHashSet::default());
     assert!(matches!(
         classify(&peer, &mine, &cache),
         ConcernResult::Ignore
@@ -89,7 +89,7 @@ fn empty_my_dirty_yields_ignore() {
 
 #[test]
 fn impact_cache_refresh_replaces_contents() {
-    let mut c = ImpactCache::from_set(HashSet::new());
+    let mut c = ImpactCache::from_set(FxHashSet::default());
     c.refresh(["foo".to_string(), "bar".to_string()]);
     assert!(c.contains("foo"));
     assert!(c.contains("bar"));

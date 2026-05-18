@@ -17,7 +17,7 @@
 //! Imports, Routes, isolates) get 0.
 
 use crate::graph::{Edge, Node, NodeKind, RelType};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone)]
 pub struct LouvainConfig {
@@ -154,7 +154,7 @@ pub fn detect_communities(nodes: &[Node], edges: &[Edge], config: &LouvainConfig
     // Louvain main loop.
     // `community[i]` = current community of node i (use node_idx as id space).
     let mut community: Vec<u32> = (0..n as u32).collect();
-    let mut sigma_tot: HashMap<u32, f64> = HashMap::new();
+    let mut sigma_tot: FxHashMap<u32, f64> = FxHashMap::default();
     for &i in &active_nodes {
         sigma_tot.insert(i, k[i as usize]);
     }
@@ -177,7 +177,7 @@ pub fn detect_communities(nodes: &[Node], edges: &[Edge], config: &LouvainConfig
             let ki = k[i as usize];
 
             // Sum of weights from i to each neighbor community (excluding self-loops).
-            let mut k_i_to: HashMap<u32, f64> = HashMap::new();
+            let mut k_i_to: FxHashMap<u32, f64> = FxHashMap::default();
             for &(j, w) in &adj[i as usize] {
                 if j == i {
                     continue;
@@ -227,7 +227,7 @@ pub fn detect_communities(nodes: &[Node], edges: &[Edge], config: &LouvainConfig
     }
 
     // Renumber communities densely starting at 1, then fold into u16.
-    let mut remap: HashMap<u32, u16> = HashMap::new();
+    let mut remap: FxHashMap<u32, u16> = FxHashMap::default();
     let mut next_id: u32 = 1;
     for &i in &active_nodes {
         let c = community[i as usize];

@@ -1,7 +1,7 @@
 use super::provider::LanguageProvider;
 use super::types::LocalGraph;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -267,8 +267,8 @@ impl AnalyzerPipeline {
         // Per-provider (count, total_ns) when GNX_PROF=1. Mutex is fine —
         // critical section is just a HashMap update, negligible vs the
         // parse_file work it brackets.
-        let times_owned: Option<Mutex<HashMap<&'static str, (u64, u64)>>> = if prof {
-            Some(Mutex::new(HashMap::new()))
+        let times_owned: Option<Mutex<FxHashMap<&'static str, (u64, u64)>>> = if prof {
+            Some(Mutex::new(FxHashMap::default()))
         } else {
             None
         };

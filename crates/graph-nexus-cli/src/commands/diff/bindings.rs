@@ -3,7 +3,7 @@
 
 use graph_nexus_core::GnxError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -78,10 +78,10 @@ pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
 }
 
 /// Parse a JSONL file of `BindingDecision` records into a keyed map.
-pub fn load_jsonl(path: &Path) -> Result<HashMap<(String, String), BindingDecision>, GnxError> {
+pub fn load_jsonl(path: &Path) -> Result<FxHashMap<(String, String), BindingDecision>, GnxError> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| GnxError::Output(format!("read {}: {e}", path.display())))?;
-    let mut map = HashMap::new();
+    let mut map = FxHashMap::default();
     for (idx, line) in raw.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
@@ -96,8 +96,8 @@ pub fn load_jsonl(path: &Path) -> Result<HashMap<(String, String), BindingDecisi
 
 /// Bucket changes between baseline and current resolver decision maps.
 pub fn diff(
-    baseline: &HashMap<(String, String), BindingDecision>,
-    current: &HashMap<(String, String), BindingDecision>,
+    baseline: &FxHashMap<(String, String), BindingDecision>,
+    current: &FxHashMap<(String, String), BindingDecision>,
 ) -> BindingsDiff {
     let mut out = BindingsDiff::default();
     let mut keys: Vec<&(String, String)> = baseline.keys().chain(current.keys()).collect();

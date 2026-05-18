@@ -5,7 +5,7 @@
 //! IGNORE otherwise
 
 use crate::session::overlay::SymbolRef;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConcernKind {
@@ -25,11 +25,11 @@ pub enum ConcernResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct ImpactCache {
-    impacted_names: HashSet<String>,
+    impacted_names: FxHashSet<String>,
 }
 
 impl ImpactCache {
-    pub fn from_set(s: HashSet<String>) -> Self {
+    pub fn from_set(s: FxHashSet<String>) -> Self {
         Self { impacted_names: s }
     }
 
@@ -54,7 +54,7 @@ pub fn classify(
     if my_dirty_symbols.is_empty() || peer_symbols.is_empty() {
         return ConcernResult::Ignore;
     }
-    let my_names: HashSet<&str> = my_dirty_symbols.iter().map(|s| s.name.as_str()).collect();
+    let my_names: FxHashSet<&str> = my_dirty_symbols.iter().map(|s| s.name.as_str()).collect();
 
     // HARD first — wins over SOFT.
     for p in peer_symbols {

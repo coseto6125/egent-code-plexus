@@ -23,7 +23,7 @@ use crate::engine::Engine;
 use graph_nexus_core::graph::{ArchivedNodeKind, ArchivedRelType};
 use graph_nexus_core::GnxError;
 use serde::Serialize;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -56,7 +56,7 @@ pub fn extract(graph_path: &Path) -> Result<Vec<ContractEntry>, GnxError> {
     let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
 
     // Build route_shape lookup: node_idx → response_keys.
-    let shape_lookup: HashMap<u32, Vec<String>> = graph
+    let shape_lookup: FxHashMap<u32, Vec<String>> = graph
         .route_shapes
         .iter()
         .map(|rs| {
@@ -115,8 +115,8 @@ pub fn extract(graph_path: &Path) -> Result<Vec<ContractEntry>, GnxError> {
 
 pub fn diff(baseline: &[ContractEntry], current: &[ContractEntry]) -> ContractsDiff {
     let key = |c: &ContractEntry| (c.kind.clone(), c.identifier.clone());
-    let baseline_map: HashMap<_, _> = baseline.iter().map(|c| (key(c), c)).collect();
-    let current_map: HashMap<_, _> = current.iter().map(|c| (key(c), c)).collect();
+    let baseline_map: FxHashMap<_, _> = baseline.iter().map(|c| (key(c), c)).collect();
+    let current_map: FxHashMap<_, _> = current.iter().map(|c| (key(c), c)).collect();
 
     let mut out = ContractsDiff::default();
     for (k, b) in &baseline_map {
