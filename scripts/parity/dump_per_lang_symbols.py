@@ -87,8 +87,14 @@ ROW_RE = re.compile(r"\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|")
 def is_anon(name: str) -> bool:
     if not name:
         return True
+    # `_` is the blank-discard identifier in every mainstream lang
+    # (Go `var _ I = (*T)(nil)` interface assertion, Rust `let _ = ...`,
+    # Python `_, x = ...`, Swift `for _ in 0..<n`, etc.). gnx-rs filters
+    # these at parse time; ref-gitnexus retains them. Without this
+    # exclusion Go alone produced 19 ref_over `Variable:_` rows that
+    # had no LLM-useful semantics.
     return name.startswith(("__anon_", "anonymous_")) or name in {
-        "<lambda>", "<anon>", "anonymous",
+        "<lambda>", "<anon>", "anonymous", "_",
     }
 
 
@@ -213,6 +219,11 @@ def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
     """Re-read previously dumped `<Lang>_ref_all.txt` so we can skip the
     expensive paginated cypher round-trip. Returns None if the cache file
     doesn't exist or is empty; the caller falls back to `dump_ref`.
+
+    Applies the same `DROP_KINDS` / `is_anon` filters as `dump_rs` and
+    `_parse_ref_md` — otherwise a cache written before the filter rules
+    were tightened (e.g. before `_` was added to the blank-discard set)
+    keeps surfacing the old rows on every aggregator run.
     """
     path = OUT_DIR / f"{lang}_ref_all.txt"
     if not path.exists():
@@ -221,7 +232,10 @@ def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
     for line in path.read_text(errors="replace").splitlines():
         parts = line.split("\t", 2)
         if len(parts) == 3 and parts[2]:
-            rows.add((parts[0], parts[1], parts[2]))
+            kind, fp, name = parts
+            if kind in DROP_KINDS or is_anon(name):
+                continue
+            rows.add((kind, fp, name))
     return rows if rows else None
 
 
