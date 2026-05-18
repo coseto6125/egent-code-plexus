@@ -35,6 +35,7 @@ pub mod move_lang;
 pub mod nim;
 pub mod php;
 pub mod post_process;
+pub mod preproc_fallback;
 pub mod python;
 pub mod resolution;
 pub mod route_detector;
