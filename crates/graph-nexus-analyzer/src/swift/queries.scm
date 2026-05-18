@@ -14,6 +14,24 @@
   (inheritance_specifier inherits_from: (user_type (type_identifier) @heritage))?
 ) @class
 
+;; ERROR-recovery fallback for `#if`/`#endif` directives inside a class body.
+;; tree-sitter 0.25's ERROR-recovery (more aggressive than 0.21 which ref-gitnexus
+;; pins) swallows the entire `class Foo: Bar { ... }` header into a flat ERROR
+;; when an `#if canImport(zlib) && ...` directive appears as a class_body child
+;; (the grammar does not allow `if_directive` inside class_body). Inside the
+;; ERROR, the recovery keeps `modifiers` + the `class` keyword + a
+;; `simple_identifier` (not `type_identifier`, because class_declaration framing
+;; is gone). Match that shape so outer test/source classes (DataStreamTests,
+;; InternalRequestTests, ServerTrustManager, etc.) are not silently dropped.
+;;
+;; swift_decl_keyword() walks @class children for the leading "class"/"struct"/
+;; "enum" token; works the same on ERROR nodes since the keyword is preserved.
+;; Heritage cannot be reliably recovered (it's wrapped in a nested ERROR), so
+;; this alternation deliberately omits the heritage capture.
+(ERROR
+  "class"
+  (simple_identifier) @class.name) @class
+
 ;; Swift `protocol P {}` → Trait (distinct from Java/C# Interface).
 (protocol_declaration
   (modifiers (visibility_modifier) @export)?
