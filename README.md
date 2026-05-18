@@ -333,6 +333,68 @@ MUST keep these tests passing before merge.
 
 Run `./scripts/audit-concurrency.sh` to re-verify all five.
 
+## Onboarding skill for AI agents
+
+`docs/skills/gnx-onboard/` ships a layered SKILL pack that turns any LLM
+agent into a personalized installation + configuration wizard for `gnx`.
+
+Four ways to use it:
+
+### (a) URL bootstrap — any LLM agent
+
+Paste into your agent chat:
+
+```
+Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/gnx-onboard/SKILL.md
+and follow it as my onboarding wizard for graph-nexus.
+```
+
+The agent reads `SKILL.md`, probes your system, and walks you through
+install + first-index + group + MCP setup, tailored to the prompts /
+preferences already in its context.
+
+### (b) ShareOnboardingGuide — Claude Code (lowest friction)
+
+From this repo's checkout:
+
+```bash
+cd docs/skills/gnx-onboard
+# In Claude Code, invoke the ShareOnboardingGuide tool
+# It uploads ONBOARDING.md and returns a short link
+```
+
+Send that link to a teammate. They open it in their Claude Code session
+and the wizard auto-loads.
+
+### (c) Plugin install — Claude Code (advanced)
+
+```bash
+# Pull only the SKILL pack — avoids downloading the whole Rust workspace
+git clone --depth=1 --filter=blob:none --sparse \
+    https://github.com/<owner>/gitnexus-rs ~/.claude/plugins/gnx-onboard-src
+cd ~/.claude/plugins/gnx-onboard-src
+git sparse-checkout set docs/skills/gnx-onboard
+ln -s docs/skills/gnx-onboard ~/.claude/skills/gnx-onboard
+```
+
+### (d) Manual git clone — any agent
+
+Same `--depth=1 --filter=blob:none --sparse` + `git sparse-checkout set
+docs/skills/gnx-onboard` recipe, dropped into your agent's skill / rule
+directory.
+
+### How the SKILL is structured (for SKILL authors)
+
+- `SKILL.md` — Layer 1 entry, frontmatter + jump table + directives.
+- `guides/01-…05-…md` — Layer 2 phase guides.
+- `_shared/cli/<version>/<cmd>.md` — Layer 3 auto-generated CLI reference (one set per gnx version).
+- `_shared/refs/{persona-inference,env-detect,recommendation-templates}.md` — Layer 3 hand-written rule tables.
+- `ONBOARDING.md` — build artifact (aggregator output). Do not hand-edit.
+
+Tooling lives at `tools/{lint-skill,aggregate,gen-cli-ref,test-persona-rules}.sh`.
+CI in `.github/workflows/skill-{aggregate,cli-ref}.yml`.
+Spec: `docs/superpowers/specs/2026-05-18-gnx-onboard-skill-design.md`.
+
 ## 📄 License
 
 Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). Personal use, research,
