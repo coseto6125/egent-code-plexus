@@ -8,6 +8,11 @@ tests/parity/fixtures/*/sample_project/
 scripts/parity/symbol_diffs/
 scripts/parity/review/
 
+# Python bytecode caches anywhere in repo (scripts/parity/, tools/, etc.)
+__pycache__/
+*.pyc
+*.pyo
+
 # Rust build
 target/
 

@@ -23,7 +23,6 @@
 use graph_nexus_analyzer::python::parser::PythonProvider;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

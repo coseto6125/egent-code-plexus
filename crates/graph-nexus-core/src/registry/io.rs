@@ -81,16 +81,14 @@ pub fn atomic_write_bytes_no_fsync(path: &Path, bytes: &[u8]) -> io::Result<()> 
     Ok(())
 }
 
-/// Append `.tmp` to the path's last component. Unlike `with_extension`,
-/// this preserves the original extension — `graph.bin` → `graph.bin.tmp`
-/// (not `graph.tmp`) — so two writers targeting different file types in
-/// the same directory cannot collide on the same temp name.
-fn tmp_sibling(path: &Path) -> PathBuf {
-    let mut buf: OsString = path.as_os_str().to_owned();
-    buf.push(".tmp");
-    PathBuf::from(buf)
-}
-
+/// Append `<pid>.<counter>.tmp` to the path's last component. Unlike
+/// `with_extension`, this preserves the original extension — `graph.bin`
+/// → `graph.bin.<pid>.<n>.tmp` — so two writers targeting different file
+/// types in the same directory cannot collide on the same temp name, AND
+/// two writers targeting the SAME file from concurrent processes get
+/// disjoint inodes (Round 81 fix: the previous shared-`.tmp` design let
+/// concurrent writers truncate the same inode and produce stacked-JSON
+/// corruption).
 fn unique_tmp_sibling(path: &Path) -> PathBuf {
     let mut buf: OsString = path.as_os_str().to_owned();
     buf.push(format!(
