@@ -124,14 +124,35 @@ pub fn clean_route_path(raw_with_quotes: &str) -> Option<String> {
 }
 
 /// Relaxed variant of `clean_route_path` for framework-specific route-
-/// registration methods (Flask `@app.route(...)`, Sanic `@app.route(...)`,
-/// FastAPI `add_api_route(...)`, Laravel `Route::get(...)`). These accept
-/// bare paths (`'register'`, `'path/<x>/y'`) per framework convention —
-/// semantically equivalent to `/register` / `/path/<x>/y`. Normalizes by
-/// prepending `/` when missing and accepts any non-empty result. The caller
-/// should only invoke this when it has independent confidence the call is
-/// a route registration (method-name allowlist), since this skips the
-/// `looks_like_path` FP filter that `clean_route_path` enforces.
+/// registration sites. Bare paths (`'register'`, `'path/<x>/y'`) are
+/// semantically equivalent to `/register` / `/path/<x>/y` per framework
+/// convention — normalize by prepending `/` when missing, accept any
+/// non-empty result.
+///
+/// The caller must have INDEPENDENT confidence the call is a route
+/// registration (annotation name allowlist, attribute name allowlist,
+/// member-method allowlist on a known router builder) — this helper
+/// skips the `looks_like_path` FP filter that `clean_route_path`
+/// enforces, so handing it `dict.get("key")` returns `Some("/key")`.
+///
+/// Frameworks confirmed in coverage:
+///
+/// | Lang     | Surface                                                      |
+/// |----------|--------------------------------------------------------------|
+/// | Python   | Flask `@app.route('register')`, Sanic `@app.route(...)`,     |
+/// |          | FastAPI `add_api_route('p')`, Starlette `add_route(...)`     |
+/// | PHP      | Laravel `Route::get('users', ...)`, Symfony `#[Route('p')]`  |
+/// | TS / JS  | NestJS decorators `@Get('users')`, `@Post(':id')`            |
+/// | Java     | Spring `@GetMapping("users")`, JAX-RS `@Path("users")`       |
+/// | Kotlin   | Spring same as Java; Ktor `route("users")` DSL               |
+/// | C#       | ASP.NET `[HttpGet("users")]`, `[Route("api")]`               |
+///
+/// The list above is intentionally `clean_route_path_lax` callers + the
+/// 4 frameworks (TS NestJS, Java Spring, Kotlin Ktor, C# HttpGet) called
+/// out as future emission sites in the 2026-05-17 route-precision spec.
+/// Each lang's parser is responsible for the allowlist gate before
+/// invoking this helper; see existing `python/parser.rs` and
+/// `php/parser.rs` call sites for the established pattern.
 pub fn clean_route_path_lax(raw_with_quotes: &str) -> Option<String> {
     let stripped = strip_string_quotes(raw_with_quotes).trim();
     if stripped.is_empty() {
@@ -181,5 +202,72 @@ mod tests {
     #[test]
     fn detect_from_call_rejects_non_path_string() {
         assert!(detect_from_call(&raw("get", "not_a_path!")).is_none());
+    }
+
+    // -- lax helper: per-framework bare-path support -------------------------
+
+    #[test]
+    fn lax_strips_quotes_and_prepends_slash() {
+        assert_eq!(clean_route_path_lax("'register'"), Some("/register".to_string()));
+        assert_eq!(clean_route_path_lax("\"users\""), Some("/users".to_string()));
+    }
+
+    #[test]
+    fn lax_preserves_leading_slash() {
+        assert_eq!(clean_route_path_lax("'/users'"), Some("/users".to_string()));
+        assert_eq!(clean_route_path_lax("\"/api/v1\""), Some("/api/v1".to_string()));
+    }
+
+    #[test]
+    fn lax_handles_python_blueprint_shorthand() {
+        // Flask `@bp.route('/block')` and `@app.route('users/<id>')` —
+        // both shapes valid Flask bare paths.
+        assert_eq!(clean_route_path_lax("'users/<id>'"), Some("/users/<id>".to_string()));
+        assert_eq!(clean_route_path_lax("'/block'"), Some("/block".to_string()));
+    }
+
+    #[test]
+    fn lax_handles_ts_nestjs_decorator_bare_path() {
+        // NestJS `@Get('users')` / `@Post(':id')`.
+        assert_eq!(clean_route_path_lax("'users'"), Some("/users".to_string()));
+        assert_eq!(clean_route_path_lax("':id'"), Some("/:id".to_string()));
+    }
+
+    #[test]
+    fn lax_handles_java_spring_request_mapping() {
+        // Spring `@GetMapping("users")` / `@RequestMapping("api")`.
+        // JAX-RS `@Path("users")` (Jakarta REST) has the same shape.
+        assert_eq!(clean_route_path_lax("\"users\""), Some("/users".to_string()));
+        assert_eq!(clean_route_path_lax("\"api/v1\""), Some("/api/v1".to_string()));
+    }
+
+    #[test]
+    fn lax_handles_kotlin_ktor_route_dsl() {
+        // Ktor `route("users") { get { ... } }`. Tree-sitter-kotlin
+        // exposes the path via `string_content`, so the value reaching
+        // this helper is already unquoted — exercise that path too.
+        assert_eq!(clean_route_path_lax("users"), Some("/users".to_string()));
+        assert_eq!(clean_route_path_lax("/api"), Some("/api".to_string()));
+    }
+
+    #[test]
+    fn lax_handles_csharp_http_attribute() {
+        // ASP.NET `[HttpGet("users")]`, `[Route("api/[controller]")]`.
+        // `[controller]` is a template token that ref-gitnexus retains
+        // verbatim; we shouldn't mangle the bracket contents.
+        assert_eq!(clean_route_path_lax("\"users\""), Some("/users".to_string()));
+        assert_eq!(
+            clean_route_path_lax("\"api/[controller]\""),
+            Some("/api/[controller]".to_string()),
+        );
+    }
+
+    #[test]
+    fn lax_rejects_empty_after_trim() {
+        // `""`, `"   "`, and empty unquoted strings all yield `None` so
+        // the caller doesn't emit a Route node with a bare `/`.
+        assert_eq!(clean_route_path_lax("''"), None);
+        assert_eq!(clean_route_path_lax("\"   \""), None);
+        assert_eq!(clean_route_path_lax(""), None);
     }
 }
