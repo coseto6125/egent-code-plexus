@@ -75,6 +75,61 @@
     ]
   ) @function)
 
+;; Free function declarations under `extern "C" { ... }` (C-compat headers).
+;; Pure-C library headers (hdr_histogram, fpconv, libuv, redis, …) routinely
+;; wrap declarations in `extern "C"` for C++ interop. tree-sitter-cpp parses
+;; that as `linkage_specification > declaration_list > declaration`, so the
+;; translation_unit-anchored rule above misses every prototype inside the
+;; wrapper. Mirror the inner declarator shapes so the symbol model stays the
+;; same regardless of whether the file uses `extern "C"`.
+(linkage_specification
+  body: (declaration_list
+    (declaration
+      type: (_) @type
+      declarator: [
+        (function_declarator
+          declarator: [
+            (identifier) @name.function
+            (reference_declarator (identifier) @name.function)
+            (pointer_declarator (identifier) @name.function)
+          ])
+        (pointer_declarator
+          (function_declarator
+            declarator: (identifier) @name.function))
+        (reference_declarator
+          (function_declarator
+            declarator: (identifier) @name.function))
+        (pointer_declarator
+          (pointer_declarator
+            (function_declarator
+              declarator: (identifier) @name.function)))
+      ]
+    ) @function))
+
+;; Single-statement linkage form: `extern "C" int foo();` (no braces).
+(linkage_specification
+  body: (declaration
+    type: (_) @type
+    declarator: [
+      (function_declarator
+        declarator: [
+          (identifier) @name.function
+          (reference_declarator (identifier) @name.function)
+          (pointer_declarator (identifier) @name.function)
+        ])
+      (pointer_declarator
+        (function_declarator
+          declarator: (identifier) @name.function))
+      (reference_declarator
+        (function_declarator
+          declarator: (identifier) @name.function))
+      (pointer_declarator
+        (pointer_declarator
+          (function_declarator
+            declarator: (identifier) @name.function)))
+    ]
+  ) @function)
+
 ;; Methods
 ;;
 ;; Same outer-wrapper expansion as Functions, plus the qualified_identifier
