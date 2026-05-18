@@ -70,3 +70,12 @@
     (variable_declaration
       (simple_identifier) @variable.name)
   ) @variable)
+
+; Enum entries — `enum class X { A, B, C }` produces an `enum_entry` per
+; identifier inside `enum_class_body`. Spec maps `enum_entry.name` to
+; NodeKind::Enum so each entry surfaces as its own Enum node (mirrors
+; ref-gitnexus convention). The parent enum class is captured separately
+; via `class.name` + `is_enum_class` promotion at parser.rs:282.
+(enum_class_body
+  (enum_entry
+    (simple_identifier) @enum_entry.name) @enum_entry)

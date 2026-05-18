@@ -176,6 +176,7 @@ impl LanguageProvider for KotlinProvider {
         // the outer node so span/dedup keys point to the full declaration.
         let idx_class = self.query.capture_index_for_name("class");
         let idx_function = self.query.capture_index_for_name("function");
+        let idx_enum_entry = self.query.capture_index_for_name("enum_entry");
 
         // Pending Ktor route refs: (verb, path_string, capture_span).
         // Emitted only if the file imports `io.ktor.*` — gate applied after the loop.
@@ -264,7 +265,8 @@ impl LanguageProvider for KotlinProvider {
                     || Some(cap_idx) == idx_function
                     || Some(cap_idx) == self.idx_constructor
                     || Some(cap_idx) == self.idx_property
-                    || Some(cap_idx) == self.idx_variable)
+                    || Some(cap_idx) == self.idx_variable
+                    || Some(cap_idx) == idx_enum_entry)
                     && root_span_node.is_none()
                 {
                     root_span_node = Some(cap.node);

@@ -110,3 +110,48 @@ fn mixed_file_emits_exactly_one_of_each_kind() {
         assert_eq!(count, 1, "expected 1 node for {}, got {}", name, count);
     }
 }
+
+#[test]
+fn enum_entries_emit_as_enum_nodes() {
+    // Pre-fix: only the parent `Color` enum surfaced as Enum; the entries
+    // (`RED`, `GREEN`, `BLUE`) were silently dropped, leaving 15 ref_over
+    // rows on `.sample_repo` (`Dart/extensions/intellij/.../*.kt`
+    // `OperatingSystem` / `Architecture` enum families). queries.scm now
+    // captures `(enum_class_body (enum_entry (simple_identifier)))` and
+    // KotlinSpec routes `enum_entry.name` to NodeKind::Enum.
+    let g = parse(
+        "enum class OperatingSystem(val value: String) {\n\
+         Linux(\"linux\"),\n\
+         MacOS(\"macos\"),\n\
+         Windows(\"windows\");\n\
+         }\n",
+    );
+    let enums: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Enum)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert!(enums.contains(&"OperatingSystem"), "parent enum missing");
+    assert!(enums.contains(&"Linux"), "Linux entry missing");
+    assert!(enums.contains(&"MacOS"), "MacOS entry missing");
+    assert!(enums.contains(&"Windows"), "Windows entry missing");
+}
+
+#[test]
+fn plain_enum_entries_without_constructor_args_emit() {
+    // The simpler `enum class Color { RED, GREEN }` form — entries lack
+    // value_arguments. Tree-sitter-kotlin still produces `enum_entry`
+    // nodes; verify the capture rule isn't accidentally constructor-arg
+    // anchored.
+    let g = parse("enum class Color { RED, GREEN, BLUE }\n");
+    let enums: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Enum)
+        .map(|n| n.name.as_str())
+        .collect();
+    for name in ["Color", "RED", "GREEN", "BLUE"] {
+        assert!(enums.contains(&name), "{name} missing from {:?}", enums);
+    }
+}
