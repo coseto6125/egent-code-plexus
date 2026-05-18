@@ -1,6 +1,6 @@
 # `gnx group` — Multi-repo Query Design
 
-**Status**: Draft
+**Status**: Shipped 2026-05-18
 **Date**: 2026-05-18
 **Author**: Iteration with brainstorming skill
 **Reference**: upstream `gitnexus` (`.source_code/gitnexus/src/cli/group.ts`, `src/core/group/`)
