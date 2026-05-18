@@ -95,6 +95,7 @@ fn meta_json_roundtrip() {
         generated_at: "2026-05-18T10:05:00Z".into(),
         repo_snapshots: snapshots,
         missing_repos: vec!["legacy".into()],
+        config_source: "default".into(),
     };
     graph_nexus_cli::commands::group::storage::write_meta(dir.path(), &meta).unwrap();
     let read = graph_nexus_cli::commands::group::storage::read_meta(dir.path()).unwrap();
