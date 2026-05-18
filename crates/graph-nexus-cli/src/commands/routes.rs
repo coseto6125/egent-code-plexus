@@ -91,6 +91,11 @@ fn list_routes(
         }
 
         let file_node = &graph.files[node.file_idx.to_native() as usize];
+        // `Example` intentionally falls through as production: framework
+        // example apps (Express `examples/auth/`, Flask `examples/tutorial/`)
+        // are canonical "how to wire routes" content LLM consumers want to
+        // see. Only `Test` flips `is_test` here, matching the builder.rs
+        // route-emission skip filter which gates on `Test | Reference`.
         let is_test = matches!(file_node.category, ArchivedFileCategory::Test);
         let row = serde_json::json!({
             "uid": node.uid.resolve(&graph.string_pool),
