@@ -1,9 +1,10 @@
 //! Resolve the active LLM session-id for L1 dir naming.
 //!
-//! Precedence: explicit CLI flag > env CLAUDE_CODE_SESSION_ID > pid-based fallback.
-//! Hooks pass session_id via env (already populated by Claude Code / MCP transport).
-//! Direct CLI invocations without any of the above get a stable per-process
-//! fallback id derived from PID + nanosecond timestamp.
+//! Precedence: explicit CLI flag > env GNX_SESSION_ID > host session env >
+//! pid-based fallback. Hooks pass session_id via env (already populated by
+//! Claude Code / MCP transport); Codex exposes a stable thread id. Direct CLI
+//! invocations without any of the above get a per-process fallback id derived
+//! from PID + nanosecond timestamp.
 
 use sha2::{Digest, Sha256};
 
@@ -13,9 +14,16 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
             return s.to_string();
         }
     }
-    if let Ok(s) = std::env::var("CLAUDE_CODE_SESSION_ID") {
-        if !s.is_empty() {
-            return s;
+    for key in [
+        "GNX_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+    ] {
+        if let Ok(s) = std::env::var(key) {
+            if !s.is_empty() {
+                return s;
+            }
         }
     }
     let pid = std::process::id();
