@@ -93,6 +93,15 @@
       (visibility_modifier)? @export
       name: (field_identifier) @property.name) @property))
 
+;; Enum variant struct-form fields: `enum E { V { f1: T, f2: U } }`. Each named
+;; field is a permanent type-level data member parallel to struct fields, and
+;; pattern-match destructuring `V { f1, f2 } => ...` references them by name.
+(enum_variant
+  body: (field_declaration_list
+    (field_declaration
+      (visibility_modifier)? @export
+      name: (field_identifier) @property.name) @property))
+
 ;; Modules (both inline `mod foo { }` and declaration `mod foo;`)
 (mod_item
   (visibility_modifier)? @export
