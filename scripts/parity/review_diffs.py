@@ -189,10 +189,39 @@ def classify_lang(lang: str) -> dict[str, list[dict]]:
     rs_only = rs_set - ref_set
     ref_only = ref_set - rs_set
     rs_only, ref_only, route_pairs = _pair_route_aliases(rs_only, ref_only)
+    # Mirror of parity_aggregate `_pair_ref_const_function_double_emit`:
+    # ref-gitnexus double-emits `Const` + `Function` for TS/JS arrow-fn
+    # bindings (`export const fn = (...) => ...`); gnx-rs emits only
+    # `Function`. The Const-side leftover is a label mismatch, not a
+    # missing symbol. Narrow scope — requires ref-side AND rs-side
+    # Function at same `(p, n)` so plain `const x = 42; function x() {}`
+    # collisions don't pair.
+    const_fn_pairs: list[tuple[str, str]] = []
+    drop_ref_const: set[tuple[str, str, str]] = set()
+    for row in ref_only:
+        if row[0] != "Const":
+            continue
+        ref_kinds = ref_by_pn.get((row[1], row[2]), [])
+        rs_kinds = rs_by_pn.get((row[1], row[2]), [])
+        if "Function" in ref_kinds and "Function" in rs_kinds:
+            drop_ref_const.add(row)
+            const_fn_pairs.append((row[1], row[2]))
+    ref_only -= drop_ref_const
 
     buckets: dict[str, list[dict]] = {
         "label": [], "model": [], "real_rs": [], "real_ref": [],
     }
+    # Surface paired Const↔Function double-emits as label entries so the
+    # review markdown still shows the cross-side mapping the reviewer
+    # would otherwise have to discover manually.
+    for p, n in const_fn_pairs:
+        buckets["label"].append({
+            "kind": "Const",
+            "path": p,
+            "name": n,
+            "rs_kinds": ["Function"],
+            "ref_kinds": ["Const", "Function"],
+        })
 
     # Render route aliases as label entries keyed on the ref-side Route row
     # (URL path is what the reviewer wants to verify); annotate `rs_kinds`

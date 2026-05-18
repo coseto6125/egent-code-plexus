@@ -106,6 +106,41 @@ EQUIV = _build_equiv_map()
 # safe — `main@*` is `if __name__ == "__main__":` blocks, not routes, and
 # TS `framework_ref@*` is a NestJS Controller class (1:N to Route methods,
 # not a 1:1 alias). Keep scope narrow until additional shapes are verified.
+# ref-side double-emit: `export const fn = (...) => ...` (TS / JS arrow-
+# function-bound const) surfaces twice on ref-gitnexus — once as `Const`
+# at the binding declaration, once as `Function` at the arrow expression.
+# gnx-rs collapses both into a single `Function` node (the callable view,
+# which is what `gnx search "fn"` should resolve to). The leftover ref-
+# only `(Const, p, n)` row is a label mismatch, not a missing symbol.
+#
+# Quantified on `.sample_repo` 2026-05-19: TS 291 rows + JS 204 rows
+# match the shape (ref has BOTH Const + Function at `(p, n)`, rs has
+# Function). Pair them as label_diff to keep the parity report focused
+# on real coverage gaps.
+#
+# Narrow on purpose — does NOT widen EQUIV to `Const ↔ Function`. A
+# plain `const x = 42; function x() {}` would collide under that broader
+# rule even though the two declarations refer to different source spans.
+# This helper requires the ref-side Function to be present at the same
+# `(p, n)` — the load-bearing signal that they are the SAME source span.
+def _pair_ref_const_function_double_emit(
+    ref_only: set[tuple[str, str, str]],
+    rs_by_pn: dict[tuple[str, str], list[str]],
+    ref_by_pn: dict[tuple[str, str], list[str]],
+) -> tuple[set[tuple[str, str, str]], int]:
+    drop_ref: set[tuple[str, str, str]] = set()
+    pairs = 0
+    for row in ref_only:
+        if row[0] != "Const":
+            continue
+        ref_kinds = ref_by_pn.get((row[1], row[2]), [])
+        rs_kinds = rs_by_pn.get((row[1], row[2]), [])
+        if "Function" in ref_kinds and "Function" in rs_kinds:
+            drop_ref.add(row)
+            pairs += 1
+    return ref_only - drop_ref, pairs
+
+
 def _pair_route_aliases(
     rs_only: set[tuple[str, str, str]],
     ref_only: set[tuple[str, str, str]],
@@ -178,8 +213,16 @@ def lang_summary(lang: str) -> dict:
     rs_only = rs_set - ref_set
     ref_only = ref_set - rs_set
     rs_only, ref_only, route_alias_pairs = _pair_route_aliases(rs_only, ref_only)
+    ref_only, const_fn_double_emit_pairs = _pair_ref_const_function_double_emit(
+        ref_only, rs_by_pn, ref_by_pn
+    )
 
-    buckets = {"model": 0, "label": route_alias_pairs, "real_rs": 0, "real_ref": 0}
+    buckets = {
+        "model": 0,
+        "label": route_alias_pairs + const_fn_double_emit_pairs,
+        "real_rs": 0,
+        "real_ref": 0,
+    }
     real_rs: dict[str, int] = defaultdict(int)
     real_ref: dict[str, int] = defaultdict(int)
 
