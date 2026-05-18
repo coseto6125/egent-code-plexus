@@ -3,21 +3,24 @@
 //! Other 9 mainstream langs are BlindSpot stubs (registered but emit nothing).
 
 pub mod grpc_go;
-pub mod grpc_python;
-pub mod grpc_node;
 pub mod grpc_java;
+pub mod grpc_node;
+pub mod grpc_python;
 pub mod grpc_rust;
 pub mod http_go;
-pub mod http_python;
-pub mod http_node;
 pub mod http_java;
+pub mod http_node;
+pub mod http_python;
 pub mod http_rust;
 
 use crate::commands::group::types::ExtractedContract;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExtractorKind { Http, Grpc }
+pub enum ExtractorKind {
+    Http,
+    Grpc,
+}
 
 pub struct ExtractorEntry {
     pub lang: &'static str,
@@ -36,21 +39,61 @@ pub fn registry() -> Vec<ExtractorEntry> {
 
 fn http_extractors() -> Vec<ExtractorEntry> {
     vec![
-        ExtractorEntry { lang: "go",     kind: ExtractorKind::Http, extract: http_go::extract_http },
-        ExtractorEntry { lang: "python", kind: ExtractorKind::Http, extract: http_python::extract_http },
-        ExtractorEntry { lang: "node",   kind: ExtractorKind::Http, extract: http_node::extract_http },
-        ExtractorEntry { lang: "java",   kind: ExtractorKind::Http, extract: http_java::extract_http },
-        ExtractorEntry { lang: "rust",   kind: ExtractorKind::Http, extract: http_rust::extract_http },
+        ExtractorEntry {
+            lang: "go",
+            kind: ExtractorKind::Http,
+            extract: http_go::extract_http,
+        },
+        ExtractorEntry {
+            lang: "python",
+            kind: ExtractorKind::Http,
+            extract: http_python::extract_http,
+        },
+        ExtractorEntry {
+            lang: "node",
+            kind: ExtractorKind::Http,
+            extract: http_node::extract_http,
+        },
+        ExtractorEntry {
+            lang: "java",
+            kind: ExtractorKind::Http,
+            extract: http_java::extract_http,
+        },
+        ExtractorEntry {
+            lang: "rust",
+            kind: ExtractorKind::Http,
+            extract: http_rust::extract_http,
+        },
     ]
 }
 
 fn grpc_extractors() -> Vec<ExtractorEntry> {
     vec![
-        ExtractorEntry { lang: "go",     kind: ExtractorKind::Grpc, extract: grpc_go::extract_grpc },
-        ExtractorEntry { lang: "python", kind: ExtractorKind::Grpc, extract: grpc_python::extract_grpc },
-        ExtractorEntry { lang: "node",   kind: ExtractorKind::Grpc, extract: grpc_node::extract_grpc },
-        ExtractorEntry { lang: "java",   kind: ExtractorKind::Grpc, extract: grpc_java::extract_grpc },
-        ExtractorEntry { lang: "rust",   kind: ExtractorKind::Grpc, extract: grpc_rust::extract_grpc },
+        ExtractorEntry {
+            lang: "go",
+            kind: ExtractorKind::Grpc,
+            extract: grpc_go::extract_grpc,
+        },
+        ExtractorEntry {
+            lang: "python",
+            kind: ExtractorKind::Grpc,
+            extract: grpc_python::extract_grpc,
+        },
+        ExtractorEntry {
+            lang: "node",
+            kind: ExtractorKind::Grpc,
+            extract: grpc_node::extract_grpc,
+        },
+        ExtractorEntry {
+            lang: "java",
+            kind: ExtractorKind::Grpc,
+            extract: grpc_java::extract_grpc,
+        },
+        ExtractorEntry {
+            lang: "rust",
+            kind: ExtractorKind::Grpc,
+            extract: grpc_rust::extract_grpc,
+        },
     ]
 }
 

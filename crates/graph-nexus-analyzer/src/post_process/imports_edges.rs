@@ -132,192 +132,196 @@ pub fn emit_edges(
             let edges_out = &mut local_edges;
 
             for import in &local_graph.imports {
-            let before = *emitted;
-            // Step 1: named-symbol lookup.
-            *emitted += try_named(
-                resolver,
-                local_graph,
-                &import.imported_name,
-                source_file_idx,
-                reason_named,
-                &mut dedupe,
-                edges_out,
-            );
+                let before = *emitted;
+                // Step 1: named-symbol lookup.
+                *emitted += try_named(
+                    resolver,
+                    local_graph,
+                    &import.imported_name,
+                    source_file_idx,
+                    reason_named,
+                    &mut dedupe,
+                    edges_out,
+                );
 
-            // Step 2: FQN last-segment retry (Kotlin / Java / PHP qualified imports).
-            if *emitted == before && import.imported_name.contains('.') {
-                if let Some(last) = import.imported_name.rsplit('.').next() {
-                    if !last.is_empty() && last != import.imported_name {
-                        *emitted += try_named(
-                            resolver,
-                            local_graph,
-                            last,
-                            source_file_idx,
-                            reason_named,
-                            &mut dedupe,
-                            edges_out,
-                        );
-                    }
-                }
-            }
-
-            // Step 3: module-style fallback (File → File). Strip leading
-            // surrounding quotes / angle brackets common in C-family
-            // `#include "alpha.h"` / `#include <alpha.h>` source strings.
-            if *emitted == before {
-                let cleaned = import
-                    .source
-                    .trim_matches(|c: char| c == '"' || c == '\'' || c == '<' || c == '>');
-
-                let probe = |spec: &str, file_node_idx: &FxHashMap<String, u32>| -> Option<u32> {
-                    let mut hit: Option<u32> = None;
-                    resolver.enumerate_candidates(&local_graph.file_path, spec, |candidate| {
-                        // Cow avoids the no-op allocation on Linux/macOS where
-                        // candidate paths already use forward slashes (probe
-                        // callback fires ~10× per import-miss × 14k files,
-                        // so unconditional `String::replace` was ~140k wasted
-                        // heap allocations per build).
-                        let normalized: Cow<'_, str> = if candidate.contains('\\') {
-                            Cow::Owned(candidate.replace('\\', "/"))
-                        } else {
-                            Cow::Borrowed(candidate)
-                        };
-                        if let Some(&idx) = file_node_idx.get(normalized.as_ref()) {
-                            hit = Some(idx);
-                            return false;
-                        }
-                        true
-                    });
-                    hit
-                };
-
-                // Step 3a: probe as-is (TypeScript `./a`, Python `.foo`, etc.
-                // already encode relativity in the specifier).
-                let mut target_file_idx = probe(cleaned, file_node_idx);
-
-                // Step 3b: if still miss, retry with `./` prefix so the
-                // resolver's relative-resolution branch joins caller dir
-                // (Ruby `require_relative 'alpha'`, Go `import "x/pkg"`,
-                // C `#include "alpha.h"` all surface here — none of them
-                // prepend a `./` but they're all caller-dir-relative in
-                // practice when the target lives in the same indexed tree).
-                if target_file_idx.is_none() && !cleaned.starts_with('.') && !cleaned.is_empty() {
-                    dot_prefix_buf.clear();
-                    dot_prefix_buf.push_str("./");
-                    dot_prefix_buf.push_str(cleaned);
-                    target_file_idx = probe(&dot_prefix_buf, file_node_idx);
-                }
-
-                // Step 3c: basename + suffix match. Handles C/C++
-                // `#include "alpha.hpp"` where the header sits under a
-                // search-path dir. O(1) hash lookup via basename_idx,
-                // then suffix-filter within the small same-basename bucket.
-                if target_file_idx.is_none() && !cleaned.is_empty() {
-                    target_file_idx = suffix_match_single(cleaned, &basename_idx);
-                }
-
-                // Step 3d: caller-extension + last-segment match. Handles
-                // Go `import "modulePath/pkg"` where the specifier carries
-                // a `go.mod` module-name prefix that isn't a filesystem
-                // path; the actual file is `pkg/<anything>.go`. Falls
-                // back to `<last-segment>.<caller-ext>` basename lookup.
-                if target_file_idx.is_none() && !cleaned.is_empty() {
-                    if let Some(last) = cleaned.rsplit('/').next() {
-                        if let Some(caller_ext) = local_graph.file_path.extension() {
-                            let ext = caller_ext.to_string_lossy();
-                            let candidate = format!("{}.{}", last, ext);
-                            target_file_idx = suffix_match_single(&candidate, &basename_idx);
+                // Step 2: FQN last-segment retry (Kotlin / Java / PHP qualified imports).
+                if *emitted == before && import.imported_name.contains('.') {
+                    if let Some(last) = import.imported_name.rsplit('.').next() {
+                        if !last.is_empty() && last != import.imported_name {
+                            *emitted += try_named(
+                                resolver,
+                                local_graph,
+                                last,
+                                source_file_idx,
+                                reason_named,
+                                &mut dedupe,
+                                edges_out,
+                            );
                         }
                     }
                 }
 
-                // Step 3e: Rust `use` path resolution. The Rust parser
-                // stamps `use crate::a::b::Foo` as `source = "crate::a::b"`
-                // (parent module path) + `imported_name = "Foo"` (already
-                // split off). The resolver doesn't grok `::` as a path
-                // separator nor `crate::` as a crate-root anchor, so this
-                // step resolves manually.
-                //
-                // Cases handled:
-                //   `use crate::a;`         → source="crate", name="a"      → suffix `a.rs`
-                //   `use crate::a::Foo;`    → source="crate::a", name="Foo" → suffix `a.rs`
-                //   `use crate::a::b::Foo;` → source="crate::a::b", name="Foo" → suffix `b.rs`
-                //   `use std::io;`          → source="std", name="io"       → external, no match
-                //   `use super::Foo;`       → source="super", name="Foo"    → skipped (needs caller dir walk)
-                if target_file_idx.is_none() {
-                    let raw = import.source.as_str();
-                    let module_last: Option<String> = if raw == "crate" || raw == "self" {
-                        // `use crate::Foo` / `use self::Foo` — imported_name IS
-                        // the module-file basename.
-                        Some(import.imported_name.clone())
-                    } else if let Some(rest) = raw
-                        .strip_prefix("crate::")
-                        .or_else(|| raw.strip_prefix("self::"))
-                    {
-                        // Strip leading qualifier, take last `::` segment.
-                        rest.rsplit("::").next().map(str::to_string)
-                    } else if raw.starts_with("super") {
-                        // super:: requires caller_dir walk; defer.
-                        None
-                    } else {
-                        // Don't probe generic `a::b::c` forms — these are
-                        // external crate imports (`use std::io::Read`,
-                        // `use tokio::io::Interest`) whose last segment is
-                        // a module name that coincidentally matches an
-                        // unrelated internal file. Probing them caused a
-                        // 15× over-extraction in the Rust corner of
-                        // .sample_repo (2092 emit vs 137 valid).
-                        None
+                // Step 3: module-style fallback (File → File). Strip leading
+                // surrounding quotes / angle brackets common in C-family
+                // `#include "alpha.h"` / `#include <alpha.h>` source strings.
+                if *emitted == before {
+                    let cleaned = import
+                        .source
+                        .trim_matches(|c: char| c == '"' || c == '\'' || c == '<' || c == '>');
+
+                    let probe = |spec: &str,
+                                 file_node_idx: &FxHashMap<String, u32>|
+                     -> Option<u32> {
+                        let mut hit: Option<u32> = None;
+                        resolver.enumerate_candidates(&local_graph.file_path, spec, |candidate| {
+                            // Cow avoids the no-op allocation on Linux/macOS where
+                            // candidate paths already use forward slashes (probe
+                            // callback fires ~10× per import-miss × 14k files,
+                            // so unconditional `String::replace` was ~140k wasted
+                            // heap allocations per build).
+                            let normalized: Cow<'_, str> = if candidate.contains('\\') {
+                                Cow::Owned(candidate.replace('\\', "/"))
+                            } else {
+                                Cow::Borrowed(candidate)
+                            };
+                            if let Some(&idx) = file_node_idx.get(normalized.as_ref()) {
+                                hit = Some(idx);
+                                return false;
+                            }
+                            true
+                        });
+                        hit
                     };
-                    if let Some(last) = module_last {
-                        if let Some(caller_ext) = local_graph.file_path.extension() {
-                            let candidate = format!("{}.{}", last, caller_ext.to_string_lossy());
-                            target_file_idx = suffix_match_single(&candidate, &basename_idx);
+
+                    // Step 3a: probe as-is (TypeScript `./a`, Python `.foo`, etc.
+                    // already encode relativity in the specifier).
+                    let mut target_file_idx = probe(cleaned, file_node_idx);
+
+                    // Step 3b: if still miss, retry with `./` prefix so the
+                    // resolver's relative-resolution branch joins caller dir
+                    // (Ruby `require_relative 'alpha'`, Go `import "x/pkg"`,
+                    // C `#include "alpha.h"` all surface here — none of them
+                    // prepend a `./` but they're all caller-dir-relative in
+                    // practice when the target lives in the same indexed tree).
+                    if target_file_idx.is_none() && !cleaned.starts_with('.') && !cleaned.is_empty()
+                    {
+                        dot_prefix_buf.clear();
+                        dot_prefix_buf.push_str("./");
+                        dot_prefix_buf.push_str(cleaned);
+                        target_file_idx = probe(&dot_prefix_buf, file_node_idx);
+                    }
+
+                    // Step 3c: basename + suffix match. Handles C/C++
+                    // `#include "alpha.hpp"` where the header sits under a
+                    // search-path dir. O(1) hash lookup via basename_idx,
+                    // then suffix-filter within the small same-basename bucket.
+                    if target_file_idx.is_none() && !cleaned.is_empty() {
+                        target_file_idx = suffix_match_single(cleaned, &basename_idx);
+                    }
+
+                    // Step 3d: caller-extension + last-segment match. Handles
+                    // Go `import "modulePath/pkg"` where the specifier carries
+                    // a `go.mod` module-name prefix that isn't a filesystem
+                    // path; the actual file is `pkg/<anything>.go`. Falls
+                    // back to `<last-segment>.<caller-ext>` basename lookup.
+                    if target_file_idx.is_none() && !cleaned.is_empty() {
+                        if let Some(last) = cleaned.rsplit('/').next() {
+                            if let Some(caller_ext) = local_graph.file_path.extension() {
+                                let ext = caller_ext.to_string_lossy();
+                                let candidate = format!("{}.{}", last, ext);
+                                target_file_idx = suffix_match_single(&candidate, &basename_idx);
+                            }
                         }
                     }
-                }
 
-                // Step 3f: namespace/module-dir match. C# `using NS;`
-                // names a namespace whose source lives under a `/NS/`
-                // directory; Swift `import Module` similarly names a
-                // module-dir. O(1) lookup via dir_component_idx, then
-                // filter same-extension single-hit within the bucket.
-                if target_file_idx.is_none() && !cleaned.is_empty() && !cleaned.contains('/') {
-                    if let Some(caller_ext) = local_graph.file_path.extension() {
-                        let ext_dot = format!(".{}", caller_ext.to_string_lossy());
-                        if let Some(bucket) = dir_component_idx.get(cleaned) {
-                            let mut hit: Option<u32> = None;
-                            let mut multi = false;
-                            for &(path, idx) in bucket {
-                                if path.ends_with(&ext_dot) {
-                                    if hit.is_some() {
-                                        multi = true;
-                                        break;
+                    // Step 3e: Rust `use` path resolution. The Rust parser
+                    // stamps `use crate::a::b::Foo` as `source = "crate::a::b"`
+                    // (parent module path) + `imported_name = "Foo"` (already
+                    // split off). The resolver doesn't grok `::` as a path
+                    // separator nor `crate::` as a crate-root anchor, so this
+                    // step resolves manually.
+                    //
+                    // Cases handled:
+                    //   `use crate::a;`         → source="crate", name="a"      → suffix `a.rs`
+                    //   `use crate::a::Foo;`    → source="crate::a", name="Foo" → suffix `a.rs`
+                    //   `use crate::a::b::Foo;` → source="crate::a::b", name="Foo" → suffix `b.rs`
+                    //   `use std::io;`          → source="std", name="io"       → external, no match
+                    //   `use super::Foo;`       → source="super", name="Foo"    → skipped (needs caller dir walk)
+                    if target_file_idx.is_none() {
+                        let raw = import.source.as_str();
+                        let module_last: Option<String> = if raw == "crate" || raw == "self" {
+                            // `use crate::Foo` / `use self::Foo` — imported_name IS
+                            // the module-file basename.
+                            Some(import.imported_name.clone())
+                        } else if let Some(rest) = raw
+                            .strip_prefix("crate::")
+                            .or_else(|| raw.strip_prefix("self::"))
+                        {
+                            // Strip leading qualifier, take last `::` segment.
+                            rest.rsplit("::").next().map(str::to_string)
+                        } else if raw.starts_with("super") {
+                            // super:: requires caller_dir walk; defer.
+                            None
+                        } else {
+                            // Don't probe generic `a::b::c` forms — these are
+                            // external crate imports (`use std::io::Read`,
+                            // `use tokio::io::Interest`) whose last segment is
+                            // a module name that coincidentally matches an
+                            // unrelated internal file. Probing them caused a
+                            // 15× over-extraction in the Rust corner of
+                            // .sample_repo (2092 emit vs 137 valid).
+                            None
+                        };
+                        if let Some(last) = module_last {
+                            if let Some(caller_ext) = local_graph.file_path.extension() {
+                                let candidate =
+                                    format!("{}.{}", last, caller_ext.to_string_lossy());
+                                target_file_idx = suffix_match_single(&candidate, &basename_idx);
+                            }
+                        }
+                    }
+
+                    // Step 3f: namespace/module-dir match. C# `using NS;`
+                    // names a namespace whose source lives under a `/NS/`
+                    // directory; Swift `import Module` similarly names a
+                    // module-dir. O(1) lookup via dir_component_idx, then
+                    // filter same-extension single-hit within the bucket.
+                    if target_file_idx.is_none() && !cleaned.is_empty() && !cleaned.contains('/') {
+                        if let Some(caller_ext) = local_graph.file_path.extension() {
+                            let ext_dot = format!(".{}", caller_ext.to_string_lossy());
+                            if let Some(bucket) = dir_component_idx.get(cleaned) {
+                                let mut hit: Option<u32> = None;
+                                let mut multi = false;
+                                for &(path, idx) in bucket {
+                                    if path.ends_with(&ext_dot) {
+                                        if hit.is_some() {
+                                            multi = true;
+                                            break;
+                                        }
+                                        hit = Some(idx);
                                     }
-                                    hit = Some(idx);
+                                }
+                                if !multi {
+                                    target_file_idx = hit;
                                 }
                             }
-                            if !multi {
-                                target_file_idx = hit;
-                            }
+                        }
+                    }
+
+                    if let Some(target) = target_file_idx {
+                        if dedupe.insert((source_file_idx, target)) {
+                            edges_out.push(Edge {
+                                source: source_file_idx,
+                                target,
+                                rel_type: RelType::Imports,
+                                confidence: 0.9,
+                                reason: reason_module,
+                            });
+                            *emitted += 1;
                         }
                     }
                 }
-
-                if let Some(target) = target_file_idx {
-                    if dedupe.insert((source_file_idx, target)) {
-                        edges_out.push(Edge {
-                            source: source_file_idx,
-                            target,
-                            rel_type: RelType::Imports,
-                            confidence: 0.9,
-                            reason: reason_module,
-                        });
-                        *emitted += 1;
-                    }
-                }
             }
-        }
             (local_emitted, local_edges)
         })
         .collect();

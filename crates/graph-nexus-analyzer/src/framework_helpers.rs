@@ -89,11 +89,7 @@ pub fn node_source_starts_with(source: &[u8], node: tree_sitter::Node, prefix: &
 /// not O(file-prefix). Window size is `suffix.len() + 4` (slack for one or
 /// two whitespace chars).
 #[inline]
-pub fn source_before_node_ends_with(
-    source: &[u8],
-    node: tree_sitter::Node,
-    suffix: &[u8],
-) -> bool {
+pub fn source_before_node_ends_with(source: &[u8], node: tree_sitter::Node, suffix: &[u8]) -> bool {
     let start = node.start_byte();
     let window = start.saturating_sub(suffix.len() + 4);
     source

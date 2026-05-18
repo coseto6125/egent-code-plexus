@@ -48,11 +48,24 @@ fn diff_contracts_two_commit_added_fetch() {
     assert!(out.status.success());
 
     let out = Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "v1"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "v1",
+        ])
         .current_dir(repo)
         .output()
         .unwrap();
-    assert!(out.status.success(), "commit v1: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "commit v1: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let baseline_sha = String::from_utf8(
         Command::new("git")
@@ -76,17 +89,34 @@ fn diff_contracts_two_commit_added_fetch() {
     assert!(out.status.success());
 
     let out = Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "v2"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "v2",
+        ])
         .current_dir(repo)
         .output()
         .unwrap();
-    assert!(out.status.success(), "commit v2: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "commit v2: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let output = Command::new(gnx_bin())
         .args([
-            "diff", "--section", "contracts",
-            "--baseline", &baseline_sha,
-            "--format", "json",
+            "diff",
+            "--section",
+            "contracts",
+            "--baseline",
+            &baseline_sha,
+            "--format",
+            "json",
         ])
         .current_dir(repo)
         .env("HOME", repo)
@@ -116,14 +146,30 @@ fn diff_contracts_two_commit_added_fetch() {
 #[test]
 fn diff_contracts_head_vs_head_empty() {
     let head_sha = {
-        let out = Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap().stdout;
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
         String::from_utf8_lossy(&out).trim().to_string()
     };
     let output = Command::new(gnx_bin())
-        .args(["diff", "--section", "contracts", "--baseline", &head_sha, "--format", "json"])
+        .args([
+            "diff",
+            "--section",
+            "contracts",
+            "--baseline",
+            &head_sha,
+            "--format",
+            "json",
+        ])
         .output()
         .expect("run gnx diff contracts");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     let contracts = &parsed["sections"]["contracts"];

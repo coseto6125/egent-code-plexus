@@ -10,7 +10,11 @@ fn parse(src: &str) -> Vec<(String, NodeKind)> {
     let graph = provider
         .parse_file(Path::new("t.sh"), src.as_bytes())
         .expect("parse_file");
-    graph.nodes.iter().map(|n| (n.name.clone(), n.kind)).collect()
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.kind))
+        .collect()
 }
 
 fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, NodeKind) {
@@ -24,7 +28,11 @@ fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, No
 fn test_bash_alias_single_quoted_emits_typedef() {
     let nodes = parse("alias ll='ls -la'\n");
     let n = find_node(&nodes, "ll");
-    assert_eq!(n.1, NodeKind::Typedef, "alias with single-quoted RHS must be Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "alias with single-quoted RHS must be Typedef"
+    );
 }
 
 #[test]

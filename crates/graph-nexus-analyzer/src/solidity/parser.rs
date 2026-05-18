@@ -1,5 +1,5 @@
-use crate::calls::extract_calls;
 use super::spec::SoliditySpec;
+use crate::calls::extract_calls;
 use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
@@ -33,7 +33,10 @@ impl SolidityProvider {
             .map(|name| SoliditySpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 

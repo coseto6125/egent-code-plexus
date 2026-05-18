@@ -142,12 +142,7 @@ fn rename_at_group_redirects_to_group_help() {
 
 #[test]
 fn cypher_at_group_redirects_to_group_help() {
-    assert_redirects_to_group_help(&[
-        "cypher",
-        "MATCH (n) RETURN n",
-        "--repo",
-        "@demo",
-    ]);
+    assert_redirects_to_group_help(&["cypher", "MATCH (n) RETURN n", "--repo", "@demo"]);
 }
 
 #[test]

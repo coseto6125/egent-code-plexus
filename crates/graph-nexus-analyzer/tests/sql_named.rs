@@ -58,7 +58,8 @@ fn test_sql_column_alias_not_typedef() {
 
 #[test]
 fn test_sql_view_and_table_coexist() {
-    let src = "CREATE TABLE products (id INT);\nCREATE VIEW top_products AS SELECT * FROM products;";
+    let src =
+        "CREATE TABLE products (id INT);\nCREATE VIEW top_products AS SELECT * FROM products;";
     let nodes = parse(src);
     find_kind(&nodes, "products", NodeKind::Class);
     find_kind(&nodes, "top_products", NodeKind::Typedef);

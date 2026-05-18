@@ -59,6 +59,10 @@ fn backed_enum_int_emits_one_enum_node() {
     let src = "<?php enum Status: int { case Active = 1; case Inactive = 2; }";
     let g = parse(src);
     let enums = names_of_kind(&g, NodeKind::Enum);
-    assert_eq!(enums.len(), 1, "expected 1 Enum for backed enum, got: {enums:?}");
+    assert_eq!(
+        enums.len(),
+        1,
+        "expected 1 Enum for backed enum, got: {enums:?}"
+    );
     assert_eq!(enums[0], "Status");
 }

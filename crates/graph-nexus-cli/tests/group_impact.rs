@@ -15,8 +15,8 @@
 use graph_nexus_cli::commands::group::{
     storage::{group_dir, read_contracts, write_contracts},
     types::{
-        ContractRegistry, ContractRole, ContractType, CrossLink, CrossLinkEndpoint, ExtractedContract,
-        MatchType, StoredContract, SymbolRef,
+        ContractRegistry, ContractRole, ContractType, CrossLink, CrossLinkEndpoint,
+        ExtractedContract, MatchType, StoredContract, SymbolRef,
     },
 };
 use std::collections::HashSet;
@@ -40,7 +40,13 @@ fn make_endpoint(repo: &str, sym_uid: &str) -> CrossLinkEndpoint {
     }
 }
 
-fn make_cross_link(from_repo: &str, from_uid: &str, to_repo: &str, to_uid: &str, conf: f32) -> CrossLink {
+fn make_cross_link(
+    from_repo: &str,
+    from_uid: &str,
+    to_repo: &str,
+    to_uid: &str,
+    conf: f32,
+) -> CrossLink {
     CrossLink {
         from: make_endpoint(from_repo, from_uid),
         to: make_endpoint(to_repo, to_uid),
@@ -113,7 +119,11 @@ fn cross_links_filter_from_uid_in_local_set() {
         })
         .collect();
 
-    assert_eq!(hits.len(), 1, "expected exactly 1 cross-link hit, got: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly 1 cross-link hit, got: {hits:?}"
+    );
     assert_eq!(hits[0].from.repo, "backend");
     assert_eq!(hits[0].to.repo, "frontend");
 }
@@ -128,9 +138,13 @@ fn cross_links_filter_to_uid_in_local_set() {
     let registry = ContractRegistry {
         version: 1,
         contracts: vec![],
-        cross_links: vec![
-            make_cross_link("backend", "createUser", "frontend", "proxy", 0.85),
-        ],
+        cross_links: vec![make_cross_link(
+            "backend",
+            "createUser",
+            "frontend",
+            "proxy",
+            0.85,
+        )],
         unmatched: vec![],
     };
 
@@ -258,9 +272,13 @@ fn group_impact_unknown_group_exits_nonzero() {
 
     let out = Command::new(gnx_bin())
         .args([
-            "group", "impact", "__no_such_group__",
-            "--target", "foo",
-            "--repo", "bar",
+            "group",
+            "impact",
+            "__no_such_group__",
+            "--target",
+            "foo",
+            "--repo",
+            "bar",
         ])
         .env("HOME", tmp.path())
         .output()

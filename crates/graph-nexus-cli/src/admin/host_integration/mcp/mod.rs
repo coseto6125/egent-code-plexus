@@ -16,12 +16,24 @@ use graph_nexus_core::GnxError;
 const HOSTS: &[menu::Item<'_>] = &[
     ("Claude Code", "Anthropic CLI — ~/.claude/settings.json"),
     ("Cursor", "Cursor editor — ~/.cursor/mcp.json"),
-    ("Windsurf", "Windsurf editor — ~/.codeium/windsurf/mcp_config.json"),
-    ("Cline / Roo Code", "VS Code extensions — cline_mcp_settings.json"),
+    (
+        "Windsurf",
+        "Windsurf editor — ~/.codeium/windsurf/mcp_config.json",
+    ),
+    (
+        "Cline / Roo Code",
+        "VS Code extensions — cline_mcp_settings.json",
+    ),
     ("Codex CLI", "Codex CLI in MCP mode — ~/.codex/config.toml"),
-    ("Gemini CLI", "Gemini CLI in MCP mode — ~/.gemini/settings.json"),
+    (
+        "Gemini CLI",
+        "Gemini CLI in MCP mode — ~/.gemini/settings.json",
+    ),
     ("Copilot", "GitHub Copilot — VS Code settings.json"),
-    ("Generic (any MCP host)", "print stdio command + JSON snippet to paste"),
+    (
+        "Generic (any MCP host)",
+        "print stdio command + JSON snippet to paste",
+    ),
     ("← Back", ""),
 ];
 

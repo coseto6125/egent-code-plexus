@@ -13,14 +13,22 @@ fn parse(src: &str) -> LocalGraph {
 #[test]
 fn module_emits_trait_kind() {
     let g = parse("module Foo\n  def bar; end\nend\n");
-    let foo = g.nodes.iter().find(|n| n.name == "Foo").expect("Foo missing");
+    let foo = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "Foo")
+        .expect("Foo missing");
     assert_eq!(foo.kind, NodeKind::Trait, "got {:?}", foo);
 }
 
 #[test]
 fn class_still_emits_class_kind() {
     let g = parse("class Foo\n  def bar; end\nend\n");
-    let foo = g.nodes.iter().find(|n| n.name == "Foo").expect("Foo missing");
+    let foo = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "Foo")
+        .expect("Foo missing");
     assert_eq!(foo.kind, NodeKind::Class, "got {:?}", foo);
 }
 

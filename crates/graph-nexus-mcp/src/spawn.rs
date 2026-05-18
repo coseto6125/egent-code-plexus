@@ -51,9 +51,7 @@ fn peel_subcmd(tool: &DerivedTool, args: &Value) -> Result<(Option<String>, Valu
         .to_string();
     if let Some(allowed) = schema_enum(&tool.schema, key) {
         if !allowed.iter().any(|s| s == &val) {
-            return Err(anyhow!(
-                "`{key}` must be one of {allowed:?}, got {val:?}"
-            ));
+            return Err(anyhow!("`{key}` must be one of {allowed:?}, got {val:?}"));
         }
     }
     let mut filtered = map.clone();

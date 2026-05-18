@@ -96,7 +96,11 @@ impl JavaProvider {
             .map(|name| JavaSpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
-        Ok(Self { query, indices, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            indices,
+            capture_kind_by_idx,
+        })
     }
 }
 

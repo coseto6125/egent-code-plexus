@@ -1,7 +1,7 @@
 use graph_nexus_core::analyzer::types::RawImport;
 use serde::Serialize;
-use std::sync::Mutex;
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{FileMeta, ResolveTarget, SymbolTable};
@@ -122,7 +122,9 @@ impl<'a> Resolver<'a> {
     /// Drain the recorded decisions. Returns `None` if dumping was never
     /// enabled.
     pub fn take_decisions(&mut self) -> Option<Vec<ResolverDecision>> {
-        self.decisions.take().map(|m| m.into_inner().unwrap_or_default())
+        self.decisions
+            .take()
+            .map(|m| m.into_inner().unwrap_or_default())
     }
 
     /// Enumerate candidate target file paths for an import specifier, walking
@@ -176,9 +178,9 @@ impl<'a> Resolver<'a> {
         // Tier 1: Try SameFile (kind-aware so a property named `Foo` doesn't
         // win the lookup for a constructor call `Foo()` in the same file —
         // see `SymbolTable::file_scoped` doc).
-        if let Some(node_id) = self
-            .symbol_table
-            .lookup_in_file_with_kind(&source_file_str, symbol_name, target)
+        if let Some(node_id) =
+            self.symbol_table
+                .lookup_in_file_with_kind(&source_file_str, symbol_name, target)
         {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
             self.record(
@@ -268,7 +270,8 @@ impl<'a> Resolver<'a> {
             let hit = self
                 .resolve_qualifier_file(source_file, qualifier, raw_imports, Some(symbol_name))
                 .and_then(|qf| {
-                    self.symbol_table.lookup_in_file_with_kind(&qf, member, target)
+                    self.symbol_table
+                        .lookup_in_file_with_kind(&qf, member, target)
                 });
             if let Some(node_id) = hit {
                 let conf = ResolutionTier::QualifierScoped.base_confidence();
@@ -296,12 +299,9 @@ impl<'a> Resolver<'a> {
             // are method calls (handled by heritage / Tier 2.5 via receiver
             // types) not module-path FQNs.
             if symbol_name.contains("::") {
-                if let Some(node_id) = self.try_module_tree_resolve(
-                    &source_file_str,
-                    symbol_name,
-                    member,
-                    target,
-                ) {
+                if let Some(node_id) =
+                    self.try_module_tree_resolve(&source_file_str, symbol_name, member, target)
+                {
                     const MT_CONF: f32 = 1.0;
                     results.push((node_id, MT_CONF));
                     self.record(
@@ -339,10 +339,11 @@ impl<'a> Resolver<'a> {
         // recorded by the parser, mirroring MRO precedence).
         if !caller_heritage.is_empty() {
             for base in caller_heritage {
-                if let Some(qf) = self.resolve_qualifier_file(source_file, base, raw_imports, None) {
-                    if let Some(node_id) = self
-                        .symbol_table
-                        .lookup_in_file_with_kind(&qf, symbol_name, target)
+                if let Some(qf) = self.resolve_qualifier_file(source_file, base, raw_imports, None)
+                {
+                    if let Some(node_id) =
+                        self.symbol_table
+                            .lookup_in_file_with_kind(&qf, symbol_name, target)
                     {
                         let conf = ResolutionTier::HeritageScoped.base_confidence();
                         results.push((node_id, conf));
@@ -396,11 +397,9 @@ impl<'a> Resolver<'a> {
             // by the unique-only cap". The post-filter count walks the
             // same predicates as `lookup_unique_global` so the two views
             // can't drift. Cost paid only on miss (Tier 3 hits skip this).
-            let filtered = self.symbol_table.count_global_kind_filtered(
-                symbol_name,
-                target,
-                caller_meta,
-            );
+            let filtered =
+                self.symbol_table
+                    .count_global_kind_filtered(symbol_name, target, caller_meta);
             let tier = if filtered >= 2 {
                 DecisionTier::AmbiguousGlobal
             } else {

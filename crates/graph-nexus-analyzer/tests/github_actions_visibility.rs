@@ -43,7 +43,10 @@ jobs:
 ";
     let nodes = parse(yaml);
     let out = find(&nodes, "build/artifact_id", NodeKind::Property);
-    assert!(out.is_exported, "`build/artifact_id` job output must be exported");
+    assert!(
+        out.is_exported,
+        "`build/artifact_id` job output must be exported"
+    );
 }
 
 #[test]
@@ -61,7 +64,10 @@ jobs:
     let nodes = parse(yaml);
     // step `id` is tracked as a Function node (run: step)
     let step = find(&nodes, "build/step0", NodeKind::Function);
-    assert!(!step.is_exported, "step `install` (id) must NOT be exported");
+    assert!(
+        !step.is_exported,
+        "step `install` (id) must NOT be exported"
+    );
 }
 
 #[test]
@@ -82,7 +88,10 @@ jobs:
 ";
     let nodes = parse(yaml);
     let out = find(&nodes, "artifact_url", NodeKind::Property);
-    assert!(out.is_exported, "`artifact_url` workflow_call output must be exported");
+    assert!(
+        out.is_exported,
+        "`artifact_url` workflow_call output must be exported"
+    );
 }
 
 #[test]
@@ -102,7 +111,10 @@ jobs:
     let nodes = parse(yaml);
 
     let out = find(&nodes, "build/result", NodeKind::Property);
-    assert!(out.is_exported, "`build/result` job output must be exported");
+    assert!(
+        out.is_exported,
+        "`build/result` job output must be exported"
+    );
 
     // The run step is emitted as a Function; step id is internal
     let step = find(&nodes, "build/step0", NodeKind::Function);

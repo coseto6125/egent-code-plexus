@@ -1,8 +1,6 @@
 //! Go HTTP route extractor: net/http + gin + chi shapes via tree-sitter.
 
-use crate::commands::group::types::{
-    ContractRole, ContractType, ExtractedContract, SymbolRef,
-};
+use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
 use streaming_iterator::StreamingIterator;
@@ -34,7 +32,10 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
         return Vec::new();
     }
     let Some(tree) = parser.parse(source, None) else {
-        tracing::warn!("group::extract_http (go): parser.parse returned None for {}", file_path.display());
+        tracing::warn!(
+            "group::extract_http (go): parser.parse returned None for {}",
+            file_path.display()
+        );
         return Vec::new();
     };
     let query: &tree_sitter::Query = &QUERY;

@@ -1,8 +1,6 @@
 //! Java HTTP route extractor: Spring MVC annotation patterns via tree-sitter.
 
-use crate::commands::group::types::{
-    ContractRole, ContractType, ExtractedContract, SymbolRef,
-};
+use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
 use streaming_iterator::StreamingIterator;

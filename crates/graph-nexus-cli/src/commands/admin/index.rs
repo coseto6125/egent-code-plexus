@@ -73,30 +73,33 @@ pub fn run_analyzer_for_paths(
     // Sequential `.build()` was ~100ms on .sample_repo's 22.7k entries —
     // parallel cuts the syscall-bound stat/readdir tax.
     const MAX_FILE_SIZE: u64 = 512 * 1024; // 512 KB
-    let (file_tx, file_rx) =
-        std::sync::mpsc::channel::<(std::path::PathBuf, std::path::PathBuf)>();
+    let (file_tx, file_rx) = std::sync::mpsc::channel::<(std::path::PathBuf, std::path::PathBuf)>();
     let skipped_large = std::sync::atomic::AtomicU64::new(0);
     let skipped_large_ref = &skipped_large;
     let src_root_ref = src_root;
-    WalkBuilder::new(src_root).hidden(false).build_parallel().run(|| {
-        let tx = file_tx.clone();
-        Box::new(move |result| {
-            if let Ok(entry) = result {
-                let path = entry.path();
-                if path.is_file() && should_analyze_path(path) {
-                    if let Ok(metadata) = entry.metadata() {
-                        if metadata.len() > MAX_FILE_SIZE {
-                            skipped_large_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return ignore::WalkState::Continue;
+    WalkBuilder::new(src_root)
+        .hidden(false)
+        .build_parallel()
+        .run(|| {
+            let tx = file_tx.clone();
+            Box::new(move |result| {
+                if let Ok(entry) = result {
+                    let path = entry.path();
+                    if path.is_file() && should_analyze_path(path) {
+                        if let Ok(metadata) = entry.metadata() {
+                            if metadata.len() > MAX_FILE_SIZE {
+                                skipped_large_ref
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                return ignore::WalkState::Continue;
+                            }
                         }
+                        let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
+                        let _ = tx.send((path.to_path_buf(), rel_path.to_path_buf()));
                     }
-                    let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
-                    let _ = tx.send((path.to_path_buf(), rel_path.to_path_buf()));
                 }
-            }
-            ignore::WalkState::Continue
-        })
-    });
+                ignore::WalkState::Continue
+            })
+        });
     drop(file_tx);
     let files_to_analyze: Vec<(std::path::PathBuf, std::path::PathBuf)> =
         file_rx.into_iter().collect();
@@ -110,7 +113,13 @@ pub fn run_analyzer_for_paths(
         );
     }
 
-    if prof { eprintln!("prof step1.scan_files: {:.2}s ({} files)", t_step1.elapsed().as_secs_f32(), files_to_analyze.len()); }
+    if prof {
+        eprintln!(
+            "prof step1.scan_files: {:.2}s ({} files)",
+            t_step1.elapsed().as_secs_f32(),
+            files_to_analyze.len()
+        );
+    }
     let t_step2 = std::time::Instant::now();
     // ── Step 2: Initialize pipeline with only needed providers ────────────
     //
@@ -121,15 +130,24 @@ pub fn run_analyzer_for_paths(
     // construction order doesn't matter for runtime semantics (file
     // routing is keyed on the lowercase `name()` string, not ordering).
     let needed = detect_needed_providers(&files_to_analyze);
-    type ProviderFactory =
-        Box<dyn FnOnce() -> std::io::Result<Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>> + Send>;
+    type ProviderFactory = Box<
+        dyn FnOnce() -> std::io::Result<
+                Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>,
+            > + Send,
+    >;
     let mut factories: Vec<ProviderFactory> = Vec::new();
     macro_rules! add {
         ($flag:expr, $ctor:expr) => {
-            if $flag { factories.push(Box::new(|| {
-                $ctor.map(|p| Box::new(p) as Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>)
-                    .map_err(std::io::Error::other)
-            })); }
+            if $flag {
+                factories.push(Box::new(|| {
+                    $ctor
+                        .map(|p| {
+                            Box::new(p)
+                                as Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>
+                        })
+                        .map_err(std::io::Error::other)
+                }));
+            }
         };
     }
     add!(needed.typescript, TypeScriptProvider::new());
@@ -149,7 +167,9 @@ pub fn run_analyzer_for_paths(
         // unwrapped — preserve that contract.
         factories.push(Box::new(|| {
             SwiftProvider::new()
-                .map(|p| Box::new(p) as Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>)
+                .map(|p| {
+                    Box::new(p) as Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>
+                })
                 .map_err(std::io::Error::other)
         }));
     }
@@ -178,9 +198,16 @@ pub fn run_analyzer_for_paths(
         .map(|f| f())
         .collect::<std::io::Result<Vec<_>>>()?;
     let mut pipeline = AnalyzerPipeline::new();
-    for p in providers { pipeline.register_provider(p); }
+    for p in providers {
+        pipeline.register_provider(p);
+    }
 
-    if prof { eprintln!("prof step2.init_providers: {:.2}s", t_step2.elapsed().as_secs_f32()); }
+    if prof {
+        eprintln!(
+            "prof step2.init_providers: {:.2}s",
+            t_step2.elapsed().as_secs_f32()
+        );
+    }
     let t_step3 = std::time::Instant::now();
     // ── Step 3: Analyze files (persistent per-file parse cache) ──────────
     let parse_cache = match parse_cache_root {
@@ -204,7 +231,12 @@ pub fn run_analyzer_for_paths(
     let local_graphs = pipeline.analyze_with_cache(files_to_analyze, |_rel_path, hash| {
         cache_ref.and_then(|c| c.get(hash))
     });
-    if prof { eprintln!("prof step3a.parse_only: {:.2}s", t_parse.elapsed().as_secs_f32()); }
+    if prof {
+        eprintln!(
+            "prof step3a.parse_only: {:.2}s",
+            t_parse.elapsed().as_secs_f32()
+        );
+    }
     let t_cache_put = std::time::Instant::now();
     // Write back only fresh parses. Cache hits return the same blob we'd
     // re-serialize on put — the existence stat skips that round-trip for
@@ -219,20 +251,27 @@ pub fn run_analyzer_for_paths(
             .filter(|g| !cache.path_for(&g.content_hash).exists())
             .map(|g| {
                 if let Err(e) = cache.put(g) {
-                    tracing::warn!(
-                        "parse_cache: put failed for {:?}: {}",
-                        g.file_path,
-                        e
-                    );
+                    tracing::warn!("parse_cache: put failed for {:?}: {}", g.file_path, e);
                 }
             })
             .count()
     } else {
         0
     };
-    if prof { eprintln!("prof step3b.cache_puts: {:.2}s ({} puts)", t_cache_put.elapsed().as_secs_f32(), put_count); }
+    if prof {
+        eprintln!(
+            "prof step3b.cache_puts: {:.2}s ({} puts)",
+            t_cache_put.elapsed().as_secs_f32(),
+            put_count
+        );
+    }
 
-    if prof { eprintln!("prof step3.analyze_files: {:.2}s", t_step3.elapsed().as_secs_f32()); }
+    if prof {
+        eprintln!(
+            "prof step3.analyze_files: {:.2}s",
+            t_step3.elapsed().as_secs_f32()
+        );
+    }
     let t_step4 = std::time::Instant::now();
     // ── Step 4: Build global graph ────────────────────────────────────────
     let aliases = crate::config_parser::parse_configs(src_root);
@@ -245,7 +284,13 @@ pub fn run_analyzer_for_paths(
     let global_graph = builder.build();
     let node_count = global_graph.nodes.len();
 
-    if prof { eprintln!("prof step4.build_global_graph: {:.2}s ({} nodes)", t_step4.elapsed().as_secs_f32(), node_count); }
+    if prof {
+        eprintln!(
+            "prof step4.build_global_graph: {:.2}s ({} nodes)",
+            t_step4.elapsed().as_secs_f32(),
+            node_count
+        );
+    }
     let t_step5 = std::time::Instant::now();
     // ── Step 5: Write graph.bin (atomic) ──────────────────────────────────
     let bin_path = out_dir.join("graph.bin");
@@ -255,7 +300,13 @@ pub fn run_analyzer_for_paths(
         rkyv::to_bytes::<rkyv::rancor::Error>(&global_graph).map_err(std::io::Error::other)?;
     graph_nexus_core::registry::atomic_write_bytes(&bin_path, &bytes)?;
 
-    if prof { eprintln!("prof step5.write_graph_bin: {:.2}s ({} bytes)", t_step5.elapsed().as_secs_f32(), bytes.len()); }
+    if prof {
+        eprintln!(
+            "prof step5.write_graph_bin: {:.2}s ({} bytes)",
+            t_step5.elapsed().as_secs_f32(),
+            bytes.len()
+        );
+    }
     let t_step6 = std::time::Instant::now();
     // ── Step 6: Build tantivy full-text index (best-effort) ───────────────
     if let Err(e) = crate::search::TantivyEngine::build_index(out_dir, &global_graph) {
@@ -266,7 +317,12 @@ pub fn run_analyzer_for_paths(
         );
     }
 
-    if prof { eprintln!("prof step6.tantivy: {:.2}s", t_step6.elapsed().as_secs_f32()); }
+    if prof {
+        eprintln!(
+            "prof step6.tantivy: {:.2}s",
+            t_step6.elapsed().as_secs_f32()
+        );
+    }
     Ok(node_count)
 }
 
@@ -297,8 +353,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
             // repo. Reads per-repo meta then upserts; idempotent on the
             // fixed binary because Registry::upsert_repo skips writes when
             // nothing changes.
-            ensure_registry_entry(&worktree)
-                .map_err(|e| format!("ensure registry entry: {e}"))?;
+            ensure_registry_entry(&worktree).map_err(|e| format!("ensure registry entry: {e}"))?;
             if !args.quiet {
                 let st = detect_source_type(&existing);
                 eprintln!(
@@ -505,12 +560,54 @@ fn should_analyze_path(path: &std::path::Path) -> bool {
     matches!(
         path.extension().and_then(|s| s.to_str()),
         Some(
-            "ts" | "tsx" | "py" | "pyi" | "go" | "rs" | "java" | "js" | "jsx" | "mjs"
-            | "cjs" | "php" | "rb" | "kt" | "kts" | "cs" | "c" | "h" | "cpp" | "hpp"
-            | "cc" | "hh" | "cxx" | "hxx" | "swift" | "dart" | "md" | "txt" | "rst"
-            | "sh" | "bash" | "lua" | "luau" | "cr" | "sol" | "move" | "dockerfile"
-            | "nim" | "tf" | "tfvars" | "hcl" | "vy" | "sql" | "cairo" | "v" | "sv"
-            | "vh" | "svh" | "zig"
+            "ts" | "tsx"
+                | "py"
+                | "pyi"
+                | "go"
+                | "rs"
+                | "java"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "php"
+                | "rb"
+                | "kt"
+                | "kts"
+                | "cs"
+                | "c"
+                | "h"
+                | "cpp"
+                | "hpp"
+                | "cc"
+                | "hh"
+                | "cxx"
+                | "hxx"
+                | "swift"
+                | "dart"
+                | "md"
+                | "txt"
+                | "rst"
+                | "sh"
+                | "bash"
+                | "lua"
+                | "luau"
+                | "cr"
+                | "sol"
+                | "move"
+                | "dockerfile"
+                | "nim"
+                | "tf"
+                | "tfvars"
+                | "hcl"
+                | "vy"
+                | "sql"
+                | "cairo"
+                | "v"
+                | "sv"
+                | "vh"
+                | "svh"
+                | "zig"
         )
     )
 }

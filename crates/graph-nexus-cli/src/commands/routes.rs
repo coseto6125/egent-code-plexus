@@ -6,7 +6,6 @@
 //!
 //! Optional `--method GET/POST/...` narrows results in both modes.
 
-use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
@@ -217,7 +216,7 @@ fn enclosing_scope_json(
             serde_json::json!({
                 "uid": n.uid.resolve(&graph.string_pool),
                 "name": n.name.resolve(&graph.string_pool),
-                "kind": kind_to_str(&n.kind),
+                "kind": n.kind.as_str(),
                 "line": n.span.0.to_native(),
             })
         }
@@ -381,7 +380,7 @@ fn inspect_route(
             handlers_out.push(serde_json::json!({
                 "uid": handler_node.uid.resolve(&graph.string_pool),
                 "name": handler_node.name.resolve(&graph.string_pool),
-                "kind": kind_to_str(&handler_node.kind),
+                "kind": handler_node.kind.as_str(),
                 "handlerKind": "named",
                 "filePath": handler_file.path.resolve(&graph.string_pool),
                 "line": handler_node.span.0.to_native(),
@@ -440,7 +439,7 @@ fn bfs_upstream(
             out.push(serde_json::json!({
                 "uid": curr_node.uid.resolve(&graph.string_pool),
                 "name": curr_node.name.resolve(&graph.string_pool),
-                "kind": kind_to_str(&curr_node.kind),
+                "kind": curr_node.kind.as_str(),
                 "filePath": file_node.path.resolve(&graph.string_pool),
                 "line": curr_node.span.0.to_native(),
                 "depth": curr_depth,

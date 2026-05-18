@@ -11,6 +11,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let marker = PathBuf::from(args.next().expect("arg 1: marker path"));
     std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut f = OpenOptions::new().create(true).append(true).open(&marker).unwrap();
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&marker)
+        .unwrap();
     writeln!(f, "{}", std::process::id()).unwrap();
 }

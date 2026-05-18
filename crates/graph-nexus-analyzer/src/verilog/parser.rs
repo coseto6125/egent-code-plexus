@@ -1,5 +1,5 @@
-use crate::calls::extract_calls;
 use super::spec::VerilogSpec;
+use crate::calls::extract_calls;
 use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
@@ -33,7 +33,10 @@ impl VerilogProvider {
             .map(|name| VerilogSpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -60,8 +63,7 @@ impl LanguageProvider for VerilogProvider {
         let idx_const = self.query.capture_index_for_name("const");
         let idx_import = self.query.capture_index_for_name("import");
         let idx_class_prop = self.query.capture_index_for_name("class_prop");
-        let idx_class_prop_visibility =
-            self.query.capture_index_for_name("class_prop.visibility");
+        let idx_class_prop_visibility = self.query.capture_index_for_name("class_prop.visibility");
         let idx_typedef = self.query.capture_index_for_name("typedef");
 
         while let Some(m) = matches.next() {
@@ -104,10 +106,7 @@ impl LanguageProvider for VerilogProvider {
                     let end = root.end_position();
                     // SV class members: `local`/`protected` → private; all else → exported.
                     let is_exported = if is_class_prop {
-                        !matches!(
-                            class_prop_visibility,
-                            Some(b"local") | Some(b"protected")
-                        )
+                        !matches!(class_prop_visibility, Some(b"local") | Some(b"protected"))
                     } else {
                         true
                     };

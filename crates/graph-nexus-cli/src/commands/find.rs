@@ -28,7 +28,6 @@
 //! first `gnx admin index` has materialised the lexical index. Every hit
 //! carries a `language` field derived from file extension.
 
-use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
@@ -261,7 +260,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             }
 
             if let Some(ref kinds) = kind_filter {
-                let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
+                let node_kind = node.kind.as_str().to_ascii_lowercase();
                 if !kinds.iter().any(|k| k == &node_kind) {
                     return None;
                 }
@@ -301,7 +300,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 file: file.path.resolve(&graph.string_pool).to_string(),
                 line: node.span.0.to_native(),
                 name: node.name.resolve(&graph.string_pool).to_string(),
-                kind: kind_to_str(&node.kind).to_string(),
+                kind: node.kind.as_str().to_string(),
                 category: category_to_str(&file.category).to_string(),
                 caller_count,
                 signature: node.uid.resolve(&graph.string_pool).to_string(),
@@ -737,7 +736,7 @@ fn build_hit(
     let language = Language::from_path(&file).as_str().to_string();
     let category = FileCategory::from(&file_entry.category);
     let line = node.span.0.to_native() + 1;
-    let kind_str = kind_to_str(&node.kind).to_string();
+    let kind_str = node.kind.as_str().to_string();
     let signature = format!("{kind_str} {name}");
 
     let in_start = graph.in_offsets[idx].to_native() as usize;
@@ -940,7 +939,13 @@ pub fn run_for_repo(
     pattern: &str,
     kind: Option<&str>,
 ) -> Result<Vec<Hit>, GnxError> {
-    compute_single(pattern, &FindMode::Bm25, kind, engine, Some(member.to_string()))
+    compute_single(
+        pattern,
+        &FindMode::Bm25,
+        kind,
+        engine,
+        Some(member.to_string()),
+    )
 }
 
 /// In-process BM25 entry point for hooks and other internal consumers.
@@ -1030,12 +1035,16 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
         if idx.is_empty() {
             continue; // repo registered but not yet built
         }
-        let Some(graph_path) = crate::commit_lookup::find_latest_by_mtime(&commits_dir)
-            .map(|d| d.join("graph.bin"))
+        let Some(graph_path) =
+            crate::commit_lookup::find_latest_by_mtime(&commits_dir).map(|d| d.join("graph.bin"))
         else {
             continue;
         };
-        let display_name = alias.aliases.first().cloned().unwrap_or_else(|| dir_name.clone());
+        let display_name = alias
+            .aliases
+            .first()
+            .cloned()
+            .unwrap_or_else(|| dir_name.clone());
         targets.push((display_name, graph_path.to_string_lossy().into_owned()));
     }
 
@@ -1092,8 +1101,7 @@ fn emit_bucketed(
         && buckets.config.is_empty();
 
     if all_empty {
-        let hint =
-            "No matches found. Try a shorter pattern or `gnx find --mode fuzzy <fragment>`.";
+        let hint = "No matches found. Try a shorter pattern or `gnx find --mode fuzzy <fragment>`.";
         match format {
             OutputFormat::Text => {
                 return emit(

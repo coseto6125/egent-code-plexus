@@ -27,7 +27,11 @@ fn extract_as_alias(s: &str) -> Option<&str> {
     // before `#` (`as m # c` and `as m#c` both yield "m").
     let before_comment = s[as_pos + 4..].split('#').next().unwrap_or("");
     let alias = before_comment.split_whitespace().next()?;
-    if alias.is_empty() { None } else { Some(alias) }
+    if alias.is_empty() {
+        None
+    } else {
+        Some(alias)
+    }
 }
 
 pub struct VyperProvider {
@@ -84,11 +88,8 @@ impl LanguageProvider for VyperProvider {
 
             for cap in m.captures {
                 let ci = cap.index;
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(ci as usize)
-                    .copied()
-                    .flatten()
+                if let Some(k_from_spec) =
+                    self.capture_kind_by_idx.get(ci as usize).copied().flatten()
                 {
                     name_node = Some(cap.node);
                     if kind.is_none() {
@@ -141,9 +142,9 @@ impl LanguageProvider for VyperProvider {
                             }
                         }
                     } else {
-                        let is_exported = decorators.iter().any(|d| {
-                            matches!(d.trim(), "external" | "view" | "payable")
-                        });
+                        let is_exported = decorators
+                            .iter()
+                            .any(|d| matches!(d.trim(), "external" | "view" | "payable"));
                         nodes.push(RawNode {
                             decorators,
                             is_exported,

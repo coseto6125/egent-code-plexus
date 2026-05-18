@@ -17,7 +17,11 @@ fn parse(src: &str) -> Vec<(String, NodeKind)> {
     let graph = provider
         .parse_file(Path::new("t.nim"), src.as_bytes())
         .expect("parse_file");
-    graph.nodes.iter().map(|n| (n.name.clone(), n.kind)).collect()
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.kind))
+        .collect()
 }
 
 fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, NodeKind) {
@@ -31,21 +35,33 @@ fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, No
 fn test_nim_simple_alias_emits_typedef() {
     let nodes = parse("type Score = int\n");
     let n = find_node(&nodes, "Score");
-    assert_eq!(n.1, NodeKind::Typedef, "simple type alias must be NodeKind::Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "simple type alias must be NodeKind::Typedef"
+    );
 }
 
 #[test]
 fn test_nim_proc_alias_emits_typedef() {
     let nodes = parse("type Cb = proc(x: int): int\n");
     let n = find_node(&nodes, "Cb");
-    assert_eq!(n.1, NodeKind::Typedef, "alias to proc type must be NodeKind::Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "alias to proc type must be NodeKind::Typedef"
+    );
 }
 
 #[test]
 fn test_nim_tuple_alias_emits_typedef() {
     let nodes = parse("type Pair = tuple[a, b: int]\n");
     let n = find_node(&nodes, "Pair");
-    assert_eq!(n.1, NodeKind::Typedef, "tuple alias must be NodeKind::Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "tuple alias must be NodeKind::Typedef"
+    );
 }
 
 #[test]
@@ -54,7 +70,11 @@ fn test_nim_object_not_typedef() {
     let nodes = parse(src);
     // Person must be Class, not Typedef
     let n = find_node(&nodes, "Person");
-    assert_eq!(n.1, NodeKind::Class, "object type must be NodeKind::Class, not Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Class,
+        "object type must be NodeKind::Class, not Typedef"
+    );
     assert!(
         nodes.iter().all(|(_, k)| *k != NodeKind::Typedef),
         "object type must not emit any Typedef, got: {nodes:#?}"

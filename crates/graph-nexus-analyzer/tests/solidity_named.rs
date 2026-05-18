@@ -17,7 +17,11 @@ fn parse(src: &str) -> Vec<(String, NodeKind)> {
     let graph = provider
         .parse_file(Path::new("t.sol"), src.as_bytes())
         .expect("parse_file");
-    graph.nodes.iter().map(|n| (n.name.clone(), n.kind)).collect()
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.kind))
+        .collect()
 }
 
 fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, NodeKind) {
@@ -32,7 +36,11 @@ fn test_solidity_using_directive_emits_typedef() {
     let src = "contract A {\n    using SafeMath for uint256;\n}\n";
     let nodes = parse(src);
     let n = find_node(&nodes, "SafeMath");
-    assert_eq!(n.1, NodeKind::Typedef, "`using X for T` must emit NodeKind::Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "`using X for T` must emit NodeKind::Typedef"
+    );
 }
 
 #[test]
@@ -40,7 +48,11 @@ fn test_solidity_user_defined_type_emits_typedef() {
     let src = "type Currency is uint256;\n";
     let nodes = parse(src);
     let n = find_node(&nodes, "Currency");
-    assert_eq!(n.1, NodeKind::Typedef, "`type X is T` must emit NodeKind::Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "`type X is T` must emit NodeKind::Typedef"
+    );
 }
 
 #[test]
@@ -48,7 +60,11 @@ fn test_solidity_contract_not_typedef() {
     let src = "contract Foo {}\n";
     let nodes = parse(src);
     let n = find_node(&nodes, "Foo");
-    assert_eq!(n.1, NodeKind::Class, "contract must be NodeKind::Class, not Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Class,
+        "contract must be NodeKind::Class, not Typedef"
+    );
     assert!(
         nodes.iter().all(|(_, k)| *k != NodeKind::Typedef),
         "contract must not emit any Typedef, got: {nodes:#?}"

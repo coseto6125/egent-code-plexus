@@ -20,7 +20,11 @@ fn parse(src: &str) -> Vec<(String, NodeKind)> {
     let graph = provider
         .parse_file(Path::new("t.vy"), src.as_bytes())
         .expect("parse_file");
-    graph.nodes.iter().map(|n| (n.name.clone(), n.kind)).collect()
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.kind))
+        .collect()
 }
 
 fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, NodeKind) {
@@ -34,14 +38,22 @@ fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, No
 fn test_vyper_import_as_emits_typedef() {
     let nodes = parse("import math as m\n");
     let n = find_node(&nodes, "m");
-    assert_eq!(n.1, NodeKind::Typedef, "`import X as Y` must emit NodeKind::Typedef for alias");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "`import X as Y` must emit NodeKind::Typedef for alias"
+    );
 }
 
 #[test]
 fn test_vyper_from_import_as_emits_typedef() {
     let nodes = parse("from vyper.interfaces import ERC20 as Token\n");
     let n = find_node(&nodes, "Token");
-    assert_eq!(n.1, NodeKind::Typedef, "`from X import Y as Z` must emit NodeKind::Typedef for alias");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "`from X import Y as Z` must emit NodeKind::Typedef for alias"
+    );
 }
 
 #[test]

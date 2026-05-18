@@ -22,7 +22,14 @@ fn canonical_hash(g: &ZeroCopyGraph) -> [u8; 32] {
     nodes.sort_by_cached_key(|n| {
         let uid = n.uid.resolve(pool).to_string();
         let name = n.name.resolve(pool).to_string();
-        (uid, name, format!("{:?}", n.kind), n.span, n.file_idx, n.community_id)
+        (
+            uid,
+            name,
+            format!("{:?}", n.kind),
+            n.span,
+            n.file_idx,
+            n.community_id,
+        )
     });
     for n in &nodes {
         h.update(n.uid.resolve(pool).as_bytes());
@@ -77,7 +84,11 @@ fn make_fixture_files() -> Vec<LocalGraph> {
                     kind: NodeKind::Class,
                     span: (0, 0, 10, 0),
                     is_exported: true,
-                    heritage: if i > 0 { vec![format!("Cls{}", i - 1)] } else { vec![] },
+                    heritage: if i > 0 {
+                        vec![format!("Cls{}", i - 1)]
+                    } else {
+                        vec![]
+                    },
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
@@ -90,7 +101,11 @@ fn make_fixture_files() -> Vec<LocalGraph> {
                     heritage: vec![],
                     type_annotation: None,
                     decorators: vec![],
-                    calls: if i > 0 { vec![format!("fn_{}", i - 1)] } else { vec![] },
+                    calls: if i > 0 {
+                        vec![format!("fn_{}", i - 1)]
+                    } else {
+                        vec![]
+                    },
                 },
             ],
             documents: vec![],
@@ -140,9 +155,11 @@ fn graph_builder_order_independence_under_default_threads() {
     let h1 = canonical_hash(&g1);
     let h2 = canonical_hash(&g2);
     assert_eq!(
-        h1, h2,
+        h1,
+        h2,
         "canonical projection differs across ingest order: {} vs {}",
-        hex(&h1), hex(&h2)
+        hex(&h1),
+        hex(&h2)
     );
 }
 
@@ -162,7 +179,8 @@ fn graph_builder_repeated_build_is_stable() {
     let first = hashes[0];
     for (i, h) in hashes.iter().enumerate() {
         assert_eq!(
-            *h, first,
+            *h,
+            first,
             "build run #{i} hashes differently from run #0: {} vs {}",
             hex(h),
             hex(&first)

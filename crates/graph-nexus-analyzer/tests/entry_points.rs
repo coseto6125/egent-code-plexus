@@ -52,7 +52,6 @@ fn mk_local_graph(
     }
 }
 
-
 /// Locate the EntryPoint marker node(s) in a built graph by inspecting
 /// `node.kind`. Returns indices for downstream assertions.
 fn entry_point_node_indices(graph: &graph_nexus_core::graph::ZeroCopyGraph) -> Vec<usize> {
@@ -109,7 +108,10 @@ fn rust_fn_main_emits_entrypoint_marker() {
         "confidence should be 0.9, got {}",
         entry_edges[0].confidence
     );
-    let reason = entry_edges[0].reason.resolve(&graph.string_pool).to_string();
+    let reason = entry_edges[0]
+        .reason
+        .resolve(&graph.string_pool)
+        .to_string();
     assert!(
         reason.starts_with("main:"),
         "reason should start with main:, got {}",
@@ -191,7 +193,10 @@ fn fastapi_route_emits_entrypoint_at_score_1_0() {
         "route confidence should be 1.0, got {}",
         entry_edges[0].confidence
     );
-    let reason = entry_edges[0].reason.resolve(&graph.string_pool).to_string();
+    let reason = entry_edges[0]
+        .reason
+        .resolve(&graph.string_pool)
+        .to_string();
     assert!(
         reason.starts_with("route:"),
         "reason should encode route kind, got {}",

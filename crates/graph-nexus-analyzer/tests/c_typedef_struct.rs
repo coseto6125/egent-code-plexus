@@ -6,7 +6,9 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let provider = CProvider::new().expect("provider");
-    provider.parse_file(Path::new("test.c"), src.as_bytes()).expect("parse")
+    provider
+        .parse_file(Path::new("test.c"), src.as_bytes())
+        .expect("parse")
 }
 
 #[test]
@@ -23,15 +25,23 @@ fn test_c_typedef_primitive_emits_typedef_node() {
 #[test]
 fn test_c_typedef_struct_emits_struct_and_typedef() {
     let graph = parse("typedef struct Bar { int x; } Bar;\n");
-    let struct_node = graph.nodes.iter().find(|n| n.name == "Bar" && n.kind == NodeKind::Struct);
-    let typedef_node = graph.nodes.iter().find(|n| n.name == "Bar" && n.kind == NodeKind::Typedef);
+    let struct_node = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "Bar" && n.kind == NodeKind::Struct);
+    let typedef_node = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "Bar" && n.kind == NodeKind::Typedef);
     assert!(
         struct_node.is_some(),
-        "expected Struct node `Bar`, got {:#?}", graph.nodes
+        "expected Struct node `Bar`, got {:#?}",
+        graph.nodes
     );
     assert!(
         typedef_node.is_some(),
-        "expected Typedef node `Bar`, got {:#?}", graph.nodes
+        "expected Typedef node `Bar`, got {:#?}",
+        graph.nodes
     );
 }
 

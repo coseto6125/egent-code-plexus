@@ -1,7 +1,5 @@
 use graph_nexus_cli::session::state::classify;
-use graph_nexus_core::session::{
-    DirtyEntry, DirtyFiles, SessionMeta, SessionState, StaleReason,
-};
+use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta, SessionState, StaleReason};
 use std::fs;
 use std::path::Path;
 
@@ -71,7 +69,10 @@ fn classify_empty_dirty_returns_pure_reference() {
     setup_repo(tmp.path(), SHA, DIRNAME);
     setup_session(tmp.path(), "sid1", SHA, DirtyFiles::empty());
     match classify(tmp.path(), "sid1") {
-        SessionState::PureReference { base_sha, l2_dirname } => {
+        SessionState::PureReference {
+            base_sha,
+            l2_dirname,
+        } => {
             assert_eq!(base_sha, SHA);
             assert_eq!(l2_dirname, DIRNAME);
         }
@@ -129,7 +130,9 @@ fn classify_corrupt_dirty_returns_stale_dirtycorrupt() {
     .unwrap();
     assert!(matches!(
         classify(tmp.path(), "sid1"),
-        SessionState::Stale { reason: StaleReason::DirtyFilesCorrupt }
+        SessionState::Stale {
+            reason: StaleReason::DirtyFilesCorrupt
+        }
     ));
 }
 
@@ -140,7 +143,9 @@ fn classify_missing_meta_returns_stale_metaunreadable() {
     fs::create_dir_all(tmp.path().join("sessions/sid1")).unwrap();
     assert!(matches!(
         classify(tmp.path(), "sid1"),
-        SessionState::Stale { reason: StaleReason::MetaUnreadable }
+        SessionState::Stale {
+            reason: StaleReason::MetaUnreadable
+        }
     ));
 }
 
@@ -151,6 +156,8 @@ fn classify_missing_l2_returns_stale_l2missing() {
     setup_session(tmp.path(), "sid1", SHA, DirtyFiles::empty());
     assert!(matches!(
         classify(tmp.path(), "sid1"),
-        SessionState::Stale { reason: StaleReason::L2Missing }
+        SessionState::Stale {
+            reason: StaleReason::L2Missing
+        }
     ));
 }

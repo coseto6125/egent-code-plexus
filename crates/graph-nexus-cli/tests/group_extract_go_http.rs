@@ -9,10 +9,14 @@ fn go_net_http_handle_func_extracts_routes() {
     let contracts = extract_http(path, &source);
 
     let ids: Vec<&str> = contracts.iter().map(|c| c.contract_id.as_str()).collect();
-    assert!(ids.contains(&"http:ANY:/api/users"),
-            "missing /api/users; got {ids:?}");
-    assert!(ids.contains(&"http:ANY:/api/users/{id}"),
-            "missing /api/users/{{id}}; got {ids:?}");
+    assert!(
+        ids.contains(&"http:ANY:/api/users"),
+        "missing /api/users; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"http:ANY:/api/users/{id}"),
+        "missing /api/users/{{id}}; got {ids:?}"
+    );
 
     for c in &contracts {
         assert_eq!(c.contract_type, ContractType::Http);

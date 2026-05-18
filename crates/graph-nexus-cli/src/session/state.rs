@@ -31,10 +31,17 @@ pub(crate) fn classify_with_index(
     sid: &str,
     idx: Option<&CommitIndex>,
 ) -> SessionState {
-    let sm_path = repo_root.join("sessions").join(sid).join("session_meta.json");
+    let sm_path = repo_root
+        .join("sessions")
+        .join(sid)
+        .join("session_meta.json");
     let sm = match SessionMeta::read(&sm_path) {
         Ok(sm) => sm,
-        Err(_) => return SessionState::Stale { reason: StaleReason::MetaUnreadable },
+        Err(_) => {
+            return SessionState::Stale {
+                reason: StaleReason::MetaUnreadable,
+            }
+        }
     };
     classify_with_meta(repo_root, sid, &sm, idx)
 }
@@ -52,17 +59,29 @@ pub(crate) fn classify_with_meta(
 
     let l2_dirname = match resolve_l2_dirname_with(idx, &sm.base_sha) {
         Some(d) => d,
-        None => return SessionState::Stale { reason: StaleReason::L2Missing },
+        None => {
+            return SessionState::Stale {
+                reason: StaleReason::L2Missing,
+            }
+        }
     };
 
     let dirty_path = sid_dir.join("dirty_files.json");
     let dirty = match fs::read(&dirty_path) {
         Ok(bytes) => match serde_json::from_slice::<DirtyFiles>(&bytes) {
             Ok(df) => df,
-            Err(_) => return SessionState::Stale { reason: StaleReason::DirtyFilesCorrupt },
+            Err(_) => {
+                return SessionState::Stale {
+                    reason: StaleReason::DirtyFilesCorrupt,
+                }
+            }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DirtyFiles::empty(),
-        Err(_) => return SessionState::Stale { reason: StaleReason::DirtyFilesCorrupt },
+        Err(_) => {
+            return SessionState::Stale {
+                reason: StaleReason::DirtyFilesCorrupt,
+            }
+        }
     };
 
     if dirty.entries.is_empty() {

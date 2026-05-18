@@ -18,7 +18,10 @@ fn parse(src: &str) -> LocalGraph {
 }
 
 fn find_exported(g: &LocalGraph, name: &str) -> Option<bool> {
-    g.nodes.iter().find(|n| n.name == name).map(|n| n.is_exported)
+    g.nodes
+        .iter()
+        .find(|n| n.name == name)
+        .map(|n| n.is_exported)
 }
 
 #[test]
@@ -60,4 +63,3 @@ fn private_type_no_star() {
         "`Qux` (no `*`) must not be exported"
     );
 }
-

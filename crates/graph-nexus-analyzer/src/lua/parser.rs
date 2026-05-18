@@ -1,5 +1,5 @@
-use crate::calls::extract_calls;
 use super::spec::LuaSpec;
+use crate::calls::extract_calls;
 use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
@@ -33,7 +33,10 @@ impl LuaProvider {
             .map(|name| LuaSpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -179,9 +182,7 @@ impl LanguageProvider for LuaProvider {
                     // by node type alone. Source-text scan is the only signal.
                     let is_local_fn = matches!(k, NodeKind::Function)
                         && crate::framework_helpers::node_source_starts_with(
-                            source,
-                            root,
-                            b"local",
+                            source, root, b"local",
                         );
 
                     let span_key = (start.row as u32, start.column as u32);

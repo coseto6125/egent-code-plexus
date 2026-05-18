@@ -1,11 +1,10 @@
 pub mod admin;
 pub mod contracts;
-pub mod group;
 pub mod coverage;
 pub mod cypher;
 pub mod diff;
 pub mod find;
-pub mod format;
+pub mod group;
 pub mod hook;
 pub mod hook_handle;
 pub mod hook_watcher;

@@ -47,7 +47,10 @@ variable "private" {
 "#;
     let nodes = parse(src);
     let node = find(&nodes, "private", NodeKind::Const);
-    assert!(!node.is_exported, "`variable \"private\"` must NOT be exported");
+    assert!(
+        !node.is_exported,
+        "`variable \"private\"` must NOT be exported"
+    );
 }
 
 #[test]
@@ -68,5 +71,8 @@ variable "region" {
     assert!(out.is_exported, "`output \"bucket_name\"` must be exported");
 
     let var = find(&nodes, "region", NodeKind::Const);
-    assert!(!var.is_exported, "`variable \"region\"` must NOT be exported");
+    assert!(
+        !var.is_exported,
+        "`variable \"region\"` must NOT be exported"
+    );
 }

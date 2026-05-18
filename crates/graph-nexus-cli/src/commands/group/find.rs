@@ -86,7 +86,10 @@ pub fn run(args: FindArgs) -> Result<(), GnxError> {
     if args.batch {
         run_batch(&engines, args.merge, args.limit, args.json);
     } else {
-        let pattern = args.pattern.as_deref().expect("clap required_unless_present");
+        let pattern = args
+            .pattern
+            .as_deref()
+            .expect("clap required_unless_present");
         run_one(&engines, pattern, args.merge, args.limit, args.json);
     }
     Ok(())
@@ -133,10 +136,7 @@ fn run_batch(engines: &[(String, Engine)], mode: MergeMode, limit: Option<usize>
     }
 }
 
-fn fan_out_per_repo<'a>(
-    engines: &'a [(String, Engine)],
-    pattern: &str,
-) -> Vec<(String, Vec<Hit>)> {
+fn fan_out_per_repo<'a>(engines: &'a [(String, Engine)], pattern: &str) -> Vec<(String, Vec<Hit>)> {
     engines
         .par_iter()
         .map(|(member, engine)| {

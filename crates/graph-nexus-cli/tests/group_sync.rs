@@ -27,9 +27,13 @@ fn git_init_and_commit(dir: &Path) {
     Command::new("git")
         .current_dir(dir)
         .args([
-            "-c", "user.email=t@t",
-            "-c", "user.name=t",
-            "commit", "-qm", "init",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
         ])
         .status()
         .unwrap();
@@ -86,7 +90,10 @@ def create_user():
     let home = home_tmp.path();
 
     // ── 3. Index both repos ───────────────────────────────────────────────
-    let out = run_gnx(&["admin", "index", "--repo", go_repo.to_str().unwrap()], home);
+    let out = run_gnx(
+        &["admin", "index", "--repo", go_repo.to_str().unwrap()],
+        home,
+    );
     assert!(
         out.status.success(),
         "admin index go failed:\nstdout: {}\nstderr: {}",
@@ -94,7 +101,10 @@ def create_user():
         String::from_utf8_lossy(&out.stderr),
     );
 
-    let out = run_gnx(&["admin", "index", "--repo", py_repo.to_str().unwrap()], home);
+    let out = run_gnx(
+        &["admin", "index", "--repo", py_repo.to_str().unwrap()],
+        home,
+    );
     assert!(
         out.status.success(),
         "admin index py failed:\nstdout: {}\nstderr: {}",

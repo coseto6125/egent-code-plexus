@@ -16,8 +16,14 @@ fn admin_verify_resolver_help_lists_required_args() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--oracle"), "expected --oracle arg in help: {stdout}");
-    assert!(stdout.contains("--gnx"), "expected --gnx arg in help: {stdout}");
+    assert!(
+        stdout.contains("--oracle"),
+        "expected --oracle arg in help: {stdout}"
+    );
+    assert!(
+        stdout.contains("--gnx"),
+        "expected --gnx arg in help: {stdout}"
+    );
 }
 
 #[test]

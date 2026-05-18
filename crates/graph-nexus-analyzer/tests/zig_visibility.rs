@@ -17,29 +17,48 @@ fn parse(src: &str) -> LocalGraph {
 }
 
 fn find_exported(g: &LocalGraph, name: &str) -> Option<bool> {
-    g.nodes.iter().find(|n| n.name == name).map(|n| n.is_exported)
+    g.nodes
+        .iter()
+        .find(|n| n.name == name)
+        .map(|n| n.is_exported)
 }
 
 #[test]
 fn pub_fn_is_exported() {
     let g = parse("pub fn pub_fn() void {}");
-    assert_eq!(find_exported(&g, "pub_fn"), Some(true), "`pub_fn` must be exported");
+    assert_eq!(
+        find_exported(&g, "pub_fn"),
+        Some(true),
+        "`pub_fn` must be exported"
+    );
 }
 
 #[test]
 fn private_fn_is_not_exported() {
     let g = parse("fn priv_fn() void {}");
-    assert_eq!(find_exported(&g, "priv_fn"), Some(false), "`priv_fn` must NOT be exported");
+    assert_eq!(
+        find_exported(&g, "priv_fn"),
+        Some(false),
+        "`priv_fn` must NOT be exported"
+    );
 }
 
 #[test]
 fn pub_const_is_exported() {
     let g = parse("pub const PubConst = 42;");
-    assert_eq!(find_exported(&g, "PubConst"), Some(true), "`PubConst` must be exported");
+    assert_eq!(
+        find_exported(&g, "PubConst"),
+        Some(true),
+        "`PubConst` must be exported"
+    );
 }
 
 #[test]
 fn private_const_is_not_exported() {
     let g = parse("const PrivConst = 42;");
-    assert_eq!(find_exported(&g, "PrivConst"), Some(false), "`PrivConst` must NOT be exported");
+    assert_eq!(
+        find_exported(&g, "PrivConst"),
+        Some(false),
+        "`PrivConst` must NOT be exported"
+    );
 }

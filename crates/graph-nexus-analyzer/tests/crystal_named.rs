@@ -46,9 +46,8 @@ fn union_type_alias_emits_typedef() {
 
 #[test]
 fn alias_inside_module_emits_typedef() {
-    let g = parse(
-        "module Kemal\n  alias WSHandler = HTTP::WebSocket, HTTP::Server::Context ->\nend",
-    );
+    let g =
+        parse("module Kemal\n  alias WSHandler = HTTP::WebSocket, HTTP::Server::Context ->\nend");
     assert!(
         find_typedef(&g, "WSHandler").is_some(),
         "`WSHandler` inside module must be NodeKind::Typedef; nodes: {:#?}",
@@ -61,7 +60,10 @@ fn alias_is_exported_by_default() {
     let g = parse("alias Callback = Proc(Int32, Nil)");
     let exported = find_typedef(&g, "Callback")
         .unwrap_or_else(|| panic!("`Callback` typedef missing; nodes: {:#?}", g.nodes));
-    assert!(exported, "`Callback` alias must be exported (default public)");
+    assert!(
+        exported,
+        "`Callback` alias must be exported (default public)"
+    );
 }
 
 #[test]

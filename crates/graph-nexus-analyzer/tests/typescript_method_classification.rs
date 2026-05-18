@@ -20,19 +20,34 @@ fn kind_of(g: &LocalGraph, name: &str) -> Option<NodeKind> {
 #[test]
 fn class_instance_method_is_method() {
     let g = parse("class Foo { bar() {} }");
-    assert_eq!(kind_of(&g, "bar"), Some(NodeKind::Method), "nodes: {:?}", g.nodes);
+    assert_eq!(
+        kind_of(&g, "bar"),
+        Some(NodeKind::Method),
+        "nodes: {:?}",
+        g.nodes
+    );
 }
 
 #[test]
 fn class_static_method_is_method() {
     let g = parse("class Foo { static bar() {} }");
-    assert_eq!(kind_of(&g, "bar"), Some(NodeKind::Method), "nodes: {:?}", g.nodes);
+    assert_eq!(
+        kind_of(&g, "bar"),
+        Some(NodeKind::Method),
+        "nodes: {:?}",
+        g.nodes
+    );
 }
 
 #[test]
 fn class_async_method_is_method() {
     let g = parse("class Foo { async bar() {} }");
-    assert_eq!(kind_of(&g, "bar"), Some(NodeKind::Method), "nodes: {:?}", g.nodes);
+    assert_eq!(
+        kind_of(&g, "bar"),
+        Some(NodeKind::Method),
+        "nodes: {:?}",
+        g.nodes
+    );
 }
 
 #[test]
@@ -67,14 +82,29 @@ fn class_arrow_field_is_property() {
 #[test]
 fn interface_method_signature_is_method() {
     let g = parse("export interface Foo { bar(): void; baz?(x: number): string; }");
-    assert_eq!(kind_of(&g, "bar"), Some(NodeKind::Method), "nodes: {:?}", g.nodes);
-    assert_eq!(kind_of(&g, "baz"), Some(NodeKind::Method), "nodes: {:?}", g.nodes);
+    assert_eq!(
+        kind_of(&g, "bar"),
+        Some(NodeKind::Method),
+        "nodes: {:?}",
+        g.nodes
+    );
+    assert_eq!(
+        kind_of(&g, "baz"),
+        Some(NodeKind::Method),
+        "nodes: {:?}",
+        g.nodes
+    );
 }
 
 #[test]
 fn abstract_method_signature_is_method() {
     let g = parse("abstract class A { abstract foo(): void; }");
-    assert_eq!(kind_of(&g, "foo"), Some(NodeKind::Method), "nodes: {:?}", g.nodes);
+    assert_eq!(
+        kind_of(&g, "foo"),
+        Some(NodeKind::Method),
+        "nodes: {:?}",
+        g.nodes
+    );
 }
 
 #[test]
@@ -82,15 +112,23 @@ fn constructor_param_property_is_property() {
     let g = parse(
         "class Foo { constructor(private readonly reflector: Reflector, public x: number) {} }",
     );
-    assert_eq!(kind_of(&g, "reflector"), Some(NodeKind::Property), "nodes: {:?}", g.nodes);
-    assert_eq!(kind_of(&g, "x"), Some(NodeKind::Property), "nodes: {:?}", g.nodes);
+    assert_eq!(
+        kind_of(&g, "reflector"),
+        Some(NodeKind::Property),
+        "nodes: {:?}",
+        g.nodes
+    );
+    assert_eq!(
+        kind_of(&g, "x"),
+        Some(NodeKind::Property),
+        "nodes: {:?}",
+        g.nodes
+    );
 }
 
 #[test]
 fn const_arrow_fn_is_function_not_const() {
-    let g = parse(
-        "export const isNil = (val: any): val is null | undefined => val === null;",
-    );
+    let g = parse("export const isNil = (val: any): val is null | undefined => val === null;");
     assert_eq!(
         kind_of(&g, "isNil"),
         Some(NodeKind::Function),

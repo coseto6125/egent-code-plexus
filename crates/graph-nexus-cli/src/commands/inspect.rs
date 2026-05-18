@@ -1,4 +1,3 @@
-use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
@@ -114,8 +113,8 @@ fn build_inspect_block(
         let target_node = &graph.nodes[edge.target.to_native() as usize];
         let target_file = &graph.files[target_node.file_idx.to_native() as usize];
         let target_file_path = target_file.path.resolve(&graph.string_pool);
-        let target_kind = kind_to_str(&target_node.kind);
-        let rel_str = rel_to_str(&edge.rel_type).to_string();
+        let target_kind = target_node.kind.as_str();
+        let rel_str = edge.rel_type.as_str().to_string();
 
         if !edge_keeps(target_kind, target_file_path, &rel_str) {
             continue;
@@ -140,8 +139,8 @@ fn build_inspect_block(
         let source_node = &graph.nodes[edge.source.to_native() as usize];
         let source_file = &graph.files[source_node.file_idx.to_native() as usize];
         let source_file_path = source_file.path.resolve(&graph.string_pool);
-        let source_kind = kind_to_str(&source_node.kind);
-        let rel_str = rel_to_str(&edge.rel_type).to_string();
+        let source_kind = source_node.kind.as_str();
+        let rel_str = edge.rel_type.as_str().to_string();
 
         // For incoming edges the "target" we filter against is the OTHER end —
         // i.e. the caller / importer.
@@ -199,7 +198,7 @@ fn build_inspect_block(
     serde_json::json!({
         "symbol": {
             "name": node.name.resolve(&graph.string_pool),
-            "kind": kind_to_str(&node.kind),
+            "kind": node.kind.as_str(),
             "filePath": file_path_str,
             "startLine": node.span.0.to_native(),
             "endLine": node.span.2.to_native(),
@@ -236,7 +235,7 @@ fn collect_contained_members(
         let target_file = &graph.files[target_node.file_idx.to_native() as usize];
         bucket.push(serde_json::json!({
             "name": target_node.name.resolve(&graph.string_pool),
-            "kind": kind_to_str(&target_node.kind),
+            "kind": target_node.kind.as_str(),
             "filePath": target_file.path.resolve(&graph.string_pool),
             "line": target_node.span.0.to_native(),
         }));
@@ -280,8 +279,8 @@ where
         }
         let source_file = &graph.files[source_node.file_idx.to_native() as usize];
         let source_file_path = source_file.path.resolve(&graph.string_pool);
-        let source_kind = kind_to_str(&source_node.kind);
-        let rel_str = rel_to_str(&edge.rel_type);
+        let source_kind = source_node.kind.as_str();
+        let rel_str = edge.rel_type.as_str();
         if !edge_keeps(source_kind, source_file_path, rel_str) {
             continue;
         }
@@ -296,7 +295,7 @@ where
         let file = &graph.files[n.file_idx.to_native() as usize];
         results.push(serde_json::json!({
             "name": n.name.resolve(&graph.string_pool),
-            "kind": kind_to_str(&n.kind),
+            "kind": n.kind.as_str(),
             "file": file.path.resolve(&graph.string_pool),
         }));
     }

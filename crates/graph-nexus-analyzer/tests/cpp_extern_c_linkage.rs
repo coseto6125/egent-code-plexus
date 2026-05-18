@@ -17,7 +17,8 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = CppProvider::new().expect("CppProvider init");
-    p.parse_file(Path::new("t.h"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.h"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn fns(g: &LocalGraph) -> Vec<&str> {
@@ -47,7 +48,10 @@ void hdr_close(void* h);
     let names = fns(&g);
     assert!(names.contains(&"hdr_add"), "expected hdr_add in {names:?}");
     assert!(names.contains(&"hdr_sub"), "expected hdr_sub in {names:?}");
-    assert!(names.contains(&"hdr_close"), "expected hdr_close in {names:?}");
+    assert!(
+        names.contains(&"hdr_close"),
+        "expected hdr_close in {names:?}"
+    );
 }
 
 #[test]
@@ -55,7 +59,10 @@ fn extern_c_single_decl_emits_function() {
     let src = "extern \"C\" int single_decl(int x);\n";
     let g = parse(src);
     let names = fns(&g);
-    assert!(names.contains(&"single_decl"), "expected single_decl in {names:?}");
+    assert!(
+        names.contains(&"single_decl"),
+        "expected single_decl in {names:?}"
+    );
 }
 
 #[test]
@@ -69,7 +76,10 @@ void* alloc_ptr(int n);
     let g = parse(src);
     let names = fns(&g);
     assert!(names.contains(&"dup_str"), "expected dup_str in {names:?}");
-    assert!(names.contains(&"alloc_ptr"), "expected alloc_ptr in {names:?}");
+    assert!(
+        names.contains(&"alloc_ptr"),
+        "expected alloc_ptr in {names:?}"
+    );
 }
 
 #[test]
@@ -97,5 +107,9 @@ int with_body(int x) { return x + 1; }
         .iter()
         .filter(|n| n.kind == NodeKind::Function && n.name == "with_body")
         .count();
-    assert_eq!(count, 1, "with_body must emit exactly once; nodes: {:#?}", g.nodes);
+    assert_eq!(
+        count, 1,
+        "with_body must emit exactly once; nodes: {:#?}",
+        g.nodes
+    );
 }

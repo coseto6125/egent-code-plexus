@@ -1,7 +1,7 @@
 pub mod admin;
 pub mod auto_ensure;
-pub mod build;
 pub mod background;
+pub mod build;
 pub use background::flock_preamble;
 pub mod commands;
 pub mod commit_lookup;

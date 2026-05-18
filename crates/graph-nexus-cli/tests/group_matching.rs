@@ -42,7 +42,11 @@ fn exact_match_pairs_provider_consumer() {
 #[test]
 fn unmatched_consumer_lands_in_unmatched() {
     let dir = TempDir::new().unwrap();
-    let contracts = vec![make_contract("b", ContractRole::Consumer, "http:GET:/orphan")];
+    let contracts = vec![make_contract(
+        "b",
+        ContractRole::Consumer,
+        "http:GET:/orphan",
+    )];
     let cfg = GroupConfig::default();
     let (links, unmatched) = match_contracts(&contracts, dir.path(), &cfg, true).unwrap();
     assert!(links.is_empty());
@@ -72,7 +76,10 @@ fn exclude_paths_drops_health_check() {
     let mut cfg = GroupConfig::default();
     cfg.exclude_links_paths = vec!["/health".into()];
     let (links, _) = match_contracts(&contracts, dir.path(), &cfg, false).unwrap();
-    assert!(links.is_empty(), "/health must be excluded from cross-links");
+    assert!(
+        links.is_empty(),
+        "/health must be excluded from cross-links"
+    );
 }
 
 #[test]
@@ -86,9 +93,17 @@ fn bm25_matches_near_miss() {
     // Lower threshold than default 0.6 to ensure near-miss matches.
     cfg.bm25_threshold = 0.01;
     let (links, unmatched) = match_contracts(&contracts, dir.path(), &cfg, false).unwrap();
-    assert!(!links.is_empty(), "BM25 should match near-miss /users ~ /user");
-    assert!(links.iter().any(|l| l.match_type == MatchType::Bm25),
-            "expected at least one Bm25-typed link; got {:?}",
-            links.iter().map(|l| &l.match_type).collect::<Vec<_>>());
-    assert!(unmatched.is_empty(), "consumer should now be matched, not in unmatched");
+    assert!(
+        !links.is_empty(),
+        "BM25 should match near-miss /users ~ /user"
+    );
+    assert!(
+        links.iter().any(|l| l.match_type == MatchType::Bm25),
+        "expected at least one Bm25-typed link; got {:?}",
+        links.iter().map(|l| &l.match_type).collect::<Vec<_>>()
+    );
+    assert!(
+        unmatched.is_empty(),
+        "consumer should now be matched, not in unmatched"
+    );
 }

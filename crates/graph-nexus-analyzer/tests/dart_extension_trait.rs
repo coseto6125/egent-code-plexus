@@ -14,11 +14,15 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = DartProvider::new().expect("DartProvider init");
-    p.parse_file(Path::new("t.dart"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.dart"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn traits(g: &LocalGraph) -> Vec<&RawNode> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Trait).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Trait)
+        .collect()
 }
 
 #[test]
@@ -50,7 +54,11 @@ fn extension_with_body_emits_trait() {
 #[test]
 fn extension_does_not_double_emit_as_class() {
     let g = parse("extension PumpApp on WidgetTester {\n}\n");
-    let classes: Vec<_> = g.nodes.iter().filter(|n| n.kind == NodeKind::Class).collect();
+    let classes: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect();
     assert!(
         classes.iter().all(|n| n.name != "PumpApp"),
         "extension leaked as Class: {:?}",

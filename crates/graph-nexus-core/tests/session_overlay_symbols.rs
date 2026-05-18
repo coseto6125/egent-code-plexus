@@ -40,15 +40,27 @@ fn dirty_files_round_trip_via_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dirty.json");
     let mut entries = BTreeMap::new();
-    entries.insert("src/a.rs".to_string(), DirtyEntry {
-        mtime_ns: 1, content_hash: "h".into(), fragment_id: "f".into(),
-        tantivy_delta_segment: None, parse_failed: false,
-        dirty_symbols: vec![SymbolRef {
-            name: "foo".into(), kind: SymbolKind::Function,
-            file: "src/a.rs".into(), line_start: 1, line_end: 10,
-        }],
-    });
-    let files = DirtyFiles { version: 1, entries };
+    entries.insert(
+        "src/a.rs".to_string(),
+        DirtyEntry {
+            mtime_ns: 1,
+            content_hash: "h".into(),
+            fragment_id: "f".into(),
+            tantivy_delta_segment: None,
+            parse_failed: false,
+            dirty_symbols: vec![SymbolRef {
+                name: "foo".into(),
+                kind: SymbolKind::Function,
+                file: "src/a.rs".into(),
+                line_start: 1,
+                line_end: 10,
+            }],
+        },
+    );
+    let files = DirtyFiles {
+        version: 1,
+        entries,
+    };
     DirtyFiles::write_atomic(&path, &files).unwrap();
     let back = DirtyFiles::read(&path).unwrap();
     assert_eq!(back.entries["src/a.rs"].dirty_symbols[0].name, "foo");

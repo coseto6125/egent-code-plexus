@@ -43,14 +43,22 @@ fn diff_help_lists_section_choices() {
 #[test]
 fn diff_baseline_invalid_ref_errors_with_hint() {
     let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
-        .args(["diff", "--section", "bindings", "--baseline", "definitely-no-such-ref"])
+        .args([
+            "diff",
+            "--section",
+            "bindings",
+            "--baseline",
+            "definitely-no-such-ref",
+        ])
         .output()
         .expect("run gnx diff");
     assert!(!output.status.success(), "invalid ref must error");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("cannot resolve") || stderr.contains("not found")
-            || stderr.contains("unknown") || stderr.contains("baseline"),
+        stderr.contains("cannot resolve")
+            || stderr.contains("not found")
+            || stderr.contains("unknown")
+            || stderr.contains("baseline"),
         "expected unresolvable-ref hint, got: {stderr}"
     );
 }
@@ -126,9 +134,21 @@ fn diff_baseline_short_name_warns_on_remote_divergence() {
         .unwrap();
     assert!(out.status.success());
     std::fs::write(repo.join("a.txt"), "hello").unwrap();
-    let _ = Command::new("git").args(["add", "-A"]).current_dir(repo).output();
     let _ = Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "main commit"])
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .output();
+    let _ = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "main commit",
+        ])
         .current_dir(repo)
         .output();
 
@@ -140,9 +160,21 @@ fn diff_baseline_short_name_warns_on_remote_divergence() {
         .current_dir(repo)
         .output();
     std::fs::write(repo.join("b.txt"), "world").unwrap();
-    let _ = Command::new("git").args(["add", "-A"]).current_dir(repo).output();
     let _ = Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "fake remote commit"])
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .output();
+    let _ = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "fake remote commit",
+        ])
         .current_dir(repo)
         .output();
     let remote_sha_out = Command::new("git")
@@ -150,10 +182,15 @@ fn diff_baseline_short_name_warns_on_remote_divergence() {
         .current_dir(repo)
         .output()
         .unwrap();
-    let remote_sha = String::from_utf8_lossy(&remote_sha_out.stdout).trim().to_string();
+    let remote_sha = String::from_utf8_lossy(&remote_sha_out.stdout)
+        .trim()
+        .to_string();
 
     // Switch back to main and forge refs/remotes/origin/main.
-    let _ = Command::new("git").args(["checkout", "-q", "main"]).current_dir(repo).output();
+    let _ = Command::new("git")
+        .args(["checkout", "-q", "main"])
+        .current_dir(repo)
+        .output();
     let _ = Command::new("git")
         .args(["update-ref", "refs/remotes/origin/main", &remote_sha])
         .current_dir(repo)
@@ -168,7 +205,9 @@ fn diff_baseline_short_name_warns_on_remote_divergence() {
         .expect("run gnx diff");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("local `main`") && stderr.contains("origin/main") && stderr.contains("differs"),
+        stderr.contains("local `main`")
+            && stderr.contains("origin/main")
+            && stderr.contains("differs"),
         "expected divergence warning in stderr, got: {stderr}"
     );
 }
@@ -179,11 +218,26 @@ fn diff_baseline_qualified_ref_no_warning() {
 
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path();
-    let _ = Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(repo).output();
-    std::fs::write(repo.join("a.txt"), "hello").unwrap();
-    let _ = Command::new("git").args(["add", "-A"]).current_dir(repo).output();
     let _ = Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"])
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(repo)
+        .output();
+    std::fs::write(repo.join("a.txt"), "hello").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .output();
+    let _ = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ])
         .current_dir(repo)
         .output();
 
@@ -220,13 +274,28 @@ fn diff_baseline_short_name_no_remote_emits_note() {
     let repo = tmp.path();
 
     // git init + 1 commit on main, but NO origin remote configured.
-    let _ = Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(repo).output();
+    let _ = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(repo)
+        .output();
     std::fs::write(repo.join("a.txt"), "hello").unwrap();
-    let _ = Command::new("git").args(["add", "-A"]).current_dir(repo).output();
-    let _ = Command::new("git").args([
-        "-c","user.email=t@t","-c","user.name=t",
-        "commit","-q","-m","init"
-    ]).current_dir(repo).output();
+    let _ = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .output();
+    let _ = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ])
+        .current_dir(repo)
+        .output();
 
     // Run gnx diff --baseline main. No origin remote → expect skip-note on stderr.
     let output = Command::new(env!("CARGO_BIN_EXE_gnx"))

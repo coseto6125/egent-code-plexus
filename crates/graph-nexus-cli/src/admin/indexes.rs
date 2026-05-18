@@ -8,10 +8,22 @@ use graph_nexus_core::GnxError;
 use std::path::PathBuf;
 
 const MENU: &[menu::Item<'_>] = &[
-    ("Build / refresh index", "(re)scan a repo and write graph.bin"),
-    ("Inspect indexed repos", "list every repo + branch in the registry"),
-    ("Prune stale indexes", "delete one branch or all orphan index dirs"),
-    ("Drop index", "remove a repo's index data and registry entry"),
+    (
+        "Build / refresh index",
+        "(re)scan a repo and write graph.bin",
+    ),
+    (
+        "Inspect indexed repos",
+        "list every repo + branch in the registry",
+    ),
+    (
+        "Prune stale indexes",
+        "delete one branch or all orphan index dirs",
+    ),
+    (
+        "Drop index",
+        "remove a repo's index data and registry entry",
+    ),
     ("← Back", ""),
 ];
 
@@ -61,7 +73,11 @@ fn print_registry(registry: &RegistryFile, home_gnx: &std::path::Path) {
         return;
     }
     for (dir_name, alias) in &registry.repos {
-        let display_name = alias.aliases.first().map(|s| s.as_str()).unwrap_or(dir_name);
+        let display_name = alias
+            .aliases
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or(dir_name);
         println!("  {}", display_name);
         println!("    dir_name: {}", dir_name);
         println!("    common_dir: {}", alias.common_dir);

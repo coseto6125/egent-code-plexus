@@ -20,7 +20,9 @@ fn parse(src: &str) -> Vec<RawNode> {
 }
 
 fn find_typedef<'a>(nodes: &'a [RawNode], name: &str) -> Option<&'a RawNode> {
-    nodes.iter().find(|n| n.name == name && n.kind == NodeKind::Typedef)
+    nodes
+        .iter()
+        .find(|n| n.name == name && n.kind == NodeKind::Typedef)
 }
 
 const MODULE_WRAP_OPEN: &str = "module 0x1::T {\n";
@@ -73,9 +75,7 @@ fn plain_use_no_alias_does_not_emit_typedef() {
 
 #[test]
 fn multiple_aliases_coexist() {
-    let src = wrap(
-        "use std::vector as V;\nuse std::option as O;\nuse std::string::String as Str;",
-    );
+    let src = wrap("use std::vector as V;\nuse std::option as O;\nuse std::string::String as Str;");
     let nodes = parse(&src);
     find_typedef(&nodes, "V").unwrap_or_else(|| panic!("`V` missing; nodes: {nodes:#?}"));
     find_typedef(&nodes, "O").unwrap_or_else(|| panic!("`O` missing; nodes: {nodes:#?}"));

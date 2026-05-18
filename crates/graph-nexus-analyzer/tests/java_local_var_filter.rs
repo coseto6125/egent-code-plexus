@@ -35,7 +35,11 @@ public class Example {
     assert!(
         !has_variable(&graph, "localA"),
         "localA (method-local) must not appear as Variable; nodes: {:?}",
-        graph.nodes.iter().map(|n| (&n.name, &n.kind)).collect::<Vec<_>>()
+        graph
+            .nodes
+            .iter()
+            .map(|n| (&n.name, &n.kind))
+            .collect::<Vec<_>>()
     );
     assert!(
         !has_variable(&graph, "localB"),

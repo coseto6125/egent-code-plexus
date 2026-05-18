@@ -28,7 +28,15 @@ fn first_build_writes_commit_dir_atomically() {
     Command::new("git")
         .arg("-C")
         .arg(&worktree)
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "x",
+        ])
         .status()
         .unwrap();
 

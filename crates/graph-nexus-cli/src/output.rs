@@ -241,10 +241,7 @@ mod tests {
             "2026-05-16T15:33:00Z"
         );
         // Already compact (no `.`, ends `Z`) → identity
-        assert_eq!(
-            compact_iso("2026-05-16T15:33:00Z"),
-            "2026-05-16T15:33:00Z"
-        );
+        assert_eq!(compact_iso("2026-05-16T15:33:00Z"), "2026-05-16T15:33:00Z");
         // No subsecond, +00:00 offset → just rewrite offset to Z
         assert_eq!(
             compact_iso("2026-05-16T15:33:00+00:00"),
@@ -277,7 +274,10 @@ mod tests {
         });
         compress_for_llm(&mut v);
         let row = &v["results"][0];
-        assert!(row.get("uid").is_none(), "uid should be stripped (derivable)");
+        assert!(
+            row.get("uid").is_none(),
+            "uid should be stripped (derivable)"
+        );
         assert!(
             row.get("handlerUid").is_some(),
             "handlerUid links to a different node — must stay"

@@ -159,7 +159,11 @@ fn distinct_callees() {
     // (scalars); multi-column returns `[["b",1],["c",2]]`. Handle both.
     let callee_names: Vec<&str> = rows
         .iter()
-        .map(|r| r.as_str().or_else(|| r.get(b_col).and_then(|v| v.as_str())).unwrap())
+        .map(|r| {
+            r.as_str()
+                .or_else(|| r.get(b_col).and_then(|v| v.as_str()))
+                .unwrap()
+        })
         .collect();
     assert!(
         callee_names.contains(&"b"),

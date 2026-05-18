@@ -6,7 +6,8 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = CSharpProvider::new().expect("provider");
-    p.parse_file(Path::new("test.cs"), src.as_bytes()).expect("parse")
+    p.parse_file(Path::new("test.cs"), src.as_bytes())
+        .expect("parse")
 }
 
 fn enums(g: &LocalGraph) -> Vec<&str> {
@@ -54,7 +55,10 @@ fn enum_not_emitted_as_class() {
         .iter()
         .filter(|n| n.kind == NodeKind::Class)
         .collect();
-    assert!(cls.is_empty(), "enum was incorrectly emitted as Class: {cls:?}");
+    assert!(
+        cls.is_empty(),
+        "enum was incorrectly emitted as Class: {cls:?}"
+    );
     assert_eq!(enums(&g).len(), 1);
 }
 

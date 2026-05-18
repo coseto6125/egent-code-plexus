@@ -10,9 +10,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
-use tantivy::{
-    collector::TopDocs, query::QueryParser, Index, IndexWriter, ReloadPolicy, Searcher,
-};
+use tantivy::{collector::TopDocs, query::QueryParser, Index, IndexWriter, ReloadPolicy, Searcher};
 
 pub fn match_contracts(
     contracts: &[StoredContract],
@@ -77,8 +75,7 @@ pub fn match_contracts(
 
         if !unmatched_consumers.is_empty() {
             let index_dir = group_dir.join("contracts_index");
-            build_bm25_index(&index_dir, &kept)
-                .map_err(io::Error::other)?;
+            build_bm25_index(&index_dir, &kept).map_err(io::Error::other)?;
 
             // Open index + build searcher/parser ONCE — reused across all consumers.
             let (searcher, parser, uid_field) =
@@ -117,8 +114,7 @@ pub fn match_contracts(
         .iter()
         .copied()
         .filter(|c| {
-            c.inner.role == ContractRole::Consumer
-                && !matched_uids.contains(&c.inner.symbol_uid)
+            c.inner.role == ContractRole::Consumer && !matched_uids.contains(&c.inner.symbol_uid)
         })
         .cloned()
         .collect();
@@ -220,9 +216,7 @@ fn build_bm25_index(index_dir: &Path, kept: &[&StoredContract]) -> Result<(), St
 
 /// Open the contracts Tantivy index and return a cached (Searcher, QueryParser, uid_field)
 /// bundle. Called once per `match_contracts` invocation — not per consumer.
-fn open_bm25_searcher(
-    index_dir: &Path,
-) -> Result<(Searcher, QueryParser, Field), String> {
+fn open_bm25_searcher(index_dir: &Path) -> Result<(Searcher, QueryParser, Field), String> {
     let index = Index::open_in_dir(index_dir)
         .map_err(|e| format!("group::bm25_search: Index::open_in_dir failed: {e:?}"))?;
     let reader = index

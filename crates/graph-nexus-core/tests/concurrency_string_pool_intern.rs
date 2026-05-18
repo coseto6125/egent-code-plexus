@@ -65,9 +65,8 @@ fn string_pool_mutex_wrapped_concurrent_dedupe() {
     // Cross-check via raw byte resolution: every unique string must round-trip
     for s in unique.iter() {
         let offset = pool.index[s];
-        let resolved = std::str::from_utf8(
-            &pool.bytes[offset as usize..(offset as usize + s.len())]
-        ).unwrap();
+        let resolved =
+            std::str::from_utf8(&pool.bytes[offset as usize..(offset as usize + s.len())]).unwrap();
         assert_eq!(resolved, s);
     }
 }

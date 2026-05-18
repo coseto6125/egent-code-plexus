@@ -23,14 +23,48 @@ thread_local! {
 fn is_c_reserved_keyword(name: &str) -> bool {
     matches!(
         name,
-        "void" | "char" | "short" | "int" | "long" | "float" | "double"
-        | "signed" | "unsigned" | "_Bool" | "_Complex" | "_Imaginary"
-        | "const" | "volatile" | "restrict" | "_Atomic" | "register"
-        | "static" | "extern" | "auto" | "_Thread_local"
-        | "struct" | "union" | "enum" | "typedef"
-        | "if" | "else" | "for" | "while" | "do" | "switch" | "case"
-        | "default" | "break" | "continue" | "return" | "goto" | "sizeof"
-        | "inline" | "_Static_assert" | "_Alignas" | "_Alignof"
+        "void"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "signed"
+            | "unsigned"
+            | "_Bool"
+            | "_Complex"
+            | "_Imaginary"
+            | "const"
+            | "volatile"
+            | "restrict"
+            | "_Atomic"
+            | "register"
+            | "static"
+            | "extern"
+            | "auto"
+            | "_Thread_local"
+            | "struct"
+            | "union"
+            | "enum"
+            | "typedef"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "do"
+            | "switch"
+            | "case"
+            | "default"
+            | "break"
+            | "continue"
+            | "return"
+            | "goto"
+            | "sizeof"
+            | "inline"
+            | "_Static_assert"
+            | "_Alignas"
+            | "_Alignof"
     )
 }
 
@@ -410,7 +444,10 @@ impl CProvider {
             .iter()
             .map(|name| CSpec::CAPTURE_KIND.get(name).copied())
             .collect();
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 

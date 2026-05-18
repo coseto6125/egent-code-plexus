@@ -32,7 +32,8 @@ fn parse(src: &str) -> LocalGraph {
 }
 
 fn routes(g: &LocalGraph) -> Vec<(&str, &str)> {
-    g.routes.iter()
+    g.routes
+        .iter()
         .map(|r| (r.method.as_str(), r.path.as_str()))
         .collect()
 }
@@ -51,8 +52,10 @@ def index2():
 "#;
     let g = parse(src);
     let rs = routes(&g);
-    assert!(rs.iter().any(|(m, p)| *m == "get" && *p == "/index2"),
-        "expected GET /index2 in {rs:?}");
+    assert!(
+        rs.iter().any(|(m, p)| *m == "get" && *p == "/index2"),
+        "expected GET /index2 in {rs:?}"
+    );
 }
 
 #[test]
@@ -66,8 +69,10 @@ def block():
 "#;
     let g = parse(src);
     let rs = routes(&g);
-    assert!(rs.iter().any(|(m, p)| *m == "post" && *p == "/block"),
-        "expected POST /block in {rs:?}");
+    assert!(
+        rs.iter().any(|(m, p)| *m == "post" && *p == "/block"),
+        "expected POST /block in {rs:?}"
+    );
 }
 
 #[test]
@@ -100,8 +105,10 @@ def delete(id):
         ("put", "/<int:id>/update"),
         ("delete", "/<int:id>/delete"),
     ] {
-        assert!(rs.iter().any(|(m, p)| *m == method && *p == path),
-            "expected {method} {path} in {rs:?}");
+        assert!(
+            rs.iter().any(|(m, p)| *m == method && *p == path),
+            "expected {method} {path} in {rs:?}"
+        );
     }
 }
 
@@ -168,6 +175,8 @@ async def read_item(id: int):
 "#;
     let g = parse(src);
     let rs = routes(&g);
-    assert!(rs.iter().any(|(m, p)| *m == "get" && *p == "/items/{id}"),
-        "expected FastAPI route in {rs:?}");
+    assert!(
+        rs.iter().any(|(m, p)| *m == "get" && *p == "/items/{id}"),
+        "expected FastAPI route in {rs:?}"
+    );
 }

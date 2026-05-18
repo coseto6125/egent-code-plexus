@@ -6,7 +6,8 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = CSharpProvider::new().expect("provider");
-    p.parse_file(Path::new("test.cs"), src.as_bytes()).expect("parse")
+    p.parse_file(Path::new("test.cs"), src.as_bytes())
+        .expect("parse")
 }
 
 fn variables(g: &LocalGraph) -> Vec<&str> {
@@ -54,10 +55,7 @@ fn parameter_not_emitted_as_variable() {
     "#;
     let g = parse(src);
     let vars = variables(&g);
-    assert!(
-        vars.is_empty(),
-        "parameters emitted as Variable: {vars:?}"
-    );
+    assert!(vars.is_empty(), "parameters emitted as Variable: {vars:?}");
 }
 
 /// Class fields stay as Property; locals in the same class must not leak.
@@ -103,10 +101,7 @@ fn using_var_not_emitted_as_variable() {
     "#;
     let g = parse(src);
     let vars = variables(&g);
-    assert!(
-        vars.is_empty(),
-        "using-var emitted as Variable: {vars:?}"
-    );
+    assert!(vars.is_empty(), "using-var emitted as Variable: {vars:?}");
 }
 
 /// `foreach var` loop variable must not emit a Variable node.
@@ -121,8 +116,5 @@ fn foreach_var_not_emitted_as_variable() {
     "#;
     let g = parse(src);
     let vars = variables(&g);
-    assert!(
-        vars.is_empty(),
-        "foreach-var emitted as Variable: {vars:?}"
-    );
+    assert!(vars.is_empty(), "foreach-var emitted as Variable: {vars:?}");
 }

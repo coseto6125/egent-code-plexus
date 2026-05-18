@@ -22,7 +22,10 @@ fn parse(src: &str) -> LocalGraph {
 }
 
 fn typedefs(g: &LocalGraph) -> Vec<&RawNode> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Typedef).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Typedef)
+        .collect()
 }
 
 #[test]
@@ -35,7 +38,8 @@ fn newstyle_function_typedef_emits_typedef() {
 
 #[test]
 fn newstyle_generic_typedef_emits_typedef() {
-    let g = parse("typedef MasonGeneratorFromBundle = Future<MasonGenerator> Function(MasonBundle);\n");
+    let g =
+        parse("typedef MasonGeneratorFromBundle = Future<MasonGenerator> Function(MasonBundle);\n");
     let tds = typedefs(&g);
     assert_eq!(tds.len(), 1);
     assert_eq!(tds[0].name, "MasonGeneratorFromBundle");
@@ -47,13 +51,20 @@ fn private_newstyle_typedef_emits_unexported_typedef() {
     let tds = typedefs(&g);
     assert_eq!(tds.len(), 1);
     assert_eq!(tds[0].name, "_Handler");
-    assert!(!tds[0].is_exported, "underscore prefix should mark as not exported");
+    assert!(
+        !tds[0].is_exported,
+        "underscore prefix should mark as not exported"
+    );
 }
 
 #[test]
 fn newstyle_typedef_does_not_double_emit_as_variable() {
     let g = parse("typedef Callback = void Function(int);\n");
-    let variables: Vec<_> = g.nodes.iter().filter(|n| n.kind == NodeKind::Variable).collect();
+    let variables: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Variable)
+        .collect();
     assert!(
         variables.is_empty(),
         "typedef misparse must not leak as Variable, got {:?}",
@@ -80,8 +91,16 @@ fn variable_with_normal_type_is_not_typedef() {
     // become Variable, not Typedef.
     let g = parse("double pi = 3.14;\n");
     let tds = typedefs(&g);
-    assert!(tds.is_empty(), "non-typedef top-level var leaked as Typedef: {:?}", g.nodes);
-    let vars: Vec<_> = g.nodes.iter().filter(|n| n.kind == NodeKind::Variable).collect();
+    assert!(
+        tds.is_empty(),
+        "non-typedef top-level var leaked as Typedef: {:?}",
+        g.nodes
+    );
+    let vars: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Variable)
+        .collect();
     assert_eq!(vars.len(), 1);
     assert_eq!(vars[0].name, "pi");
 }

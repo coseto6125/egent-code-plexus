@@ -74,7 +74,10 @@ impl SwiftProvider {
             .iter()
             .map(|name| SwiftSpec::CAPTURE_KIND.get(name).copied())
             .collect();
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -264,9 +267,9 @@ impl LanguageProvider for SwiftProvider {
                     end.column as u32,
                 );
                 for name_node in &enum_case_names {
-                    if let Ok(name_str) = std::str::from_utf8(
-                        &source[name_node.start_byte()..name_node.end_byte()],
-                    ) {
+                    if let Ok(name_str) =
+                        std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                    {
                         nodes.push(RawNode {
                             decorators: vec![],
                             is_exported: true, // enum cases follow enum visibility

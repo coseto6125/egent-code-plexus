@@ -13,7 +13,8 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = CppProvider::new().expect("CppProvider init");
-    p.parse_file(Path::new("t.h"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.h"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn fns(g: &LocalGraph) -> Vec<&str> {
@@ -51,7 +52,10 @@ static void dictRelease(dict *d);
     let g = parse(src);
     let names = fns(&g);
     assert!(names.contains(&"dictAdd"), "expected dictAdd in {names:?}");
-    assert!(names.contains(&"dictRelease"), "expected dictRelease in {names:?}");
+    assert!(
+        names.contains(&"dictRelease"),
+        "expected dictRelease in {names:?}"
+    );
 }
 
 #[test]
@@ -77,8 +81,14 @@ void hdr_close(void *h);
 "#;
     let g = parse(src);
     let names = fns(&g);
-    assert!(names.contains(&"hdr_init"), "expected hdr_init in {names:?}");
-    assert!(names.contains(&"hdr_close"), "expected hdr_close in {names:?}");
+    assert!(
+        names.contains(&"hdr_init"),
+        "expected hdr_init in {names:?}"
+    );
+    assert!(
+        names.contains(&"hdr_close"),
+        "expected hdr_close in {names:?}"
+    );
 }
 
 #[test]
@@ -111,8 +121,14 @@ public:
         .filter(|n| n.kind == NodeKind::Method)
         .map(|n| n.name.as_str())
         .collect();
-    assert!(methods.contains(&"bar"), "expected `bar` as Method in {methods:?}");
-    assert!(methods.contains(&"baz"), "expected `baz` as Method in {methods:?}");
+    assert!(
+        methods.contains(&"bar"),
+        "expected `bar` as Method in {methods:?}"
+    );
+    assert!(
+        methods.contains(&"baz"),
+        "expected `baz` as Method in {methods:?}"
+    );
 }
 
 #[test]
@@ -122,6 +138,12 @@ fn namespace_scoped_prototype_stays_function() {
     let src = "namespace foo {\n    int bar(int x);\n    void baz();\n}\n";
     let g = parse(src);
     let names = fns(&g);
-    assert!(names.contains(&"bar"), "expected `bar` as Function in {names:?}");
-    assert!(names.contains(&"baz"), "expected `baz` as Function in {names:?}");
+    assert!(
+        names.contains(&"bar"),
+        "expected `bar` as Function in {names:?}"
+    );
+    assert!(
+        names.contains(&"baz"),
+        "expected `baz` as Function in {names:?}"
+    );
 }

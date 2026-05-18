@@ -155,7 +155,10 @@ impl PhpProvider {
             .map(|name| PhpSpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -436,7 +439,11 @@ impl LanguageProvider for PhpProvider {
 
                     // Property dedupe on name-node id so multi-declarator
                     // (`public int $x, $y;`) each gets its own entry.
-                    let node_id = if k == NodeKind::Property { n.id() } else { root.id() };
+                    let node_id = if k == NodeKind::Property {
+                        n.id()
+                    } else {
+                        root.id()
+                    };
                     let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
                         let i = nodes.len();
                         nodes.push(RawNode {

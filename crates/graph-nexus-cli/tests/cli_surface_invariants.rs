@@ -207,7 +207,10 @@ fn mcp_gnx_peers_subcmds_are_real_cli_paths() {
 #[test]
 fn mcp_gnx_group_advertised_flags_exist_in_cli_help() {
     let cases: &[(&str, &[&str])] = &[
-        ("sync", &["--exact-only", "--allow-stale", "--json", "--verbose"]),
+        (
+            "sync",
+            &["--exact-only", "--allow-stale", "--json", "--verbose"],
+        ),
         ("status", &["--json"]),
         ("contracts", &["--type", "--repo", "--unmatched", "--json"]),
         (
@@ -289,8 +292,13 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
         );
     }
     // Hidden subcommands must not produce derived tools.
-    for forbidden in ["gnx_admin", "gnx_hook_handle", "gnx_hook_watcher", "gnx_hook", "gnx_watch"]
-    {
+    for forbidden in [
+        "gnx_admin",
+        "gnx_hook_handle",
+        "gnx_hook_watcher",
+        "gnx_hook",
+        "gnx_watch",
+    ] {
         assert!(
             !listing.contains(forbidden),
             "hidden subcommand leaked as MCP tool `{forbidden}`:\n{listing}"
@@ -544,7 +552,9 @@ fn mcp_serve_responds_to_initialize_and_tools_list() {
     .expect("write initialize");
 
     let mut line = String::new();
-    reader.read_line(&mut line).expect("read initialize response");
+    reader
+        .read_line(&mut line)
+        .expect("read initialize response");
     let init: serde_json::Value =
         serde_json::from_str(&line).expect("initialize response must be JSON");
     assert_eq!(init["id"], 1, "id mismatch on initialize: {line}");
@@ -561,14 +571,13 @@ fn mcp_serve_responds_to_initialize_and_tools_list() {
     .expect("write initialized notification");
 
     // 3. tools/list
-    writeln!(
-        stdin,
-        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#
-    )
-    .expect("write tools/list");
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#)
+        .expect("write tools/list");
 
     line.clear();
-    reader.read_line(&mut line).expect("read tools/list response");
+    reader
+        .read_line(&mut line)
+        .expect("read tools/list response");
     let list: serde_json::Value =
         serde_json::from_str(&line).expect("tools/list response must be JSON");
     assert_eq!(list["id"], 2, "id mismatch on tools/list: {line}");
@@ -681,9 +690,9 @@ fn extract_bracket_tags(desc: &str) -> Vec<String> {
             if end < bytes.len() {
                 let tag = &desc[start..end];
                 if !tag.is_empty()
-                    && tag
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '/')
+                    && tag.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '/'
+                    })
                 {
                     out.push(tag.to_string());
                 }

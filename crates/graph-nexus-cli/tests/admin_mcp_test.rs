@@ -16,7 +16,10 @@ fn admin_mcp_tools_lists_tools() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("inspect"), "expected `inspect` tool in list, got: {stdout}");
+    assert!(
+        stdout.contains("inspect"),
+        "expected `inspect` tool in list, got: {stdout}"
+    );
 }
 
 #[test]
@@ -39,7 +42,10 @@ fn admin_mcp_appears_under_admin_help() {
         .output()
         .expect("run gnx admin --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("mcp"), "expected `mcp` subcommand under admin, got: {stdout}");
+    assert!(
+        stdout.contains("mcp"),
+        "expected `mcp` subcommand under admin, got: {stdout}"
+    );
 }
 
 #[test]
@@ -48,10 +54,16 @@ fn admin_mcp_tools_json_format() {
         .args(["admin", "mcp", "tools", "--format", "json"])
         .output()
         .expect("run gnx admin mcp tools --format json");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("output must be valid JSON");
-    assert!(parsed.is_array() || parsed.get("tools").is_some(),
-        "expected JSON array or {{tools: [...]}} object, got: {parsed}");
+    assert!(
+        parsed.is_array() || parsed.get("tools").is_some(),
+        "expected JSON array or {{tools: [...]}} object, got: {parsed}"
+    );
 }

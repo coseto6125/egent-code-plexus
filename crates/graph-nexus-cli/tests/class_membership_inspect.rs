@@ -36,8 +36,14 @@ fn init_and_analyze(repo: &Path) {
         .unwrap();
     let _ = Command::new("git")
         .args([
-            "-c", "user.email=t@t", "-c", "user.name=t",
-            "commit", "-q", "-m", "init",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
         ])
         .current_dir(repo)
         .output()
@@ -319,10 +325,7 @@ fn cypher_has_method_b1_kind_agnostic() {
         ],
     );
     let rows_all = out_all["rows"].as_array().unwrap();
-    let names_all: Vec<&str> = rows_all
-        .iter()
-        .filter_map(|r| r[1].as_str())
-        .collect();
+    let names_all: Vec<&str> = rows_all.iter().filter_map(|r| r[1].as_str()).collect();
     assert!(
         names_all.contains(&"py_bar"),
         "kind-agnostic query must catch Python def, got {names_all:?}"
@@ -343,10 +346,7 @@ fn cypher_has_method_b1_kind_agnostic() {
         ],
     );
     let rows_strict = out_strict["rows"].as_array().unwrap();
-    let names_strict: Vec<&str> = rows_strict
-        .iter()
-        .filter_map(|r| r[0].as_str())
-        .collect();
+    let names_strict: Vec<&str> = rows_strict.iter().filter_map(|r| r[0].as_str()).collect();
     assert!(
         !names_strict.contains(&"py_bar"),
         "strict `:Method` filter must skip Python def (B.1 documented behaviour), got {names_strict:?}"

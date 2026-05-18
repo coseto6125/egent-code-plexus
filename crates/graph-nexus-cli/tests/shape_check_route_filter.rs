@@ -36,8 +36,7 @@ fn setup_fixture() -> TempDir {
     assert!(out.status.success(), "git init failed");
 
     std::fs::create_dir(repo.join("src")).expect("mkdir src");
-    std::fs::write(repo.join("src/consumer.ts"), FIXTURE_FETCH_CONSUMER)
-        .expect("write fixture");
+    std::fs::write(repo.join("src/consumer.ts"), FIXTURE_FETCH_CONSUMER).expect("write fixture");
 
     let out = Command::new("git")
         .args(["add", "-A"])
@@ -48,15 +47,23 @@ fn setup_fixture() -> TempDir {
 
     let out = Command::new("git")
         .args([
-            "-c", "user.email=t@t",
-            "-c", "user.name=t",
-            "commit", "-q", "-m", "init",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
         ])
         .current_dir(repo)
         .output()
         .expect("git commit");
-    assert!(out.status.success(), "git commit failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git commit failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let out = Command::new(gnx_bin())
         .args(["admin", "index", "--repo", "."])

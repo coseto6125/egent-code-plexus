@@ -36,10 +36,7 @@ fn sample_path_classifies_as_example() {
 
 #[test]
 fn demo_path_classifies_as_example() {
-    assert_eq!(
-        determine_category("demo/serve.py"),
-        FileCategory::Example,
-    );
+    assert_eq!(determine_category("demo/serve.py"), FileCategory::Example,);
     assert_eq!(
         determine_category("packages/x/demos/basic/main.go"),
         FileCategory::Example,
@@ -59,10 +56,7 @@ fn tests_path_still_classifies_as_test() {
         determine_category("packages/core/test/router.spec.ts"),
         FileCategory::Test,
     );
-    assert_eq!(
-        determine_category("src/server_test.go"),
-        FileCategory::Test,
-    );
+    assert_eq!(determine_category("src/server_test.go"), FileCategory::Test,);
 }
 
 #[test]
@@ -92,10 +86,7 @@ fn reference_path_still_wins_over_example() {
 
 #[test]
 fn plain_source_unaffected() {
-    assert_eq!(
-        determine_category("src/lib.rs"),
-        FileCategory::Source,
-    );
+    assert_eq!(determine_category("src/lib.rs"), FileCategory::Source,);
     assert_eq!(
         determine_category("packages/core/router.ts"),
         FileCategory::Source,

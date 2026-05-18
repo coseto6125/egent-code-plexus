@@ -429,7 +429,11 @@ impl PythonProvider {
             blind_builtin_import: query.capture_index_for_name("blind.builtin_import"),
             blind_cross_getattr: query.capture_index_for_name("blind.cross_getattr"),
         };
-        Ok(Self { query, indices, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            indices,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -851,9 +855,7 @@ impl LanguageProvider for PythonProvider {
             // import the blueprint via `from . import bp` without a direct
             // `from flask import` — `has_any_http_framework` returns false
             // there even though the decorator is unambiguously a route.
-            let route_is_decorator_call = route_call_node
-                .map(is_in_decorator)
-                .unwrap_or(false);
+            let route_is_decorator_call = route_call_node.map(is_in_decorator).unwrap_or(false);
             // Drop `<receiver>.test_client.X(...)` patterns up-front: these
             // are test-client REQUESTS, not route definitions. Tree-sitter
             // can't distinguish them by call shape; the `.test_client.`
@@ -875,7 +877,11 @@ impl LanguageProvider for PythonProvider {
                     continue;
                 }
             }
-            if is_route && (has_any_http_framework || route_method_is_framework_specific || route_is_decorator_call) {
+            if is_route
+                && (has_any_http_framework
+                    || route_method_is_framework_specific
+                    || route_is_decorator_call)
+            {
                 if let (Some(r_method), Some(r_path), Some(root)) =
                     (route_method, route_path, root_span_node)
                 {
@@ -925,8 +931,8 @@ impl LanguageProvider for PythonProvider {
                             // as `None`; builder-side symbol-table lookup
                             // takes over there if/when the parser captures
                             // the handler arg.
-                            let decorator_handler = route_call_node
-                                .and_then(|n| resolve_decorator_handler(n, source));
+                            let decorator_handler =
+                                route_call_node.and_then(|n| resolve_decorator_handler(n, source));
                             for method in methods_to_emit {
                                 routes.push(RawRoute {
                                     method,

@@ -108,4 +108,3 @@ fn uid_errors_if_not_under_repo() {
     let repo = Path::new("/repo");
     assert!(uid_path(abs, repo).is_err());
 }
-

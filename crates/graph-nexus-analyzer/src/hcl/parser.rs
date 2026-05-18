@@ -1,5 +1,5 @@
-use crate::calls::extract_calls;
 use super::spec::HclSpec;
+use crate::calls::extract_calls;
 use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
@@ -33,7 +33,10 @@ impl HclProvider {
             .map(|name| HclSpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -93,7 +96,9 @@ impl LanguageProvider for HclProvider {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx as u32) == idx_import {
                     root_span_node = Some(cap.node);
-                } else if Some(cap_idx as u32) == idx_res_type || Some(cap_idx as u32) == idx_data_type {
+                } else if Some(cap_idx as u32) == idx_res_type
+                    || Some(cap_idx as u32) == idx_data_type
+                {
                     prefix_node = Some(cap.node);
                 }
             }

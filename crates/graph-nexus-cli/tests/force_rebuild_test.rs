@@ -246,7 +246,13 @@ fn force_rebuild_l2_invalidates_dirty_session_with_same_base_sha() {
     std::env::set_var("HOME", home.path());
 
     let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
-    let repo_root = initial.commit_dir.parent().unwrap().parent().unwrap().to_path_buf();
+    let repo_root = initial
+        .commit_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     add_session(&repo_root, "sid_dirty", &sha, true);
     add_session(&repo_root, "sid_clean", &sha, false);
 

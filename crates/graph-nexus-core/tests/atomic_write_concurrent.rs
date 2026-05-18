@@ -11,8 +11,8 @@
 
 use graph_nexus_core::registry::{atomic_write_bytes, atomic_write_json};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn tmpdir() -> PathBuf {
     let base = std::env::temp_dir().join(format!(
@@ -59,7 +59,11 @@ fn concurrent_atomic_write_bytes_never_corrupts_target() {
         let corrupt = Arc::clone(&observed_corrupt);
         handles.push(std::thread::spawn(move || {
             for i in 0..iters {
-                let bytes = if (tid + i) % 2 == 0 { &short_bytes } else { &long_bytes };
+                let bytes = if (tid + i) % 2 == 0 {
+                    &short_bytes
+                } else {
+                    &long_bytes
+                };
                 atomic_write_bytes(&target, bytes).expect("write");
 
                 // Probe: re-read AFTER our rename — must always parse
@@ -82,7 +86,8 @@ fn concurrent_atomic_write_bytes_never_corrupts_target() {
 
     let n_corrupt = observed_corrupt.load(Ordering::Relaxed);
     assert_eq!(
-        n_corrupt, 0,
+        n_corrupt,
+        0,
         "atomic_write_bytes produced corrupt JSON on {} read probes \
          under concurrent writers (target: {})",
         n_corrupt,

@@ -16,11 +16,16 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = CppProvider::new().expect("CppProvider init");
-    p.parse_file(Path::new("t.cpp"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.cpp"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn methods(g: &LocalGraph) -> Vec<&str> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Method).map(|n| n.name.as_str()).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .map(|n| n.name.as_str())
+        .collect()
 }
 
 #[test]

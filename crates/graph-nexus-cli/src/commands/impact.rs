@@ -1,4 +1,3 @@
-use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::output::{emit, OutputFormat};
@@ -257,7 +256,7 @@ fn impact_by_name(
                 return false;
             }
             if let Some(ref kn) = kind_needle {
-                let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
+                let node_kind = node.kind.as_str().to_ascii_lowercase();
                 if &node_kind != kn {
                     return false;
                 }
@@ -295,7 +294,7 @@ fn impact_by_name(
                     .path
                     .resolve(&graph.string_pool);
                 json!({
-                    "kind": kind_to_str(&node.kind),
+                    "kind": node.kind.as_str(),
                     "filePath": file_path,
                     "line": node.span.0.to_native(),
                 })
@@ -428,6 +427,11 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
     type NewEntry = ((&'static str, String, String), (u64, u32));
     type OldEntry = ((&'static str, String, String), u64);
 
+    let max_file_bytes = std::env::var("GNX_MAX_FILE_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(16 * 1024 * 1024);
+
     let per_file: Vec<(Vec<NewEntry>, Vec<OldEntry>)> = changed_paths
         .par_iter()
         .map(|rel_path| {
@@ -435,37 +439,41 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
             let mut old_local: Vec<OldEntry> = Vec::new();
 
             let abs = repo_path.join(rel_path);
-            if abs.exists() {
-                if let Ok(src) = std::fs::read(&abs) {
-                    let rel_pb = PathBuf::from(rel_path);
-                    if let Ok(lg) = pipeline.parse_file_raw(&rel_pb, &src) {
-                        let lines: Vec<&[u8]> = src.split(|&b| b == b'\n').collect();
-                        for raw in &lg.nodes {
-                            if matches!(raw.kind, NodeKind::File | NodeKind::Process) {
-                                continue;
+            if let Ok(meta) = std::fs::metadata(&abs) {
+                if meta.len() <= max_file_bytes {
+                    if let Ok(src) = std::fs::read(&abs) {
+                        let rel_pb = PathBuf::from(rel_path);
+                        if let Ok(lg) = pipeline.parse_file_raw(&rel_pb, &src) {
+                            let lines: Vec<&[u8]> = src.split(|&b| b == b'\n').collect();
+                            for raw in &lg.nodes {
+                                if matches!(raw.kind, NodeKind::File | NodeKind::Process) {
+                                    continue;
+                                }
+                                let h = hash_node_lines(&lines, raw.span.0, raw.span.2);
+                                let kind_str = raw.kind.as_str();
+                                new_local.push((
+                                    (kind_str, rel_path.clone(), raw.name.clone()),
+                                    (h, raw.span.0),
+                                ));
                             }
-                            let h = hash_node_lines(&lines, raw.span.0, raw.span.2);
-                            let kind_str = node_kind_to_str(&raw.kind);
-                            new_local.push((
-                                (kind_str, rel_path.clone(), raw.name.clone()),
-                                (h, raw.span.0),
-                            ));
                         }
                     }
                 }
             }
 
             if let Some(old_src) = head_blob_at(&repo_path, rel_path, baseline_ref) {
-                let rel_pb = PathBuf::from(rel_path);
-                if let Ok(lg) = pipeline.parse_file_raw(&rel_pb, &old_src) {
-                    let lines: Vec<&[u8]> = old_src.split(|&b| b == b'\n').collect();
-                    for raw in &lg.nodes {
-                        if matches!(raw.kind, NodeKind::File | NodeKind::Process) {
-                            continue;
+                if old_src.len() as u64 <= max_file_bytes {
+                    let rel_pb = PathBuf::from(rel_path);
+                    if let Ok(lg) = pipeline.parse_file_raw(&rel_pb, &old_src) {
+                        let lines: Vec<&[u8]> = old_src.split(|&b| b == b'\n').collect();
+                        for raw in &lg.nodes {
+                            if matches!(raw.kind, NodeKind::File | NodeKind::Process) {
+                                continue;
+                            }
+                            let h = hash_node_lines(&lines, raw.span.0, raw.span.2);
+                            let kind_str = raw.kind.as_str();
+                            old_local.push(((kind_str, rel_path.clone(), raw.name.clone()), h));
                         }
-                        let h = hash_node_lines(&lines, raw.span.0, raw.span.2);
-                        let kind_str = node_kind_to_str(&raw.kind);
-                        old_local.push(((kind_str, rel_path.clone(), raw.name.clone()), h));
                     }
                 }
             }
@@ -485,7 +493,6 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
         old_map.extend(old_local);
     }
 
-    // Build lookup from old graph: (kind_str, file_path, name) → node_idx.
     let changed_files_set: HashSet<&str> = changed_paths.iter().map(|s| s.as_str()).collect();
     let mut old_graph_idx: HashMap<(&'static str, String, String), usize> = HashMap::new();
     for (idx, node) in graph.nodes.iter().enumerate() {
@@ -494,7 +501,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
         if !changed_files_set.contains(file_path) {
             continue;
         }
-        let kind_str = kind_to_str(&node.kind);
+        let kind_str = node.kind.as_str();
         let name = node.name.resolve(&graph.string_pool).to_string();
         old_graph_idx.insert((kind_str, file_path.to_string(), name), idx);
     }
@@ -695,7 +702,7 @@ fn run_bfs(
         results.push(json!({
             "uid": curr_node.uid.resolve(&graph.string_pool),
             "name": curr_node.name.resolve(&graph.string_pool),
-            "kind": kind_to_str(&curr_node.kind),
+            "kind": curr_node.kind.as_str(),
             "filePath": file_path,
             "line": curr_node.span.0.to_native(),
             "depth": curr_depth,
@@ -720,7 +727,7 @@ fn run_bfs(
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
-                        let rel_str = rel_to_str(&edge.rel_type);
+                        let rel_str = edge.rel_type.as_str();
                         if !rels.iter().any(|r| r == rel_str) {
                             continue;
                         }
@@ -746,7 +753,7 @@ fn run_bfs(
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
-                        let rel_str = rel_to_str(&edge.rel_type);
+                        let rel_str = edge.rel_type.as_str();
                         if !rels.iter().any(|r| r == rel_str) {
                             continue;
                         }
@@ -770,7 +777,7 @@ fn run_bfs(
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
-                        let rel_str = rel_to_str(&edge.rel_type);
+                        let rel_str = edge.rel_type.as_str();
                         if !rels.iter().any(|r| r == rel_str) {
                             continue;
                         }
@@ -799,36 +806,6 @@ fn collect_blind_spots(
         .filter(|bs| bs.file_path.resolve(&graph.string_pool) == target_file_path)
         .map(|bs| bs.kind.resolve(&graph.string_pool).to_string())
         .collect()
-}
-
-/// Map `NodeKind` (live) to the same strings used in the graph.
-fn node_kind_to_str(kind: &NodeKind) -> &'static str {
-    match kind {
-        NodeKind::File => "File",
-        NodeKind::Function => "Function",
-        NodeKind::Class => "Class",
-        NodeKind::Method => "Method",
-        NodeKind::Interface => "Interface",
-        NodeKind::Constructor => "Constructor",
-        NodeKind::Property => "Property",
-        NodeKind::Variable => "Variable",
-        NodeKind::Const => "Const",
-        NodeKind::Import => "Import",
-        NodeKind::Route => "Route",
-        NodeKind::Process => "Process",
-        NodeKind::Document => "Document",
-        NodeKind::Section => "Section",
-        NodeKind::EntryPoint => "EntryPoint",
-        NodeKind::Struct => "Struct",
-        NodeKind::Enum => "Enum",
-        NodeKind::Typedef => "Typedef",
-        NodeKind::Namespace => "Namespace",
-        NodeKind::Module => "Module",
-        NodeKind::Macro => "Macro",
-        NodeKind::Annotation => "Annotation",
-        NodeKind::Trait => "Trait",
-        NodeKind::Impl => "Impl",
-    }
 }
 
 /// FNV-64 hash of the source lines spanning [start_row, end_row] (inclusive,

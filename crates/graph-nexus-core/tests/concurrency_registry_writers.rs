@@ -19,8 +19,15 @@ fn example_path() -> PathBuf {
                 .unwrap()
                 .join("target")
         });
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    target_dir.join(profile).join("examples").join("registry_writer_child")
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    target_dir
+        .join(profile)
+        .join("examples")
+        .join("registry_writer_child")
 }
 
 #[test]
@@ -62,7 +69,10 @@ fn registry_concurrent_writers_converge() {
     names.sort();
     // v2 dir_names are keyed by dir_name (= the value passed by child); children
     // register with alias name as dir_name for this test fixture.
-    assert!(!names.is_empty(), "registry lost writes under concurrent contention");
+    assert!(
+        !names.is_empty(),
+        "registry lost writes under concurrent contention"
+    );
 }
 
 #[test]
@@ -97,6 +107,14 @@ fn registry_concurrent_same_repo_last_writer_wins_safely() {
 
     let reg = Registry::open(&home_gnx).expect("open final");
     let snap = reg.snapshot();
-    let shared: Vec<_> = snap.repos.iter().filter(|(k, _)| k.as_str() == "shared-repo").collect();
-    assert_eq!(shared.len(), 1, "duplicate or lost entry under same-key contention");
+    let shared: Vec<_> = snap
+        .repos
+        .iter()
+        .filter(|(k, _)| k.as_str() == "shared-repo")
+        .collect();
+    assert_eq!(
+        shared.len(),
+        1,
+        "duplicate or lost entry under same-key contention"
+    );
 }

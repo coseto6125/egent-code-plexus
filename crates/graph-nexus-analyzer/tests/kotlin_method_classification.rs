@@ -13,7 +13,11 @@ fn parse(src: &str) -> LocalGraph {
 #[test]
 fn class_fun_emits_method_kind() {
     let g = parse("class Foo {\n    fun bar() {}\n}\n");
-    let bar = g.nodes.iter().find(|n| n.name == "bar").expect("bar missing");
+    let bar = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "bar")
+        .expect("bar missing");
     assert_eq!(bar.kind, NodeKind::Method, "got {:?}", bar);
 }
 

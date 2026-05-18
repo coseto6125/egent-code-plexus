@@ -83,7 +83,10 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
 /// `session_meta.json` to decide whether this stale session is even in scope
 /// for the current `--force`. Read failure ⇒ count as in-scope (conservative).
 fn matches_sha_hint(repo_root: &Path, sid: &str, target_sha: &str) -> bool {
-    let path = repo_root.join("sessions").join(sid).join("session_meta.json");
+    let path = repo_root
+        .join("sessions")
+        .join(sid)
+        .join("session_meta.json");
     match graph_nexus_core::session::SessionMeta::read(&path) {
         Ok(sm) => sm.base_sha == target_sha,
         Err(_) => true,
@@ -102,7 +105,6 @@ fn spawn_delayed_rm_rf(path: PathBuf, delay: Duration) {
         }
     });
 }
-
 
 #[derive(Debug)]
 pub struct ForceRebuildResult {

@@ -65,9 +65,7 @@ impl Engine {
                 eng.view = GraphView::L2Only;
                 Ok(eng)
             }
-            graph_nexus_core::session::SessionState::AugmentedReference {
-                l2_dirname, ..
-            } => {
+            graph_nexus_core::session::SessionState::AugmentedReference { l2_dirname, .. } => {
                 let l2_dir = repo_root.join("commits").join(&l2_dirname);
                 let overlay_dir = repo_root.join("sessions").join(sid);
                 let mut eng = Self::load(l2_dir.join("graph.bin"))?;

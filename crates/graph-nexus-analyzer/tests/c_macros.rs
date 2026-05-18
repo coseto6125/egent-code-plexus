@@ -6,7 +6,9 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let provider = CProvider::new().expect("provider");
-    provider.parse_file(Path::new("test.c"), src.as_bytes()).expect("parse")
+    provider
+        .parse_file(Path::new("test.c"), src.as_bytes())
+        .expect("parse")
 }
 
 #[test]

@@ -50,12 +50,7 @@ fn read_dir_names(home_gnx: &Path) -> Vec<String> {
     let registry_path = home_gnx.join("registry.json");
     let bytes = fs::read(&registry_path).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    v["repos"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect()
+    v["repos"].as_object().unwrap().keys().cloned().collect()
 }
 
 // ── Smoke tests ───────────────────────────────────────────────────────────────
@@ -136,8 +131,7 @@ fn group_coverage_json_shape_two_repos() {
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let v: serde_json::Value =
-        serde_json::from_str(&stdout).expect("output must be valid JSON");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("output must be valid JSON");
 
     let per_repo = v["coverage"]["per_repo"]
         .as_array()
@@ -160,10 +154,7 @@ fn group_coverage_json_shape_two_repos() {
             entry.get("freshness").is_some(),
             "entry missing `freshness`"
         );
-        assert!(
-            entry.get("metrics").is_some(),
-            "entry missing `metrics`"
-        );
+        assert!(entry.get("metrics").is_some(), "entry missing `metrics`");
         assert!(
             entry.get("blind_spots").is_some(),
             "entry missing `blind_spots`"

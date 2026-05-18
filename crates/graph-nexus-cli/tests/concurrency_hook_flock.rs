@@ -14,11 +14,17 @@ fn slow_noop_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent().unwrap()
-                .parent().unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
                 .join("target")
         });
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let path = target_dir.join(profile).join("examples").join("slow_noop");
     if !path.exists() {
         // `cargo test` doesn't auto-build examples — invoke cargo directly so
@@ -107,5 +113,9 @@ fn hook_serial_spawn_runs_each_time() {
 
     let content = std::fs::read_to_string(&marker).unwrap_or_default();
     let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 2, "serial calls should each run; got {lines:?}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "serial calls should each run; got {lines:?}"
+    );
 }

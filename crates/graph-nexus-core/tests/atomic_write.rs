@@ -17,7 +17,8 @@ fn atomic_write_creates_target_and_leaves_no_tmp_sibling() {
     // Each writer uses a unique `<path>.<pid>.<counter>.tmp`; a successful
     // write must consume its own tmp via rename, leaving no tmp sibling
     // matching the target's basename.
-    let leftover_tmps: Vec<_> = fs::read_dir(dir.path()).unwrap()
+    let leftover_tmps: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
             let n = e.file_name();
@@ -25,7 +26,10 @@ fn atomic_write_creates_target_and_leaves_no_tmp_sibling() {
             s.starts_with("graph.bin") && s.ends_with(".tmp")
         })
         .collect();
-    assert!(leftover_tmps.is_empty(), "successful write must clean its tmp sibling, found: {leftover_tmps:?}");
+    assert!(
+        leftover_tmps.is_empty(),
+        "successful write must clean its tmp sibling, found: {leftover_tmps:?}"
+    );
 }
 
 #[test]

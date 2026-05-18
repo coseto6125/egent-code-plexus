@@ -73,11 +73,8 @@ impl LanguageProvider for CrystalProvider {
 
             for cap in m.captures {
                 let ci = cap.index;
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(ci as usize)
-                    .copied()
-                    .flatten()
+                if let Some(k_from_spec) =
+                    self.capture_kind_by_idx.get(ci as usize).copied().flatten()
                 {
                     name_node = Some(cap.node);
                     kind = Some(k_from_spec);
@@ -99,9 +96,7 @@ impl LanguageProvider for CrystalProvider {
             }
 
             if let (Some(n), Some(root), Some(k)) = (name_node, root_span_node, kind) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                {
+                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let start = root.start_position();
                     let end = root.end_position();
                     // Heritage only meaningful for Class; other kinds get empty.

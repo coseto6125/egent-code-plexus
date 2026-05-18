@@ -6,7 +6,8 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = SwiftProvider::new().expect("provider");
-    p.parse_file(Path::new("test.swift"), src.as_bytes()).expect("parse")
+    p.parse_file(Path::new("test.swift"), src.as_bytes())
+        .expect("parse")
 }
 
 /// Top-level `let` must appear as Variable; function-local `let`/`var`,
@@ -17,7 +18,12 @@ fn top_level_let_emits_variable() {
     let g = parse(src);
     let v = g.nodes.iter().find(|n| n.name == "topLevel");
     assert!(v.is_some(), "topLevel missing from nodes: {:#?}", g.nodes);
-    assert_eq!(v.unwrap().kind, NodeKind::Variable, "expected Variable, got {:?}", v.unwrap().kind);
+    assert_eq!(
+        v.unwrap().kind,
+        NodeKind::Variable,
+        "expected Variable, got {:?}",
+        v.unwrap().kind
+    );
 }
 
 #[test]

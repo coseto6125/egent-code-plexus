@@ -1,5 +1,5 @@
-use crate::calls::extract_calls;
 use super::spec::ZigSpec;
+use crate::calls::extract_calls;
 use graph_nexus_core::analyzer::lang_spec::LangSpec;
 use graph_nexus_core::analyzer::provider::LanguageProvider;
 use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
@@ -55,7 +55,10 @@ impl ZigProvider {
             .map(|name| ZigSpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 
@@ -159,7 +162,9 @@ impl LanguageProvider for ZigProvider {
                     if let Ok(src_str) =
                         std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
                     {
-                        let import = PendingImport { source: src_str.to_string() };
+                        let import = PendingImport {
+                            source: src_str.to_string(),
+                        };
                         if let Some(&i) = import_idx_by_key.get(&root_start_byte) {
                             pending_imports[i] = import;
                         } else {

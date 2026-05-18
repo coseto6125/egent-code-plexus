@@ -133,15 +133,16 @@ fn collect_rows(home_gnx: &std::path::Path) -> io::Result<Vec<ListRow>> {
             // otherwise do.
             let sm = SessionMeta::read(&s_path.join("session_meta.json")).ok();
             let state = match &sm {
-                Some(sm) => crate::session::state::classify_with_meta(
-                    &repo_dir, sid, sm, idx_ref,
-                ),
+                Some(sm) => crate::session::state::classify_with_meta(&repo_dir, sid, sm, idx_ref),
                 None => SessionState::Stale {
                     reason: graph_nexus_core::session::StaleReason::MetaUnreadable,
                 },
             };
             let (base_sha, state_view) = match &state {
-                SessionState::PureReference { base_sha, l2_dirname } => (
+                SessionState::PureReference {
+                    base_sha,
+                    l2_dirname,
+                } => (
                     base_sha.clone(),
                     StateView::PureReference {
                         l2_dirname: l2_dirname.clone(),

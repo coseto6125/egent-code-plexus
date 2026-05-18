@@ -180,7 +180,11 @@ mod tests {
     #[test]
     fn build_payload_single_column_flattens_rows_to_scalars() {
         let columns = vec!["n.name".to_string()];
-        let rows = vec![vec![json!("alpha")], vec![json!("beta")], vec![json!("gamma")]];
+        let rows = vec![
+            vec![json!("alpha")],
+            vec![json!("beta")],
+            vec![json!("gamma")],
+        ];
         let payload = build_payload(columns, rows);
         assert_eq!(payload["columns"], json!(["n.name"]));
         // Single-column projection: rows are scalars, not 1-element arrays.

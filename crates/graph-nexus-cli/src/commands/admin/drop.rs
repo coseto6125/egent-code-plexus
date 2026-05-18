@@ -51,8 +51,9 @@ pub fn run(args: DropArgs) -> Result<(), graph_nexus_core::GnxError> {
         // would silently miss the dir and registry entry. `repo_dir_name_for_cwd`
         // is the same helper `build_l2` uses to write the dir, so identifying
         // the target the same way guarantees we find it.
-        let dir_name = repo_dir_name_for_cwd(&args.repo)
-            .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("repo_identity: {e}")))?;
+        let dir_name = repo_dir_name_for_cwd(&args.repo).map_err(|e| {
+            graph_nexus_core::GnxError::InvalidArgument(format!("repo_identity: {e}"))
+        })?;
 
         let index_dir = home_gnx.join(&dir_name);
         if index_dir.exists() {

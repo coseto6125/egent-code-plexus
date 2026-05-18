@@ -33,7 +33,15 @@ fn init_git_repo(path: &Path) -> String {
         .unwrap();
     Command::new("git")
         .current_dir(path)
-        .args(["-c", "user.email=t@t.t", "-c", "user.name=t", "commit", "-qm", "init"])
+        .args([
+            "-c",
+            "user.email=t@t.t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ])
         .status()
         .unwrap();
     let out = Command::new("git")
@@ -94,7 +102,10 @@ fn status_never_synced_reports_no_meta() {
     );
 
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("never synced"), "expected 'never synced'; got: {s}");
+    assert!(
+        s.contains("never synced"),
+        "expected 'never synced'; got: {s}"
+    );
     assert!(s.contains("NO_META"), "expected 'NO_META'; got: {s}");
 }
 

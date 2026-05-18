@@ -46,7 +46,12 @@ fn run_coverage_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempD
     init_git_repo(repo_tmp.path());
 
     let idx_out = Command::new(gnx_bin())
-        .args(["admin", "index", "--repo", repo_tmp.path().to_str().unwrap()])
+        .args([
+            "admin",
+            "index",
+            "--repo",
+            repo_tmp.path().to_str().unwrap(),
+        ])
         .env("HOME", home_tmp.path())
         .output()
         .expect("admin index failed to spawn");

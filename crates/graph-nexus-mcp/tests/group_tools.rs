@@ -64,7 +64,10 @@ async fn single_gnx_group_tool_registered() {
     // The `hide = true` group subcommand must not produce its own
     // derived tool (the manual injection is the only entry).
     let group_count = names.iter().filter(|n| n.starts_with("gnx_group")).count();
-    assert_eq!(group_count, 1, "expected exactly one gnx_group* tool; got {names:?}");
+    assert_eq!(
+        group_count, 1,
+        "expected exactly one gnx_group* tool; got {names:?}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -265,11 +268,6 @@ fn invalid_subcmd_returns_err_without_spawning() {
     let dir = TempDir::new().unwrap();
     let stub = echo_stub(dir.path());
     let tool = group_tool();
-    let err = run_spawn(
-        &stub,
-        &tool,
-        &json!({"subcmd": "add", "name": "demo"}),
-    )
-    .unwrap_err();
+    let err = run_spawn(&stub, &tool, &json!({"subcmd": "add", "name": "demo"})).unwrap_err();
     assert!(err.to_string().contains("must be one of"), "got: {err:?}");
 }

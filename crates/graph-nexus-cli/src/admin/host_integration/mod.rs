@@ -14,7 +14,10 @@ const MECHANISMS: &[menu::Item<'_>] = &[
         "Native",
         "no side-car; integrates into host's own tool registry",
     ),
-    ("Hooks", "shell hooks (Claude Code) for auto-reindex on edits"),
+    (
+        "Hooks",
+        "shell hooks (Claude Code) for auto-reindex on edits",
+    ),
     ("← Back", ""),
 ];
 
@@ -33,12 +36,18 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
 }
 
 const HOOK_HOSTS: &[menu::Item<'_>] = &[
-    ("Claude Code hooks", "PreToolUse + PostToolUse for auto-reindex"),
+    (
+        "Claude Code hooks",
+        "PreToolUse + PostToolUse for auto-reindex",
+    ),
     ("← Back", ""),
 ];
 const HOOK_ACTIONS: &[menu::Item<'_>] = &[
     ("install", "write hook entries to ~/.claude/settings.json"),
-    ("uninstall", "remove gnx hook entries from the host settings"),
+    (
+        "uninstall",
+        "remove gnx hook entries from the host settings",
+    ),
     ("status", "show whether gnx hooks are registered"),
     ("← Back", ""),
 ];

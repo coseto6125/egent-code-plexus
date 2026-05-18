@@ -7,8 +7,8 @@ use graph_nexus_core::GnxError;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use crate::commands::group::{lookup_member, storage};
 use crate::commands::group::types::{ArchivedContractRegistry, ArchivedMatchType, MatchType};
+use crate::commands::group::{lookup_member, storage};
 use crate::commands::impact as local_impact;
 use crate::commit_lookup::find_latest_by_mtime;
 use crate::engine::Engine;

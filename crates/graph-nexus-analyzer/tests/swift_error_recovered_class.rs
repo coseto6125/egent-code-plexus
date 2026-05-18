@@ -20,11 +20,16 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = SwiftProvider::new().expect("SwiftProvider init");
-    p.parse_file(Path::new("t.swift"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.swift"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn classes(g: &LocalGraph) -> Vec<&str> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Class).map(|n| n.name.as_str()).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .map(|n| n.name.as_str())
+        .collect()
 }
 
 #[test]
@@ -67,7 +72,10 @@ final class InternalRequestTests: BaseTestCase {
 "#;
     let g = parse(src);
     let cs = classes(&g);
-    assert!(cs.contains(&"InternalRequestTests"), "expected class recovered from ERROR, got: {cs:?}");
+    assert!(
+        cs.contains(&"InternalRequestTests"),
+        "expected class recovered from ERROR, got: {cs:?}"
+    );
 }
 
 #[test]
@@ -132,9 +140,14 @@ final class Third: BaseTestCase {
     // cost-based, not deterministic across structurally-identical fixtures.
     // In the real corpus all 8 outer classes are recovered (verified against
     // .sample_repo/Swift); the assertion here is a smoke check.
-    let matched: Vec<&&str> = ["First", "Second", "Third"].iter()
-        .filter(|n| cs.contains(n)).collect();
-    assert!(matched.len() >= 2, "expected ≥2 of First/Second/Third in {cs:?}");
+    let matched: Vec<&&str> = ["First", "Second", "Third"]
+        .iter()
+        .filter(|n| cs.contains(n))
+        .collect();
+    assert!(
+        matched.len() >= 2,
+        "expected ≥2 of First/Second/Third in {cs:?}"
+    );
 }
 
 #[test]
@@ -145,8 +158,12 @@ fn struct_kind_disambiguation_unchanged_for_primary_path() {
     // observed corpus.
     let src = "struct Plain { let x: Int = 0 }\n";
     let g = parse(src);
-    let kinds: Vec<NodeKind> = g.nodes.iter()
-        .filter(|n| n.name == "Plain").map(|n| n.kind).collect();
+    let kinds: Vec<NodeKind> = g
+        .nodes
+        .iter()
+        .filter(|n| n.name == "Plain")
+        .map(|n| n.kind)
+        .collect();
     assert!(kinds.contains(&NodeKind::Struct), "{kinds:?}");
 }
 
@@ -204,5 +221,8 @@ fn class_via_extension_unchanged() {
     let src = "extension String {\n    var doubled: String { self + self }\n}\n";
     let g = parse(src);
     let cs = classes(&g);
-    assert!(cs.contains(&"String"), "extension target should still emit: {cs:?}");
+    assert!(
+        cs.contains(&"String"),
+        "extension target should still emit: {cs:?}"
+    );
 }

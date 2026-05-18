@@ -62,7 +62,10 @@ fn private_fun_is_not_exported() {
 fn entry_fun_is_exported() {
     let nodes = parse_in_module("entry fun submit(account: &signer) {}");
     let f = find(&nodes, "submit", NodeKind::Function);
-    assert!(f.is_exported, "`entry fun submit` must be exported (tx entry point)");
+    assert!(
+        f.is_exported,
+        "`entry fun submit` must be exported (tx entry point)"
+    );
 }
 
 #[test]
@@ -76,14 +79,20 @@ fn public_entry_fun_is_exported() {
 fn public_friend_fun_is_exported() {
     let nodes = parse_in_module("public(friend) fun helper(): u64 { 42 }");
     let f = find(&nodes, "helper", NodeKind::Function);
-    assert!(f.is_exported, "`public(friend) fun helper` must be exported");
+    assert!(
+        f.is_exported,
+        "`public(friend) fun helper` must be exported"
+    );
 }
 
 #[test]
 fn public_package_fun_is_exported() {
     let nodes = parse_in_module("public(package) fun pkg_fn(): u64 { 0 }");
     let f = find(&nodes, "pkg_fn", NodeKind::Function);
-    assert!(f.is_exported, "`public(package) fun pkg_fn` must be exported");
+    assert!(
+        f.is_exported,
+        "`public(package) fun pkg_fn` must be exported"
+    );
 }
 
 // ── mixed visibility in one module ───────────────────────────────────────────
@@ -101,7 +110,10 @@ fn mixed_function_visibility() {
     assert!(open.is_exported, "`public fun open_fn` must be exported");
 
     let closed = find(&nodes, "closed_fn", NodeKind::Function);
-    assert!(!closed.is_exported, "plain `fun closed_fn` must not be exported");
+    assert!(
+        !closed.is_exported,
+        "plain `fun closed_fn` must not be exported"
+    );
 
     let entry = find(&nodes, "entry_fn", NodeKind::Function);
     assert!(entry.is_exported, "`entry fun entry_fn` must be exported");
@@ -120,5 +132,8 @@ fn public_struct_is_exported() {
 fn private_struct_is_not_exported() {
     let nodes = parse_in_module("struct Internal has store { data: u64 }");
     let s = find(&nodes, "Internal", NodeKind::Class);
-    assert!(!s.is_exported, "plain `struct Internal` must not be exported");
+    assert!(
+        !s.is_exported,
+        "plain `struct Internal` must not be exported"
+    );
 }

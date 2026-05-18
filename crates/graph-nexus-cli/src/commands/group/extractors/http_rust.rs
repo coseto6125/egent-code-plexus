@@ -1,8 +1,6 @@
 //! Rust HTTP route extractor: axum `.route()` + actix-web attribute macros via tree-sitter.
 
-use crate::commands::group::types::{
-    ContractRole, ContractType, ExtractedContract, SymbolRef,
-};
+use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
 use streaming_iterator::StreamingIterator;
@@ -195,11 +193,9 @@ fn actix_handler_name<'a>(
                         for i in 0..s.named_child_count() {
                             if let Some(child) = s.named_child(i) {
                                 if child.kind() == "identifier" {
-                                    return std::str::from_utf8(
-                                        &source[child.byte_range()],
-                                    )
-                                    .unwrap_or("<unknown>")
-                                    .to_string();
+                                    return std::str::from_utf8(&source[child.byte_range()])
+                                        .unwrap_or("<unknown>")
+                                        .to_string();
                                 }
                             }
                         }

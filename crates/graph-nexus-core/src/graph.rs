@@ -183,6 +183,37 @@ impl NodeKind {
     }
 }
 
+impl ArchivedNodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Function => "Function",
+            Self::Class => "Class",
+            Self::Method => "Method",
+            Self::Interface => "Interface",
+            Self::Constructor => "Constructor",
+            Self::Property => "Property",
+            Self::Variable => "Variable",
+            Self::Const => "Const",
+            Self::Import => "Import",
+            Self::Route => "Route",
+            Self::Process => "Process",
+            Self::Document => "Document",
+            Self::Section => "Section",
+            Self::EntryPoint => "EntryPoint",
+            Self::Struct => "Struct",
+            Self::Enum => "Enum",
+            Self::Typedef => "Typedef",
+            Self::Namespace => "Namespace",
+            Self::Module => "Module",
+            Self::Macro => "Macro",
+            Self::Annotation => "Annotation",
+            Self::Trait => "Trait",
+            Self::Impl => "Impl",
+        }
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
@@ -204,6 +235,44 @@ pub enum RelType {
     /// count as `fetch-url-match[|keys:a,b][|fetches:N]`, parsed by
     /// `graph_nexus_analyzer::fetch_shape`.
     Fetches,
+}
+
+impl RelType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Defines => "defines",
+            Self::Imports => "imports",
+            Self::Calls => "calls",
+            Self::Extends => "extends",
+            Self::Implements => "implements",
+            Self::HasMethod => "has_method",
+            Self::HasProperty => "has_property",
+            Self::Accesses => "accesses",
+            Self::HandlesRoute => "handles_route",
+            Self::StepInProcess => "step_in_process",
+            Self::References => "references",
+            Self::Fetches => "fetches",
+        }
+    }
+}
+
+impl ArchivedRelType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Defines => "defines",
+            Self::Imports => "imports",
+            Self::Calls => "calls",
+            Self::Extends => "extends",
+            Self::Implements => "implements",
+            Self::HasMethod => "has_method",
+            Self::HasProperty => "has_property",
+            Self::Accesses => "accesses",
+            Self::HandlesRoute => "handles_route",
+            Self::StepInProcess => "step_in_process",
+            Self::References => "references",
+            Self::Fetches => "fetches",
+        }
+    }
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]

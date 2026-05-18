@@ -340,7 +340,7 @@ impl AnalyzerPipeline {
             let m = t.into_inner().unwrap();
             let mut rows: Vec<_> = m.into_iter().collect();
             // Sort by total ns descending — surface the hot providers first.
-            rows.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+            rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
             eprintln!("prof per-provider parse_file:");
             for (name, (n, ns)) in rows {
                 let per_file_us = if n > 0 { ns / n / 1000 } else { 0 };

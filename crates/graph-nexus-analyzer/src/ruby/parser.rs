@@ -140,7 +140,10 @@ impl RubyProvider {
             .iter()
             .map(|name| RubySpec::CAPTURE_KIND.get(name).copied())
             .collect();
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 

@@ -17,7 +17,10 @@ fn parse(src: &str) -> LocalGraph {
 }
 
 fn consts(g: &LocalGraph) -> Vec<&RawNode> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Const).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .collect()
 }
 
 #[test]
@@ -55,9 +58,8 @@ fn module_level_const_emits_const() {
 
 #[test]
 fn interface_const_emits_const() {
-    let g = parse(
-        "<?php\ninterface PasswordBroker {\n    const INVALID_TOKEN = 'invalid-token';\n}\n",
-    );
+    let g =
+        parse("<?php\ninterface PasswordBroker {\n    const INVALID_TOKEN = 'invalid-token';\n}\n");
     let cs = consts(&g);
     assert_eq!(cs.len(), 1);
     assert_eq!(cs[0].name, "INVALID_TOKEN");

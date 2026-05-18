@@ -254,7 +254,11 @@ impl LanguageProvider for GoProvider {
                     // expression_list (left side of the declaration). The
                     // tree-sitter query descends into sub-expressions (e.g.
                     // `n` in `n.children`), so we guard here.
-                    if cap.node.parent().is_some_and(|p| p.kind() == "expression_list") {
+                    if cap
+                        .node
+                        .parent()
+                        .is_some_and(|p| p.kind() == "expression_list")
+                    {
                         local_name_nodes.push(cap.node);
                     }
                 }

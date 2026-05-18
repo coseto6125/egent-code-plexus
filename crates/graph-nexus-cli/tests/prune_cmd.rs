@@ -59,11 +59,7 @@ fn prune_orphans_drops_entries_with_missing_common_dir() {
     let orphan_index = home_gnx.join("orphan-repo__aabbccdd");
     std::fs::create_dir_all(valid_index.join("commits")).unwrap();
     std::fs::create_dir_all(orphan_index.join("commits").join("sha_abc12345")).unwrap();
-    std::fs::write(
-        orphan_index.join("commits/sha_abc12345/graph.bin"),
-        b"junk",
-    )
-    .unwrap();
+    std::fs::write(orphan_index.join("commits/sha_abc12345/graph.bin"), b"junk").unwrap();
 
     let mut repos = BTreeMap::new();
     repos.insert(
@@ -94,11 +90,7 @@ fn prune_orphans_drops_entries_with_missing_common_dir() {
         groups: vec![],
     };
     let registry_path = home_gnx.join("registry.json");
-    std::fs::write(
-        &registry_path,
-        serde_json::to_string(&registry).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&registry_path, serde_json::to_string(&registry).unwrap()).unwrap();
 
     let out = Command::new(gnx_bin())
         .args(["admin", "prune", "--orphans"])
@@ -115,10 +107,7 @@ fn prune_orphans_drops_entries_with_missing_common_dir() {
         !orphan_index.exists(),
         "orphan repo's index dir should be removed"
     );
-    assert!(
-        valid_index.exists(),
-        "valid repo's index dir should remain"
-    );
+    assert!(valid_index.exists(), "valid repo's index dir should remain");
 
     let updated: RegistryFile =
         serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap()).unwrap();

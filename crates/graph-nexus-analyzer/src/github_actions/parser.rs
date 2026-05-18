@@ -251,20 +251,21 @@ impl LanguageProvider for GitHubActionsProvider {
         // Exported-output emission: workflow_call outputs + per-job outputs
         // both produce a Property node tagged with a decorator describing the
         // source (`workflow_call.output` or `job.output`). Shared shape.
-        let emit_output = |nodes: &mut Vec<RawNode>, name: String, decorator: &str, node: tree_sitter::Node| {
-            let s = node.start_position();
-            let e = node.end_position();
-            nodes.push(RawNode {
-                name,
-                kind: NodeKind::Property,
-                span: (s.row as u32, s.column as u32, e.row as u32, e.column as u32),
-                is_exported: true,
-                heritage: vec![],
-                type_annotation: None,
-                decorators: vec![decorator.to_string()],
-                calls: vec![],
-            });
-        };
+        let emit_output =
+            |nodes: &mut Vec<RawNode>, name: String, decorator: &str, node: tree_sitter::Node| {
+                let s = node.start_position();
+                let e = node.end_position();
+                nodes.push(RawNode {
+                    name,
+                    kind: NodeKind::Property,
+                    span: (s.row as u32, s.column as u32, e.row as u32, e.column as u32),
+                    is_exported: true,
+                    heritage: vec![],
+                    type_annotation: None,
+                    decorators: vec![decorator.to_string()],
+                    calls: vec![],
+                });
+            };
 
         // Extract workflow_call outputs from `on.workflow_call.outputs` — these
         // are consumed by reusable-workflow callers and are the workflow's public API.

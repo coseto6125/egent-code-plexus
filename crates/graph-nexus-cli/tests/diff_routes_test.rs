@@ -44,11 +44,24 @@ fn diff_routes_two_commit_added() {
     assert!(out.status.success());
 
     let out = Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "v1"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "v1",
+        ])
         .current_dir(repo)
         .output()
         .unwrap();
-    assert!(out.status.success(), "commit v1: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "commit v1: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let baseline_sha = String::from_utf8(
         Command::new("git")
@@ -72,14 +85,35 @@ fn diff_routes_two_commit_added() {
     assert!(out.status.success());
 
     let out = Command::new("git")
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "v2"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "v2",
+        ])
         .current_dir(repo)
         .output()
         .unwrap();
-    assert!(out.status.success(), "commit v2: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "commit v2: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let output = Command::new(gnx_bin())
-        .args(["diff", "--section", "routes", "--baseline", &baseline_sha, "--format", "json"])
+        .args([
+            "diff",
+            "--section",
+            "routes",
+            "--baseline",
+            &baseline_sha,
+            "--format",
+            "json",
+        ])
         .current_dir(repo)
         .env("HOME", repo)
         .output()
@@ -100,8 +134,13 @@ fn diff_routes_two_commit_added() {
         .expect("sections.routes.added must be array");
 
     assert!(
-        added.iter().any(|r| r["path"].as_str() == Some("/api/posts")
-            && r["method"].as_str().map(|m| m.eq_ignore_ascii_case("POST")).unwrap_or(false)),
+        added
+            .iter()
+            .any(|r| r["path"].as_str() == Some("/api/posts")
+                && r["method"]
+                    .as_str()
+                    .map(|m| m.eq_ignore_ascii_case("POST"))
+                    .unwrap_or(false)),
         "expected added route POST /api/posts; got: {added:?}"
     );
 }
@@ -109,19 +148,37 @@ fn diff_routes_two_commit_added() {
 #[test]
 fn diff_routes_head_vs_head_empty() {
     let head_sha = {
-        let out = Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap().stdout;
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
         String::from_utf8_lossy(&out).trim().to_string()
     };
     let output = Command::new(gnx_bin())
-        .args(["diff", "--section", "routes", "--baseline", &head_sha, "--format", "json"])
+        .args([
+            "diff",
+            "--section",
+            "routes",
+            "--baseline",
+            &head_sha,
+            "--format",
+            "json",
+        ])
         .output()
         .expect("run gnx diff routes");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     let routes = &parsed["sections"]["routes"];
     for key in ["added", "removed", "modified"] {
-        let arr = routes[key].as_array().unwrap_or_else(|| panic!("missing {key}"));
+        let arr = routes[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing {key}"));
         assert!(arr.is_empty(), "{key} should be empty: {arr:?}");
     }
 }

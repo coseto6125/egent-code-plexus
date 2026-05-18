@@ -37,9 +37,7 @@ fn template_class_inline_member_is_method() {
 
 #[test]
 fn template_class_inline_member_with_return_type_is_method() {
-    let nodes = parse(
-        "template <typename T> class C { int compute(int x) { return x; } };\n",
-    );
+    let nodes = parse("template <typename T> class C { int compute(int x) { return x; } };\n");
     find(&nodes, "compute", NodeKind::Method);
 }
 

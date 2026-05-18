@@ -54,7 +54,10 @@ fn pub_struct_is_exported() {
 fn private_struct_is_not_exported() {
     let nodes = parse("struct Hidden { v: felt252 }");
     let h = find(&nodes, "Hidden", NodeKind::Class);
-    assert!(!h.is_exported, "`struct Hidden` (no pub) must not be exported");
+    assert!(
+        !h.is_exported,
+        "`struct Hidden` (no pub) must not be exported"
+    );
 }
 
 #[test]
@@ -83,5 +86,8 @@ fn pub_const_is_exported() {
 fn private_const_is_not_exported() {
     let nodes = parse("const LIMIT: felt252 = 42;");
     let c = find(&nodes, "LIMIT", NodeKind::Const);
-    assert!(!c.is_exported, "`const LIMIT` (no pub) must not be exported");
+    assert!(
+        !c.is_exported,
+        "`const LIMIT` (no pub) must not be exported"
+    );
 }

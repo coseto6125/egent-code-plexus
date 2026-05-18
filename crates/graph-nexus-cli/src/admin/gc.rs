@@ -55,7 +55,9 @@ pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<HashSet<Str
             let name = entry.file_name();
             let s = name.to_string_lossy();
             let is_dead = s.ends_with(".dead")
-                || s.rsplit_once(".dead.").map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit())).unwrap_or(false);
+                || s.rsplit_once(".dead.")
+                    .map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or(false);
             if is_dead || s.contains(".stale-") {
                 continue;
             }
@@ -158,7 +160,10 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         let is_dead = name.ends_with(".dead")
-            || name.rsplit_once(".dead.").map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit())).unwrap_or(false);
+            || name
+                .rsplit_once(".dead.")
+                .map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false);
         if is_dead || name.contains(".stale-") {
             fs::remove_dir_all(&path)?;
             removed += 1;

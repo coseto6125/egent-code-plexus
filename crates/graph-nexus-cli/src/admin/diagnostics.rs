@@ -8,7 +8,10 @@ use std::process::Command;
 
 const MENU: &[menu::Item<'_>] = &[
     ("Doctor", "run env + registry health checks together"),
-    ("MCP tool list", "show the MCP tools `gnx mcp serve` exposes"),
+    (
+        "MCP tool list",
+        "show the MCP tools `gnx mcp serve` exposes",
+    ),
     ("Registry health", "check index dirs, graphs, meta, orphans"),
     (
         "Environment report",

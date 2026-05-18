@@ -126,7 +126,11 @@ fn contracts_lists_all_when_no_filters() {
         .args(["group", "contracts", "demo", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["contracts"].as_array().unwrap().len(), 4);
 }
@@ -140,7 +144,11 @@ fn contracts_unmatched_only_filters_matched_out() {
         .args(["group", "contracts", "demo", "--unmatched", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let contracts = v["contracts"].as_array().unwrap();
     // p_http and c_http are matched (via cross_link) → excluded
@@ -160,7 +168,11 @@ fn contracts_type_http_filters_by_type() {
         .args(["group", "contracts", "demo", "--type", "http", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let contracts = v["contracts"].as_array().unwrap();
     assert_eq!(contracts.len(), 2);
@@ -178,7 +190,11 @@ fn contracts_repo_filter() {
         .args(["group", "contracts", "demo", "--repo", "a", "--json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let contracts = v["contracts"].as_array().unwrap();
     assert_eq!(contracts.len(), 2);

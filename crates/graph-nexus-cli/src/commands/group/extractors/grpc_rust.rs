@@ -1,8 +1,6 @@
 //! Rust gRPC server-registration extractor: .add_service(<Svc>Server::new(...)) via tonic.
 
-use crate::commands::group::types::{
-    ContractRole, ContractType, ExtractedContract, SymbolRef,
-};
+use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
 use streaming_iterator::StreamingIterator;
@@ -96,4 +94,3 @@ pub fn extract_grpc(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
     }
     out
 }
-

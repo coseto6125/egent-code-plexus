@@ -25,7 +25,10 @@ fn find<'a>(nodes: &'a [RawNode], name: &str, kind: NodeKind) -> &'a RawNode {
 
 fn absent(nodes: &[RawNode], name: &str, kind: NodeKind) {
     assert!(
-        nodes.iter().find(|n| n.name == name && n.kind == kind).is_none(),
+        nodes
+            .iter()
+            .find(|n| n.name == name && n.kind == kind)
+            .is_none(),
         "unexpected {kind:?} `{name}` found in {nodes:#?}"
     );
 }

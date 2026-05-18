@@ -18,7 +18,10 @@ fn parse(src: &str) -> LocalGraph {
 }
 
 fn typedefs(g: &LocalGraph) -> Vec<&RawNode> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Typedef).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Typedef)
+        .collect()
 }
 
 fn find_alias<'a>(imports: &'a [RawImport], alias: &str) -> &'a RawImport {

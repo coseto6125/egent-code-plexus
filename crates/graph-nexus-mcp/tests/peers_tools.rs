@@ -191,8 +191,5 @@ fn invalid_subcmd_returns_err_without_spawning() {
     let stub = write_stub(dir.path(), "#!/bin/sh\necho \"$@\"\n");
     let tool = peers_tool();
     let err = run_spawn(&stub, &tool, &json!({"subcmd": "gc"})).unwrap_err();
-    assert!(
-        err.to_string().contains("must be one of"),
-        "got: {err:?}"
-    );
+    assert!(err.to_string().contains("must be one of"), "got: {err:?}");
 }

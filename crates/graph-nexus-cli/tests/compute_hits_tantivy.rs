@@ -2,8 +2,8 @@
 //! `TantivyEngine` index, not the hardcoded 1.0 / 0.7 / 0.4 substring
 //! scoring in `bm25_hits_from_graph`. Drives B+ step 1 (tantivy wireup).
 
-use graph_nexus_cli::commands::hook::pre_tool_use::format_hits;
 use graph_nexus_cli::commands::find::{compute_hits, FindArgs, FindMode, Hit, ScoreSource};
+use graph_nexus_cli::commands::hook::pre_tool_use::format_hits;
 use graph_nexus_cli::engine::Engine;
 use graph_nexus_cli::search::TantivyEngine;
 use graph_nexus_core::graph::{

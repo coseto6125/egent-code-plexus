@@ -32,18 +32,14 @@ use std::sync::OnceLock;
 fn mod_decl_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?m)^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
-        )
-        .expect("mod_decl_re")
+        regex::Regex::new(r"(?m)^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+            .expect("mod_decl_re")
     })
 }
 
 fn path_attr_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r#"#\[path\s*=\s*"([^"]+)"\]"#).expect("path_attr_re")
-    })
+    RE.get_or_init(|| regex::Regex::new(r#"#\[path\s*=\s*"([^"]+)"\]"#).expect("path_attr_re"))
 }
 
 fn line_comment_re() -> &'static regex::Regex {
@@ -60,11 +56,19 @@ fn block_comment_re() -> &'static regex::Regex {
 /// MULTILINE regex anchors keep working.
 fn strip_comments(src: &str) -> String {
     let s = block_comment_re().replace_all(src, |caps: &regex::Captures| {
-        caps[0].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect::<String>()
+        caps[0]
+            .chars()
+            .map(|c| if c == '\n' { '\n' } else { ' ' })
+            .collect::<String>()
     });
-    line_comment_re().replace_all(&s, |caps: &regex::Captures| {
-        caps[0].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect::<String>()
-    }).into_owned()
+    line_comment_re()
+        .replace_all(&s, |caps: &regex::Captures| {
+            caps[0]
+                .chars()
+                .map(|c| if c == '\n' { '\n' } else { ' ' })
+                .collect::<String>()
+        })
+        .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +124,12 @@ impl RustWorkspaceModTree {
             let mut infos = Vec::new();
             for member_dir in members {
                 let ctoml = member_dir.join("Cargo.toml");
-                let Some(craw) = read_file(&ctoml) else { continue };
-                let Some(name) = parse_package_name(&craw) else { continue };
+                let Some(craw) = read_file(&ctoml) else {
+                    continue;
+                };
+                let Some(name) = parse_package_name(&craw) else {
+                    continue;
+                };
                 let entry = find_crate_entry(&member_dir);
                 infos.push((name, member_dir, entry));
             }
@@ -147,8 +155,13 @@ impl RustWorkspaceModTree {
             // tree size is bounded by mod-tree depth × crate count.
             let norm = name.replace('-', "_");
             let needs_alias = norm != name;
-            let alias_clone = if needs_alias { Some(tree.clone()) } else { None };
-            out.crates.insert(name.clone(), (crate_dir.clone(), canon_str.clone(), tree));
+            let alias_clone = if needs_alias {
+                Some(tree.clone())
+            } else {
+                None
+            };
+            out.crates
+                .insert(name.clone(), (crate_dir.clone(), canon_str.clone(), tree));
             if let Some(alias_tree) = alias_clone {
                 out.crates
                     .entry(norm)
@@ -267,11 +280,7 @@ impl RustWorkspaceModTree {
         let mut best: Option<(usize, String)> = None;
         for (name, (_crate_dir, cdir_str, _tree)) in &self.crates {
             let is_match = caller_str == *cdir_str
-                || caller_str
-                    .as_bytes()
-                    .get(cdir_str.len())
-                    .copied()
-                    == Some(b'/')
+                || caller_str.as_bytes().get(cdir_str.len()).copied() == Some(b'/')
                     && caller_str.starts_with(cdir_str);
             if is_match {
                 let len = cdir_str.len();
@@ -354,7 +363,9 @@ fn build_mod_tree(entry: &Path) -> ModTree {
         std::collections::HashSet::from([abs_entry]);
 
     while let Some((mod_path, file)) = stack.pop() {
-        let Some(src) = read_file(&file) else { continue };
+        let Some(src) = read_file(&file) else {
+            continue;
+        };
         let clean = strip_comments(&src);
 
         // Collect `#[path = "..."]` attributes so we can honour them.
@@ -606,7 +617,11 @@ mod tests {
         let r = tree.resolve_fqn("crate::foo::bar", "src/lib.rs", dir.path());
         assert!(r.is_some(), "2-seg should resolve");
         let r = r.unwrap();
-        assert!(r.file.ends_with("foo.rs"), "expected foo.rs, got {}", r.file);
+        assert!(
+            r.file.ends_with("foo.rs"),
+            "expected foo.rs, got {}",
+            r.file
+        );
         assert_eq!(r.item_name, "bar");
     }
 
@@ -662,7 +677,11 @@ mod tests {
         let r = tree.resolve_fqn("super::parent_fn", "src/child.rs", dir.path());
         assert!(r.is_some(), "super::fn should resolve, got {:?}", r);
         let r = r.unwrap();
-        assert!(r.file.ends_with("lib.rs"), "expected lib.rs, got {}", r.file);
+        assert!(
+            r.file.ends_with("lib.rs"),
+            "expected lib.rs, got {}",
+            r.file
+        );
         assert_eq!(r.item_name, "parent_fn");
     }
 
@@ -680,7 +699,11 @@ mod tests {
         let r = tree.resolve_fqn("super::super::root_fn", "src/a/b.rs", dir.path());
         assert!(r.is_some(), "super::super::fn should resolve");
         let r = r.unwrap();
-        assert!(r.file.ends_with("lib.rs"), "expected lib.rs, got {}", r.file);
+        assert!(
+            r.file.ends_with("lib.rs"),
+            "expected lib.rs, got {}",
+            r.file
+        );
     }
 
     // ── `self::fn` ──────────────────────────────────────────────────────────
@@ -690,13 +713,20 @@ mod tests {
         let dir = make_tree(&[
             ("Cargo.toml", "[package]\nname = \"mycrate\"\n"),
             ("src/lib.rs", "pub mod foo;\n"),
-            ("src/foo.rs", "pub fn helper() {}\nfn caller() { self::helper(); }\n"),
+            (
+                "src/foo.rs",
+                "pub fn helper() {}\nfn caller() { self::helper(); }\n",
+            ),
         ]);
         let tree = RustWorkspaceModTree::build(dir.path());
         let r = tree.resolve_fqn("self::helper", "src/foo.rs", dir.path());
         assert!(r.is_some(), "self::fn should resolve");
         let r = r.unwrap();
-        assert!(r.file.ends_with("foo.rs"), "expected foo.rs, got {}", r.file);
+        assert!(
+            r.file.ends_with("foo.rs"),
+            "expected foo.rs, got {}",
+            r.file
+        );
         assert_eq!(r.item_name, "helper");
     }
 
@@ -706,14 +736,21 @@ mod tests {
     fn path_attribute_redirect() {
         let dir = make_tree(&[
             ("Cargo.toml", "[package]\nname = \"mycrate\"\n"),
-            ("src/lib.rs", "#[path = \"impl/real.rs\"]\npub mod actual;\n"),
+            (
+                "src/lib.rs",
+                "#[path = \"impl/real.rs\"]\npub mod actual;\n",
+            ),
             ("src/impl/real.rs", "pub fn redirected() {}\n"),
         ]);
         let tree = RustWorkspaceModTree::build(dir.path());
         let r = tree.resolve_fqn("crate::actual::redirected", "src/lib.rs", dir.path());
         assert!(r.is_some(), "#[path] redirect should resolve, got {:?}", r);
         let r = r.unwrap();
-        assert!(r.file.ends_with("real.rs"), "expected real.rs, got {}", r.file);
+        assert!(
+            r.file.ends_with("real.rs"),
+            "expected real.rs, got {}",
+            r.file
+        );
     }
 
     // ── Inline `mod foo { ... }` boundary ───────────────────────────────────
@@ -761,6 +798,10 @@ mod tests {
         let r = tree.resolve_fqn("crate::subdir::inside", "src/lib.rs", dir.path());
         assert!(r.is_some(), "mod/mod.rs style should resolve");
         let r = r.unwrap();
-        assert!(r.file.ends_with("mod.rs"), "expected mod.rs, got {}", r.file);
+        assert!(
+            r.file.ends_with("mod.rs"),
+            "expected mod.rs, got {}",
+            r.file
+        );
     }
 }

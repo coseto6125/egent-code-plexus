@@ -14,8 +14,7 @@ use std::path::Path;
 /// Bump the `+schema<N>` literal whenever `graph.bin`, `CommitBuildMeta`,
 /// or any persisted L2 artefact changes shape in a way pre-bump binaries
 /// can't read back.
-pub const BUILDER_FINGERPRINT: &str =
-    concat!("v", env!("CARGO_PKG_VERSION"), "+schema1");
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema1");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -16,7 +16,11 @@ fn parse(src: &str) -> Vec<(String, NodeKind)> {
     let graph = provider
         .parse_file(Path::new("t.lua"), src.as_bytes())
         .expect("parse_file");
-    graph.nodes.iter().map(|n| (n.name.clone(), n.kind)).collect()
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.kind))
+        .collect()
 }
 
 fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, NodeKind) {
@@ -30,14 +34,22 @@ fn find_node<'a>(nodes: &'a [(String, NodeKind)], name: &str) -> &'a (String, No
 fn test_lua_require_alias_emits_typedef() {
     let nodes = parse("local M = require('mymodule')\n");
     let n = find_node(&nodes, "M");
-    assert_eq!(n.1, NodeKind::Typedef, "require alias must be NodeKind::Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "require alias must be NodeKind::Typedef"
+    );
 }
 
 #[test]
 fn test_lua_dotted_path_alias_emits_typedef() {
     let nodes = parse("local Alias = SomeTable.Nested.Type\n");
     let n = find_node(&nodes, "Alias");
-    assert_eq!(n.1, NodeKind::Typedef, "dot-path alias must be NodeKind::Typedef");
+    assert_eq!(
+        n.1,
+        NodeKind::Typedef,
+        "dot-path alias must be NodeKind::Typedef"
+    );
 }
 
 #[test]
@@ -45,7 +57,11 @@ fn test_lua_plain_literal_local_not_typedef() {
     let nodes = parse("local x = 42\n");
     // Should be Const (or absent from nodes), never Typedef
     if let Some(n) = nodes.iter().find(|(name, _)| name == "x") {
-        assert_ne!(n.1, NodeKind::Typedef, "plain literal local must not be Typedef");
+        assert_ne!(
+            n.1,
+            NodeKind::Typedef,
+            "plain literal local must not be Typedef"
+        );
     }
 }
 

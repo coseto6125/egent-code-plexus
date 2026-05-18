@@ -8,7 +8,11 @@ fn parse(source: &str) -> Vec<(String, NodeKind)> {
     let graph = provider
         .parse_file(Path::new("test.rs"), source.as_bytes())
         .expect("parse_file");
-    graph.nodes.iter().map(|n| (n.name.clone(), n.kind)).collect()
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.kind))
+        .collect()
 }
 
 #[test]
@@ -20,8 +24,13 @@ impl Dog {
 }
 "#;
     let nodes = parse(src);
-    let imp = nodes.iter().find(|(n, k)| n == "Dog" && *k == NodeKind::Impl);
-    assert!(imp.is_some(), "impl Dog must produce NodeKind::Impl for 'Dog'; got: {nodes:?}");
+    let imp = nodes
+        .iter()
+        .find(|(n, k)| n == "Dog" && *k == NodeKind::Impl);
+    assert!(
+        imp.is_some(),
+        "impl Dog must produce NodeKind::Impl for 'Dog'; got: {nodes:?}"
+    );
 }
 
 #[test]
@@ -35,8 +44,13 @@ impl Speak for Cat {
 "#;
     let nodes = parse(src);
     // The impl_item.name capture is the `type:` field — `Cat` in `impl Speak for Cat`
-    let imp = nodes.iter().find(|(n, k)| n == "Cat" && *k == NodeKind::Impl);
-    assert!(imp.is_some(), "impl Speak for Cat must produce NodeKind::Impl 'Cat'; got: {nodes:?}");
+    let imp = nodes
+        .iter()
+        .find(|(n, k)| n == "Cat" && *k == NodeKind::Impl);
+    assert!(
+        imp.is_some(),
+        "impl Speak for Cat must produce NodeKind::Impl 'Cat'; got: {nodes:?}"
+    );
 }
 
 #[test]
@@ -50,9 +64,15 @@ impl Calc {
 "#;
     let nodes = parse(src);
     let add = nodes.iter().find(|(n, _)| n == "add");
-    assert!(add.is_some(), "impl methods must still be emitted: {nodes:?}");
+    assert!(
+        add.is_some(),
+        "impl methods must still be emitted: {nodes:?}"
+    );
     let sub = nodes.iter().find(|(n, _)| n == "sub");
-    assert!(sub.is_some(), "impl methods must still be emitted: {nodes:?}");
+    assert!(
+        sub.is_some(),
+        "impl methods must still be emitted: {nodes:?}"
+    );
 }
 
 #[test]
@@ -65,8 +85,18 @@ impl Server {
 }
 "#;
     let nodes = parse(src);
-    let strct = nodes.iter().find(|(n, k)| n == "Server" && *k == NodeKind::Struct);
-    assert!(strct.is_some(), "Server struct must be NodeKind::Struct: {nodes:?}");
-    let imp = nodes.iter().find(|(n, k)| n == "Server" && *k == NodeKind::Impl);
-    assert!(imp.is_some(), "Server impl must be NodeKind::Impl: {nodes:?}");
+    let strct = nodes
+        .iter()
+        .find(|(n, k)| n == "Server" && *k == NodeKind::Struct);
+    assert!(
+        strct.is_some(),
+        "Server struct must be NodeKind::Struct: {nodes:?}"
+    );
+    let imp = nodes
+        .iter()
+        .find(|(n, k)| n == "Server" && *k == NodeKind::Impl);
+    assert!(
+        imp.is_some(),
+        "Server impl must be NodeKind::Impl: {nodes:?}"
+    );
 }

@@ -11,10 +11,7 @@ fn parse(src: &str) -> LocalGraph {
 }
 
 fn find_kind(graph: &LocalGraph, name: &str, kind: NodeKind) -> bool {
-    graph
-        .nodes
-        .iter()
-        .any(|n| n.name == name && n.kind == kind)
+    graph.nodes.iter().any(|n| n.name == name && n.kind == kind)
 }
 
 #[test]
@@ -23,7 +20,11 @@ fn java_annotation_bare() {
     assert!(
         find_kind(&graph, "MyAnn", NodeKind::Annotation),
         "MyAnn must be Annotation; got: {:?}",
-        graph.nodes.iter().map(|n| (&n.name, &n.kind)).collect::<Vec<_>>()
+        graph
+            .nodes
+            .iter()
+            .map(|n| (&n.name, &n.kind))
+            .collect::<Vec<_>>()
     );
 }
 

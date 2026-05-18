@@ -157,5 +157,8 @@ fn emit_json(name: &str, records: &[ContractRecord]) {
         .collect();
 
     let out = json!({ "group": name, "contracts": contracts_arr });
-    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+    );
 }

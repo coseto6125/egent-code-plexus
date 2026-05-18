@@ -8,22 +8,36 @@ fn parse(source: &str) -> Vec<(String, NodeKind)> {
     let graph = provider
         .parse_file(Path::new("test.rs"), source.as_bytes())
         .expect("parse_file");
-    graph.nodes.iter().map(|n| (n.name.clone(), n.kind)).collect()
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.kind))
+        .collect()
 }
 
 #[test]
 fn test_struct_emits_struct_not_class() {
     let src = "pub struct Foo { x: u32 }";
     let nodes = parse(src);
-    let foo = nodes.iter().find(|(n, _)| n == "Foo").expect("Foo not found");
-    assert_eq!(foo.1, NodeKind::Struct, "struct Foo must be NodeKind::Struct");
+    let foo = nodes
+        .iter()
+        .find(|(n, _)| n == "Foo")
+        .expect("Foo not found");
+    assert_eq!(
+        foo.1,
+        NodeKind::Struct,
+        "struct Foo must be NodeKind::Struct"
+    );
 }
 
 #[test]
 fn test_enum_emits_enum_not_class() {
     let src = "pub enum Color { Red, Green, Blue }";
     let nodes = parse(src);
-    let color = nodes.iter().find(|(n, _)| n == "Color").expect("Color not found");
+    let color = nodes
+        .iter()
+        .find(|(n, _)| n == "Color")
+        .expect("Color not found");
     assert_eq!(color.1, NodeKind::Enum, "enum Color must be NodeKind::Enum");
 }
 
@@ -31,8 +45,15 @@ fn test_enum_emits_enum_not_class() {
 fn test_trait_emits_trait_not_interface() {
     let src = "pub trait Animal { fn speak(&self); }";
     let nodes = parse(src);
-    let animal = nodes.iter().find(|(n, _)| n == "Animal").expect("Animal not found");
-    assert_eq!(animal.1, NodeKind::Trait, "trait Animal must be NodeKind::Trait");
+    let animal = nodes
+        .iter()
+        .find(|(n, _)| n == "Animal")
+        .expect("Animal not found");
+    assert_eq!(
+        animal.1,
+        NodeKind::Trait,
+        "trait Animal must be NodeKind::Trait"
+    );
 }
 
 #[test]

@@ -21,15 +21,12 @@ fn is_inline_class_member(node: tree_sitter::Node<'_>) -> bool {
         match p.kind() {
             "field_declaration_list" => return true,
             // Stop at translation-unit scope or namespace/linkage boundaries.
-            "translation_unit" | "namespace_definition" | "linkage_specification" => {
-                return false
-            }
+            "translation_unit" | "namespace_definition" | "linkage_specification" => return false,
             _ => cursor = p.parent(),
         }
     }
     false
 }
-
 
 /// True if `name` is a C/C++ reserved keyword that tree-sitter sometimes
 /// mis-captures as an identifier during error-recovery from preprocessor
@@ -37,18 +34,80 @@ fn is_inline_class_member(node: tree_sitter::Node<'_>) -> bool {
 fn is_cpp_reserved_keyword(name: &str) -> bool {
     matches!(
         name,
-        "void" | "char" | "short" | "int" | "long" | "float" | "double"
-        | "signed" | "unsigned" | "bool" | "wchar_t" | "char8_t" | "char16_t" | "char32_t"
-        | "const" | "volatile" | "constexpr" | "consteval" | "constinit" | "mutable"
-        | "static" | "extern" | "auto" | "thread_local" | "register" | "inline"
-        | "struct" | "union" | "enum" | "class" | "typedef" | "namespace" | "using"
-        | "template" | "typename" | "concept" | "requires"
-        | "if" | "else" | "for" | "while" | "do" | "switch" | "case"
-        | "default" | "break" | "continue" | "return" | "goto" | "sizeof"
-        | "new" | "delete" | "throw" | "try" | "catch" | "noexcept"
-        | "public" | "private" | "protected" | "virtual" | "override" | "final"
-        | "this" | "nullptr" | "true" | "false" | "operator"
-        | "and" | "or" | "not" | "xor" | "bitand" | "bitor" | "compl"
+        "void"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "signed"
+            | "unsigned"
+            | "bool"
+            | "wchar_t"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "const"
+            | "volatile"
+            | "constexpr"
+            | "consteval"
+            | "constinit"
+            | "mutable"
+            | "static"
+            | "extern"
+            | "auto"
+            | "thread_local"
+            | "register"
+            | "inline"
+            | "struct"
+            | "union"
+            | "enum"
+            | "class"
+            | "typedef"
+            | "namespace"
+            | "using"
+            | "template"
+            | "typename"
+            | "concept"
+            | "requires"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "do"
+            | "switch"
+            | "case"
+            | "default"
+            | "break"
+            | "continue"
+            | "return"
+            | "goto"
+            | "sizeof"
+            | "new"
+            | "delete"
+            | "throw"
+            | "try"
+            | "catch"
+            | "noexcept"
+            | "public"
+            | "private"
+            | "protected"
+            | "virtual"
+            | "override"
+            | "final"
+            | "this"
+            | "nullptr"
+            | "true"
+            | "false"
+            | "operator"
+            | "and"
+            | "or"
+            | "not"
+            | "xor"
+            | "bitand"
+            | "bitor"
+            | "compl"
     )
 }
 
@@ -127,7 +186,10 @@ impl CppProvider {
             .iter()
             .map(|name| CppSpec::CAPTURE_KIND.get(name).copied())
             .collect();
-        Ok(Self { query, capture_kind_by_idx })
+        Ok(Self {
+            query,
+            capture_kind_by_idx,
+        })
     }
 }
 

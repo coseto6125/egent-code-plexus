@@ -2,8 +2,8 @@ use graph_nexus_cli::commands::group::storage::{
     read_contracts, read_contracts_archived, write_contracts, GroupMeta, RepoSnapshot,
 };
 use graph_nexus_cli::commands::group::types::{
-    ContractRegistry, ContractRole, ContractType, ExtractedContract,
-    MatchType, StoredContract, SymbolRef, CrossLink, CrossLinkEndpoint,
+    ContractRegistry, ContractRole, ContractType, CrossLink, CrossLinkEndpoint, ExtractedContract,
+    MatchType, StoredContract, SymbolRef,
 };
 use std::collections::BTreeMap;
 use tempfile::TempDir;
@@ -119,6 +119,12 @@ fn contracts_rkyv_archived_zero_copy_read() {
     let handle = read_contracts_archived(dir.path()).unwrap();
     let arch = handle.archived().unwrap();
     assert_eq!(arch.contracts.len(), 2);
-    assert_eq!(arch.contracts[0].inner.contract_id.as_str(), "http:POST:/api/users");
-    assert_eq!(arch.cross_links[0].contract_id.as_str(), "http:POST:/api/users");
+    assert_eq!(
+        arch.contracts[0].inner.contract_id.as_str(),
+        "http:POST:/api/users"
+    );
+    assert_eq!(
+        arch.cross_links[0].contract_id.as_str(),
+        "http:POST:/api/users"
+    );
 }

@@ -301,10 +301,7 @@ impl SymbolTable {
     /// the index, so an empty slice in production means "no match" rather
     /// than "index not built".
     pub fn files_by_stem(&self, stem: &str) -> &[String] {
-        self.stem_index
-            .get(stem)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.stem_index.get(stem).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Registers a node with the given file path, node name, node ID, and kind.
@@ -332,20 +329,15 @@ impl SymbolTable {
         let file_map = self.file_scoped.entry(file_path.to_string()).or_default();
         let entry = file_map.entry(node_name.to_string()).or_default();
         if kind == NodeKind::Impl {
-            let has_primary = entry.iter().any(|&id| {
-                !matches!(
-                    self.node_kinds.get(id as usize),
-                    Some(NodeKind::Impl)
-                )
-            });
+            let has_primary = entry
+                .iter()
+                .any(|&id| !matches!(self.node_kinds.get(id as usize), Some(NodeKind::Impl)));
             if !has_primary {
                 entry.push(node_id);
             }
         } else {
             // Non-Impl: remove any prior Impl-only placeholders, then push.
-            entry.retain(|&id| {
-                !matches!(self.node_kinds.get(id as usize), Some(NodeKind::Impl))
-            });
+            entry.retain(|&id| !matches!(self.node_kinds.get(id as usize), Some(NodeKind::Impl)));
             entry.push(node_id);
         }
 
@@ -400,7 +392,8 @@ impl SymbolTable {
         if let Some(list) = self.global_scoped.get_mut(node_name) {
             list.push(node_id);
         } else {
-            self.global_scoped.insert(node_name.to_string(), vec![node_id]);
+            self.global_scoped
+                .insert(node_name.to_string(), vec![node_id]);
         }
 
         self.id_to_file.insert(node_id, file_path.to_string());
@@ -592,10 +585,7 @@ mod tests {
             Language::from_normalized_path("Cpp/include/foo.h"),
             Language::Cpp
         );
-        assert_eq!(
-            Language::from_normalized_path("C/src/impl.c"),
-            Language::C
-        );
+        assert_eq!(Language::from_normalized_path("C/src/impl.c"), Language::C);
     }
 
     #[test]

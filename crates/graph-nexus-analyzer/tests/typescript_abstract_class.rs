@@ -13,11 +13,15 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = TypeScriptProvider::new().expect("TypeScriptProvider init");
-    p.parse_file(Path::new("t.ts"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.ts"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn classes(g: &LocalGraph) -> Vec<&RawNode> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Class).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect()
 }
 
 #[test]
@@ -39,14 +43,15 @@ fn exported_abstract_class_emits_class() {
 
 #[test]
 fn abstract_class_with_extends_emits_class_and_heritage() {
-    let g = parse(
-        "export abstract class ModuleRef extends AbstractInstanceResolver {}\n",
-    );
+    let g = parse("export abstract class ModuleRef extends AbstractInstanceResolver {}\n");
     let cs = classes(&g);
     assert_eq!(cs.len(), 1);
     assert_eq!(cs[0].name, "ModuleRef");
     assert!(
-        cs[0].heritage.iter().any(|h| h == "AbstractInstanceResolver"),
+        cs[0]
+            .heritage
+            .iter()
+            .any(|h| h == "AbstractInstanceResolver"),
         "expected heritage AbstractInstanceResolver, got {:?}",
         cs[0].heritage,
     );

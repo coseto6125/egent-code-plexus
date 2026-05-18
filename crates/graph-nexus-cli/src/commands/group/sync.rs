@@ -10,12 +10,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::commands::group::extractors;
-use crate::commands::group::matching::match_contracts;
-use crate::commands::group::storage::{
-    self, write_contracts, write_meta, GroupMeta, RepoSnapshot,
-};
-use crate::commands::group::types::{ContractRegistry, CrossLink, MatchType, StoredContract};
 use crate::commands::group::lookup_member;
+use crate::commands::group::matching::match_contracts;
+use crate::commands::group::storage::{self, write_contracts, write_meta, GroupMeta, RepoSnapshot};
+use crate::commands::group::types::{ContractRegistry, CrossLink, MatchType, StoredContract};
 
 /// Per-member sync outcome. `Err` carries (member-name, reason) so the caller
 /// can record the bare member name in `missing_repos` while logging the full
@@ -72,10 +70,10 @@ pub fn run(args: SyncArgs) -> Result<(), GnxError> {
     let all_extractors = extractors::registry();
 
     let member_results: Vec<MemberResult> = group_entry
-            .members
-            .par_iter()
-            .map(|member| extract_member(member, &reg, &all_extractors, args.allow_stale))
-            .collect();
+        .members
+        .par_iter()
+        .map(|member| extract_member(member, &reg, &all_extractors, args.allow_stale))
+        .collect();
 
     let mut all_contracts: Vec<StoredContract> = Vec::new();
     let mut repo_snapshots: BTreeMap<String, RepoSnapshot> = BTreeMap::new();
@@ -213,10 +211,7 @@ fn walk_and_extract(
             continue;
         }
         let path = entry.path();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let Some(lang) = extractors::lang_for_extension(ext) else {
             continue;
         };
@@ -273,7 +268,15 @@ struct SyncSummary<'a> {
 
 impl SyncSummary<'_> {
     fn emit_toon(&self) {
-        let Self { name, contracts, exact, bm25, unmatched, elapsed_ms, .. } = self;
+        let Self {
+            name,
+            contracts,
+            exact,
+            bm25,
+            unmatched,
+            elapsed_ms,
+            ..
+        } = self;
         println!("group         {name}");
         println!("contracts     {contracts}");
         println!("cross_links");
@@ -285,15 +288,26 @@ impl SyncSummary<'_> {
             for link in self.links {
                 println!(
                     "  {} -> {}  [{}, conf={:.2}]  {}",
-                    link.from.repo, link.to.repo, link.match_type,
-                    link.confidence, link.contract_id
+                    link.from.repo,
+                    link.to.repo,
+                    link.match_type,
+                    link.confidence,
+                    link.contract_id
                 );
             }
         }
     }
 
     fn emit_json(&self) {
-        let Self { name, contracts, exact, bm25, unmatched, elapsed_ms, .. } = self;
+        let Self {
+            name,
+            contracts,
+            exact,
+            bm25,
+            unmatched,
+            elapsed_ms,
+            ..
+        } = self;
         if self.verbose {
             let link_arr: Vec<_> = self.links
                 .iter()
@@ -313,4 +327,3 @@ impl SyncSummary<'_> {
         }
     }
 }
-

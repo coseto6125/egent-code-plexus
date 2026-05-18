@@ -316,7 +316,13 @@ fn impact_baseline_ref_runs_diff_mode() {
 
     let out = Command::new(gnx_bin())
         .args([
-            "impact", "--baseline", "HEAD~1", "--repo", ".", "--format", "json",
+            "impact",
+            "--baseline",
+            "HEAD~1",
+            "--repo",
+            ".",
+            "--format",
+            "json",
         ])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())

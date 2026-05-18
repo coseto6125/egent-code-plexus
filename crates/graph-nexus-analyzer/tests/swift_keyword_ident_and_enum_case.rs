@@ -20,11 +20,16 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = SwiftProvider::new().expect("SwiftProvider init");
-    p.parse_file(Path::new("t.swift"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.swift"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn names_of(g: &LocalGraph, kind: NodeKind) -> Vec<&str> {
-    g.nodes.iter().filter(|n| n.kind == kind).map(|n| n.name.as_str()).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == kind)
+        .map(|n| n.name.as_str())
+        .collect()
 }
 
 // ── Keyword-as-identifier ───────────────────────────────────────────────────
@@ -34,7 +39,10 @@ fn module_level_let_package_emits_variable() {
     // Real Package.swift pattern — `let package = Package(...)`.
     let g = parse("let package = Package(name: \"X\")\n");
     let vars = names_of(&g, NodeKind::Variable);
-    assert!(vars.contains(&"package"), "expected `package` in Variable nodes: {vars:?}");
+    assert!(
+        vars.contains(&"package"),
+        "expected `package` in Variable nodes: {vars:?}"
+    );
 }
 
 #[test]
@@ -42,7 +50,10 @@ fn module_level_let_actor_emits_variable() {
     // Same path with another Swift 5.5+ context keyword.
     let g = parse("let actor = SomeActor()\n");
     let vars = names_of(&g, NodeKind::Variable);
-    assert!(vars.contains(&"actor"), "expected `actor` in Variable nodes: {vars:?}");
+    assert!(
+        vars.contains(&"actor"),
+        "expected `actor` in Variable nodes: {vars:?}"
+    );
 }
 
 #[test]
@@ -102,5 +113,8 @@ fn enum_without_cases_emits_no_property() {
     // Regression guard.
     let g = parse("enum E {\n    func foo() {}\n}\n");
     let props = names_of(&g, NodeKind::Property);
-    assert!(props.is_empty(), "enum methods must not leak as Property; got {props:?}");
+    assert!(
+        props.is_empty(),
+        "enum methods must not leak as Property; got {props:?}"
+    );
 }

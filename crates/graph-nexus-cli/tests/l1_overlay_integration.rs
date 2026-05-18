@@ -59,10 +59,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     );
     std::fs::write(repo.join("main.rs"), "fn original() {}\n").unwrap();
     run(
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["add", "."]),
+        Command::new("git").arg("-C").arg(&repo).args(["add", "."]),
         "git add",
     );
     run(
@@ -102,11 +99,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     // ── 3. Modify a source file WITHOUT committing ────────────────────────
     // Sleep briefly so the mtime is strictly newer than graph.bin.
     std::thread::sleep(std::time::Duration::from_millis(50));
-    std::fs::write(
-        repo.join("main.rs"),
-        "fn original() {}\nfn added() {}\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("main.rs"), "fn original() {}\nfn added() {}\n").unwrap();
 
     // ── 4. Run a query — triggers auto_ensure → Stale → write_dirty_fragment
     // `find` is a lightweight agent command that goes through the graph-load path

@@ -52,7 +52,12 @@ fn decorated_class_method_is_method() {
     let src = "class Foo:\n    @staticmethod\n    def bar():\n        pass\n    @property\n    def baz(self):\n        return 1\n";
     let g = parse(src);
     let bar = find(&g, "bar").expect("bar node");
-    assert_eq!(bar.kind, NodeKind::Method, "@staticmethod-decorated def must be Method: {:?}", bar);
+    assert_eq!(
+        bar.kind,
+        NodeKind::Method,
+        "@staticmethod-decorated def must be Method: {:?}",
+        bar
+    );
     // `baz` may be classified as Property (separate Property query). Verify that's
     // the case explicitly so a future change doesn't silently demote it to Method.
     let baz = find(&g, "baz").expect("baz node");
@@ -68,7 +73,12 @@ fn async_class_method_is_method() {
     let src = "class Foo:\n    async def bar(self):\n        return 1\n";
     let g = parse(src);
     let bar = find(&g, "bar").expect("bar node");
-    assert_eq!(bar.kind, NodeKind::Method, "async def in class must be Method: {:?}", bar);
+    assert_eq!(
+        bar.kind,
+        NodeKind::Method,
+        "async def in class must be Method: {:?}",
+        bar
+    );
 }
 
 #[test]

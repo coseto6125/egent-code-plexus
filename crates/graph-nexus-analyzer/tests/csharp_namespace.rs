@@ -6,7 +6,8 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = CSharpProvider::new().expect("provider");
-    p.parse_file(Path::new("test.cs"), src.as_bytes()).expect("parse")
+    p.parse_file(Path::new("test.cs"), src.as_bytes())
+        .expect("parse")
 }
 
 fn namespaces(g: &LocalGraph) -> Vec<&str> {

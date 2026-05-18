@@ -54,12 +54,7 @@ fn read_dir_names(home_gnx: &Path) -> Vec<String> {
     let registry_path = home_gnx.join("registry.json");
     let bytes = fs::read(&registry_path).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    v["repos"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect()
+    v["repos"].as_object().unwrap().keys().cloned().collect()
 }
 
 // ── Smoke tests ───────────────────────────────────────────────────────────────
@@ -85,10 +80,7 @@ fn group_find_help_exits_zero() {
 #[test]
 fn group_find_unknown_group_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = run_gnx(
-        &["group", "find", "__no_such_group__", "foo"],
-        tmp.path(),
-    );
+    let out = run_gnx(&["group", "find", "__no_such_group__", "foo"], tmp.path());
     assert!(
         !out.status.success(),
         "expected non-zero exit for unknown group"
@@ -143,8 +135,7 @@ fn group_find_json_shape_two_repos() {
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let v: serde_json::Value =
-        serde_json::from_str(&stdout).expect("output must be valid JSON");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("output must be valid JSON");
 
     assert!(
         v.get("per_repo").is_some(),
@@ -198,10 +189,7 @@ fn group_find_merge_rrf_json_shape_two_repos() {
 
     let out = run_gnx(
         &[
-            "group", "find", "rrfgrp", "hello",
-            "--merge", "rrf",
-            "--limit", "3",
-            "--json",
+            "group", "find", "rrfgrp", "hello", "--merge", "rrf", "--limit", "3", "--json",
         ],
         home,
     );
@@ -213,8 +201,7 @@ fn group_find_merge_rrf_json_shape_two_repos() {
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let v: serde_json::Value =
-        serde_json::from_str(&stdout).expect("output must be valid JSON");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("output must be valid JSON");
     assert!(v.get("results").is_some(), "`results` missing:\n{stdout}");
     assert!(v.get("per_repo").is_some(), "`per_repo` missing:\n{stdout}");
     let per_repo = v["per_repo"].as_array().unwrap();

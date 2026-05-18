@@ -43,8 +43,8 @@ fn admin_sessions_list_json_emits_empty_array() {
 fn admin_sessions_list_shows_pure_reference_state() {
     let home = tempfile::tempdir().unwrap();
     let repo_root = home.path().join(".gnx/myrepo__deadbeef");
-    let commit_dir = repo_root
-        .join("commits/branch_main__abc123def456789012345678901234567890abcd");
+    let commit_dir =
+        repo_root.join("commits/branch_main__abc123def456789012345678901234567890abcd");
     std::fs::create_dir_all(&commit_dir).unwrap();
     let cm = graph_nexus_core::registry::CommitBuildMeta {
         version: 1,
@@ -60,11 +60,8 @@ fn admin_sessions_list_shows_pure_reference_state() {
         refs_seen_since: vec![],
         builder_fingerprint: None,
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(
-        &commit_dir.join("meta.json"),
-        &cm,
-    )
-    .unwrap();
+    graph_nexus_core::registry::CommitBuildMeta::write_atomic(&commit_dir.join("meta.json"), &cm)
+        .unwrap();
 
     let sd = repo_root.join("sessions/sid_a");
     std::fs::create_dir_all(&sd).unwrap();
@@ -80,11 +77,8 @@ fn admin_sessions_list_shows_pure_reference_state() {
         watcher_pid: None,
         last_drained_offset: 0,
     };
-    graph_nexus_core::session::SessionMeta::write_atomic(
-        &sd.join("session_meta.json"),
-        &sm,
-    )
-    .unwrap();
+    graph_nexus_core::session::SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm)
+        .unwrap();
     graph_nexus_core::session::DirtyFiles::write_atomic(
         &sd.join("dirty_files.json"),
         &graph_nexus_core::session::DirtyFiles::empty(),

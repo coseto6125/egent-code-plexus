@@ -16,11 +16,16 @@ use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
     let p = RubyProvider::new().expect("RubyProvider init");
-    p.parse_file(Path::new("t.rb"), src.as_bytes()).expect("parse_file")
+    p.parse_file(Path::new("t.rb"), src.as_bytes())
+        .expect("parse_file")
 }
 
 fn consts(g: &LocalGraph) -> Vec<&str> {
-    g.nodes.iter().filter(|n| n.kind == NodeKind::Const).map(|n| n.name.as_str()).collect()
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect()
 }
 
 #[test]
@@ -37,12 +42,14 @@ fn class_body_string_const_emits() {
 
 #[test]
 fn class_body_regex_const_emits() {
-    let g = parse(r#"
+    let g = parse(
+        r#"
 class HostAuthorization
   PORT_REGEXP = /:\d+\z/.freeze
   SUBDOMAINS = /[a-z0-9\-.]+/.freeze
 end
-"#);
+"#,
+    );
     let cs = consts(&g);
     assert!(cs.contains(&"PORT_REGEXP"), "{cs:?}");
     assert!(cs.contains(&"SUBDOMAINS"), "{cs:?}");
@@ -50,14 +57,16 @@ end
 
 #[test]
 fn class_body_hash_const_emits() {
-    let g = parse(r#"
+    let g = parse(
+        r#"
 class Base
   DEFAULT_OPTIONS = {
     reaction: :default_reaction,
     logging: true,
   }
 end
-"#);
+"#,
+    );
     assert!(consts(&g).contains(&"DEFAULT_OPTIONS"));
 }
 
@@ -96,5 +105,8 @@ fn lowercase_assignment_does_not_emit_const() {
     // query's lhs constraint must keep these out.
     let g = parse("class Foo\n  local_var = 5\nend\n");
     let cs = consts(&g);
-    assert!(!cs.contains(&"local_var"), "lowercase locals must not leak as Const: {cs:?}");
+    assert!(
+        !cs.contains(&"local_var"),
+        "lowercase locals must not leak as Const: {cs:?}"
+    );
 }
