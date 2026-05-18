@@ -107,7 +107,11 @@ fn fingerprint_scopes_cache_entries_by_subdirectory() {
     // Drop a blob into a sibling fingerprint dir — must not be visible.
     let stale_fp_dir = parse_cache_dir.join("deadbeef");
     std::fs::create_dir_all(&stale_fp_dir).unwrap();
-    std::fs::write(stale_fp_dir.join(format!("{}.rkyv", hex::encode(hash))), b"x").unwrap();
+    std::fs::write(
+        stale_fp_dir.join(format!("{:016x}.rkyv", u64::from_le_bytes(hash))),
+        b"x",
+    )
+    .unwrap();
 
     assert_eq!(
         cache.get(&hash).unwrap().file_path.to_str(),

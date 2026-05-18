@@ -6,7 +6,6 @@
 use crate::git::safe_exec;
 use graph_nexus_core::registry::atomic_write_json;
 use graph_nexus_core::session::{DirtyFiles, SessionMeta};
-use xxhash_rust::xxh3::xxh3_64;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -161,5 +160,5 @@ fn git_cat_file_hash(worktree: &Path, sha: &str, rel_path: &str) -> io::Result<S
     if !out.status.success() {
         return Err(io::Error::other(format!("git cat-file failed for {spec}")));
     }
-    Ok(format!("{:016x}", xxh3_64(&out.stdout)))
+    Ok(crate::repo_identity::xxh3_hex16(&out.stdout))
 }

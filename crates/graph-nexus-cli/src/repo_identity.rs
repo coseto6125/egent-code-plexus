@@ -59,3 +59,11 @@ pub(crate) fn short_hash_hex8(bytes: &[u8]) -> String {
     let h = xxh3_64(bytes) as u32;
     hex::encode(h.to_le_bytes())
 }
+
+/// 16-char big-endian hex of `xxh3_64(bytes)`. Used for content / blob
+/// fingerprints whose hex is logged and compared across sessions — keep
+/// all 16-hex sites going through here so `grep <hash>` finds every site.
+#[inline]
+pub(crate) fn xxh3_hex16(bytes: &[u8]) -> String {
+    format!("{:016x}", xxh3_64(bytes))
+}

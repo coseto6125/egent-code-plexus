@@ -193,7 +193,7 @@ fn sanitize_id(s: &str) -> String {
 
 pub struct GraphBuilder {
     local_graphs: Vec<LocalGraph>,
-    old_file_hashes: HashMap<String, [u8; 32]>,
+    old_file_hashes: HashMap<String, [u8; 8]>,
     /// When `Some`, the resolver pass 2 buffers every decision and writes a
     /// JSONL line per resolution attempt to this path. Used by the oracle
     /// verification harness (see specs/2026-05-15-resolver-oracle-harness.md).
@@ -240,7 +240,7 @@ impl GraphBuilder {
         self
     }
 
-    pub fn with_cache(mut self, hashes: HashMap<String, [u8; 32]>) -> Self {
+    pub fn with_cache(mut self, hashes: HashMap<String, [u8; 8]>) -> Self {
         self.old_file_hashes = hashes;
         self
     }

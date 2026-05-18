@@ -5,7 +5,7 @@
 //! an 8-hex-char digest of [`BUILDER_FINGERPRINT`] — scoping each entry
 //! to one binary build so an upgrade can't replay stale parser output
 //! against a fresh reader. The pipeline's per-file `cache_lookup` hook
-//! short-circuits to a cached graph when the file's `sha256(content)`
+//! short-circuits to a cached graph when the file's `xxh3_64(content)`
 //! matches an existing entry; misses fall through to the regular
 //! tree-sitter parse and are written back here for next time.
 //!
@@ -46,7 +46,8 @@ impl ParseCache {
     /// Filesystem location for a given content hash. Exposed for tests
     /// that need to seed corrupted blobs or inspect on-disk layout.
     pub fn path_for(&self, content_hash: &[u8; 8]) -> PathBuf {
-        self.root.join(format!("{}.rkyv", hex::encode(content_hash)))
+        self.root
+            .join(format!("{:016x}.rkyv", u64::from_le_bytes(*content_hash)))
     }
 
     /// Read a cached `LocalGraph` keyed by its content hash. Returns
