@@ -37,4 +37,12 @@ while IFS= read -r ref; do
     [[ -f "$target" ]] || fail "jump-table reference '$ref' resolves to missing file $target"
 done < <(grep -oE 'guides/[A-Za-z0-9._-]+\.md' "$skill" | sort -u)
 
+# --- Check 4: every guides/*.md is referenced from SKILL.md (no orphans) ---
+if [[ -d "$ROOT/guides" ]]; then
+    while IFS= read -r -d '' g; do
+        rel="guides/$(basename "$g")"
+        grep -qF "$rel" "$skill" || fail "orphan guide: $rel not referenced in SKILL.md"
+    done < <(find "$ROOT/guides" -maxdepth 1 -name '*.md' -print0)
+fi
+
 echo "lint OK: $ROOT"
