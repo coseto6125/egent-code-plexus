@@ -188,9 +188,13 @@ impl LanguageProvider for DartProvider {
             }
 
             // Dart top-level variable `double pi = 3.14` → Variable node.
-            // tree-sitter-dart mis-parses `typedef Foo = ...` as a
-            // top_level_variable_declaration with type text "typedef"; skip those
-            // — they are already captured by the type_alias / @typedef pattern.
+            // tree-sitter-dart mis-parses `typedef Foo = void Function(...)` as
+            // a top_level_variable_declaration with type text "typedef".  The
+            // type_alias query path does NOT recover these (it only matches
+            // old-style `typedef int Compare(int, int)`), so we synthesize a
+            // Typedef RawNode from the misparsed node here.  Without this the
+            // graph had zero Typedef nodes for new-style Dart typedefs (which
+            // is most of them in modern Dart code).
             let is_typedef_misparse = var_type
                 .map(|t| {
                     std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
@@ -199,6 +203,30 @@ impl LanguageProvider for DartProvider {
                 })
                 .unwrap_or(false);
             if is_typedef_misparse {
+                if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
+                    if let Ok(name_str) =
+                        std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
+                    {
+                        let name_str = name_str.trim();
+                        let start = v_root.start_position();
+                        let end = v_root.end_position();
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported: !name_str.starts_with('_'),
+                            heritage: vec![],
+                            type_annotation: None,
+                            name: name_str.to_string(),
+                            kind: NodeKind::Typedef,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                        });
+                    }
+                }
                 continue;
             }
             if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
