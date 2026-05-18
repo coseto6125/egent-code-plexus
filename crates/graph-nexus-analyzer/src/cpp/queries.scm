@@ -102,6 +102,11 @@
           name: [
             (identifier)
             (field_identifier)
+            ;; Out-of-class destructor: `ClassName::~ClassName() { ... }`
+            ;; The qualified_identifier name slot here is `destructor_name`
+            ;; (`~ClassName`), not the inner identifier. parser.rs emits the
+            ;; tilde-prefixed name verbatim — same shape ref-gitnexus uses.
+            (destructor_name)
           ] @name.method
         )
         (reference_declarator (qualified_identifier name: (_) @name.method))
