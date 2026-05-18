@@ -1,0 +1,37 @@
+# Each fixture: a signal string that must match (case-sensitive) the
+# 'Signal' column of a row in persona-inference.md, plus the expected
+# persona dimensions for that row.
+
+- signal: 'CLAUDE.md contains "繁體中文" or "Traditional Chinese"'
+  expected:
+    lang_pref: zh-TW
+- signal: 'CLAUDE.md contains "respond in" and "English"'
+  expected:
+    lang_pref: en
+- signal: 'Chat contains "cargo" or "rust" or "Rust workspace"'
+  expected:
+    install_pref: cargo-binstall
+- signal: 'Chat contains "brew" or "Homebrew"'
+  expected:
+    install_pref: brew
+- signal: 'Chat contains "monorepo" or "multi-repo" or "workspace"'
+  expected:
+    scope_pref: group-heavy
+- signal: 'Chat contains "Cursor" or "cursor"'
+  expected:
+    ide_pref: cursor
+- signal: 'Chat contains "Zed"'
+  expected:
+    ide_pref: zed
+- signal: 'Chat contains "VS Code" or "vscode" or "Continue"'
+  expected:
+    ide_pref: vscode
+- signal: 'Chat shows existing Claude Code session'
+  expected:
+    ide_pref: claude-code
+- signal: '(empty)'
+  expected:
+    lang_pref: unknown
+    install_pref: github-release-tarball
+    scope_pref: single-repo
+    ide_pref: unknown

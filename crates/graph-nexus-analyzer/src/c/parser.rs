@@ -654,6 +654,15 @@ impl LanguageProvider for CProvider {
         // qualifier-scope-lookup C aliases the same way.
         extract_named_bindings(tree.root_node(), source, &mut imports);
 
+        // `#define NAME` regex fallback — tree-sitter-c (0.24.x) ERROR-
+        // recovers around multi-line `\` continuations + `##` token-paste
+        // and drops the `preproc_def` wrapper, leaving the (preproc_def …)
+        // query empty for those regions. The fallback scans raw source as
+        // a safety net and emits Macro nodes for any `#define NAME` not
+        // already captured. Verified `.sample_repo`: gnx-rs went from 11/29
+        // macros in `tsd.h` to full recall after this pass.
+        emit_macro_fallback(source, &mut nodes);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -665,5 +674,31 @@ impl LanguageProvider for CProvider {
             fanout_refs: vec![],
             blind_spots: vec![],
         })
+    }
+}
+
+/// Augment `nodes` with `#define NAME` Macros that tree-sitter ERROR-
+/// recovery dropped. See `preproc_fallback` module docs for the failure
+/// shape this covers.
+fn emit_macro_fallback(source: &[u8], nodes: &mut Vec<RawNode>) {
+    let existing: std::collections::HashSet<String> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Macro)
+        .map(|n| n.name.clone())
+        .collect();
+    for hit in crate::preproc_fallback::scan_define_macros(source) {
+        if existing.contains(&hit.name) {
+            continue;
+        }
+        nodes.push(RawNode {
+            decorators: vec![],
+            is_exported: true,
+            heritage: vec![],
+            type_annotation: None,
+            name: hit.name,
+            kind: NodeKind::Macro,
+            span: (hit.line, hit.col_start, hit.line, hit.col_end),
+            calls: Vec::new(),
+        });
     }
 }

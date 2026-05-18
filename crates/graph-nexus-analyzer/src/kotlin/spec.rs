@@ -27,6 +27,14 @@ impl LangSpec for KotlinSpec {
         "function.name"    => NodeKind::Function,
         "property.name"    => NodeKind::Property,
         "variable.name"    => NodeKind::Variable,
+        // `enum class X { A, B, C }` entries — tree-sitter-kotlin produces
+        // an `enum_entry` per identifier inside `enum_class_body`. The
+        // parent enum class is already captured as `class.name` (promoted
+        // to `Enum` by `is_enum_class` at parser.rs:282); the entries
+        // themselves were silently dropped pre-fix, leaving 15 ref_over
+        // rows on `.sample_repo` (OperatingSystem.{Linux,MacOS,Windows,...}
+        // family in `Dart/extensions/intellij/.../*.kt`).
+        "enum_entry.name"  => NodeKind::Enum,
     };
 
     // Kotlin uses query-level scope anchoring; no runtime scope gate needed.
