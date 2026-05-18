@@ -14,23 +14,36 @@
   (inheritance_specifier inherits_from: (user_type (type_identifier) @heritage))?
 ) @class
 
-;; ERROR-recovery fallback for `#if`/`#endif` directives inside a class body.
+;; ERROR-recovery fallback for `#if`/`#endif` directives near a class header.
 ;; tree-sitter 0.25's ERROR-recovery (more aggressive than 0.21 which ref-gitnexus
-;; pins) swallows the entire `class Foo: Bar { ... }` header into a flat ERROR
-;; when an `#if canImport(zlib) && ...` directive appears as a class_body child
-;; (the grammar does not allow `if_directive` inside class_body). Inside the
-;; ERROR, the recovery keeps `modifiers` + the `class` keyword + a
-;; `simple_identifier` (not `type_identifier`, because class_declaration framing
-;; is gone). Match that shape so outer test/source classes (DataStreamTests,
-;; InternalRequestTests, ServerTrustManager, etc.) are not silently dropped.
+;; pins) swallows the class header when a conditional-compilation directive
+;; sits where the grammar does not allow it. Two observed shapes:
 ;;
-;; swift_decl_keyword() walks @class children for the leading "class"/"struct"/
-;; "enum" token; works the same on ERROR nodes since the keyword is preserved.
-;; Heritage cannot be reliably recovered (it's wrapped in a nested ERROR), so
-;; this alternation deliberately omits the heritage capture.
+;;   Shape 1 — `#if` *inside* class_body: the entire `class Foo: Bar { ... }`
+;;   header collapses into a flat ERROR directly under source_file. The ERROR
+;;   keeps `modifiers` + `"class"` keyword + `simple_identifier` (the class
+;;   name, not as a `type_identifier` because class_declaration framing is gone).
+;;
+;;   Shape 2 — `#if` *outside* class_body (file-level `#if canImport(_Concurrency)`
+;;   wrapping the entire class). Recovery preserves `"class"` keyword as a sibling
+;;   of a nested `ERROR` that contains the `simple_identifier` (class name); the
+;;   wrapping node is typically `function_declaration` (tree-sitter's cost-based
+;;   search picks function_declaration when the file body is large).
+;;
+;; Names are captured as `@class.name`; `@class` root is the ERROR-or-wrapper
+;; node so `swift_decl_keyword()` walks its children to find the leading
+;; "class"/"struct"/"enum" keyword (still works in both shapes since the
+;; keyword token is preserved). Heritage cannot be reliably recovered (wrapped
+;; in nested ERROR), so this alternation deliberately omits the heritage
+;; capture.
 (ERROR
   "class"
   (simple_identifier) @class.name) @class
+
+(_
+  "class"
+  (ERROR
+    (simple_identifier) @class.name)) @class
 
 ;; Swift `protocol P {}` → Trait (distinct from Java/C# Interface).
 (protocol_declaration
