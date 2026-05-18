@@ -39,7 +39,11 @@ MODEL_REF_ONLY = {"Section", "Folder", "File", "Document"}
 # share a class. Classes were derived from cross-side observation of the
 # `.sample_repo` corpus + ref-gitnexus / gnx-rs source.
 _EQUIV_CLASSES: list[set[str]] = [
-    {"Method", "Function", "Template"},
+    # ref-gitnexus emits TS / JS / Dart constructors as Method (their
+    # underlying tree-sitter node is method_definition); gnx-rs promotes
+    # to a dedicated Constructor kind. Verified per-file: both sides
+    # find the same declarations, just labeled differently.
+    {"Method", "Function", "Template", "Constructor"},
     {"Typedef", "TypeAlias"},
     {"Const", "Variable", "Property", "Static"},
     {"Interface", "Struct", "Enum", "Annotation", "Class"},
