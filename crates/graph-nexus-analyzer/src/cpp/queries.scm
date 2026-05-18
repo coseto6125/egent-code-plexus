@@ -48,87 +48,43 @@
   ]
 ) @function
 
-;; Free function declarations (no body) at translation-unit scope.
-;; Matches `int f();` and `std::map<X,Y> getAll();` so the return-type
-;; annotation lands on a Function node even when the .cpp/.h split puts
-;; the prototype in a header without a body.
-(translation_unit
-  (declaration
-    type: (_) @type
-    declarator: [
-      (function_declarator
-        declarator: [
-          (identifier) @name.function
-          (reference_declarator (identifier) @name.function)
-          (pointer_declarator (identifier) @name.function)
-        ])
-      (pointer_declarator
-        (function_declarator
-          declarator: (identifier) @name.function))
-      (reference_declarator
-        (function_declarator
-          declarator: (identifier) @name.function))
-      (pointer_declarator
-        (pointer_declarator
-          (function_declarator
-            declarator: (identifier) @name.function)))
-    ]
-  ) @function)
-
-;; Free function declarations under `extern "C" { ... }` (C-compat headers).
-;; Pure-C library headers (hdr_histogram, fpconv, libuv, redis, …) routinely
-;; wrap declarations in `extern "C"` for C++ interop. tree-sitter-cpp parses
-;; that as `linkage_specification > declaration_list > declaration`, so the
-;; translation_unit-anchored rule above misses every prototype inside the
-;; wrapper. Mirror the inner declarator shapes so the symbol model stays the
-;; same regardless of whether the file uses `extern "C"`.
-(linkage_specification
-  body: (declaration_list
-    (declaration
-      type: (_) @type
+;; Free function declarations (prototypes, no body). Matches `int f();`,
+;; `std::map<X,Y> getAll();`, `void* alloc(size_t n);` so the return-type
+;; annotation lands on a Function node when the .cpp/.h split puts the
+;; prototype in a header.
+;;
+;; No outer parent anchor (was `(translation_unit ...)` before): real
+;; `.h` files wrap declarations in `#ifndef X / #define X / ... / #endif`
+;; header guards (every header file does this) AND/OR `extern "C" { ... }`
+;; AND/OR `namespace foo { ... }`. tree-sitter-cpp parses each wrapper as
+;; an intermediate node — `preproc_ifdef`, `linkage_specification`,
+;; `namespace_definition` — that broke the previous translation_unit
+;; anchor. Match anywhere; let parser.rs `is_inline_class_member` walk
+;; the parent chain to promote `Function` → `Method` when the declaration
+;; is inside a `field_declaration_list` (class body). The walker stops at
+;; `translation_unit | namespace_definition | linkage_specification`, so
+;; namespace / extern "C" / TU-level decls stay `Function`.
+(declaration
+  type: (_) @type
+  declarator: [
+    (function_declarator
       declarator: [
-        (function_declarator
-          declarator: [
-            (identifier) @name.function
-            (reference_declarator (identifier) @name.function)
-            (pointer_declarator (identifier) @name.function)
-          ])
-        (pointer_declarator
-          (function_declarator
-            declarator: (identifier) @name.function))
-        (reference_declarator
-          (function_declarator
-            declarator: (identifier) @name.function))
-        (pointer_declarator
-          (pointer_declarator
-            (function_declarator
-              declarator: (identifier) @name.function)))
-      ]
-    ) @function))
-
-;; Single-statement linkage form: `extern "C" int foo();` (no braces).
-(linkage_specification
-  body: (declaration
-    type: (_) @type
-    declarator: [
+        (identifier) @name.function
+        (reference_declarator (identifier) @name.function)
+        (pointer_declarator (identifier) @name.function)
+      ])
+    (pointer_declarator
       (function_declarator
-        declarator: [
-          (identifier) @name.function
-          (reference_declarator (identifier) @name.function)
-          (pointer_declarator (identifier) @name.function)
-        ])
+        declarator: (identifier) @name.function))
+    (reference_declarator
+      (function_declarator
+        declarator: (identifier) @name.function))
+    (pointer_declarator
       (pointer_declarator
         (function_declarator
-          declarator: (identifier) @name.function))
-      (reference_declarator
-        (function_declarator
-          declarator: (identifier) @name.function))
-      (pointer_declarator
-        (pointer_declarator
-          (function_declarator
-            declarator: (identifier) @name.function)))
-    ]
-  ) @function)
+          declarator: (identifier) @name.function)))
+  ]
+) @function
 
 ;; Methods
 ;;
