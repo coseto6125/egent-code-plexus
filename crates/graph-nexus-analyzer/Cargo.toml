@@ -16,7 +16,6 @@ phf = { version = "0.11", features = ["macros"] }
 tree-sitter = "0.25"
 tree-sitter-typescript = "*"
 rayon = "1.10.0"
-crossbeam-channel = "0.5.12"
 ignore = "0.4.22"
 anyhow = "1.0.82"
 tracing = "0.1.40"
