@@ -11,7 +11,7 @@
 //! folded here — that requires per-callsite binding analysis whose granularity
 //! sits beyond a health summary. See the standalone `gnx tool-map` command.
 
-use crate::commit_lookup::CommitIndex;
+use crate::commit_lookup::find_latest_by_mtime;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
@@ -144,26 +144,12 @@ pub fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool)
 
 /// Find the most-recently-modified graph.bin under `<home_gnx>/<dir_name>/commits/`.
 /// v2 is content-addressed per commit; we pick the newest one for coverage
-/// reporting (the HEAD commit's build, if present).
+/// reporting (the HEAD commit's build, if present). Delegates to
+/// `commit_lookup::find_latest_by_mtime` (handles `.building` / `.stale-*`
+/// filtering); we append `graph.bin` since that helper returns the commit dir.
 fn latest_graph_path(r: &crate::repo_selector::ResolvedRepo) -> Option<PathBuf> {
-    let home_gnx = resolve_home_gnx();
-    let commits_dir = home_gnx.join(&r.dir_name).join("commits");
-    let idx = CommitIndex::scan(&commits_dir).ok()?;
-    if idx.is_empty() {
-        return None;
-    }
-    // Pick the commit dir with the most recent graph.bin mtime.
-    std::fs::read_dir(&commits_dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| {
-            let g = e.path().join("graph.bin");
-            let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
-            Some((mtime, g))
-        })
-        .max_by_key(|(mtime, _)| *mtime)
-        .map(|(_, path)| path)
+    let commits_dir = resolve_home_gnx().join(&r.dir_name).join("commits");
+    find_latest_by_mtime(&commits_dir).map(|dir| dir.join("graph.bin"))
 }
 
 /// Open the repo's graph for read. Returns `None` for any failure — caller

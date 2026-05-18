@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use crate::commands::group::{lookup_member, storage};
 use crate::commands::group::types::{ArchivedContractRegistry, ArchivedMatchType, MatchType};
 use crate::commands::impact as local_impact;
-use crate::commit_lookup::CommitIndex;
+use crate::commit_lookup::find_latest_by_mtime;
 use crate::engine::Engine;
 use crate::repo_selector::ResolvedRepo;
 
@@ -221,27 +221,14 @@ fn emit_json(
     );
 }
 
-/// Resolve the latest graph.bin for a given repo, mirroring
-/// `commands::coverage::latest_graph_path` — shared by group search / find /
-/// coverage siblings.
+/// Resolve the latest graph.bin for a given repo. Delegates to
+/// `commit_lookup::find_latest_by_mtime` (which also skips `.building` /
+/// `.stale-*` dirs); we append `graph.bin` since that helper returns the
+/// commit dir, not the archive path itself.
 pub fn latest_graph_path_for(
     r: &ResolvedRepo,
     home_gnx: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
     let commits_dir = home_gnx.join(&r.dir_name).join("commits");
-    let idx = CommitIndex::scan(&commits_dir).ok()?;
-    if idx.is_empty() {
-        return None;
-    }
-    std::fs::read_dir(&commits_dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| {
-            let g = e.path().join("graph.bin");
-            let mtime = std::fs::metadata(&g).ok()?.modified().ok()?;
-            Some((mtime, g))
-        })
-        .max_by_key(|(mtime, _)| *mtime)
-        .map(|(_, path)| path)
+    find_latest_by_mtime(&commits_dir).map(|dir| dir.join("graph.bin"))
 }

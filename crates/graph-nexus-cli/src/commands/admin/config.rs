@@ -155,17 +155,7 @@ impl App {
 
     fn enter_edit(&mut self) {
         self.editing = true;
-        // Pre-populate buffer with current raw value.
-        self.edit_buf = match self.current_field() {
-            FieldId::OutputFormat => self.cfg.output.default_format.clone(),
-            FieldId::ConfidenceHighTrust => {
-                format!("{:.2}", self.cfg.confidence.high_trust_threshold)
-            }
-            FieldId::GroupBm25Threshold => format!("{:.2}", self.cfg.group.bm25_threshold),
-            FieldId::GroupMaxCandidates => self.cfg.group.max_candidates_per_step.to_string(),
-            FieldId::GroupCrossDepth => self.cfg.group.cross_depth.to_string(),
-            FieldId::GroupTimeoutMs => self.cfg.group.local_impact_timeout_ms.to_string(),
-        };
+        self.edit_buf = self.field_value(self.current_field());
     }
 
     fn commit_edit(&mut self) {

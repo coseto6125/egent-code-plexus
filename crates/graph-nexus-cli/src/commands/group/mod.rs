@@ -12,7 +12,12 @@ pub mod types;
 
 use clap::Subcommand;
 use graph_nexus_core::GnxError;
-use graph_nexus_core::registry::{RegistryFile, RepoAlias};
+use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+use rayon::prelude::*;
+use std::path::Path;
+
+use crate::engine::Engine;
+use crate::repo_selector::ResolvedRepo;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum GroupCommands {
@@ -56,4 +61,51 @@ pub fn lookup_member<'a>(registry: &'a RegistryFile, member: &str) -> Option<&'a
         .repos
         .values()
         .find(|alias| alias.dir_name == member || alias.aliases.iter().any(|a| a == member))
+}
+
+/// Resolve each member of `group` to a loaded `Engine`, in parallel.
+///
+/// Returns `(display_name, Engine)` per successfully-loaded member. Members
+/// that can't be resolved or whose graph fails to load are dropped silently
+/// from the result vec but logged via `tracing::warn!` so the failure isn't
+/// invisible. Used by `gnx group find` + `gnx group search` (both want the
+/// loaded engine; coverage skips Engine entirely and resolves at the
+/// `ResolvedRepo` level).
+pub fn resolve_member_engines(
+    group: &GroupEntry,
+    registry: &RegistryFile,
+    home_gnx: &Path,
+) -> Vec<(String, Engine)> {
+    group
+        .members
+        .par_iter()
+        .filter_map(|member| {
+            let alias = lookup_member(registry, member).or_else(|| {
+                tracing::warn!("group: member '{member}' not found in registry");
+                None
+            })?;
+            let resolved = ResolvedRepo {
+                dir_name: alias.dir_name.clone(),
+                common_dir: alias.common_dir.clone(),
+                aliases: alias.aliases.clone(),
+            };
+            let graph_path = impact::latest_graph_path_for(&resolved, home_gnx).or_else(|| {
+                tracing::warn!("group: no graph.bin found for '{member}'");
+                None
+            })?;
+            let engine = match Engine::load(&graph_path) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("group: failed to load engine for '{member}': {e}");
+                    return None;
+                }
+            };
+            let display = alias
+                .aliases
+                .first()
+                .cloned()
+                .unwrap_or_else(|| member.to_string());
+            Some((display, engine))
+        })
+        .collect()
 }

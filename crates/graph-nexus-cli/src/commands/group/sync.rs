@@ -17,7 +17,10 @@ use crate::commands::group::storage::{
 use crate::commands::group::types::{ContractRegistry, CrossLink, MatchType, StoredContract};
 use crate::commands::group::lookup_member;
 
-type MemberResult = Result<(String, Vec<StoredContract>, RepoSnapshot), String>;
+/// Per-member sync outcome. `Err` carries (member-name, reason) so the caller
+/// can record the bare member name in `missing_repos` while logging the full
+/// reason — without the consumer having to re-parse the error string.
+type MemberResult = Result<(String, Vec<StoredContract>, RepoSnapshot), (String, String)>;
 
 #[derive(Args, Debug, Clone)]
 pub struct SyncArgs {
@@ -84,9 +87,9 @@ pub fn run(args: SyncArgs) -> Result<(), GnxError> {
                 all_contracts.extend(contracts);
                 repo_snapshots.insert(repo_name, snapshot);
             }
-            Err(e) => {
-                tracing::warn!("group sync: skipping member — {e}");
-                missing_repos.push(e);
+            Err((member, reason)) => {
+                tracing::warn!("group sync: skipping member '{member}' — {reason}");
+                missing_repos.push(member);
             }
         }
     }
@@ -151,12 +154,13 @@ fn extract_member(
     reg: &RegistryFile,
     all_extractors: &[extractors::ExtractorEntry],
     _allow_stale: bool,
-) -> Result<(String, Vec<StoredContract>, RepoSnapshot), String> {
+) -> Result<(String, Vec<StoredContract>, RepoSnapshot), (String, String)> {
+    let m = member.to_string();
     // Resolve member name → RepoAlias via shared helper (dir_name or alias, no fuzzy).
     let alias = lookup_member(reg, member).ok_or_else(|| {
-        format!(
-            "member '{member}' not found in registry \
-             (run `gnx admin index <path>` first)"
+        (
+            m.clone(),
+            "not found in registry (run `gnx admin index <path>` first)".to_string(),
         )
     })?;
 
@@ -169,9 +173,9 @@ fn extract_member(
         .unwrap_or(common_dir.clone());
 
     if !src_root.exists() {
-        return Err(format!(
-            "source root for member '{member}' does not exist: {}",
-            src_root.display()
+        return Err((
+            m,
+            format!("source root does not exist: {}", src_root.display()),
         ));
     }
 

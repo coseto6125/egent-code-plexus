@@ -10,10 +10,8 @@ use rayon::prelude::*;
 use serde_json::{json, Value};
 
 use crate::commands::find::{self, Hit};
-use crate::commands::group::impact::latest_graph_path_for;
-use crate::commands::group::lookup_member;
+use crate::commands::group::resolve_member_engines;
 use crate::engine::Engine;
-use crate::repo_selector::ResolvedRepo;
 
 /// Standard RRF constant — empirically tuned for dense-retrieval fusion.
 const RRF_K: f64 = 60.0;
@@ -52,27 +50,8 @@ pub fn run(args: SearchArgs) -> Result<(), GnxError> {
             ))
         })?;
 
-    // 2. Resolve members → (member_name, Engine) — parallel mmap loads.
-    let engines: Vec<(String, Engine)> = group
-        .members
-        .par_iter()
-        .filter_map(|member| {
-            let alias = lookup_member(&reg, member)?;
-            let resolved = ResolvedRepo {
-                dir_name: alias.dir_name.clone(),
-                common_dir: alias.common_dir.clone(),
-                aliases: alias.aliases.clone(),
-            };
-            let graph_path = latest_graph_path_for(&resolved, &home_gnx)?;
-            let engine = Engine::load(&graph_path).ok()?;
-            let display = alias
-                .aliases
-                .first()
-                .cloned()
-                .unwrap_or_else(|| member.clone());
-            Some((display, engine))
-        })
-        .collect();
+    // 2. Resolve members → (member_name, Engine) — shared helper, parallel mmap loads.
+    let engines: Vec<(String, Engine)> = resolve_member_engines(group, &reg, &home_gnx);
 
     if engines.is_empty() {
         if args.json {
