@@ -99,17 +99,39 @@ def read_rows(path: Path) -> list[tuple[str, str, str]]:
 
 
 def lang_summary(lang: str) -> dict:
-    rs_rows = read_rows(DIFF_DIR / f"{lang}_rs_only.txt")
-    ref_rows = read_rows(DIFF_DIR / f"{lang}_ref_only.txt")
-    if not rs_rows and not ref_rows:
+    """Read full sets for cross-side pairing, then classify only the rows
+    that fall in the set-diff slice.
+
+    Previous version read `_only.txt` (which is `rs - ref` / `ref - rs` per
+    exact `(kind, path, name)` triplet). That hid label pairs whose shared
+    side sat in `common` — e.g. rs `(Function, p, at)` + ref `(Function, p,
+    at)` were both in `common`, while ref also had `(Template, p, at)` in
+    `ref_only`. The aggregator only saw the ref-only Template row and never
+    knew about the rs-side Function row → false `real_ref`.
+
+    Fix: read `_all.txt` for the full per-side set, then iterate over the
+    diff slice with cross-side lookup against the full map.
+    """
+    rs_all = read_rows(DIFF_DIR / f"{lang}_rs_all.txt")
+    ref_all = read_rows(DIFF_DIR / f"{lang}_ref_all.txt")
+    # Backwards-compat fallback for stale dumps that only have `_only.txt`.
+    if not rs_all and not ref_all:
+        rs_all = read_rows(DIFF_DIR / f"{lang}_rs_only.txt")
+        ref_all = read_rows(DIFF_DIR / f"{lang}_ref_only.txt")
+    if not rs_all and not ref_all:
         return {"lang": lang, "status": "missing"}
 
     rs_by_pn: dict[tuple[str, str], list[str]] = defaultdict(list)
     ref_by_pn: dict[tuple[str, str], list[str]] = defaultdict(list)
-    for k, p, n in rs_rows:
+    for k, p, n in rs_all:
         rs_by_pn[(p, n)].append(k)
-    for k, p, n in ref_rows:
+    for k, p, n in ref_all:
         ref_by_pn[(p, n)].append(k)
+
+    rs_set = set(rs_all)
+    ref_set = set(ref_all)
+    rs_only = rs_set - ref_set
+    ref_only = ref_set - rs_set
 
     buckets = {"model": 0, "label": 0, "real_rs": 0, "real_ref": 0}
     real_rs: dict[str, int] = defaultdict(int)
@@ -122,48 +144,44 @@ def lang_summary(lang: str) -> dict:
             return "model"
         return "real"
 
-    for (p, n), rs_kinds in rs_by_pn.items():
+    for rk, p, n in rs_only:
         ref_kinds = ref_by_pn.get((p, n), [])
-        for rk in rs_kinds:
-            paired_label = False
-            for fk in ref_kinds:
-                if rk in EQUIV and fk in EQUIV.get(rk, set()):
-                    paired_label = True
-                    break
-            if paired_label:
-                buckets["label"] += 1
-                continue
-            cls = classify_one(rk, "rs")
-            if cls == "model":
-                buckets["model"] += 1
-            else:
-                buckets["real_rs"] += 1
-                real_rs[rk] += 1
-    for (p, n), ref_kinds in ref_by_pn.items():
+        paired_label = (
+            rk in EQUIV
+            and any(fk in EQUIV.get(rk, set()) for fk in ref_kinds)
+        )
+        if paired_label:
+            buckets["label"] += 1
+            continue
+        cls = classify_one(rk, "rs")
+        if cls == "model":
+            buckets["model"] += 1
+        else:
+            buckets["real_rs"] += 1
+            real_rs[rk] += 1
+    for fk, p, n in ref_only:
         rs_kinds = rs_by_pn.get((p, n), [])
-        for fk in ref_kinds:
-            paired_label = False
-            for rk in rs_kinds:
-                if fk in EQUIV and rk in EQUIV.get(fk, set()):
-                    paired_label = True
-                    break
-            if paired_label:
-                buckets["label"] += 1
-                continue
-            cls = classify_one(fk, "ref")
-            if cls == "model":
-                buckets["model"] += 1
-            else:
-                buckets["real_ref"] += 1
-                real_ref[fk] += 1
+        paired_label = (
+            fk in EQUIV
+            and any(rk in EQUIV.get(fk, set()) for rk in rs_kinds)
+        )
+        if paired_label:
+            buckets["label"] += 1
+            continue
+        cls = classify_one(fk, "ref")
+        if cls == "model":
+            buckets["model"] += 1
+        else:
+            buckets["real_ref"] += 1
+            real_ref[fk] += 1
 
     top_rs = heapq.nlargest(5, real_rs.items(), key=lambda kv: kv[1])
     top_ref = heapq.nlargest(5, real_ref.items(), key=lambda kv: kv[1])
     return {
         "lang": lang,
         "status": "ok",
-        "rs_total": len(rs_rows),
-        "ref_total": len(ref_rows),
+        "rs_total": len(rs_only),
+        "ref_total": len(ref_only),
         "buckets": buckets,
         "top_rs": top_rs,
         "top_ref": top_ref,
