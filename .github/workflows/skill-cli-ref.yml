@@ -1,0 +1,33 @@
+name: SKILL CLI ref regen
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build gnx
+        run: cargo build --release --bin gnx
+      - name: Regenerate CLI ref cards
+        run: |
+          bash tools/gen-cli-ref.sh \
+            ./target/release/gnx \
+            docs/skills/gnx-onboard/_shared/cli
+      - name: Open PR if anything changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: skill/cli-ref-regen-${{ github.ref_name }}
+          title: "chore(skill): regenerate CLI ref for ${{ github.ref_name }}"
+          commit-message: "chore(skill): regenerate CLI ref for ${{ github.ref_name }}"
+          body: |
+            Auto-regenerated CLI reference cards triggered by tag ${{ github.ref_name }}.
+            Review and merge.
