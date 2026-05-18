@@ -55,6 +55,15 @@
   (modifiers (visibility_modifier) @export)?
   name: (simple_identifier) @function.name) @function
 
+;; Protocol method requirements — `protocol P { func foo() }` produces
+;; `protocol_function_declaration` (distinct from `function_declaration`).
+;; Reuses the `@function.name` capture so `is_class_method` parent-chain
+;; walk promotes it to Method (Swift parser.rs line 492 includes
+;; `protocol_body` in the class-like body set).
+(protocol_function_declaration
+  (modifiers (visibility_modifier) @export)?
+  name: (simple_identifier) @function.name) @function
+
 ;; Function parameters — `name: Type`.
 (parameter
   (simple_identifier) @param.name

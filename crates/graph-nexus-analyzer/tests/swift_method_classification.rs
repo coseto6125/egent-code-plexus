@@ -36,3 +36,33 @@ fn enum_method_emits_method_kind() {
     let m = g.nodes.iter().find(|n| n.name == "describe").expect("describe missing");
     assert_eq!(m.kind, NodeKind::Method, "got {:?}", m);
 }
+
+#[test]
+fn protocol_method_requirement_emits_method_kind() {
+    // tree-sitter-swift uses `protocol_function_declaration` (distinct from
+    // `function_declaration`) for protocol body methods. Without the dedicated
+    // query rule in queries.scm, the 11 Alamofire `Source/Core/*.swift` /
+    // `Source/Features/*.swift` protocol requirements surfaced as ref_over
+    // Method-* rows in the 2026-05-19 parity report.
+    let g = parse(
+        "protocol DataDecoder {\n    \
+         func decode<D: Decodable>(_ type: D.Type, from data: Data) throws -> D\n\
+         }\n",
+    );
+    let m = g.nodes.iter().find(|n| n.name == "decode").expect("decode missing");
+    assert_eq!(m.kind, NodeKind::Method, "got {:?}", m);
+}
+
+#[test]
+fn protocol_method_with_inout_param_emits_method_kind() {
+    // AuthenticationInterceptor.swift `apply(_:to:)` shape — `inout` parameter
+    // is a Swift-specific function parameter modifier that tree-sitter-swift
+    // 0.25 parses identically inside `protocol_function_declaration`.
+    let g = parse(
+        "protocol RequestInterceptor {\n    \
+         func apply(_ credential: Credential, to urlRequest: inout URLRequest)\n\
+         }\n",
+    );
+    let m = g.nodes.iter().find(|n| n.name == "apply").expect("apply missing");
+    assert_eq!(m.kind, NodeKind::Method, "got {:?}", m);
+}

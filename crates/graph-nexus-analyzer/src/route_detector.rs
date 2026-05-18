@@ -2,6 +2,13 @@ use graph_nexus_core::analyzer::types::RawRoute;
 
 const HTTP_METHODS: &[&str] = &[
     "get", "post", "put", "delete", "patch", "options", "head", "connect", "trace",
+    // `use` is an Express / Connect / Koa mount-point route — `app.use('/api', router)`
+    // registers a path-prefixed sub-router that ref-gitnexus surfaces as a Route node.
+    // The queries.scm matchers in JS / TS already include `use` in the verb allowlist;
+    // adding it here lets `detect_from_call` finalize the RawRoute into a Route node
+    // (previously dropped at builder.rs:445 — verified missing for 3 routes in
+    // `examples/multi-router/index.js`, `examples/web-service/index.js` 2026-05-19).
+    "use",
 ];
 
 #[derive(Debug, Clone)]
@@ -202,6 +209,18 @@ mod tests {
     #[test]
     fn detect_from_call_rejects_non_path_string() {
         assert!(detect_from_call(&raw("get", "not_a_path!")).is_none());
+    }
+
+    #[test]
+    fn detect_from_call_accepts_express_use_mount_point() {
+        // `app.use('/api', router)` is an Express/Connect mount-point route.
+        // ref-gitnexus emits it as a Route node; gnx-rs must too — without
+        // `"use"` in HTTP_METHODS the call is silently dropped at
+        // builder.rs:445, leaving the 3 routes in `examples/multi-router/`
+        // and `examples/web-service/` unpaired in the parity report.
+        let r = detect_from_call(&raw("use", "'/api/v1'")).unwrap();
+        assert_eq!(r.method, "USE");
+        assert_eq!(r.path, "/api/v1");
     }
 
     // -- lax helper: per-framework bare-path support -------------------------

@@ -62,6 +62,12 @@ struct TypeScriptCaptureIndices {
     express_handler: Option<u32>,
     nestjs_class: Option<u32>,
     nestjs_method: Option<u32>,
+    /// `@Get('users')` / `@Post(':id')` decorator-route captures — separate
+    /// pattern in frameworks.scm because the decorator is independent of the
+    /// `@Controller` shape (any method-level decorator carrying a path-shaped
+    /// string literal is a route, gated by `has_nestjs` import presence).
+    nestjs_decorator_verb: Option<u32>,
+    nestjs_decorator_path: Option<u32>,
 }
 
 impl TypeScriptProvider {
@@ -100,6 +106,8 @@ impl TypeScriptProvider {
             express_handler: query.capture_index_for_name("express.route.handler"),
             nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
             nestjs_method: query.capture_index_for_name("nestjs.method.name"),
+            nestjs_decorator_verb: query.capture_index_for_name("nestjs.decorator.verb"),
+            nestjs_decorator_path: query.capture_index_for_name("nestjs.decorator.path"),
         };
 
         // Pre-resolve capture-name → NodeKind from the spec table so the
@@ -146,6 +154,10 @@ impl LanguageProvider for TypeScriptProvider {
         // (class_name, method_name, method_span)
         type NestJsHandler = (String, String, (u32, u32, u32, u32));
         let mut pending_nestjs_handlers: Vec<NestJsHandler> = Vec::new();
+        // NestJS decorator-routes pending `has_nestjs` import gate.
+        // (HTTP_METHOD, raw_path_with_quotes_stripped_by_capture, decorator_span)
+        let mut pending_nestjs_decorator_routes: Vec<(String, String, (u32, u32, u32, u32))> =
+            Vec::new();
 
         let idx = &self.indices;
 
@@ -171,6 +183,8 @@ impl LanguageProvider for TypeScriptProvider {
 
             let mut nestjs_class_node: Option<tree_sitter::Node> = None;
             let mut nestjs_method_node: Option<tree_sitter::Node> = None;
+            let mut nestjs_decorator_verb_node: Option<tree_sitter::Node> = None;
+            let mut nestjs_decorator_path_node: Option<tree_sitter::Node> = None;
 
             for cap in m.captures {
                 let cap_idx = Some(cap.index);
@@ -236,6 +250,10 @@ impl LanguageProvider for TypeScriptProvider {
                     nestjs_class_node = Some(cap.node);
                 } else if cap_idx == idx.nestjs_method {
                     nestjs_method_node = Some(cap.node);
+                } else if cap_idx == idx.nestjs_decorator_verb {
+                    nestjs_decorator_verb_node = Some(cap.node);
+                } else if cap_idx == idx.nestjs_decorator_path {
+                    nestjs_decorator_path_node = Some(cap.node);
                 } else if cap_idx == idx.function
                     || cap_idx == idx.class
                     || cap_idx == idx.method
@@ -388,6 +406,29 @@ impl LanguageProvider for TypeScriptProvider {
                     }
                 }
             }
+
+            // NestJS decorator-route — `@Get('users')` / `@Post(':id')`.
+            // Path string is captured separately from the generic Express
+            // matcher, and the relaxed `clean_route_path_lax` accepts bare
+            // names (NestJS convention) below in the final route cleanup.
+            // Stash as a pending decorator-route; resolve once the
+            // `has_nestjs` import flag is known (a few lines later in this
+            // function — we can't gate here because import processing
+            // happens in the same match loop).
+            if let (Some(verb_node), Some(path_node)) =
+                (nestjs_decorator_verb_node, nestjs_decorator_path_node)
+            {
+                if let (Ok(verb_str), Ok(path_str)) = (
+                    std::str::from_utf8(&source[verb_node.start_byte()..verb_node.end_byte()]),
+                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]),
+                ) {
+                    pending_nestjs_decorator_routes.push((
+                        verb_str.to_uppercase(),
+                        path_str.to_string(),
+                        node_span(&verb_node),
+                    ));
+                }
+            }
         }
 
         // Extract call sites with receiver-type binding:
@@ -417,6 +458,24 @@ impl LanguageProvider for TypeScriptProvider {
             }
             None => false,
         });
+
+        // NestJS decorator-routes — `@Get('users')` shape. Gated on
+        // `@nestjs/*` import presence so a custom `@Get(...)` decorator in
+        // an unrelated codebase does not surface a false Route. Uses the
+        // lax path helper because NestJS conventionally elides the leading
+        // `/` (the framework prepends the controller prefix at runtime).
+        if has_nestjs {
+            for (verb, raw_path, span) in pending_nestjs_decorator_routes {
+                if let Some(cleaned) = crate::route_detector::clean_route_path_lax(&raw_path) {
+                    routes.push(RawRoute {
+                        method: verb,
+                        path: cleaned,
+                        handler: None,
+                        span,
+                    });
+                }
+            }
+        }
 
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent with Actix).
