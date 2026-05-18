@@ -150,11 +150,7 @@ impl LocalImpact {
     pub fn direct_symbol_uids(&self) -> Vec<&str> {
         self.payload["impact"]
             .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v["uid"].as_str())
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|v| v["uid"].as_str()).collect())
             .unwrap_or_default()
     }
 
@@ -162,7 +158,11 @@ impl LocalImpact {
     pub fn direct_count(&self) -> usize {
         self.payload["impact"]
             .as_array()
-            .map(|arr| arr.iter().filter(|v| v["depth"].as_u64().unwrap_or(0) > 0).count())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|v| v["depth"].as_u64().unwrap_or(0) > 0)
+                    .count()
+            })
             .unwrap_or(0)
     }
 
@@ -425,8 +425,8 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
     // that `pipeline.analyze`'s `into_par_iter` already uses, so providers
     // are Send + Sync by construction.
     let pipeline = make_pipeline();
-    type NewEntry = ((String, String, String), (u64, u32));
-    type OldEntry = ((String, String, String), u64);
+    type NewEntry = ((&'static str, String, String), (u64, u32));
+    type OldEntry = ((&'static str, String, String), u64);
 
     let per_file: Vec<(Vec<NewEntry>, Vec<OldEntry>)> = changed_paths
         .par_iter()
@@ -445,7 +445,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
                                 continue;
                             }
                             let h = hash_node_lines(&lines, raw.span.0, raw.span.2);
-                            let kind_str = node_kind_to_str(&raw.kind).to_string();
+                            let kind_str = node_kind_to_str(&raw.kind);
                             new_local.push((
                                 (kind_str, rel_path.clone(), raw.name.clone()),
                                 (h, raw.span.0),
@@ -464,11 +464,8 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
                             continue;
                         }
                         let h = hash_node_lines(&lines, raw.span.0, raw.span.2);
-                        let kind_str = node_kind_to_str(&raw.kind).to_string();
-                        old_local.push((
-                            (kind_str, rel_path.clone(), raw.name.clone()),
-                            h,
-                        ));
+                        let kind_str = node_kind_to_str(&raw.kind);
+                        old_local.push(((kind_str, rel_path.clone(), raw.name.clone()), h));
                     }
                 }
             }
@@ -477,8 +474,12 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
         })
         .collect();
 
-    let mut new_map: HashMap<(String, String, String), (u64, u32)> = HashMap::new();
-    let mut old_map: HashMap<(String, String, String), u64> = HashMap::new();
+    let total_new = per_file.iter().map(|(n, _)| n.len()).sum();
+    let total_old = per_file.iter().map(|(_, o)| o.len()).sum();
+    let mut new_map: HashMap<(&'static str, String, String), (u64, u32)> =
+        HashMap::with_capacity(total_new);
+    let mut old_map: HashMap<(&'static str, String, String), u64> =
+        HashMap::with_capacity(total_old);
     for (new_local, old_local) in per_file {
         new_map.extend(new_local);
         old_map.extend(old_local);
@@ -486,14 +487,14 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
 
     // Build lookup from old graph: (kind_str, file_path, name) → node_idx.
     let changed_files_set: HashSet<&str> = changed_paths.iter().map(|s| s.as_str()).collect();
-    let mut old_graph_idx: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut old_graph_idx: HashMap<(&'static str, String, String), usize> = HashMap::new();
     for (idx, node) in graph.nodes.iter().enumerate() {
         let file_node = &graph.files[node.file_idx.to_native() as usize];
         let file_path = file_node.path.resolve(&graph.string_pool);
         if !changed_files_set.contains(file_path) {
             continue;
         }
-        let kind_str = kind_to_str(&node.kind).to_string();
+        let kind_str = kind_to_str(&node.kind);
         let name = node.name.resolve(&graph.string_pool).to_string();
         old_graph_idx.insert((kind_str, file_path.to_string(), name), idx);
     }
