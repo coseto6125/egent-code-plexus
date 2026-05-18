@@ -91,9 +91,20 @@ fn leave_tui(terminal: &mut Tui) -> io::Result<()> {
 enum FieldId {
     OutputFormat,
     ConfidenceHighTrust,
+    GroupBm25Threshold,
+    GroupMaxCandidates,
+    GroupCrossDepth,
+    GroupTimeoutMs,
 }
 
-const FIELDS: [FieldId; 2] = [FieldId::OutputFormat, FieldId::ConfidenceHighTrust];
+const FIELDS: [FieldId; 6] = [
+    FieldId::OutputFormat,
+    FieldId::ConfidenceHighTrust,
+    FieldId::GroupBm25Threshold,
+    FieldId::GroupMaxCandidates,
+    FieldId::GroupCrossDepth,
+    FieldId::GroupTimeoutMs,
+];
 
 struct App {
     cfg: Config,
@@ -135,18 +146,16 @@ impl App {
             FieldId::ConfidenceHighTrust => {
                 format!("{:.2}", self.cfg.confidence.high_trust_threshold)
             }
+            FieldId::GroupBm25Threshold => format!("{:.2}", self.cfg.group.bm25_threshold),
+            FieldId::GroupMaxCandidates => self.cfg.group.max_candidates_per_step.to_string(),
+            FieldId::GroupCrossDepth => self.cfg.group.cross_depth.to_string(),
+            FieldId::GroupTimeoutMs => self.cfg.group.local_impact_timeout_ms.to_string(),
         }
     }
 
     fn enter_edit(&mut self) {
         self.editing = true;
-        // Pre-populate buffer with current raw value.
-        self.edit_buf = match self.current_field() {
-            FieldId::OutputFormat => self.cfg.output.default_format.clone(),
-            FieldId::ConfidenceHighTrust => {
-                format!("{:.2}", self.cfg.confidence.high_trust_threshold)
-            }
-        };
+        self.edit_buf = self.field_value(self.current_field());
     }
 
     fn commit_edit(&mut self) {
@@ -156,6 +165,27 @@ impl App {
             FieldId::ConfidenceHighTrust => {
                 if let Ok(f) = v.parse::<f32>() {
                     self.cfg.confidence.high_trust_threshold = f.clamp(0.0, 1.0);
+                }
+            }
+            FieldId::GroupBm25Threshold => {
+                if let Ok(f) = v.parse::<f32>() {
+                    self.cfg.group.bm25_threshold = f.clamp(0.0, 1.0);
+                }
+            }
+            FieldId::GroupMaxCandidates => {
+                if let Ok(n) = v.parse::<u32>() {
+                    // 0 candidates breaks BM25 lookup — silent no-op cross-link generation
+                    self.cfg.group.max_candidates_per_step = n.max(1);
+                }
+            }
+            FieldId::GroupCrossDepth => {
+                if let Ok(n) = v.parse::<u32>() {
+                    self.cfg.group.cross_depth = n;
+                }
+            }
+            FieldId::GroupTimeoutMs => {
+                if let Ok(n) = v.parse::<u64>() {
+                    self.cfg.group.local_impact_timeout_ms = n;
                 }
             }
         }
@@ -405,6 +435,13 @@ fn render_form(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Line::from(""),
         group_header("Confidence"),
         field_line(app, FieldId::ConfidenceHighTrust, "High-trust thr."),
+        Line::from(""),
+        // TODO: expose exclude_links_paths (Vec<String>) and exclude_links_param_only_paths (bool) when TUI gains list/toggle widgets
+        group_header("Group"),
+        field_line(app, FieldId::GroupBm25Threshold, "BM25 threshold"),
+        field_line(app, FieldId::GroupMaxCandidates, "Max candidates"),
+        field_line(app, FieldId::GroupCrossDepth, "Cross depth"),
+        field_line(app, FieldId::GroupTimeoutMs, "Impact timeout ms"),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);

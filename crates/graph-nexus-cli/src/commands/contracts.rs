@@ -81,8 +81,9 @@ pub fn run(args: ContractsArgs) -> Result<(), GnxError> {
     let selector_str = args.repo.as_deref().unwrap_or("");
     let selector = repo_selector::parse(selector_str)
         .map_err(|e| GnxError::InvalidArgument(format!("--repo selector: {e}")))?;
-    let resolved = repo_selector::resolve(&selector, reg, cwd.to_str().unwrap_or("."))
-        .map_err(|e| GnxError::InvalidArgument(format!("--repo: {e}")))?;
+    let resolved =
+        repo_selector::resolve_top_level(&selector, reg, cwd.to_str().unwrap_or("."), "contracts")
+            .map_err(|e| GnxError::InvalidArgument(format!("--repo: {e}")))?;
 
     // 2. Multi-repo gate: contracts is only meaningful across ≥2 repos.
     if resolved.len() < 2 {

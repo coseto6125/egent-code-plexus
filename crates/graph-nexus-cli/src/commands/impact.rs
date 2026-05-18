@@ -132,6 +132,88 @@ pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxErr
     build_payload_with_hints(args, engine).map(|(v, _)| v)
 }
 
+// ── Per-symbol library API (used by `gnx group impact`) ─────────────────────
+
+/// Result of a single-symbol local impact computation.
+///
+/// Wraps the JSON payload produced by `impact_by_name` so that callers can
+/// extract the symbol UIDs touched by the traversal without re-parsing the
+/// full payload themselves.
+pub struct LocalImpact {
+    payload: Value,
+}
+
+impl LocalImpact {
+    /// UIDs of every node reached by the BFS (depth 0 = the target itself).
+    /// Returns an empty vec when the payload carries an `"error"` field.
+    pub fn direct_symbol_uids(&self) -> Vec<&str> {
+        self.payload["impact"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v["uid"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Number of nodes in the BFS result (excluding the start node at depth 0).
+    pub fn direct_count(&self) -> usize {
+        self.payload["impact"]
+            .as_array()
+            .map(|arr| arr.iter().filter(|v| v["depth"].as_u64().unwrap_or(0) > 0).count())
+            .unwrap_or(0)
+    }
+
+    /// The full JSON payload — same shape as `gnx impact --format json`.
+    pub fn as_json(&self) -> &Value {
+        &self.payload
+    }
+}
+
+/// Per-symbol impact computation callable without a CLI context.
+///
+/// `member_repo` is the `dir_name` or alias of the indexed repo; it is used
+/// only to resolve the confidence threshold from the repo config — the Engine
+/// is provided by the caller, so no graph loading happens here.
+///
+/// Returns `Ok(LocalImpact)` even when the symbol is not found in the graph
+/// (the payload will carry an `"error"` field in that case), matching the
+/// same graceful-degradation behaviour as `gnx impact --target X`.
+pub fn run_for_symbol(
+    engine: &Engine,
+    member_repo: &str,
+    target: &str,
+    direction: &str,
+    max_depth: Option<u32>,
+    timeout_ms: Option<u64>,
+    include_tests: bool,
+) -> Result<LocalImpact, GnxError> {
+    let dir = match direction.to_ascii_lowercase().as_str() {
+        "downstream" | "down" => Direction::Down,
+        "both" => Direction::Both,
+        _ => Direction::Up,
+    };
+    let args = ImpactArgs {
+        name: Some(target.to_string()),
+        target: None,
+        baseline: None,
+        file: None,
+        kind: None,
+        direction: dir,
+        depth: max_depth.unwrap_or(5) as usize,
+        high_trust_only: false,
+        min_confidence: None,
+        include_tests,
+        relation_types: None,
+        repo: Some(member_repo.to_string()),
+        format: None,
+    };
+    let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
+    let (payload, _hints) = build_payload_with_hints(&args, engine)?;
+    Ok(LocalImpact { payload })
+}
+
 fn build_payload_with_hints(
     args: &ImpactArgs,
     engine: &Engine,

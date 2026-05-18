@@ -19,7 +19,17 @@ fn slow_noop_path() -> PathBuf {
                 .join("target")
         });
     let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    target_dir.join(profile).join("examples").join("slow_noop")
+    let path = target_dir.join(profile).join("examples").join("slow_noop");
+    if !path.exists() {
+        // `cargo test` doesn't auto-build examples — invoke cargo directly so
+        // a clean checkout works without manual `cargo build --example` setup.
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "-p", "graph-nexus", "--example", "slow_noop"])
+            .status()
+            .expect("spawn cargo build --example slow_noop");
+        assert!(status.success(), "cargo build --example slow_noop failed");
+    }
+    path
 }
 
 /// Wraps `inner` with the production flock preamble so the test pins to
@@ -31,10 +41,6 @@ fn flock_shell(lock: &Path, inner: &str) -> String {
 #[test]
 fn hook_concurrent_spawn_flock_serializes() {
     let bin = slow_noop_path();
-    assert!(
-        bin.exists(),
-        "slow_noop not built — run `cargo build -p graph-nexus-cli --example slow_noop`"
-    );
 
     let tmp = tempfile::TempDir::new().unwrap();
     let lock = tmp.path().join("reindex.lock");
@@ -80,7 +86,6 @@ fn hook_concurrent_spawn_flock_serializes() {
 #[test]
 fn hook_serial_spawn_runs_each_time() {
     let bin = slow_noop_path();
-    assert!(bin.exists());
 
     let tmp = tempfile::TempDir::new().unwrap();
     let lock = tmp.path().join("reindex.lock");

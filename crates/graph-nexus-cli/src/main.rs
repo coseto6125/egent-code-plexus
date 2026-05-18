@@ -102,6 +102,12 @@ enum Commands {
     /// egress (tool-map), shape-check, and resolver-diff over changed files in
     /// one shot, filtered to high-confidence signals only.
     Review(commands::review::ReviewArgs),
+    /// Multi-repo group contract extraction and cross-link matching
+    #[command(hide = true)]
+    Group {
+        #[command(subcommand)]
+        cmd: commands::group::GroupCommands,
+    },
 }
 
 fn main() {
@@ -153,7 +159,26 @@ fn main() {
         Commands::Hook(args) => run_no_graph!(commands::hook::run(args.clone())),
         Commands::Watch(args) => run_no_graph!(commands::watch::run(args.clone())),
         Commands::Peers(args) => run_no_graph!(commands::peers::run(args.clone())),
+        Commands::Group { cmd } => run_no_graph!(commands::group::run(cmd.clone())),
         _ => {} // fall through to graph-loading path
+    }
+
+    // Reject `@<group>` on top-level `find` before auto_ensure uses it as
+    // cwd. `@all` is fine — it resolves to the registered repo set, not a
+    // group. This mirrors the equivalent check inside `find::resolve_targets`
+    // but must happen here because main.rs feeds `args.repo` to auto_ensure
+    // before `find::run` is called.
+    if let Commands::Find(args) = &cli.command {
+        if let Some(sel) = args.repo.as_deref() {
+            if let Some(group_name) = sel.strip_prefix('@') {
+                if group_name != "all" {
+                    eprintln!(
+                        "error: `@{group_name}` cannot be used at the top level — use `gnx group find` instead"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     // Agent commands + ShapeCheck (hidden internal) — need graph
@@ -175,7 +200,8 @@ fn main() {
         | Commands::HookWatcher(_)
         | Commands::Hook(_)
         | Commands::Watch(_)
-        | Commands::Peers(_) => None,
+        | Commands::Peers(_)
+        | Commands::Group { .. } => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -214,7 +240,8 @@ fn main() {
         | Commands::HookWatcher(_)
         | Commands::Hook(_)
         | Commands::Watch(_)
-        | Commands::Peers(_) => unreachable!("handled before graph load"),
+        | Commands::Peers(_)
+        | Commands::Group { .. } => unreachable!("handled before graph load"),
     };
     if let Err(e) = result {
         eprintln!("Command failed: {e}");
