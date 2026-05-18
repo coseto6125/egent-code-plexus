@@ -30,4 +30,11 @@ if [[ -d "$ROOT/guides" ]]; then
     done < <(find "$ROOT/guides" -maxdepth 1 -name '*.md' -print0)
 fi
 
+# --- Check 3: every guides/*.md referenced in SKILL.md's jump table actually exists ---
+# Match patterns like 'guides/01-install.md' anywhere in SKILL.md.
+while IFS= read -r ref; do
+    target="$ROOT/$ref"
+    [[ -f "$target" ]] || fail "jump-table reference '$ref' resolves to missing file $target"
+done < <(grep -oE 'guides/[A-Za-z0-9._-]+\.md' "$skill" | sort -u)
+
 echo "lint OK: $ROOT"
