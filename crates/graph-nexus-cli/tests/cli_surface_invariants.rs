@@ -298,7 +298,403 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
     }
 }
 
+// ── 5. Reverse-direction flag check (CLI → MCP) ──────────────────────────────
+
+/// For each `gnx group <subcmd>` and `gnx peers <subcmd>`, every `--flag`
+/// shown in the real `--help` must exist as a property in the MCP schema
+/// (after kebab→snake conversion). This is the asymmetric partner to
+/// `mcp_gnx_group_advertised_flags_exist_in_cli_help` — without both
+/// directions, a CLI-side flag addition silently leaves LLM clients
+/// unable to set it.
+///
+/// Skipped:
+/// - `--help` / `-h` (always present, never in schema)
+/// - `--graph` (global flag declared on the root Cli; not subcmd-specific)
+#[test]
+fn cli_group_flags_all_exist_in_mcp_group_schema() {
+    let tool = graph_nexus_mcp::group::group_tools()
+        .into_iter()
+        .find(|t| t.name == "gnx_group")
+        .expect("gnx_group tool");
+    let props = tool
+        .schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("properties object");
+
+    let subcmds = enum_values(&tool.schema, "subcmd");
+    for subcmd in &subcmds {
+        let out = run(&["group", subcmd, "--help"]);
+        let help = String::from_utf8_lossy(&out.stdout);
+        for flag_kebab in extract_long_flags(&help) {
+            let prop_key = flag_kebab.replace('-', "_");
+            assert!(
+                props.contains_key(&prop_key),
+                "gnx group {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) is missing from gnx_group MCP schema. Add a property entry — otherwise LLM clients cannot reach this flag.\n--- help ---\n{help}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
+    let tool = graph_nexus_mcp::peers::peer_tools()
+        .into_iter()
+        .find(|t| t.name == "gnx_peers")
+        .expect("gnx_peers tool");
+    let props = tool
+        .schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("properties object");
+
+    let subcmds = enum_values(&tool.schema, "subcmd");
+    for subcmd in &subcmds {
+        let out = run(&["peers", subcmd, "--help"]);
+        let help = String::from_utf8_lossy(&out.stdout);
+        for flag_kebab in extract_long_flags(&help) {
+            let prop_key = flag_kebab.replace('-', "_");
+            assert!(
+                props.contains_key(&prop_key),
+                "gnx peers {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) missing from gnx_peers MCP schema.\n--- help ---\n{help}"
+            );
+        }
+    }
+}
+
+// ── 6. Dynamic inventory diff vs hardcoded tables ────────────────────────────
+
+/// `gnx --help` lists every **visible** top-level subcommand. The
+/// hardcoded `TOP_LEVEL_COMMANDS` table must be a SUPERSET — every
+/// visible command appears in the inventory, but the inventory may
+/// carry extras (hidden subcommands like `admin` / `hook-*`).
+///
+/// Catches: "added a new visible top-level verb but forgot the
+/// invariant table".
+#[test]
+fn top_level_inventory_covers_all_visible_commands() {
+    let out = run(&["--help"]);
+    let help = String::from_utf8_lossy(&out.stdout);
+    let visible = extract_subcommands_from_help(&help);
+    for cmd in &visible {
+        assert!(
+            TOP_LEVEL_COMMANDS.contains(&cmd.as_str()),
+            "visible top-level command `{cmd}` is missing from TOP_LEVEL_COMMANDS inventory in this test file. Add it."
+        );
+    }
+}
+
+#[test]
+fn group_inventory_covers_all_subcommands() {
+    let out = run(&["group", "--help"]);
+    let help = String::from_utf8_lossy(&out.stdout);
+    let listed = extract_subcommands_from_help(&help);
+    for cmd in &listed {
+        assert!(
+            GROUP_SUBCMDS.contains(&cmd.as_str()),
+            "group subcommand `{cmd}` missing from GROUP_SUBCMDS inventory"
+        );
+    }
+}
+
+#[test]
+fn peers_inventory_covers_all_subcommands() {
+    let out = run(&["peers", "--help"]);
+    let help = String::from_utf8_lossy(&out.stdout);
+    let listed = extract_subcommands_from_help(&help);
+    for cmd in &listed {
+        assert!(
+            PEERS_SUBCMDS.contains(&cmd.as_str()),
+            "peers subcommand `{cmd}` missing from PEERS_SUBCMDS inventory"
+        );
+    }
+}
+
+#[test]
+fn admin_inventory_covers_all_subcommands() {
+    let out = run(&["admin", "--help"]);
+    let help = String::from_utf8_lossy(&out.stdout);
+    let listed = extract_subcommands_from_help(&help);
+    for cmd in &listed {
+        assert!(
+            ADMIN_SUBCMDS.contains(&cmd.as_str()),
+            "admin subcommand `{cmd}` missing from ADMIN_SUBCMDS inventory"
+        );
+    }
+}
+
+// ── 7. Schema semantic invariants ────────────────────────────────────────────
+
+/// Every `[subcmd]` tag inside `gnx_group` schema property descriptions
+/// must reference a subcmd that actually exists in the enum (or the
+/// special tag `[all]` meaning "applies to all subcmds"). Catches:
+/// rename a subcmd, forget to update tag references in descriptions.
+#[test]
+fn mcp_gnx_group_description_tags_reference_valid_subcmds() {
+    let tool = graph_nexus_mcp::group::group_tools()
+        .into_iter()
+        .find(|t| t.name == "gnx_group")
+        .expect("gnx_group tool");
+
+    let mut valid: Vec<String> = enum_values(&tool.schema, "subcmd");
+    valid.push("all".to_string()); // meta-tag covering every subcmd
+
+    let props = tool
+        .schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("properties");
+
+    for (prop_name, prop) in props {
+        let Some(desc) = prop.get("description").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        for tag in extract_bracket_tags(desc) {
+            assert!(
+                valid.iter().any(|v| v == &tag),
+                "property `{prop_name}` description references unknown [tag] `[{tag}]` — does not match any subcmd in enum {valid:?}\n  description: {desc}"
+            );
+        }
+    }
+}
+
+/// Every name in `required` must be a defined property. Catches: rename
+/// a property without updating the required list, or vice versa.
+#[test]
+fn mcp_gnx_group_required_keys_are_defined_properties() {
+    let tool = graph_nexus_mcp::group::group_tools()
+        .into_iter()
+        .find(|t| t.name == "gnx_group")
+        .expect("gnx_group tool");
+    let props = tool
+        .schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("properties");
+    let required = tool
+        .schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .expect("required array");
+    for key in required {
+        let key = key.as_str().expect("required entry must be string");
+        assert!(
+            props.contains_key(key),
+            "gnx_group: required key `{key}` not in properties map"
+        );
+    }
+}
+
+/// Every positional_args entry must be a defined property too — the
+/// dispatch layer (`argv::json_to_argv`) looks up by that name.
+#[test]
+fn mcp_gnx_group_positional_args_are_defined_properties() {
+    let tool = graph_nexus_mcp::group::group_tools()
+        .into_iter()
+        .find(|t| t.name == "gnx_group")
+        .expect("gnx_group tool");
+    let props = tool
+        .schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("properties");
+    for pos in &tool.positional_args {
+        assert!(
+            props.contains_key(pos),
+            "gnx_group: positional arg `{pos}` not declared in properties — dispatch will silently drop it"
+        );
+    }
+}
+
+// ── 8. End-to-end MCP smoke (JSON-RPC over stdio) ────────────────────────────
+
+/// Spawn `gnx admin mcp serve`, perform MCP initialize handshake, send
+/// `tools/list`, verify gnx_group + gnx_peers + a derived tool all
+/// appear. Catches: rmcp transport regression, schema-serialisation
+/// bug, server-loop deadlock.
+///
+/// Marked `#[ignore]` — runs on demand via
+/// `cargo test --test cli_surface_invariants -- --ignored` and in CI
+/// once we wire it into the workflow. Reason: stdio JSON-RPC handshake
+/// is timing-sensitive and the few-hundred-ms server startup adds CI
+/// flake risk; keep the always-on suite fast.
+#[test]
+#[ignore = "spawns subprocess + stdio JSON-RPC; opt-in via --ignored"]
+fn mcp_serve_responds_to_initialize_and_tools_list() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(gnx_bin())
+        .args(["admin", "mcp", "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mcp serve");
+
+    let mut stdin = child.stdin.take().expect("stdin pipe");
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let mut reader = BufReader::new(stdout);
+
+    // 1. Initialize handshake
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"cli-surface-test","version":"0"}}}}}}"#
+    )
+    .expect("write initialize");
+
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read initialize response");
+    let init: serde_json::Value =
+        serde_json::from_str(&line).expect("initialize response must be JSON");
+    assert_eq!(init["id"], 1, "id mismatch on initialize: {line}");
+    assert!(
+        init["result"]["serverInfo"]["name"].is_string(),
+        "initialize result missing serverInfo.name: {line}"
+    );
+
+    // 2. Notify initialized (no response expected)
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .expect("write initialized notification");
+
+    // 3. tools/list
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#
+    )
+    .expect("write tools/list");
+
+    line.clear();
+    reader.read_line(&mut line).expect("read tools/list response");
+    let list: serde_json::Value =
+        serde_json::from_str(&line).expect("tools/list response must be JSON");
+    assert_eq!(list["id"], 2, "id mismatch on tools/list: {line}");
+    let tools = list["result"]["tools"]
+        .as_array()
+        .expect("tools array missing");
+    let names: Vec<String> = tools
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(String::from))
+        .collect();
+    for required_tool in ["gnx_group", "gnx_peers", "gnx_find", "gnx_impact"] {
+        assert!(
+            names.iter().any(|n| n == required_tool),
+            "tool `{required_tool}` missing from tools/list response. Got: {names:?}"
+        );
+    }
+
+    // 4. Clean shutdown.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Pull `name` tokens out of a `--help` Commands: section. Lines look like
+/// `  <name>     <one-line description>`. Stops at the blank line that
+/// terminates the section. `help` is filtered out (clap auto-injects it).
+fn extract_subcommands_from_help(help: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_commands = false;
+    for line in help.lines() {
+        let trimmed_left = line.trim_start();
+        if line.starts_with("Commands:") {
+            in_commands = true;
+            continue;
+        }
+        if !in_commands {
+            continue;
+        }
+        if trimmed_left.is_empty() {
+            break; // section terminator
+        }
+        // Line shape: leading whitespace, then identifier, then spaces, then desc.
+        let first_token = trimmed_left.split_whitespace().next().unwrap_or("");
+        if first_token.is_empty() || first_token == "help" {
+            continue;
+        }
+        // Defensive: token must be a clap-style command identifier.
+        if first_token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            out.push(first_token.to_string());
+        }
+    }
+    out
+}
+
+/// Pull `--long-flag` tokens out of a clap --help dump. Only lines whose
+/// trim-leading content STARTS with `--` are treated as flag declarations
+/// — that's how clap formats its Options: section. Description / docstring
+/// lines that mention `--mode` mid-sentence are ignored on purpose.
+///
+/// Strips the leading `--`, skips `help` (always present, never in MCP)
+/// and `graph` (global flag declared on the root Cli, not per-subcmd).
+/// Dedupes within one help dump.
+fn extract_long_flags(help: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    for line in help.lines() {
+        let trimmed = line.trim_start();
+        // Only lines that start strictly with `--<alpha>` qualify as flag
+        // declarations. Short-form pairings like `-h, --help` are skipped
+        // — the only flag that comes paired with a short form is `--help`
+        // itself, which we filter out below anyway.
+        let Some(rest) = trimmed.strip_prefix("--") else {
+            continue;
+        };
+        if !rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        // Extract flag name up to the first non-ident char.
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if name.is_empty() || matches!(name.as_str(), "help" | "graph") {
+            continue;
+        }
+        if seen.insert(name.clone()) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Extract `[tag]` markers from a description string. Tags are
+/// lowercase identifiers (allowing `_` and `/` for compound tags).
+fn extract_bracket_tags(desc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = desc.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b']' {
+                end += 1;
+            }
+            if end < bytes.len() {
+                let tag = &desc[start..end];
+                if !tag.is_empty()
+                    && tag
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '/')
+                {
+                    out.push(tag.to_string());
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
 
 fn enum_values(schema: &serde_json::Value, prop_key: &str) -> Vec<String> {
     schema
