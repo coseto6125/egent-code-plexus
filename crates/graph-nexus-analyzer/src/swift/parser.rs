@@ -102,6 +102,8 @@ impl LanguageProvider for SwiftProvider {
         let idx_method = self.query.capture_index_for_name("method");
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_typealias = self.query.capture_index_for_name("typealias");
+        let idx_enum_case = self.query.capture_index_for_name("enum_case");
+        let idx_enum_case_name = self.query.capture_index_for_name("enum_case.name");
         let idx_trait = self.query.capture_index_for_name("trait");
 
         let idx_export = self.query.capture_index_for_name("export");
@@ -141,6 +143,8 @@ impl LanguageProvider for SwiftProvider {
             let mut property_name: Option<tree_sitter::Node<'_>> = None;
             let mut constructor_node: Option<tree_sitter::Node<'_>> = None;
             let mut typealias_node: Option<tree_sitter::Node<'_>> = None;
+            let mut enum_case_root: Option<tree_sitter::Node<'_>> = None;
+            let mut enum_case_names: Vec<tree_sitter::Node<'_>> = Vec::new();
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -200,6 +204,10 @@ impl LanguageProvider for SwiftProvider {
                     constructor_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_typealias {
                     typealias_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_enum_case {
+                    enum_case_root = Some(cap.node);
+                } else if Some(cap_idx) == idx_enum_case_name {
+                    enum_case_names.push(cap.node);
                 }
             }
 
@@ -237,6 +245,39 @@ impl LanguageProvider for SwiftProvider {
                         source: rhs,
                         binding_kind: None,
                     });
+                }
+            }
+
+            // Swift enum cases — `case foo` / `case bar(Int)` / `case a, b, c`.
+            // tree-sitter-swift packs all names of a multi-name `case a, b, c`
+            // into a single `enum_entry`, each as a separate `simple_identifier`
+            // child, so the query produces N name captures per match. Always
+            // type-level (enum_entry only ever sits inside enum_class_body),
+            // so no scope walker is needed — emit Property directly.
+            if let (Some(ec_root), false) = (enum_case_root, enum_case_names.is_empty()) {
+                let start = ec_root.start_position();
+                let end = ec_root.end_position();
+                let span = (
+                    start.row as u32,
+                    start.column as u32,
+                    end.row as u32,
+                    end.column as u32,
+                );
+                for name_node in &enum_case_names {
+                    if let Ok(name_str) = std::str::from_utf8(
+                        &source[name_node.start_byte()..name_node.end_byte()],
+                    ) {
+                        nodes.push(RawNode {
+                            decorators: vec![],
+                            is_exported: true, // enum cases follow enum visibility
+                            heritage: vec![],
+                            type_annotation: None,
+                            name: name_str.to_string(),
+                            kind: NodeKind::Property,
+                            span,
+                            calls: Vec::new(),
+                        });
+                    }
                 }
             }
 
@@ -574,7 +615,15 @@ fn collect_pattern_names_rec(
     source: &[u8],
     out: &mut Vec<(String, usize)>,
 ) {
-    if node.kind() == "simple_identifier" && node.child_count() == 0 {
+    // `simple_identifier` is the identifier terminal in tree-sitter-swift.
+    // Treat it as a leaf regardless of `child_count`: Swift 5.9+ context-
+    // keywords (`package`, `actor`, `await`, …) reuse identifier slots, and
+    // tree-sitter-swift represents that by wrapping them in `simple_identifier
+    // > <keyword-token>`. The previous `child_count() == 0` guard skipped
+    // those wrappers — `let package = Package(...)` collected no name at all.
+    // Read the source text of the simple_identifier node directly; its byte
+    // range is the identifier text whether or not it has a keyword child.
+    if node.kind() == "simple_identifier" {
         if let Ok(s) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
             // Skip `_` wildcards — they're not named bindings.
             if s != "_" {

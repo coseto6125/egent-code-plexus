@@ -37,6 +37,14 @@
 (property_declaration
   (pattern) @property.name.pat) @property
 
+;; Enum cases — `case foo` / `case bar(Int)` / `case a, b, c`. Each
+;; `simple_identifier` inside `enum_entry` is a separately-named case;
+;; multi-name `case a, b, c` produces three captures. parser.rs emits
+;; one Property node per case name (always type-level — no scope walk
+;; needed, an `enum_entry` only ever lives inside `enum_class_body`).
+(enum_entry
+  (simple_identifier) @enum_case.name) @enum_case
+
 ;; Constructors — Swift `init(...)` is a distinct `init_declaration` node.
 (init_declaration) @constructor
 
