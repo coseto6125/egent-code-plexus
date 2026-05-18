@@ -2,6 +2,8 @@
 //! First wave: HTTP routes + gRPC service defs in Go/Python/Node/Java/Rust.
 //! Other 9 mainstream langs are BlindSpot stubs (registered but emit nothing).
 
+pub mod http_go;
+
 use crate::commands::group::types::ExtractedContract;
 use std::path::Path;
 
@@ -23,7 +25,7 @@ pub fn registry() -> Vec<ExtractorEntry> {
 
 fn http_extractors() -> Vec<ExtractorEntry> {
     vec![
-        ExtractorEntry { lang: "go",     kind: ExtractorKind::Http, extract: blind_spot_extractor },
+        ExtractorEntry { lang: "go",     kind: ExtractorKind::Http, extract: http_go::extract_http },
         ExtractorEntry { lang: "python", kind: ExtractorKind::Http, extract: blind_spot_extractor },
         ExtractorEntry { lang: "node",   kind: ExtractorKind::Http, extract: blind_spot_extractor },
         ExtractorEntry { lang: "java",   kind: ExtractorKind::Http, extract: blind_spot_extractor },
