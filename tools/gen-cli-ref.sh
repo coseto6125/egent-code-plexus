@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # tools/gen-cli-ref.sh
-# Generate per-version CLI reference cards from `gnx --help`.
+# Generate per-version CLI reference cards from `cgn --help`.
 #
 # Usage:
-#   gen-cli-ref.sh [gnx-binary] [output-dir]
+#   gen-cli-ref.sh [cgn-binary] [output-dir]
 #
 # Defaults:
-#   gnx-binary   = ./target/release/gnx if it exists, else `gnx` from PATH
-#   output-dir   = docs/skills/gnx-onboard/_shared/cli
+#   cgn-binary   = ./target/release/cgn if it exists, else `cgn` from PATH
+#   output-dir   = docs/skills/cgn-onboard/_shared/cli
 #
 # Output layout:
 #   <output-dir>/<version>/<cmd>.md            (one per top-level + selected sub-commands)
@@ -15,21 +15,21 @@
 
 set -euo pipefail
 
-# Default gnx binary
-default_gnx() {
-    if [[ -x ./target/release/gnx ]]; then echo "./target/release/gnx"
-    elif command -v gnx >/dev/null; then echo "gnx"
+# Default cgn binary
+default_cgn() {
+    if [[ -x ./target/release/cgn ]]; then echo "./target/release/cgn"
+    elif command -v cgn >/dev/null; then echo "cgn"
     else echo ""; fi
 }
 
-GNX="${1:-$(default_gnx)}"
-OUT="${2:-docs/skills/gnx-onboard/_shared/cli}"
+CGN="${1:-$(default_cgn)}"
+OUT="${2:-docs/skills/cgn-onboard/_shared/cli}"
 
-[[ -n "$GNX" ]] || { echo "gen-cli-ref: no gnx binary found" >&2; exit 1; }
+[[ -n "$CGN" ]] || { echo "gen-cli-ref: no cgn binary found" >&2; exit 1; }
 
-# Version: "gnx 0.1.5" → 0.1.5  (also matches "gnx 9.9.9-test")
-VER=$("$GNX" --version | awk '{print $2}')
-[[ -n "$VER" ]] || { echo "gen-cli-ref: could not determine gnx version" >&2; exit 1; }
+# Version: "cgn 0.1.5" → 0.1.5  (also matches "cgn 9.9.9-test")
+VER=$("$CGN" --version | awk '{print $2}')
+[[ -n "$VER" ]] || { echo "gen-cli-ref: could not determine cgn version" >&2; exit 1; }
 
 mkdir -p "$OUT/$VER"
 
@@ -47,14 +47,14 @@ declare -a SUB=(
 
 for cmd in "${TOPLEVEL[@]}"; do
     out="$OUT/$VER/$cmd.md"
-    timeout 10 "$GNX" "$cmd" --help > "$out" 2>/dev/null || { echo "warn: $cmd has no --help; skipped" >&2; rm -f "$out"; }
+    timeout 10 "$CGN" "$cmd" --help > "$out" 2>/dev/null || { echo "warn: $cmd has no --help; skipped" >&2; rm -f "$out"; }
 done
 
 for entry in "${SUB[@]}"; do
     parent="${entry%%:*}"
     child="${entry##*:}"
     out="$OUT/$VER/${parent}-${child}.md"
-    timeout 10 "$GNX" "$parent" "$child" --help > "$out" 2>/dev/null || { echo "warn: $parent $child has no --help; skipped" >&2; rm -f "$out"; }
+    timeout 10 "$CGN" "$parent" "$child" --help > "$out" 2>/dev/null || { echo "warn: $parent $child has no --help; skipped" >&2; rm -f "$out"; }
 done
 
 # Build/update manifest.json. No `generated_at` field — git history tracks

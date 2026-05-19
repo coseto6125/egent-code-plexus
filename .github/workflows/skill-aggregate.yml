@@ -3,13 +3,13 @@ name: SKILL aggregate
 on:
   push:
     paths:
-      - 'docs/skills/gnx-onboard/SKILL.md'
-      - 'docs/skills/gnx-onboard/guides/**'
+      - 'docs/skills/cgn-onboard/SKILL.md'
+      - 'docs/skills/cgn-onboard/guides/**'
       - 'tools/aggregate.sh'
       - 'tools/lint-skill.sh'
   pull_request:
     paths:
-      - 'docs/skills/gnx-onboard/**'
+      - 'docs/skills/cgn-onboard/**'
       - 'tools/aggregate.sh'
       - 'tools/lint-skill.sh'
 
@@ -19,15 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: T1 lint
-        run: bash tools/lint-skill.sh docs/skills/gnx-onboard
+        run: bash tools/lint-skill.sh docs/skills/cgn-onboard
       - name: T2 aggregator round-trip
         run: |
-          bash tools/aggregate.sh docs/skills/gnx-onboard > /tmp/ONBOARDING.gen.md
-          diff -u docs/skills/gnx-onboard/ONBOARDING.md /tmp/ONBOARDING.gen.md
+          bash tools/aggregate.sh docs/skills/cgn-onboard > /tmp/ONBOARDING.gen.md
+          diff -u docs/skills/cgn-onboard/ONBOARDING.md /tmp/ONBOARDING.gen.md
       - name: T4 persona rules
         run: |
           bash tools/test-persona-rules.sh \
-            docs/skills/gnx-onboard/_shared/refs/persona-inference.md \
+            docs/skills/cgn-onboard/_shared/refs/persona-inference.md \
             tests/skill/persona-fixtures.yaml
       - name: All SKILL tests
         run: bash tests/skill/run-all.sh

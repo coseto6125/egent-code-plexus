@@ -1,7 +1,7 @@
 """Unit tests for `_pair_ref_template_class_double_emit` in parity_aggregate.py.
 
 The helper pairs ref-gitnexus's double-emit of `template<typename T> class Foo`
-as both `Class` AND `Template` at the same `(p, n)` against gnx-rs's single
+as both `Class` AND `Template` at the same `(p, n)` against cgn's single
 `Class` emission. Verified shape on `.sample_repo` 2026-05-19 (PR #152
 follow-up): 19 Cpp template-class definitions that previously surfaced as
 `real_ref` ref_over Template-* rows now classify as `label_diff`.
@@ -43,7 +43,7 @@ def test_pairs_ref_template_with_rs_class():
 
 
 def test_does_not_pair_without_rs_type_kind():
-    # If gnx-rs has nothing of the type-family at (p, n), the ref `Template`
+    # If cgn has nothing of the type-family at (p, n), the ref `Template`
     # row is a real missing emission — do not classify as label_diff.
     rs_all = [("Function", "tpl.hpp", "make_widget")]
     ref_all = [("Template", "tpl.hpp", "make_widget")]

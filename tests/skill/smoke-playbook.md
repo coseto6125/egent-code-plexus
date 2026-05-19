@@ -1,14 +1,14 @@
 # SKILL Smoke Playbook (T5)
 
 Manual end-to-end test. Run **before each release** that touches anything
-under `docs/skills/gnx-onboard/`. Not run in CI (cross-platform install
+under `docs/skills/cgn-onboard/`. Not run in CI (cross-platform install
 matrix is out of scope).
 
 ## Setup
 
 1. Fresh sandbox: a VM, container, or remote machine where:
-   - `gnx` is NOT installed
-   - `~/.gnx/` does NOT exist
+   - `cgn` is NOT installed
+   - `~/.cgn/` does NOT exist
    - The recipient's editor of choice is installed (Claude Code,
      Cursor, etc.)
 
@@ -17,22 +17,22 @@ matrix is out of scope).
 ### Case A: Cross-agent URL bootstrap (any LLM)
 
 1. Paste into a fresh chat session of the target agent (Cursor / Aider / Gemini CLI / etc.):
-   > "Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/gnx-onboard/SKILL.md and follow it as my onboarding wizard for graph-nexus."
+   > "Fetch https://raw.githubusercontent.com/<owner>/code-graph-nexus/main/docs/skills/cgn-onboard/SKILL.md and follow it as my onboarding wizard for code-graph-nexus."
 2. **Expect:** agent reads SKILL.md, runs probes, emits Phase 01 3-choice menu.
 3. Pick `accept`.
 4. **Expect:** download starts in background; agent advances to Phase 02 immediately (does not wait).
 5. Answer Phase 02–04 prompts.
-6. **Expect:** Phase 05 waits for download to verify before running `gnx admin index`.
+6. **Expect:** Phase 05 waits for download to verify before running `cgn admin index`.
 7. **Verify:**
-   - `which gnx` returns a path
-   - `~/.gnx/registry.json` exists
-   - `~/.gnx/onboarding-summary.md` exists
+   - `which cgn` returns a path
+   - `~/.cgn/registry.json` exists
+   - `~/.cgn/onboarding-summary.md` exists
    - IDE MCP config file written (for the IDE chosen)
-   - `gnx find . --repo <indexed-repo>` returns results
+   - `cgn find . --repo <indexed-repo>` returns results
 
 ### Case B: ShareOnboardingGuide (Claude Code)
 
-1. In Claude Code, from `docs/skills/gnx-onboard/` cwd:
+1. In Claude Code, from `docs/skills/cgn-onboard/` cwd:
    - Run the `ShareOnboardingGuide` tool with mode `check`.
 2. **Expect:** short-code link returned.
 3. Open that link in a fresh Claude Code session (different machine or `claude --reset`).
@@ -41,7 +41,7 @@ matrix is out of scope).
 ### Case C: Resume after interruption
 
 1. Run Case A; at Phase 03 say `quit` or close terminal.
-2. **Expect:** `~/.gnx/onboarding-summary.md` has frontmatter with
+2. **Expect:** `~/.cgn/onboarding-summary.md` has frontmatter with
    `last_phase_completed: 02-first-index`.
 3. Start a new agent session, paste URL bootstrap.
 4. **Expect:** agent reads summary, offers "Resume from Phase 03? Redo a specific phase? Start over?"
@@ -57,7 +57,7 @@ matrix is out of scope).
 ## Pass criteria
 
 - All 4 cases complete the listed "verify" steps.
-- No file outside `~/.gnx/onboarding-summary.md` and the IDE MCP configs is modified.
+- No file outside `~/.cgn/onboarding-summary.md` and the IDE MCP configs is modified.
 - No silent retries observed.
 - Persona inference picks the correct branch based on the test agent's CLAUDE.md (or equivalent).
 

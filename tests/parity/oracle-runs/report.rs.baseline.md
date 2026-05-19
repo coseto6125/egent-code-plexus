@@ -1,7 +1,7 @@
 # verify-resolver report (rs)
 
 Oracle records: 4581
-Gnx records: 21846
+Cgn records: 21846
 
 ## Summary
 
@@ -10,13 +10,13 @@ Gnx records: 21846
 | TP (correct) | 48 |
 | FP_ghost (wrong target) | 327 |
 | FP_overmatch (Global with alts) | 3 |
-| FN_dangling (oracle resolved, gnx didn't) | 255 |
+| FN_dangling (oracle resolved, cgn didn't) | 255 |
 | tier_demoted (correct but fell back to Global) | 46 |
-| oracle_only (oracle imports gnx never saw) | 3951 |
-| gnx_only same-file (excluded from diff) | 3820 |
-| gnx_only other (no oracle counterpart) | 16865 |
+| oracle_only (oracle imports cgn never saw) | 3951 |
+| cgn_only same-file (excluded from diff) | 3820 |
+| cgn_only other (no oracle counterpart) | 16865 |
 
-## Per-tier breakdown (gnx side)
+## Per-tier breakdown (cgn side)
 
 | tier | TP | FP_ghost | FP_overmatch | tier_demoted | FN_dangling |
 |---|---|---|---|---|---|

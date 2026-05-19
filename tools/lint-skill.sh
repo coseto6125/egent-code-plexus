@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # tools/lint-skill.sh
-# T1 structural lint for the gnx-onboard SKILL pack.
-# Usage: lint-skill.sh [path-to-skill-root]   # default: docs/skills/gnx-onboard
+# T1 structural lint for the cgn-onboard SKILL pack.
+# Usage: lint-skill.sh [path-to-skill-root]   # default: docs/skills/cgn-onboard
 
 set -euo pipefail
 
-ROOT="${1:-docs/skills/gnx-onboard}"
+ROOT="${1:-docs/skills/cgn-onboard}"
 
 fail() { echo "lint FAIL: $1" >&2; exit 1; }
 

@@ -15,13 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build gnx
-        run: cargo build --release --bin gnx
+      - name: Build cgn
+        run: cargo build --release --bin cgn
       - name: Regenerate CLI ref cards
         run: |
           bash tools/gen-cli-ref.sh \
-            ./target/release/gnx \
-            docs/skills/gnx-onboard/_shared/cli
+            ./target/release/cgn \
+            docs/skills/cgn-onboard/_shared/cli
       - name: Open PR if anything changed
         uses: peter-evans/create-pull-request@v6
         with:

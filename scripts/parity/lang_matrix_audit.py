@@ -23,7 +23,7 @@ disagreement type:
   YNY    — impossible (parser must reference to emit) — flag
   NNY    — unexplained runtime kind (not in spec or parser?)
 
-Usage (from gitnexus-rs repo root):
+Usage (from code-graph-nexus repo root):
 
     python3 scripts/parity/lang_matrix_audit.py
     python3 scripts/parity/lang_matrix_audit.py --runtime /path/to/dump.txt
@@ -42,7 +42,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-ANALYZER_SRC = REPO_ROOT / "crates" / "graph-nexus-analyzer" / "src"
+ANALYZER_SRC = REPO_ROOT / "crates" / "cgn-analyzer" / "src"
 DEFAULT_RUNTIME = REPO_ROOT / "scripts" / "parity" / "final_baseline.txt"
 
 # NodeKind variants that are *emit-capable symbol kinds*. Skipped:

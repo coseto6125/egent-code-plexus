@@ -350,6 +350,102 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "cgn-analyzer"
+version = "0.2.0"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "blake3",
+ "cgn-core",
+ "ignore",
+ "phf",
+ "rayon",
+ "regex",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "streaming-iterator",
+ "tempfile",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cairo",
+ "tree-sitter-containerfile",
+ "tree-sitter-cpp",
+ "tree-sitter-crystal",
+ "tree-sitter-dart",
+ "tree-sitter-go",
+ "tree-sitter-hcl",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-kotlin",
+ "tree-sitter-lua",
+ "tree-sitter-md",
+ "tree-sitter-move",
+ "tree-sitter-nim",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-sequel",
+ "tree-sitter-solidity",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "tree-sitter-verilog",
+ "tree-sitter-vyper",
+ "tree-sitter-yaml",
+ "tree-sitter-zig",
+]
+
+[[package]]
+name = "cgn-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "cc",
+ "chrono",
+ "criterion",
+ "crossbeam-channel",
+ "filetime",
+ "fixedbitset 0.5.7",
+ "fs2",
+ "hex",
+ "ignore",
+ "memmap2",
+ "nix",
+ "phf",
+ "rayon",
+ "regex",
+ "rkyv",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "tree-sitter",
+ "unicode-normalization",
+ "url",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "cgn-mcp"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -427,6 +523,52 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "code-graph-nexus"
+version = "0.2.0"
+dependencies = [
+ "cgn-analyzer",
+ "cgn-core",
+ "cgn-mcp",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dialoguer",
+ "etoon",
+ "fs2",
+ "hex",
+ "ignore",
+ "libc",
+ "memmap2",
+ "mimalloc",
+ "nix",
+ "notify",
+ "ratatui",
+ "rayon",
+ "regex",
+ "rkyv",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "streaming-iterator",
+ "tantivy",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "uuid",
+ "walkdir",
+ "xxhash-rust",
+]
 
 [[package]]
 name = "colorchoice"
@@ -1092,148 +1234,6 @@ dependencies = [
  "log",
  "regex-automata",
  "regex-syntax",
-]
-
-[[package]]
-name = "graph-nexus"
-version = "0.1.5"
-dependencies = [
- "chrono",
- "clap",
- "crossterm",
- "dialoguer",
- "etoon",
- "fs2",
- "graph-nexus-analyzer",
- "graph-nexus-core",
- "graph-nexus-mcp",
- "hex",
- "ignore",
- "libc",
- "memmap2",
- "mimalloc",
- "nix",
- "notify",
- "ratatui",
- "rayon",
- "regex",
- "rkyv",
- "rustc-hash",
- "serde",
- "serde_json",
- "streaming-iterator",
- "tantivy",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-go",
- "tree-sitter-java",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "uuid",
- "walkdir",
- "xxhash-rust",
-]
-
-[[package]]
-name = "graph-nexus-analyzer"
-version = "0.1.5"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "blake3",
- "graph-nexus-core",
- "ignore",
- "phf",
- "rayon",
- "regex",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "streaming-iterator",
- "tempfile",
- "tracing",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cairo",
- "tree-sitter-containerfile",
- "tree-sitter-cpp",
- "tree-sitter-crystal",
- "tree-sitter-dart",
- "tree-sitter-go",
- "tree-sitter-hcl",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-kotlin",
- "tree-sitter-lua",
- "tree-sitter-md",
- "tree-sitter-move",
- "tree-sitter-nim",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-sequel",
- "tree-sitter-solidity",
- "tree-sitter-swift",
- "tree-sitter-typescript",
- "tree-sitter-verilog",
- "tree-sitter-vyper",
- "tree-sitter-yaml",
- "tree-sitter-zig",
-]
-
-[[package]]
-name = "graph-nexus-core"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "cc",
- "chrono",
- "criterion",
- "crossbeam-channel",
- "filetime",
- "fixedbitset 0.5.7",
- "fs2",
- "hex",
- "ignore",
- "memmap2",
- "nix",
- "phf",
- "rayon",
- "regex",
- "rkyv",
- "rustc-hash",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "tree-sitter",
- "unicode-normalization",
- "url",
- "xxhash-rust",
-]
-
-[[package]]
-name = "graph-nexus-mcp"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "clap",
- "rmcp",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
