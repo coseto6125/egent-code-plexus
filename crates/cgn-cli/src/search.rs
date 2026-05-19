@@ -84,11 +84,20 @@ impl TantivyEngine {
     pub fn build_index(index_dir: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
         let index_dir = index_dir.join("tantivy");
         if index_dir.exists() {
-            // Best-effort wipe: clears any stale `.tantivy-writer.lock`
-            // or half-committed segments left by a killed prior run.
-            // If this fails (Windows file lock held by zombie), the
-            // `create_in_dir` below surfaces a clear error.
-            let _ = fs::remove_dir_all(&index_dir);
+            // Fix Windows Access Denied (os error 5) by renaming the stale directory
+            // instead of deleting it while it might be locked.
+            let dead_path = index_dir.with_extension(format!(
+                "dead.{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis()
+            ));
+            let _ = fs::rename(&index_dir, &dead_path);
+            // Non-blocking cleanup
+            std::thread::spawn(move || {
+                let _ = fs::remove_dir_all(dead_path);
+            });
         }
         fs::create_dir_all(&index_dir).map_err(|e| format!("create tantivy dir: {e}"))?;
 
