@@ -91,7 +91,10 @@ fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Resu
         match promotion::promotion_case(&session_meta.base_sha, &current_head, worktree_root) {
             promotion::PromotionCase::A => {
                 let stats = promotion::promote_case_a(&session_dir, worktree_root, &current_head)?;
-                eprintln!("session.promoted case=A dropped={} kept={}", stats.dropped, stats.kept);
+                eprintln!(
+                    "session.promoted case=A dropped={} kept={}",
+                    stats.dropped, stats.kept
+                );
             }
             promotion::PromotionCase::B => {
                 promotion::promote_case_b(&session_dir, &session_meta.base_sha, &current_head)?;
@@ -134,13 +137,10 @@ fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Resu
 
     let (n_written, n_failed) =
         match overlay_writer::write_dirty_fragments_batch(&session_dir, &inputs) {
-            Ok(outs) => outs.into_iter().fold((0usize, 0usize), |(w, f), o| {
-                if o.parse_failed {
-                    (w, f + 1)
-                } else {
-                    (w + 1, f)
-                }
-            }),
+            Ok(outs) => {
+                let n_failed = outs.iter().filter(|o| o.parse_failed).count();
+                (outs.len() - n_failed, n_failed)
+            }
             Err(e) => {
                 eprintln!("warning: overlay batch write: {e}");
                 (0, 0)
