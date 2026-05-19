@@ -3,10 +3,10 @@
 //! See `docs/specs/2026-05-15-matrix-optimization-opportunities.md` §A1 (Ruby)
 //! + §A4 (Ruby mixins).
 
-use graph_nexus_analyzer::ruby::parser::RubyProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::ruby::parser::RubyProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawNode};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(source: &str) -> LocalGraph {

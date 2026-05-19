@@ -1,5 +1,5 @@
-use graph_nexus_cli::commands::group::storage::{self, group_dir};
-use graph_nexus_cli::commands::group::types::*;
+use cgn_cli::commands::group::storage::{self, group_dir};
+use cgn_cli::commands::group::types::*;
 use std::path::Path;
 use tempfile::TempDir;
 

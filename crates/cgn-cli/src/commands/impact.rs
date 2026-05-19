@@ -4,10 +4,10 @@ use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::output::{emit, OutputFormat};
 use crate::reanalyze::make_pipeline;
 use clap::{Args, ValueEnum};
-use graph_nexus_core::algorithms::process_trace::is_test_path;
-use graph_nexus_core::config;
-use graph_nexus_core::graph::NodeKind;
-use graph_nexus_core::{GnxError, HIGH_TRUST_CONFIDENCE};
+use cgn_core::algorithms::process_trace::is_test_path;
+use cgn_core::config;
+use cgn_core::graph::NodeKind;
+use cgn_core::{GnxError, HIGH_TRUST_CONFIDENCE};
 use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -649,7 +649,7 @@ fn direction_str(dir: &Direction) -> &'static str {
 /// `--relation-types`, already-visited target) are NOT counted, since
 /// those are explicit user-driven filters rather than the silent default.
 fn run_bfs(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     start_idx: usize,
     direction: &Direction,
     max_depth: usize,
@@ -790,7 +790,7 @@ fn run_bfs(
 }
 
 fn collect_blind_spots(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     target_file_path: &str,
 ) -> Vec<String> {
     graph

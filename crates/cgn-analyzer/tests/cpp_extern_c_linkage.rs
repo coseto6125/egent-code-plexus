@@ -9,10 +9,10 @@
 //! Regression for the gap surfaced by Round 64 — Cpp Function 2003
 //! candidates after the `.h → Cpp` dispatch fix landed.
 
-use graph_nexus_analyzer::cpp::parser::CppProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::cpp::parser::CppProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

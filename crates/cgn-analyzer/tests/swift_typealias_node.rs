@@ -4,10 +4,10 @@
 //! so `MATCH (n:Typedef) WHERE n.name = '...'` returned nothing for Swift,
 //! while ref-gitnexus had 28 unpaired TypeAlias rows on Alamofire alone.
 
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

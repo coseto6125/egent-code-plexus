@@ -3,8 +3,8 @@
 //! default) and cross-repo RRF-merged top-K (`--merge rrf`).
 
 use clap::{Args, ValueEnum};
-use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, RegistryFile};
+use cgn_core::GnxError;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 

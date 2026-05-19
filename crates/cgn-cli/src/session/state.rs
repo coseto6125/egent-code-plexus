@@ -3,7 +3,7 @@
 //! `commit_lookup::CommitIndex`, which is a cli-side concern.
 
 use crate::commit_lookup::CommitIndex;
-use graph_nexus_core::session::{DirtyFiles, SessionMeta, SessionState, StaleReason};
+use cgn_core::session::{DirtyFiles, SessionMeta, SessionState, StaleReason};
 use std::fs;
 use std::path::Path;
 

@@ -32,8 +32,8 @@
 //! the dropped signal is preserved in the winner's `reason` string for
 //! downstream LLM inspection.
 
-use graph_nexus_core::analyzer::types::{RawFrameworkRef, RawNode, RawRoute};
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::types::{RawFrameworkRef, RawNode, RawRoute};
+use cgn_core::graph::NodeKind;
 
 /// One scored entry point. The builder emits one `NodeKind::EntryPoint`
 /// marker node per `EntryPoint` and a `References` edge from the marker
@@ -302,8 +302,8 @@ fn dedup_keep_highest(mut items: Vec<EntryPoint>) -> Vec<EntryPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::analyzer::types::{RawFrameworkRef, RawNode, RawRoute};
-    use graph_nexus_core::graph::NodeKind;
+    use cgn_core::analyzer::types::{RawFrameworkRef, RawNode, RawRoute};
+    use cgn_core::graph::NodeKind;
 
     fn mk_node(name: &str, kind: NodeKind) -> RawNode {
         RawNode {

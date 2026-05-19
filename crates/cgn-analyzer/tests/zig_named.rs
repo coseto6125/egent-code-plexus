@@ -4,10 +4,10 @@
 //! Plain value constants (`const x = 42`, `const s = "str"`, `const b = true`)
 //! must NOT become Typedef — they stay NodeKind::Const.
 
-use graph_nexus_analyzer::zig::parser::ZigProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::zig::parser::ZigProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

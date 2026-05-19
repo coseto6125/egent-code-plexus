@@ -1,4 +1,4 @@
-use graph_nexus_core::registry::{RegistryFile, RepoAlias};
+use cgn_core::registry::{RegistryFile, RepoAlias};
 use std::collections::BTreeMap;
 use tempfile::NamedTempFile;
 
@@ -58,7 +58,7 @@ fn v1_auto_migrates_via_rebuild_from_disk() {
 
     let repo_dir = home.join("myrepo__abcd1234");
     std::fs::create_dir(&repo_dir).unwrap();
-    let repo_meta = graph_nexus_core::registry::RepoMeta {
+    let repo_meta = cgn_core::registry::RepoMeta {
         version: 1,
         common_dir: "/work/myrepo/.git".into(),
         remote_url: Some("https://github.com/u/r.git".into()),
@@ -68,7 +68,7 @@ fn v1_auto_migrates_via_rebuild_from_disk() {
         total_size_bytes: 0,
         last_touched: "2026-05-17T10:00:00Z".into(),
     };
-    graph_nexus_core::registry::RepoMeta::write_atomic(&repo_dir.join("meta.json"), &repo_meta)
+    cgn_core::registry::RepoMeta::write_atomic(&repo_dir.join("meta.json"), &repo_meta)
         .unwrap();
 
     let reg = RegistryFile::read_or_empty(&registry_path).unwrap();
@@ -134,7 +134,7 @@ fn rebuild_from_disk_walks_repo_meta_json() {
     let home = tmp.path();
     let repo_dir = home.join("myrepo__abcd1234");
     std::fs::create_dir(&repo_dir).unwrap();
-    let repo_meta = graph_nexus_core::registry::RepoMeta {
+    let repo_meta = cgn_core::registry::RepoMeta {
         version: 1,
         common_dir: "/work/myrepo/.git".into(),
         remote_url: Some("https://github.com/u/r.git".into()),
@@ -144,7 +144,7 @@ fn rebuild_from_disk_walks_repo_meta_json() {
         total_size_bytes: 0,
         last_touched: "2026-05-17T10:00:00Z".into(),
     };
-    graph_nexus_core::registry::RepoMeta::write_atomic(&repo_dir.join("meta.json"), &repo_meta)
+    cgn_core::registry::RepoMeta::write_atomic(&repo_dir.join("meta.json"), &repo_meta)
         .unwrap();
 
     let reg = RegistryFile::rebuild_from_disk(home).unwrap();

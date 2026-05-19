@@ -28,8 +28,8 @@
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use graph_nexus_core::graph::ArchivedFileCategory;
-use graph_nexus_core::GnxError;
+use cgn_core::graph::ArchivedFileCategory;
+use cgn_core::GnxError;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 

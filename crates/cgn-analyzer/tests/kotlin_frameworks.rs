@@ -6,10 +6,10 @@
 //! unrelated `get(...)` / `post(...)` calls (those tokens are common
 //! identifiers outside Ktor).
 
-use graph_nexus_analyzer::kotlin::parser::KotlinProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::kotlin::parser::KotlinProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
-fn parse(src: &str) -> graph_nexus_core::analyzer::types::LocalGraph {
+fn parse(src: &str) -> cgn_core::analyzer::types::LocalGraph {
     let provider = KotlinProvider::new().expect("KotlinProvider::new");
     provider
         .parse_file("Test.kt".as_ref(), src.as_bytes())

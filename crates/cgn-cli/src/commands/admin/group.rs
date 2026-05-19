@@ -1,6 +1,6 @@
 use clap::Subcommand;
-use graph_nexus_core::registry::{resolve_home_gnx, FileLock, GroupEntry, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, FileLock, GroupEntry, RegistryFile};
+use cgn_core::GnxError;
 
 #[derive(Subcommand, Debug)]
 pub enum GroupCommands {

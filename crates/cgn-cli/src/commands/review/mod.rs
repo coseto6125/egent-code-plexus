@@ -7,7 +7,7 @@
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 pub mod aggregate;
 pub mod findings;

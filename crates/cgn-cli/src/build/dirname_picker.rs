@@ -2,7 +2,7 @@
 //! `<source_type>_<source_id>__<sha>` — branch > tag > pr > commit fallback.
 
 use crate::git::safe_exec;
-use graph_nexus_core::registry::sanitize_segment;
+use cgn_core::registry::sanitize_segment;
 use std::io;
 use std::path::Path;
 

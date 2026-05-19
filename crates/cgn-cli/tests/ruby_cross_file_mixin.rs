@@ -33,11 +33,11 @@
 //! callable. Both are out of scope for PR #13 — this test pins the current
 //! behaviour so a future closing PR can flip the assertions.
 
-use graph_nexus_analyzer::resolution::index::{ResolveTarget, SymbolTable};
-use graph_nexus_analyzer::resolution::resolver::Resolver;
-use graph_nexus_analyzer::ruby::parser::RubyProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
+use cgn_analyzer::resolution::index::{ResolveTarget, SymbolTable};
+use cgn_analyzer::resolution::resolver::Resolver;
+use cgn_analyzer::ruby::parser::RubyProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
 use std::path::Path;
 
 fn parse_ruby(path: &str, src: &str) -> LocalGraph {

@@ -1,6 +1,6 @@
 //! Tests for resolving (repo_name, branch, worktree_path) from cwd's git.
 
-use graph_nexus_cli::git_state::{resolve, GitState};
+use cgn_cli::git_state::{resolve, GitState};
 use std::path::Path;
 use std::process::Command;
 

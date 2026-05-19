@@ -4,8 +4,8 @@
 //! and shell-quote stripping shared between PreToolUse (pattern
 //! extraction) and PostToolUse (git mutation detection).
 
-use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, RegistryFile};
+use cgn_core::GnxError;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
@@ -207,10 +207,10 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
     }
 
     let meta_path = session_dir.join("meta.json");
-    let mut meta = graph_nexus_core::session::SessionMeta::read(&meta_path).ok()?;
+    let mut meta = cgn_core::session::SessionMeta::read(&meta_path).ok()?;
 
     let (entries, _new_offset) =
-        graph_nexus_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
+        cgn_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
     if entries.is_empty() {
         return None;
     }
@@ -219,8 +219,8 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
         return None;
     }
 
-    let _ = graph_nexus_core::peer::inbox::truncate_inbox(&inbox);
+    let _ = cgn_core::peer::inbox::truncate_inbox(&inbox);
     meta.last_drained_offset = 0;
-    let _ = graph_nexus_core::session::SessionMeta::write_atomic(&meta_path, &meta);
+    let _ = cgn_core::session::SessionMeta::write_atomic(&meta_path, &meta);
     Some(payload)
 }

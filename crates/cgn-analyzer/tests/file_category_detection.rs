@@ -1,5 +1,5 @@
-use graph_nexus_analyzer::resolution::builder::determine_category;
-use graph_nexus_core::graph::FileCategory;
+use cgn_analyzer::resolution::builder::determine_category;
+use cgn_core::graph::FileCategory;
 
 // ── Reference: vendor/ ───────────────────────────────────────────────────────
 

@@ -8,10 +8,10 @@
 //! * `local` qualifier  → is_exported = false
 //! * `protected` qualifier → is_exported = false
 
-use graph_nexus_analyzer::verilog::parser::VerilogProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::verilog::parser::VerilogProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

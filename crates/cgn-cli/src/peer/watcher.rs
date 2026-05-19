@@ -7,10 +7,10 @@
 use crate::peer::dispatch::dispatch_peer_dirty_event;
 use chrono::Utc;
 use fs2::FileExt;
-use graph_nexus_core::peer::concern::ImpactCache;
-use graph_nexus_core::peer::registry::alive_peers;
-use graph_nexus_core::session::overlay::DirtyFiles;
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::peer::concern::ImpactCache;
+use cgn_core::peer::registry::alive_peers;
+use cgn_core::session::overlay::DirtyFiles;
+use cgn_core::session::SessionMeta;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     // Cached copy of our own dirty symbols. Invalidated whenever our own
     // dirty_files.json changes (same trigger as impact_cache), avoiding N
     // reads of the same file when N peers fire dirty events in a burst.
-    let my_dirty_cache: Arc<Mutex<Option<Vec<graph_nexus_core::session::overlay::SymbolRef>>>> =
+    let my_dirty_cache: Arc<Mutex<Option<Vec<cgn_core::session::overlay::SymbolRef>>>> =
         Arc::new(Mutex::new(None));
 
     let (tx, rx) = channel::<notify::Result<Event>>();
@@ -70,17 +70,17 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
         if event_count
-            .is_multiple_of(graph_nexus_core::peer::retention::ROTATE_CHECK_EVERY_N_EVENTS)
+            .is_multiple_of(cgn_core::peer::retention::ROTATE_CHECK_EVERY_N_EVENTS)
         {
-            let _ = graph_nexus_core::peer::retention::rotate_if_needed(
+            let _ = cgn_core::peer::retention::rotate_if_needed(
                 &cfg.my_session_dir.join("msg.log"),
-                graph_nexus_core::peer::retention::MSG_LOG_ROTATE_BYTES,
-                graph_nexus_core::peer::retention::MSG_LOG_KEEP_ROTATED,
+                cgn_core::peer::retention::MSG_LOG_ROTATE_BYTES,
+                cgn_core::peer::retention::MSG_LOG_KEEP_ROTATED,
             );
-            let _ = graph_nexus_core::peer::retention::rotate_if_needed(
+            let _ = cgn_core::peer::retention::rotate_if_needed(
                 &cfg.my_session_dir.join("watcher.log"),
-                graph_nexus_core::peer::retention::WATCHER_LOG_ROTATE_BYTES,
-                graph_nexus_core::peer::retention::WATCHER_LOG_KEEP_ROTATED,
+                cgn_core::peer::retention::WATCHER_LOG_ROTATE_BYTES,
+                cgn_core::peer::retention::WATCHER_LOG_KEEP_ROTATED,
             );
         }
     }
@@ -90,7 +90,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
 fn handle_event(
     cfg: &WatcherCfg,
     cache: &Arc<Mutex<ImpactCache>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<graph_nexus_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<Vec<cgn_core::session::overlay::SymbolRef>>>>,
     ev: Event,
 ) -> std::io::Result<()> {
     if !matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
@@ -122,7 +122,7 @@ fn handle_event(
 fn dispatch_peer(
     cfg: &WatcherCfg,
     cache: &Arc<Mutex<ImpactCache>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<graph_nexus_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<Vec<cgn_core::session::overlay::SymbolRef>>>>,
     peer_sid: &str,
     peer_dirty_path: &Path,
 ) -> std::io::Result<()> {

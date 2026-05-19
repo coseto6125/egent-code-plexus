@@ -1,6 +1,6 @@
 //! Tests for registry path sanitization (spec §1.1).
 
-use graph_nexus_core::registry::sanitize_segment;
+use cgn_core::registry::sanitize_segment;
 
 #[test]
 fn rejects_empty() {
@@ -42,7 +42,7 @@ fn accepts_valid_names() {
     assert_eq!(sanitize_segment("ABC-123").unwrap(), "ABC-123");
 }
 
-use graph_nexus_core::registry::derive_repo_name;
+use cgn_core::registry::derive_repo_name;
 
 #[test]
 fn derives_from_ssh_url() {
@@ -72,7 +72,7 @@ fn errors_when_no_remote() {
     assert!(derive_repo_name(None).is_err());
 }
 
-use graph_nexus_core::registry::uid_path;
+use cgn_core::registry::uid_path;
 use std::path::Path;
 
 #[test]

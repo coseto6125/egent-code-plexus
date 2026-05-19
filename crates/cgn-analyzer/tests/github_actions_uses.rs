@@ -6,9 +6,9 @@
 //! and job-level cross-repo reusable workflows), and emits no imports for
 //! workflows that contain no `uses:` directives.
 
-use graph_nexus_analyzer::github_actions::parser::GitHubActionsProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawImport;
+use cgn_analyzer::github_actions::parser::GitHubActionsProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawImport;
 use std::path::Path;
 
 fn parse(source: &str) -> Vec<RawImport> {

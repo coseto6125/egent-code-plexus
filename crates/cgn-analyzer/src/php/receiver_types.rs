@@ -14,8 +14,8 @@
 //! types through the scope and are deferred to a later improvement task.
 
 use crate::calls::attach_to_enclosing;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use tree_sitter::Node;
 
 /// Enclosing-class context built by a pre-walk over the node list.

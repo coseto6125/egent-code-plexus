@@ -11,7 +11,7 @@ pub mod windsurf;
 
 use crate::admin::menu::{self, select};
 use dialoguer::theme::ColorfulTheme;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 const HOSTS: &[menu::Item<'_>] = &[
     ("Claude Code", "Anthropic CLI — ~/.claude/settings.json"),

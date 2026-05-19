@@ -6,7 +6,7 @@
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::sync::OnceLock;
 
 const MAX_HITS: usize = 5;

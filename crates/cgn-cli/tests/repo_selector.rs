@@ -1,5 +1,5 @@
-use graph_nexus_cli::repo_selector::{self, Atom, Selector};
-use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+use cgn_cli::repo_selector::{self, Atom, Selector};
+use cgn_core::registry::{GroupEntry, RegistryFile, RepoAlias};
 use std::collections::BTreeMap;
 use std::process::Command;
 
@@ -91,7 +91,7 @@ fn grammar_rejects_at_without_name() {
 
 // ── Resolver tests ───────────────────────────────────────────────────────────
 
-use graph_nexus_cli::repo_selector::ResolveError;
+use cgn_cli::repo_selector::ResolveError;
 
 #[test]
 fn resolve_by_name_matches_user_alias() {

@@ -1,7 +1,7 @@
 //! Output emission: consolidates the toon/json branching previously
 //! duplicated across every command.
 
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,7 +1,7 @@
-use graph_nexus_cli::commands::group::storage::{
+use cgn_cli::commands::group::storage::{
     read_contracts, read_contracts_archived, write_contracts, GroupMeta, RepoSnapshot,
 };
-use graph_nexus_cli::commands::group::types::{
+use cgn_cli::commands::group::types::{
     ContractRegistry, ContractRole, ContractType, ExtractedContract,
     MatchType, StoredContract, SymbolRef, CrossLink, CrossLinkEndpoint,
 };
@@ -97,8 +97,8 @@ fn meta_json_roundtrip() {
         missing_repos: vec!["legacy".into()],
         config_source: "default".into(),
     };
-    graph_nexus_cli::commands::group::storage::write_meta(dir.path(), &meta).unwrap();
-    let read = graph_nexus_cli::commands::group::storage::read_meta(dir.path()).unwrap();
+    cgn_cli::commands::group::storage::write_meta(dir.path(), &meta).unwrap();
+    let read = cgn_cli::commands::group::storage::read_meta(dir.path()).unwrap();
     assert_eq!(read.generated_at, meta.generated_at);
     assert_eq!(read.missing_repos, vec!["legacy".to_string()]);
 }

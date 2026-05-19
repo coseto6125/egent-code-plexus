@@ -11,7 +11,7 @@ use crate::commands::tool_map::{self, ToolMapArgs};
 use crate::engine::Engine;
 use crate::git::diff_parser::parse_diff_hunks;
 use crate::git::safe_exec;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

@@ -1,8 +1,8 @@
 //! Diagnostic reports for `gnx admin`.
 
 use crate::admin::menu::{self, select};
-use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, RegistryFile};
+use cgn_core::GnxError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -229,7 +229,7 @@ fn command_version(command: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::registry::RepoAlias;
+    use cgn_core::registry::RepoAlias;
     use std::collections::BTreeMap;
 
     #[test]

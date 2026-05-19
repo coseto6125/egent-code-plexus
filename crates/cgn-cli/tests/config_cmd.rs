@@ -6,7 +6,7 @@
 //! review-via-dry-run pattern doesn't apply. Coverage of the wiring +
 //! load/save is what we get from this test.
 
-use graph_nexus_core::config::{config_path, load, save, Config};
+use cgn_core::config::{config_path, load, save, Config};
 use std::process::Command;
 
 fn gnx_bin() -> &'static str {

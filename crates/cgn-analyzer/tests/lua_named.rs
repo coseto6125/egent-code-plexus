@@ -6,9 +6,9 @@
 //!
 //! Does NOT emit Typedef for plain locals with literal RHS (`local x = 42`).
 
-use graph_nexus_analyzer::lua::parser::LuaProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::lua::parser::LuaProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<(String, NodeKind)> {

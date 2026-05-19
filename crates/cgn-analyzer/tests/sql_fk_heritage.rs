@@ -6,10 +6,10 @@
 //! this table depends on by foreign key", which lets impact/route analysis
 //! follow data-flow edges between tables.
 
-use graph_nexus_analyzer::sql::parser::SqlProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::sql::parser::SqlProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(source: &str) -> Vec<RawNode> {

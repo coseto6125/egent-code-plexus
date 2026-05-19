@@ -5,10 +5,10 @@
 //! real `.h` file. Regression for the Round 65 surfacing on hiredis
 //! `dict.h` (10 static prototypes → 0 captured before the anchor drop).
 
-use graph_nexus_analyzer::cpp::parser::CppProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::cpp::parser::CppProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

@@ -3,7 +3,7 @@
 //! Registry redirection: set HOME to a temp dir so `resolve_home_gnx`
 //! resolves to `<temp>/.gnx/registry.json`.
 
-use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+use cgn_core::registry::{GroupEntry, RegistryFile, RepoAlias};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;

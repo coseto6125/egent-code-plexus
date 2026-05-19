@@ -18,7 +18,7 @@
 
 use crate::calls::attach_to_enclosing;
 use crate::framework_helpers::{enclosing_class, node_span};
-use graph_nexus_core::analyzer::types::RawNode;
+use cgn_core::analyzer::types::RawNode;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -234,7 +234,7 @@ fn ts_callee_name(
 #[cfg(test)]
 mod tests {
     use crate::typescript::TypeScriptProvider;
-    use graph_nexus_core::analyzer::provider::LanguageProvider;
+    use cgn_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
     /// Helper: parse source and collect all `calls` from all nodes.

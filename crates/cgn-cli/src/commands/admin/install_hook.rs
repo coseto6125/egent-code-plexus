@@ -31,7 +31,7 @@ pub struct InstallHookArgs {
     pub settings_path: Option<PathBuf>,
 }
 
-pub fn run(args: InstallHookArgs) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::GnxError> {
     if args.claude_code {
         return claude_code::run_install_claude_code(
             args.events.as_deref(),
@@ -41,9 +41,9 @@ pub fn run(args: InstallHookArgs) -> Result<(), graph_nexus_core::GnxError> {
     let out = safe_exec::git()
         .args(["rev-parse", "--git-common-dir"])
         .output()
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("git: {e}")))?;
+        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("git: {e}")))?;
     if !out.status.success() {
-        return Err(graph_nexus_core::GnxError::InvalidArgument(
+        return Err(cgn_core::GnxError::InvalidArgument(
             "not inside a git repository".into(),
         ));
     }

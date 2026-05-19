@@ -13,9 +13,9 @@
 //! File node after the first duplicate received a file_idx pointing at the
 //! wrong `files[]` entry.
 
-use graph_nexus_analyzer::resolution::builder::GraphBuilder;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::resolution::builder::GraphBuilder;
+use cgn_core::analyzer::types::{LocalGraph, RawNode};
+use cgn_core::graph::NodeKind;
 
 fn raw_fn(name: &str) -> RawNode {
     RawNode {
@@ -44,7 +44,7 @@ fn local_graph(path: &str, fn_name: &str, content_byte: u8) -> LocalGraph {
     }
 }
 
-fn assert_file_nodes_self_reference(g: &graph_nexus_core::graph::ZeroCopyGraph) {
+fn assert_file_nodes_self_reference(g: &cgn_core::graph::ZeroCopyGraph) {
     let pool = g.string_pool.as_slice();
     let mut mismatches: Vec<(usize, u32, String, String)> = Vec::new();
     for (idx, n) in g.nodes.iter().enumerate() {

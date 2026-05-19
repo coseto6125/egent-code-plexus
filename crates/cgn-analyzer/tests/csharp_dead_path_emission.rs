@@ -8,10 +8,10 @@
 //!   for struct_declaration); ref-gitnexus emits 29.
 //! - `Annotation` (custom-attribute classes) had no detection path at all.
 
-use graph_nexus_analyzer::c_sharp::parser::CSharpProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::c_sharp::parser::CSharpProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

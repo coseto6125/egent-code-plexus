@@ -43,7 +43,7 @@ pub enum AdminCommands {
     VerifyResolver(crate::commands::verify_resolver::VerifyResolverArgs),
 }
 
-pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), cgn_core::GnxError> {
     match cmd {
         AdminCommands::InstallHook(args) => install_hook::run(args),
         AdminCommands::UninstallHook(args) => claude_code::run_uninstall(args),
@@ -52,9 +52,9 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexu
         AdminCommands::Prune(args) => prune::run(args),
         AdminCommands::Config(args) => config::run(args),
         AdminCommands::Group { command } => group::run(command),
-        AdminCommands::Index(args) => index::run(args).map_err(graph_nexus_core::GnxError::Output),
+        AdminCommands::Index(args) => index::run(args).map_err(cgn_core::GnxError::Output),
         AdminCommands::Sessions { command } => {
-            sessions::run(command).map_err(graph_nexus_core::GnxError::Output)
+            sessions::run(command).map_err(cgn_core::GnxError::Output)
         }
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),
         AdminCommands::VerifyResolver(args) => crate::commands::verify_resolver::run(args),

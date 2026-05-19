@@ -45,7 +45,7 @@ fn prune_branch_returns_informative_error() {
 
 #[test]
 fn prune_orphans_drops_entries_with_missing_common_dir() {
-    use graph_nexus_core::registry::{RegistryFile, RepoAlias};
+    use cgn_core::registry::{RegistryFile, RepoAlias};
     use std::collections::BTreeMap;
 
     let home_tmp = tempfile::tempdir().unwrap();

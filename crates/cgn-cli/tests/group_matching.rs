@@ -1,8 +1,8 @@
-use graph_nexus_cli::commands::group::matching::match_contracts;
-use graph_nexus_cli::commands::group::types::{
+use cgn_cli::commands::group::matching::match_contracts;
+use cgn_cli::commands::group::types::{
     ContractRole, ContractType, ExtractedContract, MatchType, StoredContract, SymbolRef,
 };
-use graph_nexus_core::config::GroupConfig;
+use cgn_core::config::GroupConfig;
 use tempfile::TempDir;
 
 fn make_contract(repo: &str, role: ContractRole, id: &str) -> StoredContract {

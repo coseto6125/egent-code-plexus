@@ -1,5 +1,5 @@
-use graph_nexus_cli::commands::group::extractors::grpc_rust::extract_grpc;
-use graph_nexus_cli::commands::group::types::{ContractRole, ContractType};
+use cgn_cli::commands::group::extractors::grpc_rust::extract_grpc;
+use cgn_cli::commands::group::types::{ContractRole, ContractType};
 use std::path::Path;
 
 #[test]

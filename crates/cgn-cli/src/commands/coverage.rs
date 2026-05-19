@@ -15,9 +15,9 @@ use crate::commit_lookup::find_latest_by_mtime;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use graph_nexus_core::graph::ArchivedZeroCopyGraph;
-use graph_nexus_core::registry::{resolve_home_gnx, Registry, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::graph::ArchivedZeroCopyGraph;
+use cgn_core::registry::{resolve_home_gnx, Registry, RegistryFile};
+use cgn_core::GnxError;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -215,7 +215,7 @@ fn fetch_metrics(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'static 
             // value can be compared against the owned enum directly — no
             // per-node deserialize. Skipping the deserialize avoids a heap
             // alloc per node for large graphs (`--repo @all` × ~10k nodes).
-            use graph_nexus_core::graph::NodeKind;
+            use cgn_core::graph::NodeKind;
             let mut symbols: u32 = 0;
             for node in g.nodes.iter() {
                 if node.kind == NodeKind::Function
@@ -261,7 +261,7 @@ fn fetch_frameworks(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'stat
 /// confidence) tuples returned alongside `detected` so downstream tooling can
 /// identify frameworks the analyzer supports but hasn't seen in this graph.
 fn supported_framework_catalog() -> Vec<Value> {
-    use graph_nexus_analyzer::framework_confidence as fc;
+    use cgn_analyzer::framework_confidence as fc;
 
     let patterns: &[(&str, &str)] = &[
         ("Python/FastAPI", "fastapi-depends"),
@@ -383,11 +383,11 @@ fn count_blind_spots(graph: &ArchivedZeroCopyGraph) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::graph::{
+    use cgn_core::graph::{
         BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph,
         GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
     };
-    use graph_nexus_core::pool::StringPool;
+    use cgn_core::pool::StringPool;
 
     /// rkyv-archive an in-memory `ZeroCopyGraph` and pass the borrowed
     /// `ArchivedZeroCopyGraph` into the test body.

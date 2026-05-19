@@ -20,7 +20,7 @@ fn say_targeted_delivers_to_inbox() {
         h.read_inbox("bob").iter().any(|e| {
             matches!(
                 e,
-                graph_nexus_core::peer::inbox::InboxEntry::Message { body, .. }
+                cgn_core::peer::inbox::InboxEntry::Message { body, .. }
                     if body == "ack on auth refactor"
             )
         })
@@ -48,7 +48,7 @@ fn say_broadcast_reaches_all_alive_peers() {
             h.read_inbox(sid).iter().any(|e| {
                 matches!(
                     e,
-                    graph_nexus_core::peer::inbox::InboxEntry::Message { body, .. }
+                    cgn_core::peer::inbox::InboxEntry::Message { body, .. }
                         if body == "hello team"
                 )
             })

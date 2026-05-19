@@ -1,5 +1,5 @@
-use graph_nexus_analyzer::go::parser::GoProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::go::parser::GoProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 use std::path::Path;
 
 /// Helper: run the Go parser and return the `calls` vec of the named node.

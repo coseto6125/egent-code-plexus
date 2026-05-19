@@ -7,12 +7,12 @@
 //! binary with `--graph <path>` so we test the full CLI wire-up,
 //! clap parsing, and emit() output path.
 
-use graph_nexus_analyzer::fetch_shape::format_reason;
-use graph_nexus_core::graph::{
+use cgn_analyzer::fetch_shape::format_reason;
+use cgn_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
     GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::Path;

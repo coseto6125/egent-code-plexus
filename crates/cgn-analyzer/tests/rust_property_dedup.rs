@@ -3,10 +3,10 @@
 //! twice. Final_baseline showed Rust Property rs=2624 vs ref=1314 (+1310
 //! over) — almost exactly double.
 
-use graph_nexus_analyzer::rust::parser::RustProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::rust::parser::RustProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

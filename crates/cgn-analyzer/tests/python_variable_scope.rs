@@ -3,10 +3,10 @@
 //! Fix anchors `expression_statement > assignment` to `module` direct
 //! children. Function- and class-body assignments are excluded.
 
-use graph_nexus_analyzer::python::parser::PythonProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::python::parser::PythonProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

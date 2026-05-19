@@ -1,4 +1,4 @@
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
 pub type NodeId = u32;

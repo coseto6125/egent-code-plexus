@@ -2,8 +2,8 @@
 //! run the matching cascade, and write contracts.rkyv + meta.json atomically.
 
 use clap::Args;
-use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, RegistryFile};
+use cgn_core::GnxError;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -64,7 +64,7 @@ pub fn run(args: SyncArgs) -> Result<(), GnxError> {
 
     // 3. Load config (default if no project root / file missing). The group
     //    config lives in the global config, not per-repo, so we use defaults.
-    let cfg = graph_nexus_core::config::Config::default().group;
+    let cfg = cgn_core::config::Config::default().group;
 
     // 4. Resolve each member → source path via registry. Members are stored
     //    as the alias string passed to `gnx admin group add`, which may be

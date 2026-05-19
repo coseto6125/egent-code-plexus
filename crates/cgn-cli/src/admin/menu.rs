@@ -1,7 +1,7 @@
 //! Shared menu-navigation helpers wrapping `dialoguer`.
 
 use dialoguer::{theme::ColorfulTheme, Select};
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 /// One menu entry: a short label and an optional one-line description.
 ///

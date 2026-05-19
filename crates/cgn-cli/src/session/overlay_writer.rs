@@ -16,11 +16,11 @@
 
 #![allow(dead_code)]
 
-use graph_nexus_core::analyzer::pipeline::AnalyzerPipeline;
-use graph_nexus_core::graph::NodeKind;
-use graph_nexus_core::registry::atomic_write_json;
-use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
-use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use cgn_core::analyzer::pipeline::AnalyzerPipeline;
+use cgn_core::graph::NodeKind;
+use cgn_core::registry::atomic_write_json;
+use cgn_core::session::overlay::{SymbolKind, SymbolRef};
+use cgn_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use rayon::prelude::*;
 use std::fs;
 use std::io;

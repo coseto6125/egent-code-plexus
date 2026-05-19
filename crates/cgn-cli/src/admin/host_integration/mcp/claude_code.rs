@@ -2,7 +2,7 @@
 
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use serde_json::json;
 use std::ffi::OsString;
 use std::io;

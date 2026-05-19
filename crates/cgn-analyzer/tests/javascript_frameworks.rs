@@ -5,9 +5,9 @@
 //! Detection is gated by the matching `import` statement so the "no import"
 //! cases double-check the gate.
 
-use graph_nexus_analyzer::javascript::parser::JavaScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawFrameworkRef;
+use cgn_analyzer::javascript::parser::JavaScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawFrameworkRef;
 
 fn parse(src: &str) -> Vec<RawFrameworkRef> {
     let provider = JavaScriptProvider::new().unwrap();

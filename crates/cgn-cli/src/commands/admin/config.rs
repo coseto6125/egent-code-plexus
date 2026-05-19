@@ -15,8 +15,8 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use graph_nexus_core::config::{config_path, load, save, Config};
-use graph_nexus_core::GnxError;
+use cgn_core::config::{config_path, load, save, Config};
+use cgn_core::GnxError;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};

@@ -4,8 +4,8 @@
 //! `ArchivedNodeKind::Route` + `Engine::load` API used by `commands/routes.rs`.
 
 use crate::engine::Engine;
-use graph_nexus_core::graph::ArchivedNodeKind;
-use graph_nexus_core::GnxError;
+use cgn_core::graph::ArchivedNodeKind;
+use cgn_core::GnxError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;

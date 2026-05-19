@@ -1,4 +1,4 @@
-use graph_nexus_analyzer::{
+use cgn_analyzer::{
     c::parser::CProvider, c_sharp::parser::CSharpProvider, cpp::parser::CppProvider,
     dart::parser::DartProvider, go::parser::GoProvider, java::parser::JavaProvider,
     javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,

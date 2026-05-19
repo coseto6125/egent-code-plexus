@@ -5,11 +5,11 @@
 //! so the resolver's Tier 2.5 (qualifier-scoped) lookup can pick
 //! the correct target instead of falling back to bare-name Tier 3.
 
-use graph_nexus_analyzer::python::PythonProvider;
-use graph_nexus_analyzer::resolution::builder::GraphBuilder;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::{NodeKind, RelType};
+use cgn_analyzer::python::PythonProvider;
+use cgn_analyzer::resolution::builder::GraphBuilder;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::{NodeKind, RelType};
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = PythonProvider::new().unwrap();
@@ -123,7 +123,7 @@ fn receiver_bound_call_resolves_to_correct_class_method_e2e() {
     let graph = builder.build();
 
     let pool = &graph.string_pool;
-    let name_of = |s: graph_nexus_core::pool::StrRef| -> &str {
+    let name_of = |s: cgn_core::pool::StrRef| -> &str {
         let start = s.offset as usize;
         std::str::from_utf8(&pool[start..start + s.len as usize]).expect("utf-8 pool")
     };

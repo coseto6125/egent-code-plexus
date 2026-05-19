@@ -12,10 +12,10 @@
 //! synthetic minimal cases (cheap unit checks of the dedup contract)
 //! and real-file cases (the 3 macros that motivated the work).
 
-use graph_nexus_analyzer::c::parser::CProvider;
-use graph_nexus_analyzer::cpp::parser::CppProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::c::parser::CProvider;
+use cgn_analyzer::cpp::parser::CppProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn cpp_macros(src: &[u8]) -> Vec<String> {

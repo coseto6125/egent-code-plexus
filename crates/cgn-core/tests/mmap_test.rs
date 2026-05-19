@@ -1,7 +1,7 @@
-use graph_nexus_core::graph::{
+use cgn_core::graph::{
     ArchivedZeroCopyGraph, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::File;
@@ -60,7 +60,7 @@ fn test_mmap_graph_access() {
     assert_eq!(archived.fingerprint, [1; 32]);
 
     let first_node = &archived.nodes[0];
-    assert_eq!(first_node.kind, graph_nexus_core::graph::NodeKind::Function);
+    assert_eq!(first_node.kind, cgn_core::graph::NodeKind::Function);
 
     let resolved_name = first_node.name.resolve(&archived.string_pool);
     assert_eq!(resolved_name, "mmap_func");

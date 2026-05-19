@@ -1,6 +1,6 @@
-use graph_nexus_analyzer::rust::parser::RustProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::rust::parser::RustProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(source: &str) -> Vec<(String, NodeKind)> {

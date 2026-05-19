@@ -3,10 +3,10 @@
 //! `typedef logic [7:0] byte_t;` → alias name `byte_t`.
 //! Captures via `(type_declaration (simple_identifier) @typedef.name)`.
 
-use graph_nexus_analyzer::verilog::parser::VerilogProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::verilog::parser::VerilogProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

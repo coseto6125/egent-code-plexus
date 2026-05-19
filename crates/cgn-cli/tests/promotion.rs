@@ -1,7 +1,7 @@
-use graph_nexus_cli::session::promotion::{
+use cgn_cli::session::promotion::{
     promote_case_a, promote_case_b, promotion_case, PromotionCase,
 };
-use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use cgn_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use std::process::Command;
 
 fn git_init_with_commit(p: &std::path::Path) -> String {

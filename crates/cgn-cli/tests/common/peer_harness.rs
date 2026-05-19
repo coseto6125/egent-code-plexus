@@ -1,8 +1,8 @@
 //! Cross-session test fixture: spawn N gnx watcher processes against a shared temp repo.
 
 use chrono::Utc;
-use graph_nexus_core::peer::inbox::{drain, InboxEntry};
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::peer::inbox::{drain, InboxEntry};
+use cgn_core::session::SessionMeta;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -76,7 +76,7 @@ impl PeerHarness {
     }
 
     pub fn write_dirty(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {
-        use graph_nexus_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
+        use cgn_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
         use std::collections::BTreeMap;
         let sdir = self.session_dir(id);
         let mut entries = BTreeMap::new();

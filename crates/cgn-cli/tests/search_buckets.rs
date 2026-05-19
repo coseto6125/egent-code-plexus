@@ -1,7 +1,7 @@
-use graph_nexus_core::graph::{
+use cgn_core::graph::{
     File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -433,8 +433,8 @@ fn each_bucket_independently_capped_at_top_k() {
     let src_path = pool.add("src/big.rs");
     // Pre-allocate all StrRefs before building nodes vec.
     let node_data: Vec<(
-        graph_nexus_core::pool::StrRef,
-        graph_nexus_core::pool::StrRef,
+        cgn_core::pool::StrRef,
+        cgn_core::pool::StrRef,
     )> = (0..25usize)
         .map(|i| {
             let name = format!("overflow_src_{i}");

@@ -1,6 +1,6 @@
 //! Tests for ~/.gnx/audit.log (spec §9).
 
-use graph_nexus_core::registry::{AuditEvent, AuditLog};
+use cgn_core::registry::{AuditEvent, AuditLog};
 
 #[test]
 fn event_serializes_to_jsonl() {

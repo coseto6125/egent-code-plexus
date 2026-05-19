@@ -4,10 +4,10 @@
 //! not `NodeKind::Function`. Free-standing `def` and closures nested inside
 //! a method body stay `Function`.
 
-use graph_nexus_analyzer::python::parser::PythonProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::python::parser::PythonProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawNode};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(source: &str) -> LocalGraph {

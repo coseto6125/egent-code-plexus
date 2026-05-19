@@ -4,7 +4,7 @@
 //! Code hooks race to upsert the registry. flock-guarded read-modify-write
 //! MUST converge to a state containing every writer's contribution.
 
-use graph_nexus_core::registry::Registry;
+use cgn_core::registry::Registry;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 

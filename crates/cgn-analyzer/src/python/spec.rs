@@ -8,8 +8,8 @@
 //! absent from this map — they drive framework detection in `parser.rs`
 //! and must not produce spurious `RawNode` entries.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct PythonSpec;
 

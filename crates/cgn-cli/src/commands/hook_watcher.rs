@@ -14,7 +14,7 @@ pub struct HookWatcherArgs {
     pub repo: PathBuf,
 }
 
-pub fn run(args: HookWatcherArgs) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(args: HookWatcherArgs) -> Result<(), cgn_core::GnxError> {
     std::thread::sleep(Duration::from_millis(300));
 
     let out = safe_exec::git()

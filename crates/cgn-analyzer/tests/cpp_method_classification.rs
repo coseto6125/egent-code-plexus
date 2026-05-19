@@ -10,10 +10,10 @@
 //!
 //! Free functions at file scope must remain `NodeKind::Function`.
 
-use graph_nexus_analyzer::cpp::parser::CppProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::cpp::parser::CppProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

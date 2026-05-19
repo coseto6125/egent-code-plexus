@@ -4,7 +4,7 @@
 //! `engine::Engine::load`'s InvalidData error to agent commands the
 //! next time the user upgrades the CLI past a GRAPH_FORMAT_VERSION bump.
 
-use graph_nexus_cli::auto_ensure::{ensure_index, EnsureResult};
+use cgn_cli::auto_ensure::{ensure_index, EnsureResult};
 use std::fs;
 use tempfile::tempdir;
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawDocumentBlock};
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawDocumentBlock};
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -37,7 +37,7 @@ impl LanguageProvider for MarkdownProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        let mut documents: Vec<graph_nexus_core::analyzer::types::RawDocumentBlock> = Vec::new();
+        let mut documents: Vec<cgn_core::analyzer::types::RawDocumentBlock> = Vec::new();
 
         let idx_document = self
             .query

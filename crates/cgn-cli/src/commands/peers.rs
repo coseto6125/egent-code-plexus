@@ -2,13 +2,13 @@
 
 use crate::session::resolver::resolve_session_id;
 use clap::{Args, Subcommand};
-use graph_nexus_core::peer::registry::alive_peers;
+use cgn_core::peer::registry::alive_peers;
 use std::path::PathBuf;
 
 fn default_repo_root() -> std::io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(&cwd)?;
-    Ok(graph_nexus_core::registry::resolve_home_gnx().join(repo_dir))
+    Ok(cgn_core::registry::resolve_home_gnx().join(repo_dir))
 }
 
 #[derive(Args, Debug, Clone)]
@@ -107,7 +107,7 @@ fn cmd_status(repo_root: &std::path::Path) -> std::io::Result<()> {
 }
 
 fn cmd_diff(repo_root: &std::path::Path, peer: &str, symbol: Option<&str>) -> std::io::Result<()> {
-    use graph_nexus_core::session::overlay::DirtyFiles;
+    use cgn_core::session::overlay::DirtyFiles;
     let path = repo_root
         .join("sessions")
         .join(peer)
@@ -173,7 +173,7 @@ fn cmd_log(
 }
 
 fn cmd_gc(repo_root: &std::path::Path) -> std::io::Result<()> {
-    use graph_nexus_core::peer::retention::*;
+    use cgn_core::peer::retention::*;
     let me = resolve_session_id(None);
     let session_dir = repo_root.join("sessions").join(&me);
     let _ = rotate_if_needed(

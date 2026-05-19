@@ -1,5 +1,5 @@
-use graph_nexus_core::peer::concern::{classify, ConcernKind, ConcernResult, ImpactCache};
-use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
+use cgn_core::peer::concern::{classify, ConcernKind, ConcernResult, ImpactCache};
+use cgn_core::session::overlay::{SymbolKind, SymbolRef};
 use rustc_hash::FxHashSet;
 
 fn sym(name: &str, file: &str) -> SymbolRef {

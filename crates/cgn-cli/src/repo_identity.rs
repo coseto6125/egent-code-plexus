@@ -1,5 +1,5 @@
 use crate::git::safe_exec;
-use graph_nexus_core::registry::sanitize_segment;
+use cgn_core::registry::sanitize_segment;
 use std::io;
 use std::path::Path;
 use xxhash_rust::xxh3::xxh3_64;

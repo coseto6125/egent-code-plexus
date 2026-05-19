@@ -4,10 +4,10 @@
 //! `obj->method()` → `Type.method`. Falls back to bare for `auto` /
 //! template / unannotated cases.
 
-use graph_nexus_analyzer::cpp::parser::CppProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::cpp::parser::CppProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = CppProvider::new().unwrap();

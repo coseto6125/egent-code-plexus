@@ -11,7 +11,7 @@
 
 use crate::calls::attach_to_enclosing;
 use crate::framework_helpers::{enclosing_class, node_span};
-use graph_nexus_core::analyzer::types::RawNode;
+use cgn_core::analyzer::types::RawNode;
 use tree_sitter::Node;
 
 /// Walk the JavaScript AST and attach callees to enclosing functions/methods,
@@ -67,7 +67,7 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
 #[cfg(test)]
 mod tests {
     use crate::javascript::parser::JavaScriptProvider;
-    use graph_nexus_core::analyzer::provider::LanguageProvider;
+    use cgn_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
     fn all_calls(source: &str) -> Vec<String> {

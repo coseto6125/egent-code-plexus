@@ -12,10 +12,10 @@
 //!    (no query in queries.scm). ref-gitnexus emits each case name as
 //!    Property; gnx-rs missed every one.
 
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

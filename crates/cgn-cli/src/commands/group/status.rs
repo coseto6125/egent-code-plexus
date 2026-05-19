@@ -2,8 +2,8 @@
 //! against the last-synced snapshot in `meta.json`.
 
 use clap::Args;
-use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, RegistryFile};
+use cgn_core::GnxError;
 use std::path::Path;
 
 use crate::commands::group::lookup_member;

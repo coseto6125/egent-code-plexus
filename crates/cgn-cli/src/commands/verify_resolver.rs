@@ -71,11 +71,11 @@ struct ParsedJsonl {
     bad_lines: u32,
 }
 
-pub fn run(args: VerifyResolverArgs) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(args: VerifyResolverArgs) -> Result<(), cgn_core::GnxError> {
     let oracle = read_jsonl(&args.oracle)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("read oracle: {e}")))?;
+        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read oracle: {e}")))?;
     let gnx = read_jsonl(&args.gnx)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("read gnx dump: {e}")))?;
+        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read gnx dump: {e}")))?;
 
     let normalize = pick_normalize(&args.lang);
     let (counts, worst, per_tier) = diff(&oracle.records, &gnx.records, normalize);
@@ -95,14 +95,14 @@ pub fn run(args: VerifyResolverArgs) -> Result<(), graph_nexus_core::GnxError> {
             if let Some(parent) = p.parent() {
                 if !parent.as_os_str().is_empty() {
                     std::fs::create_dir_all(parent).map_err(|e| {
-                        graph_nexus_core::GnxError::InvalidArgument(format!(
+                        cgn_core::GnxError::InvalidArgument(format!(
                             "mkdir report parent: {e}"
                         ))
                     })?;
                 }
             }
             std::fs::write(p, &report).map_err(|e| {
-                graph_nexus_core::GnxError::InvalidArgument(format!("write report: {e}"))
+                cgn_core::GnxError::InvalidArgument(format!("write report: {e}"))
             })?;
             eprintln!("verify-resolver: report written to {}", p.display());
         }

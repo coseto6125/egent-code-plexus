@@ -12,8 +12,8 @@
 //! ahead of the spec lookup. Listing it here would be misleading
 //! (the entry would never be consulted), so it's intentionally omitted.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct JavaScriptSpec;
 

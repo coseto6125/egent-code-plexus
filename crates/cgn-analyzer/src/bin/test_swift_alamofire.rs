@@ -1,5 +1,5 @@
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 use std::fs;
 
 fn main() {

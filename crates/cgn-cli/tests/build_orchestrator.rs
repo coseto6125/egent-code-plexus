@@ -5,7 +5,7 @@
 #[test]
 #[ignore = "requires Task 4.4 — run_analyzer_for_paths extraction"]
 fn first_build_writes_commit_dir_atomically() {
-    use graph_nexus_cli::build::orchestrator;
+    use cgn_cli::build::orchestrator;
     use std::process::Command;
 
     let tmp = tempfile::tempdir().unwrap();

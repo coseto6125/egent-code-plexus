@@ -1,7 +1,7 @@
-use graph_nexus_cli::session::overlay_writer::{
+use cgn_cli::session::overlay_writer::{
     write_dirty_fragment, write_dirty_fragments_batch, FragmentInput,
 };
-use graph_nexus_core::session::{DirtyFiles, SessionMeta};
+use cgn_core::session::{DirtyFiles, SessionMeta};
 
 fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
     let session_dir = tmp.join("sessions").join(sid);

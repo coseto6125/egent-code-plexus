@@ -9,7 +9,7 @@
 //! target. Every final read must parse as valid JSON (one document).
 //! Background context: PR #149 search_batch flake (Round 81).
 
-use graph_nexus_core::registry::{atomic_write_bytes, atomic_write_json};
+use cgn_core::registry::{atomic_write_bytes, atomic_write_json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

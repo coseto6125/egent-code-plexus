@@ -5,7 +5,7 @@
 //! `docs/superpowers/specs/2026-05-16-tier-b-surface-and-diff-design.md` §5.
 
 use clap::{Args, ValueEnum};
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 pub mod baseline;
 pub mod bindings;

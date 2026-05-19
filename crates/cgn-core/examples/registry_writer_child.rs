@@ -3,7 +3,7 @@
 //! Used by `tests/concurrency_registry_writers.rs` to simulate
 //! N concurrent `gnx` invocations.
 
-use graph_nexus_core::registry::{Registry, RepoAlias};
+use cgn_core::registry::{Registry, RepoAlias};
 use std::path::PathBuf;
 
 fn main() {

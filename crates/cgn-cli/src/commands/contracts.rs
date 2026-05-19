@@ -44,8 +44,8 @@
 use crate::output::{emit, OutputFormat};
 use crate::repo_selector;
 use clap::Args;
-use graph_nexus_core::registry::{resolve_home_gnx, Registry};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, Registry};
+use cgn_core::GnxError;
 use serde_json::json;
 
 #[derive(Args, Debug, Clone)]

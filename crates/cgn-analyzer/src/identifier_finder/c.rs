@@ -4,7 +4,7 @@
 //! - `field_identifier` (struct/union field access / declaration)
 
 use super::generic::find_by_kinds;
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &["identifier", "type_identifier", "field_identifier"];
 

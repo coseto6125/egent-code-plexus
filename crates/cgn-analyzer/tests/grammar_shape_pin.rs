@@ -21,9 +21,9 @@
 //! (decorators, generics, lambdas, etc.) belongs in the dedicated
 //! per-feature test files.
 
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 /// Assert every `(kind, name)` in `expected` shows up at least once in
@@ -48,7 +48,7 @@ fn assert_has(g: &LocalGraph, expected: &[(NodeKind, &str)], label: &str) {
 
 #[test]
 fn typescript_shape_pin() {
-    use graph_nexus_analyzer::typescript::parser::TypeScriptProvider;
+    use cgn_analyzer::typescript::parser::TypeScriptProvider;
     let src = "\
 export function add(a: number, b: number): number { return a + b; }\n\
 export class Box<T> { value: T; constructor(v: T) { this.value = v; } }\n\
@@ -66,7 +66,7 @@ export const PI = 3.14;\n";
 
 #[test]
 fn javascript_shape_pin() {
-    use graph_nexus_analyzer::javascript::parser::JavaScriptProvider;
+    use cgn_analyzer::javascript::parser::JavaScriptProvider;
     let src = "\
 export function add(a, b) { return a + b; }\n\
 export class Box { constructor(v) { this.value = v; } }\n\
@@ -84,7 +84,7 @@ export const PI = 3.14;\n";
 
 #[test]
 fn python_shape_pin() {
-    use graph_nexus_analyzer::python::parser::PythonProvider;
+    use cgn_analyzer::python::parser::PythonProvider;
     let src = "\
 def add(a, b):\n    return a + b\n\n\
 class Box:\n    def __init__(self, v):\n        self.value = v\n\n\
@@ -102,7 +102,7 @@ PI = 3.14\n";
 
 #[test]
 fn java_shape_pin() {
-    use graph_nexus_analyzer::java::parser::JavaProvider;
+    use cgn_analyzer::java::parser::JavaProvider;
     let src = "\
 package demo;\n\
 public class Box {\n    public int add(int a, int b) { return a + b; }\n}\n";
@@ -119,7 +119,7 @@ public class Box {\n    public int add(int a, int b) { return a + b; }\n}\n";
 
 #[test]
 fn kotlin_shape_pin() {
-    use graph_nexus_analyzer::kotlin::parser::KotlinProvider;
+    use cgn_analyzer::kotlin::parser::KotlinProvider;
     let src = "\
 package demo\n\n\
 class Box(val value: Int) {\n    fun add(a: Int, b: Int): Int = a + b\n}\n\n\
@@ -137,7 +137,7 @@ fun pi(): Double = 3.14\n";
 
 #[test]
 fn csharp_shape_pin() {
-    use graph_nexus_analyzer::c_sharp::parser::CSharpProvider;
+    use cgn_analyzer::c_sharp::parser::CSharpProvider;
     let src = "\
 namespace Demo {\n  public class Box {\n    public int Add(int a, int b) { return a + b; }\n  }\n}\n";
     let p = CSharpProvider::new().expect("provider");
@@ -153,7 +153,7 @@ namespace Demo {\n  public class Box {\n    public int Add(int a, int b) { retur
 
 #[test]
 fn go_shape_pin() {
-    use graph_nexus_analyzer::go::parser::GoProvider;
+    use cgn_analyzer::go::parser::GoProvider;
     let src = "\
 package demo\n\n\
 type Box struct { Value int }\n\n\
@@ -176,7 +176,7 @@ const PI = 3.14\n";
 
 #[test]
 fn rust_shape_pin() {
-    use graph_nexus_analyzer::rust::parser::RustProvider;
+    use cgn_analyzer::rust::parser::RustProvider;
     let src = "\
 pub struct Box { value: i32 }\n\n\
 impl Box {\n    pub fn add(&self, a: i32, b: i32) -> i32 { a + b }\n}\n\n\
@@ -194,7 +194,7 @@ pub fn pi() -> f64 { 3.14 }\n";
 
 #[test]
 fn php_shape_pin() {
-    use graph_nexus_analyzer::php::parser::PhpProvider;
+    use cgn_analyzer::php::parser::PhpProvider;
     let src = "<?php\nnamespace Demo;\n\nclass Box {\n    public function add(int $a, int $b): int { return $a + $b; }\n}\n";
     let p = PhpProvider::new().expect("provider");
     let g = p.parse_file(Path::new("Box.php"), src.as_bytes()).expect("parse");
@@ -209,7 +209,7 @@ fn php_shape_pin() {
 
 #[test]
 fn ruby_shape_pin() {
-    use graph_nexus_analyzer::ruby::parser::RubyProvider;
+    use cgn_analyzer::ruby::parser::RubyProvider;
     let src = "\
 class Box\n  def add(a, b)\n    a + b\n  end\nend\n\n\
 def pi\n  3.14\nend\n";
@@ -229,7 +229,7 @@ def pi\n  3.14\nend\n";
 
 #[test]
 fn swift_shape_pin() {
-    use graph_nexus_analyzer::swift::parser::SwiftProvider;
+    use cgn_analyzer::swift::parser::SwiftProvider;
     // The `#if ... #endif` guard is the exact shape the Round 76
     // tree-sitter-swift 0.21 → 0.25 bump silently broke. Pinning it
     // here means any future Swift grammar bump that re-breaks ERROR
@@ -254,7 +254,7 @@ func pi() -> Double { return 3.14 }\n";
 
 #[test]
 fn c_shape_pin() {
-    use graph_nexus_analyzer::c::parser::CProvider;
+    use cgn_analyzer::c::parser::CProvider;
     let src = "\
 #include <stdio.h>\n\n\
 typedef struct { int value; } Box;\n\n\
@@ -277,7 +277,7 @@ int add(int a, int b) { return a + b; }\n\n\
 
 #[test]
 fn cpp_shape_pin() {
-    use graph_nexus_analyzer::cpp::parser::CppProvider;
+    use cgn_analyzer::cpp::parser::CppProvider;
     let src = "\
 #include <iostream>\n\n\
 namespace demo {\n\n\
@@ -306,7 +306,7 @@ typedef int IntAlias;\n\n\
 
 #[test]
 fn dart_shape_pin() {
-    use graph_nexus_analyzer::dart::parser::DartProvider;
+    use cgn_analyzer::dart::parser::DartProvider;
     let src = "\
 class Box {\n  final int value;\n  const Box(this.value);\n  int add(int a, int b) => a + b;\n}\n\n\
 double pi() => 3.14;\n";

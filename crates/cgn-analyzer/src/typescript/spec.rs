@@ -5,8 +5,8 @@
 //! metadata-only and are handled directly in `parser.rs`; they do NOT appear
 //! here. Only captures that produce a standalone `RawNode` are listed.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct TypeScriptSpec;
 

@@ -16,8 +16,8 @@
 //! quota / orphan sweep belong to a separate GC pass.
 
 use crate::repo_identity::short_hash_hex8;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::registry::{atomic_write_bytes_no_fsync, BUILDER_FINGERPRINT};
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::registry::{atomic_write_bytes_no_fsync, BUILDER_FINGERPRINT};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

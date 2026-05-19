@@ -4,12 +4,12 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{
     LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
 };
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};

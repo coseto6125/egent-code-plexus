@@ -20,8 +20,8 @@
 //! multi-repo producer↔consumer matching pipeline.
 
 use crate::engine::Engine;
-use graph_nexus_core::graph::{ArchivedNodeKind, ArchivedRelType};
-use graph_nexus_core::GnxError;
+use cgn_core::graph::{ArchivedNodeKind, ArchivedRelType};
+use cgn_core::GnxError;
 use serde::Serialize;
 use rustc_hash::FxHashMap;
 use std::path::Path;

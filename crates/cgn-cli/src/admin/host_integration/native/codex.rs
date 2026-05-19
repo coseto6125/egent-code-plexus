@@ -2,7 +2,7 @@
 
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -45,9 +45,9 @@ pub fn status() -> HostStatus {
 
 fn run_install() -> Result<PathBuf, GnxError> {
     let path = patch_path();
-    let graph_nexus_root =
+    let cgn_root =
         std::env::current_dir().map_err(|e| GnxError::Output(format!("current_dir: {e}")))?;
-    write_patch(&path, &graph_nexus_root)?;
+    write_patch(&path, &cgn_root)?;
     Ok(path)
 }
 
@@ -81,11 +81,11 @@ fn config_root() -> PathBuf {
     home.join(".config")
 }
 
-fn write_patch(path: &Path, graph_nexus_root: &Path) -> Result<(), GnxError> {
+fn write_patch(path: &Path, cgn_root: &Path) -> Result<(), GnxError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let root = graph_nexus_root.to_string_lossy();
+    let root = cgn_root.to_string_lossy();
     let body = format!(
         r#"diff --git a/codex-rs/core/src/tools/gnx.rs b/codex-rs/core/src/tools/gnx.rs
 new file mode 100644
@@ -95,23 +95,23 @@ index 0000000..1111111
 @@ -0,0 +1,48 @@
 +// {MARKER}
 +//
-+// Native Graph Nexus integration scaffold.
++// Native code-graph-nexus integration scaffold.
 +//
 +// Add these dependencies to codex-rs/core/Cargo.toml:
 +//
-+// graph-nexus-cli = {{ path = "{root}/crates/graph-nexus-cli" }}
-+// graph-nexus-core = {{ path = "{root}/crates/graph-nexus-core" }}
++// code-graph-nexus = {{ path = "{root}/crates/cgn-cli" }}
++// cgn-core = {{ path = "{root}/crates/cgn-core" }}
 +//
 +// Then register the tool(s) from this module in Codex's tool registry.
 +// The exact registry file changes across Codex releases, so this patch
 +// intentionally adds the stable integration module and leaves the final
 +// registration hunk to the fork maintainer.
 +
-+use graph_nexus_core::GnxError;
++use cgn_core::GnxError;
 +
 +pub const GNX_NATIVE_MARKER: &str = "{MARKER}";
 +
-+pub fn graph_nexus_command_args(tool: &str, raw_args: &[String]) -> Result<Vec<String>, GnxError> {{
++pub fn cgn_command_args(tool: &str, raw_args: &[String]) -> Result<Vec<String>, GnxError> {{
 +    let mut argv = Vec::with_capacity(raw_args.len() + 1);
 +    argv.push(tool.to_string());
 +    argv.extend(raw_args.iter().cloned());
@@ -173,7 +173,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_patch_includes_marker_and_graph_nexus_path() {
+    fn write_patch_includes_marker_and_cgn_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let patch = dir.path().join(PATCH_NAME);
         write_patch(&patch, Path::new("/repo/graph-nexus-rs")).expect("write patch");

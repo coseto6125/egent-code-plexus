@@ -5,11 +5,11 @@
 //! The fixture writes a minimal `graph.bin` (same helper as `shape_check_cmd.rs`)
 //! and confirms `build_payload` returns `{status, total_fetches, drift_count, drift}`.
 
-use graph_nexus_core::graph::{
+use cgn_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::process::Command;

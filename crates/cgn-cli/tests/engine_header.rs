@@ -5,11 +5,11 @@
 //! structural check and segfault (or silently misinterpret data) the
 //! moment a field is dereferenced.
 
-use graph_nexus_cli::engine::Engine;
-use graph_nexus_core::graph::{
+use cgn_cli::engine::Engine;
+use cgn_core::graph::{
     File, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use rkyv::rancor::Error;
 use tempfile::tempdir;
 
@@ -26,7 +26,7 @@ fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
             path: name_ref,
             mtime: 0,
             content_hash: [0; 8],
-            category: graph_nexus_core::graph::FileCategory::Source,
+            category: cgn_core::graph::FileCategory::Source,
         }],
         nodes: vec![Node {
             uid: uid_ref,

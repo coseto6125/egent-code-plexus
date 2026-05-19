@@ -1,4 +1,4 @@
-use graph_nexus_cli::build::mode::{build_mode, BuildMode};
+use cgn_cli::build::mode::{build_mode, BuildMode};
 
 #[test]
 fn first_build_is_sync() {

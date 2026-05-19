@@ -1,5 +1,5 @@
-use graph_nexus_analyzer::rust::parser::RustProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::rust::parser::RustProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 use std::path::Path;
 
 /// Helper: run the Rust parser and return the union of `calls` from every

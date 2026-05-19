@@ -19,10 +19,10 @@
 //!    the graph before the rename runs (especially in dry-run).
 
 use clap::Args;
-use graph_nexus_analyzer::identifier_finder::find_identifier_occurrences;
-use graph_nexus_core::analyzer::types::IdentifierRange;
-use graph_nexus_core::registry::atomic_write_bytes;
-use graph_nexus_core::GnxError;
+use cgn_analyzer::identifier_finder::find_identifier_occurrences;
+use cgn_core::analyzer::types::IdentifierRange;
+use cgn_core::registry::atomic_write_bytes;
+use cgn_core::GnxError;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -128,7 +128,7 @@ fn scan_word_occurrences(root: &Path, word: &str) -> Vec<Occurrence> {
 
 fn detect_collisions(
     new_name: &str,
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
 ) -> Vec<String> {
     let mut locs = Vec::new();
     for node in graph.nodes.iter() {

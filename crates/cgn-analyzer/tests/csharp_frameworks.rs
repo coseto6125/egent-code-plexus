@@ -5,9 +5,9 @@
 //! of file source — one `RawFrameworkRef` per detected framework, at
 //! module level.
 
-use graph_nexus_analyzer::c_sharp::parser::CSharpProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawFrameworkRef;
+use cgn_analyzer::c_sharp::parser::CSharpProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawFrameworkRef;
 
 fn parse(src: &str) -> Vec<RawFrameworkRef> {
     let provider = CSharpProvider::new().unwrap();

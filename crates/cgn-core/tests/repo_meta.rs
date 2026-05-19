@@ -1,4 +1,4 @@
-use graph_nexus_core::registry::RepoMeta;
+use cgn_core::registry::RepoMeta;
 use std::collections::BTreeMap;
 use tempfile::NamedTempFile;
 

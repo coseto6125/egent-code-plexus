@@ -1,4 +1,4 @@
-use graph_nexus_core::registry::CommitDirName;
+use cgn_core::registry::CommitDirName;
 use rustc_hash::FxHashMap;
 use std::io;
 use std::path::{Path, PathBuf};

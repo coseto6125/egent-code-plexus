@@ -3,7 +3,7 @@
 //! variables, properties).
 
 use super::generic::find_by_kinds;
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &["simple_identifier", "type_identifier"];
 

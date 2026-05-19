@@ -8,8 +8,8 @@
 //! `@typealias`, `@property*`) are absent — they never produce a standalone
 //! RawNode via the spec table.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct SwiftSpec;
 

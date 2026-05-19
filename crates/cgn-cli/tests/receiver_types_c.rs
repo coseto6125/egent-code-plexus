@@ -8,10 +8,10 @@
 //! Conservative on purpose — names outside the recognized receiver set
 //! and free functions fall back to bare names.
 
-use graph_nexus_analyzer::c::parser::CProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::c::parser::CProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = CProvider::new().unwrap();

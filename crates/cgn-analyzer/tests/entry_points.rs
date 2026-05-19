@@ -13,10 +13,10 @@
 //! Closes the ⚠️ Entry column for Java / Kotlin / C# / Go / Rust / Swift
 //! / C / C++ / Dart in the README Language Matrix.
 
-use graph_nexus_analyzer::entry_points::{score_entry_points, EntryKind};
-use graph_nexus_analyzer::resolution::builder::GraphBuilder;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawNode, RawRoute};
-use graph_nexus_core::graph::{NodeKind, RelType};
+use cgn_analyzer::entry_points::{score_entry_points, EntryKind};
+use cgn_analyzer::resolution::builder::GraphBuilder;
+use cgn_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawNode, RawRoute};
+use cgn_core::graph::{NodeKind, RelType};
 
 /// Minimal helper — every test below builds 1 LocalGraph; no need for
 /// the full `mk_file` ceremony from the builder's internal tests.
@@ -55,7 +55,7 @@ fn mk_local_graph(
 
 /// Locate the EntryPoint marker node(s) in a built graph by inspecting
 /// `node.kind`. Returns indices for downstream assertions.
-fn entry_point_node_indices(graph: &graph_nexus_core::graph::ZeroCopyGraph) -> Vec<usize> {
+fn entry_point_node_indices(graph: &cgn_core::graph::ZeroCopyGraph) -> Vec<usize> {
     graph
         .nodes
         .iter()

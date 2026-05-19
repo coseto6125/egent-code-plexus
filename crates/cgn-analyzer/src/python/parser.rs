@@ -5,13 +5,13 @@ use crate::framework_helpers::{
     enclosing_class, enclosing_function_name, enumerate_class_methods, has_import_from, node_span,
     Span, MODULE_LEVEL_SOURCE,
 };
-use graph_nexus_core::algorithms::process_trace::is_test_path;
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{
+use cgn_core::algorithms::process_trace::is_test_path;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode, RawRoute,
 };
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};

@@ -4,10 +4,10 @@
 //! (Tier 2.5) routes to the correct class. Extensions resolve as the
 //! extended type's class scope.
 
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = SwiftProvider::new().unwrap();

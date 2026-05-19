@@ -2,7 +2,7 @@
 //! kind-specific identifier nodes — covered the four common ones.
 
 use super::generic::find_by_kinds;
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &[
     "simple_identifier",

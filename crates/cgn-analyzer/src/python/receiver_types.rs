@@ -12,7 +12,7 @@
 //! call falls back to the bare member name as before.
 
 use crate::calls::attach_to_enclosing;
-use graph_nexus_core::analyzer::types::RawNode;
+use cgn_core::analyzer::types::RawNode;
 use std::collections::HashMap;
 use tree_sitter::Node;
 

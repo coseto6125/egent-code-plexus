@@ -2,7 +2,7 @@
 //! be unit-tested without a real git repository.
 
 use super::FileDiff;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

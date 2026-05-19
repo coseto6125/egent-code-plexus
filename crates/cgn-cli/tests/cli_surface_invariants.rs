@@ -165,7 +165,7 @@ fn every_admin_sessions_subcommand_has_help() {
 /// schema" drift.
 #[test]
 fn mcp_gnx_group_subcmds_are_real_cli_paths() {
-    let tool = graph_nexus_mcp::group::group_tools()
+    let tool = cgn_mcp::group::group_tools()
         .into_iter()
         .find(|t| t.name == "gnx_group")
         .expect("gnx_group tool missing from registry");
@@ -186,7 +186,7 @@ fn mcp_gnx_group_subcmds_are_real_cli_paths() {
 
 #[test]
 fn mcp_gnx_peers_subcmds_are_real_cli_paths() {
-    let tool = graph_nexus_mcp::peers::peer_tools()
+    let tool = cgn_mcp::peers::peer_tools()
         .into_iter()
         .find(|t| t.name == "gnx_peers")
         .expect("gnx_peers tool missing from registry");
@@ -312,7 +312,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
 /// - `--graph` (global flag declared on the root Cli; not subcmd-specific)
 #[test]
 fn cli_group_flags_all_exist_in_mcp_group_schema() {
-    let tool = graph_nexus_mcp::group::group_tools()
+    let tool = cgn_mcp::group::group_tools()
         .into_iter()
         .find(|t| t.name == "gnx_group")
         .expect("gnx_group tool");
@@ -338,7 +338,7 @@ fn cli_group_flags_all_exist_in_mcp_group_schema() {
 
 #[test]
 fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
-    let tool = graph_nexus_mcp::peers::peer_tools()
+    let tool = cgn_mcp::peers::peer_tools()
         .into_iter()
         .find(|t| t.name == "gnx_peers")
         .expect("gnx_peers tool");
@@ -431,7 +431,7 @@ fn admin_inventory_covers_all_subcommands() {
 /// rename a subcmd, forget to update tag references in descriptions.
 #[test]
 fn mcp_gnx_group_description_tags_reference_valid_subcmds() {
-    let tool = graph_nexus_mcp::group::group_tools()
+    let tool = cgn_mcp::group::group_tools()
         .into_iter()
         .find(|t| t.name == "gnx_group")
         .expect("gnx_group tool");
@@ -462,7 +462,7 @@ fn mcp_gnx_group_description_tags_reference_valid_subcmds() {
 /// a property without updating the required list, or vice versa.
 #[test]
 fn mcp_gnx_group_required_keys_are_defined_properties() {
-    let tool = graph_nexus_mcp::group::group_tools()
+    let tool = cgn_mcp::group::group_tools()
         .into_iter()
         .find(|t| t.name == "gnx_group")
         .expect("gnx_group tool");
@@ -489,7 +489,7 @@ fn mcp_gnx_group_required_keys_are_defined_properties() {
 /// dispatch layer (`argv::json_to_argv`) looks up by that name.
 #[test]
 fn mcp_gnx_group_positional_args_are_defined_properties() {
-    let tool = graph_nexus_mcp::group::group_tools()
+    let tool = cgn_mcp::group::group_tools()
         .into_iter()
         .find(|t| t.name == "gnx_group")
         .expect("gnx_group tool");

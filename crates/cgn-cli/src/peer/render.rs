@@ -1,7 +1,7 @@
 //! Render drained InboxEntry batches into a Claude Code hook payload.
 //! 4 KB hard cap; HARD kept, SOFT trimmed first when over.
 
-use graph_nexus_core::peer::inbox::{ConcernKindSer, InboxEntry};
+use cgn_core::peer::inbox::{ConcernKindSer, InboxEntry};
 use std::fmt::Write;
 
 const PAYLOAD_CAP_BYTES: usize = 4096;

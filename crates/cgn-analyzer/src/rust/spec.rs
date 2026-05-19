@@ -15,8 +15,8 @@
 //! - `trait_item.name` → `Trait` (not `Interface`); the graph layer maps
 //!   `Trait` where needed for polyglot consumers.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct RustSpec;
 

@@ -1,6 +1,6 @@
 //! Integration test: Rust Axum framework refs (T3).
-use graph_nexus_analyzer::rust::parser::RustProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::rust::parser::RustProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
 #[test]
 fn axum_route_creates_framework_refs_for_handlers() {

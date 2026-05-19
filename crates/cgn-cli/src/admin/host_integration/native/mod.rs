@@ -6,7 +6,7 @@ pub mod gemini;
 use crate::admin::menu::{self, select};
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 const HOSTS: &[menu::Item<'_>] = &[
     ("Codex CLI", "register gnx as a native tool in Codex CLI"),

@@ -1,7 +1,7 @@
-use graph_nexus_core::peer::inbox::{
+use cgn_core::peer::inbox::{
     append_entry, drain, truncate_inbox, ConcernKindSer, InboxEntry,
 };
-use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
+use cgn_core::session::overlay::{SymbolKind, SymbolRef};
 use tempfile::tempdir;
 
 fn dirty_event_fixture() -> InboxEntry {

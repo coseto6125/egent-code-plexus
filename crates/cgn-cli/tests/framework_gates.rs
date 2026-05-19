@@ -2,8 +2,8 @@
 //! imports are present. Reflection fan-out and blind_spots are NOT gated, so
 //! they must keep emitting even when no framework import exists.
 
-use graph_nexus_analyzer::python::PythonProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::python::PythonProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
 #[test]
 fn fastapi_depends_without_import_does_not_emit() {

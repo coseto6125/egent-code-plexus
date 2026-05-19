@@ -8,7 +8,7 @@
 use crate::commit_lookup::CommitIndex;
 use crate::git::safe_exec;
 use crate::repo_identity;
-use graph_nexus_core::registry::resolve_home_gnx;
+use cgn_core::registry::resolve_home_gnx;
 use std::path::{Path, PathBuf};
 
 const LEGACY_DEFAULT: &str = ".gnx/graph.bin";

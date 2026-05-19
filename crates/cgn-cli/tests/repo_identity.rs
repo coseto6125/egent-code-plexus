@@ -1,4 +1,4 @@
-use graph_nexus_cli::repo_identity::repo_dir_name_for_cwd;
+use cgn_cli::repo_identity::repo_dir_name_for_cwd;
 use std::process::Command;
 
 #[test]

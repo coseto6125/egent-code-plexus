@@ -1,6 +1,6 @@
-use graph_nexus_cli::peer::render::render_payload;
-use graph_nexus_core::peer::inbox::{ConcernKindSer, InboxEntry};
-use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
+use cgn_cli::peer::render::render_payload;
+use cgn_core::peer::inbox::{ConcernKindSer, InboxEntry};
+use cgn_core::session::overlay::{SymbolKind, SymbolRef};
 
 fn dirty_hard() -> InboxEntry {
     InboxEntry::DirtyEvent {

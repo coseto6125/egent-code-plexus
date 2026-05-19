@@ -6,7 +6,7 @@
 //! Each per-language file is a thin wrapper that calls this helper — the
 //! walk logic itself is identical across grammars.
 
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 use tree_sitter::{Node, Parser};
 
 /// Parse `source` with `language`, walk every node, and emit a byte-range

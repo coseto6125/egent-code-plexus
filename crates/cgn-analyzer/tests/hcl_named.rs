@@ -3,10 +3,10 @@
 //! Each key in a `locals` block is a named alias for a computed expression.
 //! Existing `output`, `variable`, `resource`, and `data` captures are unchanged.
 
-use graph_nexus_analyzer::hcl::parser::HclProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::hcl::parser::HclProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

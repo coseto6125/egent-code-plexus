@@ -1,6 +1,6 @@
 //! Tests for cross-platform spawn_detached (spec §4.5).
 
-use graph_nexus_core::daemon::spawn_detached;
+use cgn_core::daemon::spawn_detached;
 
 #[test]
 fn detached_child_outlives_parent_call() {

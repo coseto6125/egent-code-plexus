@@ -1,4 +1,4 @@
-use graph_nexus_core::registry::{CommitDirName, DirNameParseError as ParseError, SourceType};
+use cgn_core::registry::{CommitDirName, DirNameParseError as ParseError, SourceType};
 
 #[test]
 fn parse_branch_simple() {

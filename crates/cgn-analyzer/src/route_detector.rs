@@ -1,4 +1,4 @@
-use graph_nexus_core::analyzer::types::RawRoute;
+use cgn_core::analyzer::types::RawRoute;
 
 const HTTP_METHODS: &[&str] = &[
     "get", "post", "put", "delete", "patch", "options", "head", "connect", "trace",

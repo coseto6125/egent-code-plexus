@@ -1,5 +1,5 @@
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use tree_sitter::Node;
 
 /// Saturating conversion of a tree-sitter row (`usize`) to `u32`.

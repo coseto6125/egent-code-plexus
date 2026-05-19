@@ -10,8 +10,8 @@ use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use graph_nexus_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType};
-use graph_nexus_core::GnxError;
+use cgn_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType};
+use cgn_core::GnxError;
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Args, Debug, Clone)]
@@ -160,7 +160,7 @@ fn split_route_name(name: &str) -> (&str, &str) {
 /// nodes (arrow-function bound to a const, e.g. `const setup = () => {…}`)
 /// are also considered — TS / JS commonly express scope this way.
 fn find_enclosing_scope(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     file_idx: u32,
     line: u32,
 ) -> Option<usize> {
@@ -208,7 +208,7 @@ fn find_enclosing_scope(
 /// Build the `enclosingScope` JSON sub-object for a Route. Returns `null`
 /// when the route sits at module level (no containing function/class).
 fn enclosing_scope_json(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     scope_idx: Option<usize>,
 ) -> serde_json::Value {
     match scope_idx {
@@ -416,7 +416,7 @@ fn inspect_route(
 /// entry as `handlerUid` so consumers can group callers per registration
 /// site even when multiple are surfaced together.
 fn bfs_upstream(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     seed_idx: usize,
     depth: usize,
     anchor_uid: &str,

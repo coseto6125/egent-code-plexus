@@ -13,7 +13,7 @@
 //! All git invocations go through `safe_exec::git()` per security spec §8 H4.
 
 use crate::git::safe_exec;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::path::{Path, PathBuf};
 
 pub struct GitGuard {

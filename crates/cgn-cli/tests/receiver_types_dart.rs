@@ -2,10 +2,10 @@
 //! `this.method()` / `super.method()` / typed-var `obj.method()` rewrites
 //! to `Type.method`. `var`/inferred locals fall back to bare names.
 
-use graph_nexus_analyzer::dart::parser::DartProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::dart::parser::DartProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = DartProvider::new().unwrap();

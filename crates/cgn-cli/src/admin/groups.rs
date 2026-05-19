@@ -3,8 +3,8 @@
 use crate::admin::menu::{self, select};
 use crate::commands::admin::group;
 use dialoguer::{theme::ColorfulTheme, Input};
-use graph_nexus_core::registry::{resolve_home_gnx, Registry};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, Registry};
+use cgn_core::GnxError;
 
 const MENU: &[menu::Item<'_>] = &[
     (

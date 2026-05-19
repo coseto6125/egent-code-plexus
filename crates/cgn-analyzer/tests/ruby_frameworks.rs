@@ -2,9 +2,9 @@
 //!
 //! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/ruby.ts:156-178`.
 
-use graph_nexus_analyzer::ruby::parser::RubyProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawFrameworkRef;
+use cgn_analyzer::ruby::parser::RubyProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawFrameworkRef;
 
 fn parse(src: &str) -> Vec<RawFrameworkRef> {
     let provider = RubyProvider::new().unwrap();

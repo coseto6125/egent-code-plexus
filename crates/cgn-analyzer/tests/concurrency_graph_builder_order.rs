@@ -5,9 +5,9 @@
 //! consumers (after sort-and-archive in `build()`) MUST be byte-identical
 //! across runs and across input permutations.
 
-use graph_nexus_analyzer::resolution::builder::GraphBuilder;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawFanoutRef, RawFrameworkRef, RawNode};
-use graph_nexus_core::graph::{NodeKind, ZeroCopyGraph};
+use cgn_analyzer::resolution::builder::GraphBuilder;
+use cgn_core::analyzer::types::{LocalGraph, RawFanoutRef, RawFrameworkRef, RawNode};
+use cgn_core::graph::{NodeKind, ZeroCopyGraph};
 
 /// Canonical projection: every consumer-visible byte, in a deterministic
 /// order. Excludes rkyv padding bytes (which are stable but not asserted)

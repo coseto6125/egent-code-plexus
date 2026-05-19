@@ -7,7 +7,7 @@
 
 use crate::commands::diff::DiffPayload;
 use crate::output::{emit_to_string, OutputFormat};
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use serde_json::Value;
 
 pub fn emit(payload: &DiffPayload, format: &str) -> Result<(), GnxError> {

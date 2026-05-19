@@ -6,12 +6,12 @@
 //!   - C:    `static` storage-class specifier → not exported
 //!   - Dart: identifier starts with `_` → not exported (library-private)
 
-use graph_nexus_analyzer::c::parser::CProvider;
-use graph_nexus_analyzer::dart::parser::DartProvider;
-use graph_nexus_analyzer::go::parser::GoProvider;
-use graph_nexus_analyzer::ruby::parser::RubyProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
+use cgn_analyzer::c::parser::CProvider;
+use cgn_analyzer::dart::parser::DartProvider;
+use cgn_analyzer::go::parser::GoProvider;
+use cgn_analyzer::ruby::parser::RubyProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
 
 fn parse_go(src: &str) -> Vec<RawNode> {
     GoProvider::new()

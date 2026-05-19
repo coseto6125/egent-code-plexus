@@ -6,7 +6,7 @@
 
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::git::safe_exec;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -48,7 +48,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     if index_dir_opt.is_some() && Path::new(&input.cwd).join(".gnx/auto-watch").exists() {
         if let Ok(exe) = std::env::current_exe() {
             let exe_str = exe.to_string_lossy();
-            let _ = graph_nexus_core::daemon::spawn_detached(&[&exe_str, "watch", "--start"]);
+            let _ = cgn_core::daemon::spawn_detached(&[&exe_str, "watch", "--start"]);
         }
     }
     Ok(())

@@ -1,6 +1,6 @@
-use graph_nexus_cli::admin::gc::{enforce_quota, reachability, sweep_sessions};
-use graph_nexus_core::registry::{CommitBuildMeta, EmbeddingStatus, SourceType};
-use graph_nexus_core::session::SessionMeta;
+use cgn_cli::admin::gc::{enforce_quota, reachability, sweep_sessions};
+use cgn_core::registry::{CommitBuildMeta, EmbeddingStatus, SourceType};
+use cgn_core::session::SessionMeta;
 use std::process::Command;
 
 fn git_init_with_commit(p: &std::path::Path) -> String {

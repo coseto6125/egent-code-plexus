@@ -4,10 +4,10 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -176,7 +176,7 @@ impl LanguageProvider for PhpProvider {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
-        use graph_nexus_core::analyzer::types::RawRoute;
+        use cgn_core::analyzer::types::RawRoute;
         // Vec + idx-map pattern — see java/parser.rs same-site note.
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut node_id_to_idx: rustc_hash::FxHashMap<usize, usize> =

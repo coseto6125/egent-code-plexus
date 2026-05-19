@@ -1,6 +1,6 @@
 //! Integration test: Python getattr fan-out resolution (Phase 2).
-use graph_nexus_analyzer::python::PythonProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::python::PythonProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
 #[test]
 fn dispatch_via_getattr_emits_fanout_ref() {

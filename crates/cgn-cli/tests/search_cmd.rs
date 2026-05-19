@@ -8,11 +8,11 @@
 //! - Empty result returns "No matches" hint
 //! - `--top-k` and `--query` flags are gone (regression guards)
 
-use graph_nexus_core::graph::{
+use cgn_core::graph::{
     File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
-use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+use cgn_core::pool::StringPool;
+use cgn_core::registry::{GroupEntry, RegistryFile, RepoAlias};
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::collections::BTreeMap;

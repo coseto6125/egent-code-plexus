@@ -25,7 +25,7 @@ pub mod menu;
 pub mod status;
 
 use dialoguer::theme::ColorfulTheme;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct AdminArgs {

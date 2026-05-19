@@ -1,4 +1,4 @@
-use graph_nexus_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
+use cgn_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
 use std::collections::BTreeMap;
 
 #[test]

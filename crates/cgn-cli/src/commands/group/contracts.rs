@@ -2,8 +2,8 @@
 //! Lists contracts with optional filtering by type, repo, and match status.
 
 use clap::Args;
-use graph_nexus_core::registry::resolve_home_gnx;
-use graph_nexus_core::GnxError;
+use cgn_core::registry::resolve_home_gnx;
+use cgn_core::GnxError;
 use std::collections::HashSet;
 
 use crate::commands::group::storage;

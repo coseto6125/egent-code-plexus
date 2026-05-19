@@ -1,5 +1,5 @@
-use graph_nexus_cli::build::force::{force_rebuild_l2, invalidate_matching_l1};
-use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use cgn_cli::build::force::{force_rebuild_l2, invalidate_matching_l1};
+use cgn_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -16,21 +16,21 @@ const DIRNAME: &str = "branch_main__abc123def456789012345678901234567890abcd";
 fn setup_repo_with_l2(tmp: &Path) {
     let commits = tmp.join("commits").join(DIRNAME);
     fs::create_dir_all(&commits).unwrap();
-    let cm = graph_nexus_core::registry::CommitBuildMeta {
+    let cm = cgn_core::registry::CommitBuildMeta {
         version: 1,
         sha: SHA.into(),
-        source_type: graph_nexus_core::registry::SourceType::Branch,
+        source_type: cgn_core::registry::SourceType::Branch,
         source_id: Some("main".into()),
         built_from_worktree: "/tmp/wt".into(),
         built_at: "2026-05-17T10:00:00Z".into(),
         parent_sha: None,
         node_count: 0,
-        embedding_status: graph_nexus_core::registry::EmbeddingStatus::None,
+        embedding_status: cgn_core::registry::EmbeddingStatus::None,
         refs_at_build: vec![],
         refs_seen_since: vec![],
         builder_fingerprint: None,
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm)
+    cgn_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm)
         .unwrap();
 }
 
@@ -184,7 +184,7 @@ fn force_rebuild_l2_drops_existing_dir_and_rebuilds() {
     let sha = git_init(wt.path());
     std::env::set_var("HOME", home.path());
 
-    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let initial = cgn_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
     let first_mtime = fs::metadata(initial.commit_dir.join("graph.bin"))
         .unwrap()
         .modified()
@@ -215,7 +215,7 @@ fn force_rebuild_l2_drops_parse_cache() {
     let sha = git_init(wt.path());
     std::env::set_var("HOME", home.path());
 
-    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let initial = cgn_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
     let repo_root = initial
         .commit_dir
         .parent()
@@ -245,7 +245,7 @@ fn force_rebuild_l2_invalidates_dirty_session_with_same_base_sha() {
     let sha = git_init(wt.path());
     std::env::set_var("HOME", home.path());
 
-    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let initial = cgn_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
     let repo_root = initial.commit_dir.parent().unwrap().parent().unwrap().to_path_buf();
     add_session(&repo_root, "sid_dirty", &sha, true);
     add_session(&repo_root, "sid_clean", &sha, false);

@@ -3,7 +3,7 @@
 //! intermediate. The temp sibling must not collide with the target's
 //! own extension (so `graph.bin` ↔ `graph.bin.tmp`, never `graph.tmp`).
 
-use graph_nexus_core::registry::{atomic_write_bytes, atomic_write_bytes_no_fsync};
+use cgn_core::registry::{atomic_write_bytes, atomic_write_bytes_no_fsync};
 use std::fs;
 use std::thread;
 use tempfile::tempdir;

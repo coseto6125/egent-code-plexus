@@ -9,10 +9,10 @@
 //!
 //! Fix: synthesize a Typedef RawNode from the misparsed node.
 
-use graph_nexus_analyzer::dart::parser::DartProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::dart::parser::DartProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawNode};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

@@ -1,4 +1,4 @@
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::path::{Path, PathBuf};
 
 pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>, GnxError> {

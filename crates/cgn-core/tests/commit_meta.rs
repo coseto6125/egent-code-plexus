@@ -1,4 +1,4 @@
-use graph_nexus_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
+use cgn_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
 use tempfile::NamedTempFile;
 
 #[test]

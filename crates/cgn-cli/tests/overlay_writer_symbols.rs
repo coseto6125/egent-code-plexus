@@ -1,4 +1,4 @@
-use graph_nexus_cli::session::overlay_writer::OverlayWriter;
+use cgn_cli::session::overlay_writer::OverlayWriter;
 use std::fs;
 use tempfile::tempdir;
 

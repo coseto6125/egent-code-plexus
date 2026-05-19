@@ -1,10 +1,10 @@
 //! Verifies that Dart `mixin` declarations emit NodeKind::Trait (not Interface).
 //! Mixins are default-method containers, matching the Kotlin mixin convention.
 
-use graph_nexus_analyzer::dart::parser::DartProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::dart::parser::DartProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

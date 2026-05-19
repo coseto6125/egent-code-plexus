@@ -16,7 +16,7 @@ pub mod session_start;
 pub mod user_prompt_submit;
 
 use clap::{Args, ValueEnum};
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 #[derive(Args, Debug, Clone)]
 pub struct HookArgs {

@@ -1,4 +1,4 @@
-use graph_nexus_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use cgn_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::{self, File};
@@ -59,13 +59,13 @@ impl Engine {
     pub fn open(repo_root: &Path, sid: &str) -> io::Result<Self> {
         let state = crate::session::state::classify(repo_root, sid);
         match state {
-            graph_nexus_core::session::SessionState::PureReference { l2_dirname, .. } => {
+            cgn_core::session::SessionState::PureReference { l2_dirname, .. } => {
                 let l2_dir = repo_root.join("commits").join(&l2_dirname);
                 let mut eng = Self::load(l2_dir.join("graph.bin"))?;
                 eng.view = GraphView::L2Only;
                 Ok(eng)
             }
-            graph_nexus_core::session::SessionState::AugmentedReference {
+            cgn_core::session::SessionState::AugmentedReference {
                 l2_dirname, ..
             } => {
                 let l2_dir = repo_root.join("commits").join(&l2_dirname);
@@ -75,7 +75,7 @@ impl Engine {
                 eng.view = GraphView::L2WithOverlay;
                 Ok(eng)
             }
-            graph_nexus_core::session::SessionState::Stale { reason } => Err(io::Error::other(
+            cgn_core::session::SessionState::Stale { reason } => Err(io::Error::other(
                 format!("session stale: {reason:?}; remove via `gnx admin sessions reset <id>`"),
             )),
         }

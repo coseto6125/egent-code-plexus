@@ -4,8 +4,8 @@
 //! and restarts from the new base.
 
 use crate::git::safe_exec;
-use graph_nexus_core::registry::atomic_write_json;
-use graph_nexus_core::session::{DirtyFiles, SessionMeta};
+use cgn_core::registry::atomic_write_json;
+use cgn_core::session::{DirtyFiles, SessionMeta};
 use std::fs;
 use std::io;
 use std::path::Path;

@@ -1,5 +1,5 @@
-use graph_nexus_analyzer::javascript::parser::JavaScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::javascript::parser::JavaScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 use ignore::WalkBuilder;
 use std::fs;
 

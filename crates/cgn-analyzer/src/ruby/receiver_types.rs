@@ -13,8 +13,8 @@
 //! behaviour via `extract_calls`).
 
 use crate::calls::attach_to_enclosing;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use tree_sitter::Node;
 
 /// Enclosing class/module context built from the parsed node list.

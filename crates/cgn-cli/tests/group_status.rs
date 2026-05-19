@@ -1,6 +1,6 @@
 //! Integration tests for `gnx group status`.
 
-use graph_nexus_cli::commands::group::storage::{group_dir, write_meta, GroupMeta, RepoSnapshot};
+use cgn_cli::commands::group::storage::{group_dir, write_meta, GroupMeta, RepoSnapshot};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

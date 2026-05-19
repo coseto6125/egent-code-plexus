@@ -5,10 +5,10 @@
 //! slicing source-before-the-name. Ported from upstream
 //! `_source_code/gitnexus/src/core/ingestion/type-extractors/swift.ts`.
 
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

@@ -17,7 +17,7 @@ pub struct PruneArgs {
     pub repo: Option<PathBuf>,
 }
 
-pub fn run(args: PruneArgs) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(args: PruneArgs) -> Result<(), cgn_core::GnxError> {
     if args.orphans {
         return run_orphan_sweep();
     }
@@ -25,27 +25,27 @@ pub fn run(args: PruneArgs) -> Result<(), graph_nexus_core::GnxError> {
     // TODO(phase-5-rewire): per-commit prune — v2 stores commits, not branches.
     // Branch-based prune has no meaning in v2. Use `gnx admin gc` once
     // per-commit GC (Phase 5+) is implemented.
-    Err(graph_nexus_core::GnxError::Output(
+    Err(cgn_core::GnxError::Output(
         "gnx admin prune --branch is a no-op in v2 (branch is not stored). \
          Use `gnx admin prune --orphans` to sweep repos whose worktree is gone."
             .into(),
     ))
 }
 
-fn run_orphan_sweep() -> Result<(), graph_nexus_core::GnxError> {
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+fn run_orphan_sweep() -> Result<(), cgn_core::GnxError> {
+    let home_gnx = cgn_core::registry::resolve_home_gnx();
     run_orphan_sweep_in(&home_gnx)
 }
 
-fn run_orphan_sweep_in(home_gnx: &std::path::Path) -> Result<(), graph_nexus_core::GnxError> {
-    let audit = graph_nexus_core::registry::AuditLog::open(&home_gnx.join("audit.log")).ok();
+fn run_orphan_sweep_in(home_gnx: &std::path::Path) -> Result<(), cgn_core::GnxError> {
+    let audit = cgn_core::registry::AuditLog::open(&home_gnx.join("audit.log")).ok();
     let lock_path = home_gnx.join("registry.json.lock");
-    let _lock = graph_nexus_core::registry::FileLock::acquire_exclusive(&lock_path)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("flock: {e}")))?;
+    let _lock = cgn_core::registry::FileLock::acquire_exclusive(&lock_path)
+        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("flock: {e}")))?;
 
     let registry_path = home_gnx.join("registry.json");
-    let mut registry = graph_nexus_core::registry::RegistryFile::read_or_empty(&registry_path)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("registry read: {e}")))?;
+    let mut registry = cgn_core::registry::RegistryFile::read_or_empty(&registry_path)
+        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("registry read: {e}")))?;
     let mut orphan_names: Vec<String> = Vec::new();
 
     // v2: orphan = common_dir no longer exists on disk.
@@ -71,14 +71,14 @@ fn run_orphan_sweep_in(home_gnx: &std::path::Path) -> Result<(), graph_nexus_cor
                 .members
                 .retain(|member| !orphan_names.iter().any(|name| name == member));
         }
-        graph_nexus_core::registry::RegistryFile::write_atomic(&registry_path, &registry).map_err(
-            |e| graph_nexus_core::GnxError::InvalidArgument(format!("write registry: {e}")),
+        cgn_core::registry::RegistryFile::write_atomic(&registry_path, &registry).map_err(
+            |e| cgn_core::GnxError::InvalidArgument(format!("write registry: {e}")),
         )?;
     }
 
     for repo_name in orphan_names {
         if let Some(audit) = &audit {
-            let _ = audit.append(&graph_nexus_core::registry::AuditEvent::HookFired {
+            let _ = audit.append(&cgn_core::registry::AuditEvent::HookFired {
                 kind: "prune-orphan".into(),
                 from: Some(repo_name.clone()),
                 to: None,
@@ -93,7 +93,7 @@ fn run_orphan_sweep_in(home_gnx: &std::path::Path) -> Result<(), graph_nexus_cor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+    use cgn_core::registry::{GroupEntry, RegistryFile, RepoAlias};
     use std::collections::BTreeMap;
 
     #[test]

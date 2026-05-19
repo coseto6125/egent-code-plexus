@@ -13,10 +13,10 @@
 //! `modifier` child node on `function_definition`. Structs lack a `modifier`
 //! child, so struct visibility is detected via source-text scan.
 
-use graph_nexus_analyzer::move_lang::parser::MoveProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::move_lang::parser::MoveProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

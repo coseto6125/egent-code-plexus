@@ -9,9 +9,9 @@
 //! alias query is constrained to `left: (constant)` so lowercase local-variable
 //! assignments are skipped.
 
-use graph_nexus_analyzer::ruby::parser::RubyProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawImport};
+use cgn_analyzer::ruby::parser::RubyProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawImport};
 use std::path::Path;
 
 fn parse(source: &str) -> LocalGraph {

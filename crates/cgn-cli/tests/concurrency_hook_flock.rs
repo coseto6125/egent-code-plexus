@@ -5,7 +5,7 @@
 //! Mirrors the production shell template at
 //! `crates/graph-nexus-cli/src/background.rs:73-91` (markerless branch).
 
-use graph_nexus_cli::flock_preamble;
+use cgn_cli::flock_preamble;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 

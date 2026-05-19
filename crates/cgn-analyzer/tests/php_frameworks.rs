@@ -4,9 +4,9 @@
 //! Laravel route detection is gated by the `Illuminate` use statement;
 //! bare `Route::` in a non-Laravel codebase must NOT surface as a route.
 
-use graph_nexus_analyzer::php::parser::PhpProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawFrameworkRef;
+use cgn_analyzer::php::parser::PhpProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawFrameworkRef;
 
 fn parse(src: &str) -> Vec<RawFrameworkRef> {
     let provider = PhpProvider::new().unwrap();

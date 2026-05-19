@@ -4,10 +4,10 @@
 //! paths are kept as-is. Inferred `let x = Dog::new()` (no annotation) falls
 //! back to bare method name.
 
-use graph_nexus_analyzer::rust::parser::RustProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::rust::parser::RustProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = RustProvider::new().unwrap();

@@ -2,9 +2,9 @@
 //!
 //! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/swift.ts:281-316`.
 
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawFrameworkRef;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawFrameworkRef;
 
 fn parse(src: &str) -> Vec<RawFrameworkRef> {
     let provider = SwiftProvider::new().unwrap();

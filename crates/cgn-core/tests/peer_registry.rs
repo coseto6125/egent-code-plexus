@@ -1,7 +1,7 @@
 use chrono::Utc;
-use graph_nexus_core::peer::registry::alive_peers;
-use graph_nexus_core::registry::atomic_write_json;
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::peer::registry::alive_peers;
+use cgn_core::registry::atomic_write_json;
+use cgn_core::session::SessionMeta;
 use std::fs;
 use tempfile::tempdir;
 
@@ -46,7 +46,7 @@ fn alive_peers_empty_when_no_sessions() {
 
 #[test]
 fn pid_alive_returns_false_for_pid_zero_and_one() {
-    use graph_nexus_core::peer::registry::pid_alive;
+    use cgn_core::peer::registry::pid_alive;
     assert!(
         !pid_alive(0),
         "pid=0 must be treated as not alive (would target process group)"

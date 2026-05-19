@@ -15,7 +15,7 @@
 //!    than just `"Bark"`, feeding the resolver's Tier 2.5 qualifier lookup.
 
 use crate::calls::attach_to_enclosing;
-use graph_nexus_core::analyzer::types::RawNode;
+use cgn_core::analyzer::types::RawNode;
 use std::collections::HashMap;
 use tree_sitter::Node;
 

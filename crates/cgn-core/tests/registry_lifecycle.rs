@@ -1,6 +1,6 @@
 //! End-to-end registry lifecycle: open → upsert → reopen.
 
-use graph_nexus_core::registry::{Registry, RepoAlias};
+use cgn_core::registry::{Registry, RepoAlias};
 
 #[test]
 fn lifecycle_create_upsert_reopen() {

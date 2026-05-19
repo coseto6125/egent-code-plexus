@@ -7,8 +7,8 @@
 //! they feed post-processing paths in `parser.rs`. Only the name-node captures
 //! that drive the primary `kind` dispatch are listed.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct CppSpec;
 

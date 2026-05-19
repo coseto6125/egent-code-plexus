@@ -6,10 +6,10 @@
 //! by reusable-workflow callers).
 //! Step `id:` values are job-internal and must NOT be exported.
 
-use graph_nexus_analyzer::github_actions::parser::GitHubActionsProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::github_actions::parser::GitHubActionsProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

@@ -8,8 +8,8 @@
 //! This module consolidates those helpers so each parser stays focused on its own
 //! grammar quirks, not span arithmetic.
 
-use graph_nexus_core::analyzer::types::{RawFrameworkRef, RawImport, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::types::{RawFrameworkRef, RawImport, RawNode};
+use cgn_core::graph::NodeKind;
 
 pub type Span = (u32, u32, u32, u32);
 

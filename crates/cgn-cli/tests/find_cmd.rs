@@ -5,11 +5,11 @@
 //! CLI-level subcommand, so one focused test suite is sufficient (noted in PR
 //! body per CLAUDE.md).
 
-use graph_nexus_core::graph::{
+use cgn_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::{Path, PathBuf};

@@ -5,7 +5,7 @@
 //! group, syncs it, then asserts contracts.rkyv + meta.json are written
 //! and non-empty.
 
-use graph_nexus_cli::commands::group::storage::{group_dir, read_contracts};
+use cgn_cli::commands::group::storage::{group_dir, read_contracts};
 use std::path::Path;
 use std::process::Command;
 
@@ -107,7 +107,7 @@ def create_user():
     //    We read the registry to find actual dir_name values so we can `group add`
     //    using names that actually exist.
     let registry_path = home.join(".gnx").join("registry.json");
-    let reg = graph_nexus_core::registry::RegistryFile::read_or_empty(&registry_path).unwrap();
+    let reg = cgn_core::registry::RegistryFile::read_or_empty(&registry_path).unwrap();
 
     let go_dir_name = reg
         .repos
@@ -170,7 +170,7 @@ def create_user():
 
     // ── 9. Verify both repo names appear in meta.repo_snapshots ──────────
     let meta_bytes = std::fs::read(gdir.join("meta.json")).unwrap();
-    let meta: graph_nexus_cli::commands::group::storage::GroupMeta =
+    let meta: cgn_cli::commands::group::storage::GroupMeta =
         serde_json::from_slice(&meta_bytes).unwrap();
 
     assert!(

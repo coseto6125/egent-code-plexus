@@ -6,8 +6,8 @@ mod common;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use common::write_stub;
-use graph_nexus_mcp::server::GnxMcpServer;
-use graph_nexus_mcp::spawn::run_spawn;
+use cgn_mcp::server::GnxMcpServer;
+use cgn_mcp::spawn::run_spawn;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -100,8 +100,8 @@ async fn gnx_group_advertises_all_subcmds() {
 
 // ── spawn argv shape tests ───────────────────────────────────────────────────
 
-fn group_tool() -> graph_nexus_mcp::schema::DerivedTool {
-    graph_nexus_mcp::group::group_tools()
+fn group_tool() -> cgn_mcp::schema::DerivedTool {
+    cgn_mcp::group::group_tools()
         .into_iter()
         .find(|t| t.name == "gnx_group")
         .expect("gnx_group tool")

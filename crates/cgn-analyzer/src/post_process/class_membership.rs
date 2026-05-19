@@ -19,9 +19,9 @@
 
 use crate::framework_helpers::{span_area, span_contains, Span};
 use crate::resolution::index::SymbolTable;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
-use graph_nexus_core::graph::{Edge, NodeKind, RelType};
-use graph_nexus_core::pool::StringPool;
+use cgn_core::analyzer::types::{LocalGraph, RawNode};
+use cgn_core::graph::{Edge, NodeKind, RelType};
+use cgn_core::pool::StringPool;
 use rustc_hash::FxHashMap;
 
 /// Sentinel prefix the Rust parser writes into `RawNode.heritage` for
@@ -102,7 +102,7 @@ fn emit_pass1_span(
     classes: &[(&str, Span)],
     path_str: &str,
     symbol_table: &SymbolTable,
-    reason: graph_nexus_core::pool::StrRef,
+    reason: cgn_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let mut emitted = 0usize;
@@ -172,7 +172,7 @@ fn emit_pass2_rust_impl(
     classes_by_name: &FxHashMap<&str, Vec<Span>>,
     path_str: &str,
     symbol_table: &SymbolTable,
-    reason: graph_nexus_core::pool::StrRef,
+    reason: cgn_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let mut emitted = 0usize;
@@ -227,7 +227,7 @@ fn emit_pass2_rust_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::analyzer::types::LocalGraph;
+    use cgn_core::analyzer::types::LocalGraph;
     use std::path::PathBuf;
 
     fn raw(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {

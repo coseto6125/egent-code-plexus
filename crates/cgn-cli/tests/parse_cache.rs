@@ -6,8 +6,8 @@
 //! `BUILDER_FINGERPRINT` → new cache subdir → old entries stay on disk
 //! but become unreachable (until a future GC sweeps them).
 
-use graph_nexus_cli::parse_cache::ParseCache;
-use graph_nexus_core::analyzer::types::LocalGraph;
+use cgn_cli::parse_cache::ParseCache;
+use cgn_core::analyzer::types::LocalGraph;
 
 fn graph(file: &str, hash: [u8; 8]) -> LocalGraph {
     LocalGraph {

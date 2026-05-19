@@ -1,6 +1,6 @@
 //! Tests for safe_exec hardening wrapper (spec §8 H4).
 
-use graph_nexus_cli::git::safe_exec;
+use cgn_cli::git::safe_exec;
 
 #[test]
 fn safe_exec_disables_protocol_ext() {

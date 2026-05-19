@@ -1,4 +1,4 @@
-use graph_nexus_cli::hint::{collision_warning, empty_result, error_with_cause, fuzzy_suggestions};
+use cgn_cli::hint::{collision_warning, empty_result, error_with_cause, fuzzy_suggestions};
 
 #[test]
 fn empty_result_format() {

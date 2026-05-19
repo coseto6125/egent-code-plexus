@@ -13,7 +13,7 @@
 //! 14-language coverage rule (CLAUDE.md) applies to parser/graph primitives,
 //! not to this module-level UTF-8 guard.
 
-use graph_nexus_analyzer::fetch_shape::response_shapes::{extract, Lang};
+use cgn_analyzer::fetch_shape::response_shapes::{extract, Lang};
 
 /// Build a string whose prefix is `prefix_len` bytes of box-drawing chars
 /// (`─`, 3 bytes each), followed by `suffix`. May overshoot `prefix_len` by

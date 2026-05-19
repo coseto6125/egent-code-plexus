@@ -7,7 +7,7 @@
 //! B = file tree + top-K symbols/file (default K=5)
 //! C = community-grouped overview
 
-use graph_nexus_core::graph::ArchivedZeroCopyGraph;
+use cgn_core::graph::ArchivedZeroCopyGraph;
 use memmap2::Mmap;
 use std::collections::BTreeMap;
 use std::fs::File;

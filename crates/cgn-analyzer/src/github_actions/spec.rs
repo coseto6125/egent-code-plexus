@@ -5,8 +5,8 @@
 //! for consistency with the LangSpec trait, but the capture_kind table
 //! is not directly consulted during parsing.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct GithubActionsSpec;
 

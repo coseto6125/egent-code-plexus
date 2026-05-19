@@ -5,8 +5,8 @@
 //! commit_dir without re-running the analyzer pipeline. Dirty worktree
 //! deltas live in the L1 session overlay (out of scope here).
 
-use graph_nexus_cli::build::orchestrator;
-use graph_nexus_core::registry::CommitBuildMeta;
+use cgn_cli::build::orchestrator;
+use cgn_core::registry::CommitBuildMeta;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;

@@ -1,7 +1,7 @@
 //! Shared formatting helpers for archived graph enums. Previously each
 //! command carried its own copy of `kind_to_str` / `rel_to_str`.
 
-use graph_nexus_core::graph::{ArchivedNodeKind, ArchivedRelType};
+use cgn_core::graph::{ArchivedNodeKind, ArchivedRelType};
 
 pub fn kind_to_str(kind: &ArchivedNodeKind) -> &'static str {
     match kind {

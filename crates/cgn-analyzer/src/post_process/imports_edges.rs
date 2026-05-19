@@ -54,9 +54,9 @@
 
 use crate::resolution::index::ResolveTarget;
 use crate::resolution::resolver::Resolver;
-use graph_nexus_core::analyzer::types::LocalGraph;
-use graph_nexus_core::graph::{Edge, RelType};
-use graph_nexus_core::pool::StringPool;
+use cgn_core::analyzer::types::LocalGraph;
+use cgn_core::graph::{Edge, RelType};
+use cgn_core::pool::StringPool;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 
@@ -367,7 +367,7 @@ fn try_named(
     local_graph: &LocalGraph,
     name: &str,
     source_file_idx: u32,
-    reason: graph_nexus_core::pool::StrRef,
+    reason: cgn_core::pool::StrRef,
     dedupe: &mut FxHashSet<(u32, u32)>,
     edges_out: &mut Vec<Edge>,
 ) -> usize {

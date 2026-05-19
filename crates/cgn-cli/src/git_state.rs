@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use crate::git::safe_exec;
-use graph_nexus_core::registry::{derive_repo_name, sanitize_segment, PathError};
+use cgn_core::registry::{derive_repo_name, sanitize_segment, PathError};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]

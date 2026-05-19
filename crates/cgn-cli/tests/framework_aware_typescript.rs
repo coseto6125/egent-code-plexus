@@ -1,6 +1,6 @@
 //! Integration test: TypeScript Express framework refs (T4).
-use graph_nexus_analyzer::typescript::TypeScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::typescript::TypeScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
 #[test]
 fn express_route_creates_framework_refs_for_handlers() {

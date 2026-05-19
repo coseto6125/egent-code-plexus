@@ -1,8 +1,8 @@
 //! Bridge: classify peer dirty entry → append InboxEntry to receiver inbox.
 
-use graph_nexus_core::peer::concern::{classify, ConcernResult, ImpactCache};
-use graph_nexus_core::peer::inbox::{append_entry, ConcernKindSer, InboxEntry};
-use graph_nexus_core::session::overlay::{DirtyEntry, SymbolRef};
+use cgn_core::peer::concern::{classify, ConcernResult, ImpactCache};
+use cgn_core::peer::inbox::{append_entry, ConcernKindSer, InboxEntry};
+use cgn_core::session::overlay::{DirtyEntry, SymbolRef};
 use std::io;
 use std::path::Path;
 

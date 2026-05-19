@@ -12,7 +12,7 @@
 //!    is intentionally omitted because Go HTTP handler indexing surface varies
 //!    (see T12 spec note on test fragility).
 
-use graph_nexus_cli::commands::group::{
+use cgn_cli::commands::group::{
     storage::{group_dir, read_contracts, write_contracts},
     types::{
         ContractRegistry, ContractRole, ContractType, CrossLink, CrossLinkEndpoint, ExtractedContract,

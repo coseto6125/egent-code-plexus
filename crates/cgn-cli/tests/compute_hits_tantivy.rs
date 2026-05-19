@@ -2,15 +2,15 @@
 //! `TantivyEngine` index, not the hardcoded 1.0 / 0.7 / 0.4 substring
 //! scoring in `bm25_hits_from_graph`. Drives B+ step 1 (tantivy wireup).
 
-use graph_nexus_cli::commands::hook::pre_tool_use::format_hits;
-use graph_nexus_cli::commands::find::{compute_hits, FindArgs, FindMode, Hit, ScoreSource};
-use graph_nexus_cli::engine::Engine;
-use graph_nexus_cli::search::TantivyEngine;
-use graph_nexus_core::graph::{
+use cgn_cli::commands::hook::pre_tool_use::format_hits;
+use cgn_cli::commands::find::{compute_hits, FindArgs, FindMode, Hit, ScoreSource};
+use cgn_cli::engine::Engine;
+use cgn_cli::search::TantivyEngine;
+use cgn_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use rkyv::rancor::Error;
 use std::fs;
 use tempfile::tempdir;
@@ -244,7 +244,7 @@ fn format_hits_emits_legacy_style_called_by_and_calls_block() {
         caller_count: 2,
         callers: vec!["loadSettings".to_string(), "initApp".to_string()],
         callees: vec!["tokenize".to_string()],
-        category: graph_nexus_core::graph::FileCategory::Source,
+        category: cgn_core::graph::FileCategory::Source,
     };
     let out = format_hits(&[hit]);
     assert!(out.contains("parseConfig (src/config.rs:42)"), "got: {out}");
@@ -274,7 +274,7 @@ fn format_hits_skips_empty_caller_callee_lines() {
         caller_count: 0,
         callers: vec![],
         callees: vec![],
-        category: graph_nexus_core::graph::FileCategory::Source,
+        category: cgn_core::graph::FileCategory::Source,
     };
     let out = format_hits(&[hit]);
     assert!(out.contains("orphan (src/main.rs:1)"));

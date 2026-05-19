@@ -1,5 +1,5 @@
-use graph_nexus_cli::session::state::classify;
-use graph_nexus_core::session::{
+use cgn_cli::session::state::classify;
+use cgn_core::session::{
     DirtyEntry, DirtyFiles, SessionMeta, SessionState, StaleReason,
 };
 use std::fs;
@@ -9,21 +9,21 @@ fn setup_repo(tmp: &Path, sha: &str, dirname: &str) {
     let commits = tmp.join("commits").join(dirname);
     fs::create_dir_all(&commits).unwrap();
     fs::write(commits.join("graph.bin"), b"stub").unwrap();
-    let cm = graph_nexus_core::registry::CommitBuildMeta {
+    let cm = cgn_core::registry::CommitBuildMeta {
         version: 1,
         sha: sha.to_string(),
-        source_type: graph_nexus_core::registry::SourceType::Branch,
+        source_type: cgn_core::registry::SourceType::Branch,
         source_id: Some("main".into()),
         built_from_worktree: "/tmp/wt".into(),
         built_at: "2026-05-17T10:00:00Z".into(),
         parent_sha: None,
         node_count: 0,
-        embedding_status: graph_nexus_core::registry::EmbeddingStatus::None,
+        embedding_status: cgn_core::registry::EmbeddingStatus::None,
         refs_at_build: vec![],
         refs_seen_since: vec![],
         builder_fingerprint: None,
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm)
+    cgn_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm)
         .unwrap();
 }
 

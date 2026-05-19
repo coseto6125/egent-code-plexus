@@ -4,7 +4,7 @@
 use crate::commands::group::types::{
     ContractRole, CrossLink, CrossLinkEndpoint, MatchType, StoredContract,
 };
-use graph_nexus_core::config::GroupConfig;
+use cgn_core::config::GroupConfig;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;

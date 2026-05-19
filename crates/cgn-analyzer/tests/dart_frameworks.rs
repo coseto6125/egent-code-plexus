@@ -2,9 +2,9 @@
 //!
 //! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/dart.ts:109-132`.
 
-use graph_nexus_analyzer::dart::parser::DartProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawFrameworkRef;
+use cgn_analyzer::dart::parser::DartProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawFrameworkRef;
 
 fn parse(src: &str) -> Vec<RawFrameworkRef> {
     let provider = DartProvider::new().unwrap();

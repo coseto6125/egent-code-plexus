@@ -3,10 +3,10 @@
 //! Verifies the parsers emit a RawImport with `imported_name=X`, `alias=Some(Y)`,
 //! `source="lib"` so downstream alias-aware passes can follow the re-export chain.
 
-use graph_nexus_analyzer::javascript::parser::JavaScriptProvider;
-use graph_nexus_analyzer::typescript::TypeScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawImport;
+use cgn_analyzer::javascript::parser::JavaScriptProvider;
+use cgn_analyzer::typescript::TypeScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawImport;
 
 fn find<'a>(imports: &'a [RawImport], imported_name: &str, source: &str) -> Vec<&'a RawImport> {
     imports

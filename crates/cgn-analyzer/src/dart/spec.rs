@@ -7,8 +7,8 @@
 //! absent. Everything that maps 1-to-1 from a `.name` capture to a NodeKind
 //! lives in this table.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct DartSpec;
 

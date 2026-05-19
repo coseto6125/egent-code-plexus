@@ -5,10 +5,10 @@
 //!   - `use 0x1::module::Item as Alias`     (member alias)
 //!   - Plain `use 0x1::module::Item`        (no alias → no Typedef node)
 
-use graph_nexus_analyzer::move_lang::parser::MoveProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::move_lang::parser::MoveProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

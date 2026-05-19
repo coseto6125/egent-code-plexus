@@ -1,5 +1,5 @@
-use graph_nexus_analyzer::typescript::parser::TypeScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::typescript::parser::TypeScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
 fn main() {
     let code = "export const NestFactory = new NestFactoryStatic();";

@@ -1,6 +1,6 @@
 //! Integration test: Python blind-spot detection.
-use graph_nexus_analyzer::python::PythonProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::python::PythonProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
 #[test]
 fn python_eval_exec_compile_blind_spots() {

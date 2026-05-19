@@ -11,12 +11,12 @@
 //!
 //! Design rationale: `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
 
-use graph_nexus_analyzer::javascript::parser::JavaScriptProvider;
-use graph_nexus_analyzer::php::parser::PhpProvider;
-use graph_nexus_analyzer::python::parser::PythonProvider;
-use graph_nexus_analyzer::typescript::parser::TypeScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawRoute;
+use cgn_analyzer::javascript::parser::JavaScriptProvider;
+use cgn_analyzer::php::parser::PhpProvider;
+use cgn_analyzer::python::parser::PythonProvider;
+use cgn_analyzer::typescript::parser::TypeScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawRoute;
 
 // ─── helpers ─────────────────────────────────────────────────────────
 

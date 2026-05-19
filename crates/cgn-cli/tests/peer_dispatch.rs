@@ -1,8 +1,8 @@
 use chrono::Utc;
-use graph_nexus_cli::peer::dispatch::dispatch_peer_dirty_event;
-use graph_nexus_core::peer::concern::ImpactCache;
-use graph_nexus_core::peer::inbox::{drain, InboxEntry};
-use graph_nexus_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
+use cgn_cli::peer::dispatch::dispatch_peer_dirty_event;
+use cgn_core::peer::concern::ImpactCache;
+use cgn_core::peer::inbox::{drain, InboxEntry};
+use cgn_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
 use rustc_hash::FxHashSet;
 use tempfile::tempdir;
 

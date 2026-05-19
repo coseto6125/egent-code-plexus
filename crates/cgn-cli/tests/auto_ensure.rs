@@ -1,5 +1,5 @@
-use graph_nexus_cli::auto_ensure::{ensure_index, EnsureResult};
-use graph_nexus_core::graph::{ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use cgn_cli::auto_ensure::{ensure_index, EnsureResult};
+use cgn_core::graph::{ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;

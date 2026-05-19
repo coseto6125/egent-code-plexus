@@ -1,5 +1,5 @@
 //! Read/write `contracts.rkyv` + `meta.json`. Atomic rename pattern
-//! mirrors `graph_nexus_core::registry::io::atomic_write_json`.
+//! mirrors `cgn_core::registry::io::atomic_write_json`.
 
 use crate::commands::group::types::{ArchivedContractRegistry, ContractRegistry};
 use memmap2::Mmap;
@@ -38,7 +38,7 @@ pub fn write_contracts(group_dir: &Path, reg: &ContractRegistry) -> io::Result<(
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(reg)
         .map_err(|e| io::Error::other(format!("rkyv: {e:?}")))?;
     let path = group_dir.join(CONTRACTS_FILE);
-    graph_nexus_core::registry::atomic_write_bytes(&path, &bytes)
+    cgn_core::registry::atomic_write_bytes(&path, &bytes)
 }
 
 pub fn read_contracts(group_dir: &Path) -> io::Result<ContractRegistry> {
@@ -58,7 +58,7 @@ pub fn read_contracts(group_dir: &Path) -> io::Result<ContractRegistry> {
 
 pub fn write_meta(group_dir: &Path, meta: &GroupMeta) -> io::Result<()> {
     fs::create_dir_all(group_dir)?;
-    graph_nexus_core::registry::atomic_write_json(&group_dir.join(META_FILE), meta)
+    cgn_core::registry::atomic_write_json(&group_dir.join(META_FILE), meta)
 }
 
 /// Hot-path mmap handle. Owns the `Mmap` and exposes zero-copy access via

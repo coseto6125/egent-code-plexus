@@ -1,7 +1,7 @@
 //! `gnx shape_check` — drift detector for HTTP consumer ↔ Route shape.
 //!
 //! Iterates every `RelType::Fetches` edge in the graph, parses its
-//! `reason` via [`graph_nexus_analyzer::fetch_shape::parse_reason`],
+//! `reason` via [`cgn_analyzer::fetch_shape::parse_reason`],
 //! looks up the target Route's `RouteShape`, and reports any
 //! consumer-accessed key that is NOT in `response_keys ∪ error_keys`.
 //!
@@ -22,9 +22,9 @@
 
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use graph_nexus_analyzer::fetch_shape::parse_reason;
-use graph_nexus_core::graph::ArchivedRelType;
-use graph_nexus_core::GnxError;
+use cgn_analyzer::fetch_shape::parse_reason;
+use cgn_core::graph::ArchivedRelType;
+use cgn_core::GnxError;
 use std::collections::HashMap;
 
 /// Detect drift between HTTP consumer access patterns and the Route shapes
@@ -227,7 +227,7 @@ fn render_text(value: &serde_json::Value) -> serde_json::Value {
 pub fn run(
     args: ShapeCheckArgs,
     engine: &crate::engine::Engine,
-) -> Result<(), graph_nexus_core::GnxError> {
+) -> Result<(), cgn_core::GnxError> {
     let format = crate::output::OutputFormat::parse(args.format.as_deref());
     let (value, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(filter) = &hints.unmatched_route_filter {

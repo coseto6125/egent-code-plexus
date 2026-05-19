@@ -8,7 +8,7 @@
 //! - PR number:    `PR/13` (requires `gh` CLI authenticated to the repo)
 
 use crate::git::safe_exec;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::path::Path;
 use std::process::Command;
 

@@ -1,8 +1,8 @@
 //! Ƀ messaging — say / inbox / thread.
 
 use chrono::Utc;
-use graph_nexus_core::peer::inbox::{append_entry, InboxEntry};
-use graph_nexus_core::peer::registry::alive_peers;
+use cgn_core::peer::inbox::{append_entry, InboxEntry};
+use cgn_core::peer::registry::alive_peers;
 use std::io::Write;
 use std::path::Path;
 use uuid::Uuid;

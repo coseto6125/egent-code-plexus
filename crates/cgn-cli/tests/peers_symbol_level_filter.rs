@@ -40,8 +40,8 @@ fn same_symbol_triggers_hard_event() {
         h.read_inbox("bob").iter().any(|e| {
             matches!(
                 e,
-                graph_nexus_core::peer::inbox::InboxEntry::DirtyEvent {
-                    kind: graph_nexus_core::peer::inbox::ConcernKindSer::Hard,
+                cgn_core::peer::inbox::InboxEntry::DirtyEvent {
+                    kind: cgn_core::peer::inbox::ConcernKindSer::Hard,
                     ..
                 }
             )

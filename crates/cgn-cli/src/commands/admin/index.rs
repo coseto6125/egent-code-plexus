@@ -1,6 +1,6 @@
 use clap::Args;
-use graph_nexus_analyzer::resolution::builder::GraphBuilder;
-use graph_nexus_analyzer::{
+use cgn_analyzer::resolution::builder::GraphBuilder;
+use cgn_analyzer::{
     bash::parser::BashProvider, c::parser::CProvider, c_sharp::parser::CSharpProvider,
     cairo::parser::CairoProvider, cpp::parser::CppProvider, crystal::parser::CrystalProvider,
     dart::parser::DartProvider, docker_compose::parser::DockerComposeProvider,
@@ -14,7 +14,7 @@ use graph_nexus_analyzer::{
     verilog::parser::VerilogProvider, vyper::parser::VyperProvider, yaml::parser::YamlProvider,
     zig::parser::ZigProvider,
 };
-use graph_nexus_core::analyzer::pipeline::AnalyzerPipeline;
+use cgn_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
 
 #[derive(Args, Debug, Clone)]
@@ -122,12 +122,12 @@ pub fn run_analyzer_for_paths(
     // routing is keyed on the lowercase `name()` string, not ordering).
     let needed = detect_needed_providers(&files_to_analyze);
     type ProviderFactory =
-        Box<dyn FnOnce() -> std::io::Result<Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>> + Send>;
+        Box<dyn FnOnce() -> std::io::Result<Box<dyn cgn_core::analyzer::provider::LanguageProvider>> + Send>;
     let mut factories: Vec<ProviderFactory> = Vec::new();
     macro_rules! add {
         ($flag:expr, $ctor:expr) => {
             if $flag { factories.push(Box::new(|| {
-                $ctor.map(|p| Box::new(p) as Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>)
+                $ctor.map(|p| Box::new(p) as Box<dyn cgn_core::analyzer::provider::LanguageProvider>)
                     .map_err(std::io::Error::other)
             })); }
         };
@@ -149,7 +149,7 @@ pub fn run_analyzer_for_paths(
         // unwrapped — preserve that contract.
         factories.push(Box::new(|| {
             SwiftProvider::new()
-                .map(|p| Box::new(p) as Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>)
+                .map(|p| Box::new(p) as Box<dyn cgn_core::analyzer::provider::LanguageProvider>)
                 .map_err(std::io::Error::other)
         }));
     }
@@ -173,7 +173,7 @@ pub fn run_analyzer_for_paths(
     add!(needed.docker_compose, DockerComposeProvider::new());
 
     use rayon::prelude::*;
-    let providers: Vec<Box<dyn graph_nexus_core::analyzer::provider::LanguageProvider>> = factories
+    let providers: Vec<Box<dyn cgn_core::analyzer::provider::LanguageProvider>> = factories
         .into_par_iter()
         .map(|f| f())
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -250,10 +250,10 @@ pub fn run_analyzer_for_paths(
     // ── Step 5: Write graph.bin (atomic) ──────────────────────────────────
     let bin_path = out_dir.join("graph.bin");
     let lock_path = bin_path.with_extension("lock");
-    let _lock = graph_nexus_core::registry::FileLock::acquire_exclusive(&lock_path)?;
+    let _lock = cgn_core::registry::FileLock::acquire_exclusive(&lock_path)?;
     let bytes =
         rkyv::to_bytes::<rkyv::rancor::Error>(&global_graph).map_err(std::io::Error::other)?;
-    graph_nexus_core::registry::atomic_write_bytes(&bin_path, &bytes)?;
+    cgn_core::registry::atomic_write_bytes(&bin_path, &bytes)?;
 
     if prof { eprintln!("prof step5.write_graph_bin: {:.2}s ({} bytes)", t_step5.elapsed().as_secs_f32(), bytes.len()); }
     let t_step6 = std::time::Instant::now();
@@ -352,7 +352,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 /// commit hits this — without the early-out we'd pay a flock + per-repo
 /// meta read + registry read on a path that's supposed to be near-instant.
 fn ensure_registry_entry(worktree: &std::path::Path) -> std::io::Result<()> {
-    use graph_nexus_core::registry::{resolve_home_gnx, RegistryFile, RepoAlias, RepoMeta};
+    use cgn_core::registry::{resolve_home_gnx, RegistryFile, RepoAlias, RepoMeta};
 
     let home_gnx = resolve_home_gnx();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree)?;
@@ -375,7 +375,7 @@ fn locate_commit_dir(
     worktree: &std::path::Path,
     sha: &str,
 ) -> std::io::Result<Option<std::path::PathBuf>> {
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    let home_gnx = cgn_core::registry::resolve_home_gnx();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree)?;
     let commits = home_gnx.join(&repo_dir_name).join("commits");
     if !commits.exists() {
@@ -387,10 +387,10 @@ fn locate_commit_dir(
     Ok(idx.find(&sha_bytes).map(|name| commits.join(name)))
 }
 
-fn detect_source_type(commit_dir: &std::path::Path) -> graph_nexus_core::registry::SourceType {
-    graph_nexus_core::registry::CommitBuildMeta::read(&commit_dir.join("meta.json"))
+fn detect_source_type(commit_dir: &std::path::Path) -> cgn_core::registry::SourceType {
+    cgn_core::registry::CommitBuildMeta::read(&commit_dir.join("meta.json"))
         .map(|m| m.source_type)
-        .unwrap_or(graph_nexus_core::registry::SourceType::Commit)
+        .unwrap_or(cgn_core::registry::SourceType::Commit)
 }
 
 #[derive(Default)]

@@ -3,10 +3,10 @@
 //! `Dog.Fetch`. Param/var/short-var with explicit type bind the same way.
 //! Without a known type, fall back to the bare method name.
 
-use graph_nexus_analyzer::go::parser::GoProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::go::parser::GoProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = GoProvider::new().unwrap();

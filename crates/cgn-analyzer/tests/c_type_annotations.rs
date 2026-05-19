@@ -9,10 +9,10 @@
 //! - **Qualifier inclusion**: full prefix including storage-class. E.g.
 //!   `static const int N` → `"static const int"`.
 
-use graph_nexus_analyzer::c::parser::CProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::c::parser::CProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

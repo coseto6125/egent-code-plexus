@@ -5,8 +5,8 @@
 //! becomes one MCP tool. Dispatch is spawn-only.
 
 use clap::{Args, Command, Subcommand};
-use graph_nexus_core::GnxError;
-use graph_nexus_mcp::server::{serve_stdio, GnxMcpServer};
+use cgn_core::GnxError;
+use cgn_mcp::server::{serve_stdio, GnxMcpServer};
 use serde::Serialize;
 
 #[derive(Serialize, Debug)]

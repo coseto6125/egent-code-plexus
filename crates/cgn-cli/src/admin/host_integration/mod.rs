@@ -6,7 +6,7 @@ pub mod native;
 use crate::admin::menu::{self, select};
 use crate::commands::admin::{claude_code, install_hook};
 use dialoguer::theme::ColorfulTheme;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 
 const MECHANISMS: &[menu::Item<'_>] = &[
     ("MCP", "shared side-car for any MCP-capable host"),

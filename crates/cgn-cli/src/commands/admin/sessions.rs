@@ -2,8 +2,8 @@
 //! reset / sweep variants deferred (parent spec §11.2 follow-up).
 
 use clap::{Args, Subcommand};
-use graph_nexus_core::registry::resolve_home_gnx;
-use graph_nexus_core::session::{SessionMeta, SessionState};
+use cgn_core::registry::resolve_home_gnx;
+use cgn_core::session::{SessionMeta, SessionState};
 use std::fs;
 use std::io;
 
@@ -137,7 +137,7 @@ fn collect_rows(home_gnx: &std::path::Path) -> io::Result<Vec<ListRow>> {
                     &repo_dir, sid, sm, idx_ref,
                 ),
                 None => SessionState::Stale {
-                    reason: graph_nexus_core::session::StaleReason::MetaUnreadable,
+                    reason: cgn_core::session::StaleReason::MetaUnreadable,
                 },
             };
             let (base_sha, state_view) = match &state {

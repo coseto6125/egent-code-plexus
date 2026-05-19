@@ -1,4 +1,4 @@
-use graph_nexus_core::graph::ArchivedZeroCopyGraph;
+use cgn_core::graph::ArchivedZeroCopyGraph;
 use memmap2::Mmap;
 use std::fs::File;
 

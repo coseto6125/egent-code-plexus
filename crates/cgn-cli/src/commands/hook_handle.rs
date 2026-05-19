@@ -13,7 +13,7 @@ pub struct HookHandleArgs {
 
 const ALL_ZERO: &str = "0000000000000000000000000000000000000000";
 
-pub fn run(args: HookHandleArgs) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(args: HookHandleArgs) -> Result<(), cgn_core::GnxError> {
     if args.stage != "committed" {
         return Ok(());
     }
@@ -55,7 +55,7 @@ pub fn run(args: HookHandleArgs) -> Result<(), graph_nexus_core::GnxError> {
             branch_arg.as_str(),
             repo_arg.as_str(),
         ];
-        let _ = graph_nexus_core::daemon::spawn_detached(&args_vec);
+        let _ = cgn_core::daemon::spawn_detached(&args_vec);
     }
 
     Ok(())

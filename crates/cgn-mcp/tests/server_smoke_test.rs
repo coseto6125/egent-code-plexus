@@ -5,7 +5,7 @@
 //! without linking the full CLI binary.
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use graph_nexus_mcp::server::GnxMcpServer;
+use cgn_mcp::server::GnxMcpServer;
 
 #[derive(Parser)]
 #[command(name = "gnx")]

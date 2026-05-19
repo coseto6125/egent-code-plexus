@@ -9,10 +9,10 @@
 //! Covers Wave 3 / Matrix A1 (Go row) from
 //! `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
-use graph_nexus_analyzer::go::parser::GoProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::go::parser::GoProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

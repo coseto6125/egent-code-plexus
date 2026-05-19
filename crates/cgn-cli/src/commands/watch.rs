@@ -3,15 +3,15 @@
 use crate::peer::watcher::{run_watcher, WatcherCfg};
 use crate::session::resolver::resolve_session_id;
 use clap::Args;
-use graph_nexus_core::peer::registry::pid_alive;
-use graph_nexus_core::session::SessionMeta;
-use graph_nexus_core::GnxError;
+use cgn_core::peer::registry::pid_alive;
+use cgn_core::session::SessionMeta;
+use cgn_core::GnxError;
 use std::path::PathBuf;
 
 fn default_repo_root() -> std::io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(&cwd)?;
-    Ok(graph_nexus_core::registry::resolve_home_gnx().join(repo_dir))
+    Ok(cgn_core::registry::resolve_home_gnx().join(repo_dir))
 }
 
 #[derive(Args, Debug, Clone)]

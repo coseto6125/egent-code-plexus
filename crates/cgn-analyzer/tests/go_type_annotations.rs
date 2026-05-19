@@ -12,10 +12,10 @@
 //!
 //! Spec: `docs/specs/2026-05-15-language-coverage-gaps.md` Wave 2 / D1.
 
-use graph_nexus_analyzer::go::parser::GoProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::go::parser::GoProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

@@ -19,7 +19,7 @@
 //! * Re-export chains (`pub use foo::Bar` transitive walk).
 //! * Macro-expanded `use`s.
 
-use graph_nexus_core::registry::uid_path;
+use cgn_core::registry::uid_path;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 

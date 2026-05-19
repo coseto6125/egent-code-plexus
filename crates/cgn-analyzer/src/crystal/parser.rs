@@ -1,9 +1,9 @@
 use super::spec::CrystalSpec;
 use crate::calls::extract_calls;
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawImport, RawNode, RawRoute};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};

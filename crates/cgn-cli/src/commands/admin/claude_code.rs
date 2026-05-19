@@ -4,7 +4,7 @@
 //! hook installs).
 
 use clap::Args;
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -286,6 +286,6 @@ fn is_installed(settings: &Value, ev: &str) -> bool {
 }
 
 fn write_atomic(path: &Path, value: &Value) -> Result<(), GnxError> {
-    graph_nexus_core::registry::atomic_write_json(path, value)
+    cgn_core::registry::atomic_write_json(path, value)
         .map_err(|e| GnxError::Output(format!("atomic write {}: {e}", path.display())))
 }

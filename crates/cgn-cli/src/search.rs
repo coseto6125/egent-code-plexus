@@ -1,4 +1,4 @@
-use graph_nexus_core::graph::ZeroCopyGraph;
+use cgn_core::graph::ZeroCopyGraph;
 use std::fs;
 use std::path::Path;
 use tantivy::schema::*;

@@ -1,7 +1,7 @@
 //! Go `LangSpec` — capture-name → NodeKind table.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct GoSpec;
 

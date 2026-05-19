@@ -1,4 +1,4 @@
-use graph_nexus_core::analyzer::types::RawImport;
+use cgn_core::analyzer::types::RawImport;
 use serde::Serialize;
 use std::sync::Mutex;
 use std::path::Path;
@@ -262,7 +262,7 @@ impl<'a> Resolver<'a> {
         // the strict policy. Module-qualified free functions like
         // `registry::sanitize_branch` whose member is uniquely defined will
         // be recovered by Phase B.3 (config-aware import resolution) once the
-        // workspace crate index can distinguish `graph_nexus_core::...` (internal,
+        // workspace crate index can distinguish `cgn_core::...` (internal,
         // safe to fall back) from `std::...` (external, refuse).
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
             let hit = self
@@ -933,7 +933,7 @@ mod tests {
 
     // ── Tier-3 cap (kind-filtered + unique-only) ────────────────────────────
 
-    use graph_nexus_core::graph::NodeKind;
+    use cgn_core::graph::NodeKind;
 
     /// Build a SymbolTable from `(file, name, kind)` triples — ids auto-assigned
     /// monotonically (matching the dense-id invariant `register_node` enforces).
@@ -1294,7 +1294,7 @@ mod tests {
         // Tier 2.5 should resolve the qualifier via the import (Tier 2) →
         // find foo in x.ts. Confirms the import path works for the qualifier
         // resolution sub-step, not just same-file / global.
-        use graph_nexus_core::analyzer::types::RawImport;
+        use cgn_core::analyzer::types::RawImport;
         let st = st_with(&[
             ("src/x.ts", "MyClass", NodeKind::Class),
             ("src/x.ts", "foo", NodeKind::Method),

@@ -3,7 +3,7 @@
 //! - `type_identifier` (class / interface / enum names, type references)
 
 use super::generic::find_by_kinds;
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &["identifier", "type_identifier"];
 

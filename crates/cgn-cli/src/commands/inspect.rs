@@ -2,9 +2,9 @@ use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use graph_nexus_core::algorithms::process_trace::is_test_path;
-use graph_nexus_core::graph::ArchivedZeroCopyGraph;
-use graph_nexus_core::GnxError;
+use cgn_core::algorithms::process_trace::is_test_path;
+use cgn_core::graph::ArchivedZeroCopyGraph;
+use cgn_core::GnxError;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
@@ -185,11 +185,11 @@ fn build_inspect_block(
     // fn) — B.1 emission unifies them but doesn't hide the underlying kind.
     let (contained_methods, contained_properties) = if matches!(
         node.kind,
-        graph_nexus_core::graph::ArchivedNodeKind::Class
-            | graph_nexus_core::graph::ArchivedNodeKind::Struct
-            | graph_nexus_core::graph::ArchivedNodeKind::Trait
-            | graph_nexus_core::graph::ArchivedNodeKind::Interface
-            | graph_nexus_core::graph::ArchivedNodeKind::Enum
+        cgn_core::graph::ArchivedNodeKind::Class
+            | cgn_core::graph::ArchivedNodeKind::Struct
+            | cgn_core::graph::ArchivedNodeKind::Trait
+            | cgn_core::graph::ArchivedNodeKind::Interface
+            | cgn_core::graph::ArchivedNodeKind::Enum
     ) {
         collect_contained_members(graph, node_idx)
     } else {
@@ -228,8 +228,8 @@ fn collect_contained_members(
     for i in out_start..out_end {
         let edge = &graph.edges[i];
         let bucket = match edge.rel_type {
-            graph_nexus_core::graph::ArchivedRelType::HasMethod => &mut methods,
-            graph_nexus_core::graph::ArchivedRelType::HasProperty => &mut properties,
+            cgn_core::graph::ArchivedRelType::HasMethod => &mut methods,
+            cgn_core::graph::ArchivedRelType::HasProperty => &mut properties,
             _ => continue,
         };
         let target_node = &graph.nodes[edge.target.to_native() as usize];
@@ -274,7 +274,7 @@ where
         let source_node = &graph.nodes[src_idx];
         if matches!(
             source_node.kind,
-            graph_nexus_core::graph::ArchivedNodeKind::File
+            cgn_core::graph::ArchivedNodeKind::File
         ) {
             continue;
         }
@@ -337,17 +337,17 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     let has_primary_type = matching_nodes.iter().any(|(_, n)| {
         matches!(
             n.kind,
-            graph_nexus_core::graph::ArchivedNodeKind::Struct
-                | graph_nexus_core::graph::ArchivedNodeKind::Class
-                | graph_nexus_core::graph::ArchivedNodeKind::Enum
-                | graph_nexus_core::graph::ArchivedNodeKind::Trait
-                | graph_nexus_core::graph::ArchivedNodeKind::Interface
+            cgn_core::graph::ArchivedNodeKind::Struct
+                | cgn_core::graph::ArchivedNodeKind::Class
+                | cgn_core::graph::ArchivedNodeKind::Enum
+                | cgn_core::graph::ArchivedNodeKind::Trait
+                | cgn_core::graph::ArchivedNodeKind::Interface
         )
     });
     let matching_nodes: Vec<(usize, _)> = if has_primary_type {
         matching_nodes
             .into_iter()
-            .filter(|(_, n)| !matches!(n.kind, graph_nexus_core::graph::ArchivedNodeKind::Impl))
+            .filter(|(_, n)| !matches!(n.kind, cgn_core::graph::ArchivedNodeKind::Impl))
             .collect()
     } else {
         matching_nodes

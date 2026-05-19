@@ -8,10 +8,10 @@
 //! but the local form is wrapped in a `declaration` node under the
 //! `local_declaration` field, enabling query-level discrimination.
 
-use graph_nexus_analyzer::lua::parser::LuaProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::lua::parser::LuaProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

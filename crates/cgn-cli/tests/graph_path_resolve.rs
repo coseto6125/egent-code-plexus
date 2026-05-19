@@ -1,4 +1,4 @@
-use graph_nexus_cli::graph_path;
+use cgn_cli::graph_path;
 use std::path::Path;
 use std::process::Command;
 

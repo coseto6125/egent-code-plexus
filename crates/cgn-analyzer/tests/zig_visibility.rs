@@ -4,9 +4,9 @@
 //! The provider detects this via a 4-byte prefix scan (`b"pub "`) at the
 //! declaration's start byte in the source buffer.
 
-use graph_nexus_analyzer::zig::parser::ZigProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
+use cgn_analyzer::zig::parser::ZigProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

@@ -1,4 +1,4 @@
-use graph_nexus_core::peer::retention::{rotate_if_needed, MSG_LOG_KEEP_ROTATED};
+use cgn_core::peer::retention::{rotate_if_needed, MSG_LOG_KEEP_ROTATED};
 use std::fs;
 use tempfile::tempdir;
 

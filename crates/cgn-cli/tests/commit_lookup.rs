@@ -1,4 +1,4 @@
-use graph_nexus_cli::commit_lookup::CommitIndex;
+use cgn_cli::commit_lookup::CommitIndex;
 
 #[test]
 fn missing_commits_dir_returns_empty_index() {

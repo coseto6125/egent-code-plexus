@@ -32,10 +32,10 @@ use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
-use graph_nexus_analyzer::resolution::index::Language;
-use graph_nexus_core::graph::{ArchivedFileCategory, ArchivedZeroCopyGraph, FileCategory};
-use graph_nexus_core::registry::{resolve_home_gnx, Registry};
-use graph_nexus_core::GnxError;
+use cgn_analyzer::resolution::index::Language;
+use cgn_core::graph::{ArchivedFileCategory, ArchivedZeroCopyGraph, FileCategory};
+use cgn_core::registry::{resolve_home_gnx, Registry};
+use cgn_core::GnxError;
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -606,7 +606,7 @@ fn compute_single(
 /// substring 0.4) when `<index_dir>/tantivy/` is missing — which happens
 /// on a freshly-cloned repo before `gnx admin index` has run.
 fn bm25_hits_from_graph(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
@@ -626,7 +626,7 @@ fn bm25_hits_from_graph(
 /// fails outright (e.g. corrupt segment), preserving the contract that
 /// hooks never error out on search.
 fn tantivy_hits(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
@@ -669,7 +669,7 @@ fn tantivy_hits(
 /// shaped the same before the first `gnx admin index` has produced an
 /// index.
 fn substring_hits(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
@@ -717,7 +717,7 @@ fn substring_hits(
 /// when the node's kind doesn't match the filter. `score_source`
 /// annotates which ranker produced `score` (BM25 / substring).
 fn build_hit(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     idx: usize,
     score: f32,
     score_source: ScoreSource,

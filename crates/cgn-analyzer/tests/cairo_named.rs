@@ -6,9 +6,9 @@
 //!
 //! Plain `use path::to::Item;` (no `as`) must NOT emit Typedef.
 
-use graph_nexus_analyzer::cairo::parser::CairoProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::cairo::parser::CairoProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<(String, NodeKind)> {

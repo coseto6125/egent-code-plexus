@@ -9,7 +9,7 @@
 //! pass. Symbols at function / class / method / namespace level work.
 
 use super::generic::find_in_tree;
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &["name"];
 // `variable_name` wraps `$foo` and contains a `name` child whose text is

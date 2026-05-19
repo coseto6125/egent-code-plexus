@@ -4,7 +4,7 @@
 //! - `shorthand_property_identifier` (`{ foo }` shorthand)
 
 use super::generic::find_by_kinds;
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &[
     "identifier",

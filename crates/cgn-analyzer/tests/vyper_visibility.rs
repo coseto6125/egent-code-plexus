@@ -5,9 +5,9 @@
 //! `@internal`, `@pure`, or `@nonreentrant` are NOT externally callable.
 //! Bare functions (no decorator) are also not exported.
 
-use graph_nexus_analyzer::vyper::parser::VyperProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::LocalGraph;
+use cgn_analyzer::vyper::parser::VyperProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::LocalGraph;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

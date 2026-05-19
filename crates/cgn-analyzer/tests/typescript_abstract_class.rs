@@ -5,10 +5,10 @@
 //! NestJS source (AbstractHttpAdapter, ClientProxy, Server, ContextCreator,
 //! ModuleRef, etc.) — 17 unpaired ref_over entries on the parity dump.
 
-use graph_nexus_analyzer::typescript::parser::TypeScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::typescript::parser::TypeScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{LocalGraph, RawNode};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {

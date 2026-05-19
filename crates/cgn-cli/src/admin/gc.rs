@@ -6,8 +6,8 @@
 #![allow(dead_code)]
 
 use crate::git::safe_exec;
-use graph_nexus_core::registry::{CommitBuildMeta, CommitDirName};
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::registry::{CommitBuildMeta, CommitDirName};
+use cgn_core::session::SessionMeta;
 use rustc_hash::FxHashSet;
 use std::fs;
 use std::io;

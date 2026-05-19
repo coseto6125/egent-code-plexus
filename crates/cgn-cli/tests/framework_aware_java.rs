@@ -1,6 +1,6 @@
 //! Integration test: Spring framework refs.
-use graph_nexus_analyzer::java::JavaProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::java::JavaProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 
 #[test]
 fn spring_autowired_creates_framework_refs() {

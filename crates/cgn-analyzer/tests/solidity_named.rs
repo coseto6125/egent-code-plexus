@@ -7,9 +7,9 @@
 //! Does NOT emit Typedef for:
 //!   - `contract Foo {}` (stays Class)
 
-use graph_nexus_analyzer::solidity::parser::SolidityProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::solidity::parser::SolidityProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<(String, NodeKind)> {

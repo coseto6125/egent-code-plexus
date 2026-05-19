@@ -4,13 +4,13 @@
 //!   2. Function (object-property) — { key: function(){} } emits Function nodes
 //!   3. Route — app.use('/path', ...) emits Route
 
-use graph_nexus_analyzer::javascript::parser::JavaScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::javascript::parser::JavaScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::NodeKind;
 
 fn provider() -> JavaScriptProvider { JavaScriptProvider::new().unwrap() }
 
-fn parse(src: &str) -> graph_nexus_core::analyzer::types::LocalGraph {
+fn parse(src: &str) -> cgn_core::analyzer::types::LocalGraph {
     provider().parse_file("test.js".as_ref(), src.as_bytes()).unwrap()
 }
 

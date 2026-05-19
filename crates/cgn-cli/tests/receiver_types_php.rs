@@ -4,10 +4,10 @@
 //! and `static::method()` call sites are bound to the enclosing class so the
 //! resolver's Tier 2.5 (qualifier-scoped) lookup can route them correctly.
 
-use graph_nexus_analyzer::php::parser::PhpProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::php::parser::PhpProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = PhpProvider::new().unwrap();

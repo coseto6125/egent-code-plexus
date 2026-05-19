@@ -3,8 +3,8 @@
 use crate::admin::menu::{self, select};
 use crate::commands::admin::{drop, index, prune};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input};
-use graph_nexus_core::registry::{resolve_home_gnx, Registry, RegistryFile};
-use graph_nexus_core::GnxError;
+use cgn_core::registry::{resolve_home_gnx, Registry, RegistryFile};
+use cgn_core::GnxError;
 use std::path::PathBuf;
 
 const MENU: &[menu::Item<'_>] = &[
@@ -144,7 +144,7 @@ fn dialoguer_err(e: dialoguer::Error) -> GnxError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::registry::RepoAlias;
+    use cgn_core::registry::RepoAlias;
     use std::collections::BTreeMap;
 
     #[test]

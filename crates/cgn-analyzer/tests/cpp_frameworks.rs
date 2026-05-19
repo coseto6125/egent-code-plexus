@@ -3,9 +3,9 @@
 //! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/c-cpp.ts:414-431`.
 //! Upstream's `cProvider` has no `astFrameworkPatterns`, so this is C++-only.
 
-use graph_nexus_analyzer::cpp::parser::CppProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawFrameworkRef;
+use cgn_analyzer::cpp::parser::CppProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawFrameworkRef;
 
 fn parse(src: &str) -> Vec<RawFrameworkRef> {
     let provider = CppProvider::new().unwrap();

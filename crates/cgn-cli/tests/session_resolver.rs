@@ -1,4 +1,4 @@
-use graph_nexus_cli::session::resolver::resolve_session_id;
+use cgn_cli::session::resolver::resolve_session_id;
 use std::sync::Mutex;
 
 const ENV_KEYS: &[&str] = &[

@@ -4,10 +4,10 @@
 //! Column aliases inside SELECT (`x AS y`) are explicitly excluded.
 //! `CREATE TABLE` continues to emit `NodeKind::Class`.
 
-use graph_nexus_analyzer::sql::parser::SqlProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::sql::parser::SqlProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {

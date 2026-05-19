@@ -2,8 +2,8 @@
 //! for one group member, fanned out to cross-repo links from contracts.rkyv.
 
 use clap::Args;
-use graph_nexus_core::registry::resolve_home_gnx;
-use graph_nexus_core::GnxError;
+use cgn_core::registry::resolve_home_gnx;
+use cgn_core::GnxError;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -50,7 +50,7 @@ pub struct ImpactArgs {
 pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
     let home_gnx = resolve_home_gnx();
     let registry_path = home_gnx.join("registry.json");
-    let reg = graph_nexus_core::registry::RegistryFile::read_or_empty(&registry_path)?;
+    let reg = cgn_core::registry::RegistryFile::read_or_empty(&registry_path)?;
 
     // 1. Validate group exists.
     let _group_entry = reg
@@ -80,7 +80,7 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
     };
 
     // 3. Load the member's Engine.
-    let cfg = graph_nexus_core::config::Config::default().group;
+    let cfg = cgn_core::config::Config::default().group;
     let timeout_ms = args.timeout_ms.or(Some(cfg.local_impact_timeout_ms));
 
     let graph_path = latest_graph_path_for(&resolved, &home_gnx).ok_or_else(|| {

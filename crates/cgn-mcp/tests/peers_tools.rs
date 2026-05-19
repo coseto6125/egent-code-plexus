@@ -5,8 +5,8 @@ mod common;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use common::write_stub;
-use graph_nexus_mcp::server::GnxMcpServer;
-use graph_nexus_mcp::spawn::run_spawn;
+use cgn_mcp::server::GnxMcpServer;
+use cgn_mcp::spawn::run_spawn;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -100,8 +100,8 @@ async fn gnx_peers_advertises_subcmd_discriminator() {
 
 // ── spawn argv shape tests ────────────────────────────────────────────────────
 
-fn peers_tool() -> graph_nexus_mcp::schema::DerivedTool {
-    graph_nexus_mcp::peers::peer_tools()
+fn peers_tool() -> cgn_mcp::schema::DerivedTool {
+    cgn_mcp::peers::peer_tools()
         .into_iter()
         .find(|t| t.name == "gnx_peers")
         .expect("gnx_peers tool")

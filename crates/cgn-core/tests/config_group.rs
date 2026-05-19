@@ -1,4 +1,4 @@
-use graph_nexus_core::config::Config;
+use cgn_core::config::Config;
 
 #[test]
 fn group_section_defaults_when_absent() {

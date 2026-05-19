@@ -88,7 +88,7 @@ pub enum NodeKind {
     Document,
     Section,
     /// Scored entry-point marker — emitted by the cross-language scorer in
-    /// `graph_nexus_analyzer::entry_points`. References the underlying
+    /// `cgn_analyzer::entry_points`. References the underlying
     /// handler (`Function` / `Method` / `Route`) via a `References` edge;
     /// the edge's `reason` carries the scoring provenance (e.g. `main:0.9`,
     /// `route:1.0`, `framework_ref:0.8`).
@@ -202,7 +202,7 @@ pub enum RelType {
     /// `axios.get(...)` against a URL that matches a Route handler. The
     /// `Edge.reason` encodes accessed response keys + per-file fetch
     /// count as `fetch-url-match[|keys:a,b][|fetches:N]`, parsed by
-    /// `graph_nexus_analyzer::fetch_shape`.
+    /// `cgn_analyzer::fetch_shape`.
     Fetches,
 }
 

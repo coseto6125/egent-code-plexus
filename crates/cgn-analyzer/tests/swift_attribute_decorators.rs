@@ -5,9 +5,9 @@
 //! apple/swift-argument-parser example (the canonical Swift CLI pattern)
 //! silently dropped its EntryPoint marker.
 
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::NodeKind;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<(String, NodeKind, Vec<String>)> {

@@ -1,4 +1,4 @@
-use graph_nexus_cli::commands::group::extractors::{
+use cgn_cli::commands::group::extractors::{
     registry, ExtractorKind,
 };
 

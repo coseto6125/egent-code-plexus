@@ -1,6 +1,6 @@
 //! Tests for cross-platform file lock (spec §2.1 Layer 1).
 
-use graph_nexus_core::registry::FileLock;
+use cgn_core::registry::FileLock;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};

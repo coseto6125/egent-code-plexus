@@ -7,7 +7,7 @@
 //! mmap-backed graph.
 
 use crate::git::{safe_exec, DiffScope};
-use graph_nexus_analyzer::{
+use cgn_analyzer::{
     c::parser::CProvider, c_sharp::parser::CSharpProvider, cpp::parser::CppProvider,
     dart::parser::DartProvider, go::parser::GoProvider, java::parser::JavaProvider,
     javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
@@ -15,8 +15,8 @@ use graph_nexus_analyzer::{
     ruby::parser::RubyProvider, rust::parser::RustProvider, swift::parser::SwiftProvider,
     typescript::parser::TypeScriptProvider, yaml::parser::YamlProvider,
 };
-use graph_nexus_core::analyzer::pipeline::AnalyzerPipeline;
-use graph_nexus_core::analyzer::types::LocalGraph;
+use cgn_core::analyzer::pipeline::AnalyzerPipeline;
+use cgn_core::analyzer::types::LocalGraph;
 use std::path::{Path, PathBuf};
 
 /// Build the production analyzer pipeline with every registered language

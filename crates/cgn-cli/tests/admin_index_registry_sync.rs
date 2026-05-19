@@ -7,9 +7,9 @@
 //! was blind to anything indexed since the registry was last (manually)
 //! rebuilt — `rebuild_from_disk` was defined but had zero callers.
 
-use graph_nexus_cli::build::orchestrator;
-use graph_nexus_cli::repo_identity::repo_dir_name_for_cwd;
-use graph_nexus_core::registry::RegistryFile;
+use cgn_cli::build::orchestrator;
+use cgn_cli::repo_identity::repo_dir_name_for_cwd;
+use cgn_core::registry::RegistryFile;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;

@@ -13,8 +13,8 @@
 //! time. The const stays empty here. Other languages whose grammars
 //! don't allow query-level scope anchors (e.g., Java) will populate it.
 
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::graph::NodeKind;
 
 pub struct KotlinSpec;
 

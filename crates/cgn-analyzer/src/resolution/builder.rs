@@ -3,11 +3,11 @@ use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
 use aho_corasick::{AhoCorasick, MatchKind};
-use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
-use graph_nexus_core::graph::{
+use cgn_core::analyzer::types::{LocalGraph, RawNode};
+use cgn_core::graph::{
     BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
 };
-use graph_nexus_core::pool::{StrRef, StringPool};
+use cgn_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
@@ -368,7 +368,7 @@ impl GraphBuilder {
             // NOTE: documents (markdown/yaml section/doc nodes) are parsed into
             // `local_graph.documents` but the graph.bin DocumentBlock storage is
             // not wired up yet. Skipped here intentionally — re-enable when the
-            // `DocumentBlock` type lands in `graph_nexus_core::graph`.
+            // `DocumentBlock` type lands in `cgn_core::graph`.
         }
 
         // Finalize the basename-stem → file paths view consumed by the
@@ -422,7 +422,7 @@ impl GraphBuilder {
                             uid: string_pool.add(&uid_str),
                             name: string_pool.add(&route_name),
                             file_idx,
-                            kind: graph_nexus_core::graph::NodeKind::Route,
+                            kind: cgn_core::graph::NodeKind::Route,
                             span: raw_node.span,
                             community_id: 0,
                         });
@@ -451,7 +451,7 @@ impl GraphBuilder {
                         uid: string_pool.add(&uid_str),
                         name: string_pool.add(&route_name),
                         file_idx,
-                        kind: graph_nexus_core::graph::NodeKind::Route,
+                        kind: cgn_core::graph::NodeKind::Route,
                         span: raw_route.span,
                         community_id: 0,
                     });
@@ -930,10 +930,10 @@ impl GraphBuilder {
         // Leiden's refinement phase prevents the badly-connected-hub failure
         // mode where Louvain pins a hub to its first-touched chain.
         // Writes community_id back onto each Node in place.
-        let assignments = graph_nexus_core::algorithms::leiden::detect_communities(
+        let assignments = cgn_core::algorithms::leiden::detect_communities(
             &nodes,
             &edges,
-            &graph_nexus_core::algorithms::leiden::LeidenConfig::default(),
+            &cgn_core::algorithms::leiden::LeidenConfig::default(),
         );
         for (node, &c) in nodes.iter_mut().zip(assignments.iter()) {
             node.community_id = c;
@@ -956,11 +956,11 @@ impl GraphBuilder {
             })
             .collect();
 
-        let traces = graph_nexus_core::algorithms::process_trace::detect_processes(
+        let traces = cgn_core::algorithms::process_trace::detect_processes(
             &nodes,
             &edges,
             &file_paths,
-            &graph_nexus_core::algorithms::process_trace::ProcessConfig::default(),
+            &cgn_core::algorithms::process_trace::ProcessConfig::default(),
         );
 
         let process_start_idx = nodes.len() as u32;
@@ -1157,8 +1157,8 @@ impl GraphBuilder {
         if prof { eprintln!("prof build.csr_assembly: {:.3}s  total_build: {:.3}s",
             _t_csr.elapsed().as_secs_f32(), t_total.elapsed().as_secs_f32()); }
         ZeroCopyGraph {
-            magic: graph_nexus_core::graph::GRAPH_MAGIC,
-            version: graph_nexus_core::graph::GRAPH_FORMAT_VERSION,
+            magic: cgn_core::graph::GRAPH_MAGIC,
+            version: cgn_core::graph::GRAPH_FORMAT_VERSION,
             fingerprint: [0; 32],
             string_pool: string_pool.bytes,
             nodes,
@@ -1527,8 +1527,8 @@ mod determine_category_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
-    use graph_nexus_core::graph::NodeKind;
+    use cgn_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
+    use cgn_core::graph::NodeKind;
 
     /// L0 end-to-end: caller imports `./b`, defining file lives at
     /// `src/b.ts`. Tier 2 ImportScoped must fire and emit a `Calls` edge
@@ -1670,7 +1670,7 @@ mod tests {
 
     #[test]
     fn fanout_ref_emits_n_edges_with_confidence_decay() {
-        use graph_nexus_core::analyzer::types::RawFanoutRef;
+        use cgn_core::analyzer::types::RawFanoutRef;
 
         let g = LocalGraph {
             file_path: "test.py".into(),
@@ -1767,7 +1767,7 @@ mod tests {
 
     #[test]
     fn fanout_ref_minimum_confidence_cap() {
-        use graph_nexus_core::analyzer::types::RawFanoutRef;
+        use cgn_core::analyzer::types::RawFanoutRef;
 
         // 60 candidates → 0.5/sqrt(60) ≈ 0.0645，應 cap 到 0.1
         let mut nodes = vec![RawNode {
@@ -1983,7 +1983,7 @@ mod tests {
     /// surface) rely on.
     #[test]
     fn blind_spots_pass_through_to_graph() {
-        use graph_nexus_core::analyzer::types::BlindSpot;
+        use cgn_core::analyzer::types::BlindSpot;
 
         let g = LocalGraph {
             file_path: "test.py".into(),
@@ -2021,7 +2021,7 @@ mod tests {
             graph.blind_spots.len()
         );
 
-        let resolve = |sref: &graph_nexus_core::pool::StrRef| -> &str {
+        let resolve = |sref: &cgn_core::pool::StrRef| -> &str {
             let start = sref.offset as usize;
             let end = start + sref.len as usize;
             std::str::from_utf8(&graph.string_pool[start..end]).expect("utf-8")
@@ -2065,7 +2065,7 @@ mod tests {
     ///   * routes (`HandlesRoute`) — bar.rs exposes GET /users → other_fn
     #[test]
     fn pass2_parallel_serial_identical_per_reltype() {
-        use graph_nexus_core::analyzer::types::{RawFanoutRef, RawFrameworkRef, RawRoute};
+        use cgn_core::analyzer::types::{RawFanoutRef, RawFrameworkRef, RawRoute};
         use std::collections::{BTreeMap, BTreeSet};
 
         fn build_fixtures() -> Vec<LocalGraph> {
@@ -2173,7 +2173,7 @@ mod tests {
         // `RelType` doesn't derive `Ord`, so `format!("{:?}", …)` is used as a
         // stable string key for the BTreeMap — the Debug repr of each variant
         // is its identifier name and is not subject to drift.
-        let bucketize = |g: &graph_nexus_core::graph::ZeroCopyGraph|
+        let bucketize = |g: &cgn_core::graph::ZeroCopyGraph|
             -> BTreeMap<String, BTreeSet<(u32, u32, String)>>
         {
             let mut buckets: BTreeMap<String, BTreeSet<(u32, u32, String)>> = BTreeMap::new();
@@ -2258,7 +2258,7 @@ mod tests {
             }],
             documents: vec![],
             imports: vec![],
-            routes: vec![graph_nexus_core::analyzer::types::RawRoute {
+            routes: vec![cgn_core::analyzer::types::RawRoute {
                 method: method.into(),
                 path: route_path.into(),
                 handler: Some(handler.into()),

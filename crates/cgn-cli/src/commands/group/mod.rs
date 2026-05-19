@@ -10,8 +10,8 @@ pub mod sync;
 pub mod types;
 
 use clap::Subcommand;
-use graph_nexus_core::GnxError;
-use graph_nexus_core::registry::{GroupEntry, RegistryFile, RepoAlias};
+use cgn_core::GnxError;
+use cgn_core::registry::{GroupEntry, RegistryFile, RepoAlias};
 use rayon::prelude::*;
 use std::path::Path;
 

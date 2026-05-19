@@ -3,8 +3,8 @@
 use crate::admin::menu::{self, select};
 use crate::commands::admin::config as config_cmd;
 use dialoguer::{theme::ColorfulTheme, Input};
-use graph_nexus_core::config::{config_path, load};
-use graph_nexus_core::GnxError;
+use cgn_core::config::{config_path, load};
+use cgn_core::GnxError;
 use std::path::PathBuf;
 
 const MENU: &[menu::Item<'_>] = &[

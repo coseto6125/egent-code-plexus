@@ -1,7 +1,7 @@
 //! `bindings` section: compare per-binding resolver decisions across two
 //! commits. Each binding is keyed by `(src_file, symbol_name)`.
 
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use serde::{Deserialize, Serialize};
 use rustc_hash::FxHashMap;
 use std::path::Path;

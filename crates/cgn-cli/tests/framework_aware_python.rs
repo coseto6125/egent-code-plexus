@@ -1,7 +1,7 @@
 //! Integration test: Python FastAPI framework refs (T2) and CLI
 //! `--high-trust-only` filter behaviour (T5).
-use graph_nexus_analyzer::python::PythonProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
+use cgn_analyzer::python::PythonProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
 use std::path::Path;
 use std::process::Command;
 

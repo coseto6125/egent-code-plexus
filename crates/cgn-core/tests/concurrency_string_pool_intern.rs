@@ -5,7 +5,7 @@
 //! anywhere a pool is shared across threads, it MUST be wrapped in
 //! `Mutex`/`RwLock`, and the wrap MUST preserve dedup.
 
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 

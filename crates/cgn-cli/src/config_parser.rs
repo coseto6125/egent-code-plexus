@@ -3,7 +3,7 @@
 // wave 串接。在 file 級先把 dead_code 改為 allow，等實際接上後再收掉。
 #![allow(dead_code)]
 
-use graph_nexus_analyzer::resolution::path_aliases::PathAliases;
+use cgn_analyzer::resolution::path_aliases::PathAliases;
 use std::path::Path;
 
 pub fn parse_configs(repo_path: &Path) -> PathAliases {

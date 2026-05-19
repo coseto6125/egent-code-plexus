@@ -5,9 +5,9 @@
 //!
 //! Reference implementation: Java in `src/java/parser.rs`.
 
-use graph_nexus_analyzer::c::parser::CProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawImport;
+use cgn_analyzer::c::parser::CProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawImport;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawImport> {

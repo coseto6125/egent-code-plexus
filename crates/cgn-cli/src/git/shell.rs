@@ -2,7 +2,7 @@
 //! and parses the unified-diff output. Matches upstream byte-for-byte.
 
 use super::{parse_diff_hunks, DiffScope, FileDiff, GitDiffProvider};
-use graph_nexus_core::GnxError;
+use cgn_core::GnxError;
 use std::path::Path;
 
 pub struct ShellGitProvider;

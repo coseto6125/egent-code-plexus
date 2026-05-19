@@ -11,8 +11,8 @@
 //! the prior behavior of the generic `extract_calls` helper.
 
 use crate::calls::attach_to_enclosing;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -283,10 +283,10 @@ fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::parser::JavaProvider;
-    use graph_nexus_core::analyzer::provider::LanguageProvider;
+    use cgn_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    fn parse(src: &str) -> graph_nexus_core::analyzer::types::LocalGraph {
+    fn parse(src: &str) -> cgn_core::analyzer::types::LocalGraph {
         let provider = JavaProvider::new().expect("JavaProvider::new");
         provider
             .parse_file(Path::new("Test.java"), src.as_bytes())

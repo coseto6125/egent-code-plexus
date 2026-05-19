@@ -8,7 +8,7 @@
 //!   and written as fragments under `<repo>/sessions/<sid>/`.
 //! - Ready → noop.
 
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::fs;
 use std::io;
@@ -77,7 +77,7 @@ fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Resu
     use crate::session::{overlay_writer, promotion, resolver};
 
     let session_id = resolver::resolve_session_id(None);
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    let home_gnx = cgn_core::registry::resolve_home_gnx();
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(worktree_root)?;
     let session_dir = home_gnx.join(&repo_dir).join("sessions").join(&session_id);
     fs::create_dir_all(&session_dir)?;

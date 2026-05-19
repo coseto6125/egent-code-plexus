@@ -3,9 +3,9 @@
 //! Mirrors the inline-test style of the C# F1 config tests in
 //! `crates/graph-nexus-cli/src/config_parser.rs`, but lives as an integration
 //! test so the public `parse_single_*` entry points stay exercised through
-//! the `graph_nexus_cli` crate surface.
+//! the `cgn_cli` crate surface.
 
-use graph_nexus_cli::config_parser::{parse_single_composer_json, parse_single_swift_package};
+use cgn_cli::config_parser::{parse_single_composer_json, parse_single_swift_package};
 use std::fs;
 use tempfile::TempDir;
 

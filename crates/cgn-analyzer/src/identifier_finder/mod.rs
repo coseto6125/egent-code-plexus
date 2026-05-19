@@ -38,7 +38,7 @@ pub mod verilog;
 pub mod vyper;
 pub mod zig;
 
-use graph_nexus_core::analyzer::types::IdentifierRange;
+use cgn_core::analyzer::types::IdentifierRange;
 
 /// Dispatch identifier-occurrence scan to the matching per-language
 /// implementation based on `path`'s file extension. Returns an empty

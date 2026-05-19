@@ -3,11 +3,11 @@
 //! must expand `@/utils` to `src/utils` (then walk extensions / index
 //! suffixes) and route the import edge to the correct file.
 
-use graph_nexus_analyzer::resolution::builder::GraphBuilder;
-use graph_nexus_analyzer::resolution::path_aliases::PathAliases;
-use graph_nexus_analyzer::typescript::TypeScriptProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::graph::{NodeKind, RelType};
+use cgn_analyzer::resolution::builder::GraphBuilder;
+use cgn_analyzer::resolution::path_aliases::PathAliases;
+use cgn_analyzer::typescript::TypeScriptProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::graph::{NodeKind, RelType};
 
 #[test]
 fn alias_specifier_resolves_to_aliased_file_e2e() {
@@ -36,7 +36,7 @@ fn alias_specifier_resolves_to_aliased_file_e2e() {
     let graph = builder.build();
 
     let pool = &graph.string_pool;
-    let name_of = |s: graph_nexus_core::pool::StrRef| -> &str {
+    let name_of = |s: cgn_core::pool::StrRef| -> &str {
         let start = s.offset as usize;
         std::str::from_utf8(&pool[start..start + s.len as usize]).expect("utf-8 pool")
     };
@@ -118,7 +118,7 @@ fn no_alias_with_ambiguous_global_yields_no_resolution_baseline() {
     let graph = builder.build();
 
     let pool = &graph.string_pool;
-    let name_of = |s: graph_nexus_core::pool::StrRef| -> &str {
+    let name_of = |s: cgn_core::pool::StrRef| -> &str {
         let start = s.offset as usize;
         std::str::from_utf8(&pool[start..start + s.len as usize]).expect("utf-8 pool")
     };

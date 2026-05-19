@@ -2,9 +2,9 @@
 //! the C parser carries a `binding_kind: Some(_)` that reflects the body
 //! shape. This file verifies the four categories individually and together.
 
-use graph_nexus_analyzer::c::parser::CProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{BindingKind, RawImport};
+use cgn_analyzer::c::parser::CProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{BindingKind, RawImport};
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawImport> {

@@ -1,4 +1,4 @@
-use graph_nexus_cli::build::dirname_picker::pick_dirname;
+use cgn_cli::build::dirname_picker::pick_dirname;
 use std::path::Path;
 use std::process::Command;
 

@@ -1,6 +1,6 @@
-use graph_nexus_cli::build::orchestrator::build_l2;
-use graph_nexus_cli::engine::{Engine, GraphView};
-use graph_nexus_core::session::{DirtyFiles, SessionMeta};
+use cgn_cli::build::orchestrator::build_l2;
+use cgn_cli::engine::{Engine, GraphView};
+use cgn_core::session::{DirtyFiles, SessionMeta};
 use std::fs;
 use std::path::Path;
 use std::process::Command;

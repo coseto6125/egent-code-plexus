@@ -5,9 +5,9 @@
 //! binding emits a `RawImport` with `alias = Some(<bound name>)` so it lands
 //! in the same downstream named-binding pipeline.
 
-use graph_nexus_analyzer::swift::parser::SwiftProvider;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::RawImport;
+use cgn_analyzer::swift::parser::SwiftProvider;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::RawImport;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawImport> {

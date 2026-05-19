@@ -1,5 +1,5 @@
-use graph_nexus_cli::commands::group::extractors::http_java::extract_http;
-use graph_nexus_cli::commands::group::types::{ContractRole, ContractType};
+use cgn_cli::commands::group::extractors::http_java::extract_http;
+use cgn_cli::commands::group::types::{ContractRole, ContractType};
 use std::path::Path;
 
 #[test]

@@ -5,8 +5,8 @@
 mod common;
 
 use common::write_stub;
-use graph_nexus_mcp::schema::DerivedTool;
-use graph_nexus_mcp::spawn::run_spawn;
+use cgn_mcp::schema::DerivedTool;
+use cgn_mcp::spawn::run_spawn;
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;

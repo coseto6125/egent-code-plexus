@@ -11,7 +11,7 @@
 //! Example:
 //!
 //! ```
-//! use graph_nexus_analyzer::resolution::path_aliases::PathAliases;
+//! use cgn_analyzer::resolution::path_aliases::PathAliases;
 //! let mut aliases = PathAliases::new();
 //! aliases.add("@/*", vec!["src/*".to_string()]);
 //! let mut got = vec![];

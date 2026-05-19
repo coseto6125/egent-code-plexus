@@ -1,9 +1,9 @@
 use super::receiver_types::{collect_receiver_methods, extract_c_calls};
 use super::spec::CSpec;
-use graph_nexus_core::analyzer::lang_spec::LangSpec;
-use graph_nexus_core::analyzer::provider::LanguageProvider;
-use graph_nexus_core::analyzer::types::{BindingKind, LocalGraph, RawImport, RawNode};
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::lang_spec::LangSpec;
+use cgn_core::analyzer::provider::LanguageProvider;
+use cgn_core::analyzer::types::{BindingKind, LocalGraph, RawImport, RawNode};
+use cgn_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};

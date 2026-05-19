@@ -1,4 +1,4 @@
-use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use cgn_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use std::collections::BTreeMap;
 use tempfile::NamedTempFile;
 

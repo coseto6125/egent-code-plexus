@@ -13,8 +13,8 @@
 //! Falls back to the bare method name for unresolved receivers.
 
 use crate::calls::attach_to_enclosing;
-use graph_nexus_core::analyzer::types::RawNode;
-use graph_nexus_core::graph::NodeKind;
+use cgn_core::analyzer::types::RawNode;
+use cgn_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -272,10 +272,10 @@ fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::parser::KotlinProvider;
-    use graph_nexus_core::analyzer::provider::LanguageProvider;
+    use cgn_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    fn parse(src: &str) -> graph_nexus_core::analyzer::types::LocalGraph {
+    fn parse(src: &str) -> cgn_core::analyzer::types::LocalGraph {
         let provider = KotlinProvider::new().expect("KotlinProvider::new");
         provider
             .parse_file(Path::new("Test.kt"), src.as_bytes())

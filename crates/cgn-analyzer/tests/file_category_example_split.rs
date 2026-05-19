@@ -7,8 +7,8 @@
 //! Round 80: previously `is_test` blanket-grouped `/examples/` with `/tests/`
 //! and `builder.rs:332-340` skipped both — `gnx-rs` emitted zero Routes for
 //! the entire `.sample_repo/JavaScript/examples/` corpus (82 ref-side rows).
-use graph_nexus_analyzer::resolution::builder::determine_category;
-use graph_nexus_core::graph::FileCategory;
+use cgn_analyzer::resolution::builder::determine_category;
+use cgn_core::graph::FileCategory;
 
 #[test]
 fn examples_path_classifies_as_example() {

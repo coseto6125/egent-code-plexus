@@ -66,7 +66,7 @@ fn parse_atom(part: &str) -> Result<Atom, ParseError> {
 // ── Resolver ────────────────────────────────────────────────────────────────
 
 use crate::git::safe_exec;
-use graph_nexus_core::registry::{RegistryFile, RepoAlias};
+use cgn_core::registry::{RegistryFile, RepoAlias};
 use std::collections::HashSet;
 
 /// A repo resolved from a selector atom — derived from a v2 `RepoAlias`,

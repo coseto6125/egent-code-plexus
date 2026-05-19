@@ -46,21 +46,21 @@ fn admin_sessions_list_shows_pure_reference_state() {
     let commit_dir = repo_root
         .join("commits/branch_main__abc123def456789012345678901234567890abcd");
     std::fs::create_dir_all(&commit_dir).unwrap();
-    let cm = graph_nexus_core::registry::CommitBuildMeta {
+    let cm = cgn_core::registry::CommitBuildMeta {
         version: 1,
         sha: "abc123def456789012345678901234567890abcd".into(),
-        source_type: graph_nexus_core::registry::SourceType::Branch,
+        source_type: cgn_core::registry::SourceType::Branch,
         source_id: Some("main".into()),
         built_from_worktree: "/tmp/wt".into(),
         built_at: "2026-05-17T10:00:00Z".into(),
         parent_sha: None,
         node_count: 0,
-        embedding_status: graph_nexus_core::registry::EmbeddingStatus::None,
+        embedding_status: cgn_core::registry::EmbeddingStatus::None,
         refs_at_build: vec![],
         refs_seen_since: vec![],
         builder_fingerprint: None,
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(
+    cgn_core::registry::CommitBuildMeta::write_atomic(
         &commit_dir.join("meta.json"),
         &cm,
     )
@@ -68,7 +68,7 @@ fn admin_sessions_list_shows_pure_reference_state() {
 
     let sd = repo_root.join("sessions/sid_a");
     std::fs::create_dir_all(&sd).unwrap();
-    let sm = graph_nexus_core::session::SessionMeta {
+    let sm = cgn_core::session::SessionMeta {
         version: 1,
         session_id: "sid_a".into(),
         pid: None,
@@ -80,14 +80,14 @@ fn admin_sessions_list_shows_pure_reference_state() {
         watcher_pid: None,
         last_drained_offset: 0,
     };
-    graph_nexus_core::session::SessionMeta::write_atomic(
+    cgn_core::session::SessionMeta::write_atomic(
         &sd.join("session_meta.json"),
         &sm,
     )
     .unwrap();
-    graph_nexus_core::session::DirtyFiles::write_atomic(
+    cgn_core::session::DirtyFiles::write_atomic(
         &sd.join("dirty_files.json"),
-        &graph_nexus_core::session::DirtyFiles::empty(),
+        &cgn_core::session::DirtyFiles::empty(),
     )
     .unwrap();
 
