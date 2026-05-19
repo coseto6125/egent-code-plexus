@@ -2,7 +2,7 @@
 name = "cgn-analyzer"
 description = "code-graph-nexus — multi-language tree-sitter parser and route detector (Rust, TypeScript, Python, Go, Java, Swift, etc.)"
 version = "0.2.2"
-edition = "2021"
+edition.workspace = true
 license.workspace = true
 repository.workspace = true
 build = "build.rs"

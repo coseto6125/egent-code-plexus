@@ -2,7 +2,7 @@
 name = "code-graph-nexus"
 description = "code-graph-nexus — code intelligence graph for AI agents and LLMs (multi-language AST analysis)"
 version = "0.2.2"
-edition = "2021"
+edition.workspace = true
 default-run = "cgn"
 license.workspace = true
 repository.workspace = true

@@ -2,7 +2,7 @@
 name = "cgn-core"
 description = "code-graph-nexus — core graph storage and algorithms (zero-copy on-disk graph, registry, community detection)"
 version = "0.2.2"
-edition = "2021"
+edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
