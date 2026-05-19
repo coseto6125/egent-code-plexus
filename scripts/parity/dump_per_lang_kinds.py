@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = "/home/enor/gitnexus-rs/.sample_repo"
+REPO = "/home/enor/code-graph-nexus/.sample_repo"
 LANGS = [
     "TypeScript", "JavaScript", "Python", "Java", "Kotlin",
     "CSharp", "Go", "Rust", "PHP", "Ruby",

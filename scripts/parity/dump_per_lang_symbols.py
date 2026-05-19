@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path("/home/enor/gitnexus-rs/.sample_repo")
+REPO = Path("/home/enor/code-graph-nexus/.sample_repo")
 OUT_DIR = Path(__file__).parent / "symbol_diffs"
 REFRESH_REF = os.environ.get("PARITY_REFRESH_REF", "").strip().lower() in {"1", "true", "yes"}
 LANGS = [

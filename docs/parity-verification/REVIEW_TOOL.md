@@ -28,7 +28,7 @@ emission，而非「前後檔案 diff」。
 
 ```bash
 # 1. 兩邊都 index 同一份 corpus
-cgn admin index --repo /home/enor/gitnexus-rs/.sample_repo --force
+cgn admin index --repo /home/enor/code-graph-nexus/.sample_repo --force
 # (ref-gitnexus 端按其文件 index)
 
 # 2. dump (kind, path, name) 三元組

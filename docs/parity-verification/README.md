@@ -166,7 +166,7 @@ for path, name in unpaired[:20]:
 
 ```bash
 # Step 1: 確保兩邊都已 index 同一份 .sample_repo
-cgn admin index --repo /home/enor/gitnexus-rs/.sample_repo --force
+cgn admin index --repo /home/enor/code-graph-nexus/.sample_repo --force
 # (ref-gitnexus 那邊有自己的 indexer，按 ref repo 文件)
 
 # Step 2: dump 兩邊 symbol 集合

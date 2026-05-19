@@ -106,7 +106,7 @@ Each sub-agent gets a self-contained prompt of this shape (filled in per task):
 ```
 You are implementing <Task ID>: <scope description>.
 
-**Worktree**: /home/enor/gitnexus-rs/.claude/worktrees/task-<id>/
+**Worktree**: /home/enor/code-graph-nexus/.claude/worktrees/task-<id>/
 **Branch**: feat/<scope> (already created from main)
 **Goal**: Close ⚠️ cell(s) <list> in the README Language Matrix.
 

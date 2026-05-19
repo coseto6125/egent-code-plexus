@@ -71,7 +71,7 @@ fn jemalloc_tsdn_null_recovered_in_real_file() {
     // macro at line 43, wiping `preproc_def` for everything that follows
     // including `TSDN_NULL` at line 280. The fallback restores it.
     let bytes = std::fs::read(
-        "/home/enor/gitnexus-rs/.sample_repo/C/deps/jemalloc/include/jemalloc/internal/tsd.h",
+        "/home/enor/code-graph-nexus/.sample_repo/C/deps/jemalloc/include/jemalloc/internal/tsd.h",
     )
     .expect("sample_repo tsd.h missing — run scripts/parity bootstrap");
     let macros: Vec<String> = cpp_macros(&bytes);
@@ -87,7 +87,7 @@ fn doctest_cmp_ge_recovered_in_real_file() {
     // inside `#ifndef ... #else ... #endif` branches. The fallback
     // captures both occurrences from the raw source.
     let bytes = std::fs::read(
-        "/home/enor/gitnexus-rs/.sample_repo/Cpp/tests/thirdparty/doctest/doctest.h",
+        "/home/enor/code-graph-nexus/.sample_repo/Cpp/tests/thirdparty/doctest/doctest.h",
     )
     .expect("sample_repo doctest.h missing — run scripts/parity bootstrap");
     let macros: Vec<String> = cpp_macros(&bytes);
@@ -106,7 +106,7 @@ fn jemalloc_ro_mutex_ctl_gen_recovered_in_real_file() {
     // fallback walks raw bytes and captures the name regardless of
     // grammar state.
     let bytes =
-        std::fs::read("/home/enor/gitnexus-rs/.sample_repo/C/deps/jemalloc/src/ctl.c")
+        std::fs::read("/home/enor/code-graph-nexus/.sample_repo/C/deps/jemalloc/src/ctl.c")
             .expect("sample_repo ctl.c missing — run scripts/parity bootstrap");
     let macros: Vec<String> = c_macros(&bytes);
     assert!(

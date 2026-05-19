@@ -471,7 +471,7 @@ fn uid_path(absolute: &Path, repo_root: &Path) -> String {
     {
       "name": "gitnexus-rs",                                       // 路徑用名（撞名可加 hash）
       "remote_url": "git@github.com:coseto6125/code-graph-nexus.git",        // credential 已剝除；list-repos 顯示時 parse 出 owner
-      "worktree_path": "/home/enor/gitnexus-rs",                   // canonical absolute
+      "worktree_path": "/home/enor/code-graph-nexus",                   // canonical absolute
       "index_dir_root": "/home/enor/.cgn/gitnexus-rs",             // = ~/.cgn/<name>
       "branches": [
         {

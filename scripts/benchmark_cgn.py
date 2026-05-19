@@ -23,15 +23,15 @@ from statistics import median
 
 CMD_TIMEOUT_S = 600
 # Resolve workspace dynamically: scripts/benchmark_cgn.py → parent → workspace root.
-# Hard-coding `/home/enor/gitnexus-rs` would cargo-build main even when this
+# Hard-coding `/home/enor/code-graph-nexus` would cargo-build main even when this
 # script runs from a worktree, defeating the auto-rebuild check entirely.
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BINARY = WORKSPACE_ROOT / "target" / "release" / "cgn"
 # Bench fixtures live in the canonical repo, not per-worktree — worktrees never
 # copy `.sample_repo` (multi-GB of polyglot test sources). Keep absolute so a
 # bench run from a worktree still targets the canonical fixture.
-DEFAULT_REPO = Path("/home/enor/gitnexus-rs/.sample_repo")
-DEFAULT_GIT_REPO = Path("/home/enor/gitnexus-rs")
+DEFAULT_REPO = Path("/home/enor/code-graph-nexus/.sample_repo")
+DEFAULT_GIT_REPO = Path("/home/enor/code-graph-nexus")
 
 
 def _ensure_binary_fresh(binary: Path, *, skip: bool) -> None:

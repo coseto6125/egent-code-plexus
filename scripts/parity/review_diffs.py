@@ -43,7 +43,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-REPO = Path("/home/enor/gitnexus-rs/.sample_repo")
+REPO = Path("/home/enor/code-graph-nexus/.sample_repo")
 SCRIPT_DIR = Path(__file__).parent
 DIFF_DIR = SCRIPT_DIR / "symbol_diffs"
 OUT_DIR = SCRIPT_DIR / "review"
