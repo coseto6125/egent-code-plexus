@@ -1,7 +1,7 @@
 # code-graph-nexus 一鍵安裝（Windows PowerShell 5.1+）
 #
 #   irm https://github.com/coseto6125/code-graph-nexus/releases/latest/download/install.ps1 | iex
-#   irm https://github.com/coseto6125/code-graph-nexus/releases/download/v0.1.0/install.ps1 | iex
+#   irm https://github.com/coseto6125/code-graph-nexus/releases/download/v0.2.0/install.ps1 | iex
 #
 # 環境變數：
 #   $env:CGN_VERSION        指定版本（不含 v）。預設 latest。

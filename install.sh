@@ -2,7 +2,7 @@
 # code-graph-nexus 一鍵安裝（Linux / macOS）
 #
 #   curl -sSfL https://github.com/coseto6125/code-graph-nexus/releases/latest/download/install.sh | sh
-#   curl -sSfL https://github.com/coseto6125/code-graph-nexus/releases/download/v0.1.0/install.sh | sh
+#   curl -sSfL https://github.com/coseto6125/code-graph-nexus/releases/download/v0.2.0/install.sh | sh
 #
 # 環境變數：
 #   CGN_VERSION       指定版本（不含 v 前綴）。預設 latest。

@@ -80,7 +80,7 @@ Write `~/.cgn/onboarding-summary.md`:
 
 ```markdown
 ---
-wizard_version: 0.1.0
+wizard_version: 0.2.0
 last_phase_completed: 05-summary
 installed_version: {version}
 persona_snapshot:

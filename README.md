@@ -11,9 +11,11 @@ A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero
 `cgn` exists to be the structural-knowledge layer that an autonomous AI coding agent calls 20–50 times per task. Every design decision falls out of that one premise:
 
 - **Built for agents, not IDEs.** Output is token-cheap (TOON / compact JSON), every flag surfaces via `--help`, every command is non-interactive and stdout-parseable. No UI, no human-skim layout cruft eating the agent's context window.
-- **No warm-up, no daemon.** Each invocation `mmap`s a zero-copy `rkyv` graph file and exits. Read queries return in ~150–250 ms *including process startup*; a 22k-file repo cold-indexes in under 3 s. An agent can fire dozens of queries per task without amortising a server boot, and there is no "daemon died, please restart" failure mode.
+- **No warm-up, no daemon.** Each invocation `mmap`s a zero-copy `rkyv` graph file and exits. Read queries return in **~140–170 ms** *including process startup*; a 22k-file repo cold-indexes in under 3 s. An agent can fire dozens of queries per task without amortising a server boot, and there is no "daemon died, please restart" failure mode.
 - **Honest answers over readable graphs.** When a call site can't be statically resolved (dynamic dispatch, unresolved import, reflection), `cgn` emits a `BlindSpot` record — not a guessed edge. An agent that acts on a hallucinated dependency is much more expensive than one that gets an "I don't know" it can route around.
 - **Polyglot reach.** 31 languages parsed at the structural level so modern multi-stack repos (service code + Dockerfiles + GitHub Actions + Terraform + SQL + smart contracts) stop being black holes the moment you leave the main language.
+
+🎙️ **[Agent Interviews](./interviews/README.md)** — See how real AI agents (Gemini CLI, Codex) use and evaluate `cgn` in autonomous workflows.
 
 Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model (a structural knowledge graph of a repo), rewritten in Rust for a different audience. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE); see [NOTICES.md](./NOTICES.md) for required attribution.
 
@@ -23,39 +25,45 @@ Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhi
 
 The Mission section above is *why* `cgn` is built the way it is. This section is the receipts.
 
-**Cold index — single run on `.sample_repo`:**
+### Head-to-head vs. upstream GitNexus
+
+Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase (TypeScript) using `scripts/parity/benchmark_vs_gitnexus.py`:
+
+| Phase | cgn (Rust) | gitnexus (Node) | Speedup |
+|---|---|---|---|
+| **Cold Index** | **~970 ms** | ~58 s | **60×** |
+| **Symbol Context** | **~70 ms** | ~430 ms | **6×** |
+| **Blast Radius** | **~70 ms** | ~460 ms | **6×** |
+| **Cypher Query** | **~70 ms** | ~400 ms | **5×** |
+
+*Note: `cgn` query latency includes full process startup (no daemon). GitNexus (v1.6.5) query latency is against a warm, indexed repo via its CLI.*
+
+### Scalability — single run on `.sample_repo` (a 2.1 GB polyglot collection of ~40 real-world open source projects across 25+ languages, used for cross-language stress testing)
+
+**Ingest performance:**
 
 | Phase | Value |
 |---|---|
 | Files indexed | **22,645** across 25 detected languages |
-| Wall-clock | **2.96 s** (parse + resolve + serialize) |
-| Top langs by file count | Java 3535 · PHP 2907 · TypeScript 1704 · C# 945 · Rust 870 · Markdown 817 · C 801 · Dart 616 · Bash 493 · C++ 476 · JavaScript 466 · Solidity 403 |
+| Wall-clock (Cold) | **2.60 s** (parse + resolve + serialize) |
+| Wall-clock (Incremental) | **4.9 ms** (xxh3_64 hash walk, zero dirty files) |
+| Hardware | AMD Ryzen 9 9950X (16 logical), 39.2 GiB RAM, Linux 6.6.87 |
 
-**Per-query latency — fresh subprocess each call, no daemon, no warm-up:**
+**Per-query latency (including process startup):**
 
 | Query | Median | Notes |
 |---|---|---|
-| `coverage` (registry overview) | **1.3 ms** | smallest read — just registry mmap |
-| `routes` (HTTP route map across repo) | **162 ms** | enumerates declarative + imperative |
-| `coverage --detailed` (frameworks + blind-spots) | **165 ms** | full registry + per-framework scoring |
-| `impact <symbol> --direction down` | **169 ms** | BFS over Calls / Extends edges |
-| `inspect <symbol>` (signature + callers + callees) | **174 ms** | symbol resolution + 1-hop traversal |
-| `find <pattern> --mode bm25` (lexical search) | **184 ms** | Tantivy query + 5-bucket partition |
-| `cypher 'MATCH (a:Class)-[:HasMethod]->(b:Method) ...'` | **205 ms** | one pattern, one row returned |
-| `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **250 ms** | broader pattern, more matches |
-| `impact --baseline HEAD~1` (change-set blast radius) | **366 ms** | git diff + parallel per-file parse + BFS |
+| `coverage` (registry overview) | **1.4 ms** | smallest read — just registry mmap |
+| `routes` (HTTP route map across repo) | **142.3 ms** | enumerates declarative + imperative |
+| `coverage --detailed` (frameworks + blind-spots) | **143.4 ms** | full registry + per-framework scoring |
+| `impact <symbol> --direction down` | **145.0 ms** | BFS over Calls / Extends edges |
+| `inspect <symbol>` (signature + callers + callees) | **145.6 ms** | symbol resolution + 1-hop traversal |
+| `find <name> --mode bm25` (lexical search) | **154.5 ms** | Tantivy query + 5-bucket partition |
+| `cypher 'MATCH (a:Class)-[:HasMethod]->(b:Method) ...'` | **161.5 ms** | one pattern, one row returned |
+| `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **174.2 ms** | broader pattern, more matches |
+| `impact --baseline HEAD~1` (change-set blast radius) | **359.0 ms** | git diff + parallel per-file parse + BFS |
 
-Numbers are wall-clock medians of 3 runs each, **including process startup** (no warm daemon — each call spawns a fresh `cgn` subprocess that `mmap`s the graph file and exits). For an LLM agent firing 30+ queries per task, the multiplier matters: 30 × ~170 ms = ~5 s of structural-query budget per task with a fully cold tool.
-
-**Incremental indexing:**
-
-- Cold index of 22k-file repo: **2.96 s**
-- Re-run `cgn admin index` with no file changes (hash cache hot): **4.9 ms** — walks the xxh3_64 content cache, finds zero dirty files, exits.
-- Realistic single-file edit: re-parses only the modified file and re-resolves affected edges — not directly measured by this bench but bounded above by cold ÷ file-count.
-
-**Hardware:** AMD Ryzen 9 9950X 16-core (16 logical), 39.2 GiB RAM, Linux 6.6.87 under WSL2. Tree-sitter + Rayon for parse, `rkyv` mmap for the graph file, Tantivy BM25 for lexical search.
-
-**Reproduce:** `python scripts/benchmark_cgn.py` — auto-rebuilds the binary, drops the index, then sweeps every public subcommand. Reports cold/incremental/per-query medians.
+Reproduce: `python scripts/benchmark_cgn.py`.
 
 ---
 
@@ -63,16 +71,15 @@ Numbers are wall-clock medians of 3 runs each, **including process startup** (no
 
 Same conceptual model, different audience. `cgn` is **not** a drop-in replacement — choose based on who reads the graph and what they do with it.
 
-| Dimension | GitNexus | Code Graph Nexus |
+| Dimension | Code Graph Nexus | GitNexus |
 |---|---|---|
-| Primary consumer | Human devs + IDE integration | Autonomous AI code agents |
-| Runtime | Long-running MCP server | Stateless one-shot CLI (zero warm-up) |
-| Unresolved edge | Heuristic guess to keep graph connected | `BlindSpot` record, no fabricated edge |
-| Default output | Wiki / UI rendering | TOON / compact JSON (token-cheap) |
-| Languages | 14 (deep, 9-dimension coverage) | 31 (14 deep + 17 structural — DevOps configs, Web3 contracts, infra-as-code) |
-| Storage | Node.js + LadybugDB | Rust + `rkyv` zero-copy mmap |
-
-The short version: pick GitNexus if you're integrating into a Node-based agent platform with strong MCP/editor support and your repo is monolingual. Pick `cgn` if you're shell-mediating an LLM, your repo is polyglot, and an honest "I don't know" beats a confident wrong answer.
+| Primary consumer | Autonomous AI code agents | Human devs + IDE integration |
+| Runtime | Stateless one-shot CLI (zero warm-up) | Long-running MCP server |
+| Performance | **< 2.5s cold index / < 150ms query** | ~60s cold index / ~400ms query |
+| Unresolved edge | `BlindSpot` record (honest unknown) | Heuristic guess |
+| Default output | TOON / compact JSON (token-cheap) | Wiki / UI rendering |
+| Languages | 31 (14 deep + 17 structural) | 14 (deep, 9-dimension) |
+| Storage | Rust + `rkyv` zero-copy mmap | Node.js + LadybugDB |
 
 **Full breakdown of all 8 dimensions, philosophy, and decision matrix → [docs/vs-gitnexus.md](./docs/vs-gitnexus.md)**
 
@@ -100,8 +107,6 @@ RUSTFLAGS="-C target-cpu=native" \
   cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus \
   --bin cgn --locked --profile release-dist
 ```
-
-> Binary is `cgn`; the cargo package is `code-graph-nexus`. crates.io publish is intentionally pending until all tree-sitter grammar deps are themselves publishable.
 
 ---
 
@@ -205,7 +210,7 @@ Parse → resolve → serialize runs through an MPSC channel into a single build
 
 31 languages parsed at the structural level (functions / classes / methods / imports / calls). 14 of them — the original GitNexus set — get full-depth coverage across imports, named bindings, exports, heritage, types, constructors, config, frameworks, entry points, calls, and rename. The remaining 17 are structural-only (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig).
 
-See [docs/language-matrix.md](./docs/language-matrix.md) for the full per-language capability matrix and per-cell rationale.
+📊 **[Full Language Capability Matrix](./docs/language-matrix.md)** — Detailed per-language status and rationale.
 
 ---
 
@@ -225,7 +230,12 @@ Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). Personal use, research
 Built on:
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — original design, CLI surface, and conceptual model
 - [tree-sitter](https://tree-sitter.github.io/) — robust incremental AST parsing
-- [rkyv](https://rkyv.org/) — zero-copy deserialization
-- [Tantivy](https://github.com/quickwit-oss/tantivy) — Rust full-text search
+- [rkyv](https://rkyv.org/) — zero-copy deserialization framework
+- [Tantivy](https://github.com/quickwit-oss/tantivy) — blazing fast Rust full-text search engine
+- **Rayon** — data parallelism for multi-core concurrent AST parsing
+- **xxhash (xxh3_64)** — extremely fast non-cryptographic hashing for content-based incremental indexing
+- **DashMap** — high-performance concurrent hash maps for graph assembly
+- **memmap2** — zero-copy memory mapping for sub-millisecond graph access
+- **msgspec** — high-performance JSON serialization for inter-process communication
 
 Onboarding for AI agents (URL bootstrap, Claude Code skill, plugin install) lives at `docs/skills/cgn-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit-concurrency.sh`.

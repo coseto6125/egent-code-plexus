@@ -25,7 +25,7 @@ Neither precondition is met today, so the README line _"`brew tap coseto6125/tap
      license "MIT OR Apache-2.0"
 
      # Stable: pinned to a tagged GitHub Release artifact.
-     url "https://github.com/coseto6125/code-graph-nexus/releases/download/v0.1.1/cgn-v0.1.1-x86_64-apple-darwin.tar.gz"
+     url "https://github.com/coseto6125/code-graph-nexus/releases/download/v0.2.0/cgn-v0.2.0-x86_64-apple-darwin.tar.gz"
      sha256 "<fill from release .sha256>"
 
      # Bleeding-edge: brew install --HEAD cgn builds from main without a Release.

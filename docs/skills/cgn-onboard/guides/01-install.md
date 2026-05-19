@@ -31,7 +31,7 @@ Read fields off `config_inventory.system_probe`:
 | `cargo-binstall` | `installers.cargo_binstall = false`, `installers.cargo = true` | `cargo install code-graph-nexus` (slower; source build) + suggest installing cargo-binstall next time |
 | `brew` | `installers.brew = true` | `brew install <tap>/code-graph-nexus` (substitute the actual tap name from the README) |
 | `github-release-tarball` (or fallback) | `installers.curl = true` | `curl -L https://github.com/<owner>/code-graph-nexus/releases/latest/download/cgn-<target>.tar.gz \| tar -xz -C ~/bin/` |
-| (cgn already installed) | `cgn.installed = true` | Verification only; skip download. Use `cgn.version` to display "Detected cgn 0.1.5". |
+| (cgn already installed) | `cgn.installed = true` | Verification only; skip download. Use `cgn.version` to display "Detected cgn 0.2.0". |
 
 ## Step 3: Present 3-choice menu
 

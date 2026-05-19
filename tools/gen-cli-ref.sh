@@ -27,7 +27,7 @@ OUT="${2:-docs/skills/cgn-onboard/_shared/cli}"
 
 [[ -n "$CGN" ]] || { echo "gen-cli-ref: no cgn binary found" >&2; exit 1; }
 
-# Version: "cgn 0.1.5" → 0.1.5  (also matches "cgn 9.9.9-test")
+# Version: "cgn 0.2.0" → 0.2.0  (also matches "cgn 9.9.9-test")
 VER=$("$CGN" --version | awk '{print $2}')
 [[ -n "$VER" ]] || { echo "gen-cli-ref: could not determine cgn version" >&2; exit 1; }
 
