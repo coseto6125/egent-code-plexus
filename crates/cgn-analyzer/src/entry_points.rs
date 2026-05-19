@@ -72,7 +72,7 @@ pub enum EntryKind {
 
 impl EntryKind {
     /// Stable lowercase identifier used in `EntryPoint.reason` strings
-    /// and as the prefix in edge `reason` fields ingested by `gnx`.
+    /// and as the prefix in edge `reason` fields ingested by `cgn`.
     pub const fn tag(self) -> &'static str {
         match self {
             EntryKind::HttpRoute => "route",

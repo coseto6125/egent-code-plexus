@@ -1,4 +1,4 @@
-//! Integration tests for `gnx tool-map`.
+//! Integration tests for `cgn tool-map`.
 //!
 //! Fixture: a small TS file calling `axios.get`, `fetch`, plus a
 //! non-client helper so we can assert the catalog filter is exact and
@@ -57,7 +57,7 @@ fn setup_repo(repo: &Path, home: &Path, src: &str, origin: &str) {
 
 /// Generalised fixture: writes `src` to `rel_path` (creating parent dirs),
 /// initialises a git repo, and indexes it under the given `home` so
-/// `gnx tool-map` can resolve the registry entry.
+/// `cgn tool-map` can resolve the registry entry.
 fn setup_repo_with_file(repo: &Path, home: &Path, rel_path: &str, src: &str, origin: &str) {
     let target = repo.join(rel_path);
     if let Some(parent) = target.parent() {
@@ -261,7 +261,7 @@ fn tool_map_empty_when_no_clients_used() {
 // per-axis tests cover the remaining permutations so a future grammar /
 // parser change or PACKAGE_CATEGORY edit can't silently regress one.
 
-/// Set up a one-file fixture, run `gnx tool-map`, assert that `callee`
+/// Set up a one-file fixture, run `cgn tool-map`, assert that `callee`
 /// appears under `category`. Six tests below differ only in (file path,
 /// fixture, origin, category, expected callee) — extracting this helper
 /// keeps each test to a three-line declaration.

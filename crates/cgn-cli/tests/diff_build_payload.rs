@@ -1,6 +1,6 @@
 //! Smoke test for `build_payload` extraction in `commands::diff`.
 //!
-//! Verifies that `gnx diff --section bindings --baseline <ref>` produces
+//! Verifies that `cgn diff --section bindings --baseline <ref>` produces
 //! the same JSON shape as before the refactor: top-level `baseline`,
 //! `current`, and `sections` fields.
 //!
@@ -53,7 +53,7 @@ fn diff_build_payload_identical_shas_returns_envelope_shape() {
         ])
         .current_dir(repo.path())
         .output()
-        .expect("gnx diff failed to spawn");
+        .expect("cgn diff failed to spawn");
 
     if !out.status.success() {
         // If baseline resolution fails (e.g., no commits), skip gracefully.
@@ -62,7 +62,7 @@ fn diff_build_payload_identical_shas_returns_envelope_shape() {
             eprintln!("skipping diff_build_payload test: baseline resolution failed: {stderr}");
             return;
         }
-        panic!("gnx diff failed unexpectedly: stderr={stderr}");
+        panic!("cgn diff failed unexpectedly: stderr={stderr}");
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);

@@ -1,5 +1,5 @@
 //! Convert the MCP-side JSON args object into the argv vector
-//! `gnx <subcommand>` expects.
+//! `cgn <subcommand>` expects.
 //!
 //! `to_kebab` lowercases + replaces `_` / camelCase with `-`, matching the
 //! `Rust ident → --kebab-flag` convention clap derive uses. The agent can

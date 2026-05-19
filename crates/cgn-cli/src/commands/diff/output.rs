@@ -1,7 +1,7 @@
 //! Format diff result envelope as text / json / toon.
 //!
 //! json/toon delegate to `crate::output::emit_to_string` so toon goes through
-//! the real `etoon` encoder and json formatting matches the rest of gnx.
+//! the real `etoon` encoder and json formatting matches the rest of cgn.
 //! `text` keeps a custom renderer because the diff envelope's per-section
 //! structure doesn't map onto the generic `results`-array text path.
 

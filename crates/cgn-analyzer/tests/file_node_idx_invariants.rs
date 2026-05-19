@@ -2,7 +2,7 @@
 //!
 //! For every `NodeKind::File` node, `files[node.file_idx].path` must equal the
 //! path encoded in the node's UID (`File:<path>`). Violating this invariant
-//! makes downstream consumers (`gnx inspect` impact_upstream_1hop,
+//! makes downstream consumers (`cgn inspect` impact_upstream_1hop,
 //! `routes.rs` category lookup) report the wrong file for a File node.
 //!
 //! The bug it pins: `let node_file_idx = file_node_idx.len() as u32;` in the

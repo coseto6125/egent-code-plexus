@@ -1,4 +1,4 @@
-//! Verify text / toon output formats for `gnx diff`.
+//! Verify text / toon output formats for `cgn diff`.
 
 use std::process::Command;
 

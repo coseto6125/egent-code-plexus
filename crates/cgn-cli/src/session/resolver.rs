@@ -1,6 +1,6 @@
 //! Resolve the active LLM session-id for L1 dir naming.
 //!
-//! Precedence: explicit CLI flag > env GNX_SESSION_ID > host session env >
+//! Precedence: explicit CLI flag > env CGN_SESSION_ID > host session env >
 //! pid-based fallback. Hooks pass session_id via env (already populated by
 //! Claude Code / MCP transport); Codex exposes a stable thread id. Direct CLI
 //! invocations without any of the above get a per-process fallback id derived
@@ -15,7 +15,7 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
         }
     }
     for key in [
-        "GNX_SESSION_ID",
+        "CGN_SESSION_ID",
         "CODEX_SESSION_ID",
         "CODEX_THREAD_ID",
         "CLAUDE_CODE_SESSION_ID",

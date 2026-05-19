@@ -15,9 +15,9 @@ fn watch_foreground_exits_immediately_in_test_mode() {
             "--repo",
             dir.path().to_str().unwrap(),
         ])
-        .env("GNX_TEST_EXIT_AFTER_INIT", "1")
+        .env("CGN_TEST_EXIT_AFTER_INIT", "1")
         .output()
-        .expect("spawn gnx");
+        .expect("spawn cgn");
     assert!(
         out.status.success(),
         "stderr={}",

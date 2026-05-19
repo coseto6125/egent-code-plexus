@@ -1,4 +1,4 @@
-//! E2E tests for `gnx cypher --format toon` output.
+//! E2E tests for `cgn cypher --format toon` output.
 
 use std::process::Command;
 

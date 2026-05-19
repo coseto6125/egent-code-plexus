@@ -9,11 +9,11 @@ use std::sync::Mutex;
 /// pathological generated source can otherwise materialise straight into
 /// memory via `std::fs::read` and OOM the process. 16 MiB is well above any
 /// hand-written source we've seen while still bounding worst-case RAM at
-/// `num_threads * 16 MiB`. Override at runtime via `GNX_MAX_FILE_BYTES`.
+/// `num_threads * 16 MiB`. Override at runtime via `CGN_MAX_FILE_BYTES`.
 const MAX_FILE_BYTES_DEFAULT: u64 = 16 * 1024 * 1024;
 
 fn resolve_max_file_bytes() -> u64 {
-    std::env::var("GNX_MAX_FILE_BYTES")
+    std::env::var("CGN_MAX_FILE_BYTES")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(MAX_FILE_BYTES_DEFAULT)
@@ -263,8 +263,8 @@ impl AnalyzerPipeline {
         let (tx, rx) = crossbeam_channel::unbounded::<LocalGraph>();
         let cache_lookup = &cache_lookup;
         let max_file_bytes = resolve_max_file_bytes();
-        let prof = std::env::var("GNX_PROF").is_ok();
-        // Per-provider (count, total_ns) when GNX_PROF=1. Mutex is fine —
+        let prof = std::env::var("CGN_PROF").is_ok();
+        // Per-provider (count, total_ns) when CGN_PROF=1. Mutex is fine —
         // critical section is just a HashMap update, negligible vs the
         // parse_file work it brackets.
         let times_owned: Option<Mutex<FxHashMap<&'static str, (u64, u64)>>> = if prof {
@@ -395,7 +395,7 @@ mod tests {
         assert!(paths.contains(&"b.ts"));
     }
 
-    /// Files exceeding `GNX_MAX_FILE_BYTES` must be skipped silently so a
+    /// Files exceeding `CGN_MAX_FILE_BYTES` must be skipped silently so a
     /// rogue multi-GiB source can't OOM the process. Verify with a tiny
     /// cap (10 bytes) that an 11-byte file is excluded from results.
     #[test]
@@ -403,7 +403,7 @@ mod tests {
         // SAFETY: set_var is `unsafe` in 2024 ed. The pipeline reads the env
         // var once before spawning rayon workers, so racing with other tests
         // (which don't touch this var) is not a concern here.
-        unsafe { std::env::set_var("GNX_MAX_FILE_BYTES", "10") };
+        unsafe { std::env::set_var("CGN_MAX_FILE_BYTES", "10") };
 
         let tmp = tempfile::tempdir().unwrap();
         let big = tmp.path().join("big.ts");
@@ -435,6 +435,6 @@ mod tests {
             paths
         );
 
-        unsafe { std::env::remove_var("GNX_MAX_FILE_BYTES") };
+        unsafe { std::env::remove_var("CGN_MAX_FILE_BYTES") };
     }
 }

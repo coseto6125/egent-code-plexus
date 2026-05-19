@@ -1,6 +1,6 @@
 //! `routes` section: compare Route nodes between two graph snapshots.
 //!
-//! Reuses existing `gnx routes` extraction logic via the same
+//! Reuses existing `cgn routes` extraction logic via the same
 //! `ArchivedNodeKind::Route` + `Engine::load` API used by `commands/routes.rs`.
 
 use crate::engine::Engine;

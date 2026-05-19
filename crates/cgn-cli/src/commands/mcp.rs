@@ -1,7 +1,7 @@
-//! `gnx mcp` subcommand: serve | tools.
+//! `cgn mcp` subcommand: serve | tools.
 //!
-//! Tools are derived from the gnx CLI's `clap::Command` tree (see
-//! `graph-nexus-mcp::schema`). Every visible non-hidden subcommand
+//! Tools are derived from the cgn CLI's `clap::Command` tree (see
+//! `cgn-mcp::schema`). Every visible non-hidden subcommand
 //! becomes one MCP tool. Dispatch is spawn-only.
 
 use clap::{Args, Command, Subcommand};

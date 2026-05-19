@@ -1,4 +1,4 @@
-//! `gnx group impact <name> --target <sym> --repo <member>` — local impact
+//! `cgn group impact <name> --target <sym> --repo <member>` — local impact
 //! for one group member, fanned out to cross-repo links from contracts.rkyv.
 
 use clap::Args;
@@ -60,7 +60,7 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
         .ok_or_else(|| {
             GnxError::InvalidArgument(format!(
                 "group '{}' not found in registry\n\
-                 → create it with `gnx admin group add <repo> {}`",
+                 → create it with `cgn admin group add <repo> {}`",
                 args.name, args.name
             ))
         })?;
@@ -68,7 +68,7 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
     // 2. Resolve member → RepoAlias → ResolvedRepo.
     let alias = lookup_member(&reg, &args.repo).ok_or_else(|| {
         GnxError::InvalidArgument(format!(
-            "member '{}' not found in registry — check spelling or run `gnx admin index --repo <path>`",
+            "member '{}' not found in registry — check spelling or run `cgn admin index --repo <path>`",
             args.repo
         ))
     })?;
@@ -85,7 +85,7 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
 
     let graph_path = latest_graph_path_for(&resolved, &home_gnx).ok_or_else(|| {
         GnxError::InvalidArgument(format!(
-            "no indexed graph found for repo '{}' — run `gnx admin index --repo <path>` first",
+            "no indexed graph found for repo '{}' — run `cgn admin index --repo <path>` first",
             args.repo
         ))
     })?;

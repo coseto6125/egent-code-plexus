@@ -7,7 +7,7 @@
 //!   * top-level `var` declarations with an explicit type (Variable nodes)
 //!
 //! Short declarations (`n := 1`) intentionally leave `type_annotation=None`
-//! because Go's grammar exposes no `type:` field there — `gnx context` should
+//! because Go's grammar exposes no `type:` field there — `cgn context` should
 //! reflect that the type is inferred, not made up.
 //!
 //! Spec: `docs/specs/2026-05-15-language-coverage-gaps.md` Wave 2 / D1.

@@ -70,7 +70,7 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     ),
     (
         "python-cross-getattr",
-        "getattr(<obj>, name)() with obj != self — cross-object reflection; target class not enumerated by gnx Phase 2",
+        "getattr(<obj>, name)() with obj != self — cross-object reflection; target class not enumerated by cgn Phase 2",
     ),
 ];
 
@@ -825,7 +825,7 @@ impl LanguageProvider for PythonProvider {
             // bare `@bp.route(...)` in a file that does `from app.api import bp`
             // (transitive Flask Blueprint — common pattern in real Flask apps,
             // e.g. miguelgrinberg/microblog `app/api/tokens.py`) still gets
-            // emitted even though gnx can't statically follow the chain to
+            // emitted even though cgn can't statically follow the chain to
             // confirm `bp` is a `Blueprint`.
             //
             // Defense-in-depth: the relaxation also requires the file to have

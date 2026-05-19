@@ -61,9 +61,9 @@ fn default_high_trust_threshold() -> f32 {
     crate::HIGH_TRUST_CONFIDENCE
 }
 
-/// **stored** — values consumed by `gnx group sync / impact` when
+/// **stored** — values consumed by `cgn group sync / impact` when
 /// CLI flags do not override. See
-/// `docs/specs/2026-05-18-gnx-group-multirepo-design.md` §Configuration.
+/// `docs/specs/2026-05-18-cgn-group-multirepo-design.md` §Configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GroupConfig {
     #[serde(default = "default_group_bm25_threshold")]

@@ -27,7 +27,7 @@ fn fire(event: &str, envelope: &str, sid: &str, repo_root: &std::path::Path) -> 
     let mut child = Command::new(bin())
         .args(["hook", event, "--claude-code"])
         .env("CLAUDE_CODE_SESSION_ID", sid)
-        .env("GNX_REPO_ROOT_OVERRIDE", repo_root)
+        .env("CGN_REPO_ROOT_OVERRIDE", repo_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

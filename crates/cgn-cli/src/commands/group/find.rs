@@ -1,4 +1,4 @@
-//! `gnx group find <name> <pattern>` — BM25 symbol lookup across all group
+//! `cgn group find <name> <pattern>` — BM25 symbol lookup across all group
 //! members. Single verb covers both per-repo bucketed concat (`--merge none`,
 //! default) and cross-repo RRF-merged top-K (`--merge rrf`).
 
@@ -21,7 +21,7 @@ const DEFAULT_RRF_LIMIT: usize = 5;
 #[value(rename_all = "lowercase")]
 pub enum MergeMode {
     /// Per-repo bucketed concat — every member's hits emitted under its own
-    /// header. Matches the single-repo `gnx find --mode bm25` shape.
+    /// header. Matches the single-repo `cgn find --mode bm25` shape.
     None,
     /// Reciprocal Rank Fusion across repos → unified top-K. Ranking is by
     /// `Σ_repo 1 / (RRF_K + rank + 1)` over `Hit.signature` as the dedupe key.
@@ -71,7 +71,7 @@ pub fn run(args: FindArgs) -> Result<(), GnxError> {
         .find(|g| g.name == args.name)
         .ok_or_else(|| {
             GnxError::InvalidArgument(format!(
-                "group '{}' not found — run `gnx admin group add <repo> {}`",
+                "group '{}' not found — run `cgn admin group add <repo> {}`",
                 args.name, args.name
             ))
         })?;

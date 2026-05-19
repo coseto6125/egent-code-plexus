@@ -659,7 +659,7 @@ impl LanguageProvider for CProvider {
         // and drops the `preproc_def` wrapper, leaving the (preproc_def …)
         // query empty for those regions. The fallback scans raw source as
         // a safety net and emits Macro nodes for any `#define NAME` not
-        // already captured. Verified `.sample_repo`: gnx-rs went from 11/29
+        // already captured. Verified `.sample_repo`: cgn-rs went from 11/29
         // macros in `tsd.h` to full recall after this pass.
         emit_macro_fallback(source, &mut nodes);
 

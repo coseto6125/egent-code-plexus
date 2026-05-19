@@ -1,4 +1,4 @@
-//! Integration tests for the `gnx impact` command.
+//! Integration tests for the `cgn impact` command.
 //!
 //! Tests cover:
 //!   - Positional <name> replaces old --target <UID>
@@ -175,7 +175,7 @@ fn impact_accepts_target_flag_as_alias_for_positional() {
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
-        .expect("gnx failed to spawn");
+        .expect("cgn failed to spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("unexpected argument"),
@@ -190,7 +190,7 @@ fn impact_high_trust_only_default_false() {
         .args(["impact", "--help"])
         .current_dir(tmp.path())
         .output()
-        .expect("gnx failed to spawn");
+        .expect("cgn failed to spawn");
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(
         help.contains("--high-trust-only"),
@@ -343,7 +343,7 @@ fn impact_name_and_baseline_mutually_exclusive() {
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
-        .expect("gnx failed to spawn");
+        .expect("cgn failed to spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),

@@ -1,6 +1,6 @@
 //! Smoke test for the promoted `pub fn build_payload` in `commands::shape_check`.
 //!
-//! Uses the binary integration pattern (Option A): invokes `gnx shape-check`
+//! Uses the binary integration pattern (Option A): invokes `cgn shape-check`
 //! via the compiled binary and asserts the JSON output shape is intact.
 //! The fixture writes a minimal `graph.bin` (same helper as `shape_check_cmd.rs`)
 //! and confirms `build_payload` returns `{status, total_fetches, drift_count, drift}`.
@@ -112,7 +112,7 @@ fn shape_check_build_payload_empty_graph_returns_success_shape() {
             "json",
         ])
         .output()
-        .expect("gnx shape-check failed to spawn");
+        .expect("cgn shape-check failed to spawn");
 
     assert!(
         out.status.success(),
@@ -163,7 +163,7 @@ fn shape_check_build_payload_no_fetches_edge_zero_drift() {
             "json",
         ])
         .output()
-        .expect("gnx shape-check failed to spawn");
+        .expect("cgn shape-check failed to spawn");
 
     assert!(
         out.status.success(),

@@ -1,6 +1,6 @@
 //! Dart `extension X on T` and `extension type Foo(T x)` are type-level
 //! declarations that add named members reachable through `T.fooMethod(...)`.
-//! Previously gnx-rs's Dart parser had no capture for them — ref-gitnexus
+//! Previously cgn-rs's Dart parser had no capture for them — ref-gitnexus
 //! emitted them as Class on Alamofire / bloc fixtures, producing 8 unpaired
 //! ref_over Class entries. Map to NodeKind::Trait (closest semantic — extend
 //! behaviour without subclassing) and rely on the aggregator's

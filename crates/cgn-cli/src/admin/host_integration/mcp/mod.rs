@@ -26,9 +26,9 @@ const HOSTS: &[menu::Item<'_>] = &[
 ];
 
 const ACTIONS: &[menu::Item<'_>] = &[
-    ("install", "write the gnx MCP server entry to host config"),
-    ("uninstall", "remove the gnx MCP entry from host config"),
-    ("status", "show whether gnx is registered with this host"),
+    ("install", "write the cgn MCP server entry to host config"),
+    ("uninstall", "remove the cgn MCP entry from host config"),
+    ("status", "show whether cgn is registered with this host"),
     ("← Back", ""),
 ];
 

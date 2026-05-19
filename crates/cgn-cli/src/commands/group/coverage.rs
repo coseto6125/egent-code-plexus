@@ -1,4 +1,4 @@
-//! `gnx group coverage <name>` — health report for all group members.
+//! `cgn group coverage <name>` — health report for all group members.
 //!
 //! Delegates to `commands::coverage::build_repo_health` per member; results
 //! are concatenated in parallel and emitted as a flat array.
@@ -34,7 +34,7 @@ pub fn run(args: CoverageArgs) -> Result<(), GnxError> {
         .find(|g| g.name == args.name)
         .ok_or_else(|| {
             GnxError::InvalidArgument(format!(
-                "group '{}' not found — run `gnx admin group add <repo> {}`",
+                "group '{}' not found — run `cgn admin group add <repo> {}`",
                 args.name, args.name
             ))
         })?;

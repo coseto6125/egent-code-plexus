@@ -2,10 +2,10 @@ use cgn_cli::hint::{collision_warning, empty_result, error_with_cause, fuzzy_sug
 
 #[test]
 fn empty_result_format() {
-    let msg = empty_result("foo", "symbol", "gnx find foo --mode bm25");
+    let msg = empty_result("foo", "symbol", "cgn find foo --mode bm25");
     assert!(msg.contains("No"));
     assert!(msg.contains("foo"));
-    assert!(msg.contains("gnx find"));
+    assert!(msg.contains("cgn find"));
     assert!(msg.lines().count() <= 3);
 }
 
@@ -29,7 +29,7 @@ fn error_with_cause_three_lines() {
     let msg = error_with_cause(
         "Index build failed",
         "framework not recognized",
-        "gnx coverage --blind-spots",
+        "cgn coverage --blind-spots",
     );
     let lines: Vec<&str> = msg.lines().collect();
     assert_eq!(lines.len(), 3);

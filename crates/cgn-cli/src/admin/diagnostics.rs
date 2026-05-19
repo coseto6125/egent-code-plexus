@@ -1,4 +1,4 @@
-//! Diagnostic reports for `gnx admin`.
+//! Diagnostic reports for `cgn admin`.
 
 use crate::admin::menu::{self, select};
 use cgn_core::registry::{resolve_home_gnx, RegistryFile};
@@ -8,11 +8,11 @@ use std::process::Command;
 
 const MENU: &[menu::Item<'_>] = &[
     ("Doctor", "run env + registry health checks together"),
-    ("MCP tool list", "show the MCP tools `gnx mcp serve` exposes"),
+    ("MCP tool list", "show the MCP tools `cgn mcp serve` exposes"),
     ("Registry health", "check index dirs, graphs, meta, orphans"),
     (
         "Environment report",
-        "gnx version, paths, $HOME / $GNX_HOME, host CLIs",
+        "cgn version, paths, $HOME / $CGN_HOME, host CLIs",
     ),
     ("← Back", ""),
 ];
@@ -42,13 +42,13 @@ fn mcp_tool_list() -> Result<(), GnxError> {
     let output = Command::new(exe)
         .args(["mcp", "tools"])
         .output()
-        .map_err(|e| GnxError::Output(format!("gnx mcp tools: {e}")))?;
+        .map_err(|e| GnxError::Output(format!("cgn mcp tools: {e}")))?;
     if output.status.success() {
         print!("{}", String::from_utf8_lossy(&output.stdout));
         Ok(())
     } else {
         Err(GnxError::Output(format!(
-            "gnx mcp tools: {}",
+            "cgn mcp tools: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
@@ -57,12 +57,12 @@ fn mcp_tool_list() -> Result<(), GnxError> {
 fn environment_report() -> Result<(), GnxError> {
     let exe = std::env::current_exe().map_err(|e| GnxError::Output(format!("current_exe: {e}")))?;
     println!("Environment report");
-    println!("  gnx version: {}", env!("CARGO_PKG_VERSION"));
+    println!("  cgn version: {}", env!("CARGO_PKG_VERSION"));
     println!("  binary: {}", exe.display());
     println!("  os: {}", std::env::consts::OS);
     println!("  arch: {}", std::env::consts::ARCH);
     println!("  cwd: {}", current_dir_display());
-    for key in ["HOME", "GNX_HOME", "XDG_CONFIG_HOME", "CODEX_HOME"] {
+    for key in ["HOME", "CGN_HOME", "XDG_CONFIG_HOME", "CODEX_HOME"] {
         println!("  {key}: {}", env_value(key));
     }
     println!("  git: {}", command_version("git", &["--version"]));

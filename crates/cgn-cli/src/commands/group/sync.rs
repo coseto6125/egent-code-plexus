@@ -1,4 +1,4 @@
-//! `gnx group sync <name>` — extract contracts from all group members,
+//! `cgn group sync <name>` — extract contracts from all group members,
 //! run the matching cascade, and write contracts.rkyv + meta.json atomically.
 
 use clap::Args;
@@ -56,7 +56,7 @@ pub fn run(args: SyncArgs) -> Result<(), GnxError> {
         .ok_or_else(|| {
             GnxError::InvalidArgument(format!(
                 "group '{}' not found in registry\n\
-                 → create it with `gnx admin group add <repo> {}`",
+                 → create it with `cgn admin group add <repo> {}`",
                 args.name, args.name
             ))
         })?
@@ -67,7 +67,7 @@ pub fn run(args: SyncArgs) -> Result<(), GnxError> {
     let cfg = cgn_core::config::Config::default().group;
 
     // 4. Resolve each member → source path via registry. Members are stored
-    //    as the alias string passed to `gnx admin group add`, which may be
+    //    as the alias string passed to `cgn admin group add`, which may be
     //    either a dir_name or an alias. Resolve by matching both.
     let all_extractors = extractors::registry();
 
@@ -160,7 +160,7 @@ fn extract_member(
     let alias = lookup_member(reg, member).ok_or_else(|| {
         (
             m.clone(),
-            "not found in registry (run `gnx admin index <path>` first)".to_string(),
+            "not found in registry (run `cgn admin index <path>` first)".to_string(),
         )
     })?;
 

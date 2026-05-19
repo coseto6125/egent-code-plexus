@@ -255,7 +255,7 @@ impl GraphBuilder {
     }
 
     pub fn build(mut self) -> ZeroCopyGraph {
-        let prof = std::env::var("GNX_PROF").is_ok();
+        let prof = std::env::var("CGN_PROF").is_ok();
         let t_total = std::time::Instant::now();
         // Determinism: sort by file_path so node IDs and edge endpoints are
         // assigned in canonical order regardless of how the producer (scanner,
@@ -892,7 +892,7 @@ impl GraphBuilder {
         let _t_blind = std::time::Instant::now();
         // Pass: blind spots — pure metadata passthrough, no edges created.
         // Each local_graph's blind_spots are interned and stored in the graph's
-        // file-level metadata for `gnx context` / `gnx index` to surface to
+        // file-level metadata for `cgn context` / `cgn index` to surface to
         // the LLM (truly unresolvable patterns like eval/dynamic-import).
         let mut all_blind_spots: Vec<BlindSpotRecord> = Vec::new();
         for local_graph in &self.local_graphs {
@@ -1475,7 +1475,7 @@ mod determine_category_tests {
         // "how to wire routes" content that LLM consumers want to navigate
         // (Express's `examples/auth/`, NestJS's `sample/`, Flask's
         // `examples/tutorial/`). Previously these collapsed into `Test`,
-        // which the builder skipped — gnx-rs emitted zero Routes for the
+        // which the builder skipped — cgn-rs emitted zero Routes for the
         // 82-row JS examples corpus. Now they classify as `Example` and
         // routes flow through normally; `/tests/` / `.spec.` / Cypress
         // `/e2e/` stay as Test (test fixtures still must not pollute the
@@ -1638,7 +1638,7 @@ mod tests {
             },
         ];
 
-        let tmp = std::env::temp_dir().join(format!("gnx-dump-test-{}.jsonl", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("cgn-dump-test-{}.jsonl", std::process::id()));
         write_resolver_dump(&tmp, &decisions, &symbol_table).expect("write dump");
         let text = std::fs::read_to_string(&tmp).expect("read dump");
         let _ = std::fs::remove_file(&tmp);

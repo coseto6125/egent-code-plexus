@@ -76,7 +76,7 @@ impl Engine {
                 Ok(eng)
             }
             cgn_core::session::SessionState::Stale { reason } => Err(io::Error::other(
-                format!("session stale: {reason:?}; remove via `gnx admin sessions reset <id>`"),
+                format!("session stale: {reason:?}; remove via `cgn admin sessions reset <id>`"),
             )),
         }
     }
@@ -137,7 +137,7 @@ pub fn header_compatible(graph_path: &Path) -> bool {
     validate_header(&mmap).is_ok()
 }
 
-/// Reject `graph.bin` files that don't carry the gnx magic header or
+/// Reject `graph.bin` files that don't carry the cgn magic header or
 /// whose on-disk format version this reader doesn't understand. Both
 /// failure modes would otherwise be undetected by `rkyv::access`
 /// (which only validates structural layout, not field values) and
@@ -164,7 +164,7 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
             io::ErrorKind::InvalidData,
             format!(
                 "graph.bin: incompatible format version {version} \
-                 (this reader expects {GRAPH_FORMAT_VERSION}) — run `gnx analyze` to regenerate"
+                 (this reader expects {GRAPH_FORMAT_VERSION}) — run `cgn analyze` to regenerate"
             ),
         ));
     }

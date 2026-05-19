@@ -1,5 +1,5 @@
-//! Tests `gnx admin index` writes to ~/.gnx/<repo>/<branch>/ and updates registry.
-//! (replaces the old `gnx analyze` top-level command, folded into admin)
+//! Tests `cgn admin index` writes to ~/.gnx/<repo>/<branch>/ and updates registry.
+//! (replaces the old `cgn analyze` top-level command, folded into admin)
 
 use std::path::Path;
 use std::process::Command;
@@ -62,7 +62,7 @@ fn analyze_writes_to_registry_resolved_path() {
         ])
         .env("HOME", home_tmp.path())
         .output()
-        .expect("gnx spawn failed");
+        .expect("cgn spawn failed");
 
     assert!(
         out.status.success(),

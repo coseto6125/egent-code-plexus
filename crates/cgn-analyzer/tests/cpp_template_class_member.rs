@@ -1,11 +1,11 @@
 //! `template <typename T> class C { void f() {...} };` — class member functions
 //! defined inside a class wrapped by `template_declaration` must still emit
-//! as Method. Previously gnx-rs's cpp/queries.scm only matched
+//! as Method. Previously cgn-rs's cpp/queries.scm only matched
 //! `function_definition` nodes whose direct parent was the class body, missing
 //! the case where the whole class sits under `template_declaration`.
 //!
 //! Repro: nlohmann/json.hpp `template <...> class basic_json { reference at(...) }`
-//! — `at` shows up in ref-gitnexus as Template but gnx-rs emits nothing
+//! — `at` shows up in ref-gitnexus as Template but cgn-rs emits nothing
 //! for `(json.hpp, at)`.
 
 use cgn_analyzer::cpp::parser::CppProvider;

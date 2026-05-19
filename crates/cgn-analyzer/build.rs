@@ -1,7 +1,7 @@
-//! Build script for `graph-nexus-analyzer`.
+//! Build script for `cgn-analyzer`.
 //!
 //! Computes a SHA256 fingerprint of all parser-related source files at
-//! compile time and emits it as the `GRAPH_NEXUS_PARSER_FINGERPRINT`
+//! compile time and emits it as the `CGN_PARSER_FINGERPRINT`
 //! environment variable. The runtime reads it via `env!()` to invalidate
 //! the incremental-analysis cache whenever parser logic changes.
 //!
@@ -61,11 +61,11 @@ fn main() {
     let digest = hasher.finalize();
     let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
 
-    println!("cargo:rustc-env=GRAPH_NEXUS_PARSER_FINGERPRINT={hex}");
-    println!("cargo:rerun-if-env-changed=GNX_BUILD_VERBOSE");
-    // Opt-in via `GNX_BUILD_VERBOSE=1`; env var above keeps the fingerprint
+    println!("cargo:rustc-env=CGN_PARSER_FINGERPRINT={hex}");
+    println!("cargo:rerun-if-env-changed=CGN_BUILD_VERBOSE");
+    // Opt-in via `CGN_BUILD_VERBOSE=1`; env var above keeps the fingerprint
     // available to runtime code regardless.
-    if std::env::var_os("GNX_BUILD_VERBOSE").is_some() {
+    if std::env::var_os("CGN_BUILD_VERBOSE").is_some() {
         println!("cargo:warning=graph-nexus-analyzer parser fingerprint: {hex}");
     }
 }

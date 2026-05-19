@@ -64,7 +64,7 @@ fn template_placeholders_get_rendered_when_meta_present() {
     let claude_dir = repo.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
-        claude_dir.join("gnx-rules.md"),
+        claude_dir.join("cgn-rules.md"),
         "stats: {{stats.nodes}} symbols",
     )
     .unwrap();

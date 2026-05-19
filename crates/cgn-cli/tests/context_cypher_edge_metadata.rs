@@ -1,4 +1,4 @@
-//! Verifies that `gnx inspect` and `gnx cypher` surface per-edge metadata
+//! Verifies that `cgn inspect` and `cgn cypher` surface per-edge metadata
 //! (`reason`, `confidence`) so an LLM can distinguish direct AST calls from
 //! lower-trust resolutions (reflection fanout, framework heuristics, etc.).
 

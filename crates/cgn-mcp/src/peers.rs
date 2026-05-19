@@ -1,14 +1,14 @@
-//! Manually-constructed MCP tool for `gnx peers` sub-subcommands.
+//! Manually-constructed MCP tool for `cgn peers` sub-subcommands.
 //!
-//! `enumerate_tools` would surface `gnx peers` as a single opaque tool with
+//! `enumerate_tools` would surface `cgn peers` as a single opaque tool with
 //! no usable args (the sub-subcommand sits one clap level below the visible
 //! root). We replace that with a hand-rolled `gnx_peers` tool that carries
 //! a `subcmd` discriminator (`status` / `diff` / `log` / `say` / `inbox` /
-//! `thread`); `gnx peers gc` is intentionally omitted — it's a maintenance
+//! `thread`); `cgn peers gc` is intentionally omitted — it's a maintenance
 //! op, not an agent action.
 //!
 //! Dispatch path: `spawn::peel_subcmd` lifts the JSON `subcmd` field out and
-//! prepends it as the first arg, yielding `gnx peers <subcmd> [flags...]`.
+//! prepends it as the first arg, yielding `cgn peers <subcmd> [flags...]`.
 //!
 //! The whole feature is only useful when ≥2 LLM sessions are running with
 //! peer-sync; the tool description leads with that constraint so single-
@@ -29,7 +29,7 @@ fn tool_peers() -> DerivedTool {
         name: "gnx_peers".into(),
         subcommand: "peers".into(),
         description: "[multi-agent peer-sync only — single-session has no peers] \
-            Inspect / talk to other gnx watch sessions on this repo. \
+            Inspect / talk to other cgn watch sessions on this repo. \
             Pick `subcmd`; see each arg's [tag] for which subcmd uses it."
             .into(),
         schema: Arc::new(json!({

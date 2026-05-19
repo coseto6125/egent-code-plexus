@@ -2,14 +2,14 @@ use cgn_cli::session::resolver::resolve_session_id;
 use std::sync::Mutex;
 
 const ENV_KEYS: &[&str] = &[
-    "GNX_SESSION_ID",
+    "CGN_SESSION_ID",
     "CODEX_SESSION_ID",
     "CODEX_THREAD_ID",
     "CLAUDE_CODE_SESSION_ID",
 ];
 const CLAUDE_ENV_KEY: &str = "CLAUDE_CODE_SESSION_ID";
 const CODEX_ENV_KEY: &str = "CODEX_THREAD_ID";
-const GENERIC_ENV_KEY: &str = "GNX_SESSION_ID";
+const GENERIC_ENV_KEY: &str = "CGN_SESSION_ID";
 
 /// All tests in this file mutate session env vars. cargo's
 /// default parallel test runner interleaves them in the same process,

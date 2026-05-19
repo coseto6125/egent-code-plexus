@@ -9,8 +9,8 @@ use dialoguer::theme::ColorfulTheme;
 use cgn_core::GnxError;
 
 const HOSTS: &[menu::Item<'_>] = &[
-    ("Codex CLI", "register gnx as a native tool in Codex CLI"),
-    ("Gemini CLI", "register gnx as a native tool in Gemini CLI"),
+    ("Codex CLI", "register cgn as a native tool in Codex CLI"),
+    ("Gemini CLI", "register cgn as a native tool in Gemini CLI"),
     ("← Back", ""),
 ];
 

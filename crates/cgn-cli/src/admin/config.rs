@@ -1,4 +1,4 @@
-//! Config workflows for `gnx admin`.
+//! Config workflows for `cgn admin`.
 
 use crate::admin::menu::{self, select};
 use crate::commands::admin::config as config_cmd;
@@ -8,9 +8,9 @@ use cgn_core::GnxError;
 use std::path::PathBuf;
 
 const MENU: &[menu::Item<'_>] = &[
-    ("View config", "print the parsed gnx.toml as TOML"),
-    ("Edit config", "open gnx.toml in $EDITOR"),
-    ("Validate config", "load + check gnx.toml without writing"),
+    ("View config", "print the parsed cgn.toml as TOML"),
+    ("Edit config", "open cgn.toml in $EDITOR"),
+    ("Validate config", "load + check cgn.toml without writing"),
     ("← Back", ""),
 ];
 

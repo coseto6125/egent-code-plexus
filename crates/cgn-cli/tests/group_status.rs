@@ -1,4 +1,4 @@
-//! Integration tests for `gnx group status`.
+//! Integration tests for `cgn group status`.
 
 use cgn_cli::commands::group::storage::{group_dir, write_meta, GroupMeta, RepoSnapshot};
 use std::collections::BTreeMap;
@@ -15,7 +15,7 @@ fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
         .args(args)
         .env("HOME", home)
         .output()
-        .expect("gnx spawn failed")
+        .expect("cgn spawn failed")
 }
 
 fn init_git_repo(path: &Path) -> String {

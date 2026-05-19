@@ -214,7 +214,7 @@ fn build_inspect_block(
 }
 
 /// Walk outgoing HasMethod / HasProperty edges and produce flat member lists
-/// for `gnx inspect`'s Class view. Skips the test/file filters used by the
+/// for `cgn inspect`'s Class view. Skips the test/file filters used by the
 /// generic incoming/outgoing buckets — class membership is structural and
 /// shouldn't disappear because a method happens to live in a test file.
 fn collect_contained_members(

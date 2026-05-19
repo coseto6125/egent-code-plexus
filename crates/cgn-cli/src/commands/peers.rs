@@ -1,4 +1,4 @@
-//! `gnx peers` CLI surface.
+//! `cgn peers` CLI surface.
 
 use crate::session::resolver::resolve_session_id;
 use clap::{Args, Subcommand};

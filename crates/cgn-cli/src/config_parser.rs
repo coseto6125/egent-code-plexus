@@ -226,11 +226,11 @@ pub struct SwiftPackageMeta {
 /// monorepos often nest `src/<area>/<project>/<project>.csproj` (depth 3) or
 /// `eng/templates/<thing>.csproj` (depth 2+); 4 covers the common cases
 /// while still bounding worst-case I/O. Override at runtime via
-/// `GNX_CSPROJ_MAX_DEPTH`.
+/// `CGN_CSPROJ_MAX_DEPTH`.
 const CSPROJ_MAX_DEPTH_DEFAULT: u8 = 4;
 
 fn resolve_csproj_max_depth() -> u8 {
-    std::env::var("GNX_CSPROJ_MAX_DEPTH")
+    std::env::var("CGN_CSPROJ_MAX_DEPTH")
         .ok()
         .and_then(|s| s.parse::<u8>().ok())
         .unwrap_or(CSPROJ_MAX_DEPTH_DEFAULT)

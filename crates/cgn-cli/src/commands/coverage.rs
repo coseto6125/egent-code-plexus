@@ -1,4 +1,4 @@
-//! `gnx coverage` — unified registry + repo health entry point.
+//! `cgn coverage` — unified registry + repo health entry point.
 //!
 //! Folds doctor + status + list + summarize into one command:
 //!
@@ -9,7 +9,7 @@
 //!
 //! External-client (HTTP/DB/Redis/queue) usage detail is intentionally NOT
 //! folded here — that requires per-callsite binding analysis whose granularity
-//! sits beyond a health summary. See the standalone `gnx tool-map` command.
+//! sits beyond a health summary. See the standalone `cgn tool-map` command.
 
 use crate::commit_lookup::find_latest_by_mtime;
 use crate::engine::Engine;

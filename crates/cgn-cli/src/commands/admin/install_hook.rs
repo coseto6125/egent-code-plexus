@@ -1,4 +1,4 @@
-//! `gnx admin install-hook`: install reference-transaction hook in cwd's git common dir.
+//! `cgn admin install-hook`: install reference-transaction hook in cwd's git common dir.
 //! With `--claude-code`, instead installs entries into Claude Code's settings.json.
 
 use crate::commands::admin::claude_code;
@@ -9,11 +9,11 @@ use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
 pub struct InstallHookArgs {
-    /// Force overwrite if a non-gnx hook already exists.
+    /// Force overwrite if a non-cgn hook already exists.
     #[arg(long, default_value_t = false)]
     pub force: bool,
 
-    /// Skip hook chaining (don't preserve existing non-gnx hook).
+    /// Skip hook chaining (don't preserve existing non-cgn hook).
     #[arg(long, default_value_t = false)]
     pub no_chain: bool,
 
@@ -57,7 +57,7 @@ pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::GnxError> {
 
     let existing_chain_target = if hook_path.exists() {
         let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
-        if existing.contains("gnx hook-handle") || existing.contains("hook-handle") {
+        if existing.contains("cgn hook-handle") || existing.contains("hook-handle") {
             None
         } else if args.force || args.no_chain {
             let bak = hook_path.with_extension(format!("bak.{}", chrono::Utc::now().timestamp()));
@@ -73,7 +73,7 @@ pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::GnxError> {
         None
     };
 
-    let mut content = String::from("#!/bin/sh\n# gnx-managed reference-transaction hook\n");
+    let mut content = String::from("#!/bin/sh\n# cgn-managed reference-transaction hook\n");
     if let Some(prev) = &existing_chain_target {
         content.push_str(&format!("{} \"$@\" || exit $?\n", prev.display()));
     }

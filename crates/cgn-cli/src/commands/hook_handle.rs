@@ -1,4 +1,4 @@
-//! `gnx hook-handle <stage>`: invoked by reference-transaction hook.
+//! `cgn hook-handle <stage>`: invoked by reference-transaction hook.
 //! On `committed`, parses stdin for branch DELETE events and spawns
 //! detached watchers via graph-nexus-core daemon helper.
 

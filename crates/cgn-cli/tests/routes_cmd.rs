@@ -1,4 +1,4 @@
-//! Integration tests for `gnx routes [<path>]`.
+//! Integration tests for `cgn routes [<path>]`.
 //!
 //! Reuses the same TypeScript Express fixture as `api_impact_cmd.rs`:
 //! two routes (`GET /api/users`, `POST /api/users`) each with a named
@@ -88,7 +88,7 @@ fn setup_repo(repo: &Path, home: &Path) {
     );
 }
 
-/// Run `gnx routes [extra...]` and return parsed JSON output.
+/// Run `cgn routes [extra...]` and return parsed JSON output.
 fn run_routes_json(repo: &Path, home: &Path, extra: &[&str]) -> Value {
     let mut args = vec!["routes", "--repo", ".", "--format", "json"];
     args.extend_from_slice(extra);
@@ -111,7 +111,7 @@ fn run_routes_json(repo: &Path, home: &Path, extra: &[&str]) -> Value {
         .unwrap_or_else(|e| panic!("{args:?} JSON parse failed: {e}\nstdout={stdout}"))
 }
 
-/// Run `gnx routes [extra...]` and return raw stdout as a string.
+/// Run `cgn routes [extra...]` and return raw stdout as a string.
 fn run_routes_stdout(repo: &Path, home: &Path, extra: &[&str]) -> String {
     let mut args = vec!["routes", "--repo", "."];
     args.extend_from_slice(extra);

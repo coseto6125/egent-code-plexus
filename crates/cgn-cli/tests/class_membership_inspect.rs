@@ -1,5 +1,5 @@
 //! E2E fixture tests for class-membership post-process: verifies that
-//! `gnx inspect <Class>` surfaces `contained_methods` / `contained_properties`
+//! `cgn inspect <Class>` surfaces `contained_methods` / `contained_properties`
 //! across 5 representative language idioms (TS / Ruby / Python / Rust trait
 //! impl / Rust inherent impl) — plus a cypher behaviour test pinning the B.1
 //! emission convention (`HasMethod` target kind is parser-determined, not

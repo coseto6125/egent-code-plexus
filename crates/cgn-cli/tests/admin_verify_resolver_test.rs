@@ -9,7 +9,7 @@ fn admin_verify_resolver_help_lists_required_args() {
     let output = Command::new(gnx_bin())
         .args(["admin", "verify-resolver", "--help"])
         .output()
-        .expect("run gnx admin verify-resolver --help");
+        .expect("run cgn admin verify-resolver --help");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -17,7 +17,7 @@ fn admin_verify_resolver_help_lists_required_args() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--oracle"), "expected --oracle arg in help: {stdout}");
-    assert!(stdout.contains("--gnx"), "expected --gnx arg in help: {stdout}");
+    assert!(stdout.contains("--cgn"), "expected --cgn arg in help: {stdout}");
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn top_level_verify_resolver_no_longer_dispatches() {
     let output = Command::new(gnx_bin())
         .args(["verify-resolver", "--help"])
         .output()
-        .expect("run gnx verify-resolver --help");
+        .expect("run cgn verify-resolver --help");
     // Should fail because top-level command was removed
     assert!(
         !output.status.success() || !String::from_utf8_lossy(&output.stdout).contains("oracle"),

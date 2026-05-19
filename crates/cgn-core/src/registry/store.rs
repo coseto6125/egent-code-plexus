@@ -108,7 +108,7 @@ impl RegistryFile {
         // Probe the version field before a full parse: stale schemas auto-migrate
         // via `rebuild_from_disk` (spec §12 recovery) instead of hard-failing.
         // Trade-off: group memberships are registry-only and get wiped — operator
-        // must re-apply via `gnx admin group add`. This is preferred over forcing
+        // must re-apply via `cgn admin group add`. This is preferred over forcing
         // every CLI invocation to error until manual intervention.
         #[derive(Deserialize)]
         struct VersionProbe {
@@ -135,7 +135,7 @@ impl RegistryFile {
 
 /// Last-resort recovery: walk `~/.gnx/*/meta.json` and rebuild RegistryFile
 /// as alias cache. Filesystem is source of truth — group memberships are LOST
-/// (registry-only data), operator must re-apply via `gnx admin group add`.
+/// (registry-only data), operator must re-apply via `cgn admin group add`.
 impl RegistryFile {
     pub fn rebuild_from_disk(home_gnx: &Path) -> io::Result<Self> {
         use crate::registry::repo_meta::RepoMeta;

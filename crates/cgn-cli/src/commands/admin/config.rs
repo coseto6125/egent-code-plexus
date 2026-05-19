@@ -1,7 +1,7 @@
-//! `gnx config` — interactive TUI wizard for repo-local config.
+//! `cgn config` — interactive TUI wizard for repo-local config.
 //!
 //! Layout (top → bottom):
-//!   1. ANSI-Shadow title `GNX FOR LLM` (static, GNX cyan → gold gradient)
+//!   1. ANSI-Shadow title `CGN FOR LLM` (static, CGN cyan → gold gradient)
 //!   2. Animated 4-frame walking beaver, bouncing left↔right
 //!   3. Form: Output / Confidence groups, edit-in-place
 //!   4. Footer: keybinding hints
@@ -43,7 +43,7 @@ pub fn run(args: ConfigArgs) -> Result<(), GnxError> {
 
     if !io::stdout().is_terminal() {
         eprintln!(
-            "gnx config requires an interactive terminal.\n\
+            "cgn config requires an interactive terminal.\n\
              Edit the config TOML directly: {}",
             config_path(&repo_root).display()
         );
@@ -289,7 +289,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 // Rendering — palette + per-section draws
 // ─────────────────────────────────────────────────────────────────────────
 
-const CYAN: Color = Color::Rgb(0, 180, 216); // GNX primary
+const CYAN: Color = Color::Rgb(0, 180, 216); // CGN primary
 const GOLD: Color = Color::Rgb(255, 214, 10); // accent
 const DEEP: Color = Color::Rgb(0, 119, 182); // body shadow
 const DIM: Color = Color::DarkGray;
@@ -388,7 +388,7 @@ fn render_beaver(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Paint each char of a beaver-sprite row with GNX palette per role:
+/// Paint each char of a beaver-sprite row with CGN palette per role:
 /// teeth (`ω`) → gold; eyes (`·`) → white; legs/tail (rows 3-4) → deep blue;
 /// rest → cyan.
 fn colorize_beaver_row(row: &str, row_idx: usize) -> Vec<Span<'static>> {
@@ -538,7 +538,7 @@ fn kbd(s: &str) -> Span<'static> {
 // ─────────────────────────────────────────────────────────────────────────
 // Snapshot helper (test-only) — renders a single frame into a string
 // painted with ANSI escapes so the test harness can dump it to stderr
-// and show the user what `gnx config` will look like without launching
+// and show the user what `cgn config` will look like without launching
 // the full TUI loop.
 // ─────────────────────────────────────────────────────────────────────────
 

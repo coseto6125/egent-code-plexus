@@ -13,7 +13,7 @@
 //! 2. Client-side: consumer files containing `fetch()` /
 //!    `axios.get()` / etc. → `consumer_keys::extract` → keys encoded
 //!    into the `Fetches` edge's `reason` field.
-//! 3. `gnx shape_check` parses the reason via [`parse_reason`] and
+//! 3. `cgn shape_check` parses the reason via [`parse_reason`] and
 //!    compares against the Route's `response_keys ∪ error_keys`.
 //!
 //! Reason wire format (matches upstream verbatim for cross-port

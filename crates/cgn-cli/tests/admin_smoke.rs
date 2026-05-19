@@ -1,4 +1,4 @@
-//! Smoke: gnx admin runs without panicking when given an immediate
+//! Smoke: cgn admin runs without panicking when given an immediate
 //! "Exit" via piped input. Tests menu plumbing, not interactive flow.
 
 use std::process::{Command, Stdio};
@@ -15,7 +15,7 @@ fn gnx_admin_exits_cleanly_on_immediate_exit_choice() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn gnx admin");
+        .expect("spawn cgn admin");
 
     // Send EOF immediately — dialoguer returns Ok(None) on EOF which
     // our menu handles as "Exit".
@@ -27,24 +27,24 @@ fn gnx_admin_exits_cleanly_on_immediate_exit_choice() {
     // (or at minimum not panic). Accept any non-panic exit.
     assert!(
         out.status.code().is_some(),
-        "gnx admin should not be killed by signal — got: {:?}\nstdout: {}\nstderr: {}",
+        "cgn admin should not be killed by signal — got: {:?}\nstdout: {}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
 }
 
-/// Verify `gnx admin --help` renders correctly and exits 0.
+/// Verify `cgn admin --help` renders correctly and exits 0.
 #[test]
 fn gnx_admin_help_exits_zero() {
     let out = Command::new(gnx_bin())
         .args(["admin", "--help"])
         .output()
-        .expect("spawn gnx admin --help");
+        .expect("spawn cgn admin --help");
 
     assert!(
         out.status.success(),
-        "gnx admin --help should exit 0, got {:?}",
+        "cgn admin --help should exit 0, got {:?}",
         out.status,
     );
 

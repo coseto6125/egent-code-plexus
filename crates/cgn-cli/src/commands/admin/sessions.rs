@@ -1,4 +1,4 @@
-//! `gnx admin sessions list` — inspect L1 sessions under all repos.
+//! `cgn admin sessions list` — inspect L1 sessions under all repos.
 //! reset / sweep variants deferred (parent spec §11.2 follow-up).
 
 use clap::{Args, Subcommand};

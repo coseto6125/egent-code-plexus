@@ -6,7 +6,7 @@ use std::path::Path;
 
 /// String baked into every `CommitBuildMeta` at build time. The fast path
 /// in `build_l2` only reuses a cached L2 entry when its persisted
-/// fingerprint matches the running binary's — upgrading `gnx` (or bumping
+/// fingerprint matches the running binary's — upgrading `cgn` (or bumping
 /// the `+schema<N>` suffix below) invalidates older entries automatically,
 /// preventing a stale parser from feeding mismatched bytes back to a new
 /// reader.

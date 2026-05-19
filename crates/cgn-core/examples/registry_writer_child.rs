@@ -1,7 +1,7 @@
 //! Test helper: opens registry at $1, upserts a `RepoAlias` with dir_name=$2,
 //! marker=$3 (embedded in `common_dir` to differentiate writers).
 //! Used by `tests/concurrency_registry_writers.rs` to simulate
-//! N concurrent `gnx` invocations.
+//! N concurrent `cgn` invocations.
 
 use cgn_core::registry::{Registry, RepoAlias};
 use std::path::PathBuf;

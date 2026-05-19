@@ -129,7 +129,7 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
 
     // Background GC stale dir after 2s. The thread is detached — we don't
     // join it; if the process exits sooner, the .stale dir is left for the
-    // next gnx admin gc sweep (Phase 7) to pick up.
+    // next cgn admin gc sweep (Phase 7) to pick up.
     let stale_clone = stale.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));

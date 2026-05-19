@@ -4,7 +4,7 @@ fn gnx_bin() -> &'static str {
     env!("CARGO_BIN_EXE_gnx")
 }
 
-/// `gnx admin prune --branch` is a no-op in v2 (branch isn't stored).
+/// `cgn admin prune --branch` is a no-op in v2 (branch isn't stored).
 /// The command now returns an error directing users to --orphans.
 #[test]
 fn prune_branch_returns_informative_error() {

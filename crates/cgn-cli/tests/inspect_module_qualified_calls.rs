@@ -6,7 +6,7 @@
 //! declaration corresponding to `foo.rs` in the same crate), not a Type. On
 //! the actual `gitnexus-rs` repo this left ≥40% of internal `fn`s with zero
 //! reported callers, masking the real blast radius for any LLM driving
-//! `gnx inspect`.
+//! `cgn inspect`.
 
 use serde_json::Value;
 use std::path::Path;
@@ -88,7 +88,7 @@ fn rust_intra_crate_module_qualified_call_resolves_to_incoming() {
     // `crate_caller::caller_fn` invokes `auto_ensure::ensure_fresh()`. The
     // qualifier `auto_ensure` is a module declared by `mod auto_ensure;` and
     // backed by `src/auto_ensure.rs` — no Type with that name exists. After
-    // the Tier-4 module-file fallback, `gnx inspect ensure_fresh` must list
+    // the Tier-4 module-file fallback, `cgn inspect ensure_fresh` must list
     // `caller_fn` under incoming.calls.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();

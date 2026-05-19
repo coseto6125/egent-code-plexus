@@ -1,7 +1,7 @@
 //! TypeScript `abstract class X { }` declarations must emit as Class.
 //! tree-sitter-typescript uses a dedicated `abstract_class_declaration`
 //! node (not a subclass of `class_declaration`), so the regular class
-//! pattern doesn't fire. Previously gnx-rs missed every abstract class in
+//! pattern doesn't fire. Previously cgn-rs missed every abstract class in
 //! NestJS source (AbstractHttpAdapter, ClientProxy, Server, ContextCreator,
 //! ModuleRef, etc.) — 17 unpaired ref_over entries on the parity dump.
 

@@ -149,7 +149,7 @@ fn run_search(graph: &Path, args: &[&str]) -> std::process::Output {
         .arg("--graph")
         .arg(graph)
         .output()
-        .expect("gnx find spawn")
+        .expect("cgn find spawn")
 }
 
 fn parse_json_output(out: &std::process::Output) -> Value {

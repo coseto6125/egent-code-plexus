@@ -1,4 +1,4 @@
-//! Integration test for `gnx admin config` — covers (a) non-TTY fallback path
+//! Integration test for `cgn admin config` — covers (a) non-TTY fallback path
 //! and (b) round-tripping through the TOML config file.
 //!
 //! The TUI itself (ratatui main loop + keystroke handling) is not exercised
@@ -20,7 +20,7 @@ fn non_tty_invocation_prints_help_message_and_exits_zero() {
     let out = Command::new(gnx_bin())
         .args(["admin", "config", "--repo", repo.path().to_str().unwrap()])
         .output()
-        .expect("gnx admin config failed to spawn");
+        .expect("cgn admin config failed to spawn");
     assert!(
         out.status.success(),
         "non-tty path should exit 0, got {:?}; stderr={}",

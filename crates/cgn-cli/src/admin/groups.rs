@@ -1,4 +1,4 @@
-//! Group management workflows for `gnx admin`.
+//! Group management workflows for `cgn admin`.
 
 use crate::admin::menu::{self, select};
 use crate::commands::admin::group;
@@ -59,7 +59,7 @@ fn sync_contracts() {
             for group in &registry.snapshot().groups {
                 println!("  {}: {}", group.name, group.members.join(", "));
             }
-            println!("Contract sync is not implemented yet; use `gnx contracts` for inventory.");
+            println!("Contract sync is not implemented yet; use `cgn contracts` for inventory.");
         }
         Err(e) => eprintln!("Cannot open registry: {e}"),
     }

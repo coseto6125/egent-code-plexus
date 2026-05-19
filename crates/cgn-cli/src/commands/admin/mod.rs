@@ -1,5 +1,5 @@
-//! `gnx admin` subcommand namespace — registry / hooks / destructive ops.
-//! Hidden from top-level `gnx --help` per spec §4.
+//! `cgn admin` subcommand namespace — registry / hooks / destructive ops.
+//! Hidden from top-level `cgn --help` per spec §4.
 
 use clap::Subcommand;
 
@@ -39,7 +39,7 @@ pub enum AdminCommands {
     },
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
-    /// Diff resolver dump against language oracle (gnx-dev QA)
+    /// Diff resolver dump against language oracle (cgn-dev QA)
     VerifyResolver(crate::commands::verify_resolver::VerifyResolverArgs),
 }
 

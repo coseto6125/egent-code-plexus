@@ -1,4 +1,4 @@
-//! Integration tests for `gnx find --mode bm25` (formerly `gnx search`).
+//! Integration tests for `cgn find --mode bm25` (formerly `cgn search`).
 //!
 //! Exercises:
 //! - Single-repo BM25 search (positional pattern, replaces old `--query` flag)
@@ -145,7 +145,7 @@ fn two_repo_fixture() -> Fixture {
     }
 }
 
-// ── Helper: run `gnx find --mode bm25` pointing at a specific graph ──────────
+// ── Helper: run `cgn find --mode bm25` pointing at a specific graph ──────────
 
 fn run_search(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output {
     Command::new(gnx_bin())
@@ -157,7 +157,7 @@ fn run_search(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output 
         .arg(graph)
         .env("HOME", home)
         .output()
-        .expect("gnx find spawn")
+        .expect("cgn find spawn")
 }
 
 fn run_search_multi(home: &Path, args: &[&str]) -> std::process::Output {
@@ -172,7 +172,7 @@ fn run_search_multi(home: &Path, args: &[&str]) -> std::process::Output {
         .arg(&alpha_graph)
         .env("HOME", home)
         .output()
-        .expect("gnx find spawn")
+        .expect("cgn find spawn")
 }
 
 // ── Single-repo tests ─────────────────────────────────────────────────────────
@@ -215,7 +215,7 @@ fn run_find_raw(home: &Path, graph: &Path, args: &[&str]) -> std::process::Outpu
         .arg(graph)
         .env("HOME", home)
         .output()
-        .expect("gnx find spawn")
+        .expect("cgn find spawn")
 }
 
 #[test]

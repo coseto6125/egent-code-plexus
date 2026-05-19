@@ -1,8 +1,8 @@
-//! `gnx routes [<path>]` — unified HTTP route command.
+//! `cgn routes [<path>]` — unified HTTP route command.
 //!
-//! Without `<path>`: lists all Route nodes (replaces `gnx route_map`).
+//! Without `<path>`: lists all Route nodes (replaces `cgn route_map`).
 //! With `<path>`:    shows the handler + full upstream caller chain
-//!                   (replaces `gnx api_impact --route <path>`).
+//!                   (replaces `cgn api_impact --route <path>`).
 //!
 //! Optional `--method GET/POST/...` narrows results in both modes.
 
@@ -116,7 +116,7 @@ fn list_routes(
         eprintln!(
             "No HTTP routes detected.\n\
              → Possible causes: framework not yet supported, no route declarations found,\n\
-             or a coverage gap. Run `gnx coverage --detailed` for framework scan details."
+             or a coverage gap. Run `cgn coverage --detailed` for framework scan details."
         );
     } else if results.is_empty() && !include_tests {
         eprintln!(

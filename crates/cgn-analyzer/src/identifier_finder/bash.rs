@@ -1,6 +1,6 @@
 //! Bash identifier finder. tree-sitter-bash names function identifiers as
 //! `word` and variable references as `variable_name`. Both are renameable
-//! surfaces for `gnx rename`.
+//! surfaces for `cgn rename`.
 
 use super::generic::find_by_kinds;
 use cgn_core::analyzer::types::IdentifierRange;

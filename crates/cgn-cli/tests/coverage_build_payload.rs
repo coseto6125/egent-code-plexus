@@ -1,6 +1,6 @@
 //! Smoke test for `build_payload` extraction in `commands::coverage`.
 //!
-//! Invokes `gnx coverage --format json` and asserts the top-level
+//! Invokes `cgn coverage --format json` and asserts the top-level
 //! `coverage` key is present, confirming `build_payload` returns the
 //! same shape that `run` previously emitted.
 
@@ -18,11 +18,11 @@ fn coverage_build_payload_returns_coverage_key() {
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
-        .expect("gnx coverage failed to spawn");
+        .expect("cgn coverage failed to spawn");
 
     assert!(
         out.status.success(),
-        "gnx coverage failed: stderr={}",
+        "cgn coverage failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 
@@ -53,7 +53,7 @@ fn coverage_build_payload_with_repo_returns_per_repo_key() {
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
-        .expect("gnx coverage failed to spawn");
+        .expect("cgn coverage failed to spawn");
 
     // The command may succeed or fail (unknown repo → selector error),
     // but when it succeeds the payload must have `coverage.per_repo`.

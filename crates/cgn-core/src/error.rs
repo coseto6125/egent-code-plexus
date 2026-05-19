@@ -9,7 +9,7 @@ pub enum GnxError {
     #[error("graph deserialization failed: {0}")]
     Rkyv(String),
 
-    #[error("graph.bin not found at {path:?} — run `gnx analyze` first")]
+    #[error("graph.bin not found at {path:?} — run `cgn analyze` first")]
     GraphNotFound { path: PathBuf },
 
     #[error("symbol UID '{uid}' not found in graph")]

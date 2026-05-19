@@ -1,4 +1,4 @@
-//! Verify `gnx diff --section bindings --baseline <ref>` returns
+//! Verify `cgn diff --section bindings --baseline <ref>` returns
 //! resolver decision changes between two refs.
 
 use std::process::Command;
@@ -89,11 +89,11 @@ fn diff_bindings_two_commit_resolution_change() {
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("run gnx diff bindings");
+        .expect("run cgn diff bindings");
 
     assert!(
         output.status.success(),
-        "gnx diff bindings failed: {}",
+        "cgn diff bindings failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -125,7 +125,7 @@ fn diff_bindings_against_head_yields_empty() {
         .args(["diff", "--section", "bindings", "--baseline", &head_sha,
                "--format", "json"])
         .output()
-        .expect("run gnx diff bindings");
+        .expect("run cgn diff bindings");
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())

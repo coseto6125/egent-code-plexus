@@ -1,4 +1,4 @@
-//! Tests for `gnx group impact`.
+//! Tests for `cgn group impact`.
 //!
 //! Strategy:
 //!
@@ -7,7 +7,7 @@
 //!    into the group storage layout, then verifies that the cross_links filter
 //!    works correctly when given a set of local UIDs.
 //!
-//! 2. **CLI smoke test** — verifies `gnx group impact --help` exits 0 and that
+//! 2. **CLI smoke test** — verifies `cgn group impact --help` exits 0 and that
 //!    the subcommand is wired. Full integration (2-repo index + sync + impact)
 //!    is intentionally omitted because Go HTTP handler indexing surface varies
 //!    (see T12 spec note on test fragility).
@@ -231,13 +231,13 @@ fn cross_links_no_hits_when_local_uids_empty() {
 
 // ── CLI smoke tests ───────────────────────────────────────────────────────────
 
-/// `gnx group impact --help` must exit 0 and mention the subcommand.
+/// `cgn group impact --help` must exit 0 and mention the subcommand.
 #[test]
 fn group_impact_help_exits_zero() {
     let out = Command::new(gnx_bin())
         .args(["group", "impact", "--help"])
         .output()
-        .expect("gnx spawn failed");
+        .expect("cgn spawn failed");
 
     assert!(
         out.status.success(),
@@ -264,7 +264,7 @@ fn group_impact_unknown_group_exits_nonzero() {
         ])
         .env("HOME", tmp.path())
         .output()
-        .expect("gnx spawn failed");
+        .expect("cgn spawn failed");
 
     assert!(
         !out.status.success(),

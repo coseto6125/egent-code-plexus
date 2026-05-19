@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Run a `git` invocation and panic with stderr if it fails. Used by every
-/// integration test that builds a tempdir repo + indexes it via `gnx admin
+/// integration test that builds a tempdir repo + indexes it via `cgn admin
 /// index`. The wrapping `setup_repo*` functions stay per-file because their
 /// fixtures (file layout, branch name, remote, multi-file vs single) vary
 /// per test in ways an all-purpose helper would obscure.

@@ -1,6 +1,6 @@
 //! Concurrency invariant 4.3 — Registry concurrent process writers converge.
 //!
-//! Real production failure mode: multiple `gnx` invocations from Claude
+//! Real production failure mode: multiple `cgn` invocations from Claude
 //! Code hooks race to upsert the registry. flock-guarded read-modify-write
 //! MUST converge to a state containing every writer's contribution.
 

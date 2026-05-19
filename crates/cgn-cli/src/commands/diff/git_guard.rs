@@ -1,4 +1,4 @@
-//! RAII git workspace guard for `gnx diff`.
+//! RAII git workspace guard for `cgn diff`.
 //!
 //! On `enter`:
 //!   1. Stash dirty tree (if any), recording whether stash was created.
@@ -108,7 +108,7 @@ fn stash_if_dirty(repo_dir: &Path) -> Result<bool, GnxError> {
         return Ok(false);
     }
     let stash = safe_exec::git()
-        .args(["stash", "push", "-u", "-m", "gnx-diff-auto-stash"])
+        .args(["stash", "push", "-u", "-m", "cgn-diff-auto-stash"])
         .current_dir(repo_dir)
         .output()
         .map_err(|e| GnxError::Output(format!("git stash failed: {e}")))?;

@@ -1,11 +1,11 @@
-//! Integration tests for `gnx contracts`.
+//! Integration tests for `cgn contracts`.
 //!
 //! v1 scope: structural shape + multi-repo gate + flag surface.
 //! A real 2-repo happy-path fixture is left as an #[ignore] skeleton.
 
 use std::process::Command;
 
-fn gnx() -> Command {
+fn cgn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_gnx"))
 }
 
@@ -16,7 +16,7 @@ fn gnx() -> Command {
 #[test]
 fn contracts_single_repo_errors() {
     let home_tmp = tempfile::tempdir().unwrap();
-    let output = gnx()
+    let output = cgn()
         .args(["contracts", "--repo", "."])
         .env("HOME", home_tmp.path())
         .output()
@@ -50,10 +50,10 @@ fn contracts_single_repo_errors() {
 
 #[test]
 fn contracts_help_includes_kind_flag() {
-    let output = gnx().args(["contracts", "--help"]).output().unwrap();
+    let output = cgn().args(["contracts", "--help"]).output().unwrap();
     assert!(
         output.status.success(),
-        "gnx contracts --help exited non-zero"
+        "cgn contracts --help exited non-zero"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -64,10 +64,10 @@ fn contracts_help_includes_kind_flag() {
 
 #[test]
 fn contracts_help_includes_repo_flag() {
-    let output = gnx().args(["contracts", "--help"]).output().unwrap();
+    let output = cgn().args(["contracts", "--help"]).output().unwrap();
     assert!(
         output.status.success(),
-        "gnx contracts --help exited non-zero"
+        "cgn contracts --help exited non-zero"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -78,10 +78,10 @@ fn contracts_help_includes_repo_flag() {
 
 #[test]
 fn contracts_help_includes_unmatched_only_flag() {
-    let output = gnx().args(["contracts", "--help"]).output().unwrap();
+    let output = cgn().args(["contracts", "--help"]).output().unwrap();
     assert!(
         output.status.success(),
-        "gnx contracts --help exited non-zero"
+        "cgn contracts --help exited non-zero"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -92,10 +92,10 @@ fn contracts_help_includes_unmatched_only_flag() {
 
 #[test]
 fn contracts_help_includes_format_flag() {
-    let output = gnx().args(["contracts", "--help"]).output().unwrap();
+    let output = cgn().args(["contracts", "--help"]).output().unwrap();
     assert!(
         output.status.success(),
-        "gnx contracts --help exited non-zero"
+        "cgn contracts --help exited non-zero"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -116,7 +116,7 @@ fn contracts_help_includes_format_flag() {
 #[ignore = "requires 2-repo registry fixture — implement in contracts extraction follow-up"]
 fn contracts_two_repos_returns_shape() {
     // TODO: spin up two temp repos in the registry, run:
-    //   gnx contracts --repo @fixture-group --format json
+    //   cgn contracts --repo @fixture-group --format json
     // then assert the JSON contains repos_scanned=2, pairs=[], etc.
     todo!("wire 2-repo fixture");
 }

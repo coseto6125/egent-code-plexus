@@ -1,6 +1,6 @@
 //! Smoke test for `build_payload` extraction in `commands::impact`.
 //!
-//! Uses the binary integration pattern (Option A): invokes `gnx impact` with
+//! Uses the binary integration pattern (Option A): invokes `cgn impact` with
 //! `--format json` and asserts the JSON shape is well-formed. A minimal git
 //! repo + index is required so the engine can load the graph.
 
@@ -57,11 +57,11 @@ fn impact_build_payload_unknown_symbol_returns_error_field() {
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
-        .expect("gnx impact failed to spawn");
+        .expect("cgn impact failed to spawn");
 
     assert!(
         out.status.success(),
-        "gnx impact should exit 0 even for unknown symbol: stderr={}",
+        "cgn impact should exit 0 even for unknown symbol: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -92,7 +92,7 @@ fn impact_build_payload_no_args_returns_error() {
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .output()
-        .expect("gnx impact failed to spawn");
+        .expect("cgn impact failed to spawn");
 
     // clap or build_payload produces a non-zero exit code.
     assert!(

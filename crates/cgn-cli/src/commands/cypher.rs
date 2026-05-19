@@ -49,7 +49,7 @@ impl CypherArgs {
             .or(self.query_positional.as_deref())
             .ok_or_else(|| {
                 cgn_core::GnxError::InvalidArgument(
-                    "cypher requires a query — pass it positionally (gnx cypher \"MATCH ...\") or via --query".into(),
+                    "cypher requires a query — pass it positionally (cgn cypher \"MATCH ...\") or via --query".into(),
                 )
             })
     }

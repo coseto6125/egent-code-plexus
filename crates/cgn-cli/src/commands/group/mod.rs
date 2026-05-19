@@ -49,7 +49,7 @@ pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
 }
 
 /// Resolve a group member string to its `RepoAlias` from the registry.
-/// Members are stored verbatim from `gnx admin group add <group> <repo>`;
+/// Members are stored verbatim from `cgn admin group add <group> <repo>`;
 /// `member` may be either a `dir_name` or any of the aliases. Match order:
 /// (1) exact dir_name, (2) exact alias hit, (3) None (no fuzzy fallback).
 ///
@@ -67,7 +67,7 @@ pub fn lookup_member<'a>(registry: &'a RegistryFile, member: &str) -> Option<&'a
 /// Returns `(display_name, Engine)` per successfully-loaded member. Members
 /// that can't be resolved or whose graph fails to load are dropped silently
 /// from the result vec but logged via `tracing::warn!` so the failure isn't
-/// invisible. Used by `gnx group find` + `gnx group search` (both want the
+/// invisible. Used by `cgn group find` + `cgn group search` (both want the
 /// loaded engine; coverage skips Engine entirely and resolves at the
 /// `ResolvedRepo` level).
 pub fn resolve_member_engines(

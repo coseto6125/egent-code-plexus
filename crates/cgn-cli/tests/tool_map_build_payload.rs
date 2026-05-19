@@ -1,6 +1,6 @@
 //! Smoke test for `build_payload` extraction in `commands::tool_map`.
 //!
-//! Uses the binary integration pattern (Option A): invokes `gnx tool-map`
+//! Uses the binary integration pattern (Option A): invokes `cgn tool-map`
 //! via the compiled binary and asserts the JSON shape is intact —
 //! `{status, totals, calls}` — confirming `build_payload` returns the
 //! same value that `run` previously emitted to `emit()`.
@@ -63,11 +63,11 @@ fn tool_map_build_payload_returns_status_totals_calls() {
         .current_dir(repo.path())
         .env("HOME", repo.path())
         .output()
-        .expect("gnx tool-map failed to spawn");
+        .expect("cgn tool-map failed to spawn");
 
     assert!(
         out.status.success(),
-        "gnx tool-map failed: stderr={}",
+        "cgn tool-map failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 

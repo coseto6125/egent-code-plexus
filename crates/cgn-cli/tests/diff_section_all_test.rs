@@ -29,7 +29,7 @@ fn run_diff_json(sections: &str) -> serde_json::Value {
             "json",
         ])
         .output()
-        .expect("run gnx diff");
+        .expect("run cgn diff");
     assert!(
         out.status.success(),
         "stderr: {}",

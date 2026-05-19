@@ -13,7 +13,7 @@ use cgn_core::analyzer::types::IdentifierRange;
 
 const KINDS: &[&str] = &["name"];
 // `variable_name` wraps `$foo` and contains a `name` child whose text is
-// `foo` without the `$`. Skipping the subtree prevents `gnx rename foo`
+// `foo` without the `$`. Skipping the subtree prevents `cgn rename foo`
 // from accidentally rewriting every `$foo` variable. Variable rename is
 // a separate concern outside this finder's scope.
 const SKIP: &[&str] = &["variable_name"];

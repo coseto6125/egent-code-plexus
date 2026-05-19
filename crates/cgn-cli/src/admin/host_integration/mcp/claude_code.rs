@@ -8,18 +8,18 @@ use std::ffi::OsString;
 use std::io;
 use std::process::Command;
 
-const SERVER_NAME: &str = "gnx";
+const SERVER_NAME: &str = "cgn";
 
 pub fn install(_theme: &ColorfulTheme) {
     match run_install() {
-        Ok(()) => println!("Claude Code MCP server `gnx` installed via `claude mcp`."),
+        Ok(()) => println!("Claude Code MCP server `cgn` installed via `claude mcp`."),
         Err(e) => eprintln!("Claude Code MCP install failed: {e}"),
     }
 }
 
 pub fn uninstall(_theme: &ColorfulTheme) {
     match run_uninstall() {
-        Ok(()) => println!("Claude Code MCP server `gnx` removed via `claude mcp`."),
+        Ok(()) => println!("Claude Code MCP server `cgn` removed via `claude mcp`."),
         Err(e) => eprintln!("Claude Code MCP uninstall failed: {e}"),
     }
 }
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn install_args_register_user_scoped_stdio_server() {
-        let args = install_args("/usr/local/bin/gnx");
+        let args = install_args("/usr/local/bin/cgn");
         let text_args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
 
         assert_eq!(text_args[0], "mcp");
@@ -121,7 +121,7 @@ mod tests {
 
         let spec: Value = serde_json::from_str(&text_args[5]).expect("json spec");
         assert_eq!(spec["type"], "stdio");
-        assert_eq!(spec["command"], "/usr/local/bin/gnx");
+        assert_eq!(spec["command"], "/usr/local/bin/cgn");
         assert_eq!(spec["args"], json!(["admin", "mcp", "serve"]));
     }
 

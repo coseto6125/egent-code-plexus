@@ -21,12 +21,12 @@ fn mutate_registry<F>(op: F) -> Result<(), GnxError>
 where
     F: FnOnce(&mut RegistryFile) -> Result<bool, GnxError>,
 {
-    let gnx = resolve_home_gnx();
-    let lock_path = gnx.join("registry.json.lock");
+    let cgn = resolve_home_gnx();
+    let lock_path = cgn.join("registry.json.lock");
     let _lock = FileLock::acquire_exclusive(&lock_path)
         .map_err(|e| GnxError::InvalidArgument(format!("flock: {e}")))?;
 
-    let registry_path = gnx.join("registry.json");
+    let registry_path = cgn.join("registry.json");
     let mut reg = RegistryFile::read_or_empty(&registry_path)
         .map_err(|e| GnxError::InvalidArgument(format!("registry read: {e}")))?;
 
@@ -53,7 +53,7 @@ fn add(repo: &str, group: &str) -> Result<(), GnxError> {
             .ok_or_else(|| {
                 GnxError::Output(format!(
                     "repo not found in registry: {repo}\n\
-                     → register the repo first with `gnx admin index`"
+                     → register the repo first with `cgn admin index`"
                 ))
             })?;
         if !repo_entry.groups.iter().any(|g| g == group) {

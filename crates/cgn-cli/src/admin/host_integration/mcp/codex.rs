@@ -7,19 +7,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use toml::Value;
 
-const SERVER_NAME: &str = "gnx";
+const SERVER_NAME: &str = "cgn";
 const SERVER_ARGS: &[&str] = &["admin", "mcp", "serve"];
 
 pub fn install(_theme: &ColorfulTheme) {
     match run_install() {
-        Ok(path) => println!("Codex CLI MCP server `gnx` installed in {}", path.display()),
+        Ok(path) => println!("Codex CLI MCP server `cgn` installed in {}", path.display()),
         Err(e) => eprintln!("Codex CLI MCP install failed: {e}"),
     }
 }
 
 pub fn uninstall(_theme: &ColorfulTheme) {
     match run_uninstall() {
-        Ok(path) => println!("Codex CLI MCP server `gnx` removed from {}", path.display()),
+        Ok(path) => println!("Codex CLI MCP server `cgn` removed from {}", path.display()),
         Err(e) => eprintln!("Codex CLI MCP uninstall failed: {e}"),
     }
 }
@@ -63,7 +63,7 @@ fn config_path() -> PathBuf {
 fn current_command() -> String {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "gnx".into())
+        .unwrap_or_else(|_| "cgn".into())
 }
 
 fn upsert_server(path: &Path, command: &str) -> Result<(), GnxError> {
@@ -159,7 +159,7 @@ fn status_from_config(config: &Value, command: &str) -> HostStatus {
     });
     if !enabled {
         return HostStatus::Outdated {
-            reason: "mcp_servers.gnx is disabled".into(),
+            reason: "mcp_servers.cgn is disabled".into(),
         };
     }
     if configured_command == Some(command) && args_match {
@@ -168,7 +168,7 @@ fn status_from_config(config: &Value, command: &str) -> HostStatus {
         }
     } else {
         HostStatus::Outdated {
-            reason: "mcp_servers.gnx differs from current gnx admin mcp serve entry".into(),
+            reason: "mcp_servers.cgn differs from current cgn admin mcp serve entry".into(),
         }
     }
 }
@@ -193,7 +193,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
         )
         .expect("write seed");
 
-        upsert_server(&path, "/usr/local/bin/gnx").expect("install");
+        upsert_server(&path, "/usr/local/bin/cgn").expect("install");
         let config = read_config(&path).expect("read result");
 
         assert_eq!(
@@ -205,7 +205,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
             .and_then(|servers| servers.get("github"))
             .is_some());
         assert!(matches!(
-            status_from_config(&config, "/usr/local/bin/gnx"),
+            status_from_config(&config, "/usr/local/bin/cgn"),
             HostStatus::Installed { .. }
         ));
     }
@@ -214,12 +214,12 @@ args = ["-y", "@modelcontextprotocol/server-github"]
     fn remove_server_keeps_other_servers() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        upsert_server(&path, "/usr/local/bin/gnx").expect("install");
+        upsert_server(&path, "/usr/local/bin/cgn").expect("install");
         remove_server(&path).expect("remove");
         let config = read_config(&path).expect("read result");
 
         assert!(matches!(
-            status_from_config(&config, "/usr/local/bin/gnx"),
+            status_from_config(&config, "/usr/local/bin/cgn"),
             HostStatus::Missing
         ));
     }
@@ -238,8 +238,8 @@ args = ["-y", "@modelcontextprotocol/server-github"]
     fn disabled_server_is_not_installed() {
         let config = toml::from_str::<Value>(
             r#"
-[mcp_servers.gnx]
-command = "/usr/local/bin/gnx"
+[mcp_servers.cgn]
+command = "/usr/local/bin/cgn"
 args = ["admin", "mcp", "serve"]
 enabled = false
 "#,
@@ -247,7 +247,7 @@ enabled = false
         .expect("parse config");
 
         assert!(matches!(
-            status_from_config(&config, "/usr/local/bin/gnx"),
+            status_from_config(&config, "/usr/local/bin/cgn"),
             HostStatus::Outdated { .. }
         ));
     }

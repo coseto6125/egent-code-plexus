@@ -1,6 +1,6 @@
 //! Unit test for spawn-mode dispatch — invokes a stub script that
 //! echoes its arguments back, then verifies dispatch wrapped it
-//! correctly. Avoids depending on a built gnx binary for this layer.
+//! correctly. Avoids depending on a built cgn binary for this layer.
 
 mod common;
 
@@ -104,8 +104,8 @@ fn spawn_errors_when_subcmd_missing() {
 
 // ─── @<group> rejection (T15) ────────────────────────────────────────────────
 
-/// Stub that rejects `@<group>` exactly as the real gnx binary does after T14:
-/// exits non-zero and emits the "gnx group find" hint to stderr.
+/// Stub that rejects `@<group>` exactly as the real cgn binary does after T14:
+/// exits non-zero and emits the "cgn group find" hint to stderr.
 fn write_group_rejecting_stub(dir: &std::path::Path) -> std::path::PathBuf {
     write_stub(
         dir,
@@ -113,7 +113,7 @@ fn write_group_rejecting_stub(dir: &std::path::Path) -> std::path::PathBuf {
 for arg in "$@"; do
   case "$arg" in
     @all) ;;
-    @*) echo "error: cannot be used at the top level — use \`gnx group find\` instead" >&2; exit 1 ;;
+    @*) echo "error: cannot be used at the top level — use \`cgn group find\` instead" >&2; exit 1 ;;
   esac
 done
 echo ok
@@ -128,7 +128,7 @@ fn mcp_find_at_group_rejects_with_hint() {
     let tool = dummy_tool("find");
     let err = run_spawn(&stub, &tool, &json!({"repo": "@demo", "pattern": "x"})).unwrap_err();
     assert!(
-        err.to_string().contains("gnx group find"),
+        err.to_string().contains("cgn group find"),
         "expected hint in error; got: {err}"
     );
 }

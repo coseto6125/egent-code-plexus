@@ -1,5 +1,5 @@
 //! PreToolUse handler: extract a search pattern from Grep / Glob / Bash
-//! invocations, run an in-process `gnx find --mode bm25`, and inject
+//! invocations, run an in-process `cgn find --mode bm25`, and inject
 //! the top-K hits into the conversation as `additionalContext`. Capped
 //! at 5 hits or ~2 KB serialized to keep the token cost bounded.
 
@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 const MAX_HITS: usize = 5;
 const MAX_BYTES: usize = 2048;
-const HITS_HEADER: &str = "gnx graph hits:\n";
+const HITS_HEADER: &str = "cgn graph hits:\n";
 
 /// Glob-stem extractor. Compiled once per process — PreToolUse fires
 /// on every Grep / Glob / Bash so amortising the regex build matters.
@@ -69,7 +69,7 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
 /// and `Calls:` lines drawn from the in-process 1-hop CSR expansion in
 /// `compute_hits`. Empty caller / callee lists are skipped to keep the
 /// per-hit footprint tight; the LLM reads the absence as "no callers
-/// found within 1 hop" rather than asking gnx for a deeper trace.
+/// found within 1 hop" rather than asking cgn for a deeper trace.
 pub fn format_hits(hits: &[Hit]) -> String {
     let mut out = String::from(HITS_HEADER);
     for h in hits.iter().take(MAX_HITS) {

@@ -1,4 +1,4 @@
-//! Verify `gnx shape-check --route <path>` filters Fetches edges
+//! Verify `cgn shape-check --route <path>` filters Fetches edges
 //! by target Route path. No-match case prints helpful message.
 //!
 //! Hermetic: builds a tempdir fixture and uses `HOME=<tempdir>` so the
@@ -22,7 +22,7 @@ fn gnx_bin() -> &'static str {
 }
 
 /// Build a tempdir with one TypeScript file containing a fetch() consumer,
-/// initialize git, run `gnx admin index` with isolated HOME so the registry
+/// initialize git, run `cgn admin index` with isolated HOME so the registry
 /// is per-test. TempDir drop cleans up.
 fn setup_fixture() -> TempDir {
     let tmp = TempDir::new().expect("tempdir");
@@ -79,7 +79,7 @@ fn shape_check_help_lists_route_arg() {
     let output = Command::new(gnx_bin())
         .args(["shape-check", "--help"])
         .output()
-        .expect("run gnx shape-check --help");
+        .expect("run cgn shape-check --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("--route"),
@@ -97,7 +97,7 @@ fn shape_check_route_no_match_emits_helpful_message() {
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("run gnx shape-check --route");
+        .expect("run cgn shape-check --route");
 
     assert!(
         output.status.success(),

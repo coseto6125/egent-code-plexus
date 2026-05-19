@@ -1,4 +1,4 @@
-//! Tests for `gnx group find`.
+//! Tests for `cgn group find`.
 //!
 //! Strategy:
 //! - Smoke tests: `--help` exits 0 and unknown-group exits non-zero.
@@ -18,7 +18,7 @@ fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
         .args(args)
         .env("HOME", home)
         .output()
-        .expect("gnx spawn failed")
+        .expect("cgn spawn failed")
 }
 
 fn init_git_repo_with_rs(path: &Path) {
@@ -69,7 +69,7 @@ fn group_find_help_exits_zero() {
     let out = Command::new(gnx_bin())
         .args(["group", "find", "--help"])
         .output()
-        .expect("gnx spawn failed");
+        .expect("cgn spawn failed");
     assert!(
         out.status.success(),
         "expected exit 0 for --help; stderr: {}",
@@ -164,7 +164,7 @@ fn group_find_json_shape_two_repos() {
     }
 }
 
-// ── --merge rrf (consolidated from former `gnx group search`) ─────────────────
+// ── --merge rrf (consolidated from former `cgn group search`) ─────────────────
 
 /// `--merge rrf` returns a unified top-K via Reciprocal Rank Fusion. JSON
 /// shape: `{results: [...], per_repo: [{repo, count}, ...]}`.

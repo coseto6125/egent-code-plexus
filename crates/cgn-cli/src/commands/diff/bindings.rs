@@ -41,7 +41,7 @@ pub struct BindingChange {
     pub after: Option<BindingDecision>,
 }
 
-/// Invoke `gnx admin index --repo <repo_dir> --dump-resolver <out_path>`.
+/// Invoke `cgn admin index --repo <repo_dir> --dump-resolver <out_path>`.
 pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
     let self_exe =
         std::env::current_exe().map_err(|e| GnxError::Output(format!("current_exe: {e}")))?;
@@ -67,10 +67,10 @@ pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
             out_str,
         ])
         .output()
-        .map_err(|e| GnxError::Output(format!("gnx admin index spawn: {e}")))?;
+        .map_err(|e| GnxError::Output(format!("cgn admin index spawn: {e}")))?;
     if !out.status.success() {
         return Err(GnxError::Output(format!(
-            "gnx admin index --dump-resolver failed: {}",
+            "cgn admin index --dump-resolver failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }

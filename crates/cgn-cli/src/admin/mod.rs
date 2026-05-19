@@ -1,13 +1,13 @@
-//! `gnx admin` — interactive TUI for operational maintenance.
+//! `cgn admin` — interactive TUI for operational maintenance.
 //!
 //! Opens a `dialoguer`-based menu tree.  Index, agent integration,
 //! config, group, and diagnostic workflows are reachable from here.
-//! No top-level `gnx install` / `gnx integrate` command is exposed — this
+//! No top-level `cgn install` / `cgn integrate` command is exposed — this
 //! is the sole entry point per the UX constraint in the host-integration spec.
 //!
 //! # Menu tree
 //! ```text
-//! gnx admin
+//! cgn admin
 //! ├── Indexes
 //! ├── Agent Integrations
 //! ├── Config
@@ -40,7 +40,7 @@ pub fn run(_args: AdminArgs) -> Result<(), GnxError> {
 
 fn main_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
     loop {
-        let choice = menu::select(theme, "gnx admin", MAIN_MENU)?;
+        let choice = menu::select(theme, "cgn admin", MAIN_MENU)?;
         match choice {
             Some(0) => indexes::run(theme)?,
             Some(1) => host_integration::run(theme)?,
@@ -56,7 +56,7 @@ fn main_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
 pub const MAIN_MENU: &[menu::Item<'_>] = &[
     ("Indexes", "build, inspect, prune, drop indexes"),
     ("Agent Integrations", "MCP / native / hooks for LLM hosts"),
-    ("Config", "view, edit, validate gnx.toml"),
+    ("Config", "view, edit, validate cgn.toml"),
     ("Groups", "multi-repo grouping for cross-repo contracts"),
     ("Diagnostics", "doctor, registry health, env report"),
     ("Exit", ""),

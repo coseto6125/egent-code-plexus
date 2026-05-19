@@ -1,4 +1,4 @@
-//! `gnx rename` — AST-powered multi-lang rename.
+//! `cgn rename` — AST-powered multi-lang rename.
 //!
 //! Pipeline:
 //! 1. **Plan (graph)**: load `graph.bin`, find the target node by name,
@@ -283,7 +283,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), GnxEr
                 total_doc
             );
             println!(
-                "→ For markdown: gnx rename --symbol {} --new-name {} --markdown",
+                "→ For markdown: cgn rename --symbol {} --new-name {} --markdown",
                 args.symbol, args.new_name
             );
         }

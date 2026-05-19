@@ -12,7 +12,7 @@
 //! The cross-language test plants identically-named files in three different
 //! languages under one repo and verifies the resolver only links to the
 //! same-extension match (gitnexus produces ~50% cross-language false positives
-//! on this shape; gnx must produce zero).
+//! on this shape; cgn must produce zero).
 
 use serde_json::Value;
 use std::path::Path;
@@ -447,8 +447,8 @@ fn imports_dart_import() {
 // gitnexus on .sample_repo emits IMPORTS edges like
 //     solidity/eslint.config.mjs → Path.java
 // because its resolver does cross-language name globbing. This test pins the
-// gnx rule (spec §2: "resolver miss → don't emit"): when a TS file imports
-// `./foo`, gnx must only link to foo.ts in the same directory, never to
+// cgn rule (spec §2: "resolver miss → don't emit"): when a TS file imports
+// `./foo`, cgn must only link to foo.ts in the same directory, never to
 // foo.py / foo.java which happen to exist with the same basename elsewhere.
 
 #[test]

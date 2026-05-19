@@ -1,4 +1,4 @@
-//! E2E tests for `gnx cypher` error paths: parse errors, semantic errors,
+//! E2E tests for `cgn cypher` error paths: parse errors, semantic errors,
 //! and caret-pointer formatting in error output.
 
 use std::process::Command;

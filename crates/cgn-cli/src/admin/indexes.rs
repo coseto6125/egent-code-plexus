@@ -1,4 +1,4 @@
-//! Index maintenance workflows for `gnx admin`.
+//! Index maintenance workflows for `cgn admin`.
 
 use crate::admin::menu::{self, select};
 use crate::commands::admin::{drop, index, prune};
@@ -100,7 +100,7 @@ fn drop_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
         .map_err(dialoguer_err)?;
     if all {
         let confirmed = Confirm::with_theme(theme)
-            .with_prompt("This deletes all gnx index data and registry entries. Continue")
+            .with_prompt("This deletes all cgn index data and registry entries. Continue")
             .default(false)
             .interact()
             .map_err(dialoguer_err)?;
@@ -115,7 +115,7 @@ fn drop_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
 
     let repo = input_path(theme, "Repo path", ".")?;
     let confirmed = Confirm::with_theme(theme)
-        .with_prompt(format!("Drop gnx index data for {}", repo.display()))
+        .with_prompt(format!("Drop cgn index data for {}", repo.display()))
         .default(false)
         .interact()
         .map_err(dialoguer_err)?;
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn print_registry_accepts_empty_and_populated_registry() {
-        print_registry(&RegistryFile::empty(), std::path::Path::new("/tmp/gnx"));
+        print_registry(&RegistryFile::empty(), std::path::Path::new("/tmp/cgn"));
         let mut repos = BTreeMap::new();
         repos.insert(
             "repo__aabbccdd".into(),
@@ -182,6 +182,6 @@ mod tests {
             repos,
             groups: vec![],
         };
-        print_registry(&registry, std::path::Path::new("/tmp/gnx"));
+        print_registry(&registry, std::path::Path::new("/tmp/cgn"));
     }
 }

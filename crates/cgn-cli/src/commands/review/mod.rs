@@ -1,4 +1,4 @@
-//! `gnx review` — LLM-workflow audit aggregator.
+//! `cgn review` — LLM-workflow audit aggregator.
 //!
 //! One command, one report. Calls each constituent's `build_payload`
 //! library fn, maps results to `Finding` rows, filters to high-confidence

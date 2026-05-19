@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn tmpdir() -> PathBuf {
     let base = std::env::temp_dir().join(format!(
-        "gnx-atomic-write-test-{}-{}",
+        "cgn-atomic-write-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -65,7 +65,7 @@ pub fn uid_path(absolute: &Path, repo_root: &Path) -> Result<String, PathError> 
     Ok(s.nfc().collect())
 }
 
-/// Resolve the gnx home directory used for `registry.json` and per-branch
+/// Resolve the cgn home directory used for `registry.json` and per-branch
 /// index dirs. Tries `$HOME/.gnx` first; if HOME is unset or the directory
 /// cannot be created and written to (read-only FS, permission denied, CI
 /// sandbox), falls back to `<temp_dir>/graph-nexus-fallback/.gnx`.
@@ -83,7 +83,7 @@ pub fn resolve_home_gnx() -> PathBuf {
 
 /// Same resolution logic as [`resolve_home_gnx`], but with the HOME source
 /// supplied by the caller. In-process tests (or any caller wanting to point
-/// gnx at a private home without mutating the process-global `HOME` env
+/// cgn at a private home without mutating the process-global `HOME` env
 /// var) call this with an explicit override. Production code paths read
 /// the env var via [`resolve_home_gnx`].
 ///

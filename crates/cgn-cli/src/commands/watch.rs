@@ -1,4 +1,4 @@
-//! `gnx watch` CLI surface.
+//! `cgn watch` CLI surface.
 
 use crate::peer::watcher::{run_watcher, WatcherCfg};
 use crate::session::resolver::resolve_session_id;
@@ -49,8 +49,8 @@ pub fn run(args: WatchArgs) -> Result<(), GnxError> {
 }
 
 fn start_foreground(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Result<(), GnxError> {
-    if std::env::var("GNX_TEST_EXIT_AFTER_INIT").is_ok() {
-        eprintln!("[gnx watch] test mode — exiting after init");
+    if std::env::var("CGN_TEST_EXIT_AFTER_INIT").is_ok() {
+        eprintln!("[cgn watch] test mode — exiting after init");
         return Ok(());
     }
     let cfg = WatcherCfg {
@@ -106,7 +106,7 @@ fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Re
     });
     meta.watcher_pid = Some(pid);
     SessionMeta::write_atomic(&meta_path, &meta)?;
-    eprintln!("[gnx watch] forked watcher pid={pid}, sid={sid}");
+    eprintln!("[cgn watch] forked watcher pid={pid}, sid={sid}");
     Ok(())
 }
 

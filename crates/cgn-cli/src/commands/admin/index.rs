@@ -56,7 +56,7 @@ pub struct IndexArgs {
 /// `parse_cache_root`, when `Some`, enables the persistent per-file parse
 /// cache rooted at `<repo_root>/parse_cache/<fp>/`. Cache reads are
 /// best-effort: misses / corruption fall back to a fresh parse. Bypassed
-/// when env `GNX_NO_CACHE=1` is set — matches `--no-cache` flag semantics.
+/// when env `CGN_NO_CACHE=1` is set — matches `--no-cache` flag semantics.
 ///
 /// Returns the number of nodes written to `graph.bin`.
 pub fn run_analyzer_for_paths(
@@ -64,7 +64,7 @@ pub fn run_analyzer_for_paths(
     out_dir: &std::path::Path,
     parse_cache_root: Option<&std::path::Path>,
 ) -> std::io::Result<usize> {
-    let prof = std::env::var("GNX_PROF").is_ok();
+    let prof = std::env::var("CGN_PROF").is_ok();
     let t_step1 = std::time::Instant::now();
     // ── Step 1: Scan files (parallel walker) ──────────────────────────────
     // `WalkBuilder::build_parallel()` fans the directory traversal across
@@ -184,7 +184,7 @@ pub fn run_analyzer_for_paths(
     let t_step3 = std::time::Instant::now();
     // ── Step 3: Analyze files (persistent per-file parse cache) ──────────
     let parse_cache = match parse_cache_root {
-        Some(root) if std::env::var_os("GNX_NO_CACHE").is_none() => {
+        Some(root) if std::env::var_os("CGN_NO_CACHE").is_none() => {
             match crate::parse_cache::ParseCache::open(root) {
                 Ok(c) => Some(c),
                 Err(e) => {
@@ -274,7 +274,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     if args.dump_resolver.is_some() {
         eprintln!(
             "warning: --dump-resolver accepted but not yet wired in v2 layout; \
-             will be re-wired alongside `gnx diff` baseline path"
+             will be re-wired alongside `cgn diff` baseline path"
         );
     }
 

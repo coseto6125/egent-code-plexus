@@ -1,7 +1,7 @@
-//! Integration tests for `gnx inspect` flag surface (UID resolution,
+//! Integration tests for `cgn inspect` flag surface (UID resolution,
 //! kind / file_path / relation_types / include_tests filtering). The flags
 //! exist so the global CLAUDE.md GitNexus Workflow examples actually run.
-//! (renamed from `gnx context` in the CLI redesign)
+//! (renamed from `cgn context` in the CLI redesign)
 
 use serde_json::Value;
 use std::path::Path;

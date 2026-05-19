@@ -23,11 +23,11 @@ pub fn run(args: PruneArgs) -> Result<(), cgn_core::GnxError> {
     }
 
     // TODO(phase-5-rewire): per-commit prune — v2 stores commits, not branches.
-    // Branch-based prune has no meaning in v2. Use `gnx admin gc` once
+    // Branch-based prune has no meaning in v2. Use `cgn admin gc` once
     // per-commit GC (Phase 5+) is implemented.
     Err(cgn_core::GnxError::Output(
-        "gnx admin prune --branch is a no-op in v2 (branch is not stored). \
-         Use `gnx admin prune --orphans` to sweep repos whose worktree is gone."
+        "cgn admin prune --branch is a no-op in v2 (branch is not stored). \
+         Use `cgn admin prune --orphans` to sweep repos whose worktree is gone."
             .into(),
     ))
 }

@@ -193,7 +193,7 @@ fn git_head_sha(worktree: &Path) -> io::Result<String> {
         .to_string())
 }
 
-/// gnx-owned cache dirs that callers can't be expected to list in their
+/// cgn-owned cache dirs that callers can't be expected to list in their
 /// own `.gitignore`. Everything else — `target/`, `node_modules/`,
 /// `__pycache__/`, `dist/`, `.venv/`, etc — is honoured via `.git_ignore(true)`
 /// on the `WalkBuilder`, so the project's own `.gitignore` is the source

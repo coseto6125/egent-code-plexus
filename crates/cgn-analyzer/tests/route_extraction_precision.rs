@@ -333,7 +333,7 @@ fn python_app_test_client_chained_calls_emit_zero() {
     // look identical to `app.get(...)`).
     //
     // Empirical impact: this removes ~88% of the FPs that surfaced when
-    // running gnx with `--include-tests` on sanic-org/sanic. A user who
+    // running cgn with `--include-tests` on sanic-org/sanic. A user who
     // names a production attribute `test_client` would be false-negative,
     // but `test_client` is overwhelmingly a testing convention.
     let src = r#"
@@ -434,7 +434,7 @@ fn python_direct_client_get_emits_route_documented_limitation() {
     // This is a documented limitation. The `--include-tests` flag and
     // `FileCategory::Test` classification at index/query time are the
     // mitigation — `client = SanicTestClient(...)` patterns live in
-    // test files which get filtered by default in `gnx routes`.
+    // test files which get filtered by default in `cgn routes`.
     let src = r#"
 from sanic_testing.testing import SanicTestClient
 from sanic import Sanic
@@ -501,7 +501,7 @@ async def frozenset_methods_handler(request):
 
 #[test]
 fn python_flask_blueprint_transitive_import_extracts() {
-    // Real-world Flask pattern that gnx previously missed (recall gap
+    // Real-world Flask pattern that cgn previously missed (recall gap
     // found via gitnexus cross-validation against miguelgrinberg/microblog
     // `app/api/tokens.py`): a sub-module file does `from app.api import
     // bp` (no direct `from flask import ...`) and decorates handlers
@@ -890,7 +890,7 @@ fn php_chained_get_on_non_router_emits_zero() {
 
 #[test]
 fn php_laravel_nested_middleware_group_routes_extract() {
-    // Real-world Laravel pattern that gnx previously missed (PR #50
+    // Real-world Laravel pattern that cgn previously missed (PR #50
     // review finding): routes declared inside `Route::middleware(...)
     // ->group(function () { ... })` with bare paths and chained
     // `->name(...)`. Matches the breeze stubs structure verbatim.

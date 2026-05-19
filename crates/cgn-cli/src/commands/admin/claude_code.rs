@@ -1,4 +1,4 @@
-//! `gnx admin install-hook --claude-code` / `uninstall-hook` / `status`.
+//! `cgn admin install-hook --claude-code` / `uninstall-hook` / `status`.
 //! Writes / removes per-event entries in Claude Code's settings.json,
 //! preserving unrelated entries from other tools (e.g. legacy gitnexus
 //! hook installs).
@@ -39,7 +39,7 @@ pub const ALL_EVENTS: &[&str] = &[
     "post-tool-use",
 ];
 
-/// Entry point for `gnx admin install-hook --claude-code`.
+/// Entry point for `cgn admin install-hook --claude-code`.
 /// Called from `install_hook::run` when the host flag is set.
 pub fn run_install_claude_code(
     events_csv: Option<&str>,
@@ -228,7 +228,7 @@ fn merge_entry(settings: &mut Value, ev: &str, exe: &str) -> Result<(), GnxError
         GnxError::InvalidArgument(format!("settings.json `hooks.{camel}` is not an array"))
     })?;
 
-    // Idempotence: drop any existing entry pointing at `gnx hook <ev>`.
+    // Idempotence: drop any existing entry pointing at `cgn hook <ev>`.
     arr.retain(|e| {
         let c = command_of_entry(e);
         !(c.contains(&format!("hook {ev}")) && c.contains("--claude-code"))
@@ -243,12 +243,12 @@ fn merge_entry(settings: &mut Value, ev: &str, exe: &str) -> Result<(), GnxError
     if matches!(ev, "pre-tool-use") {
         h.insert(
             "statusMessage".into(),
-            Value::String("Enriching with gnx graph context...".into()),
+            Value::String("Enriching with cgn graph context...".into()),
         );
     } else if matches!(ev, "post-tool-use") {
         h.insert(
             "statusMessage".into(),
-            Value::String("Checking gnx index freshness...".into()),
+            Value::String("Checking cgn index freshness...".into()),
         );
     }
     entry.insert("hooks".into(), Value::Array(vec![Value::Object(h)]));

@@ -111,7 +111,7 @@ impl LanguageProvider for DockerfileProvider {
                     });
 
                     // Also emit the image name as a queryable Const node so users can
-                    // run `gnx context --name ubuntu` and get a hit.
+                    // run `cgn context --name ubuntu` and get a hit.
                     let start = root.start_position();
                     let end = root.end_position();
                     nodes.push(RawNode {

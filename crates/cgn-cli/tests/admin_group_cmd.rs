@@ -1,4 +1,4 @@
-//! Integration tests for `gnx admin group add/remove`.
+//! Integration tests for `cgn admin group add/remove`.
 //!
 //! Registry redirection: set HOME to a temp dir so `resolve_home_gnx`
 //! resolves to `<temp>/.gnx/registry.json`.
@@ -19,7 +19,7 @@ fn run_admin_group(home: &Path, args: &[&str]) -> std::process::Output {
         .args(&full_args)
         .env("HOME", home)
         .output()
-        .expect("gnx spawn failed")
+        .expect("cgn spawn failed")
 }
 
 fn read_registry(home: &Path) -> RegistryFile {
@@ -224,7 +224,7 @@ fn group_remove_preserves_non_empty_group() {
         ],
         vec![GroupEntry {
             name: "backend".into(),
-            // members use the alias strings (whatever was passed to `gnx admin group add`)
+            // members use the alias strings (whatever was passed to `cgn admin group add`)
             members: vec!["alpha".into(), "beta".into()],
         }],
     );

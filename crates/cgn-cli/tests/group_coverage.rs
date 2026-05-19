@@ -1,4 +1,4 @@
-//! Tests for `gnx group coverage`.
+//! Tests for `cgn group coverage`.
 //!
 //! Strategy:
 //! - Smoke tests: `--help` exits 0 and unknown-group exits non-zero.
@@ -19,7 +19,7 @@ fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
         .args(args)
         .env("HOME", home)
         .output()
-        .expect("gnx spawn failed")
+        .expect("cgn spawn failed")
 }
 
 fn init_git_repo(path: &Path) {
@@ -65,7 +65,7 @@ fn group_coverage_help_exits_zero() {
     let out = Command::new(gnx_bin())
         .args(["group", "coverage", "--help"])
         .output()
-        .expect("gnx spawn failed");
+        .expect("cgn spawn failed");
     assert!(
         out.status.success(),
         "expected exit 0 for --help; stderr: {}",

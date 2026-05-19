@@ -41,7 +41,7 @@ fn warn_if_local_diverges_from_remote(ref_str: &str, local_sha: &str, repo_dir: 
     }
     eprintln!(
         "warning: local `{ref_str}` ({}) differs from `{remote_ref}` ({}).\n\
-         gnx is using local. Sync with `git pull --ff-only origin {ref_str}`,\n\
+         cgn is using local. Sync with `git pull --ff-only origin {ref_str}`,\n\
          or pass `--baseline {remote_ref}` explicitly.",
         &local_sha[..7.min(local_sha.len())],
         &remote_sha[..7.min(remote_sha.len())]

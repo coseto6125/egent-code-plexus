@@ -1,4 +1,4 @@
-//! Integration test for `gnx rename` (Python MVP).
+//! Integration test for `cgn rename` (Python MVP).
 //!
 //! Pipeline coverage:
 //! - Stage 1 (graph): locate target node, collect inbound-edge source files
@@ -29,17 +29,17 @@ fn build_index(root: &Path) {
         .env("HOME", &home)
         .current_dir(root)
         .output()
-        .expect("gnx admin index failed to spawn");
+        .expect("cgn admin index failed to spawn");
     assert!(
         out.status.success(),
-        "gnx admin index failed: stderr={}, stdout={}",
+        "cgn admin index failed: stderr={}, stdout={}",
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout),
     );
 }
 
 /// Build a temp repo with rename_def.py + rename_user.py, init git, run
-/// `gnx admin index` to materialize a graph.bin. Returns the repo root.
+/// `cgn admin index` to materialize a graph.bin. Returns the repo root.
 fn setup_repo() -> tempfile::TempDir {
     let repo = tempfile::tempdir().expect("tempdir");
     let root = repo.path();
@@ -126,10 +126,10 @@ fn run_rename_stdout(root: &Path, extra_args: &[&str]) -> String {
         .env("HOME", &home)
         .current_dir(root)
         .output()
-        .expect("gnx rename failed to spawn");
+        .expect("cgn rename failed to spawn");
     assert!(
         out.status.success(),
-        "gnx rename failed:\nstderr={}\nstdout={}",
+        "cgn rename failed:\nstderr={}\nstdout={}",
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout),
     );
@@ -145,7 +145,7 @@ fn run_rename_both(root: &Path, extra_args: &[&str]) -> (String, String) {
         .env("HOME", &home)
         .current_dir(root)
         .output()
-        .expect("gnx rename failed to spawn");
+        .expect("cgn rename failed to spawn");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -176,7 +176,7 @@ fn dry_run_reports_hits_without_mutating_files() {
         .env("HOME", &home)
         .current_dir(root)
         .output()
-        .expect("gnx rename failed to spawn");
+        .expect("cgn rename failed to spawn");
     assert!(
         out.status.success(),
         "rename dry-run failed: stderr={}, stdout={}",
@@ -233,7 +233,7 @@ fn execute_renames_both_def_and_callers() {
         .env("HOME", &home)
         .current_dir(root)
         .output()
-        .expect("gnx rename failed to spawn");
+        .expect("cgn rename failed to spawn");
     assert!(
         out.status.success(),
         "rename execute failed: stderr={}, stdout={}",
@@ -397,7 +397,7 @@ fn rename_zero_occurrences_explicit_message() {
         .env("HOME", &home)
         .current_dir(root)
         .output()
-        .expect("gnx rename failed to spawn");
+        .expect("cgn rename failed to spawn");
     // Exit may be non-zero; check the message content regardless.
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);

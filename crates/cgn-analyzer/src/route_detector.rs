@@ -20,7 +20,7 @@ pub struct DetectedRoute {
 fn looks_like_path(s: &str) -> bool {
     // Strict: legitimate HTTP route literals start with `/`. The previous
     // lenient form (colon-, curly-, angle-, or pure-alphanumeric fallback)
-    // produced a ~86% FP rate on the gnx-rs self-corpus because
+    // produced a ~86% FP rate on the cgn-rs self-corpus because
     // `dict.get("key")` / `Map.get(...)` / `headers.get(...)` all matched.
     // Frameworks whose canonical literal is bare (`[HttpGet("users")]` in
     // C#) need their own parser-side path — they should not piggy-back on
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn detect_from_call_accepts_express_use_mount_point() {
         // `app.use('/api', router)` is an Express/Connect mount-point route.
-        // ref-gitnexus emits it as a Route node; gnx-rs must too — without
+        // ref-gitnexus emits it as a Route node; cgn-rs must too — without
         // `"use"` in HTTP_METHODS the call is silently dropped at
         // builder.rs:445, leaving the 3 routes in `examples/multi-router/`
         // and `examples/web-service/` unpaired in the parity report.

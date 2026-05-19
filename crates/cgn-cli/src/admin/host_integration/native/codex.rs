@@ -6,7 +6,7 @@ use cgn_core::GnxError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MARKER: &str = "gnx-codex-native-integration-v1";
+const MARKER: &str = "cgn-codex-native-integration-v1";
 const PATCH_NAME: &str = "codex-cli.patch";
 
 pub fn install(_theme: &ColorfulTheme) {
@@ -27,14 +27,14 @@ pub fn uninstall(_theme: &ColorfulTheme) {
 }
 
 pub fn status() -> HostStatus {
-    if let Some(checkout) = std::env::var_os("GNX_CODEX_CLI_CHECKOUT").map(PathBuf::from) {
+    if let Some(checkout) = std::env::var_os("CGN_CODEX_CLI_CHECKOUT").map(PathBuf::from) {
         return status_from_checkout(&checkout);
     }
     let patch = patch_path();
     if patch.exists() {
         HostStatus::Outdated {
             reason: format!(
-                "patch prepared at {}; set GNX_CODEX_CLI_CHECKOUT to verify the fork",
+                "patch prepared at {}; set CGN_CODEX_CLI_CHECKOUT to verify the fork",
                 patch.display()
             ),
         }
@@ -66,7 +66,7 @@ fn remove_patch(path: &Path) -> Result<(), GnxError> {
 
 fn patch_path() -> PathBuf {
     config_root()
-        .join("gnx")
+        .join("cgn")
         .join("host-integration")
         .join(PATCH_NAME)
 }
@@ -87,11 +87,11 @@ fn write_patch(path: &Path, cgn_root: &Path) -> Result<(), GnxError> {
     }
     let root = cgn_root.to_string_lossy();
     let body = format!(
-        r#"diff --git a/codex-rs/core/src/tools/gnx.rs b/codex-rs/core/src/tools/gnx.rs
+        r#"diff --git a/codex-rs/core/src/tools/cgn.rs b/codex-rs/core/src/tools/cgn.rs
 new file mode 100644
 index 0000000..1111111
 --- /dev/null
-+++ b/codex-rs/core/src/tools/gnx.rs
++++ b/codex-rs/core/src/tools/cgn.rs
 @@ -0,0 +1,48 @@
 +// {MARKER}
 +//
@@ -109,7 +109,7 @@ index 0000000..1111111
 +
 +use cgn_core::GnxError;
 +
-+pub const GNX_NATIVE_MARKER: &str = "{MARKER}";
++pub const CGN_NATIVE_MARKER: &str = "{MARKER}";
 +
 +pub fn cgn_command_args(tool: &str, raw_args: &[String]) -> Result<Vec<String>, GnxError> {{
 +    let mut argv = Vec::with_capacity(raw_args.len() + 1);
@@ -176,17 +176,17 @@ mod tests {
     fn write_patch_includes_marker_and_cgn_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let patch = dir.path().join(PATCH_NAME);
-        write_patch(&patch, Path::new("/repo/graph-nexus-rs")).expect("write patch");
+        write_patch(&patch, Path::new("/repo/code-graph-nexus")).expect("write patch");
 
         let body = fs::read_to_string(patch).expect("read patch");
         assert!(body.contains(MARKER));
-        assert!(body.contains("/repo/graph-nexus-rs/crates/graph-nexus-cli"));
+        assert!(body.contains("/repo/code-graph-nexus/crates/cgn-cli"));
     }
 
     #[test]
     fn status_from_checkout_detects_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("gnx.rs");
+        let file = dir.path().join("cgn.rs");
         fs::write(&file, format!("const MARKER: &str = \"{MARKER}\";")).expect("write marker");
 
         assert!(matches!(
@@ -199,7 +199,7 @@ mod tests {
     fn prepared_patch_is_not_reported_as_installed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let patch = dir.path().join(PATCH_NAME);
-        write_patch(&patch, Path::new("/repo/graph-nexus-rs")).expect("write patch");
+        write_patch(&patch, Path::new("/repo/code-graph-nexus")).expect("write patch");
 
         assert!(matches!(
             status_from_checkout(dir.path()),
@@ -211,7 +211,7 @@ mod tests {
     fn remove_patch_deletes_existing_patch_and_missing_is_noop() {
         let dir = tempfile::tempdir().expect("tempdir");
         let patch = dir.path().join(PATCH_NAME);
-        write_patch(&patch, Path::new("/repo/graph-nexus-rs")).expect("write patch");
+        write_patch(&patch, Path::new("/repo/code-graph-nexus")).expect("write patch");
 
         remove_patch(&patch).expect("remove patch");
         remove_patch(&patch).expect("remove missing patch");

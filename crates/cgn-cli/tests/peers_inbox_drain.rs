@@ -27,7 +27,7 @@ fn pre_tool_use_emits_peer_section_when_inbox_has_entries() {
     let mut child = Command::new(bin())
         .args(["hook", "pre-tool-use", "--claude-code"])
         .env("CLAUDE_CODE_SESSION_ID", me)
-        .env("GNX_REPO_ROOT_OVERRIDE", dir.path())
+        .env("CGN_REPO_ROOT_OVERRIDE", dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -53,7 +53,7 @@ fn pre_tool_use_silent_when_inbox_empty() {
     let mut child = Command::new(bin())
         .args(["hook", "pre-tool-use", "--claude-code"])
         .env("CLAUDE_CODE_SESSION_ID", me)
-        .env("GNX_REPO_ROOT_OVERRIDE", dir.path())
+        .env("CGN_REPO_ROOT_OVERRIDE", dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -62,7 +62,7 @@ fn pre_tool_use_silent_when_inbox_empty() {
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stdout.contains("[gnx peers]"),
+        !stdout.contains("[cgn peers]"),
         "should not emit peers section when inbox empty. stdout: {stdout}"
     );
 }
@@ -80,7 +80,7 @@ fn pre_tool_use_truncates_inbox_after_drain() {
     let mut child = Command::new(bin())
         .args(["hook", "pre-tool-use", "--claude-code"])
         .env("CLAUDE_CODE_SESSION_ID", me)
-        .env("GNX_REPO_ROOT_OVERRIDE", dir.path())
+        .env("CGN_REPO_ROOT_OVERRIDE", dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -115,7 +115,7 @@ fn user_prompt_submit_also_drains_inbox() {
     let mut child = Command::new(bin())
         .args(["hook", "user-prompt-submit", "--claude-code"])
         .env("CLAUDE_CODE_SESSION_ID", me)
-        .env("GNX_REPO_ROOT_OVERRIDE", dir.path())
+        .env("CGN_REPO_ROOT_OVERRIDE", dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

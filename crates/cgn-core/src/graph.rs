@@ -2,7 +2,7 @@ use crate::pool::StrRef;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Magic bytes at the head of every `graph.bin`. Used by the reader to
-/// reject non-gnx files (or files truncated below the header length)
+/// reject non-cgn files (or files truncated below the header length)
 /// before rkyv attempts a structural cast.
 pub const GRAPH_MAGIC: [u8; 8] = *b"GNX-RS\0\0";
 
@@ -127,7 +127,7 @@ pub enum NodeKind {
     /// dispatch + default-method semantics.
     Trait,
     /// Rust `impl` block: associates methods with a concrete type. Not
-    /// a symbol callers reach for directly, but `gnx inspect` needs it
+    /// a symbol callers reach for directly, but `cgn inspect` needs it
     /// to enumerate associated functions per type.
     Impl,
 }
@@ -284,7 +284,7 @@ pub struct RouteShape {
 
 /// File-level record of a truly unresolvable code pattern (eval/dynamic
 /// import/cross-object reflection/...). Persisted in the graph so that
-/// `gnx context` / `gnx analyze` can surface blind spots to the LLM,
+/// `cgn context` / `cgn analyze` can surface blind spots to the LLM,
 /// telling it "we cannot see past this site — confirm manually".
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]

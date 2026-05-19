@@ -1,4 +1,4 @@
-//! `gnx admin drop` — delete a repo's on-disk index data AND registry entry.
+//! `cgn admin drop` — delete a repo's on-disk index data AND registry entry.
 //!
 //! Targets the repo identified by `--repo` (path, defaulting to cwd).
 //! Side effects:

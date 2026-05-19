@@ -1,5 +1,5 @@
 //! Regression tests: top-level commands reject `--repo @<group>` and emit
-//! a hint pointing at `gnx group <verb>`. `@all` must continue to work.
+//! a hint pointing at `cgn group <verb>`. `@all` must continue to work.
 
 use std::fs;
 use std::process::Command;
@@ -35,7 +35,7 @@ fn search_at_group_errors_with_hint() {
     assert!(!out.status.success(), "expected non-zero exit");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("gnx group find"),
+        stderr.contains("cgn group find"),
         "missing hint; got: {stderr}"
     );
 }
@@ -51,7 +51,7 @@ fn contracts_at_group_errors_with_hint() {
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("gnx group contracts"), "got: {stderr}");
+    assert!(stderr.contains("cgn group contracts"), "got: {stderr}");
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn find_at_group_errors_with_hint() {
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("gnx group find"), "got: {stderr}");
+    assert!(stderr.contains("cgn group find"), "got: {stderr}");
 }
 
 #[test]
@@ -79,10 +79,10 @@ fn coverage_at_group_errors_with_hint() {
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("gnx group coverage"), "got: {stderr}");
+    assert!(stderr.contains("cgn group coverage"), "got: {stderr}");
 }
 
-// ── Commands with a direct `gnx group <verb>` analog ───────────────────────
+// ── Commands with a direct `cgn group <verb>` analog ───────────────────────
 
 #[test]
 fn impact_at_group_errors_with_hint() {
@@ -95,10 +95,10 @@ fn impact_at_group_errors_with_hint() {
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("gnx group impact"), "got: {stderr}");
+    assert!(stderr.contains("cgn group impact"), "got: {stderr}");
 }
 
-// ── Commands without a group analog → redirect to `gnx group --help` ────────
+// ── Commands without a group analog → redirect to `cgn group --help` ────────
 
 fn assert_redirects_to_group_help(args: &[&str]) {
     let home = TempDir::new().unwrap();
@@ -111,7 +111,7 @@ fn assert_redirects_to_group_help(args: &[&str]) {
     assert!(!out.status.success(), "args={args:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("gnx group --help"),
+        stderr.contains("cgn group --help"),
         "args={args:?}, stderr={stderr}"
     );
     // Sanity: should NOT silently expand to multi-repo or hit auto_ensure
@@ -207,7 +207,7 @@ fn search_at_all_still_works_on_empty_registry() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !combined.contains("gnx group"),
-        "@all should not suggest gnx group: {combined}"
+        !combined.contains("cgn group"),
+        "@all should not suggest cgn group: {combined}"
     );
 }

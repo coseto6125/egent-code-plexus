@@ -34,7 +34,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     let home_gnx = cgn_core::registry::resolve_home_gnx();
     if should_run_orphan_prune(&home_gnx) && spawn_background_prune(&home_gnx) {
         sections.push(
-            "gnx orphan-registry sweep started in background. Stale ~/.gnx/<repo>__<hash>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.".to_string(),
+            "cgn orphan-registry sweep started in background. Stale ~/.gnx/<repo>__<hash>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.".to_string(),
         );
     }
 
@@ -66,7 +66,7 @@ fn maybe_reindex_notice(input: &HookInput) -> Option<String> {
     }
 
     // No index registered for this worktree → nothing to refresh; the
-    // SessionStart hint already nagged the user to run `gnx admin index`.
+    // SessionStart hint already nagged the user to run `cgn admin index`.
     let index_dir = lookup_index_dir(&input.cwd)?;
     let repo_root = Path::new(&input.cwd);
     let graph_path = index_dir.join("graph.bin");
@@ -85,7 +85,7 @@ fn maybe_reindex_notice(input: &HookInput) -> Option<String> {
         return None;
     }
     Some(format!(
-        "gnx reindex started in background (index stale ~{age}s). Subsequent gnx tools may use stale data until completion (~30-120s). If it appears stuck, run `gnx admin index` manually."
+        "cgn reindex started in background (index stale ~{age}s). Subsequent cgn tools may use stale data until completion (~30-120s). If it appears stuck, run `cgn admin index` manually."
     ))
 }
 
@@ -93,7 +93,7 @@ fn is_git_mutation(cmd: &str) -> bool {
     git_mutation_re().is_match(&strip_shell_quotes(cmd))
 }
 
-/// Detached background `gnx admin index --repo <cwd>` under flock at
+/// Detached background `cgn admin index --repo <cwd>` under flock at
 /// `<state_dir>/.analyze.lock`. Writes `.rebuild-complete` on success
 /// or `.rebuild-failed` after MAX=3 attempts. Returns true iff the
 /// launcher subprocess was spawned (the analyze outcome surfaces
@@ -120,7 +120,7 @@ fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
     })
 }
 
-/// Detached background `gnx admin prune --orphans` under flock at
+/// Detached background `cgn admin prune --orphans` under flock at
 /// `<home_gnx>/.prune.lock`. Writes `.prune-complete` on success or
 /// `.prune-failed` on failure. Returns true iff the launcher spawned.
 fn spawn_background_prune(home_gnx: &Path) -> bool {

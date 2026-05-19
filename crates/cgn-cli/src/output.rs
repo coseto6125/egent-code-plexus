@@ -212,7 +212,7 @@ mod tests {
                 "current_head_short": "b6343a7"
             },
             "integer_kept": 4922,
-            "non_iso_string": "graph-nexus"
+            "non_iso_string": "code-graph-nexus"
         });
         compress_for_llm(&mut v);
         assert_eq!(v["supported"][0]["confidence"], json!(0.6));
@@ -221,7 +221,7 @@ mod tests {
         // Non-ISO strings, integers, and non-timestamp ids stay untouched.
         assert_eq!(v["freshness"]["current_head_short"], json!("b6343a7"));
         assert_eq!(v["integer_kept"], json!(4922));
-        assert_eq!(v["non_iso_string"], json!("graph-nexus"));
+        assert_eq!(v["non_iso_string"], json!("code-graph-nexus"));
     }
 
     #[test]

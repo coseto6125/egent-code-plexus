@@ -1,5 +1,5 @@
 //! Stdio JSON-RPC MCP server. Spawn-mode only; tools are derived at
-//! startup from the gnx CLI's `clap::Command` tree (see `schema.rs`).
+//! startup from the cgn CLI's `clap::Command` tree (see `schema.rs`).
 
 use crate::schema::{enumerate_tools, DerivedTool};
 use anyhow::{Context, Result};
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct GnxMcpServer {
-    /// Path to the current gnx binary; used to spawn subprocesses.
+    /// Path to the current cgn binary; used to spawn subprocesses.
     pub self_exe: PathBuf,
     /// Tools derived from the clap tree at construction time.
     tools: Vec<DerivedTool>,
@@ -29,7 +29,7 @@ impl GnxMcpServer {
         // with the three explicit peer sub-subcommand tools.
         tools.retain(|t| t.name != "gnx_peers");
         tools.extend(crate::peers::peer_tools());
-        // `gnx group` is `#[command(hide = true)]` so enumerate_tools skips
+        // `cgn group` is `#[command(hide = true)]` so enumerate_tools skips
         // it — without this manual injection, LLM clients cannot reach the
         // sub-subcommands at all. Discriminator: `subcmd`.
         tools.extend(crate::group::group_tools());
@@ -45,7 +45,7 @@ impl GnxMcpServer {
         &self.tools
     }
 
-    /// Dispatch one MCP `tools/call`: spawn `gnx <subcommand>` with argv
+    /// Dispatch one MCP `tools/call`: spawn `cgn <subcommand>` with argv
     /// derived from the JSON args and return stdout.
     pub async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<String> {
         let tool = self
@@ -69,7 +69,7 @@ impl rmcp::ServerHandler for RmcpHandler {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new("graph-nexus-mcp", env!("CARGO_PKG_VERSION")),
+            Implementation::new("cgn-mcp", env!("CARGO_PKG_VERSION")),
         )
     }
 

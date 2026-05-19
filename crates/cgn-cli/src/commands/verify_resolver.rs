@@ -1,8 +1,8 @@
-//! `gnx verify-resolver` — diff our resolver dump against a language oracle.
+//! `cgn verify-resolver` — diff our resolver dump against a language oracle.
 //!
 //! Spec: `docs/specs/2026-05-15-resolver-oracle-harness.md`.
 //!
-//! Reads two JSONL files (oracle output + gnx `--dump-resolver` output),
+//! Reads two JSONL files (oracle output + cgn `--dump-resolver` output),
 //! joins on `(src_file, name)`, classifies each match into TP / FP_ghost /
 //! FP_overmatch / FN_dangling / tier_demoted (plus side-only buckets), and
 //! prints a markdown report. Exit code is always 0 — this is a benchmark,
@@ -18,10 +18,10 @@ pub struct VerifyResolverArgs {
     #[arg(long)]
     pub oracle: PathBuf,
 
-    /// Path to the gnx resolver dump JSONL (produced by
-    /// `gnx analyze --dump-resolver`).
+    /// Path to the cgn resolver dump JSONL (produced by
+    /// `cgn analyze --dump-resolver`).
     #[arg(long)]
-    pub gnx: PathBuf,
+    pub cgn: PathBuf,
 
     /// Language selector — controls extension-equivalence rules for
     /// comparing `target_file`. Currently `ts`, `py`, or `rs`.
@@ -74,20 +74,20 @@ struct ParsedJsonl {
 pub fn run(args: VerifyResolverArgs) -> Result<(), cgn_core::GnxError> {
     let oracle = read_jsonl(&args.oracle)
         .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read oracle: {e}")))?;
-    let gnx = read_jsonl(&args.gnx)
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read gnx dump: {e}")))?;
+    let cgn = read_jsonl(&args.cgn)
+        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read cgn dump: {e}")))?;
 
     let normalize = pick_normalize(&args.lang);
-    let (counts, worst, per_tier) = diff(&oracle.records, &gnx.records, normalize);
+    let (counts, worst, per_tier) = diff(&oracle.records, &cgn.records, normalize);
     let report = render_report(
         &args.lang,
         &counts,
         &worst,
         &per_tier,
         oracle.records.len(),
-        gnx.records.len(),
+        cgn.records.len(),
         oracle.bad_lines,
-        gnx.bad_lines,
+        cgn.bad_lines,
     );
 
     match args.report.as_deref() {
@@ -190,10 +190,10 @@ struct WorstOffender {
 
 fn diff(
     oracle: &[Record],
-    gnx: &[Record],
+    cgn: &[Record],
     normalize: Normalizer,
 ) -> (Counts, Vec<WorstOffender>, FxHashMap<String, Counts>) {
-    // Index gnx by (src_file, name) — there may be multiple gnx attempts per
+    // Index cgn by (src_file, name) — there may be multiple cgn attempts per
     // key (e.g. heritage + type annotation + call). Pick the BEST attempt:
     //   resolved (tier != Unresolved) > unresolved
     //   SameFile/ImportScoped > Global > AmbiguousGlobal > Unresolved
@@ -210,7 +210,7 @@ fn diff(
             _ => 4,
         }
     };
-    for r in gnx {
+    for r in cgn {
         let key = (r.src_file.clone(), r.name.clone());
         match gnx_by_key.get(&key) {
             Some(existing) if tier_rank(&existing.tier) <= tier_rank(&r.tier) => {}
@@ -248,7 +248,7 @@ fn diff(
                         if normalize(ot) == normalize(gt) {
                             counts.tp += 1;
                             entry.tp += 1;
-                            // tier_demoted: oracle says resolved, gnx fell back to Global
+                            // tier_demoted: oracle says resolved, cgn fell back to Global
                             if g.tier == "Global" {
                                 counts.tier_demoted += 1;
                                 entry.tier_demoted += 1;
@@ -256,7 +256,7 @@ fn diff(
                                     &mut offenders,
                                     o,
                                     "tier_demoted",
-                                    &format!("gnx=Global oracle→{}", normalize(ot)),
+                                    &format!("cgn=Global oracle→{}", normalize(ot)),
                                 );
                             }
                             if g.alt_count > 0 {
@@ -276,7 +276,7 @@ fn diff(
                                 &mut offenders,
                                 o,
                                 "fp_ghost",
-                                &format!("gnx→{} oracle→{}", normalize(gt), normalize(ot)),
+                                &format!("cgn→{} oracle→{}", normalize(gt), normalize(ot)),
                             );
                         }
                     }
@@ -295,7 +295,7 @@ fn diff(
                         );
                     }
                     (None, Some(_)) => {
-                        // Oracle said unresolved but gnx connected → conservative FP_ghost
+                        // Oracle said unresolved but cgn connected → conservative FP_ghost
                         counts.fp_ghost += 1;
                         entry.fp_ghost += 1;
                     }
@@ -307,8 +307,8 @@ fn diff(
         }
     }
 
-    // gnx_only: gnx decisions for keys oracle never produced (often Tier 1 same-file)
-    for g in gnx {
+    // gnx_only: cgn decisions for keys oracle never produced (often Tier 1 same-file)
+    for g in cgn {
         let key = (g.src_file.clone(), g.name.clone());
         if !oracle_keys.contains(&key) {
             if g.tier == "SameFile" {
@@ -370,7 +370,7 @@ fn render_report(
         counts.fp_overmatch
     ));
     s.push_str(&format!(
-        "| FN_dangling (oracle resolved, gnx didn't) | {} |\n",
+        "| FN_dangling (oracle resolved, cgn didn't) | {} |\n",
         counts.fn_dangling
     ));
     s.push_str(&format!(
@@ -378,7 +378,7 @@ fn render_report(
         counts.tier_demoted
     ));
     s.push_str(&format!(
-        "| oracle_only (oracle imports gnx never saw) | {} |\n",
+        "| oracle_only (oracle imports cgn never saw) | {} |\n",
         counts.oracle_only
     ));
     s.push_str(&format!(
@@ -391,7 +391,7 @@ fn render_report(
     ));
     s.push('\n');
 
-    s.push_str("## Per-tier breakdown (gnx side)\n\n");
+    s.push_str("## Per-tier breakdown (cgn side)\n\n");
     s.push_str("| tier | TP | FP_ghost | FP_overmatch | tier_demoted | FN_dangling |\n");
     s.push_str("|---|---|---|---|---|---|\n");
     let mut tiers: Vec<&String> = per_tier.keys().collect();
@@ -471,7 +471,7 @@ mod tests {
             Some("y.ts"),
             0,
         )];
-        let gnx = vec![mk(
+        let cgn = vec![mk(
             "s.ts",
             "X",
             Some("./y"),
@@ -479,7 +479,7 @@ mod tests {
             Some("y/index.ts"),
             0,
         )];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.tp, 1);
         assert_eq!(c.fp_ghost, 0);
         assert_eq!(c.fn_dangling, 0);
@@ -495,7 +495,7 @@ mod tests {
             Some("y.ts"),
             0,
         )];
-        let gnx = vec![mk(
+        let cgn = vec![mk(
             "s.ts",
             "X",
             Some("@/y"),
@@ -503,7 +503,7 @@ mod tests {
             Some("wrong/y.ts"),
             0,
         )];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.fp_ghost, 1);
         assert_eq!(c.tp, 0);
     }
@@ -518,7 +518,7 @@ mod tests {
             Some("y.ts"),
             0,
         )];
-        let gnx = vec![mk(
+        let cgn = vec![mk(
             "s.ts",
             "X",
             Some("@/y"),
@@ -526,7 +526,7 @@ mod tests {
             Some("y.ts"),
             3, // 3 alternative candidates also got edges
         )];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.tp, 1);
         assert_eq!(c.fp_overmatch, 1);
         assert_eq!(c.tier_demoted, 1, "Global + oracle-resolved = tier_demoted");
@@ -542,8 +542,8 @@ mod tests {
             Some("y.ts"),
             0,
         )];
-        let gnx = vec![mk("s.ts", "X", Some("@/y"), "Unresolved", None, 0)];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let cgn = vec![mk("s.ts", "X", Some("@/y"), "Unresolved", None, 0)];
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.fn_dangling, 1);
         assert_eq!(c.tp, 0);
     }
@@ -558,12 +558,12 @@ mod tests {
             Some("y.ts"),
             0,
         )];
-        // gnx records two attempts for same (src, name): Unresolved then Global → Global wins
-        let gnx = vec![
+        // cgn records two attempts for same (src, name): Unresolved then Global → Global wins
+        let cgn = vec![
             mk("s.ts", "X", None, "Unresolved", None, 0),
             mk("s.ts", "X", Some("@/y"), "Global", Some("y.ts"), 0),
         ];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.tp, 1, "should pick the Global resolution, not Unresolved");
     }
 
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn diff_counts_oracle_only_when_gnx_never_saw_the_key() {
-        // Oracle has a binding gnx never resolved (e.g. import in a file
+        // Oracle has a binding cgn never resolved (e.g. import in a file
         // with no callsite). Should land in `oracle_only` and not affect
         // any other counter.
         let oracle = vec![mk(
@@ -588,8 +588,8 @@ mod tests {
             Some("y.ts"),
             0,
         )];
-        let gnx: Vec<Record> = vec![];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let cgn: Vec<Record> = vec![];
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.oracle_only, 1);
         assert_eq!(c.tp, 0);
         assert_eq!(c.fp_ghost, 0);
@@ -598,11 +598,11 @@ mod tests {
 
     #[test]
     fn diff_treats_oracle_unresolved_plus_gnx_connected_as_fp_ghost() {
-        // Oracle says the import didn't resolve; gnx still produced an
+        // Oracle says the import didn't resolve; cgn still produced an
         // edge (likely Tier-3 same-name match). Conservative: count as
-        // ghost since gnx is connecting things tsc couldn't.
+        // ghost since cgn is connecting things tsc couldn't.
         let oracle = vec![mk("s.ts", "X", Some("@/y"), "Unresolved", None, 0)];
-        let gnx = vec![mk(
+        let cgn = vec![mk(
             "s.ts",
             "X",
             Some("@/y"),
@@ -610,7 +610,7 @@ mod tests {
             Some("somewhere.ts"),
             0,
         )];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.fp_ghost, 1);
         assert_eq!(c.tp, 0);
     }
@@ -620,8 +620,8 @@ mod tests {
         // Neither side resolved — no defect, no signal. Should not bump
         // any of the headline counters.
         let oracle = vec![mk("s.ts", "X", Some("nope"), "Unresolved", None, 0)];
-        let gnx = vec![mk("s.ts", "X", Some("nope"), "Unresolved", None, 0)];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let cgn = vec![mk("s.ts", "X", Some("nope"), "Unresolved", None, 0)];
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.tp, 0);
         assert_eq!(c.fp_ghost, 0);
         assert_eq!(c.fn_dangling, 0);
@@ -630,15 +630,15 @@ mod tests {
 
     #[test]
     fn diff_buckets_gnx_only_records_by_tier() {
-        // gnx resolved Tier 1 SameFile entries oracle never sees — those
+        // cgn resolved Tier 1 SameFile entries oracle never sees — those
         // should land in `gnx_only_same_file` (excluded from diff). Other
         // tier hits oracle never sees go to `gnx_only_other`.
         let oracle: Vec<Record> = vec![];
-        let gnx = vec![
+        let cgn = vec![
             mk("s.ts", "X", None, "SameFile", Some("s.ts"), 0),
             mk("s.ts", "Y", Some("@/z"), "Global", Some("z.ts"), 0),
         ];
-        let (c, _, _) = diff(&oracle, &gnx, normalize_ts);
+        let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
         assert_eq!(c.gnx_only_same_file, 1);
         assert_eq!(c.gnx_only_other, 1);
     }
@@ -647,7 +647,7 @@ mod tests {
     fn read_jsonl_skips_malformed_lines_and_counts_them() {
         use std::io::Write;
         let path =
-            std::env::temp_dir().join(format!("gnx-jsonl-test-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("cgn-jsonl-test-{}.jsonl", std::process::id()));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(
             br#"{"src_file":"a.ts","name":"X","specifier":null,"tier":"SameFile","target_file":null,"alt_count":0}

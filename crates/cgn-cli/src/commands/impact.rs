@@ -26,7 +26,7 @@ pub enum Direction {
 /// callers / downstream callees with risk_level. From `--baseline <ref>`
 /// detects symbols changed vs the baseline and runs the same traversal per
 /// change. For edge-level resolver delta (tier degradation, silent break),
-/// use `gnx diff --section bindings` instead.
+/// use `cgn diff --section bindings` instead.
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
     /// Target symbol name (mutually exclusive with --baseline). Equivalent to
@@ -133,7 +133,7 @@ pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxErr
     build_payload_with_hints(args, engine).map(|(v, _)| v)
 }
 
-// ── Per-symbol library API (used by `gnx group impact`) ─────────────────────
+// ── Per-symbol library API (used by `cgn group impact`) ─────────────────────
 
 /// Result of a single-symbol local impact computation.
 ///
@@ -166,7 +166,7 @@ impl LocalImpact {
             .unwrap_or(0)
     }
 
-    /// The full JSON payload — same shape as `gnx impact --format json`.
+    /// The full JSON payload — same shape as `cgn impact --format json`.
     pub fn as_json(&self) -> &Value {
         &self.payload
     }
@@ -180,7 +180,7 @@ impl LocalImpact {
 ///
 /// Returns `Ok(LocalImpact)` even when the symbol is not found in the graph
 /// (the payload will carry an `"error"` field in that case), matching the
-/// same graceful-degradation behaviour as `gnx impact --target X`.
+/// same graceful-degradation behaviour as `cgn impact --target X`.
 pub fn run_for_symbol(
     engine: &Engine,
     member_repo: &str,
@@ -279,7 +279,7 @@ fn impact_by_name(
         return Ok((
             json!({
                 "error": format!("No symbol named '{name}' found in graph"),
-                "hint": "Try `gnx find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
+                "hint": "Try `cgn find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
             }),
             ImpactStderrHints::default(),
         ));
@@ -378,7 +378,7 @@ fn impact_by_name(
             "file": files_field,
             "total": all_blind_spot_kinds.len(),
             "by_kind": by_kind,
-            "note": "traversal may be incomplete — see `gnx doctor` blind spots catalog",
+            "note": "traversal may be incomplete — see `cgn doctor` blind spots catalog",
         });
     }
 

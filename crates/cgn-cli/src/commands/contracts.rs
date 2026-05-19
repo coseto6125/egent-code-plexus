@@ -1,4 +1,4 @@
-//! `gnx contracts` — cross-repo API contracts inventory.
+//! `cgn contracts` — cross-repo API contracts inventory.
 //!
 //! Scans ≥2 registered repos and matches **producers** (HTTP routes,
 //! queue producers, RPC endpoints) to **consumers** (HTTP clients,
@@ -90,7 +90,7 @@ pub fn run(args: ContractsArgs) -> Result<(), GnxError> {
         return Err(GnxError::Output(format!(
             "contracts requires ≥2 repos for cross-repo matching (got {n}).\n\
              Use --repo @<group-with-≥2-members> or --repo @all.\n\
-             Tip: run `gnx admin config --show` to list registered repos.",
+             Tip: run `cgn admin config --show` to list registered repos.",
             n = resolved.len()
         )));
     }

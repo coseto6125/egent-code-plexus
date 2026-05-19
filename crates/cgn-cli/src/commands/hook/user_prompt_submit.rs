@@ -28,7 +28,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
             let tail = read_log_tail(&log, 3);
             let _ = fs::remove_file(&failed);
             let msg = format!(
-                "gnx background reindex FAILED. {} Run `gnx admin index` manually to retry.",
+                "cgn background reindex FAILED. {} Run `cgn admin index` manually to retry.",
                 if tail.is_empty() {
                     String::new()
                 } else {
@@ -42,7 +42,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
                 .unwrap_or_else(|| "?".into());
             let _ = fs::remove_file(&complete);
             sections.push(format!(
-                "gnx index rebuild complete ({stats}). gnx tools now return fresh data."
+                "cgn index rebuild complete ({stats}). cgn tools now return fresh data."
             ));
         }
     }

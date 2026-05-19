@@ -1,8 +1,8 @@
-//! Manually-constructed MCP tool for `gnx group` sub-subcommands.
+//! Manually-constructed MCP tool for `cgn group` sub-subcommands.
 //!
-//! The root `gnx group` subcommand is `#[command(hide = true)]` in main.rs,
+//! The root `cgn group` subcommand is `#[command(hide = true)]` in main.rs,
 //! so `enumerate_tools` skips it. Without this hand-rolled tool, LLM clients
-//! would have no path to invoke `gnx group <verb>` via MCP — and the
+//! would have no path to invoke `cgn group <verb>` via MCP — and the
 //! GroupAtTopLevel migration hint emitted by `--repo @<group>` rejection
 //! would point at a verb that's MCP-unreachable.
 //!
@@ -10,7 +10,7 @@
 //! a `subcmd` discriminator (`sync` / `status` / `contracts` / `impact` /
 //! `find` / `coverage`). `spawn::peel_subcmd` lifts `subcmd` off the JSON
 //! object and prepends it as the first argv token, yielding
-//! `gnx group <subcmd> <name> [<pattern>] [--flags...]`.
+//! `cgn group <subcmd> <name> [<pattern>] [--flags...]`.
 
 use crate::schema::DerivedTool;
 use serde_json::json;
@@ -29,7 +29,7 @@ fn tool_group() -> DerivedTool {
         description: "Multi-repo group operations: extract contracts, query \
             cross-repo impact, find / batch-find across all members. Pick \
             `subcmd`; see each arg's [tag] for which subcmd uses it. \
-            Groups are managed via `gnx admin group add/remove`."
+            Groups are managed via `cgn admin group add/remove`."
             .into(),
         schema: Arc::new(json!({
             "type": "object",
@@ -41,7 +41,7 @@ fn tool_group() -> DerivedTool {
                 },
                 "name": {
                     "type": "string",
-                    "description": "[all] Group name (must exist in registry; add members via `gnx admin group add <repo> <group>`)."
+                    "description": "[all] Group name (must exist in registry; add members via `cgn admin group add <repo> <group>`)."
                 },
                 "pattern": {
                     "type": "string",

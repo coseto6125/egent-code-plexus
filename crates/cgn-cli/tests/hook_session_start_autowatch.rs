@@ -16,7 +16,7 @@ fn run_session_start(cwd: &std::path::Path) -> std::process::Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn gnx");
+        .expect("spawn cgn");
     child
         .stdin
         .as_mut()

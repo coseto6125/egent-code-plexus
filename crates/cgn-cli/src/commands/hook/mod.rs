@@ -1,4 +1,4 @@
-//! `gnx hook <event> --claude-code` — Claude Code hook entry point.
+//! `cgn hook <event> --claude-code` — Claude Code hook entry point.
 //!
 //! Reads a JSON envelope on stdin, dispatches to the per-event handler,
 //! and emits a `{"hookSpecificOutput": ...}` JSON response on stdout
@@ -43,7 +43,7 @@ pub enum HookEvent {
 pub fn run(args: HookArgs) -> Result<(), GnxError> {
     if !args.claude_code {
         return Err(GnxError::InvalidArgument(
-            "gnx hook: exactly one host flag required (e.g. --claude-code)".into(),
+            "cgn hook: exactly one host flag required (e.g. --claude-code)".into(),
         ));
     }
     let input = common::read_stdin_envelope()?;

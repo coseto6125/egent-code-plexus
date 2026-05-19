@@ -1,4 +1,4 @@
-//! Integration tests for `gnx coverage`.
+//! Integration tests for `cgn coverage`.
 //!
 //! Tests validate:
 //!   1. Without `--repo`: registry-level overview (indexed_repos + groups).
@@ -15,7 +15,7 @@ fn gnx_bin() -> &'static str {
     env!("CARGO_BIN_EXE_gnx")
 }
 
-/// Run `gnx coverage [args]` with a synthetic HOME (empty registry) and
+/// Run `cgn coverage [args]` with a synthetic HOME (empty registry) and
 /// return stdout as a String.
 fn run_coverage_empty_registry(extra: &[&str]) -> String {
     let tmp = tempfile::tempdir().unwrap();
@@ -23,7 +23,7 @@ fn run_coverage_empty_registry(extra: &[&str]) -> String {
         .args(["coverage"])
         .args(extra)
         .env("HOME", tmp.path())
-        .env("GNX_HOME", tmp.path().join(".gnx"))
+        .env("CGN_HOME", tmp.path().join(".gnx"))
         .output()
         .expect("coverage failed to spawn");
     assert!(
@@ -34,8 +34,8 @@ fn run_coverage_empty_registry(extra: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Run `gnx coverage [args]` against a registry that has one registered repo.
-/// The repo is a real temp dir indexed via `gnx admin index`. Indexing now
+/// Run `cgn coverage [args]` against a registry that has one registered repo.
+/// The repo is a real temp dir indexed via `cgn admin index`. Indexing now
 /// upserts the global registry (the only writer that does — `admin group`
 /// requires a pre-existing entry, `admin register` doesn't exist as a
 /// subcommand), so this is the canonical setup path.
@@ -147,7 +147,7 @@ fn coverage_default_format_succeeds() {
 /// With `--repo .` pointing to a registered repo, per-repo health sections
 /// (frameworks, freshness, blind_spots) must be present. External-client
 /// usage (HTTP/DB/Redis/queue) is intentionally NOT a coverage section —
-/// see the standalone `gnx tool-map` command.
+/// see the standalone `cgn tool-map` command.
 #[test]
 fn coverage_with_repo_includes_health_sections() {
     let (stdout, _home) = run_coverage_with_registered_repo(&["--format", "json", "--repo", "."]);
@@ -178,7 +178,7 @@ fn coverage_with_repo_includes_health_sections() {
     );
     assert!(
         entry.get("externals_summary").is_none(),
-        "externals_summary should NOT be a coverage section (use `gnx tool-map`)"
+        "externals_summary should NOT be a coverage section (use `cgn tool-map`)"
     );
 }
 

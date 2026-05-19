@@ -9,7 +9,7 @@ fn admin_mcp_tools_lists_tools() {
     let output = Command::new(gnx_bin())
         .args(["admin", "mcp", "tools"])
         .output()
-        .expect("run gnx admin mcp tools");
+        .expect("run cgn admin mcp tools");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -24,7 +24,7 @@ fn top_level_mcp_no_longer_visible() {
     let output = Command::new(gnx_bin())
         .args(["--help"])
         .output()
-        .expect("run gnx --help");
+        .expect("run cgn --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("\n  mcp "),
@@ -37,7 +37,7 @@ fn admin_mcp_appears_under_admin_help() {
     let output = Command::new(gnx_bin())
         .args(["admin", "--help"])
         .output()
-        .expect("run gnx admin --help");
+        .expect("run cgn admin --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("mcp"), "expected `mcp` subcommand under admin, got: {stdout}");
 }
@@ -47,7 +47,7 @@ fn admin_mcp_tools_json_format() {
     let output = Command::new(gnx_bin())
         .args(["admin", "mcp", "tools", "--format", "json"])
         .output()
-        .expect("run gnx admin mcp tools --format json");
+        .expect("run cgn admin mcp tools --format json");
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value =

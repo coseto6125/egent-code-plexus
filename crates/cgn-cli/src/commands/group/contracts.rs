@@ -1,4 +1,4 @@
-//! `gnx group contracts <name> [--type T] [--repo R] [--unmatched] [--json]`
+//! `cgn group contracts <name> [--type T] [--repo R] [--unmatched] [--json]`
 //! Lists contracts with optional filtering by type, repo, and match status.
 
 use clap::Args;

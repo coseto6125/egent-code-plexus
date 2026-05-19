@@ -10,10 +10,10 @@ use cgn_mcp::spawn::run_spawn;
 use serde_json::json;
 use tempfile::TempDir;
 
-// ── minimal synthetic CLI tree (no gnx binary needed) ────────────────────────
+// ── minimal synthetic CLI tree (no cgn binary needed) ────────────────────────
 
 #[derive(Parser)]
-#[command(name = "gnx")]
+#[command(name = "cgn")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmds,

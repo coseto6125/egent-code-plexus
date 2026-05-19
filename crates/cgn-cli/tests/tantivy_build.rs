@@ -3,7 +3,7 @@
 //! Before the `Result`-returning conversion, every internal failure
 //! (writer lock held by a zombie, half-committed segment from a killed
 //! prior run, FS full mid-commit) would `unwrap()` and abort the whole
-//! `gnx analyze` — even though `graph.bin` had already been written
+//! `cgn analyze` — even though `graph.bin` had already been written
 //! and was perfectly usable. These tests pin three behaviours: (1) the
 //! happy path returns Ok and produces a queryable index, (2) a
 //! stale/garbage directory left by a prior abort is wiped and rebuilt,

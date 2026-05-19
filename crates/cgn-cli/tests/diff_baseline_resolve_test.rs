@@ -1,4 +1,4 @@
-//! Verify `gnx diff` CLI surface: required args, section enum, baseline rejection.
+//! Verify `cgn diff` CLI surface: required args, section enum, baseline rejection.
 
 use std::process::Command;
 
@@ -11,7 +11,7 @@ fn diff_requires_section_and_baseline() {
     let output = Command::new(gnx_bin())
         .args(["diff"])
         .output()
-        .expect("run gnx diff");
+        .expect("run cgn diff");
     assert!(!output.status.success(), "diff without args must reject");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -29,7 +29,7 @@ fn diff_help_lists_section_choices() {
     let output = Command::new(gnx_bin())
         .args(["diff", "--help"])
         .output()
-        .expect("run gnx diff --help");
+        .expect("run cgn diff --help");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for word in ["bindings", "routes", "contracts", "all"] {
@@ -45,7 +45,7 @@ fn diff_baseline_invalid_ref_errors_with_hint() {
     let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
         .args(["diff", "--section", "bindings", "--baseline", "definitely-no-such-ref"])
         .output()
-        .expect("run gnx diff");
+        .expect("run cgn diff");
     assert!(!output.status.success(), "invalid ref must error");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -63,11 +63,11 @@ fn diff_baseline_pr_form_calls_gh() {
         eprintln!("skipping: gh CLI not installed");
         return;
     }
-    // Use a clearly non-existent PR; gnx should surface a clean error.
+    // Use a clearly non-existent PR; cgn should surface a clean error.
     let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
         .args(["diff", "--section", "bindings", "--baseline", "PR/9999999"])
         .output()
-        .expect("run gnx diff");
+        .expect("run cgn diff");
     assert!(!output.status.success(), "non-existent PR must error");
 }
 
@@ -159,13 +159,13 @@ fn diff_baseline_short_name_warns_on_remote_divergence() {
         .current_dir(repo)
         .output();
 
-    // Run gnx diff with --baseline main; expect warning on stderr.
+    // Run cgn diff with --baseline main; expect warning on stderr.
     let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
         .args(["diff", "--section", "bindings", "--baseline", "main"])
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("run gnx diff");
+        .expect("run cgn diff");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("local `main`") && stderr.contains("origin/main") && stderr.contains("differs"),
@@ -204,7 +204,7 @@ fn diff_baseline_qualified_ref_no_warning() {
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("run gnx diff");
+        .expect("run cgn diff");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("differs from"),
@@ -228,13 +228,13 @@ fn diff_baseline_short_name_no_remote_emits_note() {
         "commit","-q","-m","init"
     ]).current_dir(repo).output();
 
-    // Run gnx diff --baseline main. No origin remote → expect skip-note on stderr.
+    // Run cgn diff --baseline main. No origin remote → expect skip-note on stderr.
     let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
         .args(["diff", "--section", "bindings", "--baseline", "main"])
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("run gnx diff");
+        .expect("run cgn diff");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("note:") && stderr.contains("origin/main") && stderr.contains("skipped"),

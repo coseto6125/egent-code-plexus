@@ -417,7 +417,7 @@ impl LanguageProvider for CppProvider {
         // `#define NAME` regex fallback — tree-sitter-cpp (0.23.x) ERROR-
         // recovers around deeply nested templates / `JEMALLOC_ALWAYS_INLINE`-
         // style attribute macros stacked on function declarations and drops
-        // the `preproc_def` wrapper. Verified on `.sample_repo`: gnx-rs
+        // the `preproc_def` wrapper. Verified on `.sample_repo`: cgn-rs
         // emitted 137/673 macros in `doctest.h` and 11/29 in `tsd.h`; the
         // fallback restores full recall.
         emit_macro_fallback(source, &mut nodes);

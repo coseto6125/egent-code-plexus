@@ -1,4 +1,4 @@
-//! `gnx find` — unified symbol lookup. Three modes selectable via `--mode`:
+//! `cgn find` — unified symbol lookup. Three modes selectable via `--mode`:
 //!
 //! * `exact` (default) — exact-name match, single most-likely definition
 //!   ranked by category priority (Source > Document > Config > Test) then
@@ -25,7 +25,7 @@
 //! BM25 is served by the persisted tantivy index when `<index_dir>/tantivy/`
 //! exists; otherwise the substring scan fallback runs against the archived
 //! graph so a freshly cloned repo still produces shaped output before the
-//! first `gnx admin index` has materialised the lexical index. Every hit
+//! first `cgn admin index` has materialised the lexical index. Every hit
 //! carries a `language` field derived from file extension.
 
 use crate::commands::format::kind_to_str;
@@ -95,7 +95,7 @@ pub struct FindArgs {
     pub kind: Option<String>,
 
     /// Repository selector (path | name | @all | csv mix). Defaults to cwd.
-    /// `@<group>` is rejected at the top level — use `gnx group find` instead.
+    /// `@<group>` is rejected at the top level — use `cgn group find` instead.
     #[arg(long)]
     pub repo: Option<String>,
 
@@ -604,7 +604,7 @@ fn compute_single(
 /// Primary BM25 path: queries the persisted Tantivy index when present,
 /// falling back to a per-name substring scan (exact 1.0 / prefix 0.7 /
 /// substring 0.4) when `<index_dir>/tantivy/` is missing — which happens
-/// on a freshly-cloned repo before `gnx admin index` has run.
+/// on a freshly-cloned repo before `cgn admin index` has run.
 fn bm25_hits_from_graph(
     graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
@@ -666,7 +666,7 @@ fn tantivy_hits(
 
 /// Fallback BM25-shaped scan when no tantivy index is on disk.
 /// Preserves the legacy 1.0 / 0.7 / 0.4 scoring so hook output stays
-/// shaped the same before the first `gnx admin index` has produced an
+/// shaped the same before the first `cgn admin index` has produced an
 /// index.
 fn substring_hits(
     graph: &cgn_core::graph::ArchivedZeroCopyGraph,
@@ -931,7 +931,7 @@ fn compute_multi(
     ))
 }
 
-/// Per-repo BM25 entry point for `gnx group search` and `gnx group find`.
+/// Per-repo BM25 entry point for `cgn group search` and `cgn group find`.
 /// Loads the engine internally from a pre-resolved graph path.
 /// Returns raw `Hit` rows without emitting anything.
 pub fn run_for_repo(
@@ -996,7 +996,7 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
         snapshot.repos.keys().cloned().collect()
     } else if let Some(group_name) = sel.strip_prefix('@') {
         return Err(GnxError::InvalidArgument(format!(
-            "`@{group_name}` cannot be used at the top level — use `gnx group find` instead"
+            "`@{group_name}` cannot be used at the top level — use `cgn group find` instead"
         )));
     } else {
         // Comma-separated list of names or dir_names.
@@ -1093,7 +1093,7 @@ fn emit_bucketed(
 
     if all_empty {
         let hint =
-            "No matches found. Try a shorter pattern or `gnx find --mode fuzzy <fragment>`.";
+            "No matches found. Try a shorter pattern or `cgn find --mode fuzzy <fragment>`.";
         match format {
             OutputFormat::Text => {
                 return emit(

@@ -99,7 +99,7 @@ fn rebuild_preserves_user_group_membership() {
     // 1. First build → registry entry created (groups: [])
     let _ = orchestrator::build_l2(&worktree, None).unwrap();
 
-    // 2. Simulate `gnx admin group add <repo> squad`
+    // 2. Simulate `cgn admin group add <repo> squad`
     let registry_path = home.join(".gnx").join("registry.json");
     let mut reg = RegistryFile::read_or_empty(&registry_path).unwrap();
     reg.repos

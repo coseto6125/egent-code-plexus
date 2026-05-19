@@ -6,7 +6,7 @@ fn gnx_bin() -> std::path::PathBuf {
     if p.ends_with("deps") {
         p.pop();
     }
-    p.join("gnx")
+    p.join("cgn")
 }
 
 fn git_init(p: &std::path::Path) -> String {

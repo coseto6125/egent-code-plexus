@@ -1,4 +1,4 @@
-//! `gnx shape_check` — drift detector for HTTP consumer ↔ Route shape.
+//! `cgn shape_check` — drift detector for HTTP consumer ↔ Route shape.
 //!
 //! Iterates every `RelType::Fetches` edge in the graph, parses its
 //! `reason` via [`cgn_analyzer::fetch_shape::parse_reason`],

@@ -30,7 +30,7 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
     if !hard.is_empty() {
         let _ = writeln!(
             buf,
-            "[gnx peers] HARD overlap ({} event{})",
+            "[cgn peers] HARD overlap ({} event{})",
             hard.len(),
             if hard.len() == 1 { "" } else { "s" }
         );
@@ -42,7 +42,7 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
         let cap = SOFT_EVENTS_DEFAULT_CAP.min(soft.len());
         let _ = writeln!(
             buf,
-            "\n[gnx peers] SOFT overlap ({} event{})",
+            "\n[cgn peers] SOFT overlap ({} event{})",
             soft.len(),
             if soft.len() == 1 { "" } else { "s" }
         );
@@ -52,7 +52,7 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
         if soft.len() > cap {
             let _ = writeln!(
                 buf,
-                "  ... +{} more, run `gnx peers status`",
+                "  ... +{} more, run `cgn peers status`",
                 soft.len() - cap
             );
         }
@@ -60,7 +60,7 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
     if !msgs.is_empty() {
         let _ = writeln!(
             buf,
-            "\n[gnx peers] {} new message{} Ƀ",
+            "\n[cgn peers] {} new message{} Ƀ",
             msgs.len(),
             if msgs.len() == 1 { "" } else { "s" }
         );
@@ -100,7 +100,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
             if d.lines().count() > HARD_DELTA_LOC_CAP {
                 let _ = writeln!(
                     buf,
-                    "    ... (truncated, see `gnx peers diff {peer_session} {}`)",
+                    "    ... (truncated, see `cgn peers diff {peer_session} {}`)",
                     symbol.name
                 );
             }
@@ -163,7 +163,7 @@ fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
     buf.clear();
     let _ = writeln!(
         &mut buf,
-        "[gnx peers] HARD overlap ({}) — payload trimmed to fit 4KB cap",
+        "[cgn peers] HARD overlap ({}) — payload trimmed to fit 4KB cap",
         hard.len()
     );
     for e in hard {

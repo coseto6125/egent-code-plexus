@@ -1,4 +1,4 @@
-//! Derive MCP tool metadata from gnx's `clap::Command` tree.
+//! Derive MCP tool metadata from cgn's `clap::Command` tree.
 //!
 //! Every visible (non-`hide`d) subcommand of the root command becomes one
 //! tool. Each tool carries:
@@ -49,7 +49,7 @@ pub struct DerivedTool {
     /// Arg IDs that are positional, in declared order.
     pub positional_args: Vec<String>,
     /// Fixed argv tokens prepended before JSON-derived args. Used for
-    /// sub-subcommand dispatch (e.g. `["status"]` → `gnx peers status`).
+    /// sub-subcommand dispatch (e.g. `["status"]` → `cgn peers status`).
     pub prefix_args: Vec<String>,
     /// If `Some(key)`, the JSON arg with this key is peeled out, validated,
     /// and prepended as the first prefix arg at dispatch time. Lets one
@@ -72,7 +72,7 @@ fn derive_tool(cmd: &Command) -> DerivedTool {
     let description = cmd
         .get_about()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("gnx {subcommand}"));
+        .unwrap_or_else(|| format!("cgn {subcommand}"));
 
     let mut flag_args = HashSet::new();
     let mut positional_args = Vec::new();

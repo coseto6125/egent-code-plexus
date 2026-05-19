@@ -1,9 +1,9 @@
-//! Integration tests for `gnx shape_check`.
+//! Integration tests for `cgn shape_check`.
 //!
 //! Each test hand-rolls a minimal `ZeroCopyGraph` (one consumer node,
 //! one route node, one Fetches edge) so the drift logic is exercised
 //! without any analyzer / extractor in the loop. The graph is written
-//! to a tempdir's `graph.bin`, then invoked via the compiled `gnx`
+//! to a tempdir's `graph.bin`, then invoked via the compiled `cgn`
 //! binary with `--graph <path>` so we test the full CLI wire-up,
 //! clap parsing, and emit() output path.
 
@@ -167,7 +167,7 @@ fn run_shape_check(graph_path: &Path, format: &str) -> (String, String, bool) {
             format,
         ])
         .output()
-        .expect("gnx spawn failed");
+        .expect("cgn spawn failed");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),

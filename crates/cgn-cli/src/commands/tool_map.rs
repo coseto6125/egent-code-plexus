@@ -1,4 +1,4 @@
-//! `gnx tool-map` — enumerate calls to external HTTP / DB / Redis / queue
+//! `cgn tool-map` — enumerate calls to external HTTP / DB / Redis / queue
 //! clients by tracking **package imports**, not hard-coded callee names.
 //!
 //! Strategy:

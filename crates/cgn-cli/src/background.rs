@@ -1,5 +1,5 @@
 //! Reusable detached subprocess pattern for fire-and-forget jobs that
-//! must outlive the current `gnx` invocation. The job runs under a
+//! must outlive the current `cgn` invocation. The job runs under a
 //! non-blocking `flock` so concurrent triggers no-op cleanly.
 
 use std::path::Path;
@@ -13,9 +13,9 @@ pub struct BgMarkers<'a> {
     pub failed: &'a Path,
 }
 
-/// Spec for a detached background `gnx <args>` invocation.
+/// Spec for a detached background `cgn <args>` invocation.
 pub struct BgJob<'a> {
-    /// CLI args appended after the resolved `gnx` binary path.
+    /// CLI args appended after the resolved `cgn` binary path.
     /// Example: `&["admin", "index", "--repo", repo_str]`.
     pub args: &'a [&'a str],
     /// Non-blocking `flock` target. If another process holds it, the
@@ -60,7 +60,7 @@ MAX={max}; ATTEMPT=0
 while [ $ATTEMPT -lt $MAX ]; do
   ATTEMPT=$((ATTEMPT+1))
   echo "=== attempt $ATTEMPT/$MAX ===" >> {log}
-  if {gnx} {args} >> {log} 2>&1; then
+  if {cgn} {args} >> {log} 2>&1; then
     rm -f {failed}
     : > {complete}
     exit 0
@@ -72,7 +72,7 @@ rm -f {complete}
 "#,
             preamble = flock_preamble(job.lock),
             log = shell_quote(markers.log),
-            gnx = shell_quote(&self_exe),
+            cgn = shell_quote(&self_exe),
             args = args_joined,
             max = job.retry.0,
             sleep_secs = job.retry.1,
@@ -84,14 +84,14 @@ rm -f {complete}
             r#"{preamble}MAX={max}; ATTEMPT=0
 while [ $ATTEMPT -lt $MAX ]; do
   ATTEMPT=$((ATTEMPT+1))
-  if {gnx} {args} >/dev/null 2>&1; then
+  if {cgn} {args} >/dev/null 2>&1; then
     exit 0
   fi
   [ $ATTEMPT -lt $MAX ] && sleep {sleep_secs}
 done
 "#,
             preamble = flock_preamble(job.lock),
-            gnx = shell_quote(&self_exe),
+            cgn = shell_quote(&self_exe),
             args = args_joined,
             max = job.retry.0,
             sleep_secs = job.retry.1,

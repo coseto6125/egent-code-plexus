@@ -78,7 +78,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         Command::new(gnx_bin())
             .args(["admin", "index", "--repo", repo.to_str().unwrap()])
             .env("HOME", &home),
-        "gnx admin index",
+        "cgn admin index",
     );
 
     // Confirm graph.bin materialised before we mutate the working tree.
@@ -119,7 +119,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         // Supply a stable session-id so the session dir is predictable.
         .env("CLAUDE_CODE_SESSION_ID", "test-l1-sid")
         .output()
-        .expect("gnx find spawn failed");
+        .expect("cgn find spawn failed");
 
     // ── 5. Assert L1 fragment exists ──────────────────────────────────────
     let fragments: Vec<_> = WalkDir::new(&gnx_root)

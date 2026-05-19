@@ -1,4 +1,4 @@
-//! Verifies that `gnx cypher` returns function-body source text when the
+//! Verifies that `cgn cypher` returns function-body source text when the
 //! RETURN clause asks for `<var>.content`. Body text is read at query time
 //! from the file via `node.file_idx` + `node.span` — there's no precomputed
 //! body field on the graph, so this is purely a CLI-side feature.

@@ -1,4 +1,4 @@
-//! POC for `gnx summarize` — three rendering strategies on top of graph.bin.
+//! POC for `cgn summarize` — three rendering strategies on top of graph.bin.
 //!
 //! Usage:
 //!   summarize_poc <graph.bin> <A|B|C> [top_k]

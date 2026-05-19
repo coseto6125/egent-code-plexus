@@ -1,6 +1,6 @@
 //! Concurrency invariant 4.5 — hook spawn flock serialises.
 //!
-//! Two concurrent `gnx` hook invocations must converge to exactly ONE
+//! Two concurrent `cgn` hook invocations must converge to exactly ONE
 //! reindex side-effect (the second flock acquirer no-ops cleanly).
 //! Mirrors the production shell template at
 //! `crates/graph-nexus-cli/src/background.rs:73-91` (markerless branch).

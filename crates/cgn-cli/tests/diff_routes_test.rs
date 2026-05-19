@@ -1,4 +1,4 @@
-//! Verify `gnx diff --section routes --baseline <ref>` returns
+//! Verify `cgn diff --section routes --baseline <ref>` returns
 //! Route node changes between two refs.
 
 use std::process::Command;
@@ -83,11 +83,11 @@ fn diff_routes_two_commit_added() {
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("run gnx diff routes");
+        .expect("run cgn diff routes");
 
     assert!(
         output.status.success(),
-        "gnx diff routes failed: {}",
+        "cgn diff routes failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -115,7 +115,7 @@ fn diff_routes_head_vs_head_empty() {
     let output = Command::new(gnx_bin())
         .args(["diff", "--section", "routes", "--baseline", &head_sha, "--format", "json"])
         .output()
-        .expect("run gnx diff routes");
+        .expect("run cgn diff routes");
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();

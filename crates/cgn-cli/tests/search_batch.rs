@@ -1,4 +1,4 @@
-//! `gnx find --batch --mode bm25` reads patterns from stdin (one per
+//! `cgn find --batch --mode bm25` reads patterns from stdin (one per
 //! line, `#` comments and empty lines skipped) and emits a per-query
 //! block prefixed by `=== pattern: <pattern> ===`. The point is to
 //! amortise Engine load + mmap setup + tantivy open across N queries

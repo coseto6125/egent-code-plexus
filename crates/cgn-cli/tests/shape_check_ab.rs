@@ -1,7 +1,7 @@
-//! A/B regression test for `gnx shape_check` against upstream-equivalent fixtures.
+//! A/B regression test for `cgn shape_check` against upstream-equivalent fixtures.
 //!
 //! Upstream gitnexus' fixtures use Next.js App Router (`app/api/.../route.ts`
-//! filename convention) which graph-nexus-rs does not currently parse as
+//! filename convention) which code-graph-nexus does not currently parse as
 //! routes — it detects Express-style `app.get(path, handler)` calls. We
 //! mirror upstream's logical shape (3 clean consumer/route pairs + 1
 //! synthetic drifter) in Express form so the same drift semantics get
@@ -73,11 +73,11 @@ fn run(args: &[&str], repo: &Path, home: &Path) -> std::process::Output {
         .current_dir(repo)
         .env("HOME", home)
         .output()
-        .expect("gnx spawn")
+        .expect("cgn spawn")
 }
 
 /// End-to-end: write upstream fixtures + a synthetic drifter, run
-/// `gnx analyze` + `gnx shape_check`, assert the drift report matches
+/// `cgn analyze` + `cgn shape_check`, assert the drift report matches
 /// upstream's expected behavior.
 #[test]
 fn ab_upstream_fixtures_three_clean_one_drift() {
@@ -87,7 +87,7 @@ fn ab_upstream_fixtures_three_clean_one_drift() {
 
     // ── Express route handlers (logical mirror of upstream's
     //    test/fixtures/lang-resolution/shape-check-integration/app/api/
-    //    handlers, rewritten as Express to match graph-nexus-rs's
+    //    handlers, rewritten as Express to match code-graph-nexus's
     //    JS/TS route extractor surface) ──
     write(
         repo.path(),

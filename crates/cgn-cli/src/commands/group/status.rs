@@ -1,4 +1,4 @@
-//! `gnx group status <name>` — compare each group member's current HEAD
+//! `cgn group status <name>` — compare each group member's current HEAD
 //! against the last-synced snapshot in `meta.json`.
 
 use clap::Args;
@@ -45,7 +45,7 @@ pub fn run(args: StatusArgs) -> Result<(), GnxError> {
         .ok_or_else(|| {
             GnxError::InvalidArgument(format!(
                 "group '{}' not found in registry\n\
-                 → create it with `gnx admin group add <repo> {}`",
+                 → create it with `cgn admin group add <repo> {}`",
                 args.name, args.name
             ))
         })?

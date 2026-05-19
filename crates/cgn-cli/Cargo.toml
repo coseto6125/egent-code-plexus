@@ -3,21 +3,21 @@ name = "code-graph-nexus"
 description = "code-graph-nexus — code intelligence graph for AI agents and LLMs (multi-language AST analysis)"
 version = "0.2.0"
 edition = "2021"
-default-run = "gnx"
+default-run = "cgn"
 license.workspace = true
 repository.workspace = true
 
 # cargo-binstall 元資料：使 `cargo binstall code-graph-nexus` 直接抓 GitHub Release 預編 binary，
 # 跳過 source compile。{ target } / { archive-suffix } / { binary-ext } 由 binstall 依平台自動代入。
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/gnx-v{ version }-{ target }{ archive-suffix }"
-bin-dir = "gnx-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-url = "{ repo }/releases/download/v{ version }/cgn-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "cgn-v{ version }-{ target }/{ bin }{ binary-ext }"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
 
 [[bin]]
-name = "gnx"
+name = "cgn"
 path = "src/main.rs"
 
 [lib]

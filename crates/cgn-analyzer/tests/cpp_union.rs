@@ -10,7 +10,7 @@
 //!
 //! Emit policy mirrors C: no dedicated NodeKind::Union — captured as
 //! NodeKind::Struct (parity aggregator's struct-family EQUIV class
-//! pairs gnx Struct ↔ ref Union).
+//! pairs cgn Struct ↔ ref Union).
 
 use cgn_analyzer::cpp::parser::CppProvider;
 use cgn_core::analyzer::provider::LanguageProvider;

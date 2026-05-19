@@ -1,11 +1,11 @@
 //! Drift-detector for the CLI ↔ MCP surface.
 //!
-//! Why this exists: PR-146 reshaped the `gnx group` sub-subcommand tree
+//! Why this exists: PR-146 reshaped the `cgn group` sub-subcommand tree
 //! and exposed the matching `gnx_group` MCP tool by hand-rolling its
 //! schema (the root `group` command is `#[command(hide = true)]` so
 //! `enumerate_tools` skips it). Without a guard, the manual schema can
 //! silently drift away from the real CLI flags — adding a new
-//! `gnx group impact --threshold` flag without updating the MCP property
+//! `cgn group impact --threshold` flag without updating the MCP property
 //! map would leave LLM clients unable to set it, and the failure mode
 //! would only show up at runtime.
 //!
@@ -14,7 +14,7 @@
 //!    responds to `--help` with exit 0 (catches deletes, renames,
 //!    broken arg defs).
 //! 2. Every subcmd advertised by the `gnx_group` / `gnx_peers` MCP
-//!    schemas maps to a real `gnx <root> <subcmd> --help` path.
+//!    schemas maps to a real `cgn <root> <subcmd> --help` path.
 //! 3. Every non-positional flag advertised in those MCP schemas appears
 //!    as `--<kebab>` in the corresponding CLI `--help` text (the
 //!    drift-killer).
@@ -33,7 +33,7 @@ fn run(args: &[&str]) -> Output {
     Command::new(gnx_bin())
         .args(args)
         .output()
-        .expect("gnx spawn failed")
+        .expect("cgn spawn failed")
 }
 
 fn assert_help_ok(path: &[&str]) {
@@ -42,7 +42,7 @@ fn assert_help_ok(path: &[&str]) {
     let out = run(&args);
     assert!(
         out.status.success(),
-        "`gnx {} --help` failed (exit {}):\nstderr: {}\nstdout: {}",
+        "`cgn {} --help` failed (exit {}):\nstderr: {}\nstdout: {}",
         path.join(" "),
         out.status,
         String::from_utf8_lossy(&out.stderr),
@@ -78,14 +78,14 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "watch",
 ];
 
-/// `gnx group <subcmd>` — keep in sync with `GroupCommands` enum in
+/// `cgn group <subcmd>` — keep in sync with `GroupCommands` enum in
 /// `crates/graph-nexus-cli/src/commands/group/mod.rs`.
 const GROUP_SUBCMDS: &[&str] = &["sync", "status", "contracts", "impact", "find", "coverage"];
 
-/// `gnx peers <subcmd>` — keep in sync with `PeersCmd` enum.
+/// `cgn peers <subcmd>` — keep in sync with `PeersCmd` enum.
 const PEERS_SUBCMDS: &[&str] = &["status", "diff", "log", "say", "inbox", "thread", "gc"];
 
-/// `gnx admin <subcmd>` — top-level admin operations.
+/// `cgn admin <subcmd>` — top-level admin operations.
 const ADMIN_SUBCMDS: &[&str] = &[
     "install-hook",
     "uninstall-hook",
@@ -100,13 +100,13 @@ const ADMIN_SUBCMDS: &[&str] = &[
     "verify-resolver",
 ];
 
-/// `gnx admin group <subcmd>` — management-only (no query verbs here).
+/// `cgn admin group <subcmd>` — management-only (no query verbs here).
 const ADMIN_GROUP_SUBCMDS: &[&str] = &["add", "remove"];
 
-/// `gnx admin mcp <subcmd>` — MCP server entry points.
+/// `cgn admin mcp <subcmd>` — MCP server entry points.
 const ADMIN_MCP_SUBCMDS: &[&str] = &["serve", "tools"];
 
-/// `gnx admin sessions <subcmd>` — L1 session inspection.
+/// `cgn admin sessions <subcmd>` — L1 session inspection.
 const ADMIN_SESSIONS_SUBCMDS: &[&str] = &["list"];
 
 #[test]
@@ -199,7 +199,7 @@ fn mcp_gnx_peers_subcmds_are_real_cli_paths() {
 // ── 3. MCP-advertised flags must exist in the real CLI --help ────────────────
 
 /// For each (subcmd, expected_flags) tuple below, every flag must appear
-/// in `gnx group <subcmd> --help` output. This is the drift-killer.
+/// in `cgn group <subcmd> --help` output. This is the drift-killer.
 ///
 /// The expected flag set mirrors the `[subcmd]` tags in the
 /// `gnx_group` schema property descriptions
@@ -230,12 +230,12 @@ fn mcp_gnx_group_advertised_flags_exist_in_cli_help() {
 
     for (subcmd, expected_flags) in cases {
         let out = run(&["group", subcmd, "--help"]);
-        assert!(out.status.success(), "gnx group {subcmd} --help failed");
+        assert!(out.status.success(), "cgn group {subcmd} --help failed");
         let help = String::from_utf8_lossy(&out.stdout);
         for flag in *expected_flags {
             assert!(
                 help.contains(flag),
-                "gnx group {subcmd}: --help missing flag `{flag}` — MCP schema and CLI flags have drifted apart.\n--- help output ---\n{help}"
+                "cgn group {subcmd}: --help missing flag `{flag}` — MCP schema and CLI flags have drifted apart.\n--- help output ---\n{help}"
             );
         }
     }
@@ -255,12 +255,12 @@ fn mcp_gnx_peers_advertised_flags_exist_in_cli_help() {
     ];
     for (subcmd, expected_flags) in cases {
         let out = run(&["peers", subcmd, "--help"]);
-        assert!(out.status.success(), "gnx peers {subcmd} --help failed");
+        assert!(out.status.success(), "cgn peers {subcmd} --help failed");
         let help = String::from_utf8_lossy(&out.stdout);
         for flag in *expected_flags {
             assert!(
                 help.contains(flag),
-                "gnx peers {subcmd}: --help missing flag `{flag}` — gnx_peers schema drifted.\n--- help output ---\n{help}"
+                "cgn peers {subcmd}: --help missing flag `{flag}` — gnx_peers schema drifted.\n--- help output ---\n{help}"
             );
         }
     }
@@ -268,7 +268,7 @@ fn mcp_gnx_peers_advertised_flags_exist_in_cli_help() {
 
 // ── 4. MCP `tools` list shape ────────────────────────────────────────────────
 
-/// `gnx admin mcp tools` is the LLM client's discovery surface. Verify
+/// `cgn admin mcp tools` is the LLM client's discovery surface. Verify
 /// the manual tools (`gnx_peers`, `gnx_group`) appear exactly once, and
 /// that no hidden tool (gnx_admin / gnx_hook / etc.) leaks through.
 #[test]
@@ -276,7 +276,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
     let out = run(&["admin", "mcp", "tools"]);
     assert!(
         out.status.success(),
-        "gnx admin mcp tools failed:\nstderr: {}",
+        "cgn admin mcp tools failed:\nstderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let listing = String::from_utf8_lossy(&out.stdout);
@@ -285,7 +285,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
         let count = listing.matches(must_have).count();
         assert!(
             count >= 1,
-            "tool `{must_have}` missing from `gnx admin mcp tools` output:\n{listing}"
+            "tool `{must_have}` missing from `cgn admin mcp tools` output:\n{listing}"
         );
     }
     // Hidden subcommands must not produce derived tools.
@@ -300,7 +300,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
 
 // ── 5. Reverse-direction flag check (CLI → MCP) ──────────────────────────────
 
-/// For each `gnx group <subcmd>` and `gnx peers <subcmd>`, every `--flag`
+/// For each `cgn group <subcmd>` and `cgn peers <subcmd>`, every `--flag`
 /// shown in the real `--help` must exist as a property in the MCP schema
 /// (after kebab→snake conversion). This is the asymmetric partner to
 /// `mcp_gnx_group_advertised_flags_exist_in_cli_help` — without both
@@ -330,7 +330,7 @@ fn cli_group_flags_all_exist_in_mcp_group_schema() {
             let prop_key = flag_kebab.replace('-', "_");
             assert!(
                 props.contains_key(&prop_key),
-                "gnx group {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) is missing from gnx_group MCP schema. Add a property entry — otherwise LLM clients cannot reach this flag.\n--- help ---\n{help}"
+                "cgn group {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) is missing from gnx_group MCP schema. Add a property entry — otherwise LLM clients cannot reach this flag.\n--- help ---\n{help}"
             );
         }
     }
@@ -356,7 +356,7 @@ fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
             let prop_key = flag_kebab.replace('-', "_");
             assert!(
                 props.contains_key(&prop_key),
-                "gnx peers {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) missing from gnx_peers MCP schema.\n--- help ---\n{help}"
+                "cgn peers {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) missing from gnx_peers MCP schema.\n--- help ---\n{help}"
             );
         }
     }
@@ -364,7 +364,7 @@ fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
 
 // ── 6. Dynamic inventory diff vs hardcoded tables ────────────────────────────
 
-/// `gnx --help` lists every **visible** top-level subcommand. The
+/// `cgn --help` lists every **visible** top-level subcommand. The
 /// hardcoded `TOP_LEVEL_COMMANDS` table must be a SUPERSET — every
 /// visible command appears in the inventory, but the inventory may
 /// carry extras (hidden subcommands like `admin` / `hook-*`).
@@ -508,7 +508,7 @@ fn mcp_gnx_group_positional_args_are_defined_properties() {
 
 // ── 8. End-to-end MCP smoke (JSON-RPC over stdio) ────────────────────────────
 
-/// Spawn `gnx admin mcp serve`, perform MCP initialize handshake, send
+/// Spawn `cgn admin mcp serve`, perform MCP initialize handshake, send
 /// `tools/list`, verify gnx_group + gnx_peers + a derived tool all
 /// appear. Catches: rmcp transport regression, schema-serialisation
 /// bug, server-loop deadlock.

@@ -1,5 +1,5 @@
 //! SessionStart handler: render rules template (in repo or
-//! `~/.claude/hooks/gnx/rules.md`), substitute placeholders from
+//! `~/.claude/hooks/cgn/rules.md`), substitute placeholders from
 //! `<index_dir>/meta.json` (registry-resolved), surface a worktree-
 //! needs-index hint when `cwd` is a git worktree without a registered
 //! index.
@@ -79,11 +79,11 @@ fn render_rules(repo_root: &Path, index_dir: &Path) -> String {
 
 fn load_template(repo_root: &Path) -> Option<String> {
     let candidates = [
-        repo_root.join(".claude").join("gnx-rules.md"),
+        repo_root.join(".claude").join("cgn-rules.md"),
         home_dir()
             .join(".claude")
             .join("hooks")
-            .join("gnx")
+            .join("cgn")
             .join("rules.md"),
     ];
     for c in candidates {
@@ -157,7 +157,7 @@ fn detect_worktree_needing_index(cwd: &Path) -> Option<String> {
         .to_string_lossy()
         .to_string();
     Some(format!(
-        "gnx index missing in this worktree ({base} @ {branch}). Run `gnx admin index` to index it."
+        "cgn index missing in this worktree ({base} @ {branch}). Run `cgn admin index` to index it."
     ))
 }
 

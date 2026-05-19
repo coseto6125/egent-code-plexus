@@ -1,6 +1,6 @@
 //! Smoke: build a server from a synthetic clap tree, list tools.
 //!
-//! The fixture mirrors the gnx CLI's surface in miniature — two visible
+//! The fixture mirrors the cgn CLI's surface in miniature — two visible
 //! subcommands, one hidden — so we can assert visibility filtering
 //! without linking the full CLI binary.
 
@@ -8,7 +8,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use cgn_mcp::server::GnxMcpServer;
 
 #[derive(Parser)]
-#[command(name = "gnx")]
+#[command(name = "cgn")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmds,

@@ -182,7 +182,7 @@ pub fn strip_shell_quotes(cmd: &str) -> String {
 
 /// Drain this session's peer inbox, render to payload, truncate inbox.
 /// Returns `Some(payload_string)` if there was something to inject, `None` otherwise.
-/// Honors `GNX_REPO_ROOT_OVERRIDE` for tests.
+/// Honors `CGN_REPO_ROOT_OVERRIDE` for tests.
 fn default_repo_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(&cwd).ok()?;
@@ -191,7 +191,7 @@ fn default_repo_root() -> Option<PathBuf> {
 
 pub fn drain_and_render_peer_payload() -> Option<String> {
     let me = crate::session::resolver::resolve_session_id(None);
-    let repo_root: PathBuf = std::env::var("GNX_REPO_ROOT_OVERRIDE")
+    let repo_root: PathBuf = std::env::var("CGN_REPO_ROOT_OVERRIDE")
         .map(PathBuf::from)
         .ok()
         .or_else(default_repo_root)?;

@@ -9,7 +9,7 @@ fn top_level_help_contains_shape_check() {
     let output = Command::new(gnx_bin())
         .args(["--help"])
         .output()
-        .expect("run gnx --help");
+        .expect("run cgn --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("shape_check") || stdout.contains("shape-check"),
@@ -22,7 +22,7 @@ fn top_level_help_excludes_admin_only_commands() {
     let output = Command::new(gnx_bin())
         .args(["--help"])
         .output()
-        .expect("run gnx --help");
+        .expect("run cgn --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     for hidden in ["verify-resolver", "verify_resolver"] {
         assert!(
@@ -37,7 +37,7 @@ fn top_level_help_contains_diff() {
     let output = Command::new(gnx_bin())
         .args(["--help"])
         .output()
-        .expect("run gnx --help");
+        .expect("run cgn --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("diff"),
@@ -50,7 +50,7 @@ fn admin_help_contains_mcp_and_verify_resolver() {
     let output = Command::new(gnx_bin())
         .args(["admin", "--help"])
         .output()
-        .expect("run gnx admin --help");
+        .expect("run cgn admin --help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("mcp"), "admin --help missing mcp: {stdout}");
     assert!(

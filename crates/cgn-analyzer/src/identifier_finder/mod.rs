@@ -1,4 +1,4 @@
-//! Multi-language identifier-occurrence finder used by `gnx rename`'s
+//! Multi-language identifier-occurrence finder used by `cgn rename`'s
 //! Stage 2 verification pass. Dispatches by file extension to a per-
 //! language module that walks the tree-sitter AST and emits byte-ranges
 //! for every identifier whose text matches the target symbol.

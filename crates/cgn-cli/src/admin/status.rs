@@ -1,4 +1,4 @@
-//! Shared host-status enum used by every leaf handler in `gnx admin`.
+//! Shared host-status enum used by every leaf handler in `cgn admin`.
 
 /// Installation state for a tool host (MCP or Native).
 ///
@@ -17,7 +17,7 @@ pub enum HostStatus {
         /// Short descriptor, e.g. `"mode=spawn"` or `"fork: codex-cli @ /usr/local/bin"`.
         detail: String,
     },
-    /// Tool was once installed but the version on disk is behind what gnx expects.
+    /// Tool was once installed but the version on disk is behind what cgn expects.
     Outdated {
         /// Human-readable explanation, e.g. `"config version 1 < required 2"`.
         reason: String,

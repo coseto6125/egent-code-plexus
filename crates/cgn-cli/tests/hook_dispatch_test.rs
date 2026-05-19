@@ -1,4 +1,4 @@
-//! Verifies the `gnx hook <event> --claude-code` subcommand parses
+//! Verifies the `cgn hook <event> --claude-code` subcommand parses
 //! and dispatches without panic on a minimal stdin envelope. Per-event
 //! behaviour is exercised in dedicated test files (T2-T7).
 

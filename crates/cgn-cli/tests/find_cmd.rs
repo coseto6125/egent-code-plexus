@@ -1,4 +1,4 @@
-//! Integration tests for `gnx find`.
+//! Integration tests for `cgn find`.
 //!
 //! Uses the same minimal-graph fixture pattern as `tests/search_cmd.rs`.
 //! 14-language coverage applies to parser / graph primitives — `find` is a
@@ -152,7 +152,7 @@ fn run_find(graph: &Path, args: &[&str]) -> std::process::Output {
         .arg("--graph")
         .arg(graph)
         .output()
-        .expect("gnx find spawn")
+        .expect("cgn find spawn")
 }
 
 fn parse_json_stdout(out: &std::process::Output) -> Value {

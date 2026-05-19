@@ -1,4 +1,4 @@
-//! Verify `gnx diff --section contracts --baseline <ref>` returns
+//! Verify `cgn diff --section contracts --baseline <ref>` returns
 //! contract changes between two refs.
 
 use std::process::Command;
@@ -91,11 +91,11 @@ fn diff_contracts_two_commit_added_fetch() {
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("run gnx diff contracts");
+        .expect("run cgn diff contracts");
 
     assert!(
         output.status.success(),
-        "gnx diff contracts failed: {}",
+        "cgn diff contracts failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -122,7 +122,7 @@ fn diff_contracts_head_vs_head_empty() {
     let output = Command::new(gnx_bin())
         .args(["diff", "--section", "contracts", "--baseline", &head_sha, "--format", "json"])
         .output()
-        .expect("run gnx diff contracts");
+        .expect("run cgn diff contracts");
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();

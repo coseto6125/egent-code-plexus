@@ -38,8 +38,8 @@ const HOOK_HOSTS: &[menu::Item<'_>] = &[
 ];
 const HOOK_ACTIONS: &[menu::Item<'_>] = &[
     ("install", "write hook entries to ~/.claude/settings.json"),
-    ("uninstall", "remove gnx hook entries from the host settings"),
-    ("status", "show whether gnx hooks are registered"),
+    ("uninstall", "remove cgn hook entries from the host settings"),
+    ("status", "show whether cgn hooks are registered"),
     ("← Back", ""),
 ];
 

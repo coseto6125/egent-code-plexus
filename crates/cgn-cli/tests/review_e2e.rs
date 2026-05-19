@@ -1,4 +1,4 @@
-//! End-to-end tests for `gnx review`.
+//! End-to-end tests for `cgn review`.
 //!
 //! Uses the repo's own Cargo.toml as a no-symbol file that should produce
 //! a clean report when no graph is present (no engine = no findings).
@@ -8,7 +8,7 @@ use std::process::Command;
 mod common;
 use common::gnx_bin;
 
-/// `gnx review --files Cargo.toml --format json` should produce a JSON
+/// `cgn review --files Cargo.toml --format json` should produce a JSON
 /// payload with `status: "clean"` because Cargo.toml contains no symbols
 /// that impact / coverage / tool-map would flag.
 ///
@@ -27,7 +27,7 @@ fn review_files_flag_exits_successfully_and_emits_valid_json() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Run review pointing at an explicit file that exists in the project
-    // (relative path; gnx resolves from cwd).
+    // (relative path; cgn resolves from cwd).
     let out = Command::new(gnx_bin())
         .args(["review", "--files", "Cargo.toml", "--format", "json"])
         .current_dir(
@@ -38,11 +38,11 @@ fn review_files_flag_exits_successfully_and_emits_valid_json() {
                 .unwrap_or_else(|| std::path::Path::new(".")),
         )
         .output()
-        .expect("gnx review failed to spawn");
+        .expect("cgn review failed to spawn");
 
-    // Accept both success (0) and gnx's "command failed" path (1) — what
+    // Accept both success (0) and cgn's "command failed" path (1) — what
     // matters is that the stdout is valid JSON with the expected keys.
-    // On machines without a built graph, gnx exits 1 because the engine
+    // On machines without a built graph, cgn exits 1 because the engine
     // cannot load; in that case we skip the assertion.
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -59,7 +59,7 @@ fn review_files_flag_exits_successfully_and_emits_valid_json() {
             "unexpected JSON shape: {v}"
         );
     }
-    // If gnx exits non-zero (no graph built), silently pass — the test
+    // If cgn exits non-zero (no graph built), silently pass — the test
     // only validates the shape when a graph is present.
     let _ = tmp; // keep alive
 }
@@ -69,7 +69,7 @@ fn review_help_lists_all_flags() {
     let out = Command::new(gnx_bin())
         .args(["review", "--help"])
         .output()
-        .expect("gnx review --help failed to spawn");
+        .expect("cgn review --help failed to spawn");
     let help = String::from_utf8(out.stdout).unwrap();
     for flag in ["--since", "--files", "--repo", "--format"] {
         assert!(

@@ -79,7 +79,7 @@ impl TantivyEngine {
     /// Returns `Err` instead of panicking so the caller can degrade
     /// gracefully — `graph.bin` is the primary artifact and exact-name
     /// resolution still works when BM25 build fails (writer lock held
-    /// by zombie, prior commit corrupt, FS full). The next `gnx analyze`
+    /// by zombie, prior commit corrupt, FS full). The next `cgn analyze`
     /// rebuilds from scratch via the `remove_dir_all` step below.
     pub fn build_index(index_dir: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
         let index_dir = index_dir.join("tantivy");

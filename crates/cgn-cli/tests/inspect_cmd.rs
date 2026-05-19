@@ -1,4 +1,4 @@
-//! Integration tests for `gnx inspect` flag surface (kind / file_path /
+//! Integration tests for `cgn inspect` flag surface (kind / file_path /
 //! relation_types / include_tests filtering, ambiguous-match full blocks,
 //! upstream impact summary, no UID in output).
 
@@ -79,7 +79,7 @@ fn run_json(repo: &Path, args: &[&str]) -> Value {
         .unwrap_or_else(|err| panic!("{args:?} did not return JSON: {err}\nstdout={stdout}"))
 }
 
-/// Run `gnx inspect` and return raw stdout string (for UID/keyword checks).
+/// Run `cgn inspect` and return raw stdout string (for UID/keyword checks).
 fn run_stdout(repo: &Path, args: &[&str]) -> String {
     let out = Command::new(gnx_bin())
         .args(args)

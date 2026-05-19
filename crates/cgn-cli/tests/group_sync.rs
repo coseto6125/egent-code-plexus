@@ -1,4 +1,4 @@
-//! Integration test for `gnx group sync`.
+//! Integration test for `cgn group sync`.
 //!
 //! Sets up two minimal git repos — one Go file (HTTP provider) and one
 //! Python file (HTTP consumer on the same path), indexes both, forms a
@@ -40,7 +40,7 @@ fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
         .args(args)
         .env("HOME", home)
         .output()
-        .expect("gnx spawn failed")
+        .expect("cgn spawn failed")
 }
 
 #[test]
@@ -81,7 +81,7 @@ def create_user():
     .unwrap();
     git_init_and_commit(&py_repo);
 
-    // ── 2. Isolated GNX_HOME ──────────────────────────────────────────────
+    // ── 2. Isolated CGN_HOME ──────────────────────────────────────────────
     let home_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
 

@@ -28,6 +28,6 @@ pub fn error_with_cause(what: &str, cause: &str, next: &str) -> String {
 pub fn collision_warning(new_name: &str, existing_locations: &[String]) -> String {
     let locs = existing_locations.join("\n  - ");
     format!(
-        "⚠ COLLISION: \"{new_name}\" already exists at:\n  - {locs}\n→ Choose a different new name, or inspect: gnx inspect {new_name}"
+        "⚠ COLLISION: \"{new_name}\" already exists at:\n  - {locs}\n→ Choose a different new name, or inspect: cgn inspect {new_name}"
     )
 }

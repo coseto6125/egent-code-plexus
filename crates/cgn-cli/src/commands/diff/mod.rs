@@ -1,4 +1,4 @@
-//! `gnx diff` — generalized graph-level cross-commit diff command.
+//! `cgn diff` — generalized graph-level cross-commit diff command.
 //!
 //! Compares two git refs and emits structural changes per requested section
 //! (bindings / routes / contracts / all). See spec
@@ -113,11 +113,11 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, GnxError> {
     // contracts) as side effects of one analyze pass — so we run it ONCE
     // per state regardless of which sections are requested.
     let current_jsonl =
-        std::env::temp_dir().join(format!("gnx-diff-current-{}.jsonl", std::process::id()));
+        std::env::temp_dir().join(format!("cgn-diff-current-{}.jsonl", std::process::id()));
     let baseline_jsonl =
-        std::env::temp_dir().join(format!("gnx-diff-baseline-{baseline_sha}.jsonl"));
+        std::env::temp_dir().join(format!("cgn-diff-baseline-{baseline_sha}.jsonl"));
     let baseline_graph_tmp =
-        std::env::temp_dir().join(format!("gnx-diff-graph-baseline-{baseline_sha}.bin"));
+        std::env::temp_dir().join(format!("cgn-diff-graph-baseline-{baseline_sha}.bin"));
     let legacy_default = std::path::Path::new(".gnx/graph.bin");
 
     bindings::dump(&repo_dir, &current_jsonl)?;

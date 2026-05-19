@@ -1,4 +1,4 @@
-//! Cross-session test fixture: spawn N gnx watcher processes against a shared temp repo.
+//! Cross-session test fixture: spawn N cgn watcher processes against a shared temp repo.
 
 use chrono::Utc;
 use cgn_core::peer::inbox::{drain, InboxEntry};
@@ -143,7 +143,7 @@ impl PeerHarness {
             .args(&args)
             .env("CLAUDE_CODE_SESSION_ID", from)
             .output()
-            .expect("spawn gnx peers say")
+            .expect("spawn cgn peers say")
     }
 }
 
