@@ -50,6 +50,6 @@ categories = ["development-tools"]
 # machine.
 [profile.release-dist]
 inherits = "release"
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 panic = "abort"
