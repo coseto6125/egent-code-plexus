@@ -19,3 +19,5 @@ pub mod repo_identity;
 pub mod repo_selector;
 pub mod search;
 pub mod session;
+
+pub(crate) const CGN_IGNORE_FILE: &str = ".cgnignore";

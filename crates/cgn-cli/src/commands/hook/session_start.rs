@@ -5,6 +5,7 @@
 //! index.
 
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
+use crate::background::{spawn_bg, BgJob, BgMarkers};
 use crate::git::safe_exec;
 use cgn_core::CgnError;
 use std::fs;
@@ -40,6 +41,15 @@ pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     if !sections.is_empty() {
         emit_additional_context("SessionStart", &sections.join("\n\n"));
     }
+
+    // Orphan-registry sweep: detached background `cgn admin prune --orphans`.
+    // Each Claude session starts once, so this is the natural cadence for a
+    // maintenance task; no marker, no throttle, no `.last-prune` global state.
+    // Concurrent SessionStarts (multiple sessions opening simultaneously) are
+    // handled by `spawn_bg`'s non-blocking flock on `<home_cgn>/.prune.lock` —
+    // losers exit 0 without re-running prune. Silent on the user-facing side:
+    // the sweep is plumbing, not something a user took action on.
+    spawn_orphan_prune();
 
     // Auto-spawn peer watcher if opt-in marker present and the worktree is indexed
     // (un-indexed worktrees have nothing to watch). Fire-and-forget — failures
@@ -167,4 +177,30 @@ fn git_rev_parse(cwd: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8(out.stdout).ok()?.trim().to_string())
+}
+
+/// Detached background `cgn admin prune --orphans` under flock at
+/// `<home_cgn>/.prune.lock`. Writes `.prune-complete` on success or
+/// `.prune-failed` on failure (consumed by UserPromptSubmit). One spawn
+/// per Claude session; concurrent SessionStarts (multiple sessions
+/// opening at once) serialize via flock — losers exit 0 without
+/// re-running prune.
+fn spawn_orphan_prune() {
+    let home_cgn = cgn_core::registry::resolve_home_cgn();
+    let lock = home_cgn.join(".prune.lock");
+    let complete = home_cgn.join(".prune-complete");
+    let failed = home_cgn.join(".prune-failed");
+    let log = home_cgn.join("last-prune.log");
+
+    let _ = spawn_bg(BgJob {
+        args: &["admin", "prune", "--orphans"],
+        lock: &lock,
+        cwd: &home_cgn,
+        retry: (1, 0),
+        markers: Some(BgMarkers {
+            log: &log,
+            complete: &complete,
+            failed: &failed,
+        }),
+    });
 }

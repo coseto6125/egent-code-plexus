@@ -1,8 +1,19 @@
 //! PostToolUse handler: detect git ref-changing commands, kick off a
 //! detached background reindex when the index is stale.
+//!
+//! Note: orphan-registry sweep used to live here, gated by a `.last-prune`
+//! mtime marker on every Bash ToolUse. That introduced two problems:
+//! the marker was global state shared across processes (test isolation
+//! pain — see hook_post_tool_use_test flake history), and the "1-hour
+//! throttle on a side-effect that runs hundreds of times per session"
+//! design was over-engineered for a maintenance task that genuinely
+//! needs to run once per session, not once per ToolUse. Orphan prune
+//! now lives in `session_start::handle` where the trigger frequency
+//! matches the work frequency — no marker, no throttle, no global
+//! state.
 
 use super::common::{
-    emit_additional_context, cgn_state_dir_ensure, lookup_index_dir, strip_shell_quotes, HookInput,
+    cgn_state_dir_ensure, emit_additional_context, lookup_index_dir, strip_shell_quotes, HookInput,
 };
 use crate::auto_ensure::{ensure_index, EnsureResult};
 use crate::background::{spawn_bg, BgJob, BgMarkers};
@@ -23,26 +34,8 @@ pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     if input.tool_name != "Bash" {
         return Ok(());
     }
-    // Both signals (orphan-prune notice + reindex notice) merge into one
-    // additionalContext payload — Claude Code parses one JSON object on
-    // stdout, so two println!s would drop the second silently.
-    let mut sections: Vec<String> = Vec::new();
-
-    // Orphan-registry sweep is registry-level; not gated on git/index
-    // state so it actually fires on idle Edit-only sessions too. The
-    // 1-hour throttle keeps the per-call stat negligible.
-    let home_cgn = cgn_core::registry::resolve_home_cgn();
-    if should_run_orphan_prune(&home_cgn) && spawn_background_prune(&home_cgn) {
-        sections.push(
-            "cgn orphan-registry sweep started in background. Stale ~/.cgn/<repo>__<hash>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.".to_string(),
-        );
-    }
-
     if let Some(msg) = maybe_reindex_notice(input) {
-        sections.push(msg);
-    }
-    if !sections.is_empty() {
-        emit_additional_context("PostToolUse", &sections.join("\n\n"));
+        emit_additional_context("PostToolUse", &msg);
     }
     Ok(())
 }
@@ -120,43 +113,3 @@ fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
     })
 }
 
-/// Detached background `cgn admin prune --orphans` under flock at
-/// `<home_cgn>/.prune.lock`. Writes `.prune-complete` on success or
-/// `.prune-failed` on failure. Returns true iff the launcher spawned.
-fn spawn_background_prune(home_cgn: &Path) -> bool {
-    let lock = home_cgn.join(".prune.lock");
-    let complete = home_cgn.join(".prune-complete");
-    let failed = home_cgn.join(".prune-failed");
-    let log = home_cgn.join("last-prune.log");
-
-    spawn_bg(BgJob {
-        args: &["admin", "prune", "--orphans"],
-        lock: &lock,
-        cwd: home_cgn,
-        retry: (1, 0),
-        markers: Some(BgMarkers {
-            log: &log,
-            complete: &complete,
-            failed: &failed,
-        }),
-    })
-}
-
-/// Check if orphan prune should run (at most once per hour).
-/// Updates the throttle marker before returning true.
-fn should_run_orphan_prune(home_cgn: &Path) -> bool {
-    let marker = home_cgn.join(".last-prune");
-    let now = std::time::SystemTime::now();
-    let due = match std::fs::metadata(&marker).and_then(|m| m.modified()) {
-        Ok(mtime) => now
-            .duration_since(mtime)
-            .map(|d| d.as_secs() >= 3600)
-            .unwrap_or(true),
-        Err(_) => true, // no marker = first run, fire
-    };
-    if due {
-        // Touch the marker BEFORE the spawn so concurrent invocations no-op.
-        let _ = std::fs::write(&marker, b"");
-    }
-    due
-}

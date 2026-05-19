@@ -137,6 +137,13 @@ pub(crate) fn build_inside_locked(
 
     update_repo_meta(repo_root, worktree, sha_hex)?;
 
+    // Write the HEAD-SHA fingerprint next to the freshly published graph.bin
+    // so subsequent read commands can short-circuit `auto_ensure::ensure_index`
+    // without walking the working tree. Last step on the build path, detached
+    // to a background thread so the build's wall-clock isn't bumped by the
+    // tiny 41-byte write.
+    crate::auto_ensure::write_head_sha_sidecar_with_sha(&commit_dir.join("graph.bin"), sha_hex);
+
     Ok(BuildResult {
         commit_dir: commit_dir.to_path_buf(),
         sha_hex: sha_hex.to_string(),
@@ -158,6 +165,9 @@ pub(crate) fn attach_if_fingerprint_matches(commit_dir: &Path) -> Option<BuildRe
     if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT) {
         return None;
     }
+    // Back-fill the HEAD-SHA sidecar for graphs published by binaries that
+    // pre-date the auto_ensure shortcut. One-shot until the next rebuild.
+    crate::auto_ensure::write_head_sha_sidecar_with_sha(&commit_dir.join("graph.bin"), &meta.sha);
     Some(BuildResult {
         commit_dir: commit_dir.to_path_buf(),
         sha_hex: meta.sha,

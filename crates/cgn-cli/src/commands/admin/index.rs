@@ -78,7 +78,11 @@ pub fn run_analyzer_for_paths(
     let skipped_large = std::sync::atomic::AtomicU64::new(0);
     let skipped_large_ref = &skipped_large;
     let src_root_ref = src_root;
-    WalkBuilder::new(src_root).hidden(false).build_parallel().run(|| {
+    let mut walk_builder = WalkBuilder::new(src_root);
+    walk_builder
+        .hidden(false)
+        .add_custom_ignore_filename(crate::CGN_IGNORE_FILE);
+    walk_builder.build_parallel().run(|| {
         let tx = file_tx.clone();
         Box::new(move |result| {
             if let Ok(entry) = result {
