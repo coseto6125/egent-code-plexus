@@ -25,6 +25,8 @@ allow = [
   "Zlib",
   "CC0-1.0",
   "MPL-2.0",
+  "BSL-1.0",              # xxhash-rust, etc.
+  "Unlicense",            # 常用於公共領域授權，常與 MIT 並列
   "NCSA",                 # LLVM 系 crate（rav1e 一支）使用 MIT AND NCSA
   "CDLA-Permissive-2.0",  # webpki-roots 採用，Linux Foundation 標準
 ]

@@ -9,12 +9,12 @@ fn main() {
 
     let parser_path = src_dir.join("parser.c");
     c_config.file(&parser_path);
-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
+    println!("cargo:rerun-if-changed={}", parser_path.to_string_lossy());
 
     let scanner_path = src_dir.join("scanner.c");
     if scanner_path.exists() {
         c_config.file(&scanner_path);
-        println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
+        println!("cargo:rerun-if-changed={}", scanner_path.to_string_lossy());
     }
 
     c_config.compile("tree-sitter-vyper");

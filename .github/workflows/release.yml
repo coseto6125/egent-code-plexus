@@ -27,6 +27,7 @@ env:
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
   BIN_NAME: cgn
+  CGN_BUILD_VERBOSE: 1
 
 jobs:
   # ==================== Multi-platform binary builds ====================
@@ -104,7 +105,7 @@ jobs:
       - name: Generate SLSA build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'dist/*.tar.gz dist/*.zip'
+          subject-path: 'dist/*.${{ matrix.archive }}'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

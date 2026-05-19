@@ -19,6 +19,7 @@ env:
   # 縮短 panic 處理時間 + 不展開 macro 反向追蹤，build 略快。
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
+  CGN_BUILD_VERBOSE: 1
 
 jobs:
   # ==================== Code Quality ====================
@@ -157,9 +158,9 @@ jobs:
       - name: Run Ruff lint
         uses: astral-sh/ruff-action@v3
         with:
-          args: 'check tests/parity test_route_embed.py'
+          args: 'check scripts/parity scripts/*.py'
 
       - name: Run Ruff format check
         uses: astral-sh/ruff-action@v3
         with:
-          args: 'format --check tests/parity test_route_embed.py'
+          args: 'format --check scripts/parity scripts/*.py'
