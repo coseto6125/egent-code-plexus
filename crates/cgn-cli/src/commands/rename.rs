@@ -382,7 +382,7 @@ fn emit_verification_payload(
 fn apply_rename(path: &Path, ranges: &[IdentifierRange], new_bytes: &[u8]) -> std::io::Result<()> {
     let mut bytes = std::fs::read(path)?;
     let mut sorted = ranges.to_vec();
-    sorted.sort_by(|a, b| b.start_byte.cmp(&a.start_byte));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.start_byte));
     for r in &sorted {
         bytes.splice(r.start_byte..r.end_byte, new_bytes.iter().copied());
     }

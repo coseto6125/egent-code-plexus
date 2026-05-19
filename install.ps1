@@ -93,6 +93,18 @@ if ($version -eq 'latest') {
 }
 $ver = $tag.TrimStart('v')
 
+# ---- 預處理：檢查進程佔用 ----
+try {
+    $runningCgn = Get-Process -Name $bin -ErrorAction SilentlyContinue
+    if ($runningCgn) {
+        Write-Host "==> Found running $bin process. Attempting to stop..." -ForegroundColor Yellow
+        $runningCgn | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1 # 等待 OS 釋放文件鎖
+    }
+} catch {
+    Write-Host "warning: could not stop running $bin process automatically." -ForegroundColor Gray
+}
+
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 # ---- 下載 ----

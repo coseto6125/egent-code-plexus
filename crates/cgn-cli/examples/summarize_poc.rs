@@ -143,7 +143,7 @@ fn render_c(g: &ArchivedZeroCopyGraph, in_deg: &[u32], top_k: usize) {
 
     // 按 community 大小降序排序
     let mut sorted_comms: Vec<(u16, Vec<usize>)> = by_comm.into_iter().collect();
-    sorted_comms.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    sorted_comms.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
     for (cid, nodes) in sorted_comms {
         let label = if cid == 0 {
@@ -159,7 +159,7 @@ fn render_c(g: &ArchivedZeroCopyGraph, in_deg: &[u32], top_k: usize) {
                 .or_default() += 1;
         }
         let mut files_sorted: Vec<(u32, usize)> = file_count.into_iter().collect();
-        files_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        files_sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         let top_files: Vec<String> = files_sorted
             .iter()
             .take(top_k)

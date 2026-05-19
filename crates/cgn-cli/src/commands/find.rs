@@ -879,7 +879,7 @@ pub fn compute_multi_with_engines(
 
     // Drain heap in descending score order.
     let mut ordered: Vec<OrderedHit> = heap.into_iter().map(|r| r.0).collect();
-    ordered.sort_by(|a, b| b.score_bits.cmp(&a.score_bits));
+    ordered.sort_by_key(|b| std::cmp::Reverse(b.score_bits));
 
     let hits: Vec<Hit> = ordered
         .into_iter()

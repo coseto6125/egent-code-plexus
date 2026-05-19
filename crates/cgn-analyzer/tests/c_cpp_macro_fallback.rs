@@ -76,14 +76,14 @@ fn fallback_does_not_emit_macros_inside_comments() {
 
 #[test]
 fn jemalloc_tsdn_null_recovered_in_real_file() {
-    // tsd.h ERROR-recovers around the `MALLOC_TEST_TSD` multi-line `\`
-    // macro at line 43, wiping `preproc_def` for everything that follows
-    // including `TSDN_NULL` at line 280. The fallback restores it.
+    // tsd_internals.h defines TSDN_NULL via a multi-line `\` continuation.
+    // tree-sitter-c ERROR-recovers and drops the preproc_def wrapper; the
+    // regex fallback walks raw bytes and captures the name regardless.
     let bytes = std::fs::read(sample_repo_path(
-        "C/deps/jemalloc/include/jemalloc/internal/tsd.h",
+        "C/deps/jemalloc/include/jemalloc/internal/tsd_internals.h",
     ))
-    .expect("sample_repo tsd.h missing — run scripts/parity bootstrap");
-    let macros: Vec<String> = cpp_macros(&bytes);
+    .expect("sample_repo tsd_internals.h missing — run scripts/parity bootstrap");
+    let macros: Vec<String> = c_macros(&bytes);
     assert!(
         macros.iter().any(|n| n == "TSDN_NULL"),
         "TSDN_NULL must be emitted via fallback after tree-sitter ERROR recovery"
