@@ -19,12 +19,14 @@ env:
   # 縮短 panic 處理時間 + 不展開 macro 反向追蹤，build 略快。
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
+  SKIP_CI: ${{ startsWith(github.event.pull_request.title, 'chore(') || startsWith(github.event.head_commit.message, 'chore(') || contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]') }}
 
 jobs:
   # ==================== Code Quality ====================
   code-quality:
     name: Code Quality (Linting & Formatting)
     runs-on: ubuntu-latest
+    if: env.SKIP_CI != 'true'
 
     steps:
       - name: Checkout code
@@ -62,6 +64,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    if: env.SKIP_CI != 'true'
 
     steps:
       - name: Checkout code
@@ -97,6 +100,7 @@ jobs:
   audit:
     name: Supply-chain (audit & deny)
     runs-on: ubuntu-latest
+    if: env.SKIP_CI != 'true'
 
     steps:
       - name: Checkout code
@@ -134,6 +138,7 @@ jobs:
   actionlint:
     name: Lint GitHub Actions workflows
     runs-on: ubuntu-latest
+    if: env.SKIP_CI != 'true'
 
     steps:
       - name: Checkout code
