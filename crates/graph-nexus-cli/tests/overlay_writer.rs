@@ -1,4 +1,6 @@
-use graph_nexus_cli::session::overlay_writer::{write_dirty_fragment, FragmentInput};
+use graph_nexus_cli::session::overlay_writer::{
+    write_dirty_fragment, write_dirty_fragments_batch, FragmentInput,
+};
 use graph_nexus_core::session::{DirtyFiles, SessionMeta};
 
 fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
@@ -111,4 +113,42 @@ fn same_file_re_written_same_content_idempotent_id() {
     let out1 = write_dirty_fragment(&session_dir, &input).unwrap();
     let out2 = write_dirty_fragment(&session_dir, &input).unwrap();
     assert_eq!(out1.fragment_id, out2.fragment_id);
+}
+
+#[test]
+fn batch_write_same_content_inputs_do_not_collide_on_tmp_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session_dir = make_session_dir(tmp.path(), "batch-sid");
+
+    let inputs = vec![
+        FragmentInput {
+            rel_path: "a.rs".into(),
+            content: b"same".to_vec(),
+            mtime_ns: 1,
+        },
+        FragmentInput {
+            rel_path: "b.rs".into(),
+            content: b"same".to_vec(),
+            mtime_ns: 2,
+        },
+    ];
+
+    let outcomes = write_dirty_fragments_batch(&session_dir, &inputs).unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0].fragment_id, outcomes[1].fragment_id);
+
+    let df = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    assert!(df.entries.contains_key("a.rs"));
+    assert!(df.entries.contains_key("b.rs"));
+
+    let sm = SessionMeta::read(&session_dir.join("session_meta.json")).unwrap();
+    assert_eq!(sm.overlay_version, 2);
+
+    let overlay_dir = session_dir.join("graph_overlay");
+    let frag_count = std::fs::read_dir(&overlay_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("bin"))
+        .count();
+    assert_eq!(frag_count, 1);
 }
