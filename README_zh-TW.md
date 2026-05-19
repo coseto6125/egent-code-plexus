@@ -87,25 +87,24 @@
 
 ## 📦 安裝
 
-`cargo install --git` 始終可用。一旦發布標記的 Release，將提供各平台的預編譯執行檔；在那之前，安裝腳本會自動 fallback 到 cargo。
+在第一個帶 tag 的 Release 發佈前，安裝腳本會 fallback 到 cargo source build。等 release assets 存在後，預編譯 binary 會成為最快路徑。
 
 ```bash
-# 全平台 (需要 rustup — 首次編譯需幾分鐘，之後會快取)
-cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus --bin cgn --locked
-
-# Linux / macOS 一鍵安裝 (Release 優先，cargo 為輔)
+# Linux / macOS (最短路徑；尚無 Release assets 時需要 cargo/rustup)
 curl -sSfL https://raw.githubusercontent.com/coseto6125/code-graph-nexus/main/install.sh | sh
 
 # Windows PowerShell
 iwr https://raw.githubusercontent.com/coseto6125/code-graph-nexus/main/install.ps1 -UseBasicParsing | iex
+
+# 明確使用 cargo (同樣是 source build，不經 installer wrapper)
+cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus --bin cgn --locked
 ```
 
-針對您的 CPU 優化的安裝 (fat LTO + native ISA)：
+可選的 CPU 最佳化 source build：
 
 ```bash
-RUSTFLAGS="-C target-cpu=native" \
-  cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus \
-  --bin cgn --locked --profile release-dist
+repo=https://github.com/coseto6125/code-graph-nexus
+RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" code-graph-nexus --bin cgn --locked --profile release-dist
 ```
 
 ---
@@ -207,8 +206,12 @@ crates/
 - [tree-sitter](https://tree-sitter.github.io/) — 強大的增量 AST 解析
 - [rkyv](https://rkyv.org/) — 零拷貝序列化框架 (Zero-copy deserialization)
 - [Tantivy](https://github.com/quickwit-oss/tantivy) — 高效 Rust 全文搜尋引擎 (BM25)
-- **Rayon** — 用於多核心並行 AST 解析的數據並行庫
-- **xxhash (xxh3_64)** — 極速非加密雜湊，用於增量索引的內容校驗
-- **DashMap** — 高效能並行雜湊表，用於圖譜組裝
-- **memmap2** — 零拷貝記憶體映射，實現亞毫秒級圖譜讀取
-- **msgspec** — 高效能 JSON 序列化，用於進程間通訊 (IPC)
+- [Rayon](https://github.com/rayon-rs/rayon) — 用於多核心並行 AST 解析的數據並行庫
+- [xxhash (xxh3_64)](https://xxhash.com/) — 極速非加密雜湊，用於增量索引的內容校驗
+- [DashMap](https://github.com/xacrimon/dashmap) — 高效能並行雜湊表，用於圖譜組裝
+- [memmap2](https://github.com/RazrFalcon/memmap2-rs) — 零拷貝記憶體映射，實現亞毫秒級圖譜讀取
+- [msgspec](https://github.com/jcrist/msgspec) — 高效能 JSON 序列化，用於進程間通訊 (IPC)
+
+## 發佈狀態
+
+目前已驗證的安裝路徑是 `cargo install --git ...`，也就是從原始碼建置 `cgn`。release installer 已包含 checksum 與 provenance verification 流程，但必須等 tag 與 release assets 發佈後，binary 下載路徑才能做端到端驗證。Agent 安裝引導文件位於 [docs/skills/cgn-onboard/ONBOARDING.md](./docs/skills/cgn-onboard/ONBOARDING.md)；它用來引導使用者完成安裝、首次索引、可選群組、MCP wiring 與後續建議。輔助式配置與設定流程仍在完善中。
