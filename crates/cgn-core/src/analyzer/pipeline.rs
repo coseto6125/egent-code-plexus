@@ -338,10 +338,10 @@ impl AnalyzerPipeline {
             let m = t.into_inner().unwrap();
             let mut rows: Vec<_> = m.into_iter().collect();
             // Sort by total ns descending — surface the hot providers first.
-            rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+            rows.sort_by_key(|(_, (_, ns))| std::cmp::Reverse(*ns));
             eprintln!("prof per-provider parse_file:");
             for (name, (n, ns)) in rows {
-                let per_file_us = if n > 0 { ns / n / 1000 } else { 0 };
+                let per_file_us = ns.checked_div(n).unwrap_or(0) / 1000;
                 eprintln!(
                     "  {:<16} n={:>6}  total={:>7.2}s  per-file={}µs",
                     name,
