@@ -103,16 +103,14 @@ pub fn compress_for_llm(v: &mut Value) {
                 compress_for_llm(child);
             }
         }
-        Value::Number(n) => {
+        Value::Number(n) if n.is_f64() => {
             // Only round true f64s. `as_f64()` happily upcasts integers too,
             // and round-tripping them through `from_f64` would silently
             // promote `4922` to `4922.0` — surprising the consumer.
-            if n.is_f64() {
-                if let Some(f) = n.as_f64() {
-                    let rounded = (f * 10000.0).round() / 10000.0;
-                    if let Some(new_n) = serde_json::Number::from_f64(rounded) {
-                        *n = new_n;
-                    }
+            if let Some(f) = n.as_f64() {
+                let rounded = (f * 10000.0).round() / 10000.0;
+                if let Some(new_n) = serde_json::Number::from_f64(rounded) {
+                    *n = new_n;
                 }
             }
         }

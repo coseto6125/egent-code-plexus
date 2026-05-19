@@ -16,7 +16,16 @@ use cgn_analyzer::c::parser::CProvider;
 use cgn_analyzer::cpp::parser::CppProvider;
 use cgn_core::analyzer::provider::LanguageProvider;
 use cgn_core::graph::NodeKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn sample_repo_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("workspace root")
+        .join(".sample_repo")
+        .join(relative)
+}
 
 fn cpp_macros(src: &[u8]) -> Vec<String> {
     CppProvider::new()
@@ -70,9 +79,9 @@ fn jemalloc_tsdn_null_recovered_in_real_file() {
     // tsd.h ERROR-recovers around the `MALLOC_TEST_TSD` multi-line `\`
     // macro at line 43, wiping `preproc_def` for everything that follows
     // including `TSDN_NULL` at line 280. The fallback restores it.
-    let bytes = std::fs::read(
-        "/home/enor/code-graph-nexus/.sample_repo/C/deps/jemalloc/include/jemalloc/internal/tsd.h",
-    )
+    let bytes = std::fs::read(sample_repo_path(
+        "C/deps/jemalloc/include/jemalloc/internal/tsd.h",
+    ))
     .expect("sample_repo tsd.h missing — run scripts/parity bootstrap");
     let macros: Vec<String> = cpp_macros(&bytes);
     assert!(
@@ -86,9 +95,7 @@ fn doctest_cmp_ge_recovered_in_real_file() {
     // doctest.h has `#define DOCTEST_CMP_GE` twice (lines 1487, 1494)
     // inside `#ifndef ... #else ... #endif` branches. The fallback
     // captures both occurrences from the raw source.
-    let bytes = std::fs::read(
-        "/home/enor/code-graph-nexus/.sample_repo/Cpp/tests/thirdparty/doctest/doctest.h",
-    )
+    let bytes = std::fs::read(sample_repo_path("Cpp/tests/thirdparty/doctest/doctest.h"))
     .expect("sample_repo doctest.h missing — run scripts/parity bootstrap");
     let macros: Vec<String> = cpp_macros(&bytes);
     let count = macros.iter().filter(|n| *n == "DOCTEST_CMP_GE").count();
@@ -105,7 +112,7 @@ fn jemalloc_ro_mutex_ctl_gen_recovered_in_real_file() {
     // ERROR-recovers and drops the preproc_def wrapper; the regex
     // fallback walks raw bytes and captures the name regardless of
     // grammar state.
-    let bytes = std::fs::read("/home/enor/code-graph-nexus/.sample_repo/C/deps/jemalloc/src/ctl.c")
+    let bytes = std::fs::read(sample_repo_path("C/deps/jemalloc/src/ctl.c"))
         .expect("sample_repo ctl.c missing — run scripts/parity bootstrap");
     let macros: Vec<String> = c_macros(&bytes);
     assert!(

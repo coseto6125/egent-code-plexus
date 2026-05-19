@@ -264,21 +264,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
             app.quit = true;
         }
-        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-            if save(&app.repo_root, &app.cfg).is_ok() {
-                app.saved = true;
-                app.quit = true;
-            }
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) if save(&app.repo_root, &app.cfg).is_ok() => {
+            app.saved = true;
+            app.quit = true;
         }
-        (KeyCode::Up, _) => {
-            if app.cursor > 0 {
-                app.cursor -= 1;
-            }
+        (KeyCode::Up, _) if app.cursor > 0 => {
+            app.cursor -= 1;
         }
-        (KeyCode::Down, _) | (KeyCode::Tab, _) => {
-            if app.cursor + 1 < FIELDS.len() {
-                app.cursor += 1;
-            }
+        (KeyCode::Down, _) | (KeyCode::Tab, _) if app.cursor + 1 < FIELDS.len() => {
+            app.cursor += 1;
         }
         (KeyCode::Enter, _) => app.enter_edit(),
         _ => {}

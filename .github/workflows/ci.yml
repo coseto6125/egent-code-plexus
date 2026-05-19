@@ -19,7 +19,6 @@ env:
   # 縮短 panic 處理時間 + 不展開 macro 反向追蹤，build 略快。
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
-  CGN_BUILD_VERBOSE: 1
 
 jobs:
   # ==================== Code Quality ====================
@@ -75,6 +74,10 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+
+      - name: Bootstrap sample repos
+        shell: bash
+        run: bash scripts/parity/bootstrap_sample_repos.sh
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.8.0
