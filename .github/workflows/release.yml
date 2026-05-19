@@ -62,17 +62,29 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cargo-chef
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-chef
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          # 每個 target 獨立 cache（不同 ABI，無法共用 target/）
-          # 與 ci.yml 的 cache 分離，因為 release 是 --release profile
-          shared-key: release-${{ matrix.target }}
+          # Use a more granular key that includes the target and a hash of the lockfile
+          # to ensure registry/git caches are reused effectively.
+          shared-key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build release binary
-        # release-dist profile (LTO fat + codegen-units = 1) optimizes the
-        # distributed binary for runtime — build time goes 45s → ~3-4min
-        # per target, only paid once per tag.
+      - name: Cargo chef prepare
+        run: cargo chef prepare --recipe-path recipe.json
+
+      - name: Cargo chef cook (dependencies only)
+        # Pre-build dependencies. This step is cached by rust-cache.
+        # It handles the "Updating git repository" and slow dependency compiles.
+        run: cargo chef cook --profile release-dist --recipe-path recipe.json --target ${{ matrix.target }}
+
+      - name: Build release binary (app only)
+        # Since dependencies are already "cooked", this only compiles the workspace
+        # crates and performs the LTO link.
         run: cargo build --profile release-dist --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
 
       - name: Package (tar.gz)
