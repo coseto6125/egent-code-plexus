@@ -1,0 +1,119 @@
+# Language Matrix
+
+Per-language capability inventory across the 31 supported languages. Each cell answers one question: *for this language, do we extract this dimension yet?*
+
+This matrix is **not** a parity scorecard against any other tool. We took design inspiration from GitNexus's 9-dimension breakdown (credit in [vs-gitnexus.md](./vs-gitnexus.md)) but every cell describes the state of *our* implementation.
+
+## Legend
+
+- **✓** &nbsp;implemented — we extract this for this language today
+- **—** &nbsp;concept exists in the language but we don't extract it yet (concrete gap)
+- **n/a** &nbsp;language linguistically lacks this concept (e.g. Bash has no class system, so Heritage / Ctor / Types are n/a)
+
+The matrix is fully resolved — no "feasible but unimplemented" cells. Every `—` is a concrete TODO; every `n/a` is a non-target.
+
+## Matrix
+
+| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call | Rename | Group extractor |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| Go | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| PHP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| Ruby | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | —[^ge] |
+| Swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| C | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | —[^ge] |
+| C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| Dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| ─── *structural-only rows below* ─── | | | | | | | | | | | | |
+| Bash | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a | — | — | ✓ | ✓ | — |
+| Lua | ✓ | ✓ | ✓ | ✓ | n/a | — | n/a | — | — | ✓ | ✓ | — |
+| Solidity | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | ✓ | — |
+| Crystal | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | ✓ | — |
+| Nim | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | ✓ | — |
+| Cairo | ✓ | ✓ | ✓ | — | — | — | n/a | — | — | ✓ | ✓ | — |
+| Move | ✓ | ✓ | ✓ | n/a | — | n/a | n/a | — | — | ✓ | ✓ | — |
+| Zig | ✓ | ✓ | ✓ | n/a | — | — | n/a | — | — | ✓ | ✓ | — |
+| HCL | ✓ | ✓ | ✓ | n/a | — | n/a | ✓ | — | — | ✓ | ✓ | — |
+| SQL | n/a | ✓ | n/a | ✓ | — | n/a | n/a | n/a | n/a | ✓ | ✓ | — |
+| Verilog | ✓ | ✓ | ✓ | — | — | — | n/a | — | — | ✓ | ✓ | — |
+| Vyper | ✓ | ✓ | ✓ | n/a | — | — | n/a | — | — | ✓ | ✓ | — |
+| Markdown | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | — |
+| GitHub Actions | ✓ | n/a | ✓ | n/a | n/a | n/a | ✓ | n/a | — | n/a | n/a | — |
+| Docker Compose | — | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | n/a | — |
+| Dockerfile | ✓ | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | — | n/a | n/a | — |
+| YAML | n/a | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | n/a | — |
+
+[^ge]: Extractor stub only — first-wave group extractor coverage limited to Go / Python / JS / TS / Java / Rust.
+
+## Per-cell rationale
+
+**Imports**
+
+- *Bash:* `source` / `.`
+- *Lua:* `require` + binding alias
+- *Dockerfile:* `FROM <base>`
+- *GitHub Actions:* `uses:` directives — public tag/SHA refs, local composites, reusable workflows, cross-repo workflows
+
+**Named**
+
+- *Bash:* `alias` command
+- *Lua:* `local M = require(...)` and dotted-path bindings (plain literal RHS filtered)
+- *Cairo:* `use X as Y` + `type X = Y`
+- *Move:* `use ... as` alias clause (module + braced-member forms)
+- *Zig:* `const X = @import(...)` / `const X = Identifier` (numeric/string/bool literal RHS filtered via parser-side priority promotion)
+- *Crystal:* `alias X = Y`
+- *Nim:* `type X = Y` with object/distinct/ref-type/tuple-object shapes filtered out (those stay Class)
+- *Vyper:* `from X import Y as Z` / `import X as Y` (source-line scan — grammar can't AST-parse the `as` clause)
+- *Solidity:* `using L for T` directives + `type C is uint256` user-defined value types
+- *HCL:* `locals { }` block attributes (`output` blocks remain Const)
+- *SQL:* top-level `CREATE VIEW v AS …` (column aliases `SELECT x AS y` not captured)
+- *Verilog:* SystemVerilog `typedef` declarations
+- *C:* `typedef` + `#define` / `preproc_function_def` + `extern` declarations (include-guard macros filtered; classified as Alias/Constant/Macro/Flag)
+- *Swift:* `typealias` declarations + `@objc(extName)` rename attributes
+- *Ruby:* `alias` keyword + `alias_method` + constant assignment (`MyConst = Other::Constant`) + `def_delegator` / `def_delegators` / `delegate` (with Forwardable mixin detection; cross-file `include Foo` propagation resolved via resolver Tier 2.75 HeritageScoped)
+- *GitHub Actions / Docker Compose / Dockerfile* show `n/a` because these YAML/Dockerfile formats use keyed top-level entries (services, jobs, `ARG` / `LABEL`) — those are configuration keys already captured by the Config column, not re-bindable alias declarations.
+
+**Exports**
+
+- *Lua:* `function foo()` (top-level non-`local`)
+- *Crystal:* default-public minus `private` / `protected` modifier
+- *Nim:* trailing `*` marker
+- *Cairo / Zig / Move:* `pub` / `public` / `entry` keyword
+- *HCL:* `output` block
+- *Vyper:* `@external` / `@view` / `@payable` decorators
+- *Verilog:* SystemVerilog `class_property` minus `local` / `protected` qualifier
+- *GitHub Actions:* `jobs.*.outputs` + `on.workflow_call.outputs`
+
+**Heritage**
+
+- *Lua:* `setmetatable(..., {__index=Parent})` heuristic
+- *Solidity:* `is X, Y, Z`
+- *SQL:* FK `REFERENCES` clauses — inline column-level, table-level, and named-constraint forms
+
+**Ctor `—` on Go and Rust**
+
+Neither language has a language-level constructor. Go uses factory functions (`NewFoo()`) and Rust uses associated functions (`Foo::new()`) as idiomatic substitutes, but the cross-language Ctor extractor only emits `NodeKind::Constructor` for languages with a reserved ctor name (`__init__`, `initialize`, `__construct`, `constructor`, `Class::Class`).
+
+**Entry `—` on JavaScript and Ruby**
+
+Absence of a language-level `main` convention (per `entry_points.rs` coverage table). Entry points still surface for these languages via route handlers and framework decorators — just not via a `main()` symbol.
+
+**Rename `n/a` on markup/config rows**
+
+Markdown, GitHub Actions, Docker Compose, Dockerfile, and YAML carry keys / literal strings, not re-bindable code identifiers — `cgn rename` would have nothing to rewrite.
+
+## Call detection design
+
+Call detection is centralised in `crates/cgn-analyzer/src/calls.rs`. The hot helper is `extract_calls(root, source, nodes, call_kinds)`:
+
+- Each language parser passes the tree-sitter node kinds that represent a call in its grammar — e.g., `["call_expression"]` for JS/TS, `["function_call"]` for Lua, `["call"]` for Python.
+- The walker is grammar-agnostic: descends the AST once, collects every call site, extracts the callee text via `callee_name_from(node, source)`, and attaches each call to its enclosing `Function` / `Method` via `attach_to_enclosing(line, callee, nodes)` (smallest-span containment).
+- OO languages additionally bind a **receiver type** (`obj.method` → know what `obj` is). Each language has its own receiver-type module (`<lang>/receiver_types.rs`) tracking local variable annotations and class-scope `this` / `self`. The receiver type is stored on the RawCall so downstream resolution can pick the correct overload when method names collide.
+- Reflection / dynamic dispatch (`getattr(self, name)()`, JS `obj[k]()`, etc.) is **not** speculatively resolved. It lands as a `BlindSpot` record (per the project's "honest unknown beats fabricated edge" principle — see [vs-gitnexus.md §3](./vs-gitnexus.md#3-honesty-about-unresolved-edges)).
+- Call edges (`RelType::Calls`) are the largest single edge type in the graph; the saturating-conversion helper `safe_row` in `calls.rs` guards against rows exceeding `u32::MAX` corrupting call-to-function attribution.
