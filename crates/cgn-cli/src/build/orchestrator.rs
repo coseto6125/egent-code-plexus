@@ -449,23 +449,19 @@ pub(crate) fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Res
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    let commit_dir = if commit_dir.exists() {
-        commit_dir.to_path_buf()
-    } else {
-        let parent = commit_dir
-            .parent()
-            .ok_or_else(|| io::Error::other("commit dir has no parent"))?;
-        let parsed = commit_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| cgn_core::registry::CommitDirName::parse(name).ok())
-            .ok_or_else(|| io::Error::other("attached builder target dirname is invalid"))?;
-        let idx = CommitIndex::scan(parent)?;
-        let Some(name) = idx.find(&parsed.sha) else {
-            return Err(io::Error::other("attached builder failed to publish"));
-        };
-        parent.join(name)
+    let parent = commit_dir
+        .parent()
+        .ok_or_else(|| io::Error::other("commit dir has no parent"))?;
+    let parsed = commit_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| cgn_core::registry::CommitDirName::parse(name).ok())
+        .ok_or_else(|| io::Error::other("attached builder target dirname is invalid"))?;
+    let idx = CommitIndex::scan(parent)?;
+    let Some(name) = idx.find(&parsed.sha) else {
+        return Err(io::Error::other("attached builder failed to publish"));
     };
+    let commit_dir = parent.join(name);
     let meta_path = commit_dir.join("meta.json");
     let meta = CommitBuildMeta::read(&meta_path)?;
     Ok(BuildResult {
@@ -473,4 +469,50 @@ pub(crate) fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Res
         sha_hex: meta.sha,
         source_type: meta.source_type,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cgn_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
+    use tempfile::TempDir;
+
+    #[test]
+    fn wait_for_completion_prefers_latest_generation_for_same_sha() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("commits");
+        fs::create_dir_all(&parent).unwrap();
+
+        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
+        let base = parent.join(format!("branch_main__{sha_hex}"));
+        let gen_dir = parent.join(format!("branch_main__{sha_hex}.gen.1.2.3"));
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&gen_dir).unwrap();
+
+        let meta = CommitBuildMeta {
+            version: 1,
+            sha: sha_hex.to_string(),
+            source_type: SourceType::Branch,
+            source_id: Some("main".to_string()),
+            built_from_worktree: "repo".to_string(),
+            built_at: "2026-05-20T00:00:00Z".to_string(),
+            parent_sha: None,
+            node_count: 1,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![RefRecord {
+                ref_name: "refs/heads/main".to_string(),
+                seen_at: "2026-05-20T00:00:00Z".to_string(),
+            }],
+            refs_seen_since: vec![],
+            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+        };
+        CommitBuildMeta::write_atomic(&base.join("meta.json"), &meta).unwrap();
+        CommitBuildMeta::write_atomic(&gen_dir.join("meta.json"), &meta).unwrap();
+
+        let building = parent.join(format!("branch_main__{sha_hex}.building"));
+        let result = wait_for_completion(&building, &base).unwrap();
+
+        assert_eq!(result.commit_dir, gen_dir);
+        assert_eq!(result.sha_hex, sha_hex);
+    }
 }
