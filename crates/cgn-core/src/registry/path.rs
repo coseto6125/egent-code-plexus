@@ -66,19 +66,16 @@ pub fn uid_path(absolute: &Path, repo_root: &Path) -> Result<String, PathError> 
 }
 
 /// Resolve the cgn home directory used for `registry.json` and per-branch
-/// index dirs. Tries `$HOME/.cgn` first; if HOME is unset or the directory
-/// cannot be created and written to (read-only FS, permission denied, CI
+/// index dirs. Tries `$CGN_HOME`, then `$HOME/.cgn`; if neither directory
+/// can be created and written to (read-only FS, permission denied, CI
 /// sandbox), falls back to `<temp_dir>/cgn-fallback/.cgn`.
 ///
 /// Reads and writes within a single CLI invocation use the same resolved
 /// path: a project indexed in fallback mode is queryable from the same
 /// environment without extra flags.
 ///
-/// Fast path: if `registry.json` already exists inside the home candidate,
-/// the dir was writable at some point and we skip the probe entirely (one
-/// stat instead of create+write+unlink on every invocation).
 pub fn resolve_home_cgn() -> PathBuf {
-    resolve_home_cgn_from_env(std::env::var_os("HOME"))
+    resolve_home_cgn_from_env(std::env::var_os("CGN_HOME"), std::env::var_os("HOME"))
 }
 
 /// Same resolution logic as [`resolve_home_cgn`], but with the HOME source
@@ -94,16 +91,25 @@ pub fn resolve_home_cgn() -> PathBuf {
 #[allow(dead_code)]
 pub fn resolve_home_cgn_from<P: AsRef<Path>>(home: P) -> PathBuf {
     let candidate = home.as_ref().join(".cgn");
-    if candidate.join("registry.json").exists() || probe_writable(&candidate) {
+    if probe_writable(&candidate) {
         return candidate;
     }
     fallback_home()
 }
 
-fn resolve_home_cgn_from_env(home: Option<std::ffi::OsString>) -> PathBuf {
+fn resolve_home_cgn_from_env(
+    cgn_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some(path) = cgn_home {
+        let candidate = PathBuf::from(path);
+        if probe_writable(&candidate) {
+            return candidate;
+        }
+    }
     if let Some(h) = home {
         let candidate = PathBuf::from(h).join(".cgn");
-        if candidate.join("registry.json").exists() || probe_writable(&candidate) {
+        if probe_writable(&candidate) {
             return candidate;
         }
     }
@@ -166,8 +172,10 @@ mod tests {
     /// other env readers. Since only `resolve_home_cgn` reads HOME in this
     /// crate, serial mutation inside one test is safe.
     #[test]
-    fn resolve_home_cgn_covers_happy_path_fast_path_and_fallback() {
+    fn resolve_home_cgn_covers_env_override_happy_path_and_fallback() {
         let orig_home = std::env::var_os("HOME");
+        let orig_cgn_home = std::env::var_os("CGN_HOME");
+        std::env::remove_var("CGN_HOME");
 
         // (1) HOME unset → tmp fallback
         std::env::remove_var("HOME");
@@ -189,18 +197,14 @@ mod tests {
             "probe file should be cleaned up"
         );
 
-        // (3) Fast path: registry.json exists → no probe write attempted
-        std::fs::write(p.join("registry.json"), b"{}").unwrap();
-        let probe_file = p.join(".cgn-write-probe");
-        std::fs::write(&probe_file, b"stale").unwrap(); // marker
-        let _ = resolve_home_cgn();
-        // probe path should NOT have been touched (still has our stale marker)
-        assert_eq!(
-            std::fs::read(&probe_file).unwrap(),
-            b"stale",
-            "fast path must not run probe_writable"
-        );
-        let _ = std::fs::remove_file(&probe_file);
+        // (3) CGN_HOME set + writable → use it as the exact cgn root
+        let override_home = tempfile::tempdir().unwrap();
+        let override_cgn = override_home.path().join("custom-cgn");
+        std::env::set_var("CGN_HOME", &override_cgn);
+        let p = resolve_home_cgn();
+        assert_eq!(p, override_cgn);
+        assert!(p.exists(), "CGN_HOME path should be created");
+        std::env::remove_var("CGN_HOME");
 
         // (4) HOME points to read-only dir without registry.json → tmp fallback
         #[cfg(unix)]
@@ -226,6 +230,10 @@ mod tests {
         match orig_home {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),
+        }
+        match orig_cgn_home {
+            Some(h) => std::env::set_var("CGN_HOME", h),
+            None => std::env::remove_var("CGN_HOME"),
         }
     }
 }

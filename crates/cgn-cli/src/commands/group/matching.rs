@@ -179,9 +179,8 @@ fn build_bm25_schema() -> (Schema, tantivy::schema::Field, tantivy::schema::Fiel
 /// from killed prior runs don't block. Writer is dropped before returning
 /// so the same process can open a reader immediately after.
 fn build_bm25_index(index_dir: &Path, kept: &[&StoredContract]) -> Result<(), String> {
-    if index_dir.exists() {
-        let _ = fs::remove_dir_all(index_dir);
-    }
+    cgn_core::registry::retire_dir_async(index_dir)
+        .map_err(|e| format!("retire stale contracts_index dir: {e}"))?;
     fs::create_dir_all(index_dir).map_err(|e| format!("create contracts_index dir: {e}"))?;
 
     let (schema, contract_id_field, uid_field) = build_bm25_schema();

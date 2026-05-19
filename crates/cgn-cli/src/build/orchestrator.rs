@@ -4,6 +4,7 @@
 //! Concurrent builders for the same SHA attach instead of duplicating work.
 
 use crate::build::dirname_picker::pick_dirname;
+use crate::commit_lookup::CommitIndex;
 use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use cgn_core::registry::{
@@ -14,6 +15,9 @@ use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct BuildResult {
     // Read only by `tests/build_orchestrator.rs`; bin callers ignore it today.
@@ -38,16 +42,15 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     fs::create_dir_all(repo_root.join("commits"))?;
 
     let dirname = pick_dirname(worktree, &sha_hex)?;
-    let commit_dir = repo_root.join("commits").join(&dirname);
-    let building = repo_root
-        .join("commits")
-        .join(format!("{dirname}.building"));
+    let commits_dir = repo_root.join("commits");
+    let commit_dir = commits_dir.join(&dirname);
+    let building = commits_dir.join(format!("{dirname}.building"));
 
     // Fast path: same SHA already built by a binary with a matching
     // fingerprint → reuse without touching the analyzer pipeline.
     // L2 is SHA-pure (v2 layout, PR #55); working-tree drift goes through
     // the L1 session overlay, not here.
-    if let Some(attached) = attach_if_fingerprint_matches(&commit_dir) {
+    if let Some(attached) = attach_latest_if_fingerprint_matches(&commits_dir, &sha_hex) {
         return Ok(attached);
     }
 
@@ -70,7 +73,7 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
 /// Run the analyzer pipeline, write metadata, atomic-publish.
 ///
 /// Pre-conditions (caller's responsibility):
-/// - `building` dir exists, `commit_dir` does not yet exist
+/// - `building` dir exists
 /// - exclusive build lock is held by the caller for the full call duration
 /// - `repo_root.join("commits")` exists
 ///
@@ -130,20 +133,17 @@ pub(crate) fn build_inside_locked(
     };
     CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
 
-    // fsync + atomic publish. A stale commit_dir from an earlier binary
-    // (fingerprint mismatch) is swept aside before the rename — Linux
-    // refuses to rename onto a non-empty directory. force_rebuild_l2 also
-    // does its own drop earlier, so this branch covers both paths.
+    // fsync + atomic publish. If an L2 for the same SHA already exists,
+    // publish to a generation dir instead of touching the old reader-visible
+    // directory. CommitIndex resolves same-SHA generations to the newest one.
     sync_all_files(building)?;
-    if commit_dir.exists() {
-        fs::remove_dir_all(commit_dir)?;
-    }
     // Windows refuses to rename a directory that contains any open file
     // handles (os error 5). Drop the lock fd now — the rename is the
     // publication event, so the lock is no longer needed after this point.
     drop(lock_guard);
-    fs::rename(building, commit_dir)?;
-    let _ = fs::remove_dir_all(commit_dir.join("_src"));
+    let publish_dir = publish_dir_for(commit_dir);
+    fs::rename(building, &publish_dir)?;
+    let _ = cgn_core::registry::retire_dir_async(&publish_dir.join("_src"));
 
     update_repo_meta(repo_root, worktree, sha_hex)?;
 
@@ -152,13 +152,23 @@ pub(crate) fn build_inside_locked(
     // without walking the working tree. Last step on the build path, detached
     // to a background thread so the build's wall-clock isn't bumped by the
     // tiny 41-byte write.
-    crate::auto_ensure::write_head_sha_sidecar_with_sha(&commit_dir.join("graph.bin"), sha_hex);
+    crate::auto_ensure::write_head_sha_sidecar_with_sha(&publish_dir.join("graph.bin"), sha_hex);
 
     Ok(BuildResult {
-        commit_dir: commit_dir.to_path_buf(),
+        commit_dir: publish_dir,
         sha_hex: sha_hex.to_string(),
         source_type,
     })
+}
+
+pub(crate) fn attach_latest_if_fingerprint_matches(
+    commits_dir: &Path,
+    sha_hex: &str,
+) -> Option<BuildResult> {
+    let sha = sha_bytes(sha_hex)?;
+    let idx = CommitIndex::scan(commits_dir).ok()?;
+    let dir = idx.find(&sha)?;
+    attach_if_fingerprint_matches(&commits_dir.join(dir))
 }
 
 /// Cheap pre-build check: if `commit_dir/meta.json` exists and its
@@ -183,6 +193,29 @@ pub(crate) fn attach_if_fingerprint_matches(commit_dir: &Path) -> Option<BuildRe
         sha_hex: meta.sha,
         source_type: meta.source_type,
     })
+}
+
+fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
+    if !base_commit_dir.exists() {
+        return base_commit_dir.to_path_buf();
+    }
+    let name = base_commit_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("commit");
+    let generation = format!(
+        "{name}.gen.{}.{}.{}",
+        chrono::Utc::now().timestamp_millis(),
+        std::process::id(),
+        GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    base_commit_dir.with_file_name(generation)
+}
+
+fn sha_bytes(sha_hex: &str) -> Option<[u8; 20]> {
+    let mut sha = [0u8; 20];
+    hex::decode_to_slice(sha_hex, &mut sha).ok()?;
+    Some(sha)
 }
 
 pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
@@ -416,9 +449,23 @@ pub(crate) fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Res
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    if !commit_dir.exists() {
-        return Err(io::Error::other("attached builder failed to publish"));
-    }
+    let commit_dir = if commit_dir.exists() {
+        commit_dir.to_path_buf()
+    } else {
+        let parent = commit_dir
+            .parent()
+            .ok_or_else(|| io::Error::other("commit dir has no parent"))?;
+        let parsed = commit_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| cgn_core::registry::CommitDirName::parse(name).ok())
+            .ok_or_else(|| io::Error::other("attached builder target dirname is invalid"))?;
+        let idx = CommitIndex::scan(parent)?;
+        let Some(name) = idx.find(&parsed.sha) else {
+            return Err(io::Error::other("attached builder failed to publish"));
+        };
+        parent.join(name)
+    };
     let meta_path = commit_dir.join("meta.json");
     let meta = CommitBuildMeta::read(&meta_path)?;
     Ok(BuildResult {

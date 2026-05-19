@@ -176,7 +176,7 @@ fn force_rebuild_l2_when_l2_absent_builds_fresh() {
 }
 
 #[test]
-fn force_rebuild_l2_drops_existing_dir_and_rebuilds() {
+fn force_rebuild_l2_publishes_new_generation_and_rebuilds() {
     let _g = HOME_LOCK.lock().unwrap();
     let home = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
@@ -192,6 +192,14 @@ fn force_rebuild_l2_drops_existing_dir_and_rebuilds() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let r = force_rebuild_l2(wt.path(), &sha).unwrap();
+    assert_ne!(
+        r.commit_dir, initial.commit_dir,
+        "force rebuild should publish a new generation without touching active readers"
+    );
+    assert!(
+        initial.commit_dir.join("graph.bin").exists(),
+        "old generation remains available for existing readers"
+    );
     let second_mtime = fs::metadata(r.commit_dir.join("graph.bin"))
         .unwrap()
         .modified()

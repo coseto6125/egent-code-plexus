@@ -52,7 +52,7 @@ fn git_init(p: &std::path::Path) -> String {
 }
 
 #[test]
-fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
+fn two_concurrent_force_rebuilds_both_succeed_with_one_new_generation() {
     let home = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     let _sha = git_init(wt.path());
@@ -107,12 +107,13 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
         String::from_utf8_lossy(&o2.stderr)
     );
 
-    // Only one commit_dir for this SHA + no leftover .building
+    // Initial generation + one rebuilt generation for this SHA; the second
+    // concurrent force caller attaches to the winner.
     let cgn_home = home_path.join(".cgn");
     let (commit_dirs, building_dirs) = count_dirs(&cgn_home);
     assert_eq!(
-        commit_dirs, 1,
-        "expected exactly 1 commit dir, found {commit_dirs}"
+        commit_dirs, 2,
+        "expected initial + rebuilt generation, found {commit_dirs}"
     );
     assert_eq!(
         building_dirs, 0,

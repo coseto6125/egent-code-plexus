@@ -6,7 +6,7 @@
 use std::process::Command;
 
 mod common;
-use common::cgn_bin;
+use common::{cgn_bin, run_git};
 
 /// `cgn review --files Cargo.toml --format json` should produce a JSON
 /// payload with `status: "clean"` because Cargo.toml contains no symbols
@@ -77,4 +77,48 @@ fn review_help_lists_all_flags() {
             "missing {flag} in review --help:\n{help}"
         );
     }
+}
+
+#[test]
+fn review_first_run_builds_v2_index_then_loads_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(repo.join("lib.rs"), "pub fn changed_symbol() {}\n").unwrap();
+    run_git(&repo, &["init", "-q"]);
+    run_git(&repo, &["config", "user.email", "t@t"]);
+    run_git(&repo, &["config", "user.name", "t"]);
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-qm", "init"]);
+
+    let out = Command::new(cgn_bin())
+        .args([
+            "review",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .env("HOME", &home)
+        .current_dir(&repo)
+        .output()
+        .expect("cgn review failed to spawn");
+
+    assert!(
+        out.status.success(),
+        "first-run review should build and load v2 graph\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON object in stdout: {stdout}"));
+    let v: serde_json::Value = serde_json::from_str(&stdout[json_start..])
+        .unwrap_or_else(|e| panic!("invalid JSON: {e}\nstdout: {stdout}"));
+    assert!(
+        v.get("summary").is_some() || v.get("status").is_some(),
+        "unexpected review payload: {v}"
+    );
 }

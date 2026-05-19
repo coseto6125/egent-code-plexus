@@ -29,27 +29,42 @@ static SCAN_CACHE: OnceLock<CommitIndexCache> = OnceLock::new();
 
 impl CommitIndex {
     pub fn scan(commits_dir: &Path) -> io::Result<Self> {
-        let mut by_sha = FxHashMap::default();
+        let mut candidates: FxHashMap<[u8; 20], (String, SystemTime)> = FxHashMap::default();
         let it = match std::fs::read_dir(commits_dir) {
             Ok(d) => d,
             // commits/ dir absent on first build for a new repo — empty index, not error
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self { by_sha }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    by_sha: FxHashMap::default(),
+                });
+            }
             Err(e) => return Err(e),
         };
         for entry in it.flatten() {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            // Skip in-flight builds and stale dirs reserved by promotion Case B
-            if name.ends_with(".building") || name.contains(".stale") {
+            // Skip in-flight builds and retired/stale recovery debris.
+            if is_recovery_dir_name(&name) {
                 continue;
             }
             let Ok(parsed) = CommitDirName::parse(&name) else {
                 continue;
             };
-            by_sha.insert(parsed.sha, name);
+            let freshness = commit_dir_freshness(&entry.path());
+            match candidates.get(&parsed.sha) {
+                Some((_existing, existing_time)) if *existing_time >= freshness => {}
+                _ => {
+                    candidates.insert(parsed.sha, (name, freshness));
+                }
+            }
         }
-        Ok(Self { by_sha })
+        Ok(Self {
+            by_sha: candidates
+                .into_iter()
+                .map(|(sha, (name, _freshness))| (sha, name))
+                .collect(),
+        })
     }
 
     /// `scan` + process-level cache keyed on `commits_dir` mtime. Atomic
@@ -98,6 +113,26 @@ impl CommitIndex {
     }
 }
 
+fn commit_dir_freshness(path: &Path) -> SystemTime {
+    path.join("meta.json")
+        .metadata()
+        .and_then(|m| m.modified())
+        .or_else(|_| path.join("graph.bin").metadata().and_then(|m| m.modified()))
+        .or_else(|_| path.metadata().and_then(|m| m.modified()))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+fn is_recovery_dir_name(name: &str) -> bool {
+    let Some((_prefix, suffix)) = name.rsplit_once("__") else {
+        return false;
+    };
+    suffix.ends_with(".building")
+        || suffix.contains(".building.")
+        || suffix.contains(".stale-")
+        || suffix.ends_with(".dead")
+        || suffix.contains(".dead.")
+}
+
 /// Find the commit dir under `commits_dir` whose `graph.bin` has the
 /// most recent mtime. Used as fallback when SHA-keyed lookup misses
 /// (e.g. branch not yet indexed; pick most-recently-built as best guess).
@@ -112,7 +147,7 @@ pub fn find_latest_by_mtime(commits_dir: &Path) -> Option<PathBuf> {
         .filter(|e| {
             let n = e.file_name();
             let s = n.to_string_lossy();
-            !s.ends_with(".building") && !s.contains(".stale")
+            !is_recovery_dir_name(&s)
         })
         .filter_map(|e| {
             let graph_bin = e.path().join("graph.bin");

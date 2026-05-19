@@ -1,10 +1,35 @@
 use cgn_core::graph::ZeroCopyGraph;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tantivy::schema::*;
 use tantivy::{collector::TopDocs, query::QueryParser, Index, IndexWriter, ReloadPolicy};
 
 pub struct TantivyEngine;
+
+static STALE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn stale_tantivy_path(tantivy_dir: &Path) -> std::path::PathBuf {
+    let parent = tantivy_dir.parent().unwrap_or_else(|| Path::new(""));
+    let stale_name = format!(
+        "{}.tantivy.dead.{}.{}.{}",
+        parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("index"),
+        std::process::id(),
+        STALE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    if let Some(root) = parent.parent() {
+        root.join(stale_name)
+    } else {
+        parent.join(stale_name)
+    }
+}
 
 /// Split a code identifier into subword tokens so a query like `config`
 /// can match `parseConfig`, `configParser`, `parse_config_file`, etc.
@@ -84,16 +109,13 @@ impl TantivyEngine {
     pub fn build_index(index_dir: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
         let index_dir = index_dir.join("tantivy");
         if index_dir.exists() {
-            // Fix Windows Access Denied (os error 5) by renaming the stale directory
-            // instead of deleting it while it might be locked.
-            let dead_path = index_dir.with_extension(format!(
-                "dead.{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
-            ));
-            let _ = fs::rename(&index_dir, &dead_path);
+            // Move stale Tantivy state outside the build dir before async
+            // cleanup. On Windows, a background delete under `<sha>.building/`
+            // can keep a handle open and make the later `.building -> <sha>`
+            // publish fail with os error 5.
+            let dead_path = stale_tantivy_path(&index_dir);
+            fs::rename(&index_dir, &dead_path)
+                .map_err(|e| format!("move stale tantivy dir aside: {e}"))?;
             // Non-blocking cleanup
             std::thread::spawn(move || {
                 let _ = fs::remove_dir_all(dead_path);
@@ -199,7 +221,8 @@ impl TantivyEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::tokenize_identifier;
+    use super::{stale_tantivy_path, tokenize_identifier};
+    use std::path::Path;
 
     #[test]
     fn snake_case_splits_on_underscore() {
@@ -258,5 +281,18 @@ mod tests {
     #[test]
     fn empty_string_yields_empty() {
         assert_eq!(tokenize_identifier(""), "");
+    }
+
+    #[test]
+    fn stale_tantivy_path_lands_outside_build_dir() {
+        let commits = Path::new("repo").join("commits");
+        let stale = stale_tantivy_path(&commits.join("main__abc123.building").join("tantivy"));
+
+        assert_eq!(stale.parent().unwrap(), commits);
+        assert!(stale
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("main__abc123.building.tantivy.dead."));
     }
 }

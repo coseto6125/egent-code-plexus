@@ -41,7 +41,10 @@ pub enum ParseError {
 
 impl CommitDirName {
     pub fn parse(name: &str) -> Result<Self, ParseError> {
-        let (prefix, sha_str) = name.rsplit_once("__").ok_or(ParseError::NoSha)?;
+        let (prefix, sha_segment) = name.rsplit_once("__").ok_or(ParseError::NoSha)?;
+        let sha_str = sha_segment
+            .split_once(".gen.")
+            .map_or(sha_segment, |(sha, _generation)| sha);
         if sha_str.len() != 40 || !sha_str.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ParseError::InvalidSha);
         }

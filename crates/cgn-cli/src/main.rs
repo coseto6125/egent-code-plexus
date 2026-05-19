@@ -198,12 +198,13 @@ fn main() {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let graph_path = graph_path::resolve(&cli.graph, &cwd);
+    let mut graph_path = graph_path::resolve(&cli.graph, &cwd);
 
     if let Err(err) = auto_ensure::ensure_fresh(&graph_path, &cwd) {
         eprintln!("Error preparing index for {}: {err}", cwd.display());
         std::process::exit(1);
     }
+    graph_path = graph_path::resolve(&cli.graph, &cwd);
 
     let engine = match Engine::load(&graph_path) {
         Ok(e) => e,

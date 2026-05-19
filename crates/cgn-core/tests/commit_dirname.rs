@@ -31,6 +31,16 @@ fn parse_source_id_with_double_underscore() {
 }
 
 #[test]
+fn parse_generation_suffix() {
+    let n =
+        CommitDirName::parse("branch_main__abc123def4567890abc123def4567890abc123de.gen.20260520")
+            .unwrap();
+    assert_eq!(n.source_type, SourceType::Branch);
+    assert_eq!(n.source_id.as_deref(), Some("main"));
+    assert_eq!(n.sha_hex(), "abc123def4567890abc123def4567890abc123de");
+}
+
+#[test]
 fn reject_unknown_source_type() {
     assert!(matches!(
         CommitDirName::parse("fake_x__abc123def4567890abc123def4567890abc123de"),

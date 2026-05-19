@@ -3,12 +3,12 @@
 
 use crate::build::dirname_picker::pick_dirname;
 use crate::build::orchestrator::{
-    attach_if_fingerprint_matches, build_inside_locked, wait_for_completion, BuildResult,
+    attach_latest_if_fingerprint_matches, build_inside_locked, wait_for_completion, BuildResult,
 };
 use crate::commit_lookup::CommitIndex;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use crate::session::state::classify_with_index;
-use cgn_core::registry::{resolve_home_cgn, SourceType};
+use cgn_core::registry::{resolve_home_cgn, retire_dir_async, SourceType};
 use cgn_core::session::SessionState;
 use fs2::FileExt;
 use std::fs::{self, OpenOptions};
@@ -166,7 +166,9 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         // rebuild would just reproduce the same artifact. Attach to the
         // winner's result instead of drop+rebuild. This collapses N
         // concurrent --force into 1 actual build.
-        if let Some(attached) = attach_if_fingerprint_matches(&commit_dir) {
+        if let Some(attached) =
+            attach_latest_if_fingerprint_matches(&repo_root.join("commits"), &sha_hex)
+        {
             return Ok(ForceRebuildResult {
                 sha_hex: attached.sha_hex,
                 source_type: attached.source_type,
@@ -193,10 +195,8 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
     // 2. Invalidate matching L1 BEFORE dropping L2 (spec §4.4)
     let invalidate_report = invalidate_matching_l1(&repo_root, &sha_hex)?;
 
-    // 3. Drop existing L2
-    if commit_dir.exists() {
-        fs::remove_dir_all(&commit_dir)?;
-    }
+    // 3. Keep existing L2 in place. The rebuild publishes a same-SHA
+    // generation dir so active readers can continue mmaping the old graph.
 
     // 3.5. Drop per-file parse_cache too.
     //
@@ -210,9 +210,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
     // Stale-fingerprint orphan subdirs disappear with this too, which is OK
     // since they were unreachable already.
     let parse_cache_dir = repo_root.join("parse_cache");
-    if parse_cache_dir.exists() {
-        fs::remove_dir_all(&parse_cache_dir)?;
-    }
+    let _ = retire_dir_async(&parse_cache_dir)?;
 
     // 4-8. Shared build pipeline (source → analyzer → meta → atomic publish → repo_meta)
     let BuildResult {
