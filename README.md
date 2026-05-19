@@ -1,16 +1,27 @@
 # Code Graph Nexus
 
-A code intelligence graph built for **LLMs and AI code agents** — one-shot CLI, zero-copy mmap, sub-second per query. Indexes 22k-file polyglot repos in seconds, answers structural questions (*who calls this*, *blast radius if I change this function*, *what's related to the auth flow*) in milliseconds.
-
-Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model, rewritten in Rust for a different audience. See [docs/vs-gitnexus.md](./docs/vs-gitnexus.md) for the philosophical and capability differences. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE) — see [NOTICES.md](./NOTICES.md) for the required attribution.
+A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero-copy mmap, sub-second per query.
 
 [繁體中文 (Traditional Chinese)](./README_zh-TW.md)
 
 ---
 
+## 🎯 Mission
+
+`cgn` exists to be the structural-knowledge layer that an autonomous AI coding agent calls 20–50 times per task. Every design decision falls out of that one premise:
+
+- **Built for agents, not IDEs.** Output is token-cheap (TOON / compact JSON), every flag surfaces via `--help`, every command is non-interactive and stdout-parseable. No UI, no human-skim layout cruft eating the agent's context window.
+- **No warm-up, no daemon.** Each invocation `mmap`s a zero-copy `rkyv` graph file and exits. A `cypher` query takes 9 ms *including process startup*. An agent can fire dozens of queries per task without amortising a server boot, and there is no "daemon died, please restart" failure mode.
+- **Honest answers over readable graphs.** When a call site can't be statically resolved (dynamic dispatch, unresolved import, reflection), `cgn` emits a `BlindSpot` record — not a guessed edge. An agent that acts on a hallucinated dependency is much more expensive than one that gets an "I don't know" it can route around.
+- **Polyglot reach.** 31 languages parsed at the structural level so modern multi-stack repos (service code + Dockerfiles + GitHub Actions + Terraform + SQL + smart contracts) stop being black holes the moment you leave the main language.
+
+Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model (a structural knowledge graph of a repo), rewritten in Rust for a different audience. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE); see [NOTICES.md](./NOTICES.md) for required attribution.
+
+---
+
 ## ⚡ Performance
 
-Why `cgn` is built the way it is: an LLM agent fires 20–50 structural queries per task. If each query takes 200 ms to warm up, every task pays a multi-second tax before the agent thinks. `cgn` is a one-shot CLI over an `mmap`-ed `rkyv` graph — there is no warm-up.
+The Mission section above is *why* `cgn` is built the way it is. This section is the receipts.
 
 **Cold index — single run on `.sample_repo`:**
 
@@ -40,6 +51,25 @@ Why `cgn` is built the way it is: an LLM agent fires 20–50 structural queries 
 **Hardware:** AMD Ryzen 9 9950X (8 vCPU under WSL2, 11.7 GiB RAM), Linux 6.6.87. Tree-sitter + Rayon for parse, `rkyv` mmap for the graph file, Tantivy BM25 for lexical search.
 
 **Reproduce:** `python scripts/benchmark_cgn.py` (auto-rebuilds the binary, runs every public subcommand, reports median wall-clock).
+
+---
+
+## vs. upstream GitNexus
+
+Same conceptual model, different audience. `cgn` is **not** a drop-in replacement — choose based on who reads the graph and what they do with it.
+
+| Dimension | GitNexus | Code Graph Nexus |
+|---|---|---|
+| Primary consumer | Human devs + IDE integration | Autonomous AI code agents |
+| Runtime | Long-running MCP server | Stateless one-shot CLI (zero warm-up) |
+| Unresolved edge | Heuristic guess to keep graph connected | `BlindSpot` record, no fabricated edge |
+| Default output | Wiki / UI rendering | TOON / compact JSON (token-cheap) |
+| Languages | 14 (deep, 9-dimension coverage) | 31 (14 deep + 17 structural — DevOps configs, Web3 contracts, infra-as-code) |
+| Storage | Node.js + LadybugDB | Rust + `rkyv` zero-copy mmap |
+
+The short version: pick GitNexus if you're integrating into a Node-based agent platform with strong MCP/editor support and your repo is monolingual. Pick `cgn` if you're shell-mediating an LLM, your repo is polyglot, and an honest "I don't know" beats a confident wrong answer.
+
+**Full breakdown of all 8 dimensions, philosophy, and decision matrix → [docs/vs-gitnexus.md](./docs/vs-gitnexus.md)**
 
 ---
 
