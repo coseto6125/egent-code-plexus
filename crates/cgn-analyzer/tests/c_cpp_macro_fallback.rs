@@ -96,7 +96,7 @@ fn doctest_cmp_ge_recovered_in_real_file() {
     // inside `#ifndef ... #else ... #endif` branches. The fallback
     // captures both occurrences from the raw source.
     let bytes = std::fs::read(sample_repo_path("Cpp/tests/thirdparty/doctest/doctest.h"))
-    .expect("sample_repo doctest.h missing — run scripts/parity bootstrap");
+        .expect("sample_repo doctest.h missing — run scripts/parity bootstrap");
     let macros: Vec<String> = cpp_macros(&bytes);
     let count = macros.iter().filter(|n| *n == "DOCTEST_CMP_GE").count();
     assert!(

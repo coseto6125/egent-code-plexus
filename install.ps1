@@ -138,9 +138,11 @@ Write-Host ""
 # ---- PATH 提示 ----
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not $userPath -or -not ($userPath -split ';' | Where-Object { $_ -ieq $installDir })) {
-    Write-Host "  ⚠  $installDir is not in user PATH. Add with:"
-    Write-Host "       [Environment]::SetEnvironmentVariable('Path', `"$installDir;$([Environment]::GetEnvironmentVariable('Path', 'User'))`", 'User')"
-    Write-Host "     Restart your shell after running."
+    $newUserPath = if ($userPath) { "$installDir;$userPath" } else { $installDir }
+    [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+    $env:Path = "$installDir;$env:Path"
+    Write-Host "  Added $installDir to user PATH."
+    Write-Host "  It is available in this PowerShell session; restart other shells to pick it up."
     Write-Host ""
 }
 

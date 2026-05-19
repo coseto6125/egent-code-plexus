@@ -138,8 +138,9 @@ jobs:
 
       - name: Stage install scripts into dist
         run: |
-          cp install.sh  dist/install.sh
-          cp install.ps1 dist/install.ps1
+          version="${GITHUB_REF_NAME#v}"
+          sed "s/CGN_VERSION=\"\${CGN_VERSION:-latest}\"/CGN_VERSION=\"\${CGN_VERSION:-$version}\"/" install.sh > dist/install.sh
+          sed "s/\$version = if (\$env:CGN_VERSION) { \$env:CGN_VERSION } else { 'latest' }/\$version = if (\$env:CGN_VERSION) { \$env:CGN_VERSION } else { '$version' }/" install.ps1 > dist/install.ps1
           ls -la dist/
 
       - name: Create GitHub Release
