@@ -18,8 +18,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn write(repo: &Path, rel: &str, body: &str) {
@@ -58,7 +58,7 @@ fn init_and_analyze(repo: &Path) {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -72,7 +72,7 @@ fn init_and_analyze(repo: &Path) {
 }
 
 fn cypher_json(repo: &Path, query: &str) -> Value {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["cypher", query, "--format", "json"])
         .current_dir(repo)
         .env("HOME", repo)

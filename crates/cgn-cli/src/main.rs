@@ -44,7 +44,7 @@ struct Cli {
     command: Commands,
 
     /// Path to the graph.bin file
-    #[arg(long, default_value = ".gnx/graph.bin", global = true)]
+    #[arg(long, default_value = ".cgn/graph.bin", global = true)]
     graph: PathBuf,
 }
 
@@ -211,7 +211,7 @@ fn main() {
         }
     };
 
-    let result: Result<(), cgn_core::GnxError> = match cli.command {
+    let result: Result<(), cgn_core::CgnError> = match cli.command {
         Commands::Inspect(args) => commands::inspect::run(args, &engine, &graph_path),
         Commands::Find(args) => commands::find::run(args, &engine),
         Commands::Impact(args) => commands::impact::run(args, &engine),
@@ -288,7 +288,7 @@ fn check_group_atom(cli: &Cli) {
 /// Auto-trigger background GC when the home heartbeat stamp is missing
 /// or older than 24h. Spawned detached; failures are silent (best-effort).
 fn maybe_spawn_background_gc() {
-    let home = cgn_core::registry::resolve_home_gnx();
+    let home = cgn_core::registry::resolve_home_cgn();
     let stamp = home.join(".last-gc");
     let stale = std::fs::metadata(&stamp)
         .and_then(|m| m.modified())

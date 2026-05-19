@@ -17,8 +17,8 @@ async function loadUsers() {
 }
 "#;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// Build a tempdir with one TypeScript file containing a fetch() consumer,
@@ -58,7 +58,7 @@ fn setup_fixture() -> TempDir {
     assert!(out.status.success(), "git commit failed: stderr={}",
         String::from_utf8_lossy(&out.stderr));
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -76,7 +76,7 @@ fn setup_fixture() -> TempDir {
 #[test]
 fn shape_check_help_lists_route_arg() {
     // Help text doesn't depend on graph state; no fixture needed.
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["shape-check", "--help"])
         .output()
         .expect("run cgn shape-check --help");
@@ -92,7 +92,7 @@ fn shape_check_route_no_match_emits_helpful_message() {
     let tmp = setup_fixture();
     let repo = tmp.path();
 
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["shape-check", "--route", "/__nonexistent_route__"])
         .current_dir(repo)
         .env("HOME", repo)

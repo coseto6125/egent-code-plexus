@@ -6,7 +6,7 @@
 use std::process::Command;
 
 mod common;
-use common::gnx_bin;
+use common::cgn_bin;
 
 /// `cgn review --files Cargo.toml --format json` should produce a JSON
 /// payload with `status: "clean"` because Cargo.toml contains no symbols
@@ -28,7 +28,7 @@ fn review_files_flag_exits_successfully_and_emits_valid_json() {
 
     // Run review pointing at an explicit file that exists in the project
     // (relative path; cgn resolves from cwd).
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["review", "--files", "Cargo.toml", "--format", "json"])
         .current_dir(
             std::env::current_dir()
@@ -66,7 +66,7 @@ fn review_files_flag_exits_successfully_and_emits_valid_json() {
 
 #[test]
 fn review_help_lists_all_flags() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["review", "--help"])
         .output()
         .expect("cgn review --help failed to spawn");

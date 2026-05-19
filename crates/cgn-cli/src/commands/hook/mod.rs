@@ -16,7 +16,7 @@ pub mod session_start;
 pub mod user_prompt_submit;
 
 use clap::{Args, ValueEnum};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 #[derive(Args, Debug, Clone)]
 pub struct HookArgs {
@@ -40,9 +40,9 @@ pub enum HookEvent {
     SessionStart,
 }
 
-pub fn run(args: HookArgs) -> Result<(), GnxError> {
+pub fn run(args: HookArgs) -> Result<(), CgnError> {
     if !args.claude_code {
-        return Err(GnxError::InvalidArgument(
+        return Err(CgnError::InvalidArgument(
             "cgn hook: exactly one host flag required (e.g. --claude-code)".into(),
         ));
     }

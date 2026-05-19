@@ -1,7 +1,7 @@
 //! Drift-detector for the CLI ↔ MCP surface.
 //!
 //! Why this exists: PR-146 reshaped the `cgn group` sub-subcommand tree
-//! and exposed the matching `gnx_group` MCP tool by hand-rolling its
+//! and exposed the matching `cgn_group` MCP tool by hand-rolling its
 //! schema (the root `group` command is `#[command(hide = true)]` so
 //! `enumerate_tools` skips it). Without a guard, the manual schema can
 //! silently drift away from the real CLI flags — adding a new
@@ -13,7 +13,7 @@
 //! 1. Every command + sub-subcommand in the hardcoded inventory below
 //!    responds to `--help` with exit 0 (catches deletes, renames,
 //!    broken arg defs).
-//! 2. Every subcmd advertised by the `gnx_group` / `gnx_peers` MCP
+//! 2. Every subcmd advertised by the `cgn_group` / `cgn_peers` MCP
 //!    schemas maps to a real `cgn <root> <subcmd> --help` path.
 //! 3. Every non-positional flag advertised in those MCP schemas appears
 //!    as `--<kebab>` in the corresponding CLI `--help` text (the
@@ -25,12 +25,12 @@
 
 use std::process::{Command, Output};
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .args(args)
         .output()
         .expect("cgn spawn failed")
@@ -158,19 +158,19 @@ fn every_admin_sessions_subcommand_has_help() {
     }
 }
 
-// ── 2. MCP gnx_group / gnx_peers cross-checks ────────────────────────────────
+// ── 2. MCP cgn_group / cgn_peers cross-checks ────────────────────────────────
 
-/// For each subcmd advertised by `gnx_group`'s MCP schema, verify the
+/// For each subcmd advertised by `cgn_group`'s MCP schema, verify the
 /// matching CLI path is reachable. Catches "renamed verb, forgot the
 /// schema" drift.
 #[test]
-fn mcp_gnx_group_subcmds_are_real_cli_paths() {
+fn mcp_cgn_group_subcmds_are_real_cli_paths() {
     let tool = cgn_mcp::group::group_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_group")
-        .expect("gnx_group tool missing from registry");
+        .find(|t| t.name == "cgn_group")
+        .expect("cgn_group tool missing from registry");
     let allowed = enum_values(&tool.schema, "subcmd");
-    assert!(!allowed.is_empty(), "gnx_group subcmd enum is empty");
+    assert!(!allowed.is_empty(), "cgn_group subcmd enum is empty");
     for sub in &allowed {
         assert_help_ok(&["group", sub]);
     }
@@ -180,16 +180,16 @@ fn mcp_gnx_group_subcmds_are_real_cli_paths() {
     assert_eq!(
         sorted(allowed),
         sorted(inventory),
-        "gnx_group MCP schema and GROUP_SUBCMDS inventory disagree"
+        "cgn_group MCP schema and GROUP_SUBCMDS inventory disagree"
     );
 }
 
 #[test]
-fn mcp_gnx_peers_subcmds_are_real_cli_paths() {
+fn mcp_cgn_peers_subcmds_are_real_cli_paths() {
     let tool = cgn_mcp::peers::peer_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_peers")
-        .expect("gnx_peers tool missing from registry");
+        .find(|t| t.name == "cgn_peers")
+        .expect("cgn_peers tool missing from registry");
     let allowed = enum_values(&tool.schema, "subcmd");
     for sub in &allowed {
         assert_help_ok(&["peers", sub]);
@@ -202,10 +202,10 @@ fn mcp_gnx_peers_subcmds_are_real_cli_paths() {
 /// in `cgn group <subcmd> --help` output. This is the drift-killer.
 ///
 /// The expected flag set mirrors the `[subcmd]` tags in the
-/// `gnx_group` schema property descriptions
+/// `cgn_group` schema property descriptions
 /// (`crates/graph-nexus-mcp/src/group.rs`). Both files MUST move together.
 #[test]
-fn mcp_gnx_group_advertised_flags_exist_in_cli_help() {
+fn mcp_cgn_group_advertised_flags_exist_in_cli_help() {
     let cases: &[(&str, &[&str])] = &[
         ("sync", &["--exact-only", "--allow-stale", "--json", "--verbose"]),
         ("status", &["--json"]),
@@ -241,11 +241,11 @@ fn mcp_gnx_group_advertised_flags_exist_in_cli_help() {
     }
 }
 
-/// Same drift-kill for `gnx_peers`, scoped to flags whose presence is
+/// Same drift-kill for `cgn_peers`, scoped to flags whose presence is
 /// load-bearing for the LLM client (each subcmd has its own positional /
 /// flag set documented via [tag] descriptions).
 #[test]
-fn mcp_gnx_peers_advertised_flags_exist_in_cli_help() {
+fn mcp_cgn_peers_advertised_flags_exist_in_cli_help() {
     // peers subcmds vary heavily in flag set; spot-check the
     // most-used ones rather than exhaustively listing.
     let cases: &[(&str, &[&str])] = &[
@@ -260,7 +260,7 @@ fn mcp_gnx_peers_advertised_flags_exist_in_cli_help() {
         for flag in *expected_flags {
             assert!(
                 help.contains(flag),
-                "cgn peers {subcmd}: --help missing flag `{flag}` — gnx_peers schema drifted.\n--- help output ---\n{help}"
+                "cgn peers {subcmd}: --help missing flag `{flag}` — cgn_peers schema drifted.\n--- help output ---\n{help}"
             );
         }
     }
@@ -269,8 +269,8 @@ fn mcp_gnx_peers_advertised_flags_exist_in_cli_help() {
 // ── 4. MCP `tools` list shape ────────────────────────────────────────────────
 
 /// `cgn admin mcp tools` is the LLM client's discovery surface. Verify
-/// the manual tools (`gnx_peers`, `gnx_group`) appear exactly once, and
-/// that no hidden tool (gnx_admin / gnx_hook / etc.) leaks through.
+/// the manual tools (`cgn_peers`, `cgn_group`) appear exactly once, and
+/// that no hidden tool (cgn_admin / cgn_hook / etc.) leaks through.
 #[test]
 fn admin_mcp_tools_list_includes_manual_tools_once_each() {
     let out = run(&["admin", "mcp", "tools"]);
@@ -281,7 +281,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
     );
     let listing = String::from_utf8_lossy(&out.stdout);
 
-    for must_have in ["gnx_peers", "gnx_group"] {
+    for must_have in ["cgn_peers", "cgn_group"] {
         let count = listing.matches(must_have).count();
         assert!(
             count >= 1,
@@ -289,7 +289,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
         );
     }
     // Hidden subcommands must not produce derived tools.
-    for forbidden in ["gnx_admin", "gnx_hook_handle", "gnx_hook_watcher", "gnx_hook", "gnx_watch"]
+    for forbidden in ["cgn_admin", "cgn_hook_handle", "cgn_hook_watcher", "cgn_hook", "cgn_watch"]
     {
         assert!(
             !listing.contains(forbidden),
@@ -303,7 +303,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
 /// For each `cgn group <subcmd>` and `cgn peers <subcmd>`, every `--flag`
 /// shown in the real `--help` must exist as a property in the MCP schema
 /// (after kebab→snake conversion). This is the asymmetric partner to
-/// `mcp_gnx_group_advertised_flags_exist_in_cli_help` — without both
+/// `mcp_cgn_group_advertised_flags_exist_in_cli_help` — without both
 /// directions, a CLI-side flag addition silently leaves LLM clients
 /// unable to set it.
 ///
@@ -314,8 +314,8 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
 fn cli_group_flags_all_exist_in_mcp_group_schema() {
     let tool = cgn_mcp::group::group_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_group")
-        .expect("gnx_group tool");
+        .find(|t| t.name == "cgn_group")
+        .expect("cgn_group tool");
     let props = tool
         .schema
         .get("properties")
@@ -330,7 +330,7 @@ fn cli_group_flags_all_exist_in_mcp_group_schema() {
             let prop_key = flag_kebab.replace('-', "_");
             assert!(
                 props.contains_key(&prop_key),
-                "cgn group {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) is missing from gnx_group MCP schema. Add a property entry — otherwise LLM clients cannot reach this flag.\n--- help ---\n{help}"
+                "cgn group {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) is missing from cgn_group MCP schema. Add a property entry — otherwise LLM clients cannot reach this flag.\n--- help ---\n{help}"
             );
         }
     }
@@ -340,8 +340,8 @@ fn cli_group_flags_all_exist_in_mcp_group_schema() {
 fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
     let tool = cgn_mcp::peers::peer_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_peers")
-        .expect("gnx_peers tool");
+        .find(|t| t.name == "cgn_peers")
+        .expect("cgn_peers tool");
     let props = tool
         .schema
         .get("properties")
@@ -356,7 +356,7 @@ fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
             let prop_key = flag_kebab.replace('-', "_");
             assert!(
                 props.contains_key(&prop_key),
-                "cgn peers {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) missing from gnx_peers MCP schema.\n--- help ---\n{help}"
+                "cgn peers {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) missing from cgn_peers MCP schema.\n--- help ---\n{help}"
             );
         }
     }
@@ -425,16 +425,16 @@ fn admin_inventory_covers_all_subcommands() {
 
 // ── 7. Schema semantic invariants ────────────────────────────────────────────
 
-/// Every `[subcmd]` tag inside `gnx_group` schema property descriptions
+/// Every `[subcmd]` tag inside `cgn_group` schema property descriptions
 /// must reference a subcmd that actually exists in the enum (or the
 /// special tag `[all]` meaning "applies to all subcmds"). Catches:
 /// rename a subcmd, forget to update tag references in descriptions.
 #[test]
-fn mcp_gnx_group_description_tags_reference_valid_subcmds() {
+fn mcp_cgn_group_description_tags_reference_valid_subcmds() {
     let tool = cgn_mcp::group::group_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_group")
-        .expect("gnx_group tool");
+        .find(|t| t.name == "cgn_group")
+        .expect("cgn_group tool");
 
     let mut valid: Vec<String> = enum_values(&tool.schema, "subcmd");
     valid.push("all".to_string()); // meta-tag covering every subcmd
@@ -461,11 +461,11 @@ fn mcp_gnx_group_description_tags_reference_valid_subcmds() {
 /// Every name in `required` must be a defined property. Catches: rename
 /// a property without updating the required list, or vice versa.
 #[test]
-fn mcp_gnx_group_required_keys_are_defined_properties() {
+fn mcp_cgn_group_required_keys_are_defined_properties() {
     let tool = cgn_mcp::group::group_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_group")
-        .expect("gnx_group tool");
+        .find(|t| t.name == "cgn_group")
+        .expect("cgn_group tool");
     let props = tool
         .schema
         .get("properties")
@@ -480,7 +480,7 @@ fn mcp_gnx_group_required_keys_are_defined_properties() {
         let key = key.as_str().expect("required entry must be string");
         assert!(
             props.contains_key(key),
-            "gnx_group: required key `{key}` not in properties map"
+            "cgn_group: required key `{key}` not in properties map"
         );
     }
 }
@@ -488,11 +488,11 @@ fn mcp_gnx_group_required_keys_are_defined_properties() {
 /// Every positional_args entry must be a defined property too — the
 /// dispatch layer (`argv::json_to_argv`) looks up by that name.
 #[test]
-fn mcp_gnx_group_positional_args_are_defined_properties() {
+fn mcp_cgn_group_positional_args_are_defined_properties() {
     let tool = cgn_mcp::group::group_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_group")
-        .expect("gnx_group tool");
+        .find(|t| t.name == "cgn_group")
+        .expect("cgn_group tool");
     let props = tool
         .schema
         .get("properties")
@@ -501,7 +501,7 @@ fn mcp_gnx_group_positional_args_are_defined_properties() {
     for pos in &tool.positional_args {
         assert!(
             props.contains_key(pos),
-            "gnx_group: positional arg `{pos}` not declared in properties — dispatch will silently drop it"
+            "cgn_group: positional arg `{pos}` not declared in properties — dispatch will silently drop it"
         );
     }
 }
@@ -509,7 +509,7 @@ fn mcp_gnx_group_positional_args_are_defined_properties() {
 // ── 8. End-to-end MCP smoke (JSON-RPC over stdio) ────────────────────────────
 
 /// Spawn `cgn admin mcp serve`, perform MCP initialize handshake, send
-/// `tools/list`, verify gnx_group + gnx_peers + a derived tool all
+/// `tools/list`, verify cgn_group + cgn_peers + a derived tool all
 /// appear. Catches: rmcp transport regression, schema-serialisation
 /// bug, server-loop deadlock.
 ///
@@ -524,7 +524,7 @@ fn mcp_serve_responds_to_initialize_and_tools_list() {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["admin", "mcp", "serve"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -579,7 +579,7 @@ fn mcp_serve_responds_to_initialize_and_tools_list() {
         .iter()
         .filter_map(|t| t["name"].as_str().map(String::from))
         .collect();
-    for required_tool in ["gnx_group", "gnx_peers", "gnx_find", "gnx_impact"] {
+    for required_tool in ["cgn_group", "cgn_peers", "cgn_find", "cgn_impact"] {
         assert!(
             names.iter().any(|n| n == required_tool),
             "tool `{required_tool}` missing from tools/list response. Got: {names:?}"

@@ -14,7 +14,7 @@ use tempfile::TempDir;
 
 fn dummy_tool(subcommand: &str) -> DerivedTool {
     DerivedTool {
-        name: format!("gnx_{subcommand}"),
+        name: format!("cgn_{subcommand}"),
         subcommand: subcommand.into(),
         description: String::new(),
         schema: Arc::new(json!({})),

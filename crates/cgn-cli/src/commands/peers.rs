@@ -8,7 +8,7 @@ use std::path::PathBuf;
 fn default_repo_root() -> std::io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(&cwd)?;
-    Ok(cgn_core::registry::resolve_home_gnx().join(repo_dir))
+    Ok(cgn_core::registry::resolve_home_cgn().join(repo_dir))
 }
 
 #[derive(Args, Debug, Clone)]

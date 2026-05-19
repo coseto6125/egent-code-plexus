@@ -5,8 +5,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
@@ -14,7 +14,7 @@ fn smoke_admin_status_reports_missing_then_installed() {
     let tmp = TempDir::new().unwrap();
     let settings = tmp.path().join("settings.json");
 
-    let before = Command::new(gnx_bin())
+    let before = Command::new(cgn_bin())
         .args(["admin", "status", "--claude-code", "--settings-path"])
         .arg(&settings)
         .output()
@@ -35,7 +35,7 @@ fn smoke_admin_status_reports_missing_then_installed() {
     }
     assert!(body.contains("missing"));
 
-    let install = Command::new(gnx_bin())
+    let install = Command::new(cgn_bin())
         .args([
             "admin",
             "install-hook",
@@ -53,7 +53,7 @@ fn smoke_admin_status_reports_missing_then_installed() {
         String::from_utf8_lossy(&install.stderr)
     );
 
-    let after = Command::new(gnx_bin())
+    let after = Command::new(cgn_bin())
         .args(["admin", "status", "--claude-code", "--settings-path"])
         .arg(&settings)
         .output()

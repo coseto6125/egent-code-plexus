@@ -24,8 +24,8 @@ pub fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
-pub fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+pub fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 pub fn write_graph(dir: &Path, bytes: &[u8]) -> PathBuf {

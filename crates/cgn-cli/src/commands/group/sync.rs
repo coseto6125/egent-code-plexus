@@ -2,8 +2,8 @@
 //! run the matching cascade, and write contracts.rkyv + meta.json atomically.
 
 use clap::Args;
-use cgn_core::registry::{resolve_home_gnx, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, RegistryFile};
+use cgn_core::CgnError;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -40,12 +40,12 @@ pub struct SyncArgs {
     pub verbose: bool,
 }
 
-pub fn run(args: SyncArgs) -> Result<(), GnxError> {
+pub fn run(args: SyncArgs) -> Result<(), CgnError> {
     let start = Instant::now();
 
     // 1. Resolve home, open registry.
-    let home_gnx = resolve_home_gnx();
-    let registry_path = home_gnx.join("registry.json");
+    let home_cgn = resolve_home_cgn();
+    let registry_path = home_cgn.join("registry.json");
     let reg = RegistryFile::read_or_empty(&registry_path)?;
 
     // 2. Look up the group.
@@ -54,7 +54,7 @@ pub fn run(args: SyncArgs) -> Result<(), GnxError> {
         .iter()
         .find(|g| g.name == args.name)
         .ok_or_else(|| {
-            GnxError::InvalidArgument(format!(
+            CgnError::InvalidArgument(format!(
                 "group '{}' not found in registry\n\
                  → create it with `cgn admin group add <repo> {}`",
                 args.name, args.name
@@ -95,7 +95,7 @@ pub fn run(args: SyncArgs) -> Result<(), GnxError> {
     }
 
     // 5. Match contracts.
-    let group_dir = storage::group_dir(&home_gnx, &args.name);
+    let group_dir = storage::group_dir(&home_cgn, &args.name);
     let (cross_links, unmatched) =
         match_contracts(&all_contracts, &group_dir, &cfg, args.exact_only)?;
 

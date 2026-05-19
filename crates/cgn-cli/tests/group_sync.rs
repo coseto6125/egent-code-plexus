@@ -9,8 +9,8 @@ use cgn_cli::commands::group::storage::{group_dir, read_contracts};
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn git_init_and_commit(dir: &Path) {
@@ -35,8 +35,8 @@ fn git_init_and_commit(dir: &Path) {
         .unwrap();
 }
 
-fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
-    Command::new(gnx_bin())
+fn run_cgn(args: &[&str], home: &Path) -> std::process::Output {
+    Command::new(cgn_bin())
         .args(args)
         .env("HOME", home)
         .output()
@@ -86,7 +86,7 @@ def create_user():
     let home = home_tmp.path();
 
     // ── 3. Index both repos ───────────────────────────────────────────────
-    let out = run_gnx(&["admin", "index", "--repo", go_repo.to_str().unwrap()], home);
+    let out = run_cgn(&["admin", "index", "--repo", go_repo.to_str().unwrap()], home);
     assert!(
         out.status.success(),
         "admin index go failed:\nstdout: {}\nstderr: {}",
@@ -94,7 +94,7 @@ def create_user():
         String::from_utf8_lossy(&out.stderr),
     );
 
-    let out = run_gnx(&["admin", "index", "--repo", py_repo.to_str().unwrap()], home);
+    let out = run_cgn(&["admin", "index", "--repo", py_repo.to_str().unwrap()], home);
     assert!(
         out.status.success(),
         "admin index py failed:\nstdout: {}\nstderr: {}",
@@ -106,7 +106,7 @@ def create_user():
     //    `admin index` registers repos by the dir_name computed from git common-dir.
     //    We read the registry to find actual dir_name values so we can `group add`
     //    using names that actually exist.
-    let registry_path = home.join(".gnx").join("registry.json");
+    let registry_path = home.join(".cgn").join("registry.json");
     let reg = cgn_core::registry::RegistryFile::read_or_empty(&registry_path).unwrap();
 
     let go_dir_name = reg
@@ -123,14 +123,14 @@ def create_user():
         .expect("svc-py repo not in registry");
 
     // ── 5. Add both repos to the "demo" group ────────────────────────────
-    let out = run_gnx(&["admin", "group", "add", &go_dir_name, "demo"], home);
+    let out = run_cgn(&["admin", "group", "add", &go_dir_name, "demo"], home);
     assert!(
         out.status.success(),
         "admin group add go failed:\nstderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
 
-    let out = run_gnx(&["admin", "group", "add", &py_dir_name, "demo"], home);
+    let out = run_cgn(&["admin", "group", "add", &py_dir_name, "demo"], home);
     assert!(
         out.status.success(),
         "admin group add py failed:\nstderr: {}",
@@ -138,7 +138,7 @@ def create_user():
     );
 
     // ── 6. Run group sync ─────────────────────────────────────────────────
-    let out = run_gnx(&["group", "sync", "demo"], home);
+    let out = run_cgn(&["group", "sync", "demo"], home);
     assert!(
         out.status.success(),
         "group sync failed:\nstdout: {}\nstderr: {}",
@@ -147,8 +147,8 @@ def create_user():
     );
 
     // ── 7. Verify contracts.rkyv and meta.json exist ──────────────────────
-    let gnx_home = home.join(".gnx");
-    let gdir = group_dir(&gnx_home, "demo");
+    let cgn_home = home.join(".cgn");
+    let gdir = group_dir(&cgn_home, "demo");
     assert!(
         gdir.join("contracts.rkyv").exists(),
         "contracts.rkyv missing at {:?}",

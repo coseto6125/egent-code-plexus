@@ -12,8 +12,8 @@ function b() { return c(); }
 function c() { return 1; }
 "#;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn init_repo_and_analyze(repo: &std::path::Path) {
@@ -47,7 +47,7 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -61,7 +61,7 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
 }
 
 fn run_json(repo: &std::path::Path, args: &[&str]) -> Value {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(args)
         .current_dir(repo)
         .env("HOME", repo)

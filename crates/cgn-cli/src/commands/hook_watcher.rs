@@ -14,7 +14,7 @@ pub struct HookWatcherArgs {
     pub repo: PathBuf,
 }
 
-pub fn run(args: HookWatcherArgs) -> Result<(), cgn_core::GnxError> {
+pub fn run(args: HookWatcherArgs) -> Result<(), cgn_core::CgnError> {
     std::thread::sleep(Duration::from_millis(300));
 
     let out = safe_exec::git()
@@ -47,10 +47,10 @@ pub fn run(args: HookWatcherArgs) -> Result<(), cgn_core::GnxError> {
         }
     }
 
-    let gnx_bin = std::env::current_exe()?;
+    let cgn_bin = std::env::current_exe()?;
     let repo_arg = format!("--repo={}", args.repo.to_string_lossy());
 
-    let mut cmd = std::process::Command::new(&gnx_bin);
+    let mut cmd = std::process::Command::new(&cgn_bin);
     if let Some(target) = rename_target {
         let from_arg = format!("--from={}", args.branch);
         let to_arg = format!("--to={target}");

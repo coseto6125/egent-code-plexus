@@ -1,11 +1,11 @@
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
-fn init_writes_hook_with_absolute_gnx_path() {
+fn init_writes_hook_with_absolute_cgn_path() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     Command::new("git")
@@ -14,7 +14,7 @@ fn init_writes_hook_with_absolute_gnx_path() {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "install-hook"])
         .current_dir(repo)
         .output()

@@ -5,7 +5,7 @@
 //! `docs/superpowers/specs/2026-05-16-tier-b-surface-and-diff-design.md` §5.
 
 use clap::{Args, ValueEnum};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 pub mod baseline;
 pub mod bindings;
@@ -60,16 +60,16 @@ pub struct DiffArgs {
     pub repo: Option<String>,
 }
 
-pub fn run(args: DiffArgs) -> Result<(), GnxError> {
+pub fn run(args: DiffArgs) -> Result<(), CgnError> {
     let payload = build_payload(&args)?;
     let format = args.format.as_deref().unwrap_or("");
     output::emit(&payload, format)
 }
 
-pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, GnxError> {
+pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, CgnError> {
     let repo_dir = match args.repo.as_deref() {
         Some(p) => std::path::PathBuf::from(p),
-        None => std::env::current_dir().map_err(|e| GnxError::Output(format!("cwd: {e}")))?,
+        None => std::env::current_dir().map_err(|e| CgnError::Output(format!("cwd: {e}")))?,
     };
 
     let baseline_sha = baseline::resolve(&args.baseline, &repo_dir)?;
@@ -118,7 +118,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, GnxError> {
         std::env::temp_dir().join(format!("cgn-diff-baseline-{baseline_sha}.jsonl"));
     let baseline_graph_tmp =
         std::env::temp_dir().join(format!("cgn-diff-graph-baseline-{baseline_sha}.bin"));
-    let legacy_default = std::path::Path::new(".gnx/graph.bin");
+    let legacy_default = std::path::Path::new(".cgn/graph.bin");
 
     bindings::dump(&repo_dir, &current_jsonl)?;
     let current_graph = crate::graph_path::resolve(legacy_default, &repo_dir);
@@ -128,7 +128,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, GnxError> {
         bindings::dump(&repo_dir, &baseline_jsonl)?;
         let baseline_graph = crate::graph_path::resolve(legacy_default, &repo_dir);
         std::fs::copy(&baseline_graph, &baseline_graph_tmp).map_err(|e| {
-            GnxError::Output(format!(
+            CgnError::Output(format!(
                 "copy baseline graph {}: {e}",
                 baseline_graph.display()
             ))

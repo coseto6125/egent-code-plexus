@@ -2,8 +2,8 @@
 //! Lists contracts with optional filtering by type, repo, and match status.
 
 use clap::Args;
-use cgn_core::registry::resolve_home_gnx;
-use cgn_core::GnxError;
+use cgn_core::registry::resolve_home_cgn;
+use cgn_core::CgnError;
 use std::collections::HashSet;
 
 use crate::commands::group::storage;
@@ -52,9 +52,9 @@ struct ContractRecord {
     matched: bool,
 }
 
-pub fn run(args: ContractsArgs) -> Result<(), GnxError> {
-    let home_gnx = resolve_home_gnx();
-    let group_dir = storage::group_dir(&home_gnx, &args.name);
+pub fn run(args: ContractsArgs) -> Result<(), CgnError> {
+    let home_cgn = resolve_home_cgn();
+    let group_dir = storage::group_dir(&home_cgn, &args.name);
 
     let reg = storage::read_contracts(&group_dir)?;
 

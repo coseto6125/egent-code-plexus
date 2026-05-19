@@ -5,8 +5,8 @@
 //! becomes one MCP tool. Dispatch is spawn-only.
 
 use clap::{Args, Command, Subcommand};
-use cgn_core::GnxError;
-use cgn_mcp::server::{serve_stdio, GnxMcpServer};
+use cgn_core::CgnError;
+use cgn_mcp::server::{serve_stdio, CgnMcpServer};
 use serde::Serialize;
 
 #[derive(Serialize, Debug)]
@@ -34,9 +34,9 @@ pub enum McpAction {
     },
 }
 
-pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), GnxError> {
+pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), CgnError> {
     let server =
-        GnxMcpServer::new(&root_cmd).map_err(|e| GnxError::Output(format!("server init: {e}")))?;
+        CgnMcpServer::new(&root_cmd).map_err(|e| CgnError::Output(format!("server init: {e}")))?;
 
     match args.action {
         McpAction::Tools { format } => {
@@ -55,7 +55,7 @@ pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), GnxError> {
                         })
                         .collect();
                     let json = serde_json::to_string_pretty(&tool_infos)
-                        .map_err(|e| GnxError::Output(format!("json: {e}")))?;
+                        .map_err(|e| CgnError::Output(format!("json: {e}")))?;
                     println!("{json}");
                 }
                 _ => {
@@ -71,11 +71,11 @@ pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), GnxError> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| GnxError::Output(format!("tokio runtime: {e}")))?;
+                .map_err(|e| CgnError::Output(format!("tokio runtime: {e}")))?;
             rt.block_on(async move {
                 serve_stdio(server)
                     .await
-                    .map_err(|e| GnxError::Output(format!("serve_stdio: {e}")))
+                    .map_err(|e| CgnError::Output(format!("serve_stdio: {e}")))
             })?;
             Ok(())
         }

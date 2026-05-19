@@ -6,8 +6,8 @@ use std::process::Command;
 // Minimal fixture so the CLI has a graph to query against.
 const SOURCE: &str = "function foo() { return 1; }\n";
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn init_repo_and_analyze(repo: &std::path::Path) {
@@ -41,7 +41,7 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -56,7 +56,7 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
 
 /// Run a cypher query that is expected to fail; return stderr.
 fn run_expect_failure(repo: &std::path::Path, query: &str) -> (std::process::ExitStatus, String) {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["cypher", query, "--format", "json"])
         .current_dir(repo)
         .env("HOME", repo)

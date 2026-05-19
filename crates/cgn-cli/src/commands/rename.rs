@@ -22,7 +22,7 @@ use clap::Args;
 use cgn_analyzer::identifier_finder::find_identifier_occurrences;
 use cgn_core::analyzer::types::IdentifierRange;
 use cgn_core::registry::atomic_write_bytes;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -202,8 +202,8 @@ fn apply_markdown_rename(
 // Main entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
     let repo_root = args
         .repo
         .as_ref()
@@ -295,7 +295,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), GnxEr
         println!("risk safe; files {}; usages {}", hits.len(), total_ast_hits);
         println!();
         for (path, ranges) in &hits {
-            let bytes = std::fs::read(path).map_err(GnxError::Io)?;
+            let bytes = std::fs::read(path).map_err(CgnError::Io)?;
             collect_diff(
                 &bytes,
                 ranges,
@@ -330,7 +330,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), GnxEr
     // --- Stage 3b: execute — atomic per-file replace by descending offset. ---
     for (path, ranges) in hits {
         lines.push(format!("renamed: {}", path.display()));
-        apply_rename(&path, &ranges, args.new_name.as_bytes()).map_err(GnxError::Io)?;
+        apply_rename(&path, &ranges, args.new_name.as_bytes()).map_err(CgnError::Io)?;
     }
 
     // Markdown pass.

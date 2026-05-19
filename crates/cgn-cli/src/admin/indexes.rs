@@ -3,8 +3,8 @@
 use crate::admin::menu::{self, select};
 use crate::commands::admin::{drop, index, prune};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input};
-use cgn_core::registry::{resolve_home_gnx, Registry, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, Registry, RegistryFile};
+use cgn_core::CgnError;
 use std::path::PathBuf;
 
 const MENU: &[menu::Item<'_>] = &[
@@ -15,7 +15,7 @@ const MENU: &[menu::Item<'_>] = &[
     ("← Back", ""),
 ];
 
-pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
+pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Indexes", MENU)?;
         match choice {
@@ -29,7 +29,7 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
     }
 }
 
-fn build_refresh_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn build_refresh_wizard(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let repo = input(theme, "Repo path", ".")?;
     let force = Confirm::with_theme(theme)
         .with_prompt("Force full refresh")
@@ -43,19 +43,19 @@ fn build_refresh_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
         dump_resolver: None,
         quiet: false,
     })
-    .map_err(GnxError::Output)
+    .map_err(CgnError::Output)
 }
 
-fn inspect_indexed_repos() -> Result<(), GnxError> {
-    let home_gnx = resolve_home_gnx();
-    let registry = Registry::open(&home_gnx)
-        .map_err(|e| GnxError::InvalidArgument(format!("registry open: {e}")))?;
-    print_registry(registry.snapshot(), &home_gnx);
+fn inspect_indexed_repos() -> Result<(), CgnError> {
+    let home_cgn = resolve_home_cgn();
+    let registry = Registry::open(&home_cgn)
+        .map_err(|e| CgnError::InvalidArgument(format!("registry open: {e}")))?;
+    print_registry(registry.snapshot(), &home_cgn);
     Ok(())
 }
 
-fn print_registry(registry: &RegistryFile, home_gnx: &std::path::Path) {
-    println!("Registry: {}", home_gnx.join("registry.json").display());
+fn print_registry(registry: &RegistryFile, home_cgn: &std::path::Path) {
+    println!("Registry: {}", home_cgn.join("registry.json").display());
     if registry.repos.is_empty() {
         println!("  no indexed repos");
         return;
@@ -76,7 +76,7 @@ fn print_registry(registry: &RegistryFile, home_gnx: &std::path::Path) {
     }
 }
 
-fn prune_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn prune_wizard(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let confirmed = Confirm::with_theme(theme)
         .with_prompt("Sweep orphan repos (common_dir no longer exists)")
         .default(false)
@@ -92,7 +92,7 @@ fn prune_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
     Ok(())
 }
 
-fn drop_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn drop_wizard(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let all = Confirm::with_theme(theme)
         .with_prompt("Drop every registered repo")
         .default(false)
@@ -125,7 +125,7 @@ fn drop_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
     Ok(())
 }
 
-fn input(theme: &ColorfulTheme, prompt: &str, default: &str) -> Result<String, GnxError> {
+fn input(theme: &ColorfulTheme, prompt: &str, default: &str) -> Result<String, CgnError> {
     Input::with_theme(theme)
         .with_prompt(prompt)
         .default(default.to_string())
@@ -133,12 +133,12 @@ fn input(theme: &ColorfulTheme, prompt: &str, default: &str) -> Result<String, G
         .map_err(dialoguer_err)
 }
 
-fn input_path(theme: &ColorfulTheme, prompt: &str, default: &str) -> Result<PathBuf, GnxError> {
+fn input_path(theme: &ColorfulTheme, prompt: &str, default: &str) -> Result<PathBuf, CgnError> {
     input(theme, prompt, default).map(PathBuf::from)
 }
 
-fn dialoguer_err(e: dialoguer::Error) -> GnxError {
-    GnxError::Output(format!("dialoguer: {e}"))
+fn dialoguer_err(e: dialoguer::Error) -> CgnError {
+    CgnError::Output(format!("dialoguer: {e}"))
 }
 
 #[cfg(test)]

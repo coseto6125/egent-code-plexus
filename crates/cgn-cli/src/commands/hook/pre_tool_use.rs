@@ -6,7 +6,7 @@
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::sync::OnceLock;
 
 const MAX_HITS: usize = 5;
@@ -20,7 +20,7 @@ fn glob_stem_re() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"[*/]([a-zA-Z][a-zA-Z0-9_-]{2,})").unwrap())
 }
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     // Both signals (graph hits + peer drain) must be merged into a single
     // additionalContext payload — Claude Code parses one JSON object on
     // stdout, so two separate println!s would drop the second silently.

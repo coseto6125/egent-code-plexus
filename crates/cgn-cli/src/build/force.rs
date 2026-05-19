@@ -9,7 +9,7 @@ use crate::commit_lookup::CommitIndex;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use crate::session::state::classify_with_index;
 use fs2::FileExt;
-use cgn_core::registry::{resolve_home_gnx, SourceType};
+use cgn_core::registry::{resolve_home_cgn, SourceType};
 use cgn_core::session::SessionState;
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -132,9 +132,9 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
     }
 
-    let home_gnx = resolve_home_gnx();
+    let home_cgn = resolve_home_cgn();
     let repo_dir_name = repo_dir_name_for_cwd(worktree)?;
-    let repo_root = home_gnx.join(&repo_dir_name);
+    let repo_root = home_cgn.join(&repo_dir_name);
     fs::create_dir_all(repo_root.join("commits"))?;
 
     let dirname = pick_dirname(worktree, &sha_hex)?;

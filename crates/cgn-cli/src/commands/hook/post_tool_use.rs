@@ -2,11 +2,11 @@
 //! detached background reindex when the index is stale.
 
 use super::common::{
-    emit_additional_context, gnx_state_dir_ensure, lookup_index_dir, strip_shell_quotes, HookInput,
+    emit_additional_context, cgn_state_dir_ensure, lookup_index_dir, strip_shell_quotes, HookInput,
 };
 use crate::auto_ensure::{ensure_index, EnsureResult};
 use crate::background::{spawn_bg, BgJob, BgMarkers};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -19,7 +19,7 @@ fn git_mutation_re() -> &'static regex::Regex {
     })
 }
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     if input.tool_name != "Bash" {
         return Ok(());
     }
@@ -31,10 +31,10 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     // Orphan-registry sweep is registry-level; not gated on git/index
     // state so it actually fires on idle Edit-only sessions too. The
     // 1-hour throttle keeps the per-call stat negligible.
-    let home_gnx = cgn_core::registry::resolve_home_gnx();
-    if should_run_orphan_prune(&home_gnx) && spawn_background_prune(&home_gnx) {
+    let home_cgn = cgn_core::registry::resolve_home_cgn();
+    if should_run_orphan_prune(&home_cgn) && spawn_background_prune(&home_cgn) {
         sections.push(
-            "cgn orphan-registry sweep started in background. Stale ~/.gnx/<repo>__<hash>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.".to_string(),
+            "cgn orphan-registry sweep started in background. Stale ~/.cgn/<repo>__<hash>/ entries from deleted worktrees will be cleaned. Failures (if any) surface via UserPromptSubmit.".to_string(),
         );
     }
 
@@ -79,8 +79,8 @@ fn maybe_reindex_notice(input: &HookInput) -> Option<String> {
 
     // Marker/log/lock live in the hook-local state dir so they're
     // scoped to the worktree, not shared across all worktrees that
-    // happen to point at the same `~/.gnx/<repo>__<hash>/commits/<sha>/`.
-    let state_dir = gnx_state_dir_ensure(&input.cwd)?;
+    // happen to point at the same `~/.cgn/<repo>__<hash>/commits/<sha>/`.
+    let state_dir = cgn_state_dir_ensure(&input.cwd)?;
     if !spawn_background_reindex(repo_root, &state_dir) {
         return None;
     }
@@ -121,18 +121,18 @@ fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
 }
 
 /// Detached background `cgn admin prune --orphans` under flock at
-/// `<home_gnx>/.prune.lock`. Writes `.prune-complete` on success or
+/// `<home_cgn>/.prune.lock`. Writes `.prune-complete` on success or
 /// `.prune-failed` on failure. Returns true iff the launcher spawned.
-fn spawn_background_prune(home_gnx: &Path) -> bool {
-    let lock = home_gnx.join(".prune.lock");
-    let complete = home_gnx.join(".prune-complete");
-    let failed = home_gnx.join(".prune-failed");
-    let log = home_gnx.join("last-prune.log");
+fn spawn_background_prune(home_cgn: &Path) -> bool {
+    let lock = home_cgn.join(".prune.lock");
+    let complete = home_cgn.join(".prune-complete");
+    let failed = home_cgn.join(".prune-failed");
+    let log = home_cgn.join("last-prune.log");
 
     spawn_bg(BgJob {
         args: &["admin", "prune", "--orphans"],
         lock: &lock,
-        cwd: home_gnx,
+        cwd: home_cgn,
         retry: (1, 0),
         markers: Some(BgMarkers {
             log: &log,
@@ -144,8 +144,8 @@ fn spawn_background_prune(home_gnx: &Path) -> bool {
 
 /// Check if orphan prune should run (at most once per hour).
 /// Updates the throttle marker before returning true.
-fn should_run_orphan_prune(home_gnx: &Path) -> bool {
-    let marker = home_gnx.join(".last-prune");
+fn should_run_orphan_prune(home_cgn: &Path) -> bool {
+    let marker = home_cgn.join(".last-prune");
     let now = std::time::SystemTime::now();
     let due = match std::fs::metadata(&marker).and_then(|m| m.modified()) {
         Ok(mtime) => now

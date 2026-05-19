@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn init_repo(path: &Path) {
@@ -52,7 +52,7 @@ fn analyze_here_indexes_cwd() {
     let home_tmp = tempfile::tempdir().unwrap();
     init_repo(repo_tmp.path());
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo_tmp.path())
         .env("HOME", home_tmp.path())
@@ -65,13 +65,13 @@ fn analyze_here_indexes_cwd() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // v2 layout: ~/.gnx/<repo>__<hash8>/commits/<source_type>_<source_id>__<sha>/graph.bin
-    // Walk ~/.gnx/*/commits/*/graph.bin and assert at least one exists.
-    let gnx_root = home_tmp.path().join(".gnx");
-    let found = walkdir::WalkDir::new(&gnx_root)
+    // v2 layout: ~/.cgn/<repo>__<hash8>/commits/<source_type>_<source_id>__<sha>/graph.bin
+    // Walk ~/.cgn/*/commits/*/graph.bin and assert at least one exists.
+    let cgn_root = home_tmp.path().join(".cgn");
+    let found = walkdir::WalkDir::new(&cgn_root)
         .max_depth(4)
         .into_iter()
         .filter_map(Result::ok)
         .any(|e| e.file_name() == "graph.bin");
-    assert!(found, "graph.bin missing under {:?}", gnx_root);
+    assert!(found, "graph.bin missing under {:?}", cgn_root);
 }

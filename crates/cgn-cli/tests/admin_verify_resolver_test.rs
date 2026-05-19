@@ -1,12 +1,12 @@
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn admin_verify_resolver_help_lists_required_args() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["admin", "verify-resolver", "--help"])
         .output()
         .expect("run cgn admin verify-resolver --help");
@@ -22,7 +22,7 @@ fn admin_verify_resolver_help_lists_required_args() {
 
 #[test]
 fn top_level_verify_resolver_no_longer_dispatches() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["verify-resolver", "--help"])
         .output()
         .expect("run cgn verify-resolver --help");

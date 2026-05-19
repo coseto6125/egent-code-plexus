@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use xxhash_rust::xxh3::xxh3_64;
 
-/// Compute the stable per-repo directory name under `~/.gnx/`.
+/// Compute the stable per-repo directory name under `~/.cgn/`.
 ///
 /// Identity rule: `<sanitize(basename(common_dir))>__<xxh3_64(canonical_common_dir)[:8]>`.
 /// All worktrees of the same git repo share the same `--git-common-dir`,

@@ -7,7 +7,7 @@ use clap::Command;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub struct GnxMcpServer {
+pub struct CgnMcpServer {
     /// Path to the current cgn binary; used to spawn subprocesses.
     pub self_exe: PathBuf,
     /// Tools derived from the clap tree at construction time.
@@ -18,16 +18,16 @@ pub struct GnxMcpServer {
     rmcp_tools: Vec<rmcp::model::Tool>,
 }
 
-impl GnxMcpServer {
+impl CgnMcpServer {
     /// Build a server whose tool set mirrors `root`'s visible subcommands.
     /// Self-binary is detected via `current_exe()`.
     pub fn new(root: &Command) -> Result<Self> {
         let self_exe =
             std::env::current_exe().context("locating current_exe for spawn dispatch")?;
         let mut tools = enumerate_tools(root);
-        // Replace the opaque `gnx_peers` entry (which exposes no useful args)
+        // Replace the opaque `cgn_peers` entry (which exposes no useful args)
         // with the three explicit peer sub-subcommand tools.
-        tools.retain(|t| t.name != "gnx_peers");
+        tools.retain(|t| t.name != "cgn_peers");
         tools.extend(crate::peers::peer_tools());
         // `cgn group` is `#[command(hide = true)]` so enumerate_tools skips
         // it — without this manual injection, LLM clients cannot reach the
@@ -63,7 +63,7 @@ impl GnxMcpServer {
 
 // ─── rmcp ServerHandler adapter ──────────────────────────────────────────────
 
-struct RmcpHandler(Arc<GnxMcpServer>);
+struct RmcpHandler(Arc<CgnMcpServer>);
 
 impl rmcp::ServerHandler for RmcpHandler {
     fn get_info(&self) -> rmcp::model::ServerInfo {
@@ -126,7 +126,7 @@ fn build_rmcp_tools(tools: &[DerivedTool]) -> Vec<rmcp::model::Tool> {
         .collect()
 }
 
-pub async fn serve_stdio(server: GnxMcpServer) -> anyhow::Result<()> {
+pub async fn serve_stdio(server: CgnMcpServer) -> anyhow::Result<()> {
     let handler = RmcpHandler(Arc::new(server));
     let transport = rmcp::transport::stdio();
     let running = rmcp::serve_server(handler, transport).await?;

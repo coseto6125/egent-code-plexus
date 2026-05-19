@@ -21,7 +21,7 @@
 
 use crate::engine::Engine;
 use cgn_core::graph::{ArchivedNodeKind, ArchivedRelType};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde::Serialize;
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -50,10 +50,10 @@ pub struct ContractChange {
 ///
 /// Yields one entry per Route node (kind="route") and one per Fetches edge
 /// (kind="fetch"). See module doc for the simplification rationale.
-pub fn extract(graph_path: &Path) -> Result<Vec<ContractEntry>, GnxError> {
+pub fn extract(graph_path: &Path) -> Result<Vec<ContractEntry>, CgnError> {
     let engine = Engine::load(graph_path)
-        .map_err(|e| GnxError::Output(format!("load graph {}: {e}", graph_path.display())))?;
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+        .map_err(|e| CgnError::Output(format!("load graph {}: {e}", graph_path.display())))?;
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
 
     // Build route_shape lookup: node_idx → response_keys.
     let shape_lookup: FxHashMap<u32, Vec<String>> = graph

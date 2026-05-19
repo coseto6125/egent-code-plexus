@@ -79,11 +79,11 @@ impl RegistryFile {
     /// exclusive flock for the read-modify-write cycle, preserves
     /// existing `groups` on a known `dir_name`, skips the write when
     /// nothing changed.
-    pub fn upsert_repo_atomic(home_gnx: &Path, entry: RepoAlias) -> io::Result<()> {
-        let lock_path = home_gnx.join("registry.json.lock");
+    pub fn upsert_repo_atomic(home_cgn: &Path, entry: RepoAlias) -> io::Result<()> {
+        let lock_path = home_cgn.join("registry.json.lock");
         let _lock = super::FileLock::acquire_exclusive(&lock_path)?;
 
-        let registry_path = home_gnx.join("registry.json");
+        let registry_path = home_cgn.join("registry.json");
         let mut current = RegistryFile::read_or_empty(&registry_path)?;
 
         let merged = match current.repos.get(&entry.dir_name) {
@@ -116,10 +116,10 @@ impl RegistryFile {
         }
         if let Ok(probe) = serde_json::from_slice::<VersionProbe>(&bytes) {
             if probe.version != CURRENT_VERSION {
-                let home_gnx = path
+                let home_cgn = path
                     .parent()
                     .ok_or_else(|| io::Error::other("registry path has no parent directory"))?;
-                let rebuilt = RegistryFile::rebuild_from_disk(home_gnx)?;
+                let rebuilt = RegistryFile::rebuild_from_disk(home_cgn)?;
                 atomic_write_json(path, &rebuilt)?;
                 eprintln!(
                     "registry.migrated from=v{} to=v{CURRENT_VERSION} repos={} groups_lost=true",
@@ -133,15 +133,15 @@ impl RegistryFile {
     }
 }
 
-/// Last-resort recovery: walk `~/.gnx/*/meta.json` and rebuild RegistryFile
+/// Last-resort recovery: walk `~/.cgn/*/meta.json` and rebuild RegistryFile
 /// as alias cache. Filesystem is source of truth — group memberships are LOST
 /// (registry-only data), operator must re-apply via `cgn admin group add`.
 impl RegistryFile {
-    pub fn rebuild_from_disk(home_gnx: &Path) -> io::Result<Self> {
+    pub fn rebuild_from_disk(home_cgn: &Path) -> io::Result<Self> {
         use crate::registry::repo_meta::RepoMeta;
 
         let mut repos = BTreeMap::new();
-        let it = match fs::read_dir(home_gnx) {
+        let it = match fs::read_dir(home_cgn) {
             Ok(d) => d,
             Err(_) => return Ok(RegistryFile::empty()),
         };

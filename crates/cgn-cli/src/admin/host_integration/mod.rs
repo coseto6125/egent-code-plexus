@@ -6,7 +6,7 @@ pub mod native;
 use crate::admin::menu::{self, select};
 use crate::commands::admin::{claude_code, install_hook};
 use dialoguer::theme::ColorfulTheme;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 const MECHANISMS: &[menu::Item<'_>] = &[
     ("MCP", "shared side-car for any MCP-capable host"),
@@ -19,7 +19,7 @@ const MECHANISMS: &[menu::Item<'_>] = &[
 ];
 
 /// Entry point called from `admin::main_menu`.
-pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
+pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Agent Integrations", MECHANISMS)?;
         match choice {
@@ -43,7 +43,7 @@ const HOOK_ACTIONS: &[menu::Item<'_>] = &[
     ("← Back", ""),
 ];
 
-fn hooks_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn hooks_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Hooks", HOOK_HOSTS)?;
         match choice {
@@ -54,7 +54,7 @@ fn hooks_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
     }
 }
 
-fn claude_code_hooks_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn claude_code_hooks_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Claude Code hooks — action", HOOK_ACTIONS)?;
         match choice {

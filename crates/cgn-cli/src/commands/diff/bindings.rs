@@ -1,7 +1,7 @@
 //! `bindings` section: compare per-binding resolver decisions across two
 //! commits. Each binding is keyed by `(src_file, symbol_name)`.
 
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde::{Deserialize, Serialize};
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -42,17 +42,17 @@ pub struct BindingChange {
 }
 
 /// Invoke `cgn admin index --repo <repo_dir> --dump-resolver <out_path>`.
-pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
+pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), CgnError> {
     let self_exe =
-        std::env::current_exe().map_err(|e| GnxError::Output(format!("current_exe: {e}")))?;
+        std::env::current_exe().map_err(|e| CgnError::Output(format!("current_exe: {e}")))?;
     let repo_str = repo_dir.to_str().ok_or_else(|| {
-        GnxError::Output(format!(
+        CgnError::Output(format!(
             "repo path contains non-UTF-8: {}",
             repo_dir.display()
         ))
     })?;
     let out_str = out_path.to_str().ok_or_else(|| {
-        GnxError::Output(format!(
+        CgnError::Output(format!(
             "out path contains non-UTF-8: {}",
             out_path.display()
         ))
@@ -67,9 +67,9 @@ pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
             out_str,
         ])
         .output()
-        .map_err(|e| GnxError::Output(format!("cgn admin index spawn: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("cgn admin index spawn: {e}")))?;
     if !out.status.success() {
-        return Err(GnxError::Output(format!(
+        return Err(CgnError::Output(format!(
             "cgn admin index --dump-resolver failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
@@ -78,9 +78,9 @@ pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), GnxError> {
 }
 
 /// Parse a JSONL file of `BindingDecision` records into a keyed map.
-pub fn load_jsonl(path: &Path) -> Result<FxHashMap<(String, String), BindingDecision>, GnxError> {
+pub fn load_jsonl(path: &Path) -> Result<FxHashMap<(String, String), BindingDecision>, CgnError> {
     let raw = std::fs::read_to_string(path)
-        .map_err(|e| GnxError::Output(format!("read {}: {e}", path.display())))?;
+        .map_err(|e| CgnError::Output(format!("read {}: {e}", path.display())))?;
     let mut map = FxHashMap::default();
     for (idx, line) in raw.lines().enumerate() {
         let line = line.trim();
@@ -88,7 +88,7 @@ pub fn load_jsonl(path: &Path) -> Result<FxHashMap<(String, String), BindingDeci
             continue;
         }
         let dec: BindingDecision = serde_json::from_str(line)
-            .map_err(|e| GnxError::Output(format!("JSONL line {} parse: {e}", idx + 1)))?;
+            .map_err(|e| CgnError::Output(format!("JSONL line {} parse: {e}", idx + 1)))?;
         map.insert((dec.src_file.clone(), dec.name.clone()), dec);
     }
     Ok(map)

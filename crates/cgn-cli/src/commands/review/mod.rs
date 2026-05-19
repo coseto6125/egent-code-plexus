@@ -7,7 +7,7 @@
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 pub mod aggregate;
 pub mod findings;
@@ -32,12 +32,12 @@ pub struct ReviewArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), CgnError> {
     let start = std::time::Instant::now();
     let repo_dir = match args.repo.as_deref() {
         Some(p) => std::path::PathBuf::from(p),
         None => {
-            std::env::current_dir().map_err(|e| GnxError::Output(format!("resolve cwd: {e}")))?
+            std::env::current_dir().map_err(|e| CgnError::Output(format!("resolve cwd: {e}")))?
         }
     };
     let files = scope::resolve(&args, &repo_dir)?;

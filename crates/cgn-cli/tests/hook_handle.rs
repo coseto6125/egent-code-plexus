@@ -1,13 +1,13 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn hook_handle_exits_on_non_committed_stage() {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook-handle", "prepared"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -21,7 +21,7 @@ fn hook_handle_exits_on_non_committed_stage() {
 
 #[test]
 fn hook_handle_silently_ignores_non_delete_events() {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook-handle", "committed"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

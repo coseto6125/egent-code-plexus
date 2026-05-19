@@ -4,8 +4,8 @@ use std::path::Path;
 use tempfile::TempDir;
 
 fn seed(home: &Path) {
-    let home_gnx = home.join(".gnx");
-    let gdir = group_dir(&home_gnx, "demo");
+    let home_cgn = home.join(".cgn");
+    let gdir = group_dir(&home_cgn, "demo");
     std::fs::create_dir_all(&gdir).unwrap();
 
     let p_http = StoredContract {
@@ -104,14 +104,14 @@ fn seed(home: &Path) {
     };
     storage::write_contracts(&gdir, &reg).unwrap();
 
-    // Write minimal registry.json to $HOME/.gnx/
+    // Write minimal registry.json to $HOME/.cgn/
     let reg_json = serde_json::json!({
         "version": 2,
         "repos": {},
         "groups": [{"name": "demo", "members": ["a", "b", "c"]}]
     });
     std::fs::write(
-        home_gnx.join("registry.json"),
+        home_cgn.join("registry.json"),
         serde_json::to_vec_pretty(&reg_json).unwrap(),
     )
     .unwrap();
@@ -121,7 +121,7 @@ fn seed(home: &Path) {
 fn contracts_lists_all_when_no_filters() {
     let home = TempDir::new().unwrap();
     seed(home.path());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cgn"))
         .env("HOME", home.path())
         .args(["group", "contracts", "demo", "--json"])
         .output()
@@ -135,7 +135,7 @@ fn contracts_lists_all_when_no_filters() {
 fn contracts_unmatched_only_filters_matched_out() {
     let home = TempDir::new().unwrap();
     seed(home.path());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cgn"))
         .env("HOME", home.path())
         .args(["group", "contracts", "demo", "--unmatched", "--json"])
         .output()
@@ -155,7 +155,7 @@ fn contracts_unmatched_only_filters_matched_out() {
 fn contracts_type_http_filters_by_type() {
     let home = TempDir::new().unwrap();
     seed(home.path());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cgn"))
         .env("HOME", home.path())
         .args(["group", "contracts", "demo", "--type", "http", "--json"])
         .output()
@@ -173,7 +173,7 @@ fn contracts_type_http_filters_by_type() {
 fn contracts_repo_filter() {
     let home = TempDir::new().unwrap();
     seed(home.path());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cgn"))
         .env("HOME", home.path())
         .args(["group", "contracts", "demo", "--repo", "a", "--json"])
         .output()

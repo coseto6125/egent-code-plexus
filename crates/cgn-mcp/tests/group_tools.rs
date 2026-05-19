@@ -1,4 +1,4 @@
-//! Smoke tests: `gnx_group` tool registration + spawn-argv shape for the
+//! Smoke tests: `cgn_group` tool registration + spawn-argv shape for the
 //! single tool fronting all 7 `cgn group <verb>` sub-subcommands via the
 //! `subcmd` discriminator. Mirrors `peers_tools.rs`.
 
@@ -6,7 +6,7 @@ mod common;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use common::write_stub;
-use cgn_mcp::server::GnxMcpServer;
+use cgn_mcp::server::CgnMcpServer;
 use cgn_mcp::spawn::run_spawn;
 use serde_json::json;
 use tempfile::TempDir;
@@ -50,31 +50,31 @@ enum GroupCmd {
 // ── registration tests ───────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn single_gnx_group_tool_registered() {
-    let server = GnxMcpServer::new(&Cli::command()).expect("init");
+async fn single_cgn_group_tool_registered() {
+    let server = CgnMcpServer::new(&Cli::command()).expect("init");
     let names: Vec<&str> = server
         .list_tools()
         .iter()
         .map(|t| t.name.as_str())
         .collect();
     assert!(
-        names.contains(&"gnx_group"),
-        "missing gnx_group; got {names:?}"
+        names.contains(&"cgn_group"),
+        "missing cgn_group; got {names:?}"
     );
     // The `hide = true` group subcommand must not produce its own
     // derived tool (the manual injection is the only entry).
-    let group_count = names.iter().filter(|n| n.starts_with("gnx_group")).count();
-    assert_eq!(group_count, 1, "expected exactly one gnx_group* tool; got {names:?}");
+    let group_count = names.iter().filter(|n| n.starts_with("cgn_group")).count();
+    assert_eq!(group_count, 1, "expected exactly one cgn_group* tool; got {names:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn gnx_group_advertises_all_subcmds() {
-    let server = GnxMcpServer::new(&Cli::command()).expect("init");
+async fn cgn_group_advertises_all_subcmds() {
+    let server = CgnMcpServer::new(&Cli::command()).expect("init");
     let tool = server
         .list_tools()
         .iter()
-        .find(|t| t.name == "gnx_group")
-        .expect("gnx_group tool")
+        .find(|t| t.name == "cgn_group")
+        .expect("cgn_group tool")
         .clone();
     assert_eq!(tool.subcmd_arg.as_deref(), Some("subcmd"));
     let allowed = tool
@@ -103,8 +103,8 @@ async fn gnx_group_advertises_all_subcmds() {
 fn group_tool() -> cgn_mcp::schema::DerivedTool {
     cgn_mcp::group::group_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_group")
-        .expect("gnx_group tool")
+        .find(|t| t.name == "cgn_group")
+        .expect("cgn_group tool")
 }
 
 fn echo_stub(dir: &std::path::Path) -> std::path::PathBuf {

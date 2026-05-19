@@ -1,4 +1,4 @@
-//! Tests for ~/.gnx/audit.log (spec §9).
+//! Tests for ~/.cgn/audit.log (spec §9).
 
 use cgn_core::registry::{AuditEvent, AuditLog};
 

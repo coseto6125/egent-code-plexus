@@ -2,7 +2,7 @@
 
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,21 +43,21 @@ pub fn status() -> HostStatus {
     }
 }
 
-fn run_install() -> Result<PathBuf, GnxError> {
+fn run_install() -> Result<PathBuf, CgnError> {
     let path = patch_path();
     let cgn_root =
-        std::env::current_dir().map_err(|e| GnxError::Output(format!("current_dir: {e}")))?;
+        std::env::current_dir().map_err(|e| CgnError::Output(format!("current_dir: {e}")))?;
     write_patch(&path, &cgn_root)?;
     Ok(path)
 }
 
-fn run_uninstall() -> Result<PathBuf, GnxError> {
+fn run_uninstall() -> Result<PathBuf, CgnError> {
     let path = patch_path();
     remove_patch(&path)?;
     Ok(path)
 }
 
-fn remove_patch(path: &Path) -> Result<(), GnxError> {
+fn remove_patch(path: &Path) -> Result<(), CgnError> {
     if path.exists() {
         fs::remove_file(path)?;
     }
@@ -81,7 +81,7 @@ fn config_root() -> PathBuf {
     home.join(".config")
 }
 
-fn write_patch(path: &Path, cgn_root: &Path) -> Result<(), GnxError> {
+fn write_patch(path: &Path, cgn_root: &Path) -> Result<(), CgnError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -107,11 +107,11 @@ index 0000000..1111111
 +// intentionally adds the stable integration module and leaves the final
 +// registration hunk to the fork maintainer.
 +
-+use cgn_core::GnxError;
++use cgn_core::CgnError;
 +
 +pub const CGN_NATIVE_MARKER: &str = "{MARKER}";
 +
-+pub fn cgn_command_args(tool: &str, raw_args: &[String]) -> Result<Vec<String>, GnxError> {{
++pub fn cgn_command_args(tool: &str, raw_args: &[String]) -> Result<Vec<String>, CgnError> {{
 +    let mut argv = Vec::with_capacity(raw_args.len() + 1);
 +    argv.push(tool.to_string());
 +    argv.extend(raw_args.iter().cloned());
@@ -140,7 +140,7 @@ fn status_from_checkout(checkout: &Path) -> HostStatus {
     }
 }
 
-fn checkout_contains_marker(path: &Path) -> Result<bool, GnxError> {
+fn checkout_contains_marker(path: &Path) -> Result<bool, CgnError> {
     if path.is_file() {
         let raw = fs::read_to_string(path)?;
         return Ok(raw.contains(MARKER));

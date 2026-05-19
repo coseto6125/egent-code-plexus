@@ -3,8 +3,8 @@
 use crate::admin::menu::{self, select};
 use crate::commands::admin::group;
 use dialoguer::{theme::ColorfulTheme, Input};
-use cgn_core::registry::{resolve_home_gnx, Registry};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, Registry};
+use cgn_core::CgnError;
 
 const MENU: &[menu::Item<'_>] = &[
     (
@@ -16,7 +16,7 @@ const MENU: &[menu::Item<'_>] = &[
     ("← Back", ""),
 ];
 
-pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
+pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Groups", MENU)?;
         match choice {
@@ -29,7 +29,7 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
     }
 }
 
-fn add_repo_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn add_repo_wizard(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let repo = input(theme, "Repo name")?;
     let group_name = input(theme, "Group name")?;
     group::run(group::GroupCommands::Add {
@@ -38,7 +38,7 @@ fn add_repo_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
     })
 }
 
-fn remove_repo_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn remove_repo_wizard(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let repo = input(theme, "Repo name")?;
     let group_name = input(theme, "Group name")?;
     group::run(group::GroupCommands::Remove {
@@ -48,8 +48,8 @@ fn remove_repo_wizard(theme: &ColorfulTheme) -> Result<(), GnxError> {
 }
 
 fn sync_contracts() {
-    let home_gnx = resolve_home_gnx();
-    match Registry::open(&home_gnx) {
+    let home_cgn = resolve_home_cgn();
+    match Registry::open(&home_cgn) {
         Ok(registry) => {
             if registry.snapshot().groups.is_empty() {
                 println!("No groups to sync.");
@@ -65,11 +65,11 @@ fn sync_contracts() {
     }
 }
 
-fn input(theme: &ColorfulTheme, prompt: &str) -> Result<String, GnxError> {
+fn input(theme: &ColorfulTheme, prompt: &str) -> Result<String, CgnError> {
     Input::with_theme(theme)
         .with_prompt(prompt)
         .interact_text()
-        .map_err(|e| GnxError::Output(format!("dialoguer: {e}")))
+        .map_err(|e| CgnError::Output(format!("dialoguer: {e}")))
 }
 
 #[cfg(test)]

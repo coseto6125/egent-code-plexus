@@ -16,7 +16,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use cgn_core::config::{config_path, load, save, Config};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -34,7 +34,7 @@ pub struct ConfigArgs {
     pub repo: Option<String>,
 }
 
-pub fn run(args: ConfigArgs) -> Result<(), GnxError> {
+pub fn run(args: ConfigArgs) -> Result<(), CgnError> {
     let repo_root = args
         .repo
         .as_ref()
@@ -50,12 +50,12 @@ pub fn run(args: ConfigArgs) -> Result<(), GnxError> {
         return Ok(());
     }
 
-    let cfg = load(&repo_root).map_err(GnxError::InvalidArgument)?;
+    let cfg = load(&repo_root).map_err(CgnError::InvalidArgument)?;
     let mut app = App::new(cfg, repo_root);
-    let mut terminal = enter_tui().map_err(GnxError::Io)?;
+    let mut terminal = enter_tui().map_err(CgnError::Io)?;
     let outcome = run_loop(&mut terminal, &mut app);
     leave_tui(&mut terminal).ok();
-    outcome.map_err(GnxError::Io)?;
+    outcome.map_err(CgnError::Io)?;
 
     if app.saved {
         println!("✓ Saved to {}", config_path(&app.repo_root).display());
@@ -313,7 +313,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 // ----- Title -------------------------------------------------------------
 
-const TITLE_GNX: [&str; 6] = [
+const TITLE_CGN: [&str; 6] = [
     " ██████╗ ███╗   ██╗██╗  ██╗",
     "██╔════╝ ████╗  ██║╚██╗██╔╝",
     "██║  ███╗██╔██╗ ██║ ╚███╔╝ ",
@@ -346,7 +346,7 @@ fn render_title(frame: &mut ratatui::Frame<'_>, area: Rect) {
     for row in 0..6 {
         let spans = vec![
             Span::raw("  "),
-            Span::styled(TITLE_GNX[row], Style::default().fg(CYAN)),
+            Span::styled(TITLE_CGN[row], Style::default().fg(CYAN)),
             Span::raw("  "),
             Span::styled(TITLE_FOR[row], Style::default().fg(GOLD)),
             Span::raw("  "),

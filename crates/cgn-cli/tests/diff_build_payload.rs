@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 
 mod common;
-use common::{gnx_bin, run_git};
+use common::{cgn_bin, run_git};
 
 fn init_repo(repo: &Path) {
     std::fs::write(repo.join("README.md"), "hello").unwrap();
@@ -41,7 +41,7 @@ fn diff_build_payload_identical_shas_returns_envelope_shape() {
 
     // `--baseline HEAD` → baseline_sha == current_sha → fast-path in build_payload.
     // The fast-path returns empty diffs without touching git_guard or graph.bin.
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "diff",
             "--section",

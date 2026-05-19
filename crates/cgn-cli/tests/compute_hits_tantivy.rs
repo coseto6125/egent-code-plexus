@@ -121,7 +121,7 @@ fn make_config_graph() -> ZeroCopyGraph {
 }
 
 /// Persist graph.bin into `<index_dir>/graph.bin`. The tempdir itself
-/// stands in for `~/.gnx/<repo>/<branch>/` — tantivy and meta.json sit
+/// stands in for `~/.cgn/<repo>/<branch>/` — tantivy and meta.json sit
 /// alongside it in the same dir.
 fn persist_graph(index_dir: &std::path::Path, graph: &ZeroCopyGraph) {
     fs::create_dir_all(index_dir).unwrap();

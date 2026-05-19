@@ -1,11 +1,11 @@
-//! Auto-watch spawn: session_start checks for <repo>/.gnx/auto-watch marker.
+//! Auto-watch spawn: session_start checks for <repo>/.cgn/auto-watch marker.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 fn bin() -> std::path::PathBuf {
-    env!("CARGO_BIN_EXE_gnx").into()
+    env!("CARGO_BIN_EXE_cgn").into()
 }
 
 fn run_session_start(cwd: &std::path::Path) -> std::process::Output {
@@ -41,8 +41,8 @@ fn no_marker_no_spawn_no_error() {
 fn marker_present_session_start_still_returns_quickly() {
     let dir = tempdir().unwrap();
     let repo = dir.path();
-    std::fs::create_dir_all(repo.join(".gnx")).unwrap();
-    std::fs::write(repo.join(".gnx/auto-watch"), "").unwrap();
+    std::fs::create_dir_all(repo.join(".cgn")).unwrap();
+    std::fs::write(repo.join(".cgn/auto-watch"), "").unwrap();
 
     let start = std::time::Instant::now();
     let out = run_session_start(repo);

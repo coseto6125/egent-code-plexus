@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::process::Command;
 
 mod common;
-use common::{gnx_bin, write_graph};
+use common::{cgn_bin, write_graph};
 
 fn build_empty_graph() -> Vec<u8> {
     let pool = StringPool::new();
@@ -103,7 +103,7 @@ fn shape_check_build_payload_empty_graph_returns_success_shape() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_graph(dir.path(), &build_empty_graph());
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "--graph",
             path.to_str().unwrap(),
@@ -154,7 +154,7 @@ fn shape_check_build_payload_no_fetches_edge_zero_drift() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_graph(dir.path(), &build_graph_with_calls_edge());
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "--graph",
             path.to_str().unwrap(),

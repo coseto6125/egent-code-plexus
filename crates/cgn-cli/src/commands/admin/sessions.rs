@@ -2,14 +2,14 @@
 //! reset / sweep variants deferred (parent spec §11.2 follow-up).
 
 use clap::{Args, Subcommand};
-use cgn_core::registry::resolve_home_gnx;
+use cgn_core::registry::resolve_home_cgn;
 use cgn_core::session::{SessionMeta, SessionState};
 use std::fs;
 use std::io;
 
 #[derive(Subcommand, Debug)]
 pub enum SessionsCommand {
-    /// List active L1 sessions across all repos under ~/.gnx/
+    /// List active L1 sessions across all repos under ~/.cgn/
     List(ListArgs),
 }
 
@@ -51,8 +51,8 @@ enum StateView {
 }
 
 fn run_list(args: ListArgs) -> io::Result<()> {
-    let home_gnx = resolve_home_gnx();
-    let rows = collect_rows(&home_gnx)?;
+    let home_cgn = resolve_home_cgn();
+    let rows = collect_rows(&home_cgn)?;
 
     if args.json {
         println!(
@@ -90,12 +90,12 @@ fn run_list(args: ListArgs) -> io::Result<()> {
     Ok(())
 }
 
-fn collect_rows(home_gnx: &std::path::Path) -> io::Result<Vec<ListRow>> {
+fn collect_rows(home_cgn: &std::path::Path) -> io::Result<Vec<ListRow>> {
     let mut out = vec![];
-    if !home_gnx.exists() {
+    if !home_cgn.exists() {
         return Ok(out);
     }
-    for repo_entry in fs::read_dir(home_gnx)? {
+    for repo_entry in fs::read_dir(home_cgn)? {
         let repo_entry = repo_entry?;
         let repo_dir = repo_entry.path();
         if !repo_dir.is_dir() {

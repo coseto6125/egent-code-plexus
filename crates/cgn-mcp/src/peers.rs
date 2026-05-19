@@ -2,7 +2,7 @@
 //!
 //! `enumerate_tools` would surface `cgn peers` as a single opaque tool with
 //! no usable args (the sub-subcommand sits one clap level below the visible
-//! root). We replace that with a hand-rolled `gnx_peers` tool that carries
+//! root). We replace that with a hand-rolled `cgn_peers` tool that carries
 //! a `subcmd` discriminator (`status` / `diff` / `log` / `say` / `inbox` /
 //! `thread`); `cgn peers gc` is intentionally omitted — it's a maintenance
 //! op, not an agent action.
@@ -19,14 +19,14 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Return the single `gnx_peers` MCP tool fronting all peer sub-subcommands.
+/// Return the single `cgn_peers` MCP tool fronting all peer sub-subcommands.
 pub fn peer_tools() -> Vec<DerivedTool> {
     vec![tool_peers()]
 }
 
 fn tool_peers() -> DerivedTool {
     DerivedTool {
-        name: "gnx_peers".into(),
+        name: "cgn_peers".into(),
         subcommand: "peers".into(),
         description: "[multi-agent peer-sync only — single-session has no peers] \
             Inspect / talk to other cgn watch sessions on this repo. \

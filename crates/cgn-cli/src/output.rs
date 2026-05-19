@@ -1,7 +1,7 @@
 //! Output emission: consolidates the toon/json branching previously
 //! duplicated across every command.
 
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ impl OutputFormat {
 /// write to stdout — callers decide. Used by CLI `emit()` (which prints)
 /// and by MCP daemon-mode dispatch (which wraps the string in
 /// `ToolResult::text`).
-pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, GnxError> {
+pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, CgnError> {
     match format {
         OutputFormat::Llm => {
             // Apply lossy compression (rounded floats, trimmed ISO timestamps)
@@ -44,16 +44,16 @@ pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, Gnx
             let mut v = value.clone();
             compress_for_llm(&mut v);
             let bytes = serde_json::to_vec(&v)
-                .map_err(|e| GnxError::Output(format!("json serialize: {e}")))?;
-            _etoon::toon::encode(&bytes).map_err(|e| GnxError::Output(format!("toon encode: {e}")))
+                .map_err(|e| CgnError::Output(format!("json serialize: {e}")))?;
+            _etoon::toon::encode(&bytes).map_err(|e| CgnError::Output(format!("toon encode: {e}")))
         }
         OutputFormat::Toon => {
             let bytes = serde_json::to_vec(value)
-                .map_err(|e| GnxError::Output(format!("json serialize: {e}")))?;
-            _etoon::toon::encode(&bytes).map_err(|e| GnxError::Output(format!("toon encode: {e}")))
+                .map_err(|e| CgnError::Output(format!("json serialize: {e}")))?;
+            _etoon::toon::encode(&bytes).map_err(|e| CgnError::Output(format!("toon encode: {e}")))
         }
         OutputFormat::Json => serde_json::to_string(value)
-            .map_err(|e| GnxError::Output(format!("json serialize: {e}"))),
+            .map_err(|e| CgnError::Output(format!("json serialize: {e}"))),
         OutputFormat::Text => {
             if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
                 Ok(results
@@ -63,7 +63,7 @@ pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, Gnx
                     .join("\n"))
             } else {
                 serde_json::to_string_pretty(value)
-                    .map_err(|e| GnxError::Output(format!("json pretty: {e}")))
+                    .map_err(|e| CgnError::Output(format!("json pretty: {e}")))
             }
         }
     }
@@ -71,7 +71,7 @@ pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, Gnx
 
 /// Print `value` to stdout in the requested format. Thin wrapper over
 /// [`emit_to_string`].
-pub fn emit(value: &Value, format: OutputFormat) -> Result<(), GnxError> {
+pub fn emit(value: &Value, format: OutputFormat) -> Result<(), CgnError> {
     println!("{}", emit_to_string(value, format)?);
     Ok(())
 }

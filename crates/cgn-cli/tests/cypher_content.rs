@@ -11,8 +11,8 @@ use std::process::Command;
 const SOURCE: &str =
     "function callee() {\n    return 1;\n}\n\nfunction caller() {\n    return callee();\n}\n";
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn init_repo_and_analyze(repo: &std::path::Path) {
@@ -46,7 +46,7 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -60,7 +60,7 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
 }
 
 fn run_json(repo: &std::path::Path, args: &[&str]) -> Value {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(args)
         .current_dir(repo)
         .env("HOME", repo)
@@ -191,7 +191,7 @@ fn cypher_content_handles_missing_file_gracefully() {
     // Wipe the source file the graph points at.
     std::fs::remove_file(tmp.path().join("src/edges.ts")).unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "cypher",
             "MATCH (m:Function)-[r:Calls]->(t:Function) RETURN m.content, t.content",
@@ -250,7 +250,7 @@ fn cypher_content_handles_missing_file_gracefully() {
 /// `cypher --help` must mention the single-repo limitation to guide users.
 #[test]
 fn cypher_help_mentions_single_repo_limit() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["cypher", "--help"])
         .output()
         .unwrap();

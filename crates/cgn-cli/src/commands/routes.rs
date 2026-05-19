@@ -11,7 +11,7 @@ use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use cgn_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Args, Debug, Clone)]
@@ -46,7 +46,7 @@ pub struct RoutesArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: RoutesArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run(args: RoutesArgs, engine: &Engine) -> Result<(), CgnError> {
     match args.path.as_deref() {
         None => list_routes(
             engine,
@@ -69,8 +69,8 @@ fn list_routes(
     method_filter: Option<&str>,
     include_tests: bool,
     format: Option<&str>,
-) -> Result<(), GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+) -> Result<(), CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
     let fmt = OutputFormat::parse(format);
     let wanted_method = method_filter.map(|m| m.to_ascii_uppercase());
 
@@ -241,8 +241,8 @@ fn inspect_route(
     method_filter: Option<&str>,
     depth: usize,
     format: Option<&str>,
-) -> Result<(), GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+) -> Result<(), CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
     let fmt = OutputFormat::parse(format);
     let wanted_method = method_filter.map(|m| m.to_ascii_uppercase());
 

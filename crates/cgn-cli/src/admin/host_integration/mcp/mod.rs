@@ -11,7 +11,7 @@ pub mod windsurf;
 
 use crate::admin::menu::{self, select};
 use dialoguer::theme::ColorfulTheme;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 const HOSTS: &[menu::Item<'_>] = &[
     ("Claude Code", "Anthropic CLI — ~/.claude/settings.json"),
@@ -33,7 +33,7 @@ const ACTIONS: &[menu::Item<'_>] = &[
 ];
 
 /// Entry point called from `host_integration::run`.
-pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
+pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "MCP — pick a host", HOSTS)?;
         match choice {
@@ -106,7 +106,7 @@ fn host_menu(
     install: fn(&ColorfulTheme),
     uninstall: fn(&ColorfulTheme),
     status: fn() -> crate::admin::status::HostStatus,
-) -> Result<(), GnxError> {
+) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, &format!("{host_name} — action"), ACTIONS)?;
         match choice {

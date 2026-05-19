@@ -3,13 +3,13 @@
 
 use std::process::{Command, Stdio};
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
-fn gnx_admin_exits_cleanly_on_immediate_exit_choice() {
-    let mut child = Command::new(gnx_bin())
+fn cgn_admin_exits_cleanly_on_immediate_exit_choice() {
+    let mut child = Command::new(cgn_bin())
         .arg("admin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -36,8 +36,8 @@ fn gnx_admin_exits_cleanly_on_immediate_exit_choice() {
 
 /// Verify `cgn admin --help` renders correctly and exits 0.
 #[test]
-fn gnx_admin_help_exits_zero() {
-    let out = Command::new(gnx_bin())
+fn cgn_admin_help_exits_zero() {
+    let out = Command::new(cgn_bin())
         .args(["admin", "--help"])
         .output()
         .expect("spawn cgn admin --help");

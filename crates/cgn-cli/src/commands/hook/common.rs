@@ -1,11 +1,11 @@
 //! Shared utilities for Claude Code hook event handlers:
 //! stdin JSON envelope parsing, hookSpecificOutput emission, registry-
-//! aware index dir resolution, hook-local `.gnx/` state dir creation,
+//! aware index dir resolution, hook-local `.cgn/` state dir creation,
 //! and shell-quote stripping shared between PreToolUse (pattern
 //! extraction) and PostToolUse (git mutation detection).
 
-use cgn_core::registry::{resolve_home_gnx, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, RegistryFile};
+use cgn_core::CgnError;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
@@ -31,11 +31,11 @@ pub struct HookInput {
 /// resolves to an all-default `HookInput` rather than an error — the
 /// hook may legitimately be invoked with no envelope (e.g. by the
 /// SessionStart event when Claude Code hasn't surfaced any context).
-pub fn read_stdin_envelope() -> Result<HookInput, GnxError> {
+pub fn read_stdin_envelope() -> Result<HookInput, CgnError> {
     let mut buf = String::new();
     std::io::stdin()
         .read_to_string(&mut buf)
-        .map_err(GnxError::Io)?;
+        .map_err(CgnError::Io)?;
     if buf.trim().is_empty() {
         return Ok(HookInput {
             cwd: String::new(),
@@ -45,7 +45,7 @@ pub fn read_stdin_envelope() -> Result<HookInput, GnxError> {
         });
     }
     serde_json::from_str(&buf)
-        .map_err(|e| GnxError::InvalidArgument(format!("hook stdin parse: {e}")))
+        .map_err(|e| CgnError::InvalidArgument(format!("hook stdin parse: {e}")))
 }
 
 /// Emit `{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}`
@@ -62,38 +62,38 @@ pub fn emit_additional_context(event: &str, context: &str) {
     println!("{}", payload);
 }
 
-/// Hook-local state dir at `<cwd>/.gnx/`. Used only for marker files
+/// Hook-local state dir at `<cwd>/.cgn/`. Used only for marker files
 /// (`.rebuild-complete`, `.rebuild-failed`), the rebuild log, and the
 /// `.analyze.lock` — things tied to *this* worktree, not the shared
-/// index in `~/.gnx/<repo>__<hash>/commits/<sha>/`.
+/// index in `~/.cgn/<repo>__<hash>/commits/<sha>/`.
 ///
-/// Read-side: returns `Some` iff cwd is absolute AND `<cwd>/.gnx/`
+/// Read-side: returns `Some` iff cwd is absolute AND `<cwd>/.cgn/`
 /// already exists. Hooks must not block tool execution on missing
 /// dirs — callers translate `None` into a silent no-op.
-pub fn gnx_state_dir(cwd: &str) -> Option<PathBuf> {
+pub fn cgn_state_dir(cwd: &str) -> Option<PathBuf> {
     let path = Path::new(cwd);
     if !path.is_absolute() {
         return None;
     }
-    let candidate = path.join(".gnx");
+    let candidate = path.join(".cgn");
     candidate.exists().then_some(candidate)
 }
 
-/// Write-side variant: returns `Some(<cwd>/.gnx/)` and creates the
+/// Write-side variant: returns `Some(<cwd>/.cgn/)` and creates the
 /// directory if absent. Used by PostToolUse (which needs to drop a
 /// `.rebuild-complete` / `.rebuild-failed` marker even on the very
 /// first run, before any other tool has touched the dir).
-pub fn gnx_state_dir_ensure(cwd: &str) -> Option<PathBuf> {
+pub fn cgn_state_dir_ensure(cwd: &str) -> Option<PathBuf> {
     let path = Path::new(cwd);
     if !path.is_absolute() {
         return None;
     }
-    let candidate = path.join(".gnx");
+    let candidate = path.join(".cgn");
     fs::create_dir_all(&candidate).ok()?;
     Some(candidate)
 }
 
-/// Registry-aware index dir resolution. Reads `~/.gnx/registry.json`,
+/// Registry-aware index dir resolution. Reads `~/.cgn/registry.json`,
 /// finds the `RepoAlias` whose `common_dir` matches cwd's git common-dir,
 /// then resolves the commit dir for the current branch's HEAD SHA.
 ///
@@ -117,11 +117,11 @@ pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
-    let home_gnx = resolve_home_gnx();
-    let registry_path = home_gnx.join("registry.json");
+    let home_cgn = resolve_home_cgn();
+    let registry_path = home_cgn.join("registry.json");
     let registry = RegistryFile::read_or_empty(&registry_path).ok()?;
     let alias = crate::repo_selector::find_by_path(&registry, cwd)?;
-    let commits_dir = home_gnx.join(&alias.dir_name).join("commits");
+    let commits_dir = home_cgn.join(&alias.dir_name).join("commits");
 
     // Branch-affinity primary: HEAD SHA → exact commit dir.
     if let Some(head) = crate::graph_path::head_sha_bytes(path) {
@@ -186,7 +186,7 @@ pub fn strip_shell_quotes(cmd: &str) -> String {
 fn default_repo_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(&cwd).ok()?;
-    Some(resolve_home_gnx().join(repo_dir))
+    Some(resolve_home_cgn().join(repo_dir))
 }
 
 pub fn drain_and_render_peer_payload() -> Option<String> {

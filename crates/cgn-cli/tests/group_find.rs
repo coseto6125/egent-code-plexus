@@ -9,12 +9,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
-fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
-    Command::new(gnx_bin())
+fn run_cgn(args: &[&str], home: &Path) -> std::process::Output {
+    Command::new(cgn_bin())
         .args(args)
         .env("HOME", home)
         .output()
@@ -50,8 +50,8 @@ fn init_git_repo_with_rs(path: &Path) {
     }
 }
 
-fn read_dir_names(home_gnx: &Path) -> Vec<String> {
-    let registry_path = home_gnx.join("registry.json");
+fn read_dir_names(home_cgn: &Path) -> Vec<String> {
+    let registry_path = home_cgn.join("registry.json");
     let bytes = fs::read(&registry_path).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     v["repos"]
@@ -66,7 +66,7 @@ fn read_dir_names(home_gnx: &Path) -> Vec<String> {
 
 #[test]
 fn group_find_help_exits_zero() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["group", "find", "--help"])
         .output()
         .expect("cgn spawn failed");
@@ -85,7 +85,7 @@ fn group_find_help_exits_zero() {
 #[test]
 fn group_find_unknown_group_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = run_gnx(
+    let out = run_cgn(
         &["group", "find", "__no_such_group__", "foo"],
         tmp.path(),
     );
@@ -109,12 +109,12 @@ fn group_find_json_shape_two_repos() {
     let home_tmp = tempfile::tempdir().unwrap();
     let repos_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
-    let home_gnx = home.join(".gnx");
+    let home_cgn = home.join(".cgn");
 
     for name in ["repo_a", "repo_b"] {
         let repo = repos_tmp.path().join(name);
         init_git_repo_with_rs(&repo);
-        let out = run_gnx(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
+        let out = run_cgn(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
         assert!(
             out.status.success(),
             "{name} admin index failed:\nstderr: {}",
@@ -122,11 +122,11 @@ fn group_find_json_shape_two_repos() {
         );
     }
 
-    let dir_names = read_dir_names(&home_gnx);
+    let dir_names = read_dir_names(&home_cgn);
     assert_eq!(dir_names.len(), 2, "expected 2 registered repos");
 
     for dn in &dir_names {
-        let out = run_gnx(&["admin", "group", "add", dn, "findgrp"], home);
+        let out = run_cgn(&["admin", "group", "add", dn, "findgrp"], home);
         assert!(
             out.status.success(),
             "admin group add failed for {dn}:\nstderr: {}",
@@ -134,7 +134,7 @@ fn group_find_json_shape_two_repos() {
         );
     }
 
-    let out = run_gnx(&["group", "find", "findgrp", "hello", "--json"], home);
+    let out = run_cgn(&["group", "find", "findgrp", "hello", "--json"], home);
     assert!(
         out.status.success(),
         "group find failed:\nstdout: {}\nstderr: {}",
@@ -173,12 +173,12 @@ fn group_find_merge_rrf_json_shape_two_repos() {
     let home_tmp = tempfile::tempdir().unwrap();
     let repos_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
-    let home_gnx = home.join(".gnx");
+    let home_cgn = home.join(".cgn");
 
     for name in ["repo_a_rrf", "repo_b_rrf"] {
         let repo = repos_tmp.path().join(name);
         init_git_repo_with_rs(&repo);
-        let out = run_gnx(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
+        let out = run_cgn(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
         assert!(
             out.status.success(),
             "{name} admin index failed:\nstderr: {}",
@@ -186,9 +186,9 @@ fn group_find_merge_rrf_json_shape_two_repos() {
         );
     }
 
-    let dir_names = read_dir_names(&home_gnx);
+    let dir_names = read_dir_names(&home_cgn);
     for dn in &dir_names {
-        let out = run_gnx(&["admin", "group", "add", dn, "rrfgrp"], home);
+        let out = run_cgn(&["admin", "group", "add", dn, "rrfgrp"], home);
         assert!(
             out.status.success(),
             "admin group add failed for {dn}:\nstderr: {}",
@@ -196,7 +196,7 @@ fn group_find_merge_rrf_json_shape_two_repos() {
         );
     }
 
-    let out = run_gnx(
+    let out = run_cgn(
         &[
             "group", "find", "rrfgrp", "hello",
             "--merge", "rrf",
@@ -227,7 +227,7 @@ fn group_find_merge_rrf_json_shape_two_repos() {
 #[test]
 fn group_find_limit_without_merge_rrf_errors() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = run_gnx(
+    let out = run_cgn(
         &["group", "find", "anygrp", "hello", "--limit", "5"],
         tmp.path(),
     );

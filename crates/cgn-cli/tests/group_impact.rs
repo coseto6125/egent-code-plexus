@@ -22,8 +22,8 @@ use cgn_cli::commands::group::{
 use std::collections::HashSet;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ fn make_stored_contract(repo: &str, sym_uid: &str) -> StoredContract {
 fn cross_links_filter_from_uid_in_local_set() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();
-    let gnx_home = home.join(".gnx");
+    let cgn_home = home.join(".cgn");
 
     let registry = ContractRegistry {
         version: 1,
@@ -93,7 +93,7 @@ fn cross_links_filter_from_uid_in_local_set() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&gnx_home, "demo");
+    let gdir = group_dir(&cgn_home, "demo");
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
@@ -123,7 +123,7 @@ fn cross_links_filter_from_uid_in_local_set() {
 fn cross_links_filter_to_uid_in_local_set() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();
-    let gnx_home = home.join(".gnx");
+    let cgn_home = home.join(".cgn");
 
     let registry = ContractRegistry {
         version: 1,
@@ -134,7 +134,7 @@ fn cross_links_filter_to_uid_in_local_set() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&gnx_home, "demo");
+    let gdir = group_dir(&cgn_home, "demo");
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
@@ -162,7 +162,7 @@ fn cross_links_filter_to_uid_in_local_set() {
 fn cross_links_filter_respects_min_confidence() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();
-    let gnx_home = home.join(".gnx");
+    let cgn_home = home.join(".cgn");
 
     let registry = ContractRegistry {
         version: 1,
@@ -174,7 +174,7 @@ fn cross_links_filter_respects_min_confidence() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&gnx_home, "demo");
+    let gdir = group_dir(&cgn_home, "demo");
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
@@ -201,7 +201,7 @@ fn cross_links_filter_respects_min_confidence() {
 fn cross_links_no_hits_when_local_uids_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();
-    let gnx_home = home.join(".gnx");
+    let cgn_home = home.join(".cgn");
 
     let registry = ContractRegistry {
         version: 1,
@@ -210,7 +210,7 @@ fn cross_links_no_hits_when_local_uids_empty() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&gnx_home, "demo");
+    let gdir = group_dir(&cgn_home, "demo");
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
@@ -234,7 +234,7 @@ fn cross_links_no_hits_when_local_uids_empty() {
 /// `cgn group impact --help` must exit 0 and mention the subcommand.
 #[test]
 fn group_impact_help_exits_zero() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["group", "impact", "--help"])
         .output()
         .expect("cgn spawn failed");
@@ -256,7 +256,7 @@ fn group_impact_help_exits_zero() {
 fn group_impact_unknown_group_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "group", "impact", "__no_such_group__",
             "--target", "foo",

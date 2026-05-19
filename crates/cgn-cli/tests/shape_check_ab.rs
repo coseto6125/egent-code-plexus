@@ -17,8 +17,8 @@
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn init_repo(repo: &Path) {
@@ -68,7 +68,7 @@ fn git_commit(repo: &Path) {
 }
 
 fn run(args: &[&str], repo: &Path, home: &Path) -> std::process::Output {
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .args(args)
         .current_dir(repo)
         .env("HOME", home)

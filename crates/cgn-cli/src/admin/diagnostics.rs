@@ -1,8 +1,8 @@
 //! Diagnostic reports for `cgn admin`.
 
 use crate::admin::menu::{self, select};
-use cgn_core::registry::{resolve_home_gnx, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, RegistryFile};
+use cgn_core::CgnError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,13 +17,13 @@ const MENU: &[menu::Item<'_>] = &[
     ("← Back", ""),
 ];
 
-pub fn run(theme: &dialoguer::theme::ColorfulTheme) -> Result<(), GnxError> {
+pub fn run(theme: &dialoguer::theme::ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Diagnostics", MENU)?;
         match choice {
             Some(0) => doctor()?,
             Some(1) => mcp_tool_list()?,
-            Some(2) => registry_health_report(&resolve_home_gnx())?,
+            Some(2) => registry_health_report(&resolve_home_cgn())?,
             Some(3) => environment_report()?,
             Some(4) | None => return Ok(()),
             _ => unreachable!(),
@@ -31,31 +31,31 @@ pub fn run(theme: &dialoguer::theme::ColorfulTheme) -> Result<(), GnxError> {
     }
 }
 
-fn doctor() -> Result<(), GnxError> {
+fn doctor() -> Result<(), CgnError> {
     environment_report()?;
     println!();
-    registry_health_report(&resolve_home_gnx())
+    registry_health_report(&resolve_home_cgn())
 }
 
-fn mcp_tool_list() -> Result<(), GnxError> {
-    let exe = std::env::current_exe().map_err(|e| GnxError::Output(format!("current_exe: {e}")))?;
+fn mcp_tool_list() -> Result<(), CgnError> {
+    let exe = std::env::current_exe().map_err(|e| CgnError::Output(format!("current_exe: {e}")))?;
     let output = Command::new(exe)
         .args(["mcp", "tools"])
         .output()
-        .map_err(|e| GnxError::Output(format!("cgn mcp tools: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("cgn mcp tools: {e}")))?;
     if output.status.success() {
         print!("{}", String::from_utf8_lossy(&output.stdout));
         Ok(())
     } else {
-        Err(GnxError::Output(format!(
+        Err(CgnError::Output(format!(
             "cgn mcp tools: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
 }
 
-fn environment_report() -> Result<(), GnxError> {
-    let exe = std::env::current_exe().map_err(|e| GnxError::Output(format!("current_exe: {e}")))?;
+fn environment_report() -> Result<(), CgnError> {
+    let exe = std::env::current_exe().map_err(|e| CgnError::Output(format!("current_exe: {e}")))?;
     println!("Environment report");
     println!("  cgn version: {}", env!("CARGO_PKG_VERSION"));
     println!("  binary: {}", exe.display());
@@ -73,8 +73,8 @@ fn environment_report() -> Result<(), GnxError> {
     Ok(())
 }
 
-fn registry_health_report(home_gnx: &Path) -> Result<(), GnxError> {
-    let health = registry_health(home_gnx)?;
+fn registry_health_report(home_cgn: &Path) -> Result<(), CgnError> {
+    let health = registry_health(home_cgn)?;
     println!("Registry health");
     println!("  root: {}", health.root.display());
     println!("  registry: {}", health.registry_path.display());
@@ -120,17 +120,17 @@ struct RegistryHealth {
     orphan_index_dirs: Vec<PathBuf>,
 }
 
-fn registry_health(home_gnx: &Path) -> Result<RegistryHealth, GnxError> {
-    let registry_path = home_gnx.join("registry.json");
+fn registry_health(home_cgn: &Path) -> Result<RegistryHealth, CgnError> {
+    let registry_path = home_cgn.join("registry.json");
     let registry = RegistryFile::read_or_empty(&registry_path)
-        .map_err(|e| GnxError::InvalidArgument(format!("registry read: {e}")))?;
+        .map_err(|e| CgnError::InvalidArgument(format!("registry read: {e}")))?;
     // v2: repos is BTreeMap<dir_name, RepoAlias>; commit indexes live under
-    // <home_gnx>/<dir_name>/commits/<commit_dirname>/graph.bin
+    // <home_cgn>/<dir_name>/commits/<commit_dirname>/graph.bin
     let mut health = RegistryHealth {
-        root: home_gnx.to_path_buf(),
+        root: home_cgn.to_path_buf(),
         registry_path,
-        root_exists: home_gnx.exists(),
-        registry_exists: home_gnx.join("registry.json").exists(),
+        root_exists: home_cgn.exists(),
+        registry_exists: home_cgn.join("registry.json").exists(),
         repo_count: registry.repos.len(),
         branch_count: 0, // v2 has no per-branch counter; commit count varies per repo
         ..RegistryHealth::default()
@@ -142,7 +142,7 @@ fn registry_health(home_gnx: &Path) -> Result<RegistryHealth, GnxError> {
 
     // Check each registered repo's commits dir for missing graph.bin / meta.
     for (dir_name, _alias) in &registry.repos {
-        let commits_dir = home_gnx.join(dir_name).join("commits");
+        let commits_dir = home_cgn.join(dir_name).join("commits");
         if let Ok(entries) = std::fs::read_dir(&commits_dir) {
             for entry in entries.flatten().filter(|e| e.path().is_dir()) {
                 let index_dir = entry.path();
@@ -167,8 +167,8 @@ fn registry_health(home_gnx: &Path) -> Result<RegistryHealth, GnxError> {
         }
     }
 
-    // Orphans: top-level dirs under home_gnx whose name is NOT in the registry.
-    if let Ok(repos) = std::fs::read_dir(home_gnx) {
+    // Orphans: top-level dirs under home_cgn whose name is NOT in the registry.
+    if let Ok(repos) = std::fs::read_dir(home_cgn) {
         for repo_entry in repos.flatten().filter(|entry| entry.path().is_dir()) {
             let repo_path = repo_entry.path();
             let dir_name = match repo_path.file_name().and_then(|n| n.to_str()) {

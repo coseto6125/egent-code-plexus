@@ -4,7 +4,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// Magic bytes at the head of every `graph.bin`. Used by the reader to
 /// reject non-cgn files (or files truncated below the header length)
 /// before rkyv attempts a structural cast.
-pub const GRAPH_MAGIC: [u8; 8] = *b"GNX-RS\0\0";
+pub const GRAPH_MAGIC: [u8; 8] = *b"CGN-RS\0\0";
 
 /// On-disk graph format version. Bump whenever `ZeroCopyGraph`'s field
 /// layout changes in a way that would make older binaries unreadable by

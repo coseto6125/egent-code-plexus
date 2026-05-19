@@ -1,7 +1,7 @@
 use std::process::Command;
 use std::thread;
 
-fn gnx_bin() -> std::path::PathBuf {
+fn cgn_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     if p.ends_with("deps") {
@@ -60,7 +60,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
     let wt_path = wt.path().to_path_buf();
 
     // Seed an initial L2 so we exercise the drop-existing path
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .env("HOME", &home_path)
         .args(["admin", "index", "--repo"])
         .arg(&wt_path)
@@ -71,7 +71,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
         let home_path = home_path.clone();
         let wt_path = wt_path.clone();
         thread::spawn(move || {
-            Command::new(gnx_bin())
+            Command::new(cgn_bin())
                 .env("HOME", &home_path)
                 .args(["admin", "index", "--repo"])
                 .arg(&wt_path)
@@ -84,7 +84,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
         let home_path = home_path.clone();
         let wt_path = wt_path.clone();
         thread::spawn(move || {
-            Command::new(gnx_bin())
+            Command::new(cgn_bin())
                 .env("HOME", &home_path)
                 .args(["admin", "index", "--repo"])
                 .arg(&wt_path)
@@ -108,8 +108,8 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
     );
 
     // Only one commit_dir for this SHA + no leftover .building
-    let gnx_home = home_path.join(".gnx");
-    let (commit_dirs, building_dirs) = count_dirs(&gnx_home);
+    let cgn_home = home_path.join(".cgn");
+    let (commit_dirs, building_dirs) = count_dirs(&cgn_home);
     assert_eq!(
         commit_dirs, 1,
         "expected exactly 1 commit dir, found {commit_dirs}"

@@ -1,11 +1,11 @@
-//! Tests `cgn admin index` writes to ~/.gnx/<repo>/<branch>/ and updates registry.
+//! Tests `cgn admin index` writes to ~/.cgn/<repo>/<branch>/ and updates registry.
 //! (replaces the old `cgn analyze` top-level command, folded into admin)
 
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn init_repo(path: &Path) {
@@ -53,7 +53,7 @@ fn analyze_writes_to_registry_resolved_path() {
     let home_tmp = tempfile::tempdir().unwrap();
     init_repo(repo_tmp.path());
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "admin",
             "index",
@@ -70,9 +70,9 @@ fn analyze_writes_to_registry_resolved_path() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // v2 layout: ~/.gnx/<repo>__<hash8>/commits/<source_type>_<source_id>__<sha>/graph.bin
-    let gnx_root = home_tmp.path().join(".gnx");
-    let entries: Vec<_> = walkdir::WalkDir::new(&gnx_root)
+    // v2 layout: ~/.cgn/<repo>__<hash8>/commits/<source_type>_<source_id>__<sha>/graph.bin
+    let cgn_root = home_tmp.path().join(".cgn");
+    let entries: Vec<_> = walkdir::WalkDir::new(&cgn_root)
         .max_depth(4)
         .into_iter()
         .filter_map(Result::ok)
@@ -82,7 +82,7 @@ fn analyze_writes_to_registry_resolved_path() {
     assert!(
         graph_bin.is_some(),
         "graph.bin missing under {:?}; entries: {:?}",
-        gnx_root,
+        cgn_root,
         entries.iter().map(|e| e.path()).collect::<Vec<_>>()
     );
     let commit_dir = graph_bin.unwrap().path().parent().unwrap();
@@ -92,7 +92,7 @@ fn analyze_writes_to_registry_resolved_path() {
         commit_dir
     );
 
-    // Per-repo RepoMeta (v2): ~/.gnx/<repo>__<hash>/meta.json
+    // Per-repo RepoMeta (v2): ~/.cgn/<repo>__<hash>/meta.json
     let repo_dir = commit_dir.parent().unwrap().parent().unwrap();
     assert!(
         repo_dir.join("meta.json").exists(),

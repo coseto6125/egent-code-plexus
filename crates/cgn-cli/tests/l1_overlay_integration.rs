@@ -3,14 +3,14 @@
 //! Exercises the real end-to-end flow:
 //!   build L2 index → modify a source file (without committing) →
 //!   run a query → assert L1 fragments + dirty_files.json + session_meta
-//!   materialise under <home>/.gnx/<repo>__<hash>/sessions/<sid>/.
+//!   materialise under <home>/.cgn/<repo>__<hash>/sessions/<sid>/.
 
 use std::ffi::OsStr;
 use std::process::Command;
 use walkdir::WalkDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run(cmd: &mut Command, label: &str) -> std::process::Output {
@@ -75,15 +75,15 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
 
     // ── 2. Build L2 index ─────────────────────────────────────────────────
     run(
-        Command::new(gnx_bin())
+        Command::new(cgn_bin())
             .args(["admin", "index", "--repo", repo.to_str().unwrap()])
             .env("HOME", &home),
         "cgn admin index",
     );
 
     // Confirm graph.bin materialised before we mutate the working tree.
-    let gnx_root = home.join(".gnx");
-    let graph_bin = WalkDir::new(&gnx_root)
+    let cgn_root = home.join(".cgn");
+    let graph_bin = WalkDir::new(&cgn_root)
         .max_depth(5)
         .into_iter()
         .filter_map(Result::ok)
@@ -91,7 +91,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     assert!(
         graph_bin.is_some(),
         "graph.bin missing after admin index; tree:\n{:?}",
-        WalkDir::new(&gnx_root)
+        WalkDir::new(&cgn_root)
             .max_depth(5)
             .into_iter()
             .filter_map(Result::ok)
@@ -113,7 +113,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     // in main.rs, which unconditionally calls ensure_fresh before loading graph.
     // The find itself may succeed or produce no results; either is fine
     // — we only care about the L1 side effect.
-    let _ = Command::new(gnx_bin())
+    let _ = Command::new(cgn_bin())
         .args(["find", "main", "--repo", repo.to_str().unwrap()])
         .env("HOME", &home)
         // Supply a stable session-id so the session dir is predictable.
@@ -122,7 +122,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         .expect("cgn find spawn failed");
 
     // ── 5. Assert L1 fragment exists ──────────────────────────────────────
-    let fragments: Vec<_> = WalkDir::new(&gnx_root)
+    let fragments: Vec<_> = WalkDir::new(&cgn_root)
         .max_depth(7)
         .into_iter()
         .filter_map(Result::ok)
@@ -136,8 +136,8 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         .collect();
     assert!(
         !fragments.is_empty(),
-        "expected at least one graph_overlay/*.bin under {gnx_root:?};\ntree:\n{:?}",
-        WalkDir::new(&gnx_root)
+        "expected at least one graph_overlay/*.bin under {cgn_root:?};\ntree:\n{:?}",
+        WalkDir::new(&cgn_root)
             .max_depth(7)
             .into_iter()
             .filter_map(Result::ok)
@@ -146,7 +146,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     );
 
     // ── 6. Assert session_meta.json exists ───────────────────────────────
-    let session_metas: Vec<_> = WalkDir::new(&gnx_root)
+    let session_metas: Vec<_> = WalkDir::new(&cgn_root)
         .max_depth(5)
         .into_iter()
         .filter_map(Result::ok)
@@ -154,7 +154,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         .collect();
     assert!(
         !session_metas.is_empty(),
-        "expected session_meta.json under {gnx_root:?}"
+        "expected session_meta.json under {cgn_root:?}"
     );
 
     // overlay_version must be ≥ 1 (bumped by write_dirty_fragment)
@@ -166,7 +166,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     );
 
     // ── 7. Assert dirty_files.json references the mutated file ───────────
-    let dirty_files: Vec<_> = WalkDir::new(&gnx_root)
+    let dirty_files: Vec<_> = WalkDir::new(&cgn_root)
         .max_depth(5)
         .into_iter()
         .filter_map(Result::ok)
@@ -174,7 +174,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         .collect();
     assert!(
         !dirty_files.is_empty(),
-        "expected dirty_files.json under {gnx_root:?}"
+        "expected dirty_files.json under {cgn_root:?}"
     );
     let dirty_content =
         std::fs::read_to_string(dirty_files[0].path()).expect("read dirty_files.json");

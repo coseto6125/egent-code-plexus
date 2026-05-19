@@ -2,7 +2,7 @@
 
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::fs;
 use std::path::{Path, PathBuf};
 use toml::Value;
@@ -38,13 +38,13 @@ pub fn status() -> HostStatus {
     }
 }
 
-fn run_install() -> Result<PathBuf, GnxError> {
+fn run_install() -> Result<PathBuf, CgnError> {
     let path = config_path();
     upsert_server(&path, &current_command())?;
     Ok(path)
 }
 
-fn run_uninstall() -> Result<PathBuf, GnxError> {
+fn run_uninstall() -> Result<PathBuf, CgnError> {
     let path = config_path();
     remove_server(&path)?;
     Ok(path)
@@ -66,17 +66,17 @@ fn current_command() -> String {
         .unwrap_or_else(|_| "cgn".into())
 }
 
-fn upsert_server(path: &Path, command: &str) -> Result<(), GnxError> {
+fn upsert_server(path: &Path, command: &str) -> Result<(), CgnError> {
     let mut config = read_config(path)?;
     let root = config
         .as_table_mut()
-        .ok_or_else(|| GnxError::InvalidArgument("Codex config root is not a TOML table".into()))?;
+        .ok_or_else(|| CgnError::InvalidArgument("Codex config root is not a TOML table".into()))?;
     let servers = root
         .entry("mcp_servers")
         .or_insert_with(|| Value::Table(toml::map::Map::new()))
         .as_table_mut()
         .ok_or_else(|| {
-            GnxError::InvalidArgument("Codex config `mcp_servers` is not a TOML table".into())
+            CgnError::InvalidArgument("Codex config `mcp_servers` is not a TOML table".into())
         })?;
 
     let mut server = toml::map::Map::new();
@@ -96,7 +96,7 @@ fn upsert_server(path: &Path, command: &str) -> Result<(), GnxError> {
     write_config(path, &config)
 }
 
-fn remove_server(path: &Path) -> Result<(), GnxError> {
+fn remove_server(path: &Path) -> Result<(), CgnError> {
     if !path.exists() {
         return Ok(());
     }
@@ -111,25 +111,25 @@ fn remove_server(path: &Path) -> Result<(), GnxError> {
     write_config(path, &config)
 }
 
-fn read_config(path: &Path) -> Result<Value, GnxError> {
+fn read_config(path: &Path) -> Result<Value, CgnError> {
     if !path.exists() {
         return Ok(Value::Table(toml::map::Map::new()));
     }
     let raw = fs::read_to_string(path)
-        .map_err(|e| GnxError::Output(format!("read {}: {e}", path.display())))?;
+        .map_err(|e| CgnError::Output(format!("read {}: {e}", path.display())))?;
     if raw.trim().is_empty() {
         return Ok(Value::Table(toml::map::Map::new()));
     }
     toml::from_str::<Value>(&raw)
-        .map_err(|e| GnxError::InvalidArgument(format!("parse {}: {e}", path.display())))
+        .map_err(|e| CgnError::InvalidArgument(format!("parse {}: {e}", path.display())))
 }
 
-fn write_config(path: &Path, config: &Value) -> Result<(), GnxError> {
+fn write_config(path: &Path, config: &Value) -> Result<(), CgnError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let body = toml::to_string_pretty(config)
-        .map_err(|e| GnxError::Serialization(format!("TOML encode: {e}")))?;
+        .map_err(|e| CgnError::Serialization(format!("TOML encode: {e}")))?;
     let tmp = path.with_extension("toml.tmp");
     fs::write(&tmp, body)?;
     fs::rename(tmp, path)?;

@@ -2,8 +2,8 @@
 //! against the last-synced snapshot in `meta.json`.
 
 use clap::Args;
-use cgn_core::registry::{resolve_home_gnx, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, RegistryFile};
+use cgn_core::CgnError;
 use std::path::Path;
 
 use crate::commands::group::lookup_member;
@@ -33,9 +33,9 @@ struct MemberReport {
     status: MemberStatus,
 }
 
-pub fn run(args: StatusArgs) -> Result<(), GnxError> {
-    let home_gnx = resolve_home_gnx();
-    let registry_path = home_gnx.join("registry.json");
+pub fn run(args: StatusArgs) -> Result<(), CgnError> {
+    let home_cgn = resolve_home_cgn();
+    let registry_path = home_cgn.join("registry.json");
     let reg = RegistryFile::read_or_empty(&registry_path)?;
 
     let group_entry = reg
@@ -43,7 +43,7 @@ pub fn run(args: StatusArgs) -> Result<(), GnxError> {
         .iter()
         .find(|g| g.name == args.name)
         .ok_or_else(|| {
-            GnxError::InvalidArgument(format!(
+            CgnError::InvalidArgument(format!(
                 "group '{}' not found in registry\n\
                  → create it with `cgn admin group add <repo> {}`",
                 args.name, args.name
@@ -51,7 +51,7 @@ pub fn run(args: StatusArgs) -> Result<(), GnxError> {
         })?
         .clone();
 
-    let group_dir = storage::group_dir(&home_gnx, &args.name);
+    let group_dir = storage::group_dir(&home_cgn, &args.name);
     let meta_path = group_dir.join(storage::META_FILE);
 
     // No meta.json → never synced; all members are NO_META.
@@ -65,7 +65,7 @@ pub fn run(args: StatusArgs) -> Result<(), GnxError> {
         return Ok(());
     }
 
-    let meta = storage::read_meta(&group_dir).map_err(GnxError::Io)?;
+    let meta = storage::read_meta(&group_dir).map_err(CgnError::Io)?;
 
     let reports: Vec<MemberReport> = group_entry
         .members

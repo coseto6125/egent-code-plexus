@@ -8,7 +8,7 @@ use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use fs2::FileExt;
 use cgn_core::registry::{
-    resolve_home_gnx, CommitBuildMeta, EmbeddingStatus, RefRecord, RegistryFile, RepoAlias,
+    resolve_home_cgn, CommitBuildMeta, EmbeddingStatus, RefRecord, RegistryFile, RepoAlias,
     RepoMeta, SourceType, BUILDER_FINGERPRINT,
 };
 use std::fs::{self, File, OpenOptions};
@@ -32,9 +32,9 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
         return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
     }
 
-    let home_gnx = resolve_home_gnx();
+    let home_cgn = resolve_home_cgn();
     let repo_dir_name = repo_dir_name_for_cwd(worktree)?;
-    let repo_root = home_gnx.join(&repo_dir_name);
+    let repo_root = home_cgn.join(&repo_dir_name);
     fs::create_dir_all(repo_root.join("commits"))?;
 
     let dirname = pick_dirname(worktree, &sha_hex)?;
@@ -339,10 +339,10 @@ pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> 
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| io::Error::other("repo_root has no final component"))?;
-    let home_gnx = repo_root
+    let home_cgn = repo_root
         .parent()
-        .ok_or_else(|| io::Error::other("repo_root has no parent (home_gnx)"))?;
-    RegistryFile::upsert_repo_atomic(home_gnx, RepoAlias::from_repo_meta(repo_dir_name, &rm))?;
+        .ok_or_else(|| io::Error::other("repo_root has no parent (home_cgn)"))?;
+    RegistryFile::upsert_repo_atomic(home_cgn, RepoAlias::from_repo_meta(repo_dir_name, &rm))?;
     Ok(())
 }
 

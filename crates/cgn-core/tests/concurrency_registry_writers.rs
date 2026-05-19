@@ -33,12 +33,12 @@ fn registry_concurrent_writers_converge() {
     );
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let home_gnx = tmp.path().to_path_buf();
+    let home_cgn = tmp.path().to_path_buf();
 
     let children: Vec<_> = (0..8)
         .map(|i| {
             Command::new(&bin)
-                .arg(&home_gnx)
+                .arg(&home_cgn)
                 .arg(format!("repo-{i:02}"))
                 .arg(format!("slot-{i:02}"))
                 .stdout(Stdio::null())
@@ -56,7 +56,7 @@ fn registry_concurrent_writers_converge() {
         }
     }
 
-    let reg = Registry::open(&home_gnx).expect("open final");
+    let reg = Registry::open(&home_cgn).expect("open final");
     let snap = reg.snapshot();
     let mut names: Vec<_> = snap.repos.keys().cloned().collect();
     names.sort();
@@ -75,12 +75,12 @@ fn registry_concurrent_same_repo_last_writer_wins_safely() {
     );
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let home_gnx = tmp.path().to_path_buf();
+    let home_cgn = tmp.path().to_path_buf();
 
     let children: Vec<_> = (0..8)
         .map(|i| {
             Command::new(&bin)
-                .arg(&home_gnx)
+                .arg(&home_cgn)
                 .arg("shared-repo")
                 .arg(format!("slot-{i:02}"))
                 .stdout(Stdio::null())
@@ -95,7 +95,7 @@ fn registry_concurrent_same_repo_last_writer_wins_safely() {
         assert!(output.status.success());
     }
 
-    let reg = Registry::open(&home_gnx).expect("open final");
+    let reg = Registry::open(&home_cgn).expect("open final");
     let snap = reg.snapshot();
     let shared: Vec<_> = snap.repos.iter().filter(|(k, _)| k.as_str() == "shared-repo").collect();
     assert_eq!(shared.len(), 1, "duplicate or lost entry under same-key contention");

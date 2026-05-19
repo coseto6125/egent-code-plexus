@@ -13,8 +13,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// TypeScript fixture exercising mixed node kinds + multiple rel types.
@@ -83,7 +83,7 @@ fn init_repo_and_analyze(repo: &Path) {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -99,7 +99,7 @@ fn init_repo_and_analyze(repo: &Path) {
 fn run_impact(repo: &Path, extra: &[&str]) -> Value {
     let mut args = vec!["impact", "--repo", ".", "--format", "json"];
     args.extend_from_slice(extra);
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
@@ -122,7 +122,7 @@ fn run_impact(repo: &Path, extra: &[&str]) -> Value {
 fn run_impact_stderr(repo: &Path, extra: &[&str]) -> String {
     let mut args = vec!["impact", "--repo", ".", "--format", "json"];
     args.extend_from_slice(extra);
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
@@ -164,7 +164,7 @@ fn impact_accepts_target_flag_as_alias_for_positional() {
     // (i.e. the failure should come from "symbol not found", not from
     // "unexpected argument"). This pins the alias against regressions.
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "impact",
             "--target",
@@ -186,7 +186,7 @@ fn impact_accepts_target_flag_as_alias_for_positional() {
 #[test]
 fn impact_high_trust_only_default_false() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["impact", "--help"])
         .current_dir(tmp.path())
         .output()
@@ -314,7 +314,7 @@ fn impact_baseline_ref_runs_diff_mode() {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "impact", "--baseline", "HEAD~1", "--repo", ".", "--format", "json",
         ])
@@ -338,7 +338,7 @@ fn impact_baseline_ref_runs_diff_mode() {
 #[test]
 fn impact_name_and_baseline_mutually_exclusive() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["impact", "foo", "--baseline", "HEAD~1"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
@@ -364,7 +364,7 @@ fn impact_empty_callers_includes_explanation() {
 
     // `helper` is called BY `caller`, but `extraHelper` in the extra file has
     // no callers — it's a leaf. Use it to trigger the empty-upstream hint.
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "impact",
             "extraHelper",

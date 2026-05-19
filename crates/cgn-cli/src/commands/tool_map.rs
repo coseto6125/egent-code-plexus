@@ -29,7 +29,7 @@ use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use cgn_core::graph::ArchivedFileCategory;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -147,14 +147,14 @@ pub struct ToolMapArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: ToolMapArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run(args: ToolMapArgs, engine: &Engine) -> Result<(), CgnError> {
     let format = OutputFormat::parse(args.format.as_deref());
     let payload = build_payload(&args, engine)?;
     emit(&payload, format)
 }
 
-pub fn build_payload(args: &ToolMapArgs, engine: &Engine) -> Result<serde_json::Value, GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+pub fn build_payload(args: &ToolMapArgs, engine: &Engine) -> Result<serde_json::Value, CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
 
     let filter: Option<Vec<Category>> = match args.category.as_deref() {
         None => None,
@@ -168,7 +168,7 @@ pub fn build_payload(args: &ToolMapArgs, engine: &Engine) -> Result<serde_json::
                 match Category::parse(tok) {
                     Some(c) => parsed.push(c),
                     None => {
-                        return Err(GnxError::InvalidArgument(format!(
+                        return Err(CgnError::InvalidArgument(format!(
                             "unknown category '{tok}' — valid: http, db, redis, queue"
                         )));
                     }

@@ -9,15 +9,15 @@
 use cgn_core::config::{config_path, load, save, Config};
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn non_tty_invocation_prints_help_message_and_exits_zero() {
     // stdout is piped → not a TTY → must hit the fallback path.
     let repo = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "config", "--repo", repo.path().to_str().unwrap()])
         .output()
         .expect("cgn admin config failed to spawn");

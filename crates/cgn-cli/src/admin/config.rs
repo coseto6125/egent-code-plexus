@@ -4,7 +4,7 @@ use crate::admin::menu::{self, select};
 use crate::commands::admin::config as config_cmd;
 use dialoguer::{theme::ColorfulTheme, Input};
 use cgn_core::config::{config_path, load};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::path::PathBuf;
 
 const MENU: &[menu::Item<'_>] = &[
@@ -14,7 +14,7 @@ const MENU: &[menu::Item<'_>] = &[
     ("← Back", ""),
 ];
 
-pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
+pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Config", MENU)?;
         match choice {
@@ -27,37 +27,37 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
     }
 }
 
-fn view_config(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn view_config(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let repo = input_path(theme)?;
-    let cfg = load(&repo).map_err(GnxError::InvalidArgument)?;
+    let cfg = load(&repo).map_err(CgnError::InvalidArgument)?;
     let body = toml::to_string_pretty(&cfg)
-        .map_err(|e| GnxError::Serialization(format!("config TOML: {e}")))?;
+        .map_err(|e| CgnError::Serialization(format!("config TOML: {e}")))?;
     println!("Config: {}", config_path(&repo).display());
     print!("{body}");
     Ok(())
 }
 
-fn edit_config(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn edit_config(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let repo = input_path(theme)?;
     config_cmd::run(config_cmd::ConfigArgs {
         repo: Some(repo.to_string_lossy().into_owned()),
     })
 }
 
-fn validate_config(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn validate_config(theme: &ColorfulTheme) -> Result<(), CgnError> {
     let repo = input_path(theme)?;
-    load(&repo).map_err(GnxError::InvalidArgument)?;
+    load(&repo).map_err(CgnError::InvalidArgument)?;
     println!("✓ Config is valid: {}", config_path(&repo).display());
     Ok(())
 }
 
-fn input_path(theme: &ColorfulTheme) -> Result<PathBuf, GnxError> {
+fn input_path(theme: &ColorfulTheme) -> Result<PathBuf, CgnError> {
     Input::with_theme(theme)
         .with_prompt("Repo path")
         .default(".".to_string())
         .interact_text()
         .map(PathBuf::from)
-        .map_err(|e| GnxError::Output(format!("dialoguer: {e}")))
+        .map_err(|e| CgnError::Output(format!("dialoguer: {e}")))
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-fn gnx_bin() -> std::path::PathBuf {
+fn cgn_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     if p.ends_with("deps") {
@@ -12,7 +12,7 @@ fn gnx_bin() -> std::path::PathBuf {
 #[test]
 fn admin_sessions_list_runs_with_empty_home() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "sessions", "list"])
         .output()
@@ -27,7 +27,7 @@ fn admin_sessions_list_runs_with_empty_home() {
 #[test]
 fn admin_sessions_list_json_emits_empty_array() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "sessions", "list", "--json"])
         .output()
@@ -42,7 +42,7 @@ fn admin_sessions_list_json_emits_empty_array() {
 #[test]
 fn admin_sessions_list_shows_pure_reference_state() {
     let home = tempfile::tempdir().unwrap();
-    let repo_root = home.path().join(".gnx/myrepo__deadbeef");
+    let repo_root = home.path().join(".cgn/myrepo__deadbeef");
     let commit_dir = repo_root
         .join("commits/branch_main__abc123def456789012345678901234567890abcd");
     std::fs::create_dir_all(&commit_dir).unwrap();
@@ -91,7 +91,7 @@ fn admin_sessions_list_shows_pure_reference_state() {
     )
     .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "sessions", "list", "--json"])
         .output()

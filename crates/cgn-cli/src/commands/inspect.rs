@@ -4,7 +4,7 @@ use crate::output::{emit, OutputFormat};
 use clap::Args;
 use cgn_core::algorithms::process_trace::is_test_path;
 use cgn_core::graph::ArchivedZeroCopyGraph;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
@@ -304,14 +304,14 @@ where
     results
 }
 
-pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
 
     let name_query = args.name.as_deref().filter(|s| !s.is_empty());
 
     if name_query.is_none() {
-        return Err(GnxError::InvalidArgument("--name is required".to_string()));
+        return Err(CgnError::InvalidArgument("--name is required".to_string()));
     }
 
     let name = name_query.unwrap();

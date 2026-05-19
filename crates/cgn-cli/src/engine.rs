@@ -28,10 +28,10 @@ pub enum GraphView {
 impl Engine {
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         // Canonicalize so callers (especially `index_dir()`) always see an
-        // absolute path. The legacy default `.gnx/graph.bin` arrives here
+        // absolute path. The legacy default `.cgn/graph.bin` arrives here
         // relative when `graph_path::resolve` falls through (e.g. cwd is
         // outside any registered repo) — without canonicalize, `index_dir()`
-        // would yield `.gnx` and the tantivy lookup would resolve against
+        // would yield `.cgn` and the tantivy lookup would resolve against
         // whatever the process cwd happens to be at search time.
         let graph_path =
             fs::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf());
@@ -81,7 +81,7 @@ impl Engine {
         }
     }
 
-    /// Attach an L1 session overlay dir (`~/.gnx/<repo>/sessions/<sid>/`)
+    /// Attach an L1 session overlay dir (`~/.cgn/<repo>/sessions/<sid>/`)
     /// to merge dirty graph fragments + tantivy delta over the L2 base.
     /// Phase 3 lands the slot; Phase 5 wires the merge logic into query paths.
     #[allow(dead_code)]
@@ -107,7 +107,7 @@ impl Engine {
     }
 
     /// Resolved L2 commit directory: `graph.bin` lives directly inside
-    /// `~/.gnx/<repo>/commits/<dirname>/`, so the index dir is the immediate
+    /// `~/.cgn/<repo>/commits/<dirname>/`, so the index dir is the immediate
     /// parent of the graph path. Tantivy and meta.json also live there.
     pub fn index_dir(&self) -> Option<&Path> {
         self.graph_path.parent()

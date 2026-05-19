@@ -54,8 +54,8 @@ fn fastapi_depends_creates_low_confidence_framework_refs() {
     }
 }
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
@@ -102,7 +102,7 @@ fn setup_fastapi_repo(repo: &Path, home: &Path) {
             "init",
         ],
     );
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", home)
@@ -130,7 +130,7 @@ fn high_trust_only_filters_framework_edges_in_impact() {
     // Default impact upstream from get_db must include at least one caller
     // (get_current_user) reached via the low-confidence edge.
     let target_name = "get_db";
-    let default_out = Command::new(gnx_bin())
+    let default_out = Command::new(cgn_bin())
         .args([
             "impact",
             target_name,
@@ -163,7 +163,7 @@ fn high_trust_only_filters_framework_edges_in_impact() {
 
     // --high-trust-only=true: framework edges (confidence 0.6) filtered → only
     // the target node itself remains in the BFS result.
-    let strict_out = Command::new(gnx_bin())
+    let strict_out = Command::new(cgn_bin())
         .args([
             "impact",
             target_name,

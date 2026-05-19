@@ -11,8 +11,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 const FIXTURE_SRC: &str = r#"
@@ -75,7 +75,7 @@ fn setup_repo(repo: &Path, home: &Path) {
             "init",
         ],
     );
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", home)
@@ -92,7 +92,7 @@ fn setup_repo(repo: &Path, home: &Path) {
 fn run_routes_json(repo: &Path, home: &Path, extra: &[&str]) -> Value {
     let mut args = vec!["routes", "--repo", ".", "--format", "json"];
     args.extend_from_slice(extra);
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", home)
@@ -115,7 +115,7 @@ fn run_routes_json(repo: &Path, home: &Path, extra: &[&str]) -> Value {
 fn run_routes_stdout(repo: &Path, home: &Path, extra: &[&str]) -> String {
     let mut args = vec!["routes", "--repo", "."];
     args.extend_from_slice(extra);
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", home)
@@ -331,7 +331,7 @@ fn setup_empty_repo(repo: &Path, home: &Path) {
             "init",
         ],
     );
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", home)
@@ -352,7 +352,7 @@ fn routes_empty_includes_framework_hint() {
 
     // Capture stderr as well — the hint goes to stderr.
     let args = ["routes", "--repo", ".", "--format", "json"];
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(args)
         .current_dir(repo.path())
         .env("HOME", home.path())
@@ -444,7 +444,7 @@ fn setup_inline_repo(repo: &Path, home: &Path) {
             "init",
         ],
     );
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", home)
@@ -572,7 +572,7 @@ fn setup_py_decorator_repo(repo: &Path, home: &Path) {
             "init",
         ],
     );
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", home)

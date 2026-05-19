@@ -352,32 +352,32 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 /// commit hits this — without the early-out we'd pay a flock + per-repo
 /// meta read + registry read on a path that's supposed to be near-instant.
 fn ensure_registry_entry(worktree: &std::path::Path) -> std::io::Result<()> {
-    use cgn_core::registry::{resolve_home_gnx, RegistryFile, RepoAlias, RepoMeta};
+    use cgn_core::registry::{resolve_home_cgn, RegistryFile, RepoAlias, RepoMeta};
 
-    let home_gnx = resolve_home_gnx();
+    let home_cgn = resolve_home_cgn();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree)?;
-    let registry_path = home_gnx.join("registry.json");
+    let registry_path = home_cgn.join("registry.json");
     if let Ok(reg) = RegistryFile::read_or_empty(&registry_path) {
         if reg.repos.contains_key(&repo_dir_name) {
             return Ok(());
         }
     }
-    let repo_root = home_gnx.join(&repo_dir_name);
+    let repo_root = home_cgn.join(&repo_dir_name);
     let meta_path = repo_root.join("meta.json");
     if !meta_path.exists() {
         return Ok(());
     }
     let rm = RepoMeta::read(&meta_path)?;
-    RegistryFile::upsert_repo_atomic(&home_gnx, RepoAlias::from_repo_meta(repo_dir_name, &rm))
+    RegistryFile::upsert_repo_atomic(&home_cgn, RepoAlias::from_repo_meta(repo_dir_name, &rm))
 }
 
 fn locate_commit_dir(
     worktree: &std::path::Path,
     sha: &str,
 ) -> std::io::Result<Option<std::path::PathBuf>> {
-    let home_gnx = cgn_core::registry::resolve_home_gnx();
+    let home_cgn = cgn_core::registry::resolve_home_cgn();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree)?;
-    let commits = home_gnx.join(&repo_dir_name).join("commits");
+    let commits = home_cgn.join(&repo_dir_name).join("commits");
     if !commits.exists() {
         return Ok(None);
     }

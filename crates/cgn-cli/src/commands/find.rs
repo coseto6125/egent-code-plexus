@@ -34,8 +34,8 @@ use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
 use cgn_analyzer::resolution::index::Language;
 use cgn_core::graph::{ArchivedFileCategory, ArchivedZeroCopyGraph, FileCategory};
-use cgn_core::registry::{resolve_home_gnx, Registry};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, Registry};
+use cgn_core::CgnError;
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -127,14 +127,14 @@ impl FindArgs {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-pub fn run(args: FindArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run(args: FindArgs, engine: &Engine) -> Result<(), CgnError> {
     let mode = args.effective_mode();
 
     // --batch is BM25-only; reject it early in other modes so users see
     // the misconfiguration rather than silently falling back to a single
     // exact-mode query against an empty stdin.
     if args.batch && mode != FindMode::Bm25 {
-        return Err(GnxError::InvalidArgument(
+        return Err(CgnError::InvalidArgument(
             "--batch is only supported with `--mode bm25`".into(),
         ));
     }
@@ -145,14 +145,14 @@ pub fn run(args: FindArgs, engine: &Engine) -> Result<(), GnxError> {
     }
 }
 
-fn run_bm25(args: FindArgs, engine: &Engine) -> Result<(), GnxError> {
+fn run_bm25(args: FindArgs, engine: &Engine) -> Result<(), CgnError> {
     if args.batch {
         return run_batch(args, engine);
     }
 
     let format = OutputFormat::parse(args.format.as_deref());
     let pattern = args.pattern.clone().ok_or_else(|| {
-        GnxError::InvalidArgument("pattern is required (or use --batch to read from stdin)".into())
+        CgnError::InvalidArgument("pattern is required (or use --batch to read from stdin)".into())
     })?;
 
     let targets = resolve_targets(args.repo.as_deref())?;
@@ -162,7 +162,7 @@ fn run_bm25(args: FindArgs, engine: &Engine) -> Result<(), GnxError> {
     } else if targets.len() == 1 {
         let (repo_name, graph_path) = targets.into_iter().next().unwrap();
         let local_engine = Engine::load(std::path::PathBuf::from(&graph_path))
-            .map_err(|e| GnxError::Rkyv(format!("{repo_name}: load: {e}")))?;
+            .map_err(|e| CgnError::Rkyv(format!("{repo_name}: load: {e}")))?;
         run_single(
             pattern,
             args.mode,
@@ -231,11 +231,11 @@ fn count_incoming(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> u32 {
     (in_end - in_start) as u32
 }
 
-fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
     let pattern = args.pattern.as_deref().ok_or_else(|| {
-        GnxError::InvalidArgument("pattern is required in exact / fuzzy mode".into())
+        CgnError::InvalidArgument("pattern is required in exact / fuzzy mode".into())
     })?;
 
     let kind_filter: Option<Vec<String>> = args.kind.as_deref().map(|s| {
@@ -333,7 +333,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 status: "success".to_string(),
             };
             emit(
-                &serde_json::to_value(&result).map_err(|e| GnxError::Output(e.to_string()))?,
+                &serde_json::to_value(&result).map_err(|e| CgnError::Output(e.to_string()))?,
                 format,
             )
         }
@@ -351,7 +351,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
 /// `load_engines_lossy`) so mmap setup + rkyv access are amortised
 /// across queries. Per-repo load failures in multi-repo mode degrade
 /// to 0 hits + failure count rather than killing the batch.
-fn run_batch(args: FindArgs, engine: &Engine) -> Result<(), GnxError> {
+fn run_batch(args: FindArgs, engine: &Engine) -> Result<(), CgnError> {
     use std::io::BufRead;
 
     let format = OutputFormat::parse(args.format.as_deref());
@@ -374,7 +374,7 @@ fn run_batch(args: FindArgs, engine: &Engine) -> Result<(), GnxError> {
     let single_repo_engine: Option<(String, Engine)> = if targets.len() == 1 {
         let (repo_name, graph_path) = &targets[0];
         let eng = Engine::load(std::path::PathBuf::from(graph_path))
-            .map_err(|e| GnxError::InvalidArgument(format!("{repo_name}: load: {e}")))?;
+            .map_err(|e| CgnError::InvalidArgument(format!("{repo_name}: load: {e}")))?;
         Some((repo_name.clone(), eng))
     } else {
         None
@@ -575,7 +575,7 @@ fn run_single(
     format: OutputFormat,
     engine: &Engine,
     repo_label: Option<String>,
-) -> Result<(), GnxError> {
+) -> Result<(), CgnError> {
     let hits = compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
     let buckets = BucketedResults::partition(hits);
     emit_bucketed(&buckets, format, None)
@@ -589,8 +589,8 @@ fn compute_single(
     kind_filter: Option<&str>,
     engine: &Engine,
     repo_label: Option<String>,
-) -> Result<Vec<Hit>, GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+) -> Result<Vec<Hit>, CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
     let index_dir = engine.index_dir();
 
     let kind_set: Option<Vec<String>> =
@@ -793,7 +793,7 @@ fn run_multi(
     kind_filter: Option<String>,
     format: OutputFormat,
     targets: Vec<(String, String)>, // (repo_name, graph_path_str)
-) -> Result<(), GnxError> {
+) -> Result<(), CgnError> {
     let (hits, summary) = compute_multi(&pattern, &mode, kind_filter.as_deref(), targets)?;
     let buckets = BucketedResults::partition(hits);
     emit_bucketed(&buckets, format, Some(summary))
@@ -921,7 +921,7 @@ fn compute_multi(
     mode: &FindMode,
     kind_filter: Option<&str>,
     targets: Vec<(String, String)>, // (repo_name, graph_path_str)
-) -> Result<(Vec<Hit>, String), GnxError> {
+) -> Result<(Vec<Hit>, String), CgnError> {
     let loaded = load_engines_lossy(&targets);
     Ok(compute_multi_with_engines(
         pattern,
@@ -939,7 +939,7 @@ pub fn run_for_repo(
     member: &str,
     pattern: &str,
     kind: Option<&str>,
-) -> Result<Vec<Hit>, GnxError> {
+) -> Result<Vec<Hit>, CgnError> {
     compute_single(pattern, &FindMode::Bm25, kind, engine, Some(member.to_string()))
 }
 
@@ -950,9 +950,9 @@ pub fn run_for_repo(
 /// different, so callers wanting those modes should use `run` and parse
 /// the JSON payload. Batch mode is not exposed here — hooks always run
 /// one pattern at a time.
-pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, GnxError> {
+pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, CgnError> {
     let pattern = args.pattern.as_deref().ok_or_else(|| {
-        GnxError::InvalidArgument("compute_hits requires a pattern (--batch not supported)".into())
+        CgnError::InvalidArgument("compute_hits requires a pattern (--batch not supported)".into())
     })?;
     let targets = resolve_targets(args.repo.as_deref())?;
     if targets.is_empty() {
@@ -960,7 +960,7 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, GnxErro
     } else if targets.len() == 1 {
         let (repo_name, graph_path) = targets.into_iter().next().unwrap();
         let local_engine = Engine::load(std::path::PathBuf::from(&graph_path))
-            .map_err(|e| GnxError::Rkyv(format!("{repo_name}: load: {e}")))?;
+            .map_err(|e| CgnError::Rkyv(format!("{repo_name}: load: {e}")))?;
         compute_single(
             pattern,
             &args.mode,
@@ -978,7 +978,7 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, GnxErro
 
 /// Resolve `--repo` to `Vec<(display_name, graph_path_str)>`.
 /// Returns empty Vec when the selector is absent (caller uses pre-loaded engine).
-fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxError> {
+fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, CgnError> {
     use crate::commit_lookup::CommitIndex;
 
     let sel = match selector {
@@ -986,16 +986,16 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
         Some(s) => s,
     };
 
-    let home_gnx = resolve_home_gnx();
-    let registry = Registry::open(&home_gnx)
-        .map_err(|e| GnxError::InvalidArgument(format!("open registry: {e}")))?;
+    let home_cgn = resolve_home_cgn();
+    let registry = Registry::open(&home_cgn)
+        .map_err(|e| CgnError::InvalidArgument(format!("open registry: {e}")))?;
     let snapshot = registry.snapshot();
 
     // Expand selector into dir_names (v2 key).
     let dir_names: Vec<String> = if sel == "@all" {
         snapshot.repos.keys().cloned().collect()
     } else if let Some(group_name) = sel.strip_prefix('@') {
-        return Err(GnxError::InvalidArgument(format!(
+        return Err(CgnError::InvalidArgument(format!(
             "`@{group_name}` cannot be used at the top level — use `cgn group find` instead"
         )));
     } else {
@@ -1024,9 +1024,9 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<(String, String)>, GnxE
             Some(a) => a,
             None => continue,
         };
-        let commits_dir = home_gnx.join(dir_name).join("commits");
+        let commits_dir = home_cgn.join(dir_name).join("commits");
         let idx = CommitIndex::scan(&commits_dir)
-            .map_err(|e| GnxError::InvalidArgument(format!("{dir_name}: scan commits: {e}")))?;
+            .map_err(|e| CgnError::InvalidArgument(format!("{dir_name}: scan commits: {e}")))?;
         if idx.is_empty() {
             continue; // repo registered but not yet built
         }
@@ -1083,7 +1083,7 @@ fn emit_bucketed(
     buckets: &BucketedResults,
     format: OutputFormat,
     summary: Option<String>,
-) -> Result<(), GnxError> {
+) -> Result<(), CgnError> {
     let all_empty = buckets.source.is_empty()
         && buckets.examples.is_empty()
         && buckets.tests.is_empty()
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn compute_hits_signature_check() {
-        fn _check(_: fn(FindArgs, &Engine) -> Result<Vec<Hit>, GnxError>) {}
+        fn _check(_: fn(FindArgs, &Engine) -> Result<Vec<Hit>, CgnError>) {}
         _check(compute_hits);
     }
 }

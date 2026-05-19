@@ -2,7 +2,7 @@ use cgn_cli::graph_path;
 use std::path::Path;
 use std::process::Command;
 
-const LEGACY_DEFAULT: &str = ".gnx/graph.bin";
+const LEGACY_DEFAULT: &str = ".cgn/graph.bin";
 
 #[test]
 fn custom_path_passes_through() {
@@ -66,14 +66,14 @@ fn legacy_default_in_git_repo_resolves_to_commits_dir() {
 
     let resolved = graph_path::resolve(Path::new(LEGACY_DEFAULT), tmp.path());
     let s = resolved.to_string_lossy();
-    assert!(s.contains(".gnx"), "got: {s}");
+    assert!(s.contains(".cgn"), "got: {s}");
     assert!(s.contains("commits"), "got: {s}");
     assert!(s.ends_with("graph.bin"), "got: {s}");
 }
 
 #[test]
 fn legacy_default_in_git_repo_without_l2_falls_back_to_input() {
-    // git repo exists, but no <home>/.gnx/<repo>/commits/<sha>/ entry yet
+    // git repo exists, but no <home>/.cgn/<repo>/commits/<sha>/ entry yet
     // (cold start: first run before any build)
     let tmp = tempfile::tempdir().unwrap();
     Command::new("git")

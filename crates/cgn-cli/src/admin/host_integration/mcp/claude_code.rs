@@ -2,7 +2,7 @@
 
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde_json::json;
 use std::ffi::OsString;
 use std::io;
@@ -34,9 +34,9 @@ pub fn status() -> HostStatus {
     }
 }
 
-fn run_install() -> Result<(), GnxError> {
+fn run_install() -> Result<(), CgnError> {
     let exe = std::env::current_exe()
-        .map_err(|e| GnxError::Output(format!("current_exe: {e}")))?
+        .map_err(|e| CgnError::Output(format!("current_exe: {e}")))?
         .to_string_lossy()
         .into_owned();
     let args = install_args(&exe);
@@ -44,7 +44,7 @@ fn run_install() -> Result<(), GnxError> {
     let output = Command::new("claude")
         .args(args)
         .output()
-        .map_err(|e| GnxError::Output(format!("spawn claude: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("spawn claude: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -52,9 +52,9 @@ fn run_install() -> Result<(), GnxError> {
     }
 }
 
-fn run_uninstall() -> Result<(), GnxError> {
+fn run_uninstall() -> Result<(), CgnError> {
     let output = claude_mcp(["mcp", "remove", SERVER_NAME])
-        .map_err(|e| GnxError::Output(format!("spawn claude: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("spawn claude: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -96,11 +96,11 @@ fn status_from_get_result(success: bool) -> HostStatus {
     }
 }
 
-fn command_error(command: &str, output: &std::process::Output) -> GnxError {
+fn command_error(command: &str, output: &std::process::Output) -> CgnError {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let detail = if stderr.is_empty() { stdout } else { stderr };
-    GnxError::Output(format!("{command}: {detail}"))
+    CgnError::Output(format!("{command}: {detail}"))
 }
 
 #[cfg(test)]

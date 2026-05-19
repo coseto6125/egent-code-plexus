@@ -4,8 +4,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// v1: a.ts imports from ./b (resolves) and from ./c (unresolved — c.ts absent).
@@ -84,7 +84,7 @@ fn diff_bindings_two_commit_resolution_change() {
         .unwrap();
     assert!(out.status.success(), "commit v2: {}", String::from_utf8_lossy(&out.stderr));
 
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["diff", "--section", "bindings", "--baseline", &baseline_sha, "--format", "json"])
         .current_dir(repo)
         .env("HOME", repo)
@@ -121,7 +121,7 @@ fn diff_bindings_against_head_yields_empty() {
         let out = Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap().stdout;
         String::from_utf8_lossy(&out).trim().to_string()
     };
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["diff", "--section", "bindings", "--baseline", &head_sha,
                "--format", "json"])
         .output()

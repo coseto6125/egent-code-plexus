@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum GnxError {
+pub enum CgnError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -31,4 +31,4 @@ pub enum GnxError {
     Output(String),
 }
 
-pub type GnxResult<T> = Result<T, GnxError>;
+pub type CgnResult<T> = Result<T, CgnError>;

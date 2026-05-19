@@ -2,7 +2,7 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn bin() -> std::path::PathBuf {
-    env!("CARGO_BIN_EXE_gnx").into()
+    env!("CARGO_BIN_EXE_cgn").into()
 }
 
 #[test]

@@ -4,8 +4,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 const V1_ROUTES: &str = r#"
@@ -78,7 +78,7 @@ fn diff_routes_two_commit_added() {
         .unwrap();
     assert!(out.status.success(), "commit v2: {}", String::from_utf8_lossy(&out.stderr));
 
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["diff", "--section", "routes", "--baseline", &baseline_sha, "--format", "json"])
         .current_dir(repo)
         .env("HOME", repo)
@@ -112,7 +112,7 @@ fn diff_routes_head_vs_head_empty() {
         let out = Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap().stdout;
         String::from_utf8_lossy(&out).trim().to_string()
     };
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["diff", "--section", "routes", "--baseline", &head_sha, "--format", "json"])
         .output()
         .expect("run cgn diff routes");

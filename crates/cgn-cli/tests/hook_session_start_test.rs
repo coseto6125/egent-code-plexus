@@ -4,14 +4,14 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// Run hook with optional HOME override so the subprocess resolves
-/// `~/.gnx/registry.json` against a fake home.
+/// `~/.cgn/registry.json` against a fake home.
 fn run_session_start(envelope: &str, home: Option<&std::path::Path>) -> std::process::Output {
-    let mut cmd = Command::new(gnx_bin());
+    let mut cmd = Command::new(cgn_bin());
     cmd.args(["hook", "session-start", "--claude-code"]);
     if let Some(h) = home {
         cmd.env("HOME", h);
@@ -51,9 +51,9 @@ fn no_index_present_yields_empty_output() {
 fn template_placeholders_get_rendered_when_meta_present() {
     let tmp = TempDir::new().unwrap();
     let fake_home = tmp.path().join("home");
-    let home_gnx = fake_home.join(".gnx");
+    let home_cgn = fake_home.join(".cgn");
     let repo = tmp.path().join("repo");
-    let index_dir = home_gnx.join("alpha").join("main");
+    let index_dir = home_cgn.join("alpha").join("main");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::create_dir_all(&index_dir).unwrap();
     std::fs::write(
@@ -75,7 +75,7 @@ fn template_placeholders_get_rendered_when_meta_present() {
             "name": "alpha",
             "remote_url": "",
             "worktree_path": repo.to_string_lossy(),
-            "index_dir_root": home_gnx.join("alpha").to_string_lossy(),
+            "index_dir_root": home_cgn.join("alpha").to_string_lossy(),
             "branches": [{
                 "name": "main",
                 "index_dir": index_dir.to_string_lossy(),
@@ -88,7 +88,7 @@ fn template_placeholders_get_rendered_when_meta_present() {
         "groups": []
     });
     std::fs::write(
-        home_gnx.join("registry.json"),
+        home_cgn.join("registry.json"),
         serde_json::to_string(&registry).unwrap(),
     )
     .unwrap();

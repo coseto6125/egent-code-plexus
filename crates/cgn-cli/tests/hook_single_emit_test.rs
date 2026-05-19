@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 fn bin() -> std::path::PathBuf {
-    env!("CARGO_BIN_EXE_gnx").into()
+    env!("CARGO_BIN_EXE_cgn").into()
 }
 
 fn write_meta(session_dir: &std::path::Path, sid: &str) {
@@ -118,9 +118,9 @@ fn user_prompt_submit_coalesces_rebuild_marker_and_peer_drain() {
     let session_dir = tmp.path().join("sessions").join(sid);
     seed_inbox(&session_dir, sid, "ups-dual-peer");
 
-    // gnx_state_dir() requires an absolute cwd with `<cwd>/.gnx/` present.
+    // cgn_state_dir() requires an absolute cwd with `<cwd>/.cgn/` present.
     let cwd = tempdir().unwrap();
-    let state_dir = cwd.path().join(".gnx");
+    let state_dir = cwd.path().join(".cgn");
     std::fs::create_dir_all(&state_dir).unwrap();
     std::fs::write(state_dir.join(".rebuild-complete"), b"").unwrap();
 

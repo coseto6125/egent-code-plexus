@@ -19,8 +19,8 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::tempdir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// Construct a 2-node graph: a consumer Function and a Route. Edges
@@ -158,7 +158,7 @@ fn write_graph(dir: &Path, bytes: &[u8]) -> std::path::PathBuf {
 }
 
 fn run_shape_check(graph_path: &Path, format: &str) -> (String, String, bool) {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "--graph",
             graph_path.to_str().unwrap(),

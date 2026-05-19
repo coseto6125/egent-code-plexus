@@ -10,7 +10,7 @@ pub mod sync;
 pub mod types;
 
 use clap::Subcommand;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use cgn_core::registry::{GroupEntry, RegistryFile, RepoAlias};
 use rayon::prelude::*;
 use std::path::Path;
@@ -37,7 +37,7 @@ pub enum GroupCommands {
     Coverage(coverage::CoverageArgs),
 }
 
-pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
+pub fn run(cmd: GroupCommands) -> Result<(), CgnError> {
     match cmd {
         GroupCommands::Sync(args) => sync::run(args),
         GroupCommands::Status(args) => status::run(args),
@@ -73,7 +73,7 @@ pub fn lookup_member<'a>(registry: &'a RegistryFile, member: &str) -> Option<&'a
 pub fn resolve_member_engines(
     group: &GroupEntry,
     registry: &RegistryFile,
-    home_gnx: &Path,
+    home_cgn: &Path,
 ) -> Vec<(String, Engine)> {
     group
         .members
@@ -88,7 +88,7 @@ pub fn resolve_member_engines(
                 common_dir: alias.common_dir.clone(),
                 aliases: alias.aliases.clone(),
             };
-            let graph_path = impact::latest_graph_path_for(&resolved, home_gnx).or_else(|| {
+            let graph_path = impact::latest_graph_path_for(&resolved, home_cgn).or_else(|| {
                 tracing::warn!("group: no graph.bin found for '{member}'");
                 None
             })?;

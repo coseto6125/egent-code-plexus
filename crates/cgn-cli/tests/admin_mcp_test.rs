@@ -1,12 +1,12 @@
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn admin_mcp_tools_lists_tools() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["admin", "mcp", "tools"])
         .output()
         .expect("run cgn admin mcp tools");
@@ -21,7 +21,7 @@ fn admin_mcp_tools_lists_tools() {
 
 #[test]
 fn top_level_mcp_no_longer_visible() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["--help"])
         .output()
         .expect("run cgn --help");
@@ -34,7 +34,7 @@ fn top_level_mcp_no_longer_visible() {
 
 #[test]
 fn admin_mcp_appears_under_admin_help() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["admin", "--help"])
         .output()
         .expect("run cgn admin --help");
@@ -44,7 +44,7 @@ fn admin_mcp_appears_under_admin_help() {
 
 #[test]
 fn admin_mcp_tools_json_format() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["admin", "mcp", "tools", "--format", "json"])
         .output()
         .expect("run cgn admin mcp tools --format json");

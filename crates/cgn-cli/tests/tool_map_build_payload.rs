@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 mod common;
-use common::{gnx_bin, run_git};
+use common::{cgn_bin, run_git};
 
 fn init_repo_with_ts(repo: &Path) {
     let src = r#"
@@ -40,7 +40,7 @@ export async function fetchUser(id: string) {
         ],
     );
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -58,7 +58,7 @@ fn tool_map_build_payload_returns_status_totals_calls() {
     let repo = tempfile::tempdir().unwrap();
     init_repo_with_ts(repo.path());
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["tool-map", "--repo", ".", "--format", "json"])
         .current_dir(repo.path())
         .env("HOME", repo.path())

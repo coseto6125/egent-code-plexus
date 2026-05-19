@@ -1,7 +1,7 @@
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::path::{Path, PathBuf};
 
-pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>, GnxError> {
+pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>, CgnError> {
     if let Some(files) = &args.files {
         return Ok(files.iter().map(PathBuf::from).collect());
     }
@@ -16,17 +16,17 @@ pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>
 }
 
 /// Run `git diff <spec> --name-only` and parse the newline-separated output.
-fn diff_name_only(repo_dir: &Path, spec: &str) -> Result<Vec<PathBuf>, GnxError> {
+fn diff_name_only(repo_dir: &Path, spec: &str) -> Result<Vec<PathBuf>, CgnError> {
     let out = crate::git::safe_exec::git()
         .args(["diff", spec, "--name-only"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| GnxError::GitDiff {
+        .map_err(|e| CgnError::GitDiff {
             reason: format!("spawn failed: {e}"),
         })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(GnxError::GitDiff {
+        return Err(CgnError::GitDiff {
             reason: format!("git diff --name-only: {}", stderr.trim()),
         });
     }
@@ -39,17 +39,17 @@ fn diff_name_only(repo_dir: &Path, spec: &str) -> Result<Vec<PathBuf>, GnxError>
 }
 
 /// Run `git ls-files --others --exclude-standard` to list untracked files.
-fn untracked_files(repo_dir: &Path) -> Result<Vec<PathBuf>, GnxError> {
+fn untracked_files(repo_dir: &Path) -> Result<Vec<PathBuf>, CgnError> {
     let out = crate::git::safe_exec::git()
         .args(["ls-files", "--others", "--exclude-standard"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| GnxError::GitDiff {
+        .map_err(|e| CgnError::GitDiff {
             reason: format!("spawn failed: {e}"),
         })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(GnxError::GitDiff {
+        return Err(CgnError::GitDiff {
             reason: format!("git ls-files: {}", stderr.trim()),
         });
     }

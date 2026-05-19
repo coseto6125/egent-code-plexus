@@ -20,15 +20,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 // ── Fixture helpers ─────────────────────────────────────────────────────────
 
-/// Seed a graph under the v2 layout: `<home_gnx>/<dir_name>/commits/<sha>/graph.bin`.
+/// Seed a graph under the v2 layout: `<home_cgn>/<dir_name>/commits/<sha>/graph.bin`.
 /// Returns the path to the graph.bin.
-fn seed_repo(home_gnx: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]) -> PathBuf {
+fn seed_repo(home_cgn: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]) -> PathBuf {
     let mut pool = StringPool::new();
     let nodes: Vec<Node> = node_names
         .iter()
@@ -67,17 +67,17 @@ fn seed_repo(home_gnx: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]
         route_shapes: vec![],
     };
     let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
-    let commit_dir = home_gnx.join(dir_name).join("commits").join(sha_dir);
+    let commit_dir = home_cgn.join(dir_name).join("commits").join(sha_dir);
     std::fs::create_dir_all(&commit_dir).unwrap();
     let graph_path = commit_dir.join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
     graph_path
 }
 
-fn write_registry(home_gnx: &Path, file: &RegistryFile) {
-    std::fs::create_dir_all(home_gnx).unwrap();
+fn write_registry(home_cgn: &Path, file: &RegistryFile) {
+    std::fs::create_dir_all(home_cgn).unwrap();
     let json = serde_json::to_vec_pretty(file).unwrap();
-    std::fs::write(home_gnx.join("registry.json"), &json).unwrap();
+    std::fs::write(home_cgn.join("registry.json"), &json).unwrap();
 }
 
 struct Fixture {
@@ -89,16 +89,16 @@ struct Fixture {
 
 fn two_repo_fixture() -> Fixture {
     let home = TempDir::new().unwrap();
-    let home_gnx = home.path().join(".gnx");
+    let home_cgn = home.path().join(".cgn");
 
     let alpha_graph = seed_repo(
-        &home_gnx,
+        &home_cgn,
         "alpha__aabbccdd",
         "sha_alpha0001",
         &["fetch_user", "save_user"],
     );
     let _beta_graph = seed_repo(
-        &home_gnx,
+        &home_cgn,
         "beta__aabbccdd",
         "sha_beta00001",
         &["fetch_account", "delete_session"],
@@ -135,7 +135,7 @@ fn two_repo_fixture() -> Fixture {
             members: vec!["alpha__aabbccdd".into(), "beta__aabbccdd".into()],
         }],
     };
-    write_registry(&home_gnx, &registry);
+    write_registry(&home_cgn, &registry);
 
     let home_path = home.path().to_path_buf();
     Fixture {
@@ -148,7 +148,7 @@ fn two_repo_fixture() -> Fixture {
 // ── Helper: run `cgn find --mode bm25` pointing at a specific graph ──────────
 
 fn run_search(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .arg("find")
         .arg("--mode")
         .arg("bm25")
@@ -162,8 +162,8 @@ fn run_search(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output 
 
 fn run_search_multi(home: &Path, args: &[&str]) -> std::process::Output {
     let alpha_graph = home
-        .join(".gnx/alpha__aabbccdd/commits/sha_alpha0001/graph.bin");
-    Command::new(gnx_bin())
+        .join(".cgn/alpha__aabbccdd/commits/sha_alpha0001/graph.bin");
+    Command::new(cgn_bin())
         .arg("find")
         .arg("--mode")
         .arg("bm25")
@@ -208,7 +208,7 @@ fn search_positional_pattern_finds_match() {
 /// to keep BM25-shape assertions stable, which would conflict with
 /// explicit `--mode` values supplied by the test body).
 fn run_find_raw(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .arg("find")
         .args(args)
         .arg("--graph")
@@ -331,7 +331,7 @@ fn search_multi_repo_missing_graph_degrades_gracefully() {
     let f = two_repo_fixture();
     let beta_graph = f
         .home_path
-        .join(".gnx/beta__aabbccdd/commits/sha_beta00001/graph.bin");
+        .join(".cgn/beta__aabbccdd/commits/sha_beta00001/graph.bin");
     std::fs::remove_file(&beta_graph).unwrap();
 
     let out = run_search_multi(

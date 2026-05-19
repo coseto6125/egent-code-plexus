@@ -1,7 +1,7 @@
 //! Per-file persistent parse cache.
 //!
 //! Stores tree-sitter `LocalGraph` blobs at
-//! `<home_gnx>/<repo>/parse_cache/<fp>/<content_hash>.rkyv`, where `<fp>` is
+//! `<home_cgn>/<repo>/parse_cache/<fp>/<content_hash>.rkyv`, where `<fp>` is
 //! an 8-hex-char digest of [`BUILDER_FINGERPRINT`] — scoping each entry
 //! to one binary build so an upgrade can't replay stale parser output
 //! against a fresh reader. The pipeline's per-file `cache_lookup` hook
@@ -36,7 +36,7 @@ pub struct ParseCache {
 impl ParseCache {
     /// Open (and create on demand) the cache at
     /// `<repo_root>/parse_cache/<fp>/`. `repo_root` should be the per-repo
-    /// dir under `~/.gnx/` (e.g. `~/.gnx/myrepo__abc123`).
+    /// dir under `~/.cgn/` (e.g. `~/.cgn/myrepo__abc123`).
     pub fn open(repo_root: &Path) -> std::io::Result<Self> {
         let root = repo_root.join("parse_cache").join(fingerprint_dir_name());
         std::fs::create_dir_all(&root)?;

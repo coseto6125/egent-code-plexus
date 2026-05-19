@@ -13,7 +13,7 @@
 //! All git invocations go through `safe_exec::git()` per security spec §8 H4.
 
 use crate::git::safe_exec;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::path::{Path, PathBuf};
 
 pub struct GitGuard {
@@ -23,7 +23,7 @@ pub struct GitGuard {
 }
 
 impl GitGuard {
-    pub fn enter(repo_dir: &Path, target_sha: &str) -> Result<Self, GnxError> {
+    pub fn enter(repo_dir: &Path, target_sha: &str) -> Result<Self, CgnError> {
         let original_ref = current_head_ref(repo_dir)?;
         let stash_created = stash_if_dirty(repo_dir)?;
 
@@ -31,7 +31,7 @@ impl GitGuard {
             .args(["checkout", "--detach", target_sha])
             .current_dir(repo_dir)
             .output()
-            .map_err(|e| GnxError::Output(format!("git checkout failed to spawn: {e}")))?;
+            .map_err(|e| CgnError::Output(format!("git checkout failed to spawn: {e}")))?;
         if !out.status.success() {
             // Best-effort restore stash before bailing.
             if stash_created {
@@ -40,7 +40,7 @@ impl GitGuard {
                     .current_dir(repo_dir)
                     .output();
             }
-            return Err(GnxError::Output(format!(
+            return Err(CgnError::Output(format!(
                 "git checkout {target_sha} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
@@ -81,12 +81,12 @@ impl Drop for GitGuard {
     }
 }
 
-fn current_head_ref(repo_dir: &Path) -> Result<String, GnxError> {
+fn current_head_ref(repo_dir: &Path) -> Result<String, CgnError> {
     let out = safe_exec::git()
         .args(["symbolic-ref", "--short", "HEAD"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| GnxError::Output(format!("git symbolic-ref failed: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("git symbolic-ref failed: {e}")))?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }
@@ -94,16 +94,16 @@ fn current_head_ref(repo_dir: &Path) -> Result<String, GnxError> {
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| GnxError::Output(format!("git rev-parse HEAD failed: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("git rev-parse HEAD failed: {e}")))?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn stash_if_dirty(repo_dir: &Path) -> Result<bool, GnxError> {
+fn stash_if_dirty(repo_dir: &Path) -> Result<bool, CgnError> {
     let out = safe_exec::git()
         .args(["status", "--porcelain"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| GnxError::Output(format!("git status failed: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("git status failed: {e}")))?;
     if out.stdout.is_empty() {
         return Ok(false);
     }
@@ -111,9 +111,9 @@ fn stash_if_dirty(repo_dir: &Path) -> Result<bool, GnxError> {
         .args(["stash", "push", "-u", "-m", "cgn-diff-auto-stash"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| GnxError::Output(format!("git stash failed: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("git stash failed: {e}")))?;
     if !stash.status.success() {
-        return Err(GnxError::Output(format!(
+        return Err(CgnError::Output(format!(
             "git stash push failed: {}",
             String::from_utf8_lossy(&stash.stderr).trim()
         )));

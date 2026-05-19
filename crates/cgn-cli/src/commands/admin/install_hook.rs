@@ -31,7 +31,7 @@ pub struct InstallHookArgs {
     pub settings_path: Option<PathBuf>,
 }
 
-pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::GnxError> {
+pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::CgnError> {
     if args.claude_code {
         return claude_code::run_install_claude_code(
             args.events.as_deref(),
@@ -41,9 +41,9 @@ pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::GnxError> {
     let out = safe_exec::git()
         .args(["rev-parse", "--git-common-dir"])
         .output()
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("git: {e}")))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("git: {e}")))?;
     if !out.status.success() {
-        return Err(cgn_core::GnxError::InvalidArgument(
+        return Err(cgn_core::CgnError::InvalidArgument(
             "not inside a git repository".into(),
         ));
     }
@@ -52,8 +52,8 @@ pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::GnxError> {
     std::fs::create_dir_all(&hook_dir)?;
 
     let hook_path = hook_dir.join("reference-transaction");
-    let gnx_bin = std::env::current_exe()?;
-    let gnx_bin_str = gnx_bin.to_string_lossy().into_owned();
+    let cgn_bin = std::env::current_exe()?;
+    let cgn_bin_str = cgn_bin.to_string_lossy().into_owned();
 
     let existing_chain_target = if hook_path.exists() {
         let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
@@ -77,7 +77,7 @@ pub fn run(args: InstallHookArgs) -> Result<(), cgn_core::GnxError> {
     if let Some(prev) = &existing_chain_target {
         content.push_str(&format!("{} \"$@\" || exit $?\n", prev.display()));
     }
-    content.push_str(&format!("exec \"{gnx_bin_str}\" hook-handle \"$@\"\n"));
+    content.push_str(&format!("exec \"{cgn_bin_str}\" hook-handle \"$@\"\n"));
 
     let mut f = std::fs::OpenOptions::new()
         .create(true)

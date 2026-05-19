@@ -7,14 +7,14 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run_batch_with_stdin(stdin_payload: &str, extra_args: &[&str]) -> std::process::Output {
     let mut args = vec!["find", "--batch", "--mode", "bm25"];
     args.extend_from_slice(extra_args);
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

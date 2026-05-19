@@ -1,6 +1,6 @@
 use clap::Subcommand;
-use cgn_core::registry::{resolve_home_gnx, FileLock, GroupEntry, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, FileLock, GroupEntry, RegistryFile};
+use cgn_core::CgnError;
 
 #[derive(Subcommand, Debug)]
 pub enum GroupCommands {
@@ -10,36 +10,36 @@ pub enum GroupCommands {
     Remove { repo: String, group: String },
 }
 
-pub fn run(cmd: GroupCommands) -> Result<(), GnxError> {
+pub fn run(cmd: GroupCommands) -> Result<(), CgnError> {
     match cmd {
         GroupCommands::Add { repo, group } => add(&repo, &group),
         GroupCommands::Remove { repo, group } => remove(&repo, &group),
     }
 }
 
-fn mutate_registry<F>(op: F) -> Result<(), GnxError>
+fn mutate_registry<F>(op: F) -> Result<(), CgnError>
 where
-    F: FnOnce(&mut RegistryFile) -> Result<bool, GnxError>,
+    F: FnOnce(&mut RegistryFile) -> Result<bool, CgnError>,
 {
-    let cgn = resolve_home_gnx();
+    let cgn = resolve_home_cgn();
     let lock_path = cgn.join("registry.json.lock");
     let _lock = FileLock::acquire_exclusive(&lock_path)
-        .map_err(|e| GnxError::InvalidArgument(format!("flock: {e}")))?;
+        .map_err(|e| CgnError::InvalidArgument(format!("flock: {e}")))?;
 
     let registry_path = cgn.join("registry.json");
     let mut reg = RegistryFile::read_or_empty(&registry_path)
-        .map_err(|e| GnxError::InvalidArgument(format!("registry read: {e}")))?;
+        .map_err(|e| CgnError::InvalidArgument(format!("registry read: {e}")))?;
 
     let mutated = op(&mut reg)?;
 
     if mutated {
         RegistryFile::write_atomic(&registry_path, &reg)
-            .map_err(|e| GnxError::InvalidArgument(format!("registry write: {e}")))?;
+            .map_err(|e| CgnError::InvalidArgument(format!("registry write: {e}")))?;
     }
     Ok(())
 }
 
-fn add(repo: &str, group: &str) -> Result<(), GnxError> {
+fn add(repo: &str, group: &str) -> Result<(), CgnError> {
     mutate_registry(|reg| {
         let mut changed = false;
 
@@ -51,7 +51,7 @@ fn add(repo: &str, group: &str) -> Result<(), GnxError> {
             .find(|(_k, v)| v.dir_name == repo || v.aliases.iter().any(|a| a == repo))
             .map(|(_k, v)| v)
             .ok_or_else(|| {
-                GnxError::Output(format!(
+                CgnError::Output(format!(
                     "repo not found in registry: {repo}\n\
                      → register the repo first with `cgn admin index`"
                 ))
@@ -82,7 +82,7 @@ fn add(repo: &str, group: &str) -> Result<(), GnxError> {
     })
 }
 
-fn remove(repo: &str, group: &str) -> Result<(), GnxError> {
+fn remove(repo: &str, group: &str) -> Result<(), CgnError> {
     mutate_registry(|reg| {
         let mut changed = false;
 

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-fn gnx_bin() -> std::path::PathBuf {
+fn cgn_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     if p.ends_with("deps") {
@@ -56,7 +56,7 @@ fn admin_index_without_force_builds_when_l2_absent() {
     let wt = tempfile::tempdir().unwrap();
     git_init(wt.path());
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"])
         .arg(wt.path())
@@ -80,13 +80,13 @@ fn admin_index_without_force_skips_when_l2_exists() {
     let wt = tempfile::tempdir().unwrap();
     git_init(wt.path());
 
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"])
         .arg(wt.path())
         .status()
         .unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"])
         .arg(wt.path())
@@ -107,7 +107,7 @@ fn admin_index_with_force_rebuilds_existing_l2() {
     let wt = tempfile::tempdir().unwrap();
     git_init(wt.path());
 
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"])
         .arg(wt.path())
@@ -115,7 +115,7 @@ fn admin_index_with_force_rebuilds_existing_l2() {
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"])
         .arg(wt.path())
@@ -136,7 +136,7 @@ fn admin_index_with_force_rebuilds_existing_l2() {
 
 #[test]
 fn admin_index_rejects_no_cache_flag() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "/tmp/x", "--no-cache"])
         .output()
         .unwrap();
@@ -150,7 +150,7 @@ fn admin_index_rejects_no_cache_flag() {
 
 #[test]
 fn admin_index_rejects_embeddings_flag() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "/tmp/x", "--embeddings"])
         .output()
         .unwrap();
@@ -159,7 +159,7 @@ fn admin_index_rejects_embeddings_flag() {
 
 #[test]
 fn admin_index_rejects_drop_embeddings_flag() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "/tmp/x", "--drop-embeddings"])
         .output()
         .unwrap();

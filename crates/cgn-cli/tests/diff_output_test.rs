@@ -2,8 +2,8 @@
 
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn head_sha() -> String {
@@ -18,7 +18,7 @@ fn head_sha() -> String {
 #[test]
 fn diff_text_output_has_section_header() {
     let sha = head_sha();
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args([
             "diff",
             "--section",
@@ -45,7 +45,7 @@ fn diff_text_output_has_section_header() {
 #[test]
 fn diff_toon_output_parses() {
     let sha = head_sha();
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args([
             "diff",
             "--section",
@@ -73,7 +73,7 @@ fn diff_toon_output_parses() {
 #[test]
 fn diff_json_output_parses_as_valid_json() {
     let sha = head_sha();
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args([
             "diff",
             "--section",

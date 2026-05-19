@@ -1,5 +1,5 @@
 //! Regression: `admin index` / `build_l2` must register the repo in
-//! `~/.gnx/registry.json` so cross-repo commands (`contracts`, `coverage`,
+//! `~/.cgn/registry.json` so cross-repo commands (`contracts`, `coverage`,
 //! `--repo @all`) can see freshly indexed repos.
 //!
 //! Pre-fix: `build_inside_locked` wrote per-commit `meta.json` and per-repo
@@ -64,7 +64,7 @@ fn build_l2_registers_repo_in_global_registry() {
     let dir_name = repo_dir_name_for_cwd(&worktree).unwrap();
     let _ = orchestrator::build_l2(&worktree, None).unwrap();
 
-    let registry_path = home.join(".gnx").join("registry.json");
+    let registry_path = home.join(".cgn").join("registry.json");
     assert!(
         registry_path.exists(),
         "registry.json must exist after build_l2"
@@ -100,7 +100,7 @@ fn rebuild_preserves_user_group_membership() {
     let _ = orchestrator::build_l2(&worktree, None).unwrap();
 
     // 2. Simulate `cgn admin group add <repo> squad`
-    let registry_path = home.join(".gnx").join("registry.json");
+    let registry_path = home.join(".cgn").join("registry.json");
     let mut reg = RegistryFile::read_or_empty(&registry_path).unwrap();
     reg.repos
         .get_mut(&dir_name)

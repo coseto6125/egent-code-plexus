@@ -6,7 +6,7 @@
 use std::process::Command;
 
 fn cgn() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_gnx"))
+    Command::new(env!("CARGO_BIN_EXE_cgn"))
 }
 
 // ── Gate: single / zero repos ────────────────────────────────────────────────

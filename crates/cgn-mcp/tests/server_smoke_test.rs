@@ -5,7 +5,7 @@
 //! without linking the full CLI binary.
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use cgn_mcp::server::GnxMcpServer;
+use cgn_mcp::server::CgnMcpServer;
 
 #[derive(Parser)]
 #[command(name = "cgn")]
@@ -38,14 +38,14 @@ struct SearchArgs {
 
 #[tokio::test(flavor = "current_thread")]
 async fn list_tools_filters_hidden_subcommands() {
-    let server = GnxMcpServer::new(&Cli::command()).expect("init");
+    let server = CgnMcpServer::new(&Cli::command()).expect("init");
     let names: Vec<&str> = server
         .list_tools()
         .iter()
         .map(|t| t.name.as_str())
         .collect();
-    assert!(names.contains(&"gnx_inspect"));
-    assert!(names.contains(&"gnx_search"));
+    assert!(names.contains(&"cgn_inspect"));
+    assert!(names.contains(&"cgn_search"));
     assert!(
         !names.iter().any(|n| n.contains("hook")),
         "hidden subcommand leaked into tool list: {names:?}"

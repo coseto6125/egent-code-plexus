@@ -71,7 +71,7 @@ use std::collections::HashSet;
 
 /// A repo resolved from a selector atom — derived from a v2 `RepoAlias`,
 /// carrying the alias's stable `dir_name` (which is the `<repo>/` segment
-/// under `~/.gnx/`) and the canonical git common-dir.
+/// under `~/.cgn/`) and the canonical git common-dir.
 #[derive(Debug, Clone)]
 pub struct ResolvedRepo {
     pub dir_name: String,

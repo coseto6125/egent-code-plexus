@@ -19,7 +19,7 @@ pub struct GroupMeta {
     pub repo_snapshots: BTreeMap<String, RepoSnapshot>,
     pub missing_repos: Vec<String>,
     /// Which config source was used for this sync run.
-    /// `"default"` = built-in defaults; `"file"` = loaded from `~/.gnx/config.toml`.
+    /// `"default"` = built-in defaults; `"file"` = loaded from `~/.cgn/config.toml`.
     pub config_source: String,
 }
 
@@ -29,8 +29,8 @@ pub struct RepoSnapshot {
     pub last_commit: String,
 }
 
-pub fn group_dir(home_gnx: &Path, group_name: &str) -> PathBuf {
-    home_gnx.join("groups").join(group_name)
+pub fn group_dir(home_cgn: &Path, group_name: &str) -> PathBuf {
+    home_cgn.join("groups").join(group_name)
 }
 
 pub fn write_contracts(group_dir: &Path, reg: &ContractRegistry) -> io::Result<()> {

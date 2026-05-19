@@ -59,8 +59,8 @@ struct Counts {
     fn_dangling: u32,
     tier_demoted: u32,
     oracle_only: u32,
-    gnx_only_same_file: u32,
-    gnx_only_other: u32,
+    cgn_only_same_file: u32,
+    cgn_only_other: u32,
 }
 
 /// Result of parsing a JSONL dump file. Bad lines are surfaced as a count
@@ -71,11 +71,11 @@ struct ParsedJsonl {
     bad_lines: u32,
 }
 
-pub fn run(args: VerifyResolverArgs) -> Result<(), cgn_core::GnxError> {
+pub fn run(args: VerifyResolverArgs) -> Result<(), cgn_core::CgnError> {
     let oracle = read_jsonl(&args.oracle)
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read oracle: {e}")))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("read oracle: {e}")))?;
     let cgn = read_jsonl(&args.cgn)
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read cgn dump: {e}")))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("read cgn dump: {e}")))?;
 
     let normalize = pick_normalize(&args.lang);
     let (counts, worst, per_tier) = diff(&oracle.records, &cgn.records, normalize);
@@ -95,14 +95,14 @@ pub fn run(args: VerifyResolverArgs) -> Result<(), cgn_core::GnxError> {
             if let Some(parent) = p.parent() {
                 if !parent.as_os_str().is_empty() {
                     std::fs::create_dir_all(parent).map_err(|e| {
-                        cgn_core::GnxError::InvalidArgument(format!(
+                        cgn_core::CgnError::InvalidArgument(format!(
                             "mkdir report parent: {e}"
                         ))
                     })?;
                 }
             }
             std::fs::write(p, &report).map_err(|e| {
-                cgn_core::GnxError::InvalidArgument(format!("write report: {e}"))
+                cgn_core::CgnError::InvalidArgument(format!("write report: {e}"))
             })?;
             eprintln!("verify-resolver: report written to {}", p.display());
         }
@@ -200,7 +200,7 @@ fn diff(
     // AmbiguousGlobal ranks above Unresolved because it carries diagnostic
     // signal (candidates were found, just suppressed) — preferring it on
     // dedup surfaces "defence fired" over the silent "nothing found".
-    let mut gnx_by_key: FxHashMap<(String, String), &Record> = FxHashMap::default();
+    let mut cgn_by_key: FxHashMap<(String, String), &Record> = FxHashMap::default();
     let tier_rank = |t: &str| -> u8 {
         match t {
             "SameFile" => 0,
@@ -212,10 +212,10 @@ fn diff(
     };
     for r in cgn {
         let key = (r.src_file.clone(), r.name.clone());
-        match gnx_by_key.get(&key) {
+        match cgn_by_key.get(&key) {
             Some(existing) if tier_rank(&existing.tier) <= tier_rank(&r.tier) => {}
             _ => {
-                gnx_by_key.insert(key, r);
+                cgn_by_key.insert(key, r);
             }
         }
     }
@@ -234,7 +234,7 @@ fn diff(
         let bucket = per_tier.entry("oracle".into()).or_default();
         let _ = bucket; // touch to keep map populated even if no per-tier hits below
 
-        match gnx_by_key.get(&key) {
+        match cgn_by_key.get(&key) {
             None => {
                 counts.oracle_only += 1;
                 if o.target_file.is_some() {
@@ -307,14 +307,14 @@ fn diff(
         }
     }
 
-    // gnx_only: cgn decisions for keys oracle never produced (often Tier 1 same-file)
+    // cgn_only: cgn decisions for keys oracle never produced (often Tier 1 same-file)
     for g in cgn {
         let key = (g.src_file.clone(), g.name.clone());
         if !oracle_keys.contains(&key) {
             if g.tier == "SameFile" {
-                counts.gnx_only_same_file += 1;
+                counts.cgn_only_same_file += 1;
             } else {
-                counts.gnx_only_other += 1;
+                counts.cgn_only_other += 1;
             }
         }
     }
@@ -343,16 +343,16 @@ fn render_report(
     worst: &[WorstOffender],
     per_tier: &FxHashMap<String, Counts>,
     oracle_total: usize,
-    gnx_total: usize,
+    cgn_total: usize,
     oracle_bad: u32,
-    gnx_bad: u32,
+    cgn_bad: u32,
 ) -> String {
     let mut s = String::new();
     s.push_str(&format!("# verify-resolver report ({lang})\n\n"));
     s.push_str(&format!(
-        "Oracle records: {oracle_total} (bad lines: {oracle_bad})\nGnx records: {gnx_total} (bad lines: {gnx_bad})\n\n"
+        "Oracle records: {oracle_total} (bad lines: {oracle_bad})\nCgn records: {cgn_total} (bad lines: {cgn_bad})\n\n"
     ));
-    if oracle_bad > 0 || gnx_bad > 0 {
+    if oracle_bad > 0 || cgn_bad > 0 {
         s.push_str(
             "> ⚠ Some input lines failed JSON parse — totals above are post-skip. \
                     Check the warn-level logs for line numbers.\n\n",
@@ -382,12 +382,12 @@ fn render_report(
         counts.oracle_only
     ));
     s.push_str(&format!(
-        "| gnx_only same-file (excluded from diff) | {} |\n",
-        counts.gnx_only_same_file
+        "| cgn_only same-file (excluded from diff) | {} |\n",
+        counts.cgn_only_same_file
     ));
     s.push_str(&format!(
-        "| gnx_only other (no oracle counterpart) | {} |\n",
-        counts.gnx_only_other
+        "| cgn_only other (no oracle counterpart) | {} |\n",
+        counts.cgn_only_other
     ));
     s.push('\n');
 
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_classifies_fn_dangling_when_gnx_unresolved() {
+    fn diff_classifies_fn_dangling_when_cgn_unresolved() {
         let oracle = vec![mk(
             "s.ts",
             "X",
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_prefers_best_gnx_attempt_per_key() {
+    fn diff_prefers_best_cgn_attempt_per_key() {
         let oracle = vec![mk(
             "s.ts",
             "X",
@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_counts_oracle_only_when_gnx_never_saw_the_key() {
+    fn diff_counts_oracle_only_when_cgn_never_saw_the_key() {
         // Oracle has a binding cgn never resolved (e.g. import in a file
         // with no callsite). Should land in `oracle_only` and not affect
         // any other counter.
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_treats_oracle_unresolved_plus_gnx_connected_as_fp_ghost() {
+    fn diff_treats_oracle_unresolved_plus_cgn_connected_as_fp_ghost() {
         // Oracle says the import didn't resolve; cgn still produced an
         // edge (likely Tier-3 same-name match). Conservative: count as
         // ghost since cgn is connecting things tsc couldn't.
@@ -629,18 +629,18 @@ mod tests {
     }
 
     #[test]
-    fn diff_buckets_gnx_only_records_by_tier() {
+    fn diff_buckets_cgn_only_records_by_tier() {
         // cgn resolved Tier 1 SameFile entries oracle never sees — those
-        // should land in `gnx_only_same_file` (excluded from diff). Other
-        // tier hits oracle never sees go to `gnx_only_other`.
+        // should land in `cgn_only_same_file` (excluded from diff). Other
+        // tier hits oracle never sees go to `cgn_only_other`.
         let oracle: Vec<Record> = vec![];
         let cgn = vec![
             mk("s.ts", "X", None, "SameFile", Some("s.ts"), 0),
             mk("s.ts", "Y", Some("@/z"), "Global", Some("z.ts"), 0),
         ];
         let (c, _, _) = diff(&oracle, &cgn, normalize_ts);
-        assert_eq!(c.gnx_only_same_file, 1);
-        assert_eq!(c.gnx_only_other, 1);
+        assert_eq!(c.cgn_only_same_file, 1);
+        assert_eq!(c.cgn_only_other, 1);
     }
 
     #[test]

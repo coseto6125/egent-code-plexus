@@ -3,8 +3,8 @@
 
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn head_sha() -> String {
@@ -18,7 +18,7 @@ fn head_sha() -> String {
 
 fn run_diff_json(sections: &str) -> serde_json::Value {
     let sha = head_sha();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "diff",
             "--section",

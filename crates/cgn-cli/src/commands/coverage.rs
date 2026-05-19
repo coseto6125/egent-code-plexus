@@ -16,8 +16,8 @@ use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use cgn_core::graph::ArchivedZeroCopyGraph;
-use cgn_core::registry::{resolve_home_gnx, Registry, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, Registry, RegistryFile};
+use cgn_core::CgnError;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -41,16 +41,16 @@ pub struct CoverageArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: CoverageArgs, _graph_arg: &Path) -> Result<(), GnxError> {
+pub fn run(args: CoverageArgs, _graph_arg: &Path) -> Result<(), CgnError> {
     let format = OutputFormat::parse(args.format.as_deref());
     let payload = build_payload(&args, _graph_arg)?;
     emit(&payload, format)
 }
 
-pub fn build_payload(args: &CoverageArgs, _graph_arg: &Path) -> Result<Value, GnxError> {
-    let home_gnx = resolve_home_gnx();
-    let registry = Registry::open(&home_gnx)
-        .map_err(|e| GnxError::InvalidArgument(format!("registry open: {e}")))?;
+pub fn build_payload(args: &CoverageArgs, _graph_arg: &Path) -> Result<Value, CgnError> {
+    let home_cgn = resolve_home_cgn();
+    let registry = Registry::open(&home_cgn)
+        .map_err(|e| CgnError::InvalidArgument(format!("registry open: {e}")))?;
     let reg = registry.snapshot();
 
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -62,11 +62,11 @@ pub fn build_payload(args: &CoverageArgs, _graph_arg: &Path) -> Result<Value, Gn
     // the relevant entries). Without `--repo`, fall back to registry view.
     if let Some(repo_sel) = args.repo.as_deref() {
         let selector = crate::repo_selector::parse(repo_sel)
-            .map_err(|e| GnxError::Output(format!("selector: {e}")))?;
+            .map_err(|e| CgnError::Output(format!("selector: {e}")))?;
         let cwd_str = cwd.to_string_lossy();
         let resolved =
             crate::repo_selector::resolve_top_level(&selector, reg, &cwd_str, "coverage")
-                .map_err(|e| GnxError::Output(format!("selector: {e}")))?;
+                .map_err(|e| CgnError::Output(format!("selector: {e}")))?;
         let per_repo: Vec<Value> = resolved
             .iter()
             .map(|r| build_repo_health(r, args.detailed))
@@ -142,13 +142,13 @@ pub fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool)
     })
 }
 
-/// Find the most-recently-modified graph.bin under `<home_gnx>/<dir_name>/commits/`.
+/// Find the most-recently-modified graph.bin under `<home_cgn>/<dir_name>/commits/`.
 /// v2 is content-addressed per commit; we pick the newest one for coverage
 /// reporting (the HEAD commit's build, if present). Delegates to
 /// `commit_lookup::find_latest_by_mtime` (handles `.building` / `.stale-*`
 /// filtering); we append `graph.bin` since that helper returns the commit dir.
 fn latest_graph_path(r: &crate::repo_selector::ResolvedRepo) -> Option<PathBuf> {
-    let commits_dir = resolve_home_gnx().join(&r.dir_name).join("commits");
+    let commits_dir = resolve_home_cgn().join(&r.dir_name).join("commits");
     find_latest_by_mtime(&commits_dir).map(|dir| dir.join("graph.bin"))
 }
 

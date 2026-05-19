@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 fn bin() -> std::path::PathBuf {
-    env!("CARGO_BIN_EXE_gnx").into()
+    env!("CARGO_BIN_EXE_cgn").into()
 }
 
 fn write_meta(session_dir: &std::path::Path, sid: &str) {

@@ -2,8 +2,8 @@
 //! for one group member, fanned out to cross-repo links from contracts.rkyv.
 
 use clap::Args;
-use cgn_core::registry::resolve_home_gnx;
-use cgn_core::GnxError;
+use cgn_core::registry::resolve_home_cgn;
+use cgn_core::CgnError;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -47,9 +47,9 @@ pub struct ImpactArgs {
     pub json: bool,
 }
 
-pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
-    let home_gnx = resolve_home_gnx();
-    let registry_path = home_gnx.join("registry.json");
+pub fn run(args: ImpactArgs) -> Result<(), CgnError> {
+    let home_cgn = resolve_home_cgn();
+    let registry_path = home_cgn.join("registry.json");
     let reg = cgn_core::registry::RegistryFile::read_or_empty(&registry_path)?;
 
     // 1. Validate group exists.
@@ -58,7 +58,7 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
         .iter()
         .find(|g| g.name == args.name)
         .ok_or_else(|| {
-            GnxError::InvalidArgument(format!(
+            CgnError::InvalidArgument(format!(
                 "group '{}' not found in registry\n\
                  → create it with `cgn admin group add <repo> {}`",
                 args.name, args.name
@@ -67,7 +67,7 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
 
     // 2. Resolve member → RepoAlias → ResolvedRepo.
     let alias = lookup_member(&reg, &args.repo).ok_or_else(|| {
-        GnxError::InvalidArgument(format!(
+        CgnError::InvalidArgument(format!(
             "member '{}' not found in registry — check spelling or run `cgn admin index --repo <path>`",
             args.repo
         ))
@@ -83,14 +83,14 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
     let cfg = cgn_core::config::Config::default().group;
     let timeout_ms = args.timeout_ms.or(Some(cfg.local_impact_timeout_ms));
 
-    let graph_path = latest_graph_path_for(&resolved, &home_gnx).ok_or_else(|| {
-        GnxError::InvalidArgument(format!(
+    let graph_path = latest_graph_path_for(&resolved, &home_cgn).ok_or_else(|| {
+        CgnError::InvalidArgument(format!(
             "no indexed graph found for repo '{}' — run `cgn admin index --repo <path>` first",
             args.repo
         ))
     })?;
     let engine = Engine::load(&graph_path)
-        .map_err(|e| GnxError::Io(std::io::Error::other(format!("engine load: {e}"))))?;
+        .map_err(|e| CgnError::Io(std::io::Error::other(format!("engine load: {e}"))))?;
 
     // 4. Local impact.
     let local = local_impact::run_for_symbol(
@@ -104,7 +104,7 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
     )?;
 
     // 5. Read contracts.rkyv via zero-copy mmap.
-    let group_dir = storage::group_dir(&home_gnx, &args.name);
+    let group_dir = storage::group_dir(&home_cgn, &args.name);
     let contracts_path = group_dir.join(storage::CONTRACTS_FILE);
 
     // 6. Build local_uids set.
@@ -126,10 +126,10 @@ pub fn run(args: ImpactArgs) -> Result<(), GnxError> {
     let min_conf = args.min_confidence.unwrap_or(0.0);
     let cross_hits: Vec<Value> = if depth_cap >= 1 && contracts_path.exists() {
         let mmap = storage::read_contracts_archived(&group_dir)
-            .map_err(|e| GnxError::Io(std::io::Error::other(format!("read contracts: {e}"))))?;
+            .map_err(|e| CgnError::Io(std::io::Error::other(format!("read contracts: {e}"))))?;
         let arch: &ArchivedContractRegistry = mmap
             .archived()
-            .map_err(|e| GnxError::Io(std::io::Error::other(format!("rkyv access: {e}"))))?;
+            .map_err(|e| CgnError::Io(std::io::Error::other(format!("rkyv access: {e}"))))?;
         arch.cross_links
             .iter()
             .filter(|link| link.confidence >= min_conf)
@@ -227,8 +227,8 @@ fn emit_json(
 /// commit dir, not the archive path itself.
 pub fn latest_graph_path_for(
     r: &ResolvedRepo,
-    home_gnx: &std::path::Path,
+    home_cgn: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let commits_dir = home_gnx.join(&r.dir_name).join("commits");
+    let commits_dir = home_cgn.join(&r.dir_name).join("commits");
     find_latest_by_mtime(&commits_dir).map(|dir| dir.join("graph.bin"))
 }

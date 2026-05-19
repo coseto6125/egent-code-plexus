@@ -1,7 +1,7 @@
 //! Shared menu-navigation helpers wrapping `dialoguer`.
 
 use dialoguer::{theme::ColorfulTheme, Select};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 /// One menu entry: a short label and an optional one-line description.
 ///
@@ -19,7 +19,7 @@ pub fn select(
     theme: &ColorfulTheme,
     prompt: &str,
     items: &[Item<'_>],
-) -> Result<Option<usize>, GnxError> {
+) -> Result<Option<usize>, CgnError> {
     let rendered = render(items);
     let view: Vec<&str> = rendered.iter().map(String::as_str).collect();
     Select::with_theme(theme)
@@ -27,7 +27,7 @@ pub fn select(
         .items(&view)
         .default(0)
         .interact_opt()
-        .map_err(|e| GnxError::Output(format!("dialoguer: {e}")))
+        .map_err(|e| CgnError::Output(format!("dialoguer: {e}")))
 }
 
 pub(crate) fn render(items: &[Item<'_>]) -> Vec<String> {

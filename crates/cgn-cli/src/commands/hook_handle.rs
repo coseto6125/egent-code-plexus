@@ -13,7 +13,7 @@ pub struct HookHandleArgs {
 
 const ALL_ZERO: &str = "0000000000000000000000000000000000000000";
 
-pub fn run(args: HookHandleArgs) -> Result<(), cgn_core::GnxError> {
+pub fn run(args: HookHandleArgs) -> Result<(), cgn_core::CgnError> {
     if args.stage != "committed" {
         return Ok(());
     }
@@ -43,14 +43,14 @@ pub fn run(args: HookHandleArgs) -> Result<(), cgn_core::GnxError> {
 
     let repo = std::env::current_dir()?;
     let repo_str = repo.to_string_lossy().into_owned();
-    let gnx_bin = std::env::current_exe()?;
-    let gnx_bin_str = gnx_bin.to_string_lossy().into_owned();
+    let cgn_bin = std::env::current_exe()?;
+    let cgn_bin_str = cgn_bin.to_string_lossy().into_owned();
 
     for branch in deleted {
         let branch_arg = format!("--branch={}", branch);
         let repo_arg = format!("--repo={}", repo_str);
         let args_vec: Vec<&str> = vec![
-            gnx_bin_str.as_str(),
+            cgn_bin_str.as_str(),
             "hook-watcher",
             branch_arg.as_str(),
             repo_arg.as_str(),

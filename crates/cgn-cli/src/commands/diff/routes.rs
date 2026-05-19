@@ -5,7 +5,7 @@
 
 use crate::engine::Engine;
 use cgn_core::graph::ArchivedNodeKind;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -32,10 +32,10 @@ pub struct RouteChange {
 }
 
 /// Extract all Route nodes from a graph.bin file.
-pub fn extract(graph_path: &Path) -> Result<Vec<RouteEntry>, GnxError> {
+pub fn extract(graph_path: &Path) -> Result<Vec<RouteEntry>, CgnError> {
     let engine = Engine::load(graph_path)
-        .map_err(|e| GnxError::Output(format!("load graph {}: {e}", graph_path.display())))?;
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+        .map_err(|e| CgnError::Output(format!("load graph {}: {e}", graph_path.display())))?;
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
 
     let mut entries = Vec::new();
     for node in graph.nodes.iter() {

@@ -44,8 +44,8 @@
 use crate::output::{emit, OutputFormat};
 use crate::repo_selector;
 use clap::Args;
-use cgn_core::registry::{resolve_home_gnx, Registry};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, Registry};
+use cgn_core::CgnError;
 use serde_json::json;
 
 #[derive(Args, Debug, Clone)]
@@ -68,26 +68,26 @@ pub struct ContractsArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: ContractsArgs) -> Result<(), GnxError> {
+pub fn run(args: ContractsArgs) -> Result<(), CgnError> {
     let format = OutputFormat::parse(args.format.as_deref());
 
     // 1. Load registry and resolve selector.
-    let home_gnx = resolve_home_gnx();
-    let registry = Registry::open(&home_gnx)
-        .map_err(|e| GnxError::InvalidArgument(format!("registry open: {e}")))?;
+    let home_cgn = resolve_home_cgn();
+    let registry = Registry::open(&home_cgn)
+        .map_err(|e| CgnError::InvalidArgument(format!("registry open: {e}")))?;
     let reg = registry.snapshot();
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let selector_str = args.repo.as_deref().unwrap_or("");
     let selector = repo_selector::parse(selector_str)
-        .map_err(|e| GnxError::InvalidArgument(format!("--repo selector: {e}")))?;
+        .map_err(|e| CgnError::InvalidArgument(format!("--repo selector: {e}")))?;
     let resolved =
         repo_selector::resolve_top_level(&selector, reg, cwd.to_str().unwrap_or("."), "contracts")
-            .map_err(|e| GnxError::InvalidArgument(format!("--repo: {e}")))?;
+            .map_err(|e| CgnError::InvalidArgument(format!("--repo: {e}")))?;
 
     // 2. Multi-repo gate: contracts is only meaningful across ≥2 repos.
     if resolved.len() < 2 {
-        return Err(GnxError::Output(format!(
+        return Err(CgnError::Output(format!(
             "contracts requires ≥2 repos for cross-repo matching (got {n}).\n\
              Use --repo @<group-with-≥2-members> or --repo @all.\n\
              Tip: run `cgn admin config --show` to list registered repos.",
@@ -242,7 +242,7 @@ fn parse_kind_filter(kind: &str) -> Vec<&'static str> {
 fn extract_contracts_for_repo(
     _repo: &repo_selector::ResolvedRepo,
     _kind_filter: &[&'static str],
-) -> Result<(Vec<Producer>, Vec<Consumer>), GnxError> {
+) -> Result<(Vec<Producer>, Vec<Consumer>), CgnError> {
     Ok((vec![], vec![]))
 }
 

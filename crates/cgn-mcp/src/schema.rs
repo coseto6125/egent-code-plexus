@@ -2,7 +2,7 @@
 //!
 //! Every visible (non-`hide`d) subcommand of the root command becomes one
 //! tool. Each tool carries:
-//! - `name` / `subcommand` — `gnx_<sub>` / `<sub>`
+//! - `name` / `subcommand` — `cgn_<sub>` / `<sub>`
 //! - `description` — the subcommand's `#[command(about = ...)]`
 //! - `schema` — JSON-schema object reverse-engineered from the subcommand's
 //!   `clap::Arg` set; `description` comes from `#[arg(help = ...)]`, and
@@ -32,7 +32,7 @@ const FLOAT_TIDS: [TypeId; 2] = [TypeId::of::<f64>(), TypeId::of::<f32>()];
 
 #[derive(Debug, Clone)]
 pub struct DerivedTool {
-    /// MCP tool name (`gnx_<subcommand>`).
+    /// MCP tool name (`cgn_<subcommand>`).
     pub name: String,
     /// CLI subcommand name (no prefix).
     pub subcommand: String,
@@ -68,7 +68,7 @@ pub fn enumerate_tools(root: &Command) -> Vec<DerivedTool> {
 
 fn derive_tool(cmd: &Command) -> DerivedTool {
     let subcommand = cmd.get_name().to_string();
-    let name = format!("gnx_{subcommand}");
+    let name = format!("cgn_{subcommand}");
     let description = cmd
         .get_about()
         .map(|s| s.to_string())
@@ -213,7 +213,7 @@ mod tests {
     fn enumerate_includes_only_visible() {
         let tools = enumerate_tools(&Cli::command());
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["gnx_foo"]);
+        assert_eq!(names, vec!["cgn_foo"]);
     }
 
     #[test]

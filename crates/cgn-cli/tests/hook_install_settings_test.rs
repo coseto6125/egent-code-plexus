@@ -3,8 +3,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
@@ -20,7 +20,7 @@ fn install_one_event_creates_entry_preserves_others() {
 }"#;
     std::fs::write(&settings_path, initial).unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "admin",
             "install-hook",
@@ -71,7 +71,7 @@ fn reinstalling_same_event_is_idempotent() {
     std::fs::write(&settings_path, "{}").unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(gnx_bin())
+        let out = Command::new(cgn_bin())
             .args([
                 "admin",
                 "install-hook",
@@ -106,7 +106,7 @@ fn uninstall_removes_only_specified_event() {
     let settings_path = tmp.path().join("settings.json");
     std::fs::write(&settings_path, "{}").unwrap();
 
-    let install = Command::new(gnx_bin())
+    let install = Command::new(cgn_bin())
         .args([
             "admin",
             "install-hook",
@@ -120,7 +120,7 @@ fn uninstall_removes_only_specified_event() {
         .unwrap();
     assert!(install.status.success());
 
-    let uninstall = Command::new(gnx_bin())
+    let uninstall = Command::new(cgn_bin())
         .args([
             "admin",
             "uninstall-hook",

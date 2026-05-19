@@ -77,9 +77,9 @@ fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Resu
     use crate::session::{overlay_writer, promotion, resolver};
 
     let session_id = resolver::resolve_session_id(None);
-    let home_gnx = cgn_core::registry::resolve_home_gnx();
+    let home_cgn = cgn_core::registry::resolve_home_cgn();
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(worktree_root)?;
-    let session_dir = home_gnx.join(&repo_dir).join("sessions").join(&session_id);
+    let session_dir = home_cgn.join(&repo_dir).join("sessions").join(&session_id);
     fs::create_dir_all(&session_dir)?;
     ensure_session_meta(&session_dir, worktree_root)?;
 
@@ -201,7 +201,7 @@ fn git_head_sha(worktree: &Path) -> io::Result<String> {
 /// belt-and-suspenders guard: `WalkBuilder` already filters it, but
 /// `filter_entry` runs before that, and a project with no `.gitignore` at
 /// all would otherwise walk `.git/` mtimes (noisy as hell).
-const SKIP_DIRS: &[&str] = &[".git", ".gnx", ".gitnexus-rs"];
+const SKIP_DIRS: &[&str] = &[".git", ".cgn", ".gitnexus-rs"];
 
 /// Short-circuits on the first source file newer than `graph_mtime`.
 /// Walking the full tree only happens when the graph is genuinely

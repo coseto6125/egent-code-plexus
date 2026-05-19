@@ -74,7 +74,7 @@ fn tokenize_identifier(name: &str) -> String {
 
 impl TantivyEngine {
     /// Build the tantivy index into `<index_dir>/tantivy/`. `index_dir`
-    /// is the resolved per-(repo, branch) directory under `~/.gnx/...`
+    /// is the resolved per-(repo, branch) directory under `~/.cgn/...`
     /// (or a tempdir in tests); the `tantivy` subdir is created on demand.
     /// Returns `Err` instead of panicking so the caller can degrade
     /// gracefully — `graph.bin` is the primary artifact and exact-name

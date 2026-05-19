@@ -2,7 +2,7 @@
 //! be unit-tested without a real git repository.
 
 use super::FileDiff;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,18 +14,18 @@ pub enum DiffScope {
 }
 
 impl DiffScope {
-    pub fn parse(scope: Option<&str>, base_ref: Option<&str>) -> Result<Self, GnxError> {
+    pub fn parse(scope: Option<&str>, base_ref: Option<&str>) -> Result<Self, CgnError> {
         match scope.unwrap_or("unstaged") {
             "unstaged" => Ok(DiffScope::Unstaged),
             "staged" => Ok(DiffScope::Staged),
             "all" => Ok(DiffScope::All),
             "compare" => {
                 let r = base_ref.ok_or_else(|| {
-                    GnxError::InvalidArgument("base_ref is required for scope=compare".to_string())
+                    CgnError::InvalidArgument("base_ref is required for scope=compare".to_string())
                 })?;
                 Ok(DiffScope::Compare(r.to_string()))
             }
-            other => Err(GnxError::InvalidArgument(format!(
+            other => Err(CgnError::InvalidArgument(format!(
                 "unknown scope '{other}' (expected unstaged|staged|all|compare)"
             ))),
         }
@@ -33,5 +33,5 @@ impl DiffScope {
 }
 
 pub trait GitDiffProvider: Send + Sync {
-    fn diff(&self, repo: &Path, scope: &DiffScope) -> Result<Vec<FileDiff>, GnxError>;
+    fn diff(&self, repo: &Path, scope: &DiffScope) -> Result<Vec<FileDiff>, CgnError>;
 }

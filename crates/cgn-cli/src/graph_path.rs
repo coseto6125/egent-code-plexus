@@ -1,17 +1,17 @@
 //! Resolve the `--graph` arg to a concrete `graph.bin` path.
 //!
 //! Custom absolute / non-default paths pass through unchanged. The legacy
-//! default `.gnx/graph.bin` is routed through the v2 commit-content-addressed
-//! layout: `<home>/.gnx/<repo>/commits/<dirname>/graph.bin`, resolved via
+//! default `.cgn/graph.bin` is routed through the v2 commit-content-addressed
+//! layout: `<home>/.cgn/<repo>/commits/<dirname>/graph.bin`, resolved via
 //! cwd's git common-dir + HEAD SHA + CommitIndex scan.
 
 use crate::commit_lookup::CommitIndex;
 use crate::git::safe_exec;
 use crate::repo_identity;
-use cgn_core::registry::resolve_home_gnx;
+use cgn_core::registry::resolve_home_cgn;
 use std::path::{Path, PathBuf};
 
-const LEGACY_DEFAULT: &str = ".gnx/graph.bin";
+const LEGACY_DEFAULT: &str = ".cgn/graph.bin";
 
 pub fn resolve(graph: &Path, cwd: &Path) -> PathBuf {
     if graph.as_os_str() != LEGACY_DEFAULT {
@@ -21,9 +21,9 @@ pub fn resolve(graph: &Path, cwd: &Path) -> PathBuf {
 }
 
 fn resolve_v2(cwd: &Path) -> Option<PathBuf> {
-    let home_gnx = resolve_home_gnx();
+    let home_cgn = resolve_home_cgn();
     let repo_dir_name = repo_identity::repo_dir_name_for_cwd(cwd).ok()?;
-    let commits = home_gnx.join(&repo_dir_name).join("commits");
+    let commits = home_cgn.join(&repo_dir_name).join("commits");
 
     let head_sha = head_sha_bytes(cwd)?;
     let idx = CommitIndex::scan(&commits).ok()?;

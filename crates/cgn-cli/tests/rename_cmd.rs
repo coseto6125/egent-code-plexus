@@ -15,8 +15,8 @@ use common::run_git;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// Build the graph index for a repo. `home` is an isolated home dir to avoid
@@ -24,7 +24,7 @@ fn gnx_bin() -> &'static str {
 fn build_index(root: &Path) {
     let home = root.join(".home");
     std::fs::create_dir_all(&home).unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", root.to_str().unwrap()])
         .env("HOME", &home)
         .current_dir(root)
@@ -120,7 +120,7 @@ fn setup_repo_two_symbols(sym_a: &str, sym_b: &str) -> tempfile::TempDir {
 /// Run rename and capture stdout. Panics on non-zero exit.
 fn run_rename_stdout(root: &Path, extra_args: &[&str]) -> String {
     let home = root.join(".home");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(extra_args)
         .args(["--repo", root.to_str().unwrap()])
         .env("HOME", &home)
@@ -139,7 +139,7 @@ fn run_rename_stdout(root: &Path, extra_args: &[&str]) -> String {
 /// Run rename, capture both stdout+stderr. Does NOT assert success.
 fn run_rename_both(root: &Path, extra_args: &[&str]) -> (String, String) {
     let home = root.join(".home");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(extra_args)
         .args(["--repo", root.to_str().unwrap()])
         .env("HOME", &home)
@@ -162,7 +162,7 @@ fn dry_run_reports_hits_without_mutating_files() {
     let root = repo.path();
     let home = root.join(".home");
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "rename",
             "--symbol",
@@ -220,7 +220,7 @@ fn execute_renames_both_def_and_callers() {
     let root = repo.path();
     let home = root.join(".home");
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "rename",
             "--symbol",
@@ -384,7 +384,7 @@ fn rename_zero_occurrences_explicit_message() {
     let repo = setup_repo();
     let root = repo.path();
     let home = root.join(".home");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "rename",
             "--symbol",

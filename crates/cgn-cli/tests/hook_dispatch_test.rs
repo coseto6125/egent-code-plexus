@@ -5,13 +5,13 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn pre_tool_use_no_match_returns_empty_stdout() {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "pre-tool-use", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -39,7 +39,7 @@ fn pre_tool_use_no_match_returns_empty_stdout() {
 
 #[test]
 fn missing_host_flag_errors() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["hook", "pre-tool-use"])
         .output()
         .unwrap();

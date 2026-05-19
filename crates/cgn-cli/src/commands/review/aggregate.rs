@@ -11,7 +11,7 @@ use crate::commands::tool_map::{self, ToolMapArgs};
 use crate::engine::Engine;
 use crate::git::diff_parser::parse_diff_hunks;
 use crate::git::safe_exec;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ pub fn run(
     repo_dir: &Path,
     engine: &Engine,
     since: Option<&str>,
-) -> Result<Report, GnxError> {
+) -> Result<Report, CgnError> {
     let mut deferred: Vec<&'static str> = Vec::new();
 
     if files.is_empty() {

@@ -24,7 +24,7 @@ use crate::output::{emit, OutputFormat};
 use clap::Args;
 use cgn_analyzer::fetch_shape::parse_reason;
 use cgn_core::graph::ArchivedRelType;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::collections::HashMap;
 
 /// Detect drift between HTTP consumer access patterns and the Route shapes
@@ -64,15 +64,15 @@ struct ShapeCheckHints {
 pub fn build_payload(
     args: &ShapeCheckArgs,
     engine: &crate::engine::Engine,
-) -> Result<serde_json::Value, GnxError> {
+) -> Result<serde_json::Value, CgnError> {
     build_payload_with_hints(args, engine).map(|(v, _)| v)
 }
 
 fn build_payload_with_hints(
     args: &ShapeCheckArgs,
     engine: &crate::engine::Engine,
-) -> Result<(serde_json::Value, ShapeCheckHints), GnxError> {
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+) -> Result<(serde_json::Value, ShapeCheckHints), CgnError> {
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
 
     // Lookup: route node_idx → (known_keys set, response_keys list, error_keys list).
     // One pass over route_shapes; resolves StrRef → owned String once so the
@@ -227,7 +227,7 @@ fn render_text(value: &serde_json::Value) -> serde_json::Value {
 pub fn run(
     args: ShapeCheckArgs,
     engine: &crate::engine::Engine,
-) -> Result<(), cgn_core::GnxError> {
+) -> Result<(), cgn_core::CgnError> {
     let format = crate::output::OutputFormat::parse(args.format.as_deref());
     let (value, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(filter) = &hints.unmatched_route_filter {

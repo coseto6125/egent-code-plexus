@@ -6,11 +6,11 @@
 
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::git::safe_exec;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     if input.cwd.is_empty() {
         return Ok(());
     }
@@ -45,7 +45,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     // (un-indexed worktrees have nothing to watch). Fire-and-forget — failures
     // don't block session_start. `daemon::spawn_detached` calls setsid() so the
     // watcher survives terminal SIGHUP and the hook subprocess exiting.
-    if index_dir_opt.is_some() && Path::new(&input.cwd).join(".gnx/auto-watch").exists() {
+    if index_dir_opt.is_some() && Path::new(&input.cwd).join(".cgn/auto-watch").exists() {
         if let Ok(exe) = std::env::current_exe() {
             let exe_str = exe.to_string_lossy();
             let _ = cgn_core::daemon::spawn_detached(&[&exe_str, "watch", "--start"]);

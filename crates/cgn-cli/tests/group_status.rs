@@ -6,12 +6,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
-fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
-    Command::new(gnx_bin())
+fn run_cgn(args: &[&str], home: &Path) -> std::process::Output {
+    Command::new(cgn_bin())
         .args(args)
         .env("HOME", home)
         .output()
@@ -44,8 +44,8 @@ fn init_git_repo(path: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-fn read_first_dir_name(home_gnx: &Path) -> String {
-    let registry_path = home_gnx.join("registry.json");
+fn read_first_dir_name(home_cgn: &Path) -> String {
+    let registry_path = home_cgn.join("registry.json");
     let bytes = fs::read(&registry_path).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     v["repos"]
@@ -61,13 +61,13 @@ fn read_first_dir_name(home_gnx: &Path) -> String {
 fn status_never_synced_reports_no_meta() {
     let home_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
-    let home_gnx = home.join(".gnx");
+    let home_cgn = home.join(".cgn");
 
     let repos_tmp = tempfile::tempdir().unwrap();
     let repo = repos_tmp.path().join("backend");
     init_git_repo(&repo);
 
-    let out = run_gnx(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
+    let out = run_cgn(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
     assert!(
         out.status.success(),
         "admin index failed:\nstdout: {}\nstderr: {}",
@@ -75,17 +75,17 @@ fn status_never_synced_reports_no_meta() {
         String::from_utf8_lossy(&out.stderr),
     );
 
-    let dir_name = read_first_dir_name(&home_gnx);
+    let dir_name = read_first_dir_name(&home_cgn);
 
     // admin group add <repo> <group>
-    let out = run_gnx(&["admin", "group", "add", &dir_name, "demo"], home);
+    let out = run_cgn(&["admin", "group", "add", &dir_name, "demo"], home);
     assert!(
         out.status.success(),
         "admin group add failed:\nstderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
 
-    let out = run_gnx(&["group", "status", "demo"], home);
+    let out = run_cgn(&["group", "status", "demo"], home);
     assert!(
         out.status.success(),
         "group status failed:\nstdout: {}\nstderr: {}",
@@ -102,13 +102,13 @@ fn status_never_synced_reports_no_meta() {
 fn status_reports_stale_when_meta_commit_differs_from_head() {
     let home_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
-    let home_gnx = home.join(".gnx");
+    let home_cgn = home.join(".cgn");
 
     let repos_tmp = tempfile::tempdir().unwrap();
     let repo = repos_tmp.path().join("backend");
     init_git_repo(&repo);
 
-    let out = run_gnx(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
+    let out = run_cgn(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
     assert!(
         out.status.success(),
         "admin index failed:\nstdout: {}\nstderr: {}",
@@ -116,9 +116,9 @@ fn status_reports_stale_when_meta_commit_differs_from_head() {
         String::from_utf8_lossy(&out.stderr),
     );
 
-    let dir_name = read_first_dir_name(&home_gnx);
+    let dir_name = read_first_dir_name(&home_cgn);
 
-    let out = run_gnx(&["admin", "group", "add", &dir_name, "demo"], home);
+    let out = run_cgn(&["admin", "group", "add", &dir_name, "demo"], home);
     assert!(
         out.status.success(),
         "admin group add failed:\nstderr: {}",
@@ -126,7 +126,7 @@ fn status_reports_stale_when_meta_commit_differs_from_head() {
     );
 
     // Write a meta.json with a deliberately-wrong stored commit.
-    let gdir = group_dir(&home_gnx, "demo");
+    let gdir = group_dir(&home_cgn, "demo");
     let mut snapshots = BTreeMap::new();
     snapshots.insert(
         dir_name.clone(),
@@ -147,7 +147,7 @@ fn status_reports_stale_when_meta_commit_differs_from_head() {
     )
     .unwrap();
 
-    let out = run_gnx(&["group", "status", "demo"], home);
+    let out = run_cgn(&["group", "status", "demo"], home);
     assert!(
         out.status.success(),
         "group status failed:\nstdout: {}\nstderr: {}",

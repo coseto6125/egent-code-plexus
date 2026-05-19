@@ -2,13 +2,13 @@
 
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn diff_requires_section_and_baseline() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["diff"])
         .output()
         .expect("run cgn diff");
@@ -26,7 +26,7 @@ fn diff_requires_section_and_baseline() {
 
 #[test]
 fn diff_help_lists_section_choices() {
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["diff", "--help"])
         .output()
         .expect("run cgn diff --help");
@@ -42,7 +42,7 @@ fn diff_help_lists_section_choices() {
 
 #[test]
 fn diff_baseline_invalid_ref_errors_with_hint() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["diff", "--section", "bindings", "--baseline", "definitely-no-such-ref"])
         .output()
         .expect("run cgn diff");
@@ -64,7 +64,7 @@ fn diff_baseline_pr_form_calls_gh() {
         return;
     }
     // Use a clearly non-existent PR; cgn should surface a clean error.
-    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["diff", "--section", "bindings", "--baseline", "PR/9999999"])
         .output()
         .expect("run cgn diff");
@@ -96,7 +96,7 @@ fn git_guard_restores_branch_on_drop() {
         String::from_utf8_lossy(&out).trim().to_string()
     };
 
-    let _ = Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let _ = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["diff", "--section", "bindings", "--baseline", &baseline_sha])
         .output();
 
@@ -160,7 +160,7 @@ fn diff_baseline_short_name_warns_on_remote_divergence() {
         .output();
 
     // Run cgn diff with --baseline main; expect warning on stderr.
-    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["diff", "--section", "bindings", "--baseline", "main"])
         .current_dir(repo)
         .env("HOME", repo)
@@ -199,7 +199,7 @@ fn diff_baseline_qualified_ref_no_warning() {
     .to_string();
 
     // Pass full SHA — should NOT trigger divergence check.
-    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["diff", "--section", "bindings", "--baseline", &head_sha])
         .current_dir(repo)
         .env("HOME", repo)
@@ -229,7 +229,7 @@ fn diff_baseline_short_name_no_remote_emits_note() {
     ]).current_dir(repo).output();
 
     // Run cgn diff --baseline main. No origin remote → expect skip-note on stderr.
-    let output = Command::new(env!("CARGO_BIN_EXE_gnx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["diff", "--section", "bindings", "--baseline", "main"])
         .current_dir(repo)
         .env("HOME", repo)

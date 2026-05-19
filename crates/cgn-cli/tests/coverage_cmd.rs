@@ -6,24 +6,24 @@
 //!   3. With `--repo @test-group`: graceful handling (no crash).
 //!
 //! The registry is built from a temp HOME so tests are isolated from the
-//! developer's real ~/.gnx registry.
+//! developer's real ~/.cgn registry.
 
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// Run `cgn coverage [args]` with a synthetic HOME (empty registry) and
 /// return stdout as a String.
 fn run_coverage_empty_registry(extra: &[&str]) -> String {
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["coverage"])
         .args(extra)
         .env("HOME", tmp.path())
-        .env("CGN_HOME", tmp.path().join(".gnx"))
+        .env("CGN_HOME", tmp.path().join(".cgn"))
         .output()
         .expect("coverage failed to spawn");
     assert!(
@@ -45,7 +45,7 @@ fn run_coverage_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempD
 
     init_git_repo(repo_tmp.path());
 
-    let idx_out = Command::new(gnx_bin())
+    let idx_out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", repo_tmp.path().to_str().unwrap()])
         .env("HOME", home_tmp.path())
         .output()
@@ -56,7 +56,7 @@ fn run_coverage_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempD
         String::from_utf8_lossy(&idx_out.stderr)
     );
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["coverage"])
         .args(extra)
         .current_dir(repo_tmp.path())
@@ -193,7 +193,7 @@ fn coverage_with_repo_includes_health_sections() {
 #[test]
 fn coverage_at_group_unknown_does_not_panic() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["coverage", "--repo", "@unknown-group", "--format", "json"])
         .env("HOME", tmp.path())
         .output()
@@ -210,7 +210,7 @@ fn coverage_at_group_unknown_does_not_panic() {
 /// Verify the `--help` output surfaces the command with its flags.
 #[test]
 fn coverage_help_output() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["coverage", "--help"])
         .output()
         .expect("coverage --help failed to spawn");

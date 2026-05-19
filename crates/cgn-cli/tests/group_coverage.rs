@@ -10,12 +10,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
-fn run_gnx(args: &[&str], home: &Path) -> std::process::Output {
-    Command::new(gnx_bin())
+fn run_cgn(args: &[&str], home: &Path) -> std::process::Output {
+    Command::new(cgn_bin())
         .args(args)
         .env("HOME", home)
         .output()
@@ -46,8 +46,8 @@ fn init_git_repo(path: &Path) {
     }
 }
 
-fn read_dir_names(home_gnx: &Path) -> Vec<String> {
-    let registry_path = home_gnx.join("registry.json");
+fn read_dir_names(home_cgn: &Path) -> Vec<String> {
+    let registry_path = home_cgn.join("registry.json");
     let bytes = fs::read(&registry_path).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     v["repos"]
@@ -62,7 +62,7 @@ fn read_dir_names(home_gnx: &Path) -> Vec<String> {
 
 #[test]
 fn group_coverage_help_exits_zero() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["group", "coverage", "--help"])
         .output()
         .expect("cgn spawn failed");
@@ -81,7 +81,7 @@ fn group_coverage_help_exits_zero() {
 #[test]
 fn group_coverage_unknown_group_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = run_gnx(&["group", "coverage", "__no_such_group__"], tmp.path());
+    let out = run_cgn(&["group", "coverage", "__no_such_group__"], tmp.path());
     assert!(
         !out.status.success(),
         "expected non-zero exit for unknown group"
@@ -102,12 +102,12 @@ fn group_coverage_json_shape_two_repos() {
     let home_tmp = tempfile::tempdir().unwrap();
     let repos_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
-    let home_gnx = home.join(".gnx");
+    let home_cgn = home.join(".cgn");
 
     for name in ["svc_a", "svc_b"] {
         let repo = repos_tmp.path().join(name);
         init_git_repo(&repo);
-        let out = run_gnx(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
+        let out = run_cgn(&["admin", "index", "--repo", repo.to_str().unwrap()], home);
         assert!(
             out.status.success(),
             "{name} admin index failed:\nstderr: {}",
@@ -115,11 +115,11 @@ fn group_coverage_json_shape_two_repos() {
         );
     }
 
-    let dir_names = read_dir_names(&home_gnx);
+    let dir_names = read_dir_names(&home_cgn);
     assert_eq!(dir_names.len(), 2, "expected 2 registered repos");
 
     for dn in &dir_names {
-        let out = run_gnx(&["admin", "group", "add", dn, "covgrp"], home);
+        let out = run_cgn(&["admin", "group", "add", dn, "covgrp"], home);
         assert!(
             out.status.success(),
             "admin group add failed for {dn}:\nstderr: {}",
@@ -127,7 +127,7 @@ fn group_coverage_json_shape_two_repos() {
         );
     }
 
-    let out = run_gnx(&["group", "coverage", "covgrp", "--json"], home);
+    let out = run_cgn(&["group", "coverage", "covgrp", "--json"], home);
     assert!(
         out.status.success(),
         "group coverage failed:\nstdout: {}\nstderr: {}",

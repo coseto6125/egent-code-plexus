@@ -7,10 +7,10 @@
 
 use crate::commands::diff::DiffPayload;
 use crate::output::{emit_to_string, OutputFormat};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde_json::Value;
 
-pub fn emit(payload: &DiffPayload, format: &str) -> Result<(), GnxError> {
+pub fn emit(payload: &DiffPayload, format: &str) -> Result<(), CgnError> {
     let fmt = OutputFormat::parse(Some(format));
     match fmt {
         OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {

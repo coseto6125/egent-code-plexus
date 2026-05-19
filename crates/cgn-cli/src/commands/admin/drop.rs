@@ -2,7 +2,7 @@
 //!
 //! Targets the repo identified by `--repo` (path, defaulting to cwd).
 //! Side effects:
-//!   * delete `<home_gnx>/<repo.name>/` (index dir, all branches)
+//!   * delete `<home_cgn>/<repo.name>/` (index dir, all branches)
 //!   * rewrite `registry.json` without that entry (atomic, flock-guarded)
 //!   * append a `registry.mutate` audit event
 //!
@@ -21,24 +21,24 @@ pub struct DropArgs {
     pub all: bool,
 }
 
-pub fn run(args: DropArgs) -> Result<(), cgn_core::GnxError> {
-    let home_gnx = cgn_core::registry::resolve_home_gnx();
-    let registry = cgn_core::registry::Registry::open(&home_gnx)
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("registry: {e}")))?;
+pub fn run(args: DropArgs) -> Result<(), cgn_core::CgnError> {
+    let home_cgn = cgn_core::registry::resolve_home_cgn();
+    let registry = cgn_core::registry::Registry::open(&home_cgn)
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("registry: {e}")))?;
 
     if args.all {
         let snapshot = registry.snapshot().clone();
         for (dir_name, _alias) in &snapshot.repos {
-            let index_dir = home_gnx.join(dir_name);
+            let index_dir = home_cgn.join(dir_name);
             if index_dir.exists() {
                 std::fs::remove_dir_all(&index_dir)?;
             }
         }
         // Rewrite registry removing all entries under exclusive lock.
         drop(registry);
-        rewrite_without(&home_gnx, None)?;
+        rewrite_without(&home_cgn, None)?;
 
-        if let Ok(audit) = cgn_core::registry::AuditLog::open(&home_gnx.join("audit.log")) {
+        if let Ok(audit) = cgn_core::registry::AuditLog::open(&home_cgn.join("audit.log")) {
             let _ = audit.append(&cgn_core::registry::AuditEvent::RegistryMutate {
                 op: "drop-all".into(),
                 repo: "all".into(),
@@ -52,18 +52,18 @@ pub fn run(args: DropArgs) -> Result<(), cgn_core::GnxError> {
         // is the same helper `build_l2` uses to write the dir, so identifying
         // the target the same way guarantees we find it.
         let dir_name = repo_dir_name_for_cwd(&args.repo)
-            .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("repo_identity: {e}")))?;
+            .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("repo_identity: {e}")))?;
 
-        let index_dir = home_gnx.join(&dir_name);
+        let index_dir = home_cgn.join(&dir_name);
         if index_dir.exists() {
             std::fs::remove_dir_all(&index_dir)?;
         }
 
         // Drop registry handle before acquiring exclusive flock.
         drop(registry);
-        rewrite_without(&home_gnx, Some(&dir_name))?;
+        rewrite_without(&home_cgn, Some(&dir_name))?;
 
-        if let Ok(audit) = cgn_core::registry::AuditLog::open(&home_gnx.join("audit.log")) {
+        if let Ok(audit) = cgn_core::registry::AuditLog::open(&home_cgn.join("audit.log")) {
             let _ = audit.append(&cgn_core::registry::AuditEvent::RegistryMutate {
                 op: "drop".into(),
                 repo: dir_name,
@@ -78,16 +78,16 @@ pub fn run(args: DropArgs) -> Result<(), cgn_core::GnxError> {
 /// Re-read registry.json under exclusive flock, remove the named repo (or all
 /// repos when `repo_name` is None), and atomically write back.
 fn rewrite_without(
-    home_gnx: &Path,
+    home_cgn: &Path,
     repo_name: Option<&str>,
-) -> Result<(), cgn_core::GnxError> {
-    let lock_path = home_gnx.join("registry.json.lock");
+) -> Result<(), cgn_core::CgnError> {
+    let lock_path = home_cgn.join("registry.json.lock");
     let _lock = cgn_core::registry::FileLock::acquire_exclusive(&lock_path)
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("flock: {e}")))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("flock: {e}")))?;
 
-    let registry_path = home_gnx.join("registry.json");
+    let registry_path = home_cgn.join("registry.json");
     let mut current = cgn_core::registry::RegistryFile::read_or_empty(&registry_path)
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("read: {e}")))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("read: {e}")))?;
 
     match repo_name {
         Some(name) => {
@@ -106,6 +106,6 @@ fn rewrite_without(
     }
 
     cgn_core::registry::RegistryFile::write_atomic(&registry_path, &current)
-        .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("write: {e}")))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("write: {e}")))?;
     Ok(())
 }

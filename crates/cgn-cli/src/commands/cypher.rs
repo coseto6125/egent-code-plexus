@@ -43,12 +43,12 @@ pub struct CypherArgs {
 }
 
 impl CypherArgs {
-    fn resolved_query(&self) -> Result<&str, cgn_core::GnxError> {
+    fn resolved_query(&self) -> Result<&str, cgn_core::CgnError> {
         self.query
             .as_deref()
             .or(self.query_positional.as_deref())
             .ok_or_else(|| {
-                cgn_core::GnxError::InvalidArgument(
+                cgn_core::CgnError::InvalidArgument(
                     "cypher requires a query — pass it positionally (cgn cypher \"MATCH ...\") or via --query".into(),
                 )
             })
@@ -62,22 +62,22 @@ fn resolve_repo_root(repo_arg: Option<&str>) -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), cgn_core::GnxError> {
+pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), cgn_core::CgnError> {
     // Multi-repo gate: cypher is single-repo only (graph identity is per-repo).
     if let Some(repo_sel) = args.repo.as_deref() {
-        let home_gnx = cgn_core::registry::resolve_home_gnx();
+        let home_cgn = cgn_core::registry::resolve_home_cgn();
         let registry =
-            RegistryFile::read_or_empty(&home_gnx.join("registry.json")).map_err(|e| {
-                cgn_core::GnxError::InvalidArgument(format!("registry read: {e}"))
+            RegistryFile::read_or_empty(&home_cgn.join("registry.json")).map_err(|e| {
+                cgn_core::CgnError::InvalidArgument(format!("registry read: {e}"))
             })?;
         let selector = repo_selector::parse(repo_sel).map_err(|e| {
-            cgn_core::GnxError::InvalidArgument(format!("--repo selector: {e}"))
+            cgn_core::CgnError::InvalidArgument(format!("--repo selector: {e}"))
         })?;
         let cwd = std::env::current_dir().unwrap_or_default();
         let repos = repo_selector::resolve(&selector, &registry, cwd.to_str().unwrap_or("."))
-            .map_err(|e| cgn_core::GnxError::InvalidArgument(format!("--repo: {e}")))?;
+            .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("--repo: {e}")))?;
         if repos.len() > 1 {
-            return Err(cgn_core::GnxError::InvalidArgument(format!(
+            return Err(cgn_core::CgnError::InvalidArgument(format!(
                 "cypher is single-repo only (graph identity); --repo resolved to {} repos. Pick one with --repo <name|path>.",
                 repos.len()
             )));
@@ -86,16 +86,16 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), cgn_core::GnxError> 
 
     let graph = engine
         .graph()
-        .map_err(|e| cgn_core::GnxError::Rkyv(e.to_string()))?;
+        .map_err(|e| cgn_core::CgnError::Rkyv(e.to_string()))?;
 
     let query_str = args.resolved_query()?;
     let query = cypher::parse(query_str).map_err(|e| {
-        cgn_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e))
+        cgn_core::CgnError::InvalidArgument(format_cypher_error(query_str, &e))
     })?;
 
     let result =
         cypher::execute(&query, graph, &resolve_repo_root(args.repo.as_deref())).map_err(|e| {
-            cgn_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e))
+            cgn_core::CgnError::InvalidArgument(format_cypher_error(query_str, &e))
         })?;
 
     let rows_json: Vec<Vec<serde_json::Value>> = result

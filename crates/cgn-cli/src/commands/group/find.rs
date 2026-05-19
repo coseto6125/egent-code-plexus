@@ -3,8 +3,8 @@
 //! default) and cross-repo RRF-merged top-K (`--merge rrf`).
 
 use clap::{Args, ValueEnum};
-use cgn_core::registry::{resolve_home_gnx, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, RegistryFile};
+use cgn_core::CgnError;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 
@@ -51,18 +51,18 @@ pub struct FindArgs {
     pub json: bool,
 }
 
-pub fn run(args: FindArgs) -> Result<(), GnxError> {
+pub fn run(args: FindArgs) -> Result<(), CgnError> {
     // Cross-flag validation: `--limit` is RRF-only. Single-mode (`--merge none`)
     // emits per-repo concat where a global cap would be ambiguous (truncate
     // which repo first?), so reject the combo loudly.
     if args.limit.is_some() && args.merge != MergeMode::Rrf {
-        return Err(GnxError::InvalidArgument(
+        return Err(CgnError::InvalidArgument(
             "--limit requires `--merge rrf`; per-repo concat (default) has no global top-K".into(),
         ));
     }
 
-    let home_gnx = resolve_home_gnx();
-    let registry_path = home_gnx.join("registry.json");
+    let home_cgn = resolve_home_cgn();
+    let registry_path = home_cgn.join("registry.json");
     let reg = RegistryFile::read_or_empty(&registry_path)?;
 
     let group = reg
@@ -70,13 +70,13 @@ pub fn run(args: FindArgs) -> Result<(), GnxError> {
         .iter()
         .find(|g| g.name == args.name)
         .ok_or_else(|| {
-            GnxError::InvalidArgument(format!(
+            CgnError::InvalidArgument(format!(
                 "group '{}' not found — run `cgn admin group add <repo> {}`",
                 args.name, args.name
             ))
         })?;
 
-    let engines: Vec<(String, Engine)> = resolve_member_engines(group, &reg, &home_gnx);
+    let engines: Vec<(String, Engine)> = resolve_member_engines(group, &reg, &home_cgn);
 
     if engines.is_empty() {
         emit_empty(args.merge, args.json);

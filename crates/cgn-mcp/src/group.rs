@@ -17,14 +17,14 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Return the single `gnx_group` MCP tool fronting all group sub-subcommands.
+/// Return the single `cgn_group` MCP tool fronting all group sub-subcommands.
 pub fn group_tools() -> Vec<DerivedTool> {
     vec![tool_group()]
 }
 
 fn tool_group() -> DerivedTool {
     DerivedTool {
-        name: "gnx_group".into(),
+        name: "cgn_group".into(),
         subcommand: "group".into(),
         description: "Multi-repo group operations: extract contracts, query \
             cross-repo impact, find / batch-find across all members. Pick \

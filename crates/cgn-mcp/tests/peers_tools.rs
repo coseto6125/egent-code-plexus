@@ -1,11 +1,11 @@
 //! Smoke tests: peer tool registration + spawn-argv shape for the single
-//! `gnx_peers` tool fronting all sub-subcommands via `subcmd` discriminator.
+//! `cgn_peers` tool fronting all sub-subcommands via `subcmd` discriminator.
 
 mod common;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use common::write_stub;
-use cgn_mcp::server::GnxMcpServer;
+use cgn_mcp::server::CgnMcpServer;
 use cgn_mcp::spawn::run_spawn;
 use serde_json::json;
 use tempfile::TempDir;
@@ -49,8 +49,8 @@ enum PeersCmd {
 // ── registration tests ────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn single_gnx_peers_tool_registered() {
-    let server = GnxMcpServer::new(&Cli::command()).expect("init");
+async fn single_cgn_peers_tool_registered() {
+    let server = CgnMcpServer::new(&Cli::command()).expect("init");
     let names: Vec<&str> = server
         .list_tools()
         .iter()
@@ -58,10 +58,10 @@ async fn single_gnx_peers_tool_registered() {
         .collect();
 
     assert!(
-        names.contains(&"gnx_peers"),
-        "missing gnx_peers; got {names:?}"
+        names.contains(&"cgn_peers"),
+        "missing cgn_peers; got {names:?}"
     );
-    for stale in ["gnx_peers_status", "gnx_peers_log", "gnx_peers_say"] {
+    for stale in ["cgn_peers_status", "cgn_peers_log", "cgn_peers_say"] {
         assert!(
             !names.contains(&stale),
             "split-form `{stale}` must not appear; got {names:?}"
@@ -70,13 +70,13 @@ async fn single_gnx_peers_tool_registered() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn gnx_peers_advertises_subcmd_discriminator() {
-    let server = GnxMcpServer::new(&Cli::command()).expect("init");
+async fn cgn_peers_advertises_subcmd_discriminator() {
+    let server = CgnMcpServer::new(&Cli::command()).expect("init");
     let tool = server
         .list_tools()
         .iter()
-        .find(|t| t.name == "gnx_peers")
-        .expect("gnx_peers tool")
+        .find(|t| t.name == "cgn_peers")
+        .expect("cgn_peers tool")
         .clone();
     assert_eq!(tool.subcmd_arg.as_deref(), Some("subcmd"));
     let allowed = tool
@@ -103,8 +103,8 @@ async fn gnx_peers_advertises_subcmd_discriminator() {
 fn peers_tool() -> cgn_mcp::schema::DerivedTool {
     cgn_mcp::peers::peer_tools()
         .into_iter()
-        .find(|t| t.name == "gnx_peers")
-        .expect("gnx_peers tool")
+        .find(|t| t.name == "cgn_peers")
+        .expect("cgn_peers tool")
 }
 
 #[test]

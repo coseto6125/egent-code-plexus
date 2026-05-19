@@ -6,7 +6,7 @@ pub mod gemini;
 use crate::admin::menu::{self, select};
 use crate::admin::status::HostStatus;
 use dialoguer::theme::ColorfulTheme;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 const HOSTS: &[menu::Item<'_>] = &[
     ("Codex CLI", "register cgn as a native tool in Codex CLI"),
@@ -22,7 +22,7 @@ const ACTIONS: &[menu::Item<'_>] = &[
 ];
 
 /// Entry point called from `host_integration::run`.
-pub fn run(theme: &ColorfulTheme) -> Result<(), GnxError> {
+pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Native — pick a host", HOSTS)?;
         match choice {
@@ -52,7 +52,7 @@ fn host_menu(
     install: fn(&ColorfulTheme),
     uninstall: fn(&ColorfulTheme),
     status: fn() -> HostStatus,
-) -> Result<(), GnxError> {
+) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, &format!("{host_name} — action"), ACTIONS)?;
         match choice {

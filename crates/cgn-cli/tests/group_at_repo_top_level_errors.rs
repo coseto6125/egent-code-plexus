@@ -5,8 +5,8 @@ use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn make_home_with_group(home: &std::path::Path, group_name: &str) {
@@ -15,9 +15,9 @@ fn make_home_with_group(home: &std::path::Path, group_name: &str) {
         "repos": {},
         "groups": [{"name": group_name, "members": []}]
     });
-    fs::create_dir_all(home.join(".gnx")).unwrap();
+    fs::create_dir_all(home.join(".cgn")).unwrap();
     fs::write(
-        home.join(".gnx/registry.json"),
+        home.join(".cgn/registry.json"),
         serde_json::to_vec_pretty(&reg).unwrap(),
     )
     .unwrap();
@@ -27,7 +27,7 @@ fn make_home_with_group(home: &std::path::Path, group_name: &str) {
 fn search_at_group_errors_with_hint() {
     let home = TempDir::new().unwrap();
     make_home_with_group(home.path(), "demo");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["find", "--mode", "bm25", "--repo", "@demo", "x"])
         .output()
@@ -44,7 +44,7 @@ fn search_at_group_errors_with_hint() {
 fn contracts_at_group_errors_with_hint() {
     let home = TempDir::new().unwrap();
     make_home_with_group(home.path(), "demo");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["contracts", "--repo", "@demo"])
         .output()
@@ -58,7 +58,7 @@ fn contracts_at_group_errors_with_hint() {
 fn find_at_group_errors_with_hint() {
     let home = TempDir::new().unwrap();
     make_home_with_group(home.path(), "demo");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["find", "--repo", "@demo", "x"])
         .output()
@@ -72,7 +72,7 @@ fn find_at_group_errors_with_hint() {
 fn coverage_at_group_errors_with_hint() {
     let home = TempDir::new().unwrap();
     make_home_with_group(home.path(), "demo");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["coverage", "--repo", "@demo"])
         .output()
@@ -88,7 +88,7 @@ fn coverage_at_group_errors_with_hint() {
 fn impact_at_group_errors_with_hint() {
     let home = TempDir::new().unwrap();
     make_home_with_group(home.path(), "demo");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["impact", "x", "--repo", "@demo"])
         .output()
@@ -103,7 +103,7 @@ fn impact_at_group_errors_with_hint() {
 fn assert_redirects_to_group_help(args: &[&str]) {
     let home = TempDir::new().unwrap();
     make_home_with_group(home.path(), "demo");
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(args)
         .output()
@@ -188,13 +188,13 @@ fn search_at_all_still_works_on_empty_registry() {
     // @all on an empty registry should succeed with no results, not error.
     let home = TempDir::new().unwrap();
     let reg = serde_json::json!({"version": 2, "repos": {}, "groups": []});
-    fs::create_dir_all(home.path().join(".gnx")).unwrap();
+    fs::create_dir_all(home.path().join(".cgn")).unwrap();
     fs::write(
-        home.path().join(".gnx/registry.json"),
+        home.path().join(".cgn/registry.json"),
         serde_json::to_vec_pretty(&reg).unwrap(),
     )
     .unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["find", "--mode", "bm25", "--repo", "@all", "x"])
         .output()

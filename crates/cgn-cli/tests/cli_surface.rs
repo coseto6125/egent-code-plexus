@@ -1,23 +1,23 @@
 use std::process::Command;
 
-fn gnx_help() -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_gnx"))
+fn cgn_help() -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .arg("--help")
         .output()
         .unwrap();
     String::from_utf8(out.stdout).unwrap()
 }
 
-fn gnx_admin_help() -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_gnx"))
+fn cgn_admin_help() -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["admin", "--help"])
         .output()
         .unwrap();
     String::from_utf8(out.stdout).unwrap()
 }
 
-fn gnx_admin_prune_help() -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_gnx"))
+fn cgn_admin_prune_help() -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_cgn"))
         .args(["admin", "prune", "--help"])
         .output()
         .unwrap();
@@ -26,7 +26,7 @@ fn gnx_admin_prune_help() -> String {
 
 #[test]
 fn top_level_lists_agent_commands() {
-    let help = gnx_help();
+    let help = cgn_help();
     for cmd in [
         "inspect",
         "find",
@@ -45,7 +45,7 @@ fn top_level_lists_agent_commands() {
 
 #[test]
 fn top_level_hides_admin() {
-    let help = gnx_help();
+    let help = cgn_help();
     // The Admin variant exists but is hidden; "admin" should not appear
     // as a top-level command line. Allow it in descriptions.
     for line in help.lines() {
@@ -59,7 +59,7 @@ fn top_level_hides_admin() {
 #[test]
 fn admin_help_lists_expected_entries() {
     // rename-branch removed in v2 (branch not in storage)
-    let help = gnx_admin_help();
+    let help = cgn_admin_help();
     for cmd in ["install-hook", "drop", "prune", "config", "group", "index"] {
         assert!(help.contains(cmd), "missing {cmd} in admin --help:\n{help}");
     }
@@ -67,7 +67,7 @@ fn admin_help_lists_expected_entries() {
 
 #[test]
 fn admin_prune_help_keeps_orphan_sweep_mode() {
-    let help = gnx_admin_prune_help();
+    let help = cgn_admin_prune_help();
     assert!(
         help.contains("--orphans"),
         "missing --orphans in prune help:\n{help}"
@@ -76,7 +76,7 @@ fn admin_prune_help_keeps_orphan_sweep_mode() {
 
 #[test]
 fn top_level_does_not_list_scan() {
-    let help = gnx_help();
+    let help = cgn_help();
     for line in help.lines() {
         let t = line.trim_start();
         // scan is removed; allow the word "scan" in unrelated descriptions
@@ -89,7 +89,7 @@ fn top_level_does_not_list_scan() {
 
 #[test]
 fn no_old_top_level_commands() {
-    let help = gnx_help();
+    let help = cgn_help();
     for old in [
         "analyze",
         "context",

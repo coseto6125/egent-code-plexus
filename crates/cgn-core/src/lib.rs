@@ -11,7 +11,7 @@ pub mod pool;
 pub mod registry;
 pub mod session;
 
-pub use error::{GnxError, GnxResult};
+pub use error::{CgnError, CgnResult};
 
 /// Confidence threshold for `--high-trust-only` filtering on impact / detect-changes.
 /// Edges below this confidence (e.g. framework-aware refs like FastAPI `Depends()` at 0.6)

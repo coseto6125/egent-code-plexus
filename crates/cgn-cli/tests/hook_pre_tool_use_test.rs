@@ -16,8 +16,8 @@ use rkyv::rancor::Error;
 use std::fs;
 use tempfile::tempdir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run(envelope: &str) -> std::process::Output {
@@ -25,10 +25,10 @@ fn run(envelope: &str) -> std::process::Output {
 }
 
 /// Run the hook with an optional HOME override so a fake registry can
-/// be planted at `<home>/.gnx/registry.json`. Each subprocess inherits
+/// be planted at `<home>/.cgn/registry.json`. Each subprocess inherits
 /// the env we set on the child only — parent's env is untouched.
 fn run_with_home(envelope: &str, home: Option<&std::path::Path>) -> std::process::Output {
-    let mut cmd = Command::new(gnx_bin());
+    let mut cmd = Command::new(cgn_bin());
     cmd.args(["hook", "pre-tool-use", "--claude-code"]);
     if let Some(h) = home {
         cmd.env("HOME", h);
@@ -162,14 +162,14 @@ fn make_graph() -> ZeroCopyGraph {
 #[test]
 #[ignore = "fixture mocks v1 registry + <repo>/<branch>/ layout; needs full rewrite to v2 (<repo>__<hash>/commits/<dirname>/ + BTreeMap registry)"]
 fn with_index_emits_legacy_block_via_subprocess() {
-    // The hook resolves cwd → index_dir via `~/.gnx/registry.json`.
+    // The hook resolves cwd → index_dir via `~/.cgn/registry.json`.
     // We plant both the registry and the per-branch index dir under a
     // tempdir, then point HOME at it for the subprocess.
     let tmp = tempdir().unwrap();
     let fake_home = tmp.path().join("home");
-    let home_gnx = fake_home.join(".gnx");
+    let home_cgn = fake_home.join(".cgn");
     let repo = tmp.path().join("repo");
-    let index_dir = home_gnx.join("alpha").join("main");
+    let index_dir = home_cgn.join("alpha").join("main");
     fs::create_dir_all(&repo).unwrap();
     fs::create_dir_all(&index_dir).unwrap();
 
@@ -187,7 +187,7 @@ fn with_index_emits_legacy_block_via_subprocess() {
             "name": "alpha",
             "remote_url": "",
             "worktree_path": repo.to_string_lossy(),
-            "index_dir_root": home_gnx.join("alpha").to_string_lossy(),
+            "index_dir_root": home_cgn.join("alpha").to_string_lossy(),
             "branches": [{
                 "name": "main",
                 "index_dir": index_dir.to_string_lossy(),
@@ -200,7 +200,7 @@ fn with_index_emits_legacy_block_via_subprocess() {
         "groups": []
     });
     fs::write(
-        home_gnx.join("registry.json"),
+        home_cgn.join("registry.json"),
         serde_json::to_string(&registry).unwrap(),
     )
     .unwrap();

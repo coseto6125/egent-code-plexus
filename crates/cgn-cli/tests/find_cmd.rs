@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 // ── Fixture helpers ───────────────────────────────────────────────────────────
@@ -146,7 +146,7 @@ fn kind_str(k: NodeKind) -> &'static str {
 }
 
 fn run_find(graph: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .arg("find")
         .args(args)
         .arg("--graph")

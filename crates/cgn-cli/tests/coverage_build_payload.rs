@@ -7,13 +7,13 @@
 use std::process::Command;
 
 mod common;
-use common::gnx_bin;
+use common::cgn_bin;
 
 #[test]
 fn coverage_build_payload_returns_coverage_key() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["coverage", "--format", "json"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
@@ -48,7 +48,7 @@ fn coverage_build_payload_with_repo_returns_per_repo_key() {
 
     // `--repo` with an unknown name → graceful empty per_repo array,
     // not a panic or process failure.
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["coverage", "--repo", "__no_such_repo__", "--format", "json"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())

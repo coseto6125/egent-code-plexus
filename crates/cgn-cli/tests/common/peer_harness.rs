@@ -47,7 +47,7 @@ impl PeerHarness {
         };
         SessionMeta::write_atomic(&session_dir.join("meta.json"), &meta).unwrap();
 
-        let bin: PathBuf = env!("CARGO_BIN_EXE_gnx").into();
+        let bin: PathBuf = env!("CARGO_BIN_EXE_cgn").into();
         let child = Command::new(&bin)
             .args([
                 "watch",
@@ -127,7 +127,7 @@ impl PeerHarness {
     }
 
     pub fn say(&self, from: &str, to: Option<&str>, body: &str) -> std::process::Output {
-        let bin: PathBuf = env!("CARGO_BIN_EXE_gnx").into();
+        let bin: PathBuf = env!("CARGO_BIN_EXE_cgn").into();
         let mut args = vec![
             "peers",
             "say",

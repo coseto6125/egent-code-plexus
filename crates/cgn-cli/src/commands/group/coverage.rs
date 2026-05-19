@@ -4,8 +4,8 @@
 //! are concatenated in parallel and emitted as a flat array.
 
 use clap::Args;
-use cgn_core::registry::{resolve_home_gnx, RegistryFile};
-use cgn_core::GnxError;
+use cgn_core::registry::{resolve_home_cgn, RegistryFile};
+use cgn_core::CgnError;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 
@@ -22,9 +22,9 @@ pub struct CoverageArgs {
     pub json: bool,
 }
 
-pub fn run(args: CoverageArgs) -> Result<(), GnxError> {
-    let home_gnx = resolve_home_gnx();
-    let registry_path = home_gnx.join("registry.json");
+pub fn run(args: CoverageArgs) -> Result<(), CgnError> {
+    let home_cgn = resolve_home_cgn();
+    let registry_path = home_cgn.join("registry.json");
     let reg = RegistryFile::read_or_empty(&registry_path)?;
 
     // 1. Validate group.
@@ -33,7 +33,7 @@ pub fn run(args: CoverageArgs) -> Result<(), GnxError> {
         .iter()
         .find(|g| g.name == args.name)
         .ok_or_else(|| {
-            GnxError::InvalidArgument(format!(
+            CgnError::InvalidArgument(format!(
                 "group '{}' not found — run `cgn admin group add <repo> {}`",
                 args.name, args.name
             ))

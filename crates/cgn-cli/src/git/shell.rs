@@ -2,13 +2,13 @@
 //! and parses the unified-diff output. Matches upstream byte-for-byte.
 
 use super::{parse_diff_hunks, DiffScope, FileDiff, GitDiffProvider};
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::path::Path;
 
 pub struct ShellGitProvider;
 
 impl GitDiffProvider for ShellGitProvider {
-    fn diff(&self, repo: &Path, scope: &DiffScope) -> Result<Vec<FileDiff>, GnxError> {
+    fn diff(&self, repo: &Path, scope: &DiffScope) -> Result<Vec<FileDiff>, CgnError> {
         const ZERO_CONTEXT: &str = "-U0";
         let mut args: Vec<&str> = vec!["diff"];
         let base_owned: String;
@@ -27,13 +27,13 @@ impl GitDiffProvider for ShellGitProvider {
             .args(&args)
             .current_dir(repo)
             .output()
-            .map_err(|e| GnxError::GitDiff {
+            .map_err(|e| CgnError::GitDiff {
                 reason: format!("spawn failed: {e}"),
             })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(GnxError::GitDiff {
+            return Err(CgnError::GitDiff {
                 reason: format!(
                     "git exited with status {}: {}",
                     output.status,

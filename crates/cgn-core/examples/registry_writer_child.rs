@@ -8,11 +8,11 @@ use std::path::PathBuf;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let home_gnx = PathBuf::from(args.next().expect("arg 1: home_gnx path"));
+    let home_cgn = PathBuf::from(args.next().expect("arg 1: home_cgn path"));
     let repo_name = args.next().expect("arg 2: repo name");
     let marker = args.next().expect("arg 3: slot marker");
 
-    let mut reg = Registry::open(&home_gnx).expect("registry open");
+    let mut reg = Registry::open(&home_cgn).expect("registry open");
     reg.upsert_repo(RepoAlias {
         dir_name: repo_name.clone(),
         common_dir: format!("/tmp/test/{repo_name}#{marker}/.git"),

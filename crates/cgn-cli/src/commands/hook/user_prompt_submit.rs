@@ -2,8 +2,8 @@
 //! files, then unlink them so each event fires only once. Failure takes
 //! priority over success because it is more actionable.
 
-use super::common::{emit_additional_context, gnx_state_dir, lookup_index_dir, HookInput};
-use cgn_core::GnxError;
+use super::common::{emit_additional_context, cgn_state_dir, lookup_index_dir, HookInput};
+use cgn_core::CgnError;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -13,13 +13,13 @@ use std::path::Path;
 /// (with multi-KB stderr per attempt) fits in one seek+read.
 const LOG_TAIL_WINDOW: u64 = 4096;
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     // All signals (rebuild marker + peer drain) merge into one
     // additionalContext payload — Claude Code parses one JSON object on
     // stdout, so two println!s would drop the second silently.
     let mut sections: Vec<String> = Vec::new();
 
-    if let Some(state_dir) = gnx_state_dir(&input.cwd) {
+    if let Some(state_dir) = cgn_state_dir(&input.cwd) {
         let complete = state_dir.join(".rebuild-complete");
         let failed = state_dir.join(".rebuild-failed");
         let log = state_dir.join("last-rebuild.log");

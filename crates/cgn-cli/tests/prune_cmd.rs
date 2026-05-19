@@ -1,7 +1,7 @@
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// `cgn admin prune --branch` is a no-op in v2 (branch isn't stored).
@@ -18,7 +18,7 @@ fn prune_branch_returns_informative_error() {
         .output()
         .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "admin",
             "prune",
@@ -49,14 +49,14 @@ fn prune_orphans_drops_entries_with_missing_common_dir() {
     use std::collections::BTreeMap;
 
     let home_tmp = tempfile::tempdir().unwrap();
-    let home_gnx = home_tmp.path().join(".gnx");
-    std::fs::create_dir_all(&home_gnx).unwrap();
+    let home_cgn = home_tmp.path().join(".cgn");
+    std::fs::create_dir_all(&home_cgn).unwrap();
 
-    // valid-repo: common_dir exists (use the home_gnx dir itself as a stand-in)
-    let valid_common_dir = home_gnx.clone();
-    let valid_index = home_gnx.join("valid-repo__aabbccdd");
+    // valid-repo: common_dir exists (use the home_cgn dir itself as a stand-in)
+    let valid_common_dir = home_cgn.clone();
+    let valid_index = home_cgn.join("valid-repo__aabbccdd");
     // orphan-repo: common_dir does NOT exist
-    let orphan_index = home_gnx.join("orphan-repo__aabbccdd");
+    let orphan_index = home_cgn.join("orphan-repo__aabbccdd");
     std::fs::create_dir_all(valid_index.join("commits")).unwrap();
     std::fs::create_dir_all(orphan_index.join("commits").join("sha_abc12345")).unwrap();
     std::fs::write(
@@ -93,14 +93,14 @@ fn prune_orphans_drops_entries_with_missing_common_dir() {
         repos,
         groups: vec![],
     };
-    let registry_path = home_gnx.join("registry.json");
+    let registry_path = home_cgn.join("registry.json");
     std::fs::write(
         &registry_path,
         serde_json::to_string(&registry).unwrap(),
     )
     .unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "prune", "--orphans"])
         .env("HOME", home_tmp.path())
         .output()

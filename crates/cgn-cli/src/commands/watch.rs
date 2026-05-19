@@ -5,13 +5,13 @@ use crate::session::resolver::resolve_session_id;
 use clap::Args;
 use cgn_core::peer::registry::pid_alive;
 use cgn_core::session::SessionMeta;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use std::path::PathBuf;
 
 fn default_repo_root() -> std::io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(&cwd)?;
-    Ok(cgn_core::registry::resolve_home_gnx().join(repo_dir))
+    Ok(cgn_core::registry::resolve_home_cgn().join(repo_dir))
 }
 
 #[derive(Args, Debug, Clone)]
@@ -28,7 +28,7 @@ pub struct WatchArgs {
     pub repo: Option<PathBuf>,
 }
 
-pub fn run(args: WatchArgs) -> Result<(), GnxError> {
+pub fn run(args: WatchArgs) -> Result<(), CgnError> {
     let repo_root = match args.repo.clone() {
         Some(p) => p,
         None => default_repo_root()?,
@@ -42,13 +42,13 @@ pub fn run(args: WatchArgs) -> Result<(), GnxError> {
         (true, false, false, false) => start_background(repo_root, session_id, session_dir),
         (false, true, false, false) => stop_watcher(&session_dir),
         (false, false, true, false) => print_status(&session_dir),
-        _ => Err(GnxError::InvalidArgument(
+        _ => Err(CgnError::InvalidArgument(
             "specify exactly one of --start | --stop | --status | --foreground".into(),
         )),
     }
 }
 
-fn start_foreground(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Result<(), GnxError> {
+fn start_foreground(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Result<(), CgnError> {
     if std::env::var("CGN_TEST_EXIT_AFTER_INIT").is_ok() {
         eprintln!("[cgn watch] test mode — exiting after init");
         return Ok(());
@@ -59,11 +59,11 @@ fn start_foreground(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Re
         my_session_dir: session_dir.clone(),
         lock_path: session_dir.join("watcher.lock"),
     };
-    run_watcher(cfg).map_err(|e| GnxError::Io(e))
+    run_watcher(cfg).map_err(|e| CgnError::Io(e))
 }
 
 #[cfg(unix)]
-fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Result<(), GnxError> {
+fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Result<(), CgnError> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let watcher_log = session_dir.join("watcher.log");
@@ -111,13 +111,13 @@ fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Re
 }
 
 #[cfg(not(unix))]
-fn start_background(_: PathBuf, _: String, _: PathBuf) -> Result<(), GnxError> {
-    Err(GnxError::InvalidArgument(
+fn start_background(_: PathBuf, _: String, _: PathBuf) -> Result<(), CgnError> {
+    Err(CgnError::InvalidArgument(
         "background watch not yet supported on this platform; use --foreground".into(),
     ))
 }
 
-fn stop_watcher(session_dir: &std::path::Path) -> Result<(), GnxError> {
+fn stop_watcher(session_dir: &std::path::Path) -> Result<(), CgnError> {
     let meta_path = session_dir.join("meta.json");
     let mut meta = match SessionMeta::read(&meta_path) {
         Ok(m) => m,
@@ -142,7 +142,7 @@ fn stop_watcher(session_dir: &std::path::Path) -> Result<(), GnxError> {
     Ok(())
 }
 
-fn print_status(session_dir: &std::path::Path) -> Result<(), GnxError> {
+fn print_status(session_dir: &std::path::Path) -> Result<(), CgnError> {
     let meta_path = session_dir.join("meta.json");
     let meta = SessionMeta::read(&meta_path).ok();
     match meta.and_then(|m| m.watcher_pid) {

@@ -15,7 +15,7 @@ pub enum PathError {
 }
 
 /// Validate a single path segment (e.g. `<repo>` or `<branch>`) for use
-/// inside `~/.gnx/`. Whitelist `[A-Za-z0-9_.-]+`, reject `..`, reject
+/// inside `~/.cgn/`. Whitelist `[A-Za-z0-9_.-]+`, reject `..`, reject
 /// leading `-` or `.`, max 64 chars.
 pub fn sanitize_segment(s: &str) -> Result<String, PathError> {
     if s.is_empty() {
@@ -66,9 +66,9 @@ pub fn uid_path(absolute: &Path, repo_root: &Path) -> Result<String, PathError> 
 }
 
 /// Resolve the cgn home directory used for `registry.json` and per-branch
-/// index dirs. Tries `$HOME/.gnx` first; if HOME is unset or the directory
+/// index dirs. Tries `$HOME/.cgn` first; if HOME is unset or the directory
 /// cannot be created and written to (read-only FS, permission denied, CI
-/// sandbox), falls back to `<temp_dir>/graph-nexus-fallback/.gnx`.
+/// sandbox), falls back to `<temp_dir>/graph-nexus-fallback/.cgn`.
 ///
 /// Reads and writes within a single CLI invocation use the same resolved
 /// path: a project indexed in fallback mode is queryable from the same
@@ -77,32 +77,32 @@ pub fn uid_path(absolute: &Path, repo_root: &Path) -> Result<String, PathError> 
 /// Fast path: if `registry.json` already exists inside the home candidate,
 /// the dir was writable at some point and we skip the probe entirely (one
 /// stat instead of create+write+unlink on every invocation).
-pub fn resolve_home_gnx() -> PathBuf {
-    resolve_home_gnx_from_env(std::env::var_os("HOME"))
+pub fn resolve_home_cgn() -> PathBuf {
+    resolve_home_cgn_from_env(std::env::var_os("HOME"))
 }
 
-/// Same resolution logic as [`resolve_home_gnx`], but with the HOME source
+/// Same resolution logic as [`resolve_home_cgn`], but with the HOME source
 /// supplied by the caller. In-process tests (or any caller wanting to point
 /// cgn at a private home without mutating the process-global `HOME` env
 /// var) call this with an explicit override. Production code paths read
-/// the env var via [`resolve_home_gnx`].
+/// the env var via [`resolve_home_cgn`].
 ///
 /// `#[allow(dead_code)]` because the only intended caller today is the
 /// future in-process integration test refactor; ships now so the public
 /// API is in place when that work lands without forcing it into the
 /// same PR.
 #[allow(dead_code)]
-pub fn resolve_home_gnx_from<P: AsRef<Path>>(home: P) -> PathBuf {
-    let candidate = home.as_ref().join(".gnx");
+pub fn resolve_home_cgn_from<P: AsRef<Path>>(home: P) -> PathBuf {
+    let candidate = home.as_ref().join(".cgn");
     if candidate.join("registry.json").exists() || probe_writable(&candidate) {
         return candidate;
     }
     fallback_home()
 }
 
-fn resolve_home_gnx_from_env(home: Option<std::ffi::OsString>) -> PathBuf {
+fn resolve_home_cgn_from_env(home: Option<std::ffi::OsString>) -> PathBuf {
     if let Some(h) = home {
-        let candidate = PathBuf::from(h).join(".gnx");
+        let candidate = PathBuf::from(h).join(".cgn");
         if candidate.join("registry.json").exists() || probe_writable(&candidate) {
             return candidate;
         }
@@ -113,14 +113,14 @@ fn resolve_home_gnx_from_env(home: Option<std::ffi::OsString>) -> PathBuf {
 fn fallback_home() -> PathBuf {
     std::env::temp_dir()
         .join("graph-nexus-fallback")
-        .join(".gnx")
+        .join(".cgn")
 }
 
 fn probe_writable(dir: &Path) -> bool {
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
-    let probe = dir.join(".gnx-write-probe");
+    let probe = dir.join(".cgn-write-probe");
     let ok = std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(&probe);
     ok
@@ -135,7 +135,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         assert!(probe_writable(tmp.path()));
         // probe file should be cleaned up
-        assert!(!tmp.path().join(".gnx-write-probe").exists());
+        assert!(!tmp.path().join(".cgn-write-probe").exists());
     }
 
     #[cfg(unix)]
@@ -163,39 +163,39 @@ mod tests {
         assert!(!probe_writable(&file));
     }
 
-    /// Single test covers all `resolve_home_gnx` scenarios sequentially —
+    /// Single test covers all `resolve_home_cgn` scenarios sequentially —
     /// HOME is process-global and racing with parallel tests would corrupt
-    /// other env readers. Since only `resolve_home_gnx` reads HOME in this
+    /// other env readers. Since only `resolve_home_cgn` reads HOME in this
     /// crate, serial mutation inside one test is safe.
     #[test]
-    fn resolve_home_gnx_covers_happy_path_fast_path_and_fallback() {
+    fn resolve_home_cgn_covers_happy_path_fast_path_and_fallback() {
         let orig_home = std::env::var_os("HOME");
 
         // (1) HOME unset → tmp fallback
         std::env::remove_var("HOME");
-        let p = resolve_home_gnx();
+        let p = resolve_home_cgn();
         assert!(
             p.starts_with(std::env::temp_dir()),
             "no-HOME should fall back to temp_dir, got {p:?}"
         );
-        assert!(p.ends_with(".gnx"), "fallback path tail should end in .gnx");
+        assert!(p.ends_with(".cgn"), "fallback path tail should end in .cgn");
 
-        // (2) HOME set + writable, no registry.json → probe runs, returns <HOME>/.gnx, no leftover probe
+        // (2) HOME set + writable, no registry.json → probe runs, returns <HOME>/.cgn, no leftover probe
         let writable = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", writable.path());
-        let p = resolve_home_gnx();
-        assert_eq!(p, writable.path().join(".gnx"));
+        let p = resolve_home_cgn();
+        assert_eq!(p, writable.path().join(".cgn"));
         assert!(p.exists(), "probe path should be created");
         assert!(
-            !p.join(".gnx-write-probe").exists(),
+            !p.join(".cgn-write-probe").exists(),
             "probe file should be cleaned up"
         );
 
         // (3) Fast path: registry.json exists → no probe write attempted
         std::fs::write(p.join("registry.json"), b"{}").unwrap();
-        let probe_file = p.join(".gnx-write-probe");
+        let probe_file = p.join(".cgn-write-probe");
         std::fs::write(&probe_file, b"stale").unwrap(); // marker
-        let _ = resolve_home_gnx();
+        let _ = resolve_home_cgn();
         // probe path should NOT have been touched (still has our stale marker)
         assert_eq!(
             std::fs::read(&probe_file).unwrap(),
@@ -213,7 +213,7 @@ mod tests {
             perms.set_mode(0o500);
             std::fs::set_permissions(ro.path(), perms).unwrap();
             std::env::set_var("HOME", ro.path());
-            let p = resolve_home_gnx();
+            let p = resolve_home_cgn();
             assert!(
                 p.starts_with(std::env::temp_dir()),
                 "read-only HOME should fall back, got {p:?}"

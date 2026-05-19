@@ -25,7 +25,7 @@ pub mod menu;
 pub mod status;
 
 use dialoguer::theme::ColorfulTheme;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct AdminArgs {
@@ -33,12 +33,12 @@ pub struct AdminArgs {
     // (Subproject C may add --non-interactive for scripting later.)
 }
 
-pub fn run(_args: AdminArgs) -> Result<(), GnxError> {
+pub fn run(_args: AdminArgs) -> Result<(), CgnError> {
     let theme = ColorfulTheme::default();
     main_menu(&theme)
 }
 
-fn main_menu(theme: &ColorfulTheme) -> Result<(), GnxError> {
+fn main_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = menu::select(theme, "cgn admin", MAIN_MENU)?;
         match choice {

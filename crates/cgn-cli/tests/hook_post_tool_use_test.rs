@@ -6,12 +6,12 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run_with(envelope: &str) -> std::process::Output {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "post-tool-use", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

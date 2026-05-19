@@ -4,8 +4,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 /// v1: empty placeholder — no routes yet.
@@ -82,7 +82,7 @@ fn diff_contracts_two_commit_added_fetch() {
         .unwrap();
     assert!(out.status.success(), "commit v2: {}", String::from_utf8_lossy(&out.stderr));
 
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args([
             "diff", "--section", "contracts",
             "--baseline", &baseline_sha,
@@ -119,7 +119,7 @@ fn diff_contracts_head_vs_head_empty() {
         let out = Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap().stdout;
         String::from_utf8_lossy(&out).trim().to_string()
     };
-    let output = Command::new(gnx_bin())
+    let output = Command::new(cgn_bin())
         .args(["diff", "--section", "contracts", "--baseline", &head_sha, "--format", "json"])
         .output()
         .expect("run cgn diff contracts");

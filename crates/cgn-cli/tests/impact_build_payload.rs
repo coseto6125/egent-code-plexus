@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 mod common;
-use common::{gnx_bin, run_git};
+use common::{cgn_bin, run_git};
 
 fn init_repo_and_analyze(repo: &Path) {
     std::fs::create_dir_all(repo.join("src")).unwrap();
@@ -32,7 +32,7 @@ fn init_repo_and_analyze(repo: &Path) {
             "init",
         ],
     );
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", repo)
@@ -52,7 +52,7 @@ fn impact_build_payload_unknown_symbol_returns_error_field() {
 
     // Graph is indexed but symbol doesn't exist → build_payload returns
     // {"error": "No symbol named … found in graph"}, not a process failure.
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["impact", "__nonexistent_symbol_xyzzy__", "--format", "json"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
@@ -87,7 +87,7 @@ fn impact_build_payload_no_args_returns_error() {
 
     // Neither positional name nor --baseline → build_payload returns an
     // InvalidArgument error which propagates to the CLI as a non-zero exit.
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["impact"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())

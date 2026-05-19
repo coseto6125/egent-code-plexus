@@ -11,8 +11,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 // `axios.get` / `fetch` are both in the HTTP catalog. `compute()` is a
@@ -80,7 +80,7 @@ fn setup_repo_with_file(repo: &Path, home: &Path, rel_path: &str, src: &str, ori
             "init",
         ],
     );
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "."])
         .current_dir(repo)
         .env("HOME", home)
@@ -96,7 +96,7 @@ fn setup_repo_with_file(repo: &Path, home: &Path, rel_path: &str, src: &str, ori
 fn run_tool_map(repo: &Path, home: &Path, extra: &[&str]) -> Value {
     let mut args = vec!["tool-map", "--repo", ".", "--format", "json"];
     args.extend_from_slice(extra);
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", home)

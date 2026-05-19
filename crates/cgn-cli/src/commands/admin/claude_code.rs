@@ -4,7 +4,7 @@
 //! hook installs).
 
 use clap::Args;
-use cgn_core::GnxError;
+use cgn_core::CgnError;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ pub const ALL_EVENTS: &[&str] = &[
 pub fn run_install_claude_code(
     events_csv: Option<&str>,
     settings_path: Option<&Path>,
-) -> Result<(), GnxError> {
+) -> Result<(), CgnError> {
     let events = match events_csv {
         Some(s) => parse_events(s)?,
         None => prompt_events_tui()?,
@@ -64,9 +64,9 @@ pub fn run_install_claude_code(
     Ok(())
 }
 
-pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), GnxError> {
+pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), CgnError> {
     if !args.claude_code {
-        return Err(GnxError::InvalidArgument("--claude-code required".into()));
+        return Err(CgnError::InvalidArgument("--claude-code required".into()));
     }
     let events = match &args.events {
         Some(s) => parse_events(s)?,
@@ -86,9 +86,9 @@ pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), GnxError> {
     Ok(())
 }
 
-pub fn run_status(args: StatusArgs) -> Result<(), GnxError> {
+pub fn run_status(args: StatusArgs) -> Result<(), CgnError> {
     if !args.claude_code {
-        return Err(GnxError::InvalidArgument("--claude-code required".into()));
+        return Err(CgnError::InvalidArgument("--claude-code required".into()));
     }
     let settings_path = resolve_settings_path(args.settings_path.as_deref());
     let settings = read_or_init(&settings_path)?;
@@ -106,7 +106,7 @@ pub fn run_status(args: StatusArgs) -> Result<(), GnxError> {
 
 // ─── internals ─────────────────────────────────────────────────────────────
 
-fn parse_events(csv: &str) -> Result<Vec<String>, GnxError> {
+fn parse_events(csv: &str) -> Result<Vec<String>, CgnError> {
     let mut out = Vec::new();
     for raw in csv.split(',') {
         let t = raw.trim();
@@ -114,7 +114,7 @@ fn parse_events(csv: &str) -> Result<Vec<String>, GnxError> {
             continue;
         }
         if !ALL_EVENTS.contains(&t) {
-            return Err(GnxError::InvalidArgument(format!(
+            return Err(CgnError::InvalidArgument(format!(
                 "unknown event '{t}' — expected one of: {}",
                 ALL_EVENTS.join(", ")
             )));
@@ -122,18 +122,18 @@ fn parse_events(csv: &str) -> Result<Vec<String>, GnxError> {
         out.push(t.to_string());
     }
     if out.is_empty() {
-        return Err(GnxError::InvalidArgument("--events list is empty".into()));
+        return Err(CgnError::InvalidArgument("--events list is empty".into()));
     }
     Ok(out)
 }
 
-fn prompt_events_tui() -> Result<Vec<String>, GnxError> {
+fn prompt_events_tui() -> Result<Vec<String>, CgnError> {
     use dialoguer::{theme::ColorfulTheme, MultiSelect};
     let chosen = MultiSelect::with_theme(&ColorfulTheme::default())
         .with_prompt("Select Claude Code hook events to install")
         .items(ALL_EVENTS)
         .interact()
-        .map_err(|e| GnxError::Output(format!("TUI: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("TUI: {e}")))?;
     Ok(chosen
         .into_iter()
         .map(|i| ALL_EVENTS[i].to_string())
@@ -150,23 +150,23 @@ fn resolve_settings_path(override_path: Option<&Path>) -> PathBuf {
     home.join(".claude").join("settings.json")
 }
 
-fn read_or_init(path: &Path) -> Result<Value, GnxError> {
+fn read_or_init(path: &Path) -> Result<Value, CgnError> {
     if !path.exists() {
         return Ok(json!({"hooks": {}}));
     }
     let raw = fs::read_to_string(path)
-        .map_err(|e| GnxError::Output(format!("read {}: {e}", path.display())))?;
+        .map_err(|e| CgnError::Output(format!("read {}: {e}", path.display())))?;
     if raw.trim().is_empty() {
         return Ok(json!({"hooks": {}}));
     }
     serde_json::from_str(&raw)
-        .map_err(|e| GnxError::InvalidArgument(format!("settings.json parse: {e}")))
+        .map_err(|e| CgnError::InvalidArgument(format!("settings.json parse: {e}")))
 }
 
-fn self_exe() -> Result<String, GnxError> {
+fn self_exe() -> Result<String, CgnError> {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| GnxError::Output(format!("current_exe: {e}")))
+        .map_err(|e| CgnError::Output(format!("current_exe: {e}")))
 }
 
 fn event_kebab_to_camel(ev: &str) -> &'static str {
@@ -210,22 +210,22 @@ fn command_of_entry(entry: &Value) -> &str {
         .unwrap_or("")
 }
 
-fn merge_entry(settings: &mut Value, ev: &str, exe: &str) -> Result<(), GnxError> {
+fn merge_entry(settings: &mut Value, ev: &str, exe: &str) -> Result<(), CgnError> {
     let camel = event_kebab_to_camel(ev);
     let cmd = format!("\"{exe}\" hook {ev} --claude-code");
 
     let root = settings.as_object_mut().ok_or_else(|| {
-        GnxError::InvalidArgument("settings.json root is not a JSON object".into())
+        CgnError::InvalidArgument("settings.json root is not a JSON object".into())
     })?;
     let hooks_obj = root.entry("hooks").or_insert_with(|| json!({}));
     let hooks_map = hooks_obj.as_object_mut().ok_or_else(|| {
-        GnxError::InvalidArgument("settings.json `hooks` field is not an object".into())
+        CgnError::InvalidArgument("settings.json `hooks` field is not an object".into())
     })?;
     let arr_val = hooks_map
         .entry(camel.to_string())
         .or_insert_with(|| json!([]));
     let arr = arr_val.as_array_mut().ok_or_else(|| {
-        GnxError::InvalidArgument(format!("settings.json `hooks.{camel}` is not an array"))
+        CgnError::InvalidArgument(format!("settings.json `hooks.{camel}` is not an array"))
     })?;
 
     // Idempotence: drop any existing entry pointing at `cgn hook <ev>`.
@@ -285,7 +285,7 @@ fn is_installed(settings: &Value, ev: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn write_atomic(path: &Path, value: &Value) -> Result<(), GnxError> {
+fn write_atomic(path: &Path, value: &Value) -> Result<(), CgnError> {
     cgn_core::registry::atomic_write_json(path, value)
-        .map_err(|e| GnxError::Output(format!("atomic write {}: {e}", path.display())))
+        .map_err(|e| CgnError::Output(format!("atomic write {}: {e}", path.display())))
 }

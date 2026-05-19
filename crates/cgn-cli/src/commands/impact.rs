@@ -7,7 +7,7 @@ use clap::{Args, ValueEnum};
 use cgn_core::algorithms::process_trace::is_test_path;
 use cgn_core::config;
 use cgn_core::graph::NodeKind;
-use cgn_core::{GnxError, HIGH_TRUST_CONFIDENCE};
+use cgn_core::{CgnError, HIGH_TRUST_CONFIDENCE};
 use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -110,7 +110,7 @@ struct ImpactStderrHints {
     hidden_edges: u64,
 }
 
-pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
+pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), CgnError> {
     let format = OutputFormat::parse(args.format.as_deref());
     let (payload, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(name) = &hints.empty_hint_name {
@@ -129,7 +129,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), GnxError> {
 /// caller and `cargo` flags it as dead. Kept `pub` to mirror the 5-command
 /// `build_payload` surface introduced in PR #88 for future library consumers.
 #[allow(dead_code)]
-pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
+pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, CgnError> {
     build_payload_with_hints(args, engine).map(|(v, _)| v)
 }
 
@@ -189,7 +189,7 @@ pub fn run_for_symbol(
     max_depth: Option<u32>,
     timeout_ms: Option<u64>,
     include_tests: bool,
-) -> Result<LocalImpact, GnxError> {
+) -> Result<LocalImpact, CgnError> {
     let dir = match direction.to_ascii_lowercase().as_str() {
         "downstream" | "down" => Direction::Down,
         "both" => Direction::Both,
@@ -218,14 +218,14 @@ pub fn run_for_symbol(
 fn build_payload_with_hints(
     args: &ImpactArgs,
     engine: &Engine,
-) -> Result<(Value, ImpactStderrHints), GnxError> {
+) -> Result<(Value, ImpactStderrHints), CgnError> {
     let has_name = args.name.is_some() || args.target.is_some();
     match (has_name, args.baseline.as_ref()) {
         (true, None) => impact_by_name(args, engine),
         (false, Some(_)) => {
             impact_with_baseline(args, engine).map(|v| (v, ImpactStderrHints::default()))
         }
-        (false, None) => Err(GnxError::InvalidArgument(
+        (false, None) => Err(CgnError::InvalidArgument(
             "impact requires a symbol (positional <name> or --target <name>) or --baseline <ref>"
                 .into(),
         )),
@@ -236,13 +236,13 @@ fn build_payload_with_hints(
 fn impact_by_name(
     args: &ImpactArgs,
     engine: &Engine,
-) -> Result<(Value, ImpactStderrHints), GnxError> {
+) -> Result<(Value, ImpactStderrHints), CgnError> {
     let name = args
         .name
         .as_deref()
         .or(args.target.as_deref())
         .expect("build_payload_with_hints gates on name||target");
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
 
     // Resolve name → matching node indices, with optional --file / --kind disambiguation.
     let file_needle = args.file.as_deref();
@@ -391,7 +391,7 @@ fn impact_by_name(
     ))
 }
 
-fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, GnxError> {
+fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, CgnError> {
     let baseline_ref = args.baseline.as_deref().unwrap();
     let repo_path = PathBuf::from(args.repo.as_deref().unwrap_or("."));
 
@@ -409,7 +409,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Gnx
         }));
     }
 
-    let graph = engine.graph().map_err(|e| GnxError::Rkyv(e.to_string()))?;
+    let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
 
     // Identify changed file paths from the diff.
     let changed_paths: Vec<String> = file_diffs

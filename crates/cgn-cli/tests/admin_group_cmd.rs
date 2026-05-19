@@ -1,21 +1,21 @@
 //! Integration tests for `cgn admin group add/remove`.
 //!
-//! Registry redirection: set HOME to a temp dir so `resolve_home_gnx`
-//! resolves to `<temp>/.gnx/registry.json`.
+//! Registry redirection: set HOME to a temp dir so `resolve_home_cgn`
+//! resolves to `<temp>/.cgn/registry.json`.
 
 use cgn_core::registry::{GroupEntry, RegistryFile, RepoAlias};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run_admin_group(home: &Path, args: &[&str]) -> std::process::Output {
     let mut full_args = vec!["admin", "group"];
     full_args.extend_from_slice(args);
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .args(&full_args)
         .env("HOME", home)
         .output()
@@ -23,13 +23,13 @@ fn run_admin_group(home: &Path, args: &[&str]) -> std::process::Output {
 }
 
 fn read_registry(home: &Path) -> RegistryFile {
-    RegistryFile::read_or_empty(&home.join(".gnx/registry.json")).unwrap()
+    RegistryFile::read_or_empty(&home.join(".cgn/registry.json")).unwrap()
 }
 
-/// Seed `<home>/.gnx/registry.json` with the given repos and initial groups.
+/// Seed `<home>/.cgn/registry.json` with the given repos and initial groups.
 fn seed_registry(home: &Path, repos: Vec<RepoAlias>, groups: Vec<GroupEntry>) {
-    let home_gnx = home.join(".gnx");
-    std::fs::create_dir_all(&home_gnx).unwrap();
+    let home_cgn = home.join(".cgn");
+    std::fs::create_dir_all(&home_cgn).unwrap();
     let mut repo_map = BTreeMap::new();
     for r in repos {
         repo_map.insert(r.dir_name.clone(), r);
@@ -39,7 +39,7 @@ fn seed_registry(home: &Path, repos: Vec<RepoAlias>, groups: Vec<GroupEntry>) {
         repos: repo_map,
         groups,
     };
-    RegistryFile::write_atomic(&home_gnx.join("registry.json"), &reg).unwrap();
+    RegistryFile::write_atomic(&home_cgn.join("registry.json"), &reg).unwrap();
 }
 
 fn make_repo(name: &str, groups: Vec<String>) -> RepoAlias {
@@ -57,7 +57,7 @@ fn make_repo(name: &str, groups: Vec<String>) -> RepoAlias {
 
 #[test]
 fn group_help_works() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "group", "--help"])
         .output()
         .unwrap();
@@ -79,7 +79,7 @@ fn group_help_works() {
 
 #[test]
 fn group_add_help_works() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "group", "add", "--help"])
         .output()
         .unwrap();
@@ -92,7 +92,7 @@ fn group_add_help_works() {
 
 #[test]
 fn group_remove_help_works() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "group", "remove", "--help"])
         .output()
         .unwrap();
