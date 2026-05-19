@@ -98,6 +98,7 @@ jobs:
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
 
+
       - name: Package (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
