@@ -1,6 +1,6 @@
 # Lua Sample Project
 
-This fixture exercises the `LuaProvider` for `graph-nexus-analyzer`.
+This fixture exercises the `LuaProvider` for `cgn-analyzer`.
 
 ## Files
 

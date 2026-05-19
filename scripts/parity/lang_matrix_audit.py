@@ -42,7 +42,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-ANALYZER_SRC = REPO_ROOT / "crates" / "graph-nexus-analyzer" / "src"
+ANALYZER_SRC = REPO_ROOT / "crates" / "cgn-analyzer" / "src"
 DEFAULT_RUNTIME = REPO_ROOT / "scripts" / "parity" / "final_baseline.txt"
 
 # NodeKind variants that are *emit-capable symbol kinds*. Skipped:

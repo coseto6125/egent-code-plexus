@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Wire `gnx admin index --force` to actually drop + rebuild L2 (currently warn-no-op), introduce `SessionState` as a derived view so query hot-path can skip overlay merge for clean sessions, remove three dead flags, and add a minimal `admin sessions list` so the new state shows up in the CLI.
+**Goal:** Wire `cgn admin index --force` to actually drop + rebuild L2 (currently warn-no-op), introduce `SessionState` as a derived view so query hot-path can skip overlay merge for clean sessions, remove three dead flags, and add a minimal `admin sessions list` so the new state shows up in the CLI.
 
 **Architecture:** New cross-cutting type `SessionState` classifies each `<repo>/sessions/<sid>/` as `PureReference | AugmentedReference | Stale` based on dirty_files + session_meta + L2 lookup. Three callers consume it: (1) `force_rebuild_l2` selectively invalidates Augmented sessions (Pure kept); (2) `Engine::open` takes a fast L2-only path for Pure; (3) `admin sessions list` shows STATE column. Force-rebuild order is L1-then-L2 to keep crash recovery self-consistent. Attach contention falls through to existing `wait_for_completion` then re-locks.
 
@@ -20,46 +20,46 @@
 
 | Path | Responsibility |
 |---|---|
-| `crates/graph-nexus-core/src/session/state.rs` | `SessionState` enum + `StaleReason` enum. Pure types, no I/O. |
-| `crates/graph-nexus-cli/src/session/state.rs` | `pub fn classify(repo_root, sid) -> SessionState`. Reads session_meta + dirty_files, resolves L2 via `commit_lookup::CommitIndex`. |
-| `crates/graph-nexus-cli/src/build/force.rs` | `force_rebuild_l2` + `invalidate_matching_l1` + `InvalidateReport` + `ForceRebuildResult`. Reuses build internals via `build_l2_with_options`. |
-| `crates/graph-nexus-cli/src/commands/admin/sessions.rs` | `Sessions { command: SessionsCommand }` clap subcommand. Initially only `List` variant. |
-| `crates/graph-nexus-cli/tests/session_state_test.rs` | Unit/integration tests for `classify`. |
-| `crates/graph-nexus-cli/tests/force_rebuild_test.rs` | Integration tests for `force_rebuild_l2` happy + L1 interaction. |
-| `crates/graph-nexus-cli/tests/admin_index_force_test.rs` | CLI integration tests for `gnx admin index --force` and idempotent skip. |
-| `crates/graph-nexus-cli/tests/admin_sessions_list_test.rs` | CLI integration tests for `gnx admin sessions list` STATE column + JSON. |
-| `crates/graph-nexus-cli/tests/force_rebuild_concurrent_test.rs` | Two-thread concurrent --force test. |
+| `crates/cgn-core/src/session/state.rs` | `SessionState` enum + `StaleReason` enum. Pure types, no I/O. |
+| `crates/cgn-cli/src/session/state.rs` | `pub fn classify(repo_root, sid) -> SessionState`. Reads session_meta + dirty_files, resolves L2 via `commit_lookup::CommitIndex`. |
+| `crates/cgn-cli/src/build/force.rs` | `force_rebuild_l2` + `invalidate_matching_l1` + `InvalidateReport` + `ForceRebuildResult`. Reuses build internals via `build_l2_with_options`. |
+| `crates/cgn-cli/src/commands/admin/sessions.rs` | `Sessions { command: SessionsCommand }` clap subcommand. Initially only `List` variant. |
+| `crates/cgn-cli/tests/session_state_test.rs` | Unit/integration tests for `classify`. |
+| `crates/cgn-cli/tests/force_rebuild_test.rs` | Integration tests for `force_rebuild_l2` happy + L1 interaction. |
+| `crates/cgn-cli/tests/admin_index_force_test.rs` | CLI integration tests for `cgn admin index --force` and idempotent skip. |
+| `crates/cgn-cli/tests/admin_sessions_list_test.rs` | CLI integration tests for `cgn admin sessions list` STATE column + JSON. |
+| `crates/cgn-cli/tests/force_rebuild_concurrent_test.rs` | Two-thread concurrent --force test. |
 
 ### Modified files
 
 | Path | What changes |
 |---|---|
-| `crates/graph-nexus-core/src/session/mod.rs` | `pub mod state;` + `pub use state::{SessionState, StaleReason};` |
-| `crates/graph-nexus-cli/src/session/mod.rs` | `pub mod state;` (promotion.rs already there) |
-| `crates/graph-nexus-cli/src/build/mod.rs` | `pub mod force;` |
-| `crates/graph-nexus-cli/src/build/orchestrator.rs` | Extract reusable helpers (no signature change to `build_l2`). |
-| `crates/graph-nexus-cli/src/engine.rs` | Add `Engine::open(repo_root, sid)` constructor + `GraphView` enum; keep `Engine::load` for back-compat. |
-| `crates/graph-nexus-cli/src/commands/admin/index.rs` | Delete `no_cache / embeddings / drop_embeddings` + warn block; rewrite `run()` as 3-way match. |
-| `crates/graph-nexus-cli/src/commands/admin/mod.rs` | Add `Sessions` variant to `AdminCommands` + dispatch arm. |
+| `crates/cgn-core/src/session/mod.rs` | `pub mod state;` + `pub use state::{SessionState, StaleReason};` |
+| `crates/cgn-cli/src/session/mod.rs` | `pub mod state;` (promotion.rs already there) |
+| `crates/cgn-cli/src/build/mod.rs` | `pub mod force;` |
+| `crates/cgn-cli/src/build/orchestrator.rs` | Extract reusable helpers (no signature change to `build_l2`). |
+| `crates/cgn-cli/src/engine.rs` | Add `Engine::open(repo_root, sid)` constructor + `GraphView` enum; keep `Engine::load` for back-compat. |
+| `crates/cgn-cli/src/commands/admin/index.rs` | Delete `no_cache / embeddings / drop_embeddings` + warn block; rewrite `run()` as 3-way match. |
+| `crates/cgn-cli/src/commands/admin/mod.rs` | Add `Sessions` variant to `AdminCommands` + dispatch arm. |
 
 ---
 
 ## Task 1: SessionState enum + classify foundation
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/session/state.rs`
-- Create: `crates/graph-nexus-cli/src/session/state.rs`
-- Modify: `crates/graph-nexus-core/src/session/mod.rs`
-- Modify: `crates/graph-nexus-cli/src/session/mod.rs`
-- Test: `crates/graph-nexus-cli/tests/session_state_test.rs`
+- Create: `crates/cgn-core/src/session/state.rs`
+- Create: `crates/cgn-cli/src/session/state.rs`
+- Modify: `crates/cgn-core/src/session/mod.rs`
+- Modify: `crates/cgn-cli/src/session/mod.rs`
+- Test: `crates/cgn-cli/tests/session_state_test.rs`
 
 - [ ] **Step 1: Write the failing test file**
 
-Create `crates/graph-nexus-cli/tests/session_state_test.rs`:
+Create `crates/cgn-cli/tests/session_state_test.rs`:
 
 ```rust
-use graph_nexus_cli::session::state::classify;
-use graph_nexus_core::session::{
+use cgn_cli::session::state::classify;
+use cgn_core::session::{
     DirtyEntry, DirtyFiles, SessionMeta, SessionState, StaleReason,
 };
 use std::fs;
@@ -69,20 +69,20 @@ fn setup_repo(tmp: &Path, sha: &str, dirname: &str) {
     let commits = tmp.join("commits").join(dirname);
     fs::create_dir_all(&commits).unwrap();
     fs::write(commits.join("graph.bin"), b"stub").unwrap();
-    let cm = graph_nexus_core::registry::CommitBuildMeta {
+    let cm = cgn_core::registry::CommitBuildMeta {
         version: 1,
         sha: sha.to_string(),
-        source_type: graph_nexus_core::registry::SourceType::Branch,
+        source_type: cgn_core::registry::SourceType::Branch,
         source_id: Some("main".into()),
         built_from_worktree: "/tmp/wt".into(),
         built_at: "2026-05-17T10:00:00Z".into(),
         parent_sha: None,
         node_count: 0,
-        embedding_status: graph_nexus_core::registry::EmbeddingStatus::None,
+        embedding_status: cgn_core::registry::EmbeddingStatus::None,
         refs_at_build: vec![],
         refs_seen_since: vec![],
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm)
+    cgn_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm)
         .unwrap();
 }
 
@@ -210,13 +210,13 @@ fn classify_missing_l2_returns_stale_l2missing() {
 
 - [ ] **Step 2: Run test to verify it fails (no impl yet)**
 
-Run: `cargo test -p graph-nexus-cli --test session_state_test 2>&1 | tail -20`
+Run: `cargo test -p cgn-cli --test session_state_test 2>&1 | tail -20`
 
 Expected: compile error, `session_state::classify` and `SessionState` not found.
 
 - [ ] **Step 3: Write enum types in core**
 
-Create `crates/graph-nexus-core/src/session/state.rs`:
+Create `crates/cgn-core/src/session/state.rs`:
 
 ```rust
 //! Derived view of session liveness, classifying each `<repo>/sessions/<sid>/`
@@ -263,7 +263,7 @@ impl StaleReason {
 
 - [ ] **Step 4: Re-export from core::session::mod**
 
-Modify `crates/graph-nexus-core/src/session/mod.rs`:
+Modify `crates/cgn-core/src/session/mod.rs`:
 
 ```rust
 pub mod meta;
@@ -276,7 +276,7 @@ pub use state::{SessionState, StaleReason};
 
 - [ ] **Step 5: Write classify in cli**
 
-Create `crates/graph-nexus-cli/src/session/state.rs`:
+Create `crates/cgn-cli/src/session/state.rs`:
 
 ```rust
 //! `classify`: pure function from filesystem state to `SessionState`.
@@ -284,7 +284,7 @@ Create `crates/graph-nexus-cli/src/session/state.rs`:
 //! `commit_lookup::CommitIndex`, which is a cli-side concern.
 
 use crate::commit_lookup::CommitIndex;
-use graph_nexus_core::session::{DirtyFiles, SessionMeta, SessionState, StaleReason};
+use cgn_core::session::{DirtyFiles, SessionMeta, SessionState, StaleReason};
 use std::fs;
 use std::path::Path;
 
@@ -341,10 +341,10 @@ fn sha_hex_to_bytes(hex: &str) -> Option<[u8; 20]> {
 
 - [ ] **Step 6: Re-export from cli::session::mod**
 
-Check current contents of `crates/graph-nexus-cli/src/session/mod.rs`:
+Check current contents of `crates/cgn-cli/src/session/mod.rs`:
 
 ```bash
-cat crates/graph-nexus-cli/src/session/mod.rs
+cat crates/cgn-cli/src/session/mod.rs
 ```
 
 It currently exposes `promotion` only. Add `state`:
@@ -357,25 +357,25 @@ pub mod state;
 - [ ] **Step 7: Verify CommitIndex::find returns &str**
 
 ```bash
-grep -n "fn find\|pub fn scan" crates/graph-nexus-cli/src/commit_lookup.rs | head
+grep -n "fn find\|pub fn scan" crates/cgn-cli/src/commit_lookup.rs | head
 ```
 
 If `find` returns `Option<&str>` or `Option<&String>`, the `.map(|s| s.to_string())` in `resolve_l2_dirname` is correct. If it returns `Option<&Path>`, change to `.map(|p| p.file_name().unwrap().to_string_lossy().into_owned())`. Adjust accordingly.
 
 - [ ] **Step 8: Run tests to verify they pass**
 
-Run: `cargo test -p graph-nexus-cli --test session_state_test 2>&1 | tail -25`
+Run: `cargo test -p cgn-cli --test session_state_test 2>&1 | tail -25`
 
 Expected: 6 tests pass.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/session/state.rs \
-        crates/graph-nexus-core/src/session/mod.rs \
-        crates/graph-nexus-cli/src/session/state.rs \
-        crates/graph-nexus-cli/src/session/mod.rs \
-        crates/graph-nexus-cli/tests/session_state_test.rs
+git add crates/cgn-core/src/session/state.rs \
+        crates/cgn-core/src/session/mod.rs \
+        crates/cgn-cli/src/session/state.rs \
+        crates/cgn-cli/src/session/mod.rs \
+        crates/cgn-cli/tests/session_state_test.rs
 git commit -m "feat(session): SessionState derived view + classify (PureReference / Augmented / Stale)
 
 Cross-cutting type that classifies each <repo>/sessions/<sid>/ as
@@ -392,17 +392,17 @@ needs commit_lookup::CommitIndex to resolve base_sha → l2_dirname."
 ## Task 2: invalidate_matching_l1 + InvalidateReport
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/build/force.rs`
-- Modify: `crates/graph-nexus-cli/src/build/mod.rs`
-- Test: `crates/graph-nexus-cli/tests/force_rebuild_test.rs`
+- Create: `crates/cgn-cli/src/build/force.rs`
+- Modify: `crates/cgn-cli/src/build/mod.rs`
+- Test: `crates/cgn-cli/tests/force_rebuild_test.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Create `crates/graph-nexus-cli/tests/force_rebuild_test.rs`:
+Create `crates/cgn-cli/tests/force_rebuild_test.rs`:
 
 ```rust
-use graph_nexus_cli::build::force::{invalidate_matching_l1, InvalidateReport};
-use graph_nexus_core::session::{
+use cgn_cli::build::force::{invalidate_matching_l1, InvalidateReport};
+use cgn_core::session::{
     DirtyEntry, DirtyFiles, SessionMeta,
 };
 use std::fs;
@@ -415,17 +415,17 @@ const DIRNAME: &str = "branch_main__abc123def456789012345678901234567890abcd";
 fn setup_repo_with_l2(tmp: &Path) {
     let commits = tmp.join("commits").join(DIRNAME);
     fs::create_dir_all(&commits).unwrap();
-    let cm = graph_nexus_core::registry::CommitBuildMeta {
+    let cm = cgn_core::registry::CommitBuildMeta {
         version: 1, sha: SHA.into(),
-        source_type: graph_nexus_core::registry::SourceType::Branch,
+        source_type: cgn_core::registry::SourceType::Branch,
         source_id: Some("main".into()),
         built_from_worktree: "/tmp/wt".into(),
         built_at: "2026-05-17T10:00:00Z".into(),
         parent_sha: None, node_count: 0,
-        embedding_status: graph_nexus_core::registry::EmbeddingStatus::None,
+        embedding_status: cgn_core::registry::EmbeddingStatus::None,
         refs_at_build: vec![], refs_seen_since: vec![],
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(
+    cgn_core::registry::CommitBuildMeta::write_atomic(
         &commits.join("meta.json"), &cm).unwrap();
 }
 
@@ -523,20 +523,20 @@ fn invalidate_classifies_corrupt_session_as_stale_skipped() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p graph-nexus-cli --test force_rebuild_test 2>&1 | tail -15`
+Run: `cargo test -p cgn-cli --test force_rebuild_test 2>&1 | tail -15`
 
 Expected: compile error, `build::force::invalidate_matching_l1` not found.
 
 - [ ] **Step 3: Create force.rs with InvalidateReport + invalidate fn**
 
-Create `crates/graph-nexus-cli/src/build/force.rs`:
+Create `crates/cgn-cli/src/build/force.rs`:
 
 ```rust
 //! Force rebuild orchestration: drop existing L2 + selective L1 invalidation
 //! before re-running the standard build pipeline.
 
 use crate::session::state::classify;
-use graph_nexus_core::session::{SessionState, StaleReason};
+use cgn_core::session::{SessionState, StaleReason};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -604,7 +604,7 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
 /// for the current `--force`. Read failure ⇒ count as in-scope (conservative).
 fn matches_sha_hint(repo_root: &Path, sid: &str, target_sha: &str) -> bool {
     let path = repo_root.join("sessions").join(sid).join("session_meta.json");
-    match graph_nexus_core::session::SessionMeta::read(&path) {
+    match cgn_core::session::SessionMeta::read(&path) {
         Ok(sm) => sm.base_sha == target_sha,
         Err(_) => true,
     }
@@ -620,7 +620,7 @@ fn spawn_delayed_rm_rf(path: std::path::PathBuf, delay: Duration) {
 
 - [ ] **Step 4: Re-export from build::mod**
 
-Modify `crates/graph-nexus-cli/src/build/mod.rs`:
+Modify `crates/cgn-cli/src/build/mod.rs`:
 
 ```rust
 pub mod dirname_picker;
@@ -631,16 +631,16 @@ pub mod orchestrator;
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo test -p graph-nexus-cli --test force_rebuild_test 2>&1 | tail -20`
+Run: `cargo test -p cgn-cli --test force_rebuild_test 2>&1 | tail -20`
 
 Expected: 5 tests pass. The "rename to stale" test verifies the rename happened synchronously; the 2s GC delay means the stale dir may still be on disk when the test asserts existence — that's fine.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/build/force.rs \
-        crates/graph-nexus-cli/src/build/mod.rs \
-        crates/graph-nexus-cli/tests/force_rebuild_test.rs
+git add crates/cgn-cli/src/build/force.rs \
+        crates/cgn-cli/src/build/mod.rs \
+        crates/cgn-cli/tests/force_rebuild_test.rs
 git commit -m "feat(build): invalidate_matching_l1 — selective L1 session invalidation
 
 Walks <repo>/sessions/*, classifies each via SessionState, renames
@@ -654,37 +654,37 @@ L2 directly compatible). Stale sessions are skipped with a warning."
 ## Task 3: force_rebuild_l2 main flow
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/build/force.rs` (extend with `force_rebuild_l2`)
-- Modify: `crates/graph-nexus-cli/src/build/orchestrator.rs` (expose `build_l2` plus a `force` variant internally, OR factor common helpers — see Step 2)
-- Test: `crates/graph-nexus-cli/tests/force_rebuild_test.rs` (extend)
+- Modify: `crates/cgn-cli/src/build/force.rs` (extend with `force_rebuild_l2`)
+- Modify: `crates/cgn-cli/src/build/orchestrator.rs` (expose `build_l2` plus a `force` variant internally, OR factor common helpers — see Step 2)
+- Test: `crates/cgn-cli/tests/force_rebuild_test.rs` (extend)
 
 - [ ] **Step 1: Read orchestrator.rs in full to identify reusable helpers**
 
 ```bash
-wc -l crates/graph-nexus-cli/src/build/orchestrator.rs
+wc -l crates/cgn-cli/src/build/orchestrator.rs
 ```
 
 Look for: `pick_dirname`, `head_sha_hex`, `worktree_clean_and_head_matches`, `git_archive_to`, `collect_refs`, `source_type_from_refs`, `source_id_from_refs`, `parent_sha`, `sync_all_files`, `update_repo_meta`, `wait_for_completion`. Some are `pub(crate)`, some `fn`. We need `force_rebuild_l2` to reuse them.
 
 - [ ] **Step 2: Refactor build_l2 to split into pub(crate) helpers (no behavior change)**
 
-Modify `crates/graph-nexus-cli/src/build/orchestrator.rs` — expose internals needed by `force.rs`. Make `head_sha_hex`, `pick_dirname` reuse, `worktree_clean_and_head_matches`, `git_archive_to`, `collect_refs`, `source_type_from_refs`, `source_id_from_refs`, `parent_sha`, `sync_all_files`, `update_repo_meta`, `wait_for_completion` all `pub(crate)`.
+Modify `crates/cgn-cli/src/build/orchestrator.rs` — expose internals needed by `force.rs`. Make `head_sha_hex`, `pick_dirname` reuse, `worktree_clean_and_head_matches`, `git_archive_to`, `collect_refs`, `source_type_from_refs`, `source_id_from_refs`, `parent_sha`, `sync_all_files`, `update_repo_meta`, `wait_for_completion` all `pub(crate)`.
 
 For every private fn currently used inside `build_l2`, change to `pub(crate) fn`. Don't change behavior.
 
 Verify with:
 ```bash
-cargo build -p graph-nexus-cli 2>&1 | tail -20
+cargo build -p cgn-cli 2>&1 | tail -20
 ```
 
 Expected: clean build.
 
 - [ ] **Step 3: Write failing tests for force_rebuild_l2**
 
-Append to `crates/graph-nexus-cli/tests/force_rebuild_test.rs`:
+Append to `crates/cgn-cli/tests/force_rebuild_test.rs`:
 
 ```rust
-use graph_nexus_cli::build::force::force_rebuild_l2;
+use cgn_cli::build::force::force_rebuild_l2;
 use std::process::Command;
 
 fn git_init(p: &Path) -> String {
@@ -706,7 +706,7 @@ fn git_init(p: &Path) -> String {
 fn force_rebuild_l2_when_l2_absent_builds_fresh() {
     let wt = tempfile::tempdir().unwrap();
     let sha = git_init(wt.path());
-    // Point HOME at a temp dir so ~/.gnx lands in the test scratch.
+    // Point HOME at a temp dir so ~/.cgn lands in the test scratch.
     std::env::set_var("HOME", wt.path());
     let r = force_rebuild_l2(wt.path(), &sha).unwrap();
     assert_eq!(r.sha_hex, sha);
@@ -722,7 +722,7 @@ fn force_rebuild_l2_drops_existing_dir_and_rebuilds() {
     std::env::set_var("HOME", wt.path());
 
     // First build (no force) — use build_l2 directly
-    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let initial = cgn_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
     let first_mtime = fs::metadata(initial.commit_dir.join("graph.bin"))
         .unwrap().modified().unwrap();
 
@@ -742,7 +742,7 @@ fn force_rebuild_l2_invalidates_dirty_session_with_same_base_sha() {
     std::env::set_var("HOME", wt.path());
 
     // First build to establish L2
-    let initial = graph_nexus_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
+    let initial = cgn_cli::build::orchestrator::build_l2(wt.path(), None).unwrap();
     let repo_root = initial.commit_dir.parent().unwrap().parent().unwrap();
     add_session(repo_root, "sid_dirty", &sha, true);
     add_session(repo_root, "sid_clean", &sha, false);
@@ -758,17 +758,17 @@ fn force_rebuild_l2_invalidates_dirty_session_with_same_base_sha() {
 
 Notes:
 - These tests mutate `HOME` env var — they MUST run with `--test-threads=1` to avoid cross-test bleed, OR use a process-wide mutex (see `tests/promotion.rs` pattern if it has one).
-- If `HOME` env mutation is brittle, refactor `force_rebuild_l2` to accept an explicit `home_gnx: Option<&Path>` parameter (preferred), then pass `wt.path()` directly. This avoids the env race entirely.
+- If `HOME` env mutation is brittle, refactor `force_rebuild_l2` to accept an explicit `home_cgn: Option<&Path>` parameter (preferred), then pass `wt.path()` directly. This avoids the env race entirely.
 
 - [ ] **Step 4: Run tests to verify they fail**
 
-Run: `cargo test -p graph-nexus-cli --test force_rebuild_test 2>&1 | tail -10`
+Run: `cargo test -p cgn-cli --test force_rebuild_test 2>&1 | tail -10`
 
 Expected: compile error, `force_rebuild_l2` not found.
 
 - [ ] **Step 5: Implement force_rebuild_l2**
 
-Append to `crates/graph-nexus-cli/src/build/force.rs`:
+Append to `crates/cgn-cli/src/build/force.rs`:
 
 ```rust
 use crate::build::dirname_picker::pick_dirname;
@@ -779,8 +779,8 @@ use crate::build::orchestrator::{
 };
 use crate::repo_identity::repo_dir_name_for_cwd;
 use fs2::FileExt;
-use graph_nexus_core::registry::{
-    resolve_home_gnx, CommitBuildMeta, EmbeddingStatus, RepoMeta,
+use cgn_core::registry::{
+    resolve_home_cgn, CommitBuildMeta, EmbeddingStatus, RepoMeta,
 };
 use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
@@ -788,7 +788,7 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct ForceRebuildResult {
     pub sha_hex: String,
-    pub source_type: graph_nexus_core::registry::SourceType,
+    pub source_type: cgn_core::registry::SourceType,
     pub commit_dir: PathBuf,
     pub rebuilt: bool,
     pub invalidate_report: InvalidateReport,
@@ -801,9 +801,9 @@ pub fn force_rebuild_l2(worktree: &std::path::Path, target_sha: &str) -> io::Res
         return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
     }
 
-    let home_gnx = resolve_home_gnx();
+    let home_cgn = resolve_home_cgn();
     let repo_dir_name = repo_dir_name_for_cwd(worktree)?;
-    let repo_root = home_gnx.join(&repo_dir_name);
+    let repo_root = home_cgn.join(&repo_dir_name);
     fs::create_dir_all(repo_root.join("commits"))?;
 
     let dirname = pick_dirname(worktree, &sha_hex)?;
@@ -881,18 +881,18 @@ If you find that orchestrator helpers (`head_sha_hex`, `pick_dirname`, etc.) are
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p graph-nexus-cli --test force_rebuild_test 2>&1 | tail -30`
+Run: `cargo test -p cgn-cli --test force_rebuild_test 2>&1 | tail -30`
 
 Expected: 8 tests pass (5 from Task 2 + 3 new).
 
-If `HOME` env var tests are flaky, the cleanest fix is to pass `home_gnx_override: Option<PathBuf>` into `force_rebuild_l2` (and have a wrapper that defaults to `resolve_home_gnx()`). Land that before continuing.
+If `HOME` env var tests are flaky, the cleanest fix is to pass `home_cgn_override: Option<PathBuf>` into `force_rebuild_l2` (and have a wrapper that defaults to `resolve_home_cgn()`). Land that before continuing.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/build/force.rs \
-        crates/graph-nexus-cli/src/build/orchestrator.rs \
-        crates/graph-nexus-cli/tests/force_rebuild_test.rs
+git add crates/cgn-cli/src/build/force.rs \
+        crates/cgn-cli/src/build/orchestrator.rs \
+        crates/cgn-cli/tests/force_rebuild_test.rs
 git commit -m "feat(build): force_rebuild_l2 — drop existing L2 + rebuild with L1 invalidation
 
 Acquires build lock (attach-and-retake if contended), invalidates
@@ -908,21 +908,21 @@ Exposes orchestrator helpers as pub(crate) for reuse."
 ## Task 4: admin index --force wiring + clap cleanup + idempotent skip
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/admin/index.rs`
-- Create: `crates/graph-nexus-cli/tests/admin_index_force_test.rs`
+- Modify: `crates/cgn-cli/src/commands/admin/index.rs`
+- Create: `crates/cgn-cli/tests/admin_index_force_test.rs`
 
 - [ ] **Step 1: Write failing CLI integration tests**
 
-Create `crates/graph-nexus-cli/tests/admin_index_force_test.rs`:
+Create `crates/cgn-cli/tests/admin_index_force_test.rs`:
 
 ```rust
 use std::process::Command;
 
-fn gnx_bin() -> std::path::PathBuf {
+fn cgn_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     if p.ends_with("deps") { p.pop(); }
-    p.join("gnx")
+    p.join("cgn")
 }
 
 fn git_init(p: &std::path::Path) -> String {
@@ -946,7 +946,7 @@ fn admin_index_without_force_builds_when_l2_absent() {
     let wt = tempfile::tempdir().unwrap();
     git_init(wt.path());
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"]).arg(wt.path())
         .output().unwrap();
@@ -962,12 +962,12 @@ fn admin_index_without_force_skips_when_l2_exists() {
     git_init(wt.path());
 
     // First build
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"]).arg(wt.path())
         .status().unwrap();
     // Second run — should skip
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"]).arg(wt.path())
         .output().unwrap();
@@ -983,13 +983,13 @@ fn admin_index_with_force_rebuilds_existing_l2() {
     let wt = tempfile::tempdir().unwrap();
     git_init(wt.path());
 
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"]).arg(wt.path())
         .status().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "index", "--repo"]).arg(wt.path()).arg("--force")
         .output().unwrap();
@@ -1000,7 +1000,7 @@ fn admin_index_with_force_rebuilds_existing_l2() {
 
 #[test]
 fn admin_index_rejects_no_cache_flag() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "/tmp/x", "--no-cache"])
         .output().unwrap();
     assert!(!out.status.success());
@@ -1011,7 +1011,7 @@ fn admin_index_rejects_no_cache_flag() {
 
 #[test]
 fn admin_index_rejects_embeddings_flag() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "/tmp/x", "--embeddings"])
         .output().unwrap();
     assert!(!out.status.success());
@@ -1019,7 +1019,7 @@ fn admin_index_rejects_embeddings_flag() {
 
 #[test]
 fn admin_index_rejects_drop_embeddings_flag() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["admin", "index", "--repo", "/tmp/x", "--drop-embeddings"])
         .output().unwrap();
     assert!(!out.status.success());
@@ -1028,16 +1028,16 @@ fn admin_index_rejects_drop_embeddings_flag() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p graph-nexus-cli --test admin_index_force_test -- --test-threads=1 2>&1 | tail -15`
+Run: `cargo test -p cgn-cli --test admin_index_force_test -- --test-threads=1 2>&1 | tail -15`
 
-Expected: build first (`cargo build -p graph-nexus-cli`). Tests should fail because:
+Expected: build first (`cargo build -p cgn-cli`). Tests should fail because:
 - `--force` is still warn-no-op (no `l2.rebuilt` output)
 - L2-exists case still does a full rebuild instead of `l2.exists` message
 - `--no-cache / --embeddings / --drop-embeddings` are still accepted
 
 - [ ] **Step 3: Rewrite IndexArgs (remove dead flags)**
 
-Modify `crates/graph-nexus-cli/src/commands/admin/index.rs` lines 20-49 — replace `IndexArgs` struct:
+Modify `crates/cgn-cli/src/commands/admin/index.rs` lines 20-49 — replace `IndexArgs` struct:
 
 ```rust
 #[derive(Args, Debug, Clone)]
@@ -1070,13 +1070,13 @@ pub struct IndexArgs {
 Three flags deleted: `no_cache`, `embeddings`, `drop_embeddings`. If any of these field names appear elsewhere in the codebase (constructed with `IndexArgs { no_cache: ..., ... }`), grep and fix:
 
 ```bash
-grep -rn "IndexArgs {" crates/graph-nexus-cli/src/ | head
-grep -rn "no_cache\b" crates/graph-nexus-cli/src/ | head
+grep -rn "IndexArgs {" crates/cgn-cli/src/ | head
+grep -rn "no_cache\b" crates/cgn-cli/src/ | head
 ```
 
 - [ ] **Step 4: Rewrite run() with 3-way match**
 
-Replace `pub fn run(args: IndexArgs) -> Result<(), String>` body at `crates/graph-nexus-cli/src/commands/admin/index.rs:303-325`:
+Replace `pub fn run(args: IndexArgs) -> Result<(), String>` body at `crates/cgn-cli/src/commands/admin/index.rs:303-325`:
 
 ```rust
 pub fn run(args: IndexArgs) -> Result<(), String> {
@@ -1144,9 +1144,9 @@ fn locate_commit_dir(
     worktree: &std::path::Path,
     sha: &str,
 ) -> std::io::Result<Option<std::path::PathBuf>> {
-    let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+    let home_cgn = cgn_core::registry::resolve_home_cgn();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree)?;
-    let commits = home_gnx.join(&repo_dir_name).join("commits");
+    let commits = home_cgn.join(&repo_dir_name).join("commits");
     if !commits.exists() {
         return Ok(None);
     }
@@ -1164,10 +1164,10 @@ fn sha_hex_to_bytes(hex: &str) -> Option<[u8; 20]> {
     Some(out)
 }
 
-fn detect_source_type(commit_dir: &std::path::Path) -> graph_nexus_core::registry::SourceType {
-    graph_nexus_core::registry::CommitBuildMeta::read(&commit_dir.join("meta.json"))
+fn detect_source_type(commit_dir: &std::path::Path) -> cgn_core::registry::SourceType {
+    cgn_core::registry::CommitBuildMeta::read(&commit_dir.join("meta.json"))
         .map(|m| m.source_type)
-        .unwrap_or(graph_nexus_core::registry::SourceType::Commit)
+        .unwrap_or(cgn_core::registry::SourceType::Commit)
 }
 ```
 
@@ -1177,21 +1177,21 @@ Also delete lines 303-309 (the `warn` block) — replaced by the new run() body.
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo test -p graph-nexus-cli --test admin_index_force_test -- --test-threads=1 2>&1 | tail -20`
+Run: `cargo test -p cgn-cli --test admin_index_force_test -- --test-threads=1 2>&1 | tail -20`
 
 Expected: 6 tests pass.
 
 - [ ] **Step 6: Run the broader test suite to catch regressions**
 
-Run: `cargo test -p graph-nexus-cli 2>&1 | tail -30`
+Run: `cargo test -p cgn-cli 2>&1 | tail -30`
 
 Watch for failures in any test that constructed `IndexArgs` with the deleted fields. If any, update those tests to drop the fields.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/admin/index.rs \
-        crates/graph-nexus-cli/tests/admin_index_force_test.rs
+git add crates/cgn-cli/src/commands/admin/index.rs \
+        crates/cgn-cli/tests/admin_index_force_test.rs
 git commit -m "feat(admin/index): wire --force to force_rebuild_l2; idempotent skip; drop dead flags
 
 --force now actually drops the L2 dir + invalidates matching L1
@@ -1210,20 +1210,20 @@ content-addressed L2 dirs already subsume)."
 ## Task 5: Engine::open SessionState dispatch + GraphView
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/engine.rs`
-- Test: `crates/graph-nexus-cli/tests/engine_session_state_test.rs` (new)
+- Modify: `crates/cgn-cli/src/engine.rs`
+- Test: `crates/cgn-cli/tests/engine_session_state_test.rs` (new)
 
 - [ ] **Step 1: Write failing tests**
 
-Create `crates/graph-nexus-cli/tests/engine_session_state_test.rs`:
+Create `crates/cgn-cli/tests/engine_session_state_test.rs`:
 
 ```rust
-use graph_nexus_cli::engine::Engine;
+use cgn_cli::engine::Engine;
 use std::fs;
 use std::path::Path;
 
 // Reuse setup from session_state_test.rs — copy the helpers here OR move them
-// into crates/graph-nexus-cli/tests/common/ and share. Plan-writer choice:
+// into crates/cgn-cli/tests/common/ and share. Plan-writer choice:
 // inline for now since shared mod requires Cargo.toml integration test plumbing.
 
 const SHA: &str = "abc123def456789012345678901234567890abcd";
@@ -1235,20 +1235,20 @@ fn write_minimal_l2(commit_dir: &Path) {
     // directly. For unit test isolation, use a real `cargo build`-produced
     // graph.bin fixture from another test's tempdir; alternatively, invoke
     // build_l2 in this test's setup.
-    let g = graph_nexus_core::graph::ZeroCopyGraph::default();
+    let g = cgn_core::graph::ZeroCopyGraph::default();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
     fs::write(commit_dir.join("graph.bin"), &bytes).unwrap();
-    let cm = graph_nexus_core::registry::CommitBuildMeta {
+    let cm = cgn_core::registry::CommitBuildMeta {
         version: 1, sha: SHA.into(),
-        source_type: graph_nexus_core::registry::SourceType::Branch,
+        source_type: cgn_core::registry::SourceType::Branch,
         source_id: Some("main".into()),
         built_from_worktree: "/tmp/wt".into(),
         built_at: "2026-05-17T10:00:00Z".into(),
         parent_sha: None, node_count: 0,
-        embedding_status: graph_nexus_core::registry::EmbeddingStatus::None,
+        embedding_status: cgn_core::registry::EmbeddingStatus::None,
         refs_at_build: vec![], refs_seen_since: vec![],
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(
+    cgn_core::registry::CommitBuildMeta::write_atomic(
         &commit_dir.join("meta.json"), &cm).unwrap();
 }
 
@@ -1262,7 +1262,7 @@ fn engine_open_pure_reference_loads_l2only() {
     // Set up session
     let sd = tmp.path().join("sessions").join("sid_pure");
     fs::create_dir_all(&sd).unwrap();
-    let sm = graph_nexus_core::session::SessionMeta {
+    let sm = cgn_core::session::SessionMeta {
         version: 1, session_id: "sid_pure".into(), pid: None,
         started_at: "2026-05-17T10:00:00Z".into(),
         last_touched: "2026-05-17T10:00:00Z".into(),
@@ -1270,17 +1270,17 @@ fn engine_open_pure_reference_loads_l2only() {
         source_worktree: "/tmp/wt".into(),
         overlay_version: 0,
     };
-    graph_nexus_core::session::SessionMeta::write_atomic(
+    cgn_core::session::SessionMeta::write_atomic(
         &sd.join("session_meta.json"), &sm).unwrap();
-    graph_nexus_core::session::DirtyFiles::write_atomic(
+    cgn_core::session::DirtyFiles::write_atomic(
         &sd.join("dirty_files.json"),
-        &graph_nexus_core::session::DirtyFiles::empty(),
+        &cgn_core::session::DirtyFiles::empty(),
     ).unwrap();
 
     let engine = Engine::open(tmp.path(), "sid_pure").unwrap();
     assert!(matches!(
         engine.view(),
-        graph_nexus_cli::engine::GraphView::L2Only(_)
+        cgn_cli::engine::GraphView::L2Only(_)
     ));
 }
 
@@ -1295,13 +1295,13 @@ fn engine_open_stale_session_returns_err() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p graph-nexus-cli --test engine_session_state_test 2>&1 | tail -15`
+Run: `cargo test -p cgn-cli --test engine_session_state_test 2>&1 | tail -15`
 
 Expected: compile error — `Engine::open`, `Engine::view`, `GraphView::L2Only` don't exist.
 
 - [ ] **Step 3: Add GraphView + Engine::open**
 
-Modify `crates/graph-nexus-cli/src/engine.rs`. After the existing `Engine` impl block, add:
+Modify `crates/cgn-cli/src/engine.rs`. After the existing `Engine` impl block, add:
 
 ```rust
 /// Discriminated view over the L2 graph plus an optional L1 overlay.
@@ -1321,13 +1321,13 @@ impl Engine {
     pub fn open(repo_root: &Path, sid: &str) -> io::Result<Self> {
         let state = crate::session::state::classify(repo_root, sid);
         match state {
-            graph_nexus_core::session::SessionState::PureReference { l2_dirname, .. } => {
+            cgn_core::session::SessionState::PureReference { l2_dirname, .. } => {
                 let l2_dir = repo_root.join("commits").join(&l2_dirname);
                 let mut eng = Self::load(l2_dir.join("graph.bin"))?;
                 eng.view = GraphView::L2Only;
                 Ok(eng)
             }
-            graph_nexus_core::session::SessionState::AugmentedReference { l2_dirname, .. } => {
+            cgn_core::session::SessionState::AugmentedReference { l2_dirname, .. } => {
                 let l2_dir = repo_root.join("commits").join(&l2_dirname);
                 let overlay_dir = repo_root.join("sessions").join(sid);
                 let mut eng = Self::load(l2_dir.join("graph.bin"))?;
@@ -1335,9 +1335,9 @@ impl Engine {
                 eng.view = GraphView::L2WithOverlay;
                 Ok(eng)
             }
-            graph_nexus_core::session::SessionState::Stale { reason } => {
+            cgn_core::session::SessionState::Stale { reason } => {
                 Err(io::Error::other(format!(
-                    "session stale: {reason:?}; remove via `gnx admin sessions reset <id>`"
+                    "session stale: {reason:?}; remove via `cgn admin sessions reset <id>`"
                 )))
             }
         }
@@ -1364,21 +1364,21 @@ Initialize `view: GraphView::L2WithOverlay` in `Engine::load` (back-compat — c
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p graph-nexus-cli --test engine_session_state_test 2>&1 | tail -15`
+Run: `cargo test -p cgn-cli --test engine_session_state_test 2>&1 | tail -15`
 
 Expected: 2 tests pass.
 
 - [ ] **Step 5: Run broader suite for regressions**
 
-Run: `cargo test -p graph-nexus-cli 2>&1 | tail -25`
+Run: `cargo test -p cgn-cli 2>&1 | tail -25`
 
 Watch for any test that pattern-matches on the `Engine` struct fields — they may need to construct `GraphView`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/engine.rs \
-        crates/graph-nexus-cli/tests/engine_session_state_test.rs
+git add crates/cgn-cli/src/engine.rs \
+        crates/cgn-cli/tests/engine_session_state_test.rs
 git commit -m "feat(engine): SessionState-driven Engine::open + GraphView fast-path
 
 Engine::open dispatches on SessionState: PureReference yields a
@@ -1395,28 +1395,28 @@ Real overlay merge for AugmentedReference still deferred to P2."
 ## Task 6: admin sessions list (minimal) with STATE column
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/admin/sessions.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/admin/mod.rs`
-- Test: `crates/graph-nexus-cli/tests/admin_sessions_list_test.rs`
+- Create: `crates/cgn-cli/src/commands/admin/sessions.rs`
+- Modify: `crates/cgn-cli/src/commands/admin/mod.rs`
+- Test: `crates/cgn-cli/tests/admin_sessions_list_test.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/graph-nexus-cli/tests/admin_sessions_list_test.rs`:
+Create `crates/cgn-cli/tests/admin_sessions_list_test.rs`:
 
 ```rust
 use std::process::Command;
 
-fn gnx_bin() -> std::path::PathBuf {
+fn cgn_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     if p.ends_with("deps") { p.pop(); }
-    p.join("gnx")
+    p.join("cgn")
 }
 
 #[test]
 fn admin_sessions_list_runs_with_empty_home() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "sessions", "list"])
         .output().unwrap();
@@ -1426,7 +1426,7 @@ fn admin_sessions_list_runs_with_empty_home() {
 #[test]
 fn admin_sessions_list_json_emits_empty_array() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "sessions", "list", "--json"])
         .output().unwrap();
@@ -1440,27 +1440,27 @@ fn admin_sessions_list_json_emits_empty_array() {
 #[test]
 fn admin_sessions_list_shows_pure_reference_state() {
     let home = tempfile::tempdir().unwrap();
-    // Build an L2 + 1 clean session by hand under $HOME/.gnx/
-    let repo_root = home.path().join(".gnx/myrepo__deadbeef");
+    // Build an L2 + 1 clean session by hand under $HOME/.cgn/
+    let repo_root = home.path().join(".cgn/myrepo__deadbeef");
     let commit_dir = repo_root.join("commits/branch_main__abc123def456789012345678901234567890abcd");
     std::fs::create_dir_all(&commit_dir).unwrap();
-    let cm = graph_nexus_core::registry::CommitBuildMeta {
+    let cm = cgn_core::registry::CommitBuildMeta {
         version: 1,
         sha: "abc123def456789012345678901234567890abcd".into(),
-        source_type: graph_nexus_core::registry::SourceType::Branch,
+        source_type: cgn_core::registry::SourceType::Branch,
         source_id: Some("main".into()),
         built_from_worktree: "/tmp/wt".into(),
         built_at: "2026-05-17T10:00:00Z".into(),
         parent_sha: None, node_count: 0,
-        embedding_status: graph_nexus_core::registry::EmbeddingStatus::None,
+        embedding_status: cgn_core::registry::EmbeddingStatus::None,
         refs_at_build: vec![], refs_seen_since: vec![],
     };
-    graph_nexus_core::registry::CommitBuildMeta::write_atomic(
+    cgn_core::registry::CommitBuildMeta::write_atomic(
         &commit_dir.join("meta.json"), &cm).unwrap();
 
     let sd = repo_root.join("sessions/sid_a");
     std::fs::create_dir_all(&sd).unwrap();
-    let sm = graph_nexus_core::session::SessionMeta {
+    let sm = cgn_core::session::SessionMeta {
         version: 1, session_id: "sid_a".into(), pid: None,
         started_at: "2026-05-17T10:00:00Z".into(),
         last_touched: "2026-05-17T10:00:00Z".into(),
@@ -1468,14 +1468,14 @@ fn admin_sessions_list_shows_pure_reference_state() {
         source_worktree: "/tmp/wt".into(),
         overlay_version: 0,
     };
-    graph_nexus_core::session::SessionMeta::write_atomic(
+    cgn_core::session::SessionMeta::write_atomic(
         &sd.join("session_meta.json"), &sm).unwrap();
-    graph_nexus_core::session::DirtyFiles::write_atomic(
+    cgn_core::session::DirtyFiles::write_atomic(
         &sd.join("dirty_files.json"),
-        &graph_nexus_core::session::DirtyFiles::empty(),
+        &cgn_core::session::DirtyFiles::empty(),
     ).unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .env("HOME", home.path())
         .args(["admin", "sessions", "list", "--json"])
         .output().unwrap();
@@ -1490,17 +1490,17 @@ fn admin_sessions_list_shows_pure_reference_state() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p graph-nexus-cli --test admin_sessions_list_test -- --test-threads=1 2>&1 | tail -15`
+Run: `cargo test -p cgn-cli --test admin_sessions_list_test -- --test-threads=1 2>&1 | tail -15`
 
 Expected: clap rejects the `sessions` subcommand (it doesn't exist yet).
 
 - [ ] **Step 3: Add Sessions variant to AdminCommands**
 
-Modify `crates/graph-nexus-cli/src/commands/admin/mod.rs`:
+Modify `crates/cgn-cli/src/commands/admin/mod.rs`:
 
 ```rust
-//! `gnx admin` subcommand namespace — registry / hooks / destructive ops.
-//! Hidden from top-level `gnx --help` per spec §4.
+//! `cgn admin` subcommand namespace — registry / hooks / destructive ops.
+//! Hidden from top-level `cgn --help` per spec §4.
 
 use clap::Subcommand;
 
@@ -1541,11 +1541,11 @@ pub enum AdminCommands {
     },
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
-    /// Diff resolver dump against language oracle (gnx-dev QA)
+    /// Diff resolver dump against language oracle (cgn-dev QA)
     VerifyResolver(crate::commands::verify_resolver::VerifyResolverArgs),
 }
 
-pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), cgn_core::CgnError> {
     match cmd {
         AdminCommands::InstallHook(args) => install_hook::run(args),
         AdminCommands::UninstallHook(args) => claude_code::run_uninstall(args),
@@ -1554,8 +1554,8 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexu
         AdminCommands::Prune(args) => prune::run(args),
         AdminCommands::Config(args) => config::run(args),
         AdminCommands::Group { command } => group::run(command),
-        AdminCommands::Index(args) => index::run(args).map_err(graph_nexus_core::GnxError::Output),
-        AdminCommands::Sessions { command } => sessions::run(command).map_err(graph_nexus_core::GnxError::Output),
+        AdminCommands::Index(args) => index::run(args).map_err(cgn_core::CgnError::Output),
+        AdminCommands::Sessions { command } => sessions::run(command).map_err(cgn_core::CgnError::Output),
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),
         AdminCommands::VerifyResolver(args) => crate::commands::verify_resolver::run(args),
     }
@@ -1564,21 +1564,21 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), graph_nexu
 
 - [ ] **Step 4: Create sessions.rs subcommand**
 
-Create `crates/graph-nexus-cli/src/commands/admin/sessions.rs`:
+Create `crates/cgn-cli/src/commands/admin/sessions.rs`:
 
 ```rust
-//! `gnx admin sessions list` — inspect L1 sessions under all repos.
+//! `cgn admin sessions list` — inspect L1 sessions under all repos.
 //! reset / sweep variants deferred (parent spec §11.2 follow-up).
 
 use clap::{Args, Subcommand};
-use graph_nexus_core::registry::resolve_home_gnx;
-use graph_nexus_core::session::{SessionMeta, SessionState, StaleReason};
+use cgn_core::registry::resolve_home_cgn;
+use cgn_core::session::{SessionMeta, SessionState, StaleReason};
 use std::fs;
 use std::io;
 
 #[derive(Subcommand, Debug)]
 pub enum SessionsCommand {
-    /// List active L1 sessions across all repos under ~/.gnx/
+    /// List active L1 sessions across all repos under ~/.cgn/
     List(ListArgs),
 }
 
@@ -1613,8 +1613,8 @@ enum StateView {
 }
 
 fn run_list(args: ListArgs) -> io::Result<()> {
-    let home_gnx = resolve_home_gnx();
-    let rows = collect_rows(&home_gnx)?;
+    let home_cgn = resolve_home_cgn();
+    let rows = collect_rows(&home_cgn)?;
 
     if args.json {
         println!("{}", serde_json::to_string(&rows).map_err(io::Error::other)?);
@@ -1644,12 +1644,12 @@ fn run_list(args: ListArgs) -> io::Result<()> {
     Ok(())
 }
 
-fn collect_rows(home_gnx: &std::path::Path) -> io::Result<Vec<ListRow>> {
+fn collect_rows(home_cgn: &std::path::Path) -> io::Result<Vec<ListRow>> {
     let mut out = vec![];
-    if !home_gnx.exists() {
+    if !home_cgn.exists() {
         return Ok(out);
     }
-    for repo_entry in fs::read_dir(home_gnx)? {
+    for repo_entry in fs::read_dir(home_cgn)? {
         let repo_entry = repo_entry?;
         let repo_dir = repo_entry.path();
         if !repo_dir.is_dir() {
@@ -1717,19 +1717,19 @@ fn collect_rows(home_gnx: &std::path::Path) -> io::Result<Vec<ListRow>> {
 Already added in Task 1 Step 3 (`StaleReason::short()`). Confirm:
 
 ```bash
-grep -n "fn short" crates/graph-nexus-core/src/session/state.rs
+grep -n "fn short" crates/cgn-core/src/session/state.rs
 ```
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p graph-nexus-cli --test admin_sessions_list_test -- --test-threads=1 2>&1 | tail -15`
+Run: `cargo test -p cgn-cli --test admin_sessions_list_test -- --test-threads=1 2>&1 | tail -15`
 
 Expected: 3 tests pass.
 
-- [ ] **Step 7: Sanity check `gnx admin --help` shows sessions**
+- [ ] **Step 7: Sanity check `cgn admin --help` shows sessions**
 
 ```bash
-cargo run -p graph-nexus-cli --bin gnx -- admin --help 2>&1 | grep -i session
+cargo run -p cgn-cli --bin cgn -- admin --help 2>&1 | grep -i session
 ```
 
 Expected: a line like `sessions   List / inspect L1 sessions`.
@@ -1737,12 +1737,12 @@ Expected: a line like `sessions   List / inspect L1 sessions`.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/admin/sessions.rs \
-        crates/graph-nexus-cli/src/commands/admin/mod.rs \
-        crates/graph-nexus-cli/tests/admin_sessions_list_test.rs
+git add crates/cgn-cli/src/commands/admin/sessions.rs \
+        crates/cgn-cli/src/commands/admin/mod.rs \
+        crates/cgn-cli/tests/admin_sessions_list_test.rs
 git commit -m "feat(admin/sessions): list subcommand with STATE column (PureReference / Augmented / Stale)
 
-Walks ~/.gnx/<repo>/sessions/<sid>/ across all repos, classifies via
+Walks ~/.cgn/<repo>/sessions/<sid>/ across all repos, classifies via
 SessionState, emits table or --json. PureReference shows 'PureReference',
 AugmentedReference shows 'Augmented (N)' with fragment count, Stale
 shows 'Stale(<short-reason>)'. reset / sweep subcommands deferred to
@@ -1754,21 +1754,21 @@ parent spec §11.2 follow-up."
 ## Task 7: Concurrent --force integration test
 
 **Files:**
-- Test: `crates/graph-nexus-cli/tests/force_rebuild_concurrent_test.rs`
+- Test: `crates/cgn-cli/tests/force_rebuild_concurrent_test.rs`
 
 - [ ] **Step 1: Write the concurrency test**
 
-Create `crates/graph-nexus-cli/tests/force_rebuild_concurrent_test.rs`:
+Create `crates/cgn-cli/tests/force_rebuild_concurrent_test.rs`:
 
 ```rust
 use std::process::Command;
 use std::thread;
 
-fn gnx_bin() -> std::path::PathBuf {
+fn cgn_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     if p.ends_with("deps") { p.pop(); }
-    p.join("gnx")
+    p.join("cgn")
 }
 
 fn git_init(p: &std::path::Path) -> String {
@@ -1795,7 +1795,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
     let wt_path = wt.path().to_path_buf();
 
     // Seed an initial L2 so we exercise the drop-existing path
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .env("HOME", &home_path)
         .args(["admin", "index", "--repo"]).arg(&wt_path)
         .status().unwrap();
@@ -1804,7 +1804,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
         let home_path = home_path.clone();
         let wt_path = wt_path.clone();
         thread::spawn(move || {
-            Command::new(gnx_bin())
+            Command::new(cgn_bin())
                 .env("HOME", &home_path)
                 .args(["admin", "index", "--repo"]).arg(&wt_path).arg("--force")
                 .output().unwrap()
@@ -1814,7 +1814,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
         let home_path = home_path.clone();
         let wt_path = wt_path.clone();
         thread::spawn(move || {
-            Command::new(gnx_bin())
+            Command::new(cgn_bin())
                 .env("HOME", &home_path)
                 .args(["admin", "index", "--repo"]).arg(&wt_path).arg("--force")
                 .output().unwrap()
@@ -1829,7 +1829,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
             String::from_utf8_lossy(&o2.stderr));
 
     // Only one commit_dir for this SHA + no leftover .building
-    let commits = home_path.join(".gnx");
+    let commits = home_path.join(".cgn");
     let mut dir_count = 0;
     let mut building_count = 0;
     fn walk(p: &std::path::Path, c: &mut usize, b: &mut usize) {
@@ -1851,7 +1851,7 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_final_commit_dir() {
 
 - [ ] **Step 2: Run test**
 
-Run: `cargo test -p graph-nexus-cli --test force_rebuild_concurrent_test -- --test-threads=1 2>&1 | tail -15`
+Run: `cargo test -p cgn-cli --test force_rebuild_concurrent_test -- --test-threads=1 2>&1 | tail -15`
 
 Expected: pass.
 
@@ -1860,7 +1860,7 @@ If it's flaky (timing-dependent), do NOT mark `#[ignore]` and move on — the sp
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/tests/force_rebuild_concurrent_test.rs
+git add crates/cgn-cli/tests/force_rebuild_concurrent_test.rs
 git commit -m "test(force-rebuild): two concurrent --force on same SHA converge to one final L2
 
 Verifies the attach-and-retake pattern: when two processes race to
@@ -1878,7 +1878,7 @@ After all 7 tasks:
 - [ ] **Run full test suite**
 
 ```bash
-cargo test -p graph-nexus-cli -p graph-nexus-core -- --test-threads=1 2>&1 | tail -40
+cargo test -p cgn-cli -p cgn-core -- --test-threads=1 2>&1 | tail -40
 ```
 
 Expected: all tests pass. Watch for:
@@ -1888,7 +1888,7 @@ Expected: all tests pass. Watch for:
 - [ ] **Clippy**
 
 ```bash
-cargo clippy -p graph-nexus-cli -p graph-nexus-core --tests 2>&1 | tail -30
+cargo clippy -p cgn-cli -p cgn-core --tests 2>&1 | tail -30
 ```
 
 Expected: no new warnings.
@@ -1897,14 +1897,14 @@ Expected: no new warnings.
 
 ```bash
 cd $(mktemp -d) && git init -q && echo 'fn x() {}' > a.rs && git add . && git commit -qm init
-# Build (should land in $HOME/.gnx)
-cargo run -q --bin gnx -- admin index --repo .
+# Build (should land in $HOME/.cgn)
+cargo run -q --bin cgn -- admin index --repo .
 # Should skip
-cargo run -q --bin gnx -- admin index --repo .
+cargo run -q --bin cgn -- admin index --repo .
 # Should force-rebuild
-cargo run -q --bin gnx -- admin index --repo . --force
+cargo run -q --bin cgn -- admin index --repo . --force
 # Sessions list (likely empty)
-cargo run -q --bin gnx -- admin sessions list
+cargo run -q --bin cgn -- admin sessions list
 ```
 
 Expected output sequence: `l2.built ...` → `l2.exists ... (use --force to rebuild)` → `l2.rebuilt ...` → `(no sessions)`.

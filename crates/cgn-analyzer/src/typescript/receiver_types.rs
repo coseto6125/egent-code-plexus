@@ -1,6 +1,6 @@
 //! Local-scope receiver-type binding for TypeScript.
 //!
-//! Mirrors `crates/graph-nexus-analyzer/src/python/receiver_types.rs`.
+//! Mirrors `crates/cgn-analyzer/src/python/receiver_types.rs`.
 //!
 //! Collects typed bindings from:
 //! (a) Typed parameters: `function f(x: MyType)` — `required_parameter` with a
@@ -230,7 +230,7 @@ fn ts_callee_name(
     }
 }
 
-/// Tests live here so they run as part of `cargo test -p graph-nexus-analyzer`.
+/// Tests live here so they run as part of `cargo test -p cgn-analyzer`.
 #[cfg(test)]
 mod tests {
     use crate::typescript::TypeScriptProvider;

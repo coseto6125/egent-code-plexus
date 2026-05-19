@@ -1,6 +1,6 @@
 //! `cgn hook-handle <stage>`: invoked by reference-transaction hook.
 //! On `committed`, parses stdin for branch DELETE events and spawns
-//! detached watchers via graph-nexus-core daemon helper.
+//! detached watchers via cgn-core daemon helper.
 
 use clap::Args;
 use std::io::BufRead;

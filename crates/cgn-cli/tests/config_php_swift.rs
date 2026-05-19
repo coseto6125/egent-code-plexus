@@ -1,7 +1,7 @@
 //! Wave 2 — Task F2+F3: PHP `composer.json` + Swift `Package.swift` parsing.
 //!
 //! Mirrors the inline-test style of the C# F1 config tests in
-//! `crates/graph-nexus-cli/src/config_parser.rs`, but lives as an integration
+//! `crates/cgn-cli/src/config_parser.rs`, but lives as an integration
 //! test so the public `parse_single_*` entry points stay exercised through
 //! the `cgn_cli` crate surface.
 

@@ -1,8 +1,8 @@
 # Wave 1 Parser Dispatch Plan
 
-**Goal:** Add 7 new language providers to `graph-nexus-analyzer` in parallel: Lua, Solidity, Bash, Zig, Move, Crystal, Dockerfile.
+**Goal:** Add 7 new language providers to `cgn-analyzer` in parallel: Lua, Solidity, Bash, Zig, Move, Crystal, Dockerfile.
 
-**Why these 7:** Per `2026-05-14-graph-nexus-parser-expansion.md` Wave 1 — the A-tier "high confidence" set where tree-sitter grammar is mature and language semantics map cleanly to graph-nexus's NodeKind/RelType vocabulary.
+**Why these 7:** Per `2026-05-14-code-graph-nexus-parser-expansion.md` Wave 1 — the A-tier "high confidence" set where tree-sitter grammar is mature and language semantics map cleanly to code-graph-nexus's NodeKind/RelType vocabulary.
 
 **Date:** 2026-05-14
 
@@ -13,9 +13,9 @@
 - ✅ Worker brief written: `docs/plans/parser-worker-brief.md`
 - ✅ Verified Swift `@name.X` convention is intentional legacy, not a bug — workers will use majority `@X.name` convention
 - ✅ Verified `scripts/parity/run_parity.py` exists
-- ✅ Confirmed registration sites in `crates/graph-nexus-cli/src/commands/analyze.rs` (lines ~50 and ~76)
-- ✅ Confirmed `crates/graph-nexus-analyzer/src/lib.rs` is a flat `pub mod <lang>;` list
-- ✅ Confirmed `crates/graph-nexus-analyzer/Cargo.toml` `[dependencies]` section pattern
+- ✅ Confirmed registration sites in `crates/cgn-cli/src/commands/analyze.rs` (lines ~50 and ~76)
+- ✅ Confirmed `crates/cgn-analyzer/src/lib.rs` is a flat `pub mod <lang>;` list
+- ✅ Confirmed `crates/cgn-analyzer/Cargo.toml` `[dependencies]` section pattern
 
 ## Per-language dispatch table
 
@@ -31,7 +31,7 @@
 
 ### Notes per language
 
-**Lua** — queries.scm draft already exists in `docs/specs/2026-05-14-graph-nexus-parser-expansion.md` §5.3, use it as a starting point but verify each pattern against actual tree-sitter-lua node types.
+**Lua** — queries.scm draft already exists in `docs/specs/2026-05-14-code-graph-nexus-parser-expansion.md` §5.3, use it as a starting point but verify each pattern against actual tree-sitter-lua node types.
 
 **Solidity** — most important captures: `contract_declaration`, `library_declaration`, `interface_declaration`, `function_definition`, `modifier_definition`, `event_definition`, `import_directive`, `inheritance_specifier`. Treat `contract` / `library` / `interface` all as `NodeKind::Class`.
 
@@ -72,12 +72,12 @@ After all merges:
 
 ```bash
 # 1. Confirm builds still pass cleanly with all 7 langs registered
-cargo build -p graph-nexus-analyzer
-cargo build -p graph-nexus-cli
+cargo build -p cgn-analyzer
+cargo build -p cgn-cli
 
 # 2. Sanity-check by running analyze on each fixture
 for L in lua solidity bash zig move crystal dockerfile; do
-  target/debug/graph-nexus-cli analyze --repo tests/parity/fixtures/$L/sample_project
+  target/debug/cgn-cli analyze --repo tests/parity/fixtures/$L/sample_project
 done
 
 # 3. One context query per language to confirm symbols resolved

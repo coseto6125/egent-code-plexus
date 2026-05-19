@@ -3,7 +3,7 @@
 //! Two concurrent `cgn` hook invocations must converge to exactly ONE
 //! reindex side-effect (the second flock acquirer no-ops cleanly).
 //! Mirrors the production shell template at
-//! `crates/graph-nexus-cli/src/background.rs:73-91` (markerless branch).
+//! `crates/cgn-cli/src/background.rs:73-91` (markerless branch).
 
 use cgn_cli::flock_preamble;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ fn slow_noop_path() -> PathBuf {
         // `cargo test` doesn't auto-build examples — invoke cargo directly so
         // a clean checkout works without manual `cargo build --example` setup.
         let status = Command::new(env!("CARGO"))
-            .args(["build", "-p", "graph-nexus", "--example", "slow_noop"])
+            .args(["build", "-p", "code-graph-nexus", "--example", "slow_noop"])
             .status()
             .expect("spawn cargo build --example slow_noop");
         assert!(status.success(), "cargo build --example slow_noop failed");

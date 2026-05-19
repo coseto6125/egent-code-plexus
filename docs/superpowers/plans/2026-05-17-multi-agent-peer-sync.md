@@ -4,7 +4,7 @@
 
 **Goal:** Enable real-time peer-session awareness — when peer modifies a symbol that intersects with mine, my next tool call surfaces it via hook injection. Includes Ƀ (beta) messaging.
 
-**Architecture:** Filesystem-as-transport (atomic JSON + inotify), per-session forked watcher, hook-based LLM injection, symbol-level concern matching via the existing impact graph. No daemon, no socket — sessions communicate by writing/reading files under `~/.gnx/graph-nexus/<repo>/sessions/<id>/`.
+**Architecture:** Filesystem-as-transport (atomic JSON + inotify), per-session forked watcher, hook-based LLM injection, symbol-level concern matching via the existing impact graph. No daemon, no socket — sessions communicate by writing/reading files under `~/.cgn/code-graph-nexus/<repo>/sessions/<id>/`.
 
 **Tech Stack:** Rust, `notify` crate (inotify / fsevents / RDCW), `fs2` (flock), `serde` + serde_json, `chrono` (timestamps), `uuid` v7 (msg_id), `tracing`, `std::backtrace`.
 
@@ -34,7 +34,7 @@ Phase 7: Cross-session integration tests (Tasks 18-22)  ← FINAL VALIDATION
 - All work on branch `feat/peer-sync` (worktree at `.claude/worktrees/peer-sync/`)
 - Each task = one commit; commit message format `feat(peer): ...` / `feat(peer-cli): ...` / `feat(peer-hook): ...` / `test(peer): ...`
 - TDD strictly: failing test → run to confirm RED → minimal impl → run to confirm GREEN → commit
-- Build check before every commit: `cargo build -p graph-nexus --bin gnx` and `cargo build -p graph-nexus-core`
+- Build check before every commit: `cargo build -p code-graph-nexus --bin cgn` and `cargo build -p cgn-core`
 - Lint touched files only: `rustfmt --edition 2021 <file>` then `cargo clippy -p <crate> --tests`
 
 ---
@@ -44,30 +44,30 @@ Phase 7: Cross-session integration tests (Tasks 18-22)  ← FINAL VALIDATION
 ### Created
 
 ```
-crates/graph-nexus-core/src/peer/
+crates/cgn-core/src/peer/
   ├─ mod.rs                      (5 LOC) — re-exports
   ├─ registry.rs                 (100 LOC) — PeerSession, alive_peers()
   ├─ concern.rs                  (150 LOC) — ConcernKind, classify(), ImpactCache
   ├─ inbox.rs                    (120 LOC) — InboxEntry, append, drain
   └─ retention.rs                (80 LOC) — rotation constants + rotate()
 
-crates/graph-nexus-cli/src/peer/
+crates/cgn-cli/src/peer/
   ├─ mod.rs                      (5 LOC)
   ├─ watcher.rs                  (200 LOC) — fork, inotify loop, lifecycle
   ├─ dispatch.rs                 (80 LOC) — concern → inbox
   └─ render.rs                   (150 LOC) — InboxEntry → hookSpecificOutput
 
-crates/graph-nexus-cli/src/commands/
+crates/cgn-cli/src/commands/
   ├─ peers.rs                    (180 LOC) — status / diff / log / say / inbox / thread / gc
   └─ watch.rs                    (120 LOC) — --start / --stop / --status / --foreground
 
-crates/graph-nexus-mcp/src/tools/
+crates/cgn-mcp/src/tools/
   └─ peers.rs                    (60 LOC) — 3 MCP tools
 
-crates/graph-nexus-cli/tests/common/
+crates/cgn-cli/tests/common/
   └─ peer_harness.rs             (120 LOC) — PeerHarness fixture
 
-crates/graph-nexus-cli/tests/
+crates/cgn-cli/tests/
   ├─ peers_watch_lifecycle.rs        (80 LOC)
   ├─ peers_inbox_drain.rs            (60 LOC)
   ├─ peers_msg_log_rotation.rs       (50 LOC)
@@ -81,13 +81,13 @@ crates/graph-nexus-cli/tests/
 ### Modified
 
 ```
-crates/graph-nexus-core/src/
+crates/cgn-core/src/
   ├─ lib.rs                       (+1) `pub mod peer;`
   ├─ session/overlay.rs           (+30) DirtyEntry.dirty_symbols + SymbolRef
   ├─ session/overlay_writer.rs    (+40) extract symbols at write-time
   └─ session/meta.rs              (+5) watcher_pid + last_drained_offset
 
-crates/graph-nexus-cli/src/
+crates/cgn-cli/src/
   ├─ lib.rs                       (+1) `pub mod peer;`
   ├─ main.rs                      (+15) top-level dispatch for watch + peers
   ├─ commands/mod.rs              (+5) wire submodules
@@ -96,7 +96,7 @@ crates/graph-nexus-cli/src/
   ├─ commands/hook/pre_tool_use.rs     (+60) drain + render + emit
   └─ commands/hook/user_prompt_submit.rs (+30) drain + render + emit
 
-crates/graph-nexus-mcp/src/lib.rs   (+5) register peer tools
+crates/cgn-mcp/src/lib.rs   (+5) register peer tools
 ```
 
 ---
@@ -106,17 +106,17 @@ crates/graph-nexus-mcp/src/lib.rs   (+5) register peer tools
 ### Task 1: SymbolRef type + DirtyEntry.dirty_symbols field
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/session/overlay.rs:1-50`
-- Test: `crates/graph-nexus-core/tests/session_overlay_symbols.rs` (new)
+- Modify: `crates/cgn-core/src/session/overlay.rs:1-50`
+- Test: `crates/cgn-core/tests/session_overlay_symbols.rs` (new)
 
 **Goal:** Extend `DirtyEntry` to carry the list of symbols modified in that file, with serde default for backward compatibility.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-core/tests/session_overlay_symbols.rs`:
+Create `crates/cgn-core/tests/session_overlay_symbols.rs`:
 
 ```rust
-use graph_nexus_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
+use cgn_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
 use std::collections::BTreeMap;
 
 #[test]
@@ -176,14 +176,14 @@ fn dirty_files_round_trip_via_disk() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus-core --test session_overlay_symbols
+cargo test -p cgn-core --test session_overlay_symbols
 ```
 
 Expected: compilation error — `SymbolRef`, `SymbolKind`, `dirty_symbols` not defined.
 
 - [ ] **Step 3: Implement the types**
 
-Edit `crates/graph-nexus-core/src/session/overlay.rs`, replace the existing `DirtyEntry` struct and add `SymbolRef`/`SymbolKind`:
+Edit `crates/cgn-core/src/session/overlay.rs`, replace the existing `DirtyEntry` struct and add `SymbolRef`/`SymbolKind`:
 
 ```rust
 use crate::registry::io::atomic_write_json;
@@ -252,7 +252,7 @@ impl DirtyFiles {
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus-core --test session_overlay_symbols
+cargo test -p cgn-core --test session_overlay_symbols
 ```
 
 Expected: 3 passed.
@@ -260,9 +260,9 @@ Expected: 3 passed.
 - [ ] **Step 5: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-core/src/session/overlay.rs
-cargo clippy -p graph-nexus-core --tests -- -D warnings
-cargo build -p graph-nexus-core
+rustfmt --edition 2021 crates/cgn-core/src/session/overlay.rs
+cargo clippy -p cgn-core --tests -- -D warnings
+cargo build -p cgn-core
 ```
 
 Expected: no warnings, build succeeds.
@@ -270,8 +270,8 @@ Expected: no warnings, build succeeds.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/session/overlay.rs \
-        crates/graph-nexus-core/tests/session_overlay_symbols.rs
+git add crates/cgn-core/src/session/overlay.rs \
+        crates/cgn-core/tests/session_overlay_symbols.rs
 git commit -m "$(cat <<'EOF'
 feat(peer): add SymbolRef + dirty_symbols field to DirtyEntry
 
@@ -289,17 +289,17 @@ EOF
 ### Task 2: OverlayWriter symbol extraction at write-time
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/session/overlay_writer.rs`
-- Test: `crates/graph-nexus-cli/tests/overlay_writer_symbols.rs` (new)
+- Modify: `crates/cgn-cli/src/session/overlay_writer.rs`
+- Test: `crates/cgn-cli/tests/overlay_writer_symbols.rs` (new)
 
 **Goal:** When `OverlayWriter` records a dirty file, run the existing analyzer pipeline on that path to extract `Vec<SymbolRef>` and store it in `DirtyEntry.dirty_symbols`.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/overlay_writer_symbols.rs`:
+Create `crates/cgn-cli/tests/overlay_writer_symbols.rs`:
 
 ```rust
-use graph_nexus_cli::session::overlay_writer::OverlayWriter;
+use cgn_cli::session::overlay_writer::OverlayWriter;
 use std::fs;
 use tempfile::tempdir;
 
@@ -341,18 +341,18 @@ fn write_dirty_on_unsupported_file_keeps_empty_symbols() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus --test overlay_writer_symbols
+cargo test -p code-graph-nexus --test overlay_writer_symbols
 ```
 
 Expected: FAIL — either method missing or symbols field empty.
 
 - [ ] **Step 3: Implement symbol extraction in OverlayWriter**
 
-Edit `crates/graph-nexus-cli/src/session/overlay_writer.rs`. Add at top:
+Edit `crates/cgn-cli/src/session/overlay_writer.rs`. Add at top:
 
 ```rust
-use graph_nexus_analyzer::extract_symbols_from_file;
-use graph_nexus_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
+use cgn_analyzer::extract_symbols_from_file;
+use cgn_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
 ```
 
 Replace `append_dirty` body with:
@@ -413,7 +413,7 @@ fn map_kind(s: &str) -> SymbolKind {
 }
 ```
 
-In `crates/graph-nexus-analyzer/src/lib.rs`, add the public helper:
+In `crates/cgn-analyzer/src/lib.rs`, add the public helper:
 
 ```rust
 pub fn extract_symbols_from_file(path: &std::path::Path) -> Result<Vec<crate::SymbolRecord>, crate::AnalyzerError> {
@@ -429,7 +429,7 @@ pub fn extract_symbols_from_file(path: &std::path::Path) -> Result<Vec<crate::Sy
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus --test overlay_writer_symbols
+cargo test -p code-graph-nexus --test overlay_writer_symbols
 ```
 
 Expected: 2 passed.
@@ -437,17 +437,17 @@ Expected: 2 passed.
 - [ ] **Step 5: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-cli/src/session/overlay_writer.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
-cargo build -p graph-nexus --bin gnx
+rustfmt --edition 2021 crates/cgn-cli/src/session/overlay_writer.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
+cargo build -p code-graph-nexus --bin cgn
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/session/overlay_writer.rs \
-        crates/graph-nexus-cli/tests/overlay_writer_symbols.rs \
-        crates/graph-nexus-analyzer/src/lib.rs
+git add crates/cgn-cli/src/session/overlay_writer.rs \
+        crates/cgn-cli/tests/overlay_writer_symbols.rs \
+        crates/cgn-analyzer/src/lib.rs
 git commit -m "$(cat <<'EOF'
 feat(peer): extract dirty_symbols at OverlayWriter write-time
 
@@ -467,23 +467,23 @@ EOF
 ### Task 3: peer::registry — alive_peers()
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/peer/mod.rs`
-- Create: `crates/graph-nexus-core/src/peer/registry.rs`
-- Modify: `crates/graph-nexus-core/src/lib.rs:+1`
-- Modify: `crates/graph-nexus-core/src/session/meta.rs:+5`
-- Test: `crates/graph-nexus-core/tests/peer_registry.rs` (new)
+- Create: `crates/cgn-core/src/peer/mod.rs`
+- Create: `crates/cgn-core/src/peer/registry.rs`
+- Modify: `crates/cgn-core/src/lib.rs:+1`
+- Modify: `crates/cgn-core/src/session/meta.rs:+5`
+- Test: `crates/cgn-core/tests/peer_registry.rs` (new)
 
 **Goal:** Enumerate alive peer sessions in a repo by scanning `sessions/*/meta.json` and pruning entries whose `pid` is dead.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-core/tests/peer_registry.rs`:
+Create `crates/cgn-core/tests/peer_registry.rs`:
 
 ```rust
 use chrono::Utc;
-use graph_nexus_core::peer::registry::alive_peers;
-use graph_nexus_core::registry::atomic_write_json;
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::peer::registry::alive_peers;
+use cgn_core::registry::atomic_write_json;
+use cgn_core::session::SessionMeta;
 use std::fs;
 use tempfile::tempdir;
 
@@ -536,14 +536,14 @@ fn alive_peers_empty_when_no_sessions() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus-core --test peer_registry
+cargo test -p cgn-core --test peer_registry
 ```
 
 Expected: FAIL — `peer::registry::alive_peers` not found, `watcher_pid` / `last_drained_offset` not on `SessionMeta`.
 
 - [ ] **Step 3: Extend SessionMeta**
 
-Edit `crates/graph-nexus-core/src/session/meta.rs`:
+Edit `crates/cgn-core/src/session/meta.rs`:
 
 ```rust
 use crate::registry::io::atomic_write_json;
@@ -581,7 +581,7 @@ impl SessionMeta {
 
 - [ ] **Step 4: Implement peer::registry**
 
-Create `crates/graph-nexus-core/src/peer/mod.rs`:
+Create `crates/cgn-core/src/peer/mod.rs`:
 
 ```rust
 pub mod registry;
@@ -590,7 +590,7 @@ pub mod inbox;
 pub mod retention;
 ```
 
-Create `crates/graph-nexus-core/src/peer/registry.rs`:
+Create `crates/cgn-core/src/peer/registry.rs`:
 
 ```rust
 //! Enumerate alive peer sessions sharing the same repo `common_dir`.
@@ -658,14 +658,14 @@ pub fn pid_alive(pid: u32) -> bool {
 }
 ```
 
-Add `libc` to `crates/graph-nexus-core/Cargo.toml` if not present:
+Add `libc` to `crates/cgn-core/Cargo.toml` if not present:
 
 ```toml
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 ```
 
-Edit `crates/graph-nexus-core/src/lib.rs`, add:
+Edit `crates/cgn-core/src/lib.rs`, add:
 
 ```rust
 pub mod peer;
@@ -674,7 +674,7 @@ pub mod peer;
 - [ ] **Step 5: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus-core --test peer_registry
+cargo test -p cgn-core --test peer_registry
 ```
 
 Expected: 2 passed.
@@ -682,18 +682,18 @@ Expected: 2 passed.
 - [ ] **Step 6: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-core/src/peer/registry.rs crates/graph-nexus-core/src/peer/mod.rs crates/graph-nexus-core/src/session/meta.rs
-cargo clippy -p graph-nexus-core --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-core/src/peer/registry.rs crates/cgn-core/src/peer/mod.rs crates/cgn-core/src/session/meta.rs
+cargo clippy -p cgn-core --tests -- -D warnings
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/peer/ \
-        crates/graph-nexus-core/src/session/meta.rs \
-        crates/graph-nexus-core/src/lib.rs \
-        crates/graph-nexus-core/Cargo.toml \
-        crates/graph-nexus-core/tests/peer_registry.rs
+git add crates/cgn-core/src/peer/ \
+        crates/cgn-core/src/session/meta.rs \
+        crates/cgn-core/src/lib.rs \
+        crates/cgn-core/Cargo.toml \
+        crates/cgn-core/tests/peer_registry.rs
 git commit -m "$(cat <<'EOF'
 feat(peer): peer::registry — enumerate alive peer sessions
 
@@ -711,18 +711,18 @@ EOF
 ### Task 4: peer::concern — HARD/SOFT/IGNORE classification
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/peer/concern.rs`
-- Test: `crates/graph-nexus-core/tests/peer_concern.rs` (new)
+- Create: `crates/cgn-core/src/peer/concern.rs`
+- Test: `crates/cgn-core/tests/peer_concern.rs` (new)
 
 **Goal:** Implement the precise concern definition from spec §7.2. `ImpactCache` materializes `IMPACT(MY_DIRTY_SYMBOLS)` on demand and invalidates on self-dirty change.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-core/tests/peer_concern.rs`:
+Create `crates/cgn-core/tests/peer_concern.rs`:
 
 ```rust
-use graph_nexus_core::peer::concern::{classify, ConcernKind, ConcernResult, ImpactCache};
-use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
+use cgn_core::peer::concern::{classify, ConcernKind, ConcernResult, ImpactCache};
+use cgn_core::session::overlay::{SymbolKind, SymbolRef};
 use std::collections::HashSet;
 
 fn sym(name: &str, file: &str) -> SymbolRef {
@@ -795,14 +795,14 @@ fn empty_my_dirty_yields_ignore() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus-core --test peer_concern
+cargo test -p cgn-core --test peer_concern
 ```
 
 Expected: FAIL — module not present.
 
 - [ ] **Step 3: Implement peer::concern**
 
-Create `crates/graph-nexus-core/src/peer/concern.rs`:
+Create `crates/cgn-core/src/peer/concern.rs`:
 
 ```rust
 //! Concern classification — decide whether a peer dirty event matters.
@@ -886,7 +886,7 @@ pub fn classify(
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus-core --test peer_concern
+cargo test -p cgn-core --test peer_concern
 ```
 
 Expected: 5 passed.
@@ -894,15 +894,15 @@ Expected: 5 passed.
 - [ ] **Step 5: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-core/src/peer/concern.rs
-cargo clippy -p graph-nexus-core --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-core/src/peer/concern.rs
+cargo clippy -p cgn-core --tests -- -D warnings
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/peer/concern.rs \
-        crates/graph-nexus-core/tests/peer_concern.rs
+git add crates/cgn-core/src/peer/concern.rs \
+        crates/cgn-core/tests/peer_concern.rs
 git commit -m "$(cat <<'EOF'
 feat(peer): peer::concern — HARD/SOFT/IGNORE classification
 
@@ -921,19 +921,19 @@ EOF
 ### Task 5: peer::inbox — append, drain, watermark
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/peer/inbox.rs`
-- Test: `crates/graph-nexus-core/tests/peer_inbox.rs` (new)
+- Create: `crates/cgn-core/src/peer/inbox.rs`
+- Test: `crates/cgn-core/tests/peer_inbox.rs` (new)
 
 **Goal:** `InboxEntry` schema (DirtyEvent + Message), append-as-line-O_APPEND, drain-and-truncate with watermark.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-core/tests/peer_inbox.rs`:
+Create `crates/cgn-core/tests/peer_inbox.rs`:
 
 ```rust
-use graph_nexus_core::peer::concern::ConcernKind;
-use graph_nexus_core::peer::inbox::{append_entry, drain, InboxEntry};
-use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
+use cgn_core::peer::concern::ConcernKind;
+use cgn_core::peer::inbox::{append_entry, drain, InboxEntry};
+use cgn_core::session::overlay::{SymbolKind, SymbolRef};
 use tempfile::tempdir;
 
 fn dirty_event_fixture() -> InboxEntry {
@@ -1016,14 +1016,14 @@ fn drain_skips_corrupt_line_and_continues() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus-core --test peer_inbox
+cargo test -p cgn-core --test peer_inbox
 ```
 
 Expected: FAIL — `peer::inbox` module not present.
 
 - [ ] **Step 3: Implement peer::inbox**
 
-Create `crates/graph-nexus-core/src/peer/inbox.rs`:
+Create `crates/cgn-core/src/peer/inbox.rs`:
 
 ```rust
 //! Inbox transport — append-only JSON lines, drain-and-truncate semantics.
@@ -1120,7 +1120,7 @@ pub fn drain(path: &Path, start_offset: u64) -> io::Result<(Vec<InboxEntry>, u64
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus-core --test peer_inbox
+cargo test -p cgn-core --test peer_inbox
 ```
 
 Expected: 4 passed.
@@ -1128,15 +1128,15 @@ Expected: 4 passed.
 - [ ] **Step 5: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-core/src/peer/inbox.rs
-cargo clippy -p graph-nexus-core --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-core/src/peer/inbox.rs
+cargo clippy -p cgn-core --tests -- -D warnings
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/peer/inbox.rs \
-        crates/graph-nexus-core/tests/peer_inbox.rs
+git add crates/cgn-core/src/peer/inbox.rs \
+        crates/cgn-core/tests/peer_inbox.rs
 git commit -m "$(cat <<'EOF'
 feat(peer): peer::inbox — append + drain with watermark
 
@@ -1155,15 +1155,15 @@ EOF
 ### Task 6: peer::retention — rotation constants + rotate()
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/peer/retention.rs`
-- Test: `crates/graph-nexus-core/tests/peer_retention.rs` (new)
+- Create: `crates/cgn-core/src/peer/retention.rs`
+- Test: `crates/cgn-core/tests/peer_retention.rs` (new)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-core/tests/peer_retention.rs`:
+Create `crates/cgn-core/tests/peer_retention.rs`:
 
 ```rust
-use graph_nexus_core::peer::retention::{rotate_if_needed, MSG_LOG_KEEP_ROTATED};
+use cgn_core::peer::retention::{rotate_if_needed, MSG_LOG_KEEP_ROTATED};
 use std::fs;
 use tempfile::tempdir;
 
@@ -1207,14 +1207,14 @@ fn rotation_drops_oldest_beyond_keep_count() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus-core --test peer_retention
+cargo test -p cgn-core --test peer_retention
 ```
 
 Expected: FAIL — module not present.
 
 - [ ] **Step 3: Implement peer::retention**
 
-Create `crates/graph-nexus-core/src/peer/retention.rs`:
+Create `crates/cgn-core/src/peer/retention.rs`:
 
 ```rust
 //! Log rotation + retention constants for peer-sync logs.
@@ -1266,7 +1266,7 @@ pub fn rotate_if_needed(log: &Path, threshold_bytes: u64, keep: usize) -> io::Re
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus-core --test peer_retention
+cargo test -p cgn-core --test peer_retention
 ```
 
 Expected: 3 passed.
@@ -1274,16 +1274,16 @@ Expected: 3 passed.
 - [ ] **Step 5: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-core/src/peer/retention.rs
-cargo clippy -p graph-nexus-core --tests -- -D warnings
-cargo build -p graph-nexus-core
+rustfmt --edition 2021 crates/cgn-core/src/peer/retention.rs
+cargo clippy -p cgn-core --tests -- -D warnings
+cargo build -p cgn-core
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/peer/retention.rs \
-        crates/graph-nexus-core/tests/peer_retention.rs
+git add crates/cgn-core/src/peer/retention.rs \
+        crates/cgn-core/tests/peer_retention.rs
 git commit -m "$(cat <<'EOF'
 feat(peer): peer::retention — log rotation primitives
 
@@ -1303,8 +1303,8 @@ EOF
 Run full test suite for core peer module:
 
 ```bash
-cargo test -p graph-nexus-core peer
-cargo clippy -p graph-nexus-core --tests -- -D warnings
+cargo test -p cgn-core peer
+cargo clippy -p cgn-core --tests -- -D warnings
 ```
 
 Expected: all peer_* tests green, no clippy warnings.
@@ -1318,21 +1318,21 @@ If any RED → stop, investigate, fix before proceeding to Phase 3.
 ### Task 7: cli/peer/render — InboxEntry → hookSpecificOutput payload
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/peer/mod.rs`
-- Create: `crates/graph-nexus-cli/src/peer/render.rs`
-- Modify: `crates/graph-nexus-cli/src/lib.rs:+1`
-- Test: `crates/graph-nexus-cli/tests/peer_render.rs` (new)
+- Create: `crates/cgn-cli/src/peer/mod.rs`
+- Create: `crates/cgn-cli/src/peer/render.rs`
+- Modify: `crates/cgn-cli/src/lib.rs:+1`
+- Test: `crates/cgn-cli/tests/peer_render.rs` (new)
 
 **Goal:** Render a drained batch of `InboxEntry` into the structured text payload from spec §6 + §3 (HARD inline / SOFT one-line / Messages full body), with the 4 KB cap.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/peer_render.rs`:
+Create `crates/cgn-cli/tests/peer_render.rs`:
 
 ```rust
-use graph_nexus_cli::peer::render::render_payload;
-use graph_nexus_core::peer::inbox::{ConcernKindSer, InboxEntry};
-use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
+use cgn_cli::peer::render::render_payload;
+use cgn_core::peer::inbox::{ConcernKindSer, InboxEntry};
+use cgn_core::session::overlay::{SymbolKind, SymbolRef};
 
 fn dirty_hard() -> InboxEntry {
     InboxEntry::DirtyEvent {
@@ -1415,14 +1415,14 @@ fn enforces_4kb_cap_by_truncating_soft_first() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus --test peer_render
+cargo test -p code-graph-nexus --test peer_render
 ```
 
 Expected: FAIL — module not present.
 
 - [ ] **Step 3: Implement cli/peer/render**
 
-Create `crates/graph-nexus-cli/src/peer/mod.rs`:
+Create `crates/cgn-cli/src/peer/mod.rs`:
 
 ```rust
 pub mod render;
@@ -1430,13 +1430,13 @@ pub mod dispatch;
 pub mod watcher;
 ```
 
-Create `crates/graph-nexus-cli/src/peer/render.rs`:
+Create `crates/cgn-cli/src/peer/render.rs`:
 
 ```rust
 //! Render drained InboxEntry batches into a Claude Code hook payload.
 //! Hard cap 4 KB; HARD events kept, SOFT trimmed first, messages kept after HARD.
 
-use graph_nexus_core::peer::inbox::{ConcernKindSer, InboxEntry};
+use cgn_core::peer::inbox::{ConcernKindSer, InboxEntry};
 use std::fmt::Write;
 
 const PAYLOAD_CAP_BYTES: usize = 4096;
@@ -1457,23 +1457,23 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
     }
     let mut buf = String::new();
     if !hard.is_empty() {
-        let _ = writeln!(buf, "[gnx peers] HARD overlap ({} event{})", hard.len(), if hard.len() == 1 { "" } else { "s" });
+        let _ = writeln!(buf, "[cgn peers] HARD overlap ({} event{})", hard.len(), if hard.len() == 1 { "" } else { "s" });
         for e in &hard {
             render_hard(&mut buf, e);
         }
     }
     if !soft.is_empty() {
         let cap = SOFT_EVENTS_DEFAULT_CAP.min(soft.len());
-        let _ = writeln!(buf, "\n[gnx peers] SOFT overlap ({} event{})", soft.len(), if soft.len() == 1 { "" } else { "s" });
+        let _ = writeln!(buf, "\n[cgn peers] SOFT overlap ({} event{})", soft.len(), if soft.len() == 1 { "" } else { "s" });
         for e in soft.iter().take(cap) {
             render_soft_one_line(&mut buf, e);
         }
         if soft.len() > cap {
-            let _ = writeln!(buf, "  ... +{} more, run `gnx peers status`", soft.len() - cap);
+            let _ = writeln!(buf, "  ... +{} more, run `cgn peers status`", soft.len() - cap);
         }
     }
     if !msgs.is_empty() {
-        let _ = writeln!(buf, "\n[gnx peers] {} new message{} Ƀ", msgs.len(), if msgs.len() == 1 { "" } else { "s" });
+        let _ = writeln!(buf, "\n[cgn peers] {} new message{} Ƀ", msgs.len(), if msgs.len() == 1 { "" } else { "s" });
         for e in &msgs {
             render_message(&mut buf, e);
         }
@@ -1495,7 +1495,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
                 let _ = writeln!(buf, "    {l}");
             }
             if d.lines().count() > HARD_DELTA_LOC_CAP {
-                let _ = writeln!(buf, "    ... (truncated, see `gnx peers diff {peer_session} {}`)", symbol.name);
+                let _ = writeln!(buf, "    ... (truncated, see `cgn peers diff {peer_session} {}`)", symbol.name);
             }
         }
         if let Some((s, end)) = your_overlap_range {
@@ -1531,7 +1531,7 @@ fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
     }
     // Fall back: rebuild keeping only HARD section + top 3 message lines.
     buf.clear();
-    let _ = writeln!(&mut buf, "[gnx peers] HARD overlap ({}) — payload trimmed to fit 4KB cap", hard.len());
+    let _ = writeln!(&mut buf, "[cgn peers] HARD overlap ({}) — payload trimmed to fit 4KB cap", hard.len());
     for e in hard {
         render_hard(&mut buf, e);
         if buf.len() > PAYLOAD_CAP_BYTES {
@@ -1544,7 +1544,7 @@ fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
 }
 ```
 
-Edit `crates/graph-nexus-cli/src/lib.rs`, add:
+Edit `crates/cgn-cli/src/lib.rs`, add:
 
 ```rust
 pub mod peer;
@@ -1553,7 +1553,7 @@ pub mod peer;
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus --test peer_render
+cargo test -p code-graph-nexus --test peer_render
 ```
 
 Expected: 4 passed.
@@ -1561,8 +1561,8 @@ Expected: 4 passed.
 - [ ] **Step 5: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-cli/src/peer/mod.rs crates/graph-nexus-cli/src/peer/render.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/peer/mod.rs crates/cgn-cli/src/peer/render.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 ```
 
 (Empty `dispatch.rs` / `watcher.rs` may be needed as stubs to satisfy `pub mod` declarations — if so, add `// stub, implemented in next task` plus `#![allow(dead_code)]` until Task 8/9 lands.)
@@ -1570,8 +1570,8 @@ cargo clippy -p graph-nexus --tests -- -D warnings
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/peer/ crates/graph-nexus-cli/src/lib.rs \
-        crates/graph-nexus-cli/tests/peer_render.rs
+git add crates/cgn-cli/src/peer/ crates/cgn-cli/src/lib.rs \
+        crates/cgn-cli/tests/peer_render.rs
 git commit -m "$(cat <<'EOF'
 feat(peer-cli): render — InboxEntry batch → hookSpecificOutput payload
 
@@ -1589,21 +1589,21 @@ EOF
 ### Task 8: cli/peer/dispatch — concern → inbox bridge
 
 **Files:**
-- Replace stub: `crates/graph-nexus-cli/src/peer/dispatch.rs`
-- Test: `crates/graph-nexus-cli/tests/peer_dispatch.rs` (new)
+- Replace stub: `crates/cgn-cli/src/peer/dispatch.rs`
+- Test: `crates/cgn-cli/tests/peer_dispatch.rs` (new)
 
 **Goal:** Given a peer's DirtyEntry, an ImpactCache, and the receiver session dir, classify each peer symbol and append `InboxEntry::DirtyEvent` for HARD/SOFT (skip IGNORE).
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/peer_dispatch.rs`:
+Create `crates/cgn-cli/tests/peer_dispatch.rs`:
 
 ```rust
 use chrono::Utc;
-use graph_nexus_cli::peer::dispatch::dispatch_peer_dirty_event;
-use graph_nexus_core::peer::concern::ImpactCache;
-use graph_nexus_core::peer::inbox::{drain, InboxEntry};
-use graph_nexus_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
+use cgn_cli::peer::dispatch::dispatch_peer_dirty_event;
+use cgn_core::peer::concern::ImpactCache;
+use cgn_core::peer::inbox::{drain, InboxEntry};
+use cgn_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
 use std::collections::HashSet;
 use tempfile::tempdir;
 
@@ -1662,21 +1662,21 @@ fn ignore_writes_nothing() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus --test peer_dispatch
+cargo test -p code-graph-nexus --test peer_dispatch
 ```
 
 Expected: FAIL.
 
 - [ ] **Step 3: Implement cli/peer/dispatch**
 
-Replace `crates/graph-nexus-cli/src/peer/dispatch.rs`:
+Replace `crates/cgn-cli/src/peer/dispatch.rs`:
 
 ```rust
 //! Bridge: classify peer dirty entry → append InboxEntry to receiver inbox.
 
-use graph_nexus_core::peer::concern::{classify, ConcernResult, ImpactCache};
-use graph_nexus_core::peer::inbox::{append_entry, ConcernKindSer, InboxEntry};
-use graph_nexus_core::session::overlay::{DirtyEntry, SymbolRef};
+use cgn_core::peer::concern::{classify, ConcernResult, ImpactCache};
+use cgn_core::peer::inbox::{append_entry, ConcernKindSer, InboxEntry};
+use cgn_core::session::overlay::{DirtyEntry, SymbolRef};
 use std::io;
 use std::path::Path;
 
@@ -1712,7 +1712,7 @@ pub fn dispatch_peer_dirty_event(
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus --test peer_dispatch
+cargo test -p code-graph-nexus --test peer_dispatch
 ```
 
 Expected: 2 passed.
@@ -1720,15 +1720,15 @@ Expected: 2 passed.
 - [ ] **Step 5: Lint + build**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-cli/src/peer/dispatch.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/peer/dispatch.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/peer/dispatch.rs \
-        crates/graph-nexus-cli/tests/peer_dispatch.rs
+git add crates/cgn-cli/src/peer/dispatch.rs \
+        crates/cgn-cli/tests/peer_dispatch.rs
 git commit -m "$(cat <<'EOF'
 feat(peer-cli): dispatch — peer dirty entry → inbox append
 
@@ -1745,8 +1745,8 @@ EOF
 ### Task 9: cli/peer/watcher — inotify event loop + lifecycle
 
 **Files:**
-- Replace stub: `crates/graph-nexus-cli/src/peer/watcher.rs`
-- Modify: `crates/graph-nexus-cli/Cargo.toml` — add `notify = "6"`, `fs2 = "0.4"`, `daemonize = "0.5"` (optional, only if not building daemon manually)
+- Replace stub: `crates/cgn-cli/src/peer/watcher.rs`
+- Modify: `crates/cgn-cli/Cargo.toml` — add `notify = "6"`, `fs2 = "0.4"`, `daemonize = "0.5"` (optional, only if not building daemon manually)
 
 **Goal:** A blocking `run_watcher()` function that: takes a flock, computes initial impact_cache, loops on inotify events for `sessions/*/dirty.json`, and dispatches via Task 8. SIGTERM → release lock + exit cleanly.
 
@@ -1754,7 +1754,7 @@ The watcher binary entry-point (forking + setsid + log redirection) is implement
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `crates/graph-nexus-cli/tests/peer_dispatch.rs` (we reuse it because Watch loop test is integration-y; place a small unit covering only flock semantics):
+Append to `crates/cgn-cli/tests/peer_dispatch.rs` (we reuse it because Watch loop test is integration-y; place a small unit covering only flock semantics):
 
 ```rust
 #[test]
@@ -1775,14 +1775,14 @@ fn watcher_lock_rejects_second_holder() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus --test peer_dispatch -- watcher_lock_rejects_second_holder
+cargo test -p code-graph-nexus --test peer_dispatch -- watcher_lock_rejects_second_holder
 ```
 
 Expected: FAIL — `fs2` not in Cargo.toml.
 
 - [ ] **Step 3: Add dependencies**
 
-Edit `crates/graph-nexus-cli/Cargo.toml` `[dependencies]`:
+Edit `crates/cgn-cli/Cargo.toml` `[dependencies]`:
 
 ```toml
 notify = "6"
@@ -1793,7 +1793,7 @@ fs2 = "0.4"
 
 - [ ] **Step 4: Implement cli/peer/watcher**
 
-Replace `crates/graph-nexus-cli/src/peer/watcher.rs`:
+Replace `crates/cgn-cli/src/peer/watcher.rs`:
 
 ```rust
 //! Watcher main loop: inotify-driven peer-dirty fan-in.
@@ -1801,10 +1801,10 @@ Replace `crates/graph-nexus-cli/src/peer/watcher.rs`:
 use crate::peer::dispatch::dispatch_peer_dirty_event;
 use chrono::Utc;
 use fs2::FileExt;
-use graph_nexus_core::peer::concern::ImpactCache;
-use graph_nexus_core::peer::registry::alive_peers;
-use graph_nexus_core::session::overlay::DirtyFiles;
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::peer::concern::ImpactCache;
+use cgn_core::peer::registry::alive_peers;
+use cgn_core::session::overlay::DirtyFiles;
+use cgn_core::session::SessionMeta;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -1848,16 +1848,16 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        if event_count % graph_nexus_core::peer::retention::ROTATE_CHECK_EVERY_N_EVENTS == 0 {
-            let _ = graph_nexus_core::peer::retention::rotate_if_needed(
+        if event_count % cgn_core::peer::retention::ROTATE_CHECK_EVERY_N_EVENTS == 0 {
+            let _ = cgn_core::peer::retention::rotate_if_needed(
                 &cfg.my_session_dir.join("msg.log"),
-                graph_nexus_core::peer::retention::MSG_LOG_ROTATE_BYTES,
-                graph_nexus_core::peer::retention::MSG_LOG_KEEP_ROTATED,
+                cgn_core::peer::retention::MSG_LOG_ROTATE_BYTES,
+                cgn_core::peer::retention::MSG_LOG_KEEP_ROTATED,
             );
-            let _ = graph_nexus_core::peer::retention::rotate_if_needed(
+            let _ = cgn_core::peer::retention::rotate_if_needed(
                 &cfg.my_session_dir.join("watcher.log"),
-                graph_nexus_core::peer::retention::WATCHER_LOG_ROTATE_BYTES,
-                graph_nexus_core::peer::retention::WATCHER_LOG_KEEP_ROTATED,
+                cgn_core::peer::retention::WATCHER_LOG_ROTATE_BYTES,
+                cgn_core::peer::retention::WATCHER_LOG_KEEP_ROTATED,
             );
         }
     }
@@ -1948,8 +1948,8 @@ fn _suppress_unused(_: HashSet<String>) {}
 - [ ] **Step 5: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus --test peer_dispatch -- watcher_lock_rejects_second_holder
-cargo build -p graph-nexus --bin gnx
+cargo test -p code-graph-nexus --test peer_dispatch -- watcher_lock_rejects_second_holder
+cargo build -p code-graph-nexus --bin cgn
 ```
 
 Expected: lock test passes, binary builds.
@@ -1957,15 +1957,15 @@ Expected: lock test passes, binary builds.
 - [ ] **Step 6: Lint**
 
 ```
-rustfmt --edition 2021 crates/graph-nexus-cli/src/peer/watcher.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/peer/watcher.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/peer/watcher.rs crates/graph-nexus-cli/Cargo.toml \
-        crates/graph-nexus-cli/tests/peer_dispatch.rs
+git add crates/cgn-cli/src/peer/watcher.rs crates/cgn-cli/Cargo.toml \
+        crates/cgn-cli/tests/peer_dispatch.rs
 git commit -m "$(cat <<'EOF'
 feat(peer-cli): watcher — inotify loop with flock-bounded lifetime
 
@@ -1986,26 +1986,26 @@ EOF
 
 ## Phase 4: CLI Commands
 
-### Task 10: gnx watch — --start / --stop / --status / --foreground
+### Task 10: cgn watch — --start / --stop / --status / --foreground
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/watch.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/mod.rs:+1`
-- Modify: `crates/graph-nexus-cli/src/main.rs` (add top-level dispatch)
-- Test: `crates/graph-nexus-cli/tests/peers_watch_lifecycle.rs` (new, full)
+- Create: `crates/cgn-cli/src/commands/watch.rs`
+- Modify: `crates/cgn-cli/src/commands/mod.rs:+1`
+- Modify: `crates/cgn-cli/src/main.rs` (add top-level dispatch)
+- Test: `crates/cgn-cli/tests/peers_watch_lifecycle.rs` (new, full)
 
 **Goal:** CLI entry that forks the watcher (or runs foreground), signals SIGTERM to existing PID, prints status from `watcher.log` + lock state.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/peers_watch_lifecycle.rs`:
+Create `crates/cgn-cli/tests/peers_watch_lifecycle.rs`:
 
 ```rust
 use std::process::Command;
 use tempfile::tempdir;
 
 fn bin() -> std::path::PathBuf {
-    env!("CARGO_BIN_EXE_gnx").into()
+    env!("CARGO_BIN_EXE_cgn").into()
 }
 
 #[test]
@@ -2013,9 +2013,9 @@ fn watch_foreground_exits_immediately_when_no_repo() {
     let dir = tempdir().unwrap();
     let out = Command::new(bin())
         .args(["watch", "--foreground", "--repo", dir.path().to_str().unwrap()])
-        .env("GNX_TEST_EXIT_AFTER_INIT", "1")
+        .env("CGN_TEST_EXIT_AFTER_INIT", "1")
         .output()
-        .expect("spawn gnx");
+        .expect("spawn cgn");
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -2034,23 +2034,23 @@ fn watch_status_when_no_watcher_running_returns_not_running() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus --test peers_watch_lifecycle
+cargo test -p code-graph-nexus --test peers_watch_lifecycle
 ```
 
 Expected: FAIL — `watch` subcommand absent.
 
 - [ ] **Step 3: Implement commands/watch.rs**
 
-Create `crates/graph-nexus-cli/src/commands/watch.rs`:
+Create `crates/cgn-cli/src/commands/watch.rs`:
 
 ```rust
-//! `gnx watch` CLI surface.
+//! `cgn watch` CLI surface.
 
 use crate::peer::watcher::{run_watcher, WatcherCfg};
 use crate::session::resolver::resolve_session_id;
 use clap::Args;
-use graph_nexus_core::peer::registry::pid_alive;
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::peer::registry::pid_alive;
+use cgn_core::session::SessionMeta;
 use std::path::PathBuf;
 
 #[derive(Args, Debug)]
@@ -2085,12 +2085,12 @@ fn resolve_repo_root(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
         return Ok(p);
     }
     // Fall back to existing registry resolver
-    Ok(graph_nexus_core::registry::resolve_home_gnx().join("graph-nexus/main"))
+    Ok(cgn_core::registry::resolve_home_cgn().join("code-graph-nexus/main"))
 }
 
 fn start_foreground(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> anyhow::Result<()> {
-    if std::env::var("GNX_TEST_EXIT_AFTER_INIT").is_ok() {
-        eprintln!("[gnx watch] test mode — exiting after init");
+    if std::env::var("CGN_TEST_EXIT_AFTER_INIT").is_ok() {
+        eprintln!("[cgn watch] test mode — exiting after init");
         return Ok(());
     }
     let cfg = WatcherCfg {
@@ -2128,7 +2128,7 @@ fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> an
         meta.watcher_pid = Some(pid);
         SessionMeta::write_atomic(&meta_path, &meta)?;
     }
-    eprintln!("[gnx watch] forked watcher pid={pid}, sid={sid}");
+    eprintln!("[cgn watch] forked watcher pid={pid}, sid={sid}");
     Ok(())
 }
 
@@ -2172,13 +2172,13 @@ fn print_status(session_dir: &std::path::Path) -> anyhow::Result<()> {
 }
 ```
 
-Edit `crates/graph-nexus-cli/src/commands/mod.rs`, add:
+Edit `crates/cgn-cli/src/commands/mod.rs`, add:
 
 ```rust
 pub mod watch;
 ```
 
-Edit `crates/graph-nexus-cli/src/main.rs` (dispatch — actual structure varies, the principle is):
+Edit `crates/cgn-cli/src/main.rs` (dispatch — actual structure varies, the principle is):
 
 ```rust
 // In the Command enum:
@@ -2191,7 +2191,7 @@ Command::Watch(a) => commands::watch::run(a),
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus --test peers_watch_lifecycle
+cargo test -p code-graph-nexus --test peers_watch_lifecycle
 ```
 
 Expected: 2 passed.
@@ -2199,11 +2199,11 @@ Expected: 2 passed.
 - [ ] **Step 5: Manual smoke**
 
 ```bash
-./target/debug/gnx watch --status --repo /tmp/x
-./target/debug/gnx watch --foreground --repo /tmp/x &
+./target/debug/cgn watch --status --repo /tmp/x
+./target/debug/cgn watch --foreground --repo /tmp/x &
 sleep 0.5
-./target/debug/gnx watch --status --repo /tmp/x
-./target/debug/gnx watch --stop --repo /tmp/x
+./target/debug/cgn watch --status --repo /tmp/x
+./target/debug/cgn watch --stop --repo /tmp/x
 ```
 
 Expected: status shows pid then "no watcher" after stop.
@@ -2211,15 +2211,15 @@ Expected: status shows pid then "no watcher" after stop.
 - [ ] **Step 6: Lint + commit**
 
 ```bash
-rustfmt --edition 2021 crates/graph-nexus-cli/src/commands/watch.rs crates/graph-nexus-cli/src/main.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/commands/watch.rs crates/cgn-cli/src/main.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 
-git add crates/graph-nexus-cli/src/commands/watch.rs \
-        crates/graph-nexus-cli/src/commands/mod.rs \
-        crates/graph-nexus-cli/src/main.rs \
-        crates/graph-nexus-cli/tests/peers_watch_lifecycle.rs
+git add crates/cgn-cli/src/commands/watch.rs \
+        crates/cgn-cli/src/commands/mod.rs \
+        crates/cgn-cli/src/main.rs \
+        crates/cgn-cli/tests/peers_watch_lifecycle.rs
 git commit -m "$(cat <<'EOF'
-feat(peer-cli): gnx watch — start | stop | status | foreground
+feat(peer-cli): cgn watch — start | stop | status | foreground
 
 --start forks self with --foreground (setsid + redirect stdio → watcher.log),
 writes watcher_pid into SessionMeta. --stop sends SIGTERM. --status prints
@@ -2232,23 +2232,23 @@ EOF
 
 ---
 
-### Task 11: gnx peers — status / diff / log
+### Task 11: cgn peers — status / diff / log
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/peers.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/mod.rs:+1`
-- Modify: `crates/graph-nexus-cli/src/main.rs`
-- Test: `crates/graph-nexus-cli/tests/peers_cmd_status.rs` (new)
+- Create: `crates/cgn-cli/src/commands/peers.rs`
+- Modify: `crates/cgn-cli/src/commands/mod.rs:+1`
+- Modify: `crates/cgn-cli/src/main.rs`
+- Test: `crates/cgn-cli/tests/peers_cmd_status.rs` (new)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/peers_cmd_status.rs`:
+Create `crates/cgn-cli/tests/peers_cmd_status.rs`:
 
 ```rust
 use std::process::Command;
 use tempfile::tempdir;
 
-fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_gnx").into() }
+fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_cgn").into() }
 
 #[test]
 fn peers_status_empty_repo_prints_no_peers() {
@@ -2265,20 +2265,20 @@ fn peers_status_empty_repo_prints_no_peers() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus --test peers_cmd_status
+cargo test -p code-graph-nexus --test peers_cmd_status
 ```
 
 Expected: FAIL — `peers` subcommand absent.
 
 - [ ] **Step 3: Implement commands/peers.rs (status / diff / log only — say/inbox/thread in Task 12)**
 
-Create `crates/graph-nexus-cli/src/commands/peers.rs`:
+Create `crates/cgn-cli/src/commands/peers.rs`:
 
 ```rust
-//! `gnx peers` CLI surface.
+//! `cgn peers` CLI surface.
 
 use clap::{Args, Subcommand};
-use graph_nexus_core::peer::registry::alive_peers;
+use cgn_core::peer::registry::alive_peers;
 use std::path::PathBuf;
 
 #[derive(Args, Debug)]
@@ -2314,7 +2314,7 @@ pub enum PeersCmd {
 }
 
 pub fn run(args: PeersArgs) -> anyhow::Result<()> {
-    let repo_root = args.repo.unwrap_or_else(|| graph_nexus_core::registry::resolve_home_gnx().join("graph-nexus/main"));
+    let repo_root = args.repo.unwrap_or_else(|| cgn_core::registry::resolve_home_cgn().join("code-graph-nexus/main"));
     match args.cmd {
         PeersCmd::Status => cmd_status(&repo_root),
         PeersCmd::Diff { peer, symbol } => cmd_diff(&repo_root, &peer, symbol.as_deref()),
@@ -2342,7 +2342,7 @@ fn cmd_status(repo_root: &std::path::Path) -> anyhow::Result<()> {
 }
 
 fn cmd_diff(repo_root: &std::path::Path, peer: &str, symbol: Option<&str>) -> anyhow::Result<()> {
-    use graph_nexus_core::session::overlay::DirtyFiles;
+    use cgn_core::session::overlay::DirtyFiles;
     let peer_dirty = DirtyFiles::read(&repo_root.join("sessions").join(peer).join("dirty.json"))?;
     for (path, entry) in &peer_dirty.entries {
         if let Some(sym) = symbol {
@@ -2386,7 +2386,7 @@ fn cmd_log(repo_root: &std::path::Path, _since: Option<&str>, peer: Option<&str>
 fn cmd_gc(repo_root: &std::path::Path) -> anyhow::Result<()> {
     let me = crate::session::resolver::resolve_session_id(None);
     let session_dir = repo_root.join("sessions").join(&me);
-    use graph_nexus_core::peer::retention::*;
+    use cgn_core::peer::retention::*;
     let _ = rotate_if_needed(&session_dir.join("msg.log"), MSG_LOG_ROTATE_BYTES, MSG_LOG_KEEP_ROTATED);
     let _ = rotate_if_needed(&session_dir.join("watcher.log"), WATCHER_LOG_ROTATE_BYTES, WATCHER_LOG_KEEP_ROTATED);
     println!("rotated logs for session={me}");
@@ -2394,20 +2394,20 @@ fn cmd_gc(repo_root: &std::path::Path) -> anyhow::Result<()> {
 }
 ```
 
-Edit `crates/graph-nexus-cli/src/commands/mod.rs`:
+Edit `crates/cgn-cli/src/commands/mod.rs`:
 
 ```rust
 pub mod peers;
 pub mod peers_msg;   // implemented in Task 12
 ```
 
-Edit `crates/graph-nexus-cli/src/main.rs` dispatch:
+Edit `crates/cgn-cli/src/main.rs` dispatch:
 
 ```rust
 Command::Peers(a) => commands::peers::run(a),
 ```
 
-Create empty stub `crates/graph-nexus-cli/src/commands/peers_msg.rs`:
+Create empty stub `crates/cgn-cli/src/commands/peers_msg.rs`:
 
 ```rust
 //! Stub — implemented in Task 12 (say / inbox / thread).
@@ -2426,7 +2426,7 @@ pub fn cmd_thread(_: &Path, _: &str) -> anyhow::Result<()> {
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus --test peers_cmd_status
+cargo test -p code-graph-nexus --test peers_cmd_status
 ```
 
 Expected: PASS.
@@ -2434,16 +2434,16 @@ Expected: PASS.
 - [ ] **Step 5: Lint + commit**
 
 ```bash
-rustfmt --edition 2021 crates/graph-nexus-cli/src/commands/peers.rs crates/graph-nexus-cli/src/commands/peers_msg.rs crates/graph-nexus-cli/src/main.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/commands/peers.rs crates/cgn-cli/src/commands/peers_msg.rs crates/cgn-cli/src/main.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 
-git add crates/graph-nexus-cli/src/commands/peers.rs \
-        crates/graph-nexus-cli/src/commands/peers_msg.rs \
-        crates/graph-nexus-cli/src/commands/mod.rs \
-        crates/graph-nexus-cli/src/main.rs \
-        crates/graph-nexus-cli/tests/peers_cmd_status.rs
+git add crates/cgn-cli/src/commands/peers.rs \
+        crates/cgn-cli/src/commands/peers_msg.rs \
+        crates/cgn-cli/src/commands/mod.rs \
+        crates/cgn-cli/src/main.rs \
+        crates/cgn-cli/tests/peers_cmd_status.rs
 git commit -m "$(cat <<'EOF'
-feat(peer-cli): gnx peers status | diff | log | gc
+feat(peer-cli): cgn peers status | diff | log | gc
 
 Read-side peer commands. status enumerates alive peers, diff prints
 peer dirty symbols (optionally filtered to one name), log tails the
@@ -2457,21 +2457,21 @@ EOF
 
 ---
 
-### Task 12: gnx peers — say / inbox / thread (Ƀ)
+### Task 12: cgn peers — say / inbox / thread (Ƀ)
 
 **Files:**
-- Replace stub: `crates/graph-nexus-cli/src/commands/peers_msg.rs`
-- Test: `crates/graph-nexus-cli/tests/peers_cmd_msg.rs` (new)
+- Replace stub: `crates/cgn-cli/src/commands/peers_msg.rs`
+- Test: `crates/cgn-cli/tests/peers_cmd_msg.rs` (new)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/peers_cmd_msg.rs`:
+Create `crates/cgn-cli/tests/peers_cmd_msg.rs`:
 
 ```rust
 use std::process::Command;
 use tempfile::tempdir;
 
-fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_gnx").into() }
+fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_cgn").into() }
 
 #[test]
 fn say_broadcast_writes_to_each_peer_inbox() {
@@ -2504,19 +2504,19 @@ fn say_broadcast_writes_to_each_peer_inbox() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```
-cargo test -p graph-nexus --test peers_cmd_msg
+cargo test -p code-graph-nexus --test peers_cmd_msg
 ```
 
 Expected: FAIL — stub bails.
 
 - [ ] **Step 3: Implement peers_msg.rs**
 
-Replace `crates/graph-nexus-cli/src/commands/peers_msg.rs`:
+Replace `crates/cgn-cli/src/commands/peers_msg.rs`:
 
 ```rust
 use chrono::Utc;
-use graph_nexus_core::peer::inbox::{append_entry, drain, InboxEntry};
-use graph_nexus_core::peer::registry::alive_peers;
+use cgn_core::peer::inbox::{append_entry, drain, InboxEntry};
+use cgn_core::peer::registry::alive_peers;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -2616,7 +2616,7 @@ pub fn cmd_inbox(repo_root: &Path, limit: usize) -> anyhow::Result<()> {
 - [ ] **Step 4: Run test to verify it passes**
 
 ```
-cargo test -p graph-nexus --test peers_cmd_msg
+cargo test -p code-graph-nexus --test peers_cmd_msg
 ```
 
 Expected: PASS.
@@ -2624,12 +2624,12 @@ Expected: PASS.
 - [ ] **Step 5: Lint + commit**
 
 ```bash
-rustfmt --edition 2021 crates/graph-nexus-cli/src/commands/peers_msg.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/commands/peers_msg.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 
-git add crates/graph-nexus-cli/src/commands/peers_msg.rs \
-        crates/graph-nexus-cli/Cargo.toml \
-        crates/graph-nexus-cli/tests/peers_cmd_msg.rs
+git add crates/cgn-cli/src/commands/peers_msg.rs \
+        crates/cgn-cli/Cargo.toml \
+        crates/cgn-cli/tests/peers_cmd_msg.rs
 git commit -m "$(cat <<'EOF'
 feat(peer-cli): Ƀ messaging — say / inbox / thread
 
@@ -2645,7 +2645,7 @@ EOF
 
 ---
 
-### Task 13: gnx peers gc — wire to existing scaffolding
+### Task 13: cgn peers gc — wire to existing scaffolding
 
 Already covered by `cmd_gc` in Task 11. **Skip — no separate commit.**
 
@@ -2658,16 +2658,16 @@ Mark this as completed when proceeding.
 Smoke test the full CLI:
 
 ```bash
-cargo build -p graph-nexus --bin gnx
-./target/debug/gnx peers --help
-./target/debug/gnx watch --help
+cargo build -p code-graph-nexus --bin cgn
+./target/debug/cgn peers --help
+./target/debug/cgn watch --help
 ```
 
 Expected: subcommands documented, no panic.
 
 ```bash
-cargo test -p graph-nexus peer
-cargo clippy -p graph-nexus --tests -- -D warnings
+cargo test -p code-graph-nexus peer
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 ```
 
 Expected: green.
@@ -2679,24 +2679,24 @@ Expected: green.
 ### Task 14: session_start hook — auto-watch spawn
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/session_start.rs`
+- Modify: `crates/cgn-cli/src/commands/hook/session_start.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/hook_session_start_autowatch.rs`:
+Create `crates/cgn-cli/tests/hook_session_start_autowatch.rs`:
 
 ```rust
 use std::process::Command;
 use tempfile::tempdir;
 
-fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_gnx").into() }
+fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_cgn").into() }
 
 #[test]
 fn autowatch_marker_present_spawns_watcher() {
     let dir = tempdir().unwrap();
     let repo = dir.path();
-    std::fs::create_dir_all(repo.join(".gnx")).unwrap();
-    std::fs::write(repo.join(".gnx/auto-watch"), "").unwrap();
+    std::fs::create_dir_all(repo.join(".cgn")).unwrap();
+    std::fs::write(repo.join(".cgn/auto-watch"), "").unwrap();
 
     let out = Command::new(bin())
         .args(["hook", "session_start"])
@@ -2726,20 +2726,20 @@ fn no_marker_no_spawn() {
 - [ ] **Step 2: Run to verify failure**
 
 ```
-cargo test -p graph-nexus --test hook_session_start_autowatch
+cargo test -p code-graph-nexus --test hook_session_start_autowatch
 ```
 
 Expected: FAIL or compilation error (depending on whether the hook subcommand currently exists).
 
 - [ ] **Step 3: Modify session_start handler**
 
-Edit `crates/graph-nexus-cli/src/commands/hook/session_start.rs`. Locate the main handler function (likely `pub fn handle(_: HookInput) -> ...`) and at the end add:
+Edit `crates/cgn-cli/src/commands/hook/session_start.rs`. Locate the main handler function (likely `pub fn handle(_: HookInput) -> ...`) and at the end add:
 
 ```rust
 // Spawn watcher if opt-in marker present
 let project_dir = std::env::var("CLAUDE_PROJECT_DIR").ok().map(std::path::PathBuf::from);
 if let Some(proj) = project_dir {
-    let marker = proj.join(".gnx/auto-watch");
+    let marker = proj.join(".cgn/auto-watch");
     if marker.exists() {
         eprintln!("autowatch marker detected, spawning watcher");
         let exe = std::env::current_exe().ok();
@@ -2758,7 +2758,7 @@ if let Some(proj) = project_dir {
 - [ ] **Step 4: Run test**
 
 ```
-cargo test -p graph-nexus --test hook_session_start_autowatch
+cargo test -p code-graph-nexus --test hook_session_start_autowatch
 ```
 
 Expected: 2 passed.
@@ -2766,15 +2766,15 @@ Expected: 2 passed.
 - [ ] **Step 5: Lint + commit**
 
 ```bash
-rustfmt --edition 2021 crates/graph-nexus-cli/src/commands/hook/session_start.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/commands/hook/session_start.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 
-git add crates/graph-nexus-cli/src/commands/hook/session_start.rs \
-        crates/graph-nexus-cli/tests/hook_session_start_autowatch.rs
+git add crates/cgn-cli/src/commands/hook/session_start.rs \
+        crates/cgn-cli/tests/hook_session_start_autowatch.rs
 git commit -m "$(cat <<'EOF'
 feat(peer-hook): session_start auto-spawns watcher when marker present
 
-If <repo>/.gnx/auto-watch exists, session_start hook fires `gnx watch
+If <repo>/.cgn/auto-watch exists, session_start hook fires `cgn watch
 --start` in background. Absent marker → no-op. Opt-in per spec §9.
 
 Refs: spec §9
@@ -2787,19 +2787,19 @@ EOF
 ### Task 15: pre_tool_use hook — drain + render + emit
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs`
-- Test: `crates/graph-nexus-cli/tests/peers_inbox_drain.rs` (new — partial; the full version with bidirectional flow is Task 19)
+- Modify: `crates/cgn-cli/src/commands/hook/pre_tool_use.rs`
+- Test: `crates/cgn-cli/tests/peers_inbox_drain.rs` (new — partial; the full version with bidirectional flow is Task 19)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-cli/tests/peers_inbox_drain.rs`:
+Create `crates/cgn-cli/tests/peers_inbox_drain.rs`:
 
 ```rust
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 use std::io::Write;
 
-fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_gnx").into() }
+fn bin() -> std::path::PathBuf { env!("CARGO_BIN_EXE_cgn").into() }
 
 #[test]
 fn pre_tool_use_emits_peer_section_when_inbox_has_entries() {
@@ -2823,7 +2823,7 @@ fn pre_tool_use_emits_peer_section_when_inbox_has_entries() {
         .args(["hook", "pre_tool_use"])
         .env("CLAUDE_CODE_SESSION_ID", me)
         .env("CLAUDE_PROJECT_DIR", dir.path())
-        .env("GNX_REPO_ROOT_OVERRIDE", dir.path())
+        .env("CGN_REPO_ROOT_OVERRIDE", dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn().unwrap();
@@ -2838,35 +2838,35 @@ fn pre_tool_use_emits_peer_section_when_inbox_has_entries() {
 - [ ] **Step 2: Run to verify failure**
 
 ```
-cargo test -p graph-nexus --test peers_inbox_drain
+cargo test -p code-graph-nexus --test peers_inbox_drain
 ```
 
 Expected: FAIL — hook does not emit peer section.
 
 - [ ] **Step 3: Modify pre_tool_use handler**
 
-Edit `crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs`. At the end of the main handler, before emitting JSON:
+Edit `crates/cgn-cli/src/commands/hook/pre_tool_use.rs`. At the end of the main handler, before emitting JSON:
 
 ```rust
 // Drain peer inbox and prepend to hookSpecificOutput.additionalContext
 fn drain_and_render_peer_payload() -> Option<String> {
     let me = crate::session::resolver::resolve_session_id(None);
-    let repo_root = std::env::var("GNX_REPO_ROOT_OVERRIDE")
+    let repo_root = std::env::var("CGN_REPO_ROOT_OVERRIDE")
         .map(std::path::PathBuf::from)
         .ok()
-        .unwrap_or_else(|| graph_nexus_core::registry::resolve_home_gnx().join("graph-nexus/main"));
+        .unwrap_or_else(|| cgn_core::registry::resolve_home_cgn().join("code-graph-nexus/main"));
     let session_dir = repo_root.join("sessions").join(&me);
     let inbox = session_dir.join("inbox.jsonl");
     let meta_path = session_dir.join("meta.json");
-    let mut meta = graph_nexus_core::session::SessionMeta::read(&meta_path).ok()?;
-    let (entries, new_offset) = graph_nexus_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
+    let mut meta = cgn_core::session::SessionMeta::read(&meta_path).ok()?;
+    let (entries, new_offset) = cgn_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
     if entries.is_empty() { return None; }
     let payload = crate::peer::render::render_payload(&entries);
     if payload.is_empty() { return None; }
     // Truncate inbox + advance watermark
     let _ = std::fs::write(&inbox, "");
     meta.last_drained_offset = 0;
-    let _ = graph_nexus_core::session::SessionMeta::write_atomic(&meta_path, &meta);
+    let _ = cgn_core::session::SessionMeta::write_atomic(&meta_path, &meta);
     let _ = new_offset; // unused after reset, kept for future watermark mode
     Some(payload)
 }
@@ -2894,7 +2894,7 @@ println!("{payload}");
 - [ ] **Step 4: Run test**
 
 ```
-cargo test -p graph-nexus --test peers_inbox_drain
+cargo test -p code-graph-nexus --test peers_inbox_drain
 ```
 
 Expected: PASS.
@@ -2902,11 +2902,11 @@ Expected: PASS.
 - [ ] **Step 5: Lint + commit**
 
 ```bash
-rustfmt --edition 2021 crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/commands/hook/pre_tool_use.rs
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 
-git add crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs \
-        crates/graph-nexus-cli/tests/peers_inbox_drain.rs
+git add crates/cgn-cli/src/commands/hook/pre_tool_use.rs \
+        crates/cgn-cli/tests/peers_inbox_drain.rs
 git commit -m "$(cat <<'EOF'
 feat(peer-hook): pre_tool_use drains inbox + injects payload
 
@@ -2925,13 +2925,13 @@ EOF
 ### Task 16: user_prompt_submit hook — secondary drain
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/user_prompt_submit.rs`
+- Modify: `crates/cgn-cli/src/commands/hook/user_prompt_submit.rs`
 
 Same pattern as Task 15 but on a different hook. This ensures the LLM also sees peer activity when the user submits a new prompt (not just before a tool call).
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `crates/graph-nexus-cli/tests/peers_inbox_drain.rs`:
+Append to `crates/cgn-cli/tests/peers_inbox_drain.rs`:
 
 ```rust
 #[test]
@@ -2949,7 +2949,7 @@ fn user_prompt_submit_also_drains_inbox() {
     let mut child = Command::new(bin())
         .args(["hook", "user_prompt_submit"])
         .env("CLAUDE_CODE_SESSION_ID", me)
-        .env("GNX_REPO_ROOT_OVERRIDE", dir.path())
+        .env("CGN_REPO_ROOT_OVERRIDE", dir.path())
         .stdin(Stdio::piped()).stdout(Stdio::piped())
         .spawn().unwrap();
     child.stdin.as_mut().unwrap().write_all(b"{}").unwrap();
@@ -2962,37 +2962,37 @@ fn user_prompt_submit_also_drains_inbox() {
 - [ ] **Step 2: Run to verify failure**
 
 ```
-cargo test -p graph-nexus --test peers_inbox_drain -- user_prompt_submit_also_drains_inbox
+cargo test -p code-graph-nexus --test peers_inbox_drain -- user_prompt_submit_also_drains_inbox
 ```
 
 Expected: FAIL.
 
 - [ ] **Step 3: Modify handler**
 
-In `crates/graph-nexus-cli/src/commands/hook/user_prompt_submit.rs`, paste the same `drain_and_render_peer_payload` helper from Task 15 (or extract to shared `commands/hook/common.rs`) and call it before emitting output. Merge into `additionalContext`.
+In `crates/cgn-cli/src/commands/hook/user_prompt_submit.rs`, paste the same `drain_and_render_peer_payload` helper from Task 15 (or extract to shared `commands/hook/common.rs`) and call it before emitting output. Merge into `additionalContext`.
 
 To avoid duplication, refactor Task 15's helper into `commands/hook/common.rs`:
 
 ```rust
-// crates/graph-nexus-cli/src/commands/hook/common.rs (append)
+// crates/cgn-cli/src/commands/hook/common.rs (append)
 
 pub fn drain_and_render_peer_payload() -> Option<String> {
     let me = crate::session::resolver::resolve_session_id(None);
-    let repo_root = std::env::var("GNX_REPO_ROOT_OVERRIDE")
+    let repo_root = std::env::var("CGN_REPO_ROOT_OVERRIDE")
         .map(std::path::PathBuf::from)
         .ok()
-        .unwrap_or_else(|| graph_nexus_core::registry::resolve_home_gnx().join("graph-nexus/main"));
+        .unwrap_or_else(|| cgn_core::registry::resolve_home_cgn().join("code-graph-nexus/main"));
     let session_dir = repo_root.join("sessions").join(&me);
     let inbox = session_dir.join("inbox.jsonl");
     let meta_path = session_dir.join("meta.json");
-    let mut meta = graph_nexus_core::session::SessionMeta::read(&meta_path).ok()?;
-    let (entries, _new_offset) = graph_nexus_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
+    let mut meta = cgn_core::session::SessionMeta::read(&meta_path).ok()?;
+    let (entries, _new_offset) = cgn_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
     if entries.is_empty() { return None; }
     let payload = crate::peer::render::render_payload(&entries);
     if payload.is_empty() { return None; }
     let _ = std::fs::write(&inbox, "");
     meta.last_drained_offset = 0;
-    let _ = graph_nexus_core::session::SessionMeta::write_atomic(&meta_path, &meta);
+    let _ = cgn_core::session::SessionMeta::write_atomic(&meta_path, &meta);
     Some(payload)
 }
 ```
@@ -3008,7 +3008,7 @@ let peer_payload = drain_and_render_peer_payload().unwrap_or_default();
 - [ ] **Step 4: Run all hook tests**
 
 ```
-cargo test -p graph-nexus --test peers_inbox_drain
+cargo test -p code-graph-nexus --test peers_inbox_drain
 ```
 
 Expected: 2 passed.
@@ -3016,10 +3016,10 @@ Expected: 2 passed.
 - [ ] **Step 5: Lint + commit**
 
 ```bash
-rustfmt --edition 2021 crates/graph-nexus-cli/src/commands/hook/{common.rs,user_prompt_submit.rs,pre_tool_use.rs}
-cargo clippy -p graph-nexus --tests -- -D warnings
+rustfmt --edition 2021 crates/cgn-cli/src/commands/hook/{common.rs,user_prompt_submit.rs,pre_tool_use.rs}
+cargo clippy -p code-graph-nexus --tests -- -D warnings
 
-git add crates/graph-nexus-cli/src/commands/hook/
+git add crates/cgn-cli/src/commands/hook/
 git commit -m "$(cat <<'EOF'
 feat(peer-hook): user_prompt_submit also drains inbox; shared helper
 
@@ -3039,16 +3039,16 @@ EOF
 ### Task 17: MCP tools — peers_status / peers_log / peers_say (Ƀ)
 
 **Files:**
-- Create: `crates/graph-nexus-mcp/src/tools/peers.rs`
-- Modify: `crates/graph-nexus-mcp/src/lib.rs:+5`
-- Test: `crates/graph-nexus-mcp/tests/peers_tools.rs` (new)
+- Create: `crates/cgn-mcp/src/tools/peers.rs`
+- Modify: `crates/cgn-mcp/src/lib.rs:+5`
+- Test: `crates/cgn-mcp/tests/peers_tools.rs` (new)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/graph-nexus-mcp/tests/peers_tools.rs`:
+Create `crates/cgn-mcp/tests/peers_tools.rs`:
 
 ```rust
-use graph_nexus_mcp::tools::peers::{peers_status_tool, peers_log_tool, peers_say_tool};
+use cgn_mcp::tools::peers::{peers_status_tool, peers_log_tool, peers_say_tool};
 
 #[test]
 fn tools_are_registered_with_expected_names() {
@@ -3057,44 +3057,44 @@ fn tools_are_registered_with_expected_names() {
         peers_log_tool().name(),
         peers_say_tool().name(),
     ].into_iter().collect();
-    assert!(names.contains(&"gnx_peers_status"));
-    assert!(names.contains(&"gnx_peers_log"));
-    assert!(names.contains(&"gnx_peers_say"));
+    assert!(names.contains(&"cgn_peers_status"));
+    assert!(names.contains(&"cgn_peers_log"));
+    assert!(names.contains(&"cgn_peers_say"));
 }
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
 ```
-cargo test -p graph-nexus-mcp --test peers_tools
+cargo test -p cgn-mcp --test peers_tools
 ```
 
 Expected: FAIL — module/functions absent.
 
 - [ ] **Step 3: Implement MCP tools**
 
-Create `crates/graph-nexus-mcp/src/tools/peers.rs`:
+Create `crates/cgn-mcp/src/tools/peers.rs`:
 
 ```rust
-//! MCP tools mirroring `gnx peers` CLI.
+//! MCP tools mirroring `cgn peers` CLI.
 
 use rmcp::Tool;
 use serde_json::Value;
 
 pub fn peers_status_tool() -> Tool {
-    Tool::new("gnx_peers_status", "List alive peer sessions in the current repo.")
+    Tool::new("cgn_peers_status", "List alive peer sessions in the current repo.")
         .with_handler(|_args: Value| async move {
-            // Shell out to gnx; reuse CLI logic to avoid duplication.
-            let out = std::process::Command::new("gnx")
+            // Shell out to cgn; reuse CLI logic to avoid duplication.
+            let out = std::process::Command::new("cgn")
                 .args(["peers", "status"])
                 .output()
-                .map_err(|e| format!("spawn gnx: {e}"))?;
+                .map_err(|e| format!("spawn cgn: {e}"))?;
             Ok(serde_json::json!({ "stdout": String::from_utf8_lossy(&out.stdout).into_owned() }))
         })
 }
 
 pub fn peers_log_tool() -> Tool {
-    Tool::new("gnx_peers_log", "Read this session's message log filtered by peer/direction.")
+    Tool::new("cgn_peers_log", "Read this session's message log filtered by peer/direction.")
         .with_arg("peer", "filter by peer session id", true)
         .with_arg("direction", "sent | recv", true)
         .with_arg("limit", "max entries", true)
@@ -3111,14 +3111,14 @@ pub fn peers_log_tool() -> Tool {
                 lim_str = l.to_string();
                 cmd.push("--limit"); cmd.push(&lim_str);
             }
-            let out = std::process::Command::new("gnx").args(&cmd).output()
-                .map_err(|e| format!("spawn gnx: {e}"))?;
+            let out = std::process::Command::new("cgn").args(&cmd).output()
+                .map_err(|e| format!("spawn cgn: {e}"))?;
             Ok(serde_json::json!({ "stdout": String::from_utf8_lossy(&out.stdout).into_owned() }))
         })
 }
 
 pub fn peers_say_tool() -> Tool {
-    Tool::new("gnx_peers_say", "Ƀ Send a message to peer sessions (broadcast or targeted).")
+    Tool::new("cgn_peers_say", "Ƀ Send a message to peer sessions (broadcast or targeted).")
         .with_arg("body", "message text", false)
         .with_arg("to", "target peer session id", true)
         .with_arg("reply", "reply to msg_id", true)
@@ -3136,8 +3136,8 @@ pub fn peers_say_tool() -> Tool {
                 r_owned = r.to_string();
                 cmd.push("--reply"); cmd.push(&r_owned);
             }
-            let out = std::process::Command::new("gnx").args(&cmd).output()
-                .map_err(|e| format!("spawn gnx: {e}"))?;
+            let out = std::process::Command::new("cgn").args(&cmd).output()
+                .map_err(|e| format!("spawn cgn: {e}"))?;
             Ok(serde_json::json!({
                 "status": if out.status.success() { "ok" } else { "error" },
                 "stderr": String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -3146,9 +3146,9 @@ pub fn peers_say_tool() -> Tool {
 }
 ```
 
-(Adapt to the actual `rmcp::Tool` API used elsewhere in `graph-nexus-mcp`. If the project uses a `#[tool]` macro pattern, follow that — the structure above is illustrative; preserve the existing crate's conventions.)
+(Adapt to the actual `rmcp::Tool` API used elsewhere in `cgn-mcp`. If the project uses a `#[tool]` macro pattern, follow that — the structure above is illustrative; preserve the existing crate's conventions.)
 
-Edit `crates/graph-nexus-mcp/src/lib.rs`, add:
+Edit `crates/cgn-mcp/src/lib.rs`, add:
 
 ```rust
 pub mod tools {
@@ -3167,7 +3167,7 @@ server.add_tool(tools::peers::peers_say_tool());
 - [ ] **Step 4: Run test**
 
 ```
-cargo test -p graph-nexus-mcp --test peers_tools
+cargo test -p cgn-mcp --test peers_tools
 ```
 
 Expected: PASS.
@@ -3175,16 +3175,16 @@ Expected: PASS.
 - [ ] **Step 5: Lint + commit**
 
 ```bash
-rustfmt --edition 2021 crates/graph-nexus-mcp/src/tools/peers.rs crates/graph-nexus-mcp/src/lib.rs
-cargo clippy -p graph-nexus-mcp --tests -- -D warnings
-cargo build -p graph-nexus-mcp
+rustfmt --edition 2021 crates/cgn-mcp/src/tools/peers.rs crates/cgn-mcp/src/lib.rs
+cargo clippy -p cgn-mcp --tests -- -D warnings
+cargo build -p cgn-mcp
 
-git add crates/graph-nexus-mcp/src/tools/peers.rs crates/graph-nexus-mcp/src/lib.rs \
-        crates/graph-nexus-mcp/tests/peers_tools.rs
+git add crates/cgn-mcp/src/tools/peers.rs crates/cgn-mcp/src/lib.rs \
+        crates/cgn-mcp/tests/peers_tools.rs
 git commit -m "$(cat <<'EOF'
-feat(peer-mcp): expose gnx_peers_status | gnx_peers_log | gnx_peers_say
+feat(peer-mcp): expose cgn_peers_status | cgn_peers_log | cgn_peers_say
 
-Ƀ messaging tool included. All three shell out to the gnx CLI to avoid
+Ƀ messaging tool included. All three shell out to the cgn CLI to avoid
 duplicating logic; preserves single source of truth at the CLI layer.
 
 Refs: spec §9.1
@@ -3213,27 +3213,27 @@ Expected: green across all crates.
 ### Task 18: peer_harness — shared test fixture
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/common/peer_harness.rs`
-- Create: `crates/graph-nexus-cli/tests/common/mod.rs` (if absent)
+- Create: `crates/cgn-cli/tests/common/peer_harness.rs`
+- Create: `crates/cgn-cli/tests/common/mod.rs` (if absent)
 
-**Goal:** A reusable fixture that spawns N gnx watcher processes against a shared temp repo, drives dirty events and messages, and reaps cleanly on drop.
+**Goal:** A reusable fixture that spawns N cgn watcher processes against a shared temp repo, drives dirty events and messages, and reaps cleanly on drop.
 
 - [ ] **Step 1: Implement the harness**
 
-Create `crates/graph-nexus-cli/tests/common/mod.rs`:
+Create `crates/cgn-cli/tests/common/mod.rs`:
 
 ```rust
 pub mod peer_harness;
 ```
 
-Create `crates/graph-nexus-cli/tests/common/peer_harness.rs`:
+Create `crates/cgn-cli/tests/common/peer_harness.rs`:
 
 ```rust
-//! Cross-session test fixture: spawn N gnx watcher processes against a shared temp repo.
+//! Cross-session test fixture: spawn N cgn watcher processes against a shared temp repo.
 
 use chrono::Utc;
-use graph_nexus_core::peer::inbox::{drain, InboxEntry};
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::peer::inbox::{drain, InboxEntry};
+use cgn_core::session::SessionMeta;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -3275,8 +3275,8 @@ impl PeerHarness {
         };
         SessionMeta::write_atomic(&session_dir.join("meta.json"), &meta).unwrap();
 
-        // Spawn `gnx watch --foreground` so the child writes peer inbox events.
-        let bin: PathBuf = env!("CARGO_BIN_EXE_gnx").into();
+        // Spawn `cgn watch --foreground` so the child writes peer inbox events.
+        let bin: PathBuf = env!("CARGO_BIN_EXE_cgn").into();
         let child = Command::new(&bin)
             .args(["watch", "--foreground", "--repo", self.repo_root.path().to_str().unwrap()])
             .env("CLAUDE_CODE_SESSION_ID", id)
@@ -3300,7 +3300,7 @@ impl PeerHarness {
     }
 
     pub fn write_dirty(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {
-        use graph_nexus_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
+        use cgn_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
         use std::collections::BTreeMap;
         let sdir = self.session_dir(id);
         let mut entries = BTreeMap::new();
@@ -3336,12 +3336,12 @@ impl PeerHarness {
     }
 
     pub fn say(&self, from: &str, to: Option<&str>, body: &str) -> std::process::Output {
-        let bin: PathBuf = env!("CARGO_BIN_EXE_gnx").into();
+        let bin: PathBuf = env!("CARGO_BIN_EXE_cgn").into();
         let mut cmd = vec!["peers", "say", body, "--repo", self.repo_root.path().to_str().unwrap()];
         if let Some(t) = to { cmd.push("--to"); cmd.push(t); }
         Command::new(bin).args(&cmd)
             .env("CLAUDE_CODE_SESSION_ID", from)
-            .output().expect("spawn gnx peers say")
+            .output().expect("spawn cgn peers say")
     }
 }
 
@@ -3361,7 +3361,7 @@ impl Drop for PeerHarness {
 - [ ] **Step 2: Build to confirm the harness compiles standalone**
 
 ```
-cargo build --tests -p graph-nexus
+cargo build --tests -p code-graph-nexus
 ```
 
 Expected: build succeeds (no test runs yet since no test file references it).
@@ -3369,11 +3369,11 @@ Expected: build succeeds (no test runs yet since no test file references it).
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/tests/common/
+git add crates/cgn-cli/tests/common/
 git commit -m "$(cat <<'EOF'
 test(peer): peer_harness fixture for cross-session integration tests
 
-Spawns N gnx watcher processes against a shared temp repo, exposes
+Spawns N cgn watcher processes against a shared temp repo, exposes
 write_dirty / read_inbox / say / assert_within helpers. Drop impl
 SIGTERMs all children to prevent zombies.
 
@@ -3387,7 +3387,7 @@ EOF
 ### Task 19: cross-session dirty event test
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/peers_two_session_dirty_event.rs`
+- Create: `crates/cgn-cli/tests/peers_two_session_dirty_event.rs`
 
 - [ ] **Step 1: Write the test**
 
@@ -3419,7 +3419,7 @@ fn peer_dirty_arrives_in_my_inbox_within_500ms() {
 - [ ] **Step 2: Run**
 
 ```
-cargo test -p graph-nexus --test peers_two_session_dirty_event
+cargo test -p code-graph-nexus --test peers_two_session_dirty_event
 ```
 
 Expected: PASS (watchers from earlier tasks must be working).
@@ -3431,7 +3431,7 @@ If FAIL, debug at:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/tests/peers_two_session_dirty_event.rs
+git add crates/cgn-cli/tests/peers_two_session_dirty_event.rs
 git commit -m "test(peer): cross-session dirty event fan-in within 2s budget"
 ```
 
@@ -3440,7 +3440,7 @@ git commit -m "test(peer): cross-session dirty event fan-in within 2s budget"
 ### Task 20: cross-session message test
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/peers_two_session_msg.rs`
+- Create: `crates/cgn-cli/tests/peers_two_session_msg.rs`
 
 - [ ] **Step 1: Write the test**
 
@@ -3459,7 +3459,7 @@ fn peers_say_targeted_delivers_to_inbox() {
 
     let inbox = h.read_inbox("bob");
     let has = inbox.iter().any(|e| matches!(e,
-        graph_nexus_core::peer::inbox::InboxEntry::Message { body, .. }
+        cgn_core::peer::inbox::InboxEntry::Message { body, .. }
         if body == "ack on auth refactor"));
     assert!(has, "bob inbox missing targeted message: {inbox:?}");
 }
@@ -3477,7 +3477,7 @@ fn peers_say_broadcast_reaches_all_alive_peers() {
     for sid in ["bob", "carol"] {
         let inbox = h.read_inbox(sid);
         assert!(inbox.iter().any(|e| matches!(e,
-            graph_nexus_core::peer::inbox::InboxEntry::Message { body, .. }
+            cgn_core::peer::inbox::InboxEntry::Message { body, .. }
             if body == "hello team")), "{sid} did not receive broadcast");
     }
 }
@@ -3486,8 +3486,8 @@ fn peers_say_broadcast_reaches_all_alive_peers() {
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus --test peers_two_session_msg
-git add crates/graph-nexus-cli/tests/peers_two_session_msg.rs
+cargo test -p code-graph-nexus --test peers_two_session_msg
+git add crates/cgn-cli/tests/peers_two_session_msg.rs
 git commit -m "test(peer): Ƀ broadcast + targeted message cross-session delivery"
 ```
 
@@ -3496,7 +3496,7 @@ git commit -m "test(peer): Ƀ broadcast + targeted message cross-session deliver
 ### Task 21: symbol-level filter test
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/peers_symbol_level_filter.rs`
+- Create: `crates/cgn-cli/tests/peers_symbol_level_filter.rs`
 
 - [ ] **Step 1: Write the test**
 
@@ -3532,8 +3532,8 @@ fn same_symbol_triggers_hard_event() {
 
     let arrived = h.assert_within(Duration::from_millis(2000), || {
         h.read_inbox("bob").iter().any(|e| matches!(e,
-            graph_nexus_core::peer::inbox::InboxEntry::DirtyEvent {
-                kind: graph_nexus_core::peer::inbox::ConcernKindSer::Hard, ..
+            cgn_core::peer::inbox::InboxEntry::DirtyEvent {
+                kind: cgn_core::peer::inbox::ConcernKindSer::Hard, ..
             }))
     });
     assert!(arrived, "HARD event missing within 2s");
@@ -3543,8 +3543,8 @@ fn same_symbol_triggers_hard_event() {
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus --test peers_symbol_level_filter
-git add crates/graph-nexus-cli/tests/peers_symbol_level_filter.rs
+cargo test -p code-graph-nexus --test peers_symbol_level_filter
+git add crates/cgn-cli/tests/peers_symbol_level_filter.rs
 git commit -m "test(peer): symbol-level filter — unrelated = IGNORE, same = HARD"
 ```
 
@@ -3553,7 +3553,7 @@ git commit -m "test(peer): symbol-level filter — unrelated = IGNORE, same = HA
 ### Task 22: impact cache invalidation test
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/peers_concern_impact_cache_invalidation.rs`
+- Create: `crates/cgn-cli/tests/peers_concern_impact_cache_invalidation.rs`
 
 - [ ] **Step 1: Write the test**
 
@@ -3588,8 +3588,8 @@ fn changing_self_dirty_invalidates_impact_cache_eventually() {
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus --test peers_concern_impact_cache_invalidation
-git add crates/graph-nexus-cli/tests/peers_concern_impact_cache_invalidation.rs
+cargo test -p code-graph-nexus --test peers_concern_impact_cache_invalidation
+git add crates/cgn-cli/tests/peers_concern_impact_cache_invalidation.rs
 git commit -m "test(peer): impact_cache invalidates when self-dirty changes"
 ```
 
@@ -3603,15 +3603,15 @@ cargo test --workspace
 cargo clippy --workspace --tests -- -D warnings
 ```
 
-Smoke test the real flow against the actual `~/.gnx/` registry:
+Smoke test the real flow against the actual `~/.cgn/` registry:
 
 ```bash
 # Terminal 1
-GNX_GROUP_REPO=test-repo gnx watch --foreground &
+CGN_GROUP_REPO=test-repo cgn watch --foreground &
 
 # Terminal 2
-GNX_GROUP_REPO=test-repo gnx peers status
-GNX_GROUP_REPO=test-repo gnx peers say "hello from terminal 2"
+CGN_GROUP_REPO=test-repo cgn peers status
+CGN_GROUP_REPO=test-repo cgn peers say "hello from terminal 2"
 
 # Terminal 1 should show the message echoed via watcher.log (and any pre_tool_use hook would inject it)
 ```
@@ -3627,7 +3627,7 @@ gh pr create --title "feat(peer): multi-agent peer sync — symbol-level concern
 - Symbol-level peer change awareness: HARD (same symbol) / SOFT (1-hop graph neighbor) / IGNORE
 - Per-session `inotify`-based watcher (single instance via flock, daemonized at session start opt-in)
 - Hook injection (pre_tool_use + user_prompt_submit + session_start) is the only LLM-facing channel
-- Ƀ (beta) messaging: `gnx peers say`, persisted to `msg.log` per session
+- Ƀ (beta) messaging: `cgn peers say`, persisted to `msg.log` per session
 - Log rotation: msg.log 5MB×7, watcher.log 10MB×3
 - Fail-open watcher with backtrace logging
 
@@ -3635,8 +3635,8 @@ gh pr create --title "feat(peer): multi-agent peer sync — symbol-level concern
 
 - [ ] cargo test --workspace passes (22 new tests across 11 files)
 - [ ] cargo clippy --workspace --tests -- -D warnings clean
-- [ ] Manual: two `gnx watch --foreground` instances, dirty event arrives in <2s
-- [ ] Manual: `gnx peers say` broadcasts to all alive peers
+- [ ] Manual: two `cgn watch --foreground` instances, dirty event arrives in <2s
+- [ ] Manual: `cgn peers say` broadcasts to all alive peers
 - [ ] Manual: HARD event from same-symbol edit; IGNORE for unrelated symbol
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

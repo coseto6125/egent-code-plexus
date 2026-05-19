@@ -130,7 +130,7 @@
 ;; The `(#not-eq?)` predicate prevents the generic @method pattern from also
 ;; firing on constructor method_definitions (which match @constructor above);
 ;; without it, every constructor produces both a Constructor and a Method node
-;; for the same span, inflating gnx-rs Constructor counts ~25%.
+;; for the same span, inflating cgn Constructor counts ~25%.
 (method_definition
   name: (property_identifier) @method.name
   return_type: (type_annotation (type_identifier) @type)?

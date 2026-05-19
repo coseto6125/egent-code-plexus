@@ -30,9 +30,9 @@ that produce no semantic symbol.
 
 ## Current state
 
-### gnx-rs (no emission)
+### cgn-rs (no emission)
 
-gnx-rs does not emit anything for macro **invocations**, only for
+cgn-rs does not emit anything for macro **invocations**, only for
 macro **definitions** (`#define X` → `NodeKind::Macro`). The C / Cpp
 queries.scm capture `preproc_def` and `preproc_function_def` for the
 declaration site but have no `call_expression` query gated on
@@ -42,7 +42,7 @@ This is a coverage gap — but a deliberate one until now, because:
 
 - Tree-sitter has no way to know that `Foo(...)` resolves to a
   preprocessor macro vs. a regular function (resolution requires
-  the preprocessor, which neither tree-sitter nor gnx implements).
+  the preprocessor, which neither tree-sitter nor cgn implements).
 - Any rule we pick (allowlist by name, allcaps heuristic, etc.) is
   fuzzy and will misfire on at least one corpus.
 
@@ -59,7 +59,7 @@ inconsistently:
 
 This is what the parity report surfaces as 8 Cpp `Function-*` and 4-7
 Cpp / C `Variable-*` ref_over rows for these macro families. None
-are gnx-side bugs — gnx is consistently silent — but they show up as
+are cgn-side bugs — cgn is consistently silent — but they show up as
 "ref_over" because ref labels them inconsistently and the EQUIV map
 can't pair `Macro ↔ Function` without overpairing.
 
@@ -75,13 +75,13 @@ Justification:
    inline) nor a Variable (no binding survives after preprocessing).
    Forcing it into one of these labels poisons searches: an LLM that
    sees `Function:NLOHMANN_DEFINE_TYPE_INTRUSIVE` then tries to follow
-   `gnx inspect` will get the macro's generated-code surface, not a
+   `cgn inspect` will get the macro's generated-code surface, not a
    useful answer.
 
 2. **The signal-to-noise ratio is bad without a curated allowlist.**
    `DOCTEST_CLANG_SUPPRESS_WARNING` is noise (no symbol effect);
    `Q_OBJECT` is signal (load-bearing for Qt). Distinguishing them
-   requires a per-macro decision, not a syntactic one. gnx's
+   requires a per-macro decision, not a syntactic one. cgn's
    `frameworks.scm` per-lang file is the right home for that, NOT
    the generic parser query.
 
@@ -128,7 +128,7 @@ treat the row as "macro family not yet on the framework allowlist."
 Cpp ref_over (macros):
   Function-10 (NLOHMANN_*, DOCTEST_*)
   Variable-12 (DOCTEST_CLANG_SUPPRESS_WARNING)
-  Macro-2     (TSDN_NULL, DOCTEST_CMP_GE — these are #define macros gnx-rs DOES support,
+  Macro-2     (TSDN_NULL, DOCTEST_CMP_GE — these are #define macros cgn-rs DOES support,
                separate bug, file under "C/Cpp queries.scm coverage gap")
 
 C ref_over (macros):
@@ -144,7 +144,7 @@ C ref_over (macros):
   as a binding from the struct to "serialization" would help the
   LLM answer "is `person` JSON-serializable?" without reading the
   macro body.
-- **`#define` macros gnx-rs misses (the 4 Macro-2 ref_over rows
+- **`#define` macros cgn-rs misses (the 4 Macro-2 ref_over rows
   above)**. Investigate whether they're inside `#if` guards or other
   preprocessor branches that the tree-sitter query doesn't enter.
 

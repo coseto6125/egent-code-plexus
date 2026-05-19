@@ -7,7 +7,7 @@
 
 ## Problem
 
-`gnx admin index --repo .` on this repo produces **49 Route nodes, 42 of which are false positives (86% FP rate)**. The FPs all come from one shape: `dict.get("key")` / `Map.get("x")` / `headers.get("y")` style calls being matched by an under-constrained tree-sitter query.
+`cgn admin index --repo .` on this repo produces **49 Route nodes, 42 of which are false positives (86% FP rate)**. The FPs all come from one shape: `dict.get("key")` / `Map.get("x")` / `headers.get("y")` style calls being matched by an under-constrained tree-sitter query.
 
 Root cause is structural — five per-language `queries.scm` files (python / typescript / javascript / ruby / php) each contain a generic route capture with **no constraint on the call receiver**:
 
@@ -24,14 +24,14 @@ Comparison to gitnexus is **not** a strict over/under judgement — gitnexus's f
 
 ## Goals
 
-- **Precision target**: ≥95% on framework-idiomatic code (committed fixtures), ≥98% on the gnx-rs self-corpus.
+- **Precision target**: ≥95% on framework-idiomatic code (committed fixtures), ≥98% on the cgn-rs self-corpus.
 - **Recall preservation**: idiomatic FastAPI / Flask / Django / Express / NestJS / Laravel patterns must still extract.
 - **No hardcoded receiver allowlist**. Receiver legitimacy is established structurally — via framework-constructor tracking — not by enumerating identifier names.
 - **User-tunable precision**: `--route-confidence high|certain|all` CLI flag with `high` as default.
 
 ## Non-goals
 
-- Not chasing parity with gitnexus's count. Real route count is somewhere between 291 (gitnexus) and 4474 (current gnx) — neither is ground truth.
+- Not chasing parity with gitnexus's count. Real route count is somewhere between 291 (gitnexus) and 4474 (current cgn) — neither is ground truth.
 - Not adding new framework support in this PR beyond what existing parsers already attempt (Express, FastAPI, Flask, Django, NestJS basics, Laravel). New frameworks land in follow-up PRs.
 - Not removing the `RawRoute` plumbing — only tightening the gates.
 
@@ -79,9 +79,9 @@ pub enum RouteConfidence {
 ```
 
 `--route-confidence` CLI flag drops emissions below the threshold:
-- `certain` → only Tier-Certain  (paranoid; expected ~7 routes on gnx-rs)
-- `high`    → Tier-Certain + High (default; expected ~10-15 on gnx-rs)
-- `all`     → all three           (recall-leaning; expected ~30-50 on gnx-rs)
+- `certain` → only Tier-Certain  (paranoid; expected ~7 routes on cgn-rs)
+- `high`    → Tier-Certain + High (default; expected ~10-15 on cgn-rs)
+- `all`     → all three           (recall-leaning; expected ~30-50 on cgn-rs)
 
 Files with **no HTTP framework import are never emitted Routes** under any threshold — S2 is mandatory. This single gate eliminates the `dict.get("key")` FP class universally.
 
@@ -95,24 +95,24 @@ Structural (S7): in the same file, walk for assignments where RHS is a construct
 
 | File | Change |
 |------|--------|
-| `crates/graph-nexus-analyzer/src/route_detector.rs` | `looks_like_path` → `s.starts_with('/')`; `detect_from_call` substring → exact verb match; add `confidence` field |
-| `crates/graph-nexus-core/src/analyzer/types.rs` | `RawRoute` gains `confidence: f32` (default 0.7) |
-| `crates/graph-nexus-analyzer/src/python/queries.scm` | Remove generic route block (lines 46-50) |
-| `crates/graph-nexus-analyzer/src/typescript/queries.scm` | Same |
-| `crates/graph-nexus-analyzer/src/javascript/queries.scm` | Same — keep the existing Express-specific framework query |
-| `crates/graph-nexus-analyzer/src/ruby/queries.scm` | Same |
-| `crates/graph-nexus-analyzer/src/php/queries.scm` | Same |
-| `crates/graph-nexus-analyzer/src/python/parser.rs` | Pre-scan pass to collect framework-constructor LHS identifiers; gate route emission on S2 + S7 |
-| `crates/graph-nexus-analyzer/src/typescript/parser.rs` | Same shape |
-| `crates/graph-nexus-analyzer/src/javascript/parser.rs` | Same shape |
-| `crates/graph-nexus-analyzer/src/resolution/builder.rs` | Pipe `confidence` through to Route node creation; honour `--route-confidence` threshold |
-| `crates/graph-nexus/src/commands/admin/index.rs` (or wherever the index CLI args live) | New `--route-confidence` flag |
-| `crates/graph-nexus-analyzer/tests/fixtures/routes/` | New directory with positive + negative fixture files + `manifest.json` |
-| `crates/graph-nexus-analyzer/tests/route_extraction_precision.rs` | New test — runs every fixture, asserts emitted route set matches manifest |
+| `crates/cgn-analyzer/src/route_detector.rs` | `looks_like_path` → `s.starts_with('/')`; `detect_from_call` substring → exact verb match; add `confidence` field |
+| `crates/cgn-core/src/analyzer/types.rs` | `RawRoute` gains `confidence: f32` (default 0.7) |
+| `crates/cgn-analyzer/src/python/queries.scm` | Remove generic route block (lines 46-50) |
+| `crates/cgn-analyzer/src/typescript/queries.scm` | Same |
+| `crates/cgn-analyzer/src/javascript/queries.scm` | Same — keep the existing Express-specific framework query |
+| `crates/cgn-analyzer/src/ruby/queries.scm` | Same |
+| `crates/cgn-analyzer/src/php/queries.scm` | Same |
+| `crates/cgn-analyzer/src/python/parser.rs` | Pre-scan pass to collect framework-constructor LHS identifiers; gate route emission on S2 + S7 |
+| `crates/cgn-analyzer/src/typescript/parser.rs` | Same shape |
+| `crates/cgn-analyzer/src/javascript/parser.rs` | Same shape |
+| `crates/cgn-analyzer/src/resolution/builder.rs` | Pipe `confidence` through to Route node creation; honour `--route-confidence` threshold |
+| `crates/code-graph-nexus/src/commands/admin/index.rs` (or wherever the index CLI args live) | New `--route-confidence` flag |
+| `crates/cgn-analyzer/tests/fixtures/routes/` | New directory with positive + negative fixture files + `manifest.json` |
+| `crates/cgn-analyzer/tests/route_extraction_precision.rs` | New test — runs every fixture, asserts emitted route set matches manifest |
 
 ## Verification strategy
 
-**All verification is internal to the gnx-rs repo. No external scripts under `scripts/`. No CI dependency on external repos.**
+**All verification is internal to the cgn-rs repo. No external scripts under `scripts/`. No CI dependency on external repos.**
 
 ### Layer 1 — committed fixture tests (CI-blocking)
 
@@ -133,7 +133,7 @@ Required fixtures (minimum for PR 1):
 
 ### Layer 2 — self-corpus regression check (PR body, not committed test)
 
-Run `gnx admin index --repo .` on gnx-rs itself before + after. Assert in PR body:
+Run `cgn admin index --repo .` on cgn-rs itself before + after. Assert in PR body:
 - Before: 49 routes, 42 FP (86%)
 - After (default `high`): ≤ 15 routes, ≤ 2 FP (≤ 15%)
 - After (`certain`): ≤ 10 routes, 0 FP
@@ -146,21 +146,21 @@ Procedure:
 1. `git clone tiangolo/full-stack-fastapi-template /tmp/fastapi-sample`
 2. Generate openapi from the sample: `python -c "from app.main import app; import json; print(json.dumps(app.openapi()))"` → `/tmp/fastapi-sample.openapi.json`
 3. Extract ground-truth route set: `jq -r '.paths | to_entries[] | .key as $p | .value | keys[] | "\(. | ascii_upcase) \($p)"' /tmp/fastapi-sample.openapi.json | sort`
-4. `cp -r /tmp/fastapi-sample /tmp/gnx-sample && cd /tmp/gnx-sample && gnx admin index --repo . && gnx cypher "MATCH (n) WHERE n.kind='Route' RETURN n.name" --format json | jq -r '.rows[][]' | sort > /tmp/gnx-routes.txt`
-5. `diff /tmp/gnx-routes.txt /tmp/openapi-routes.txt` → count FP / FN
+4. `cp -r /tmp/fastapi-sample /tmp/cgn-sample && cd /tmp/cgn-sample && cgn admin index --repo . && cgn cypher "MATCH (n) WHERE n.kind='Route' RETURN n.name" --format json | jq -r '.rows[][]' | sort > /tmp/cgn-routes.txt`
+5. `diff /tmp/cgn-routes.txt /tmp/openapi-routes.txt` → count FP / FN
 6. Repeat for an Express sample (manual count if no openapi.json available, or use swagger-jsdoc-generated spec)
 
 PR body posts:
 - Repo + commit pin
 - Ground-truth route count from openapi.json
-- Gnx-extracted route count (default `high` + `certain` thresholds)
+- Cgn-extracted route count (default `high` + `certain` thresholds)
 - Precision / Recall / F1
 
 **No script is committed.** The procedure above lives in this spec only — anyone replicating runs it manually.
 
 ### Layer 4 — gitnexus cross-validation: **infeasible, explicitly skipped**
 
-Cannot run gitnexus inside gnx-rs CI (different runtime, dep conflicts, nondeterministic indexing). Cross-validation is a future-PR exercise if/when an isolation harness exists. Stated here so we don't silently drop it.
+Cannot run gitnexus inside cgn-rs CI (different runtime, dep conflicts, nondeterministic indexing). Cross-validation is a future-PR exercise if/when an isolation harness exists. Stated here so we don't silently drop it.
 
 ## Trade-offs accepted
 

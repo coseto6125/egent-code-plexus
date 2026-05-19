@@ -6,7 +6,7 @@
 
 ## 動機
 
-現行 `gnx cypher` 只支援單一 regex 解析的最小 pattern：
+現行 `cgn cypher` 只支援單一 regex 解析的最小 pattern：
 
 ```
 MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='val'] RETURN a,b
@@ -59,7 +59,7 @@ RETURN DISTINCT a.name, b.kind, COUNT(*) AS n, r.reason
 ### 模組結構
 
 ```
-crates/graph-nexus-core/src/cypher/
+crates/cgn-core/src/cypher/
 ├── mod.rs        — 對外 API: parse(&str) -> Result<Query, CypherError>
 │                              execute(&Query, &Graph, &repo_root) -> Result<QueryResult, CypherError>
 ├── lexer.rs      — Token stream（keyword case-insensitive、ident、string、number、symbol）
@@ -70,7 +70,7 @@ crates/graph-nexus-core/src/cypher/
 └── value.rs      — Value enum
 ```
 
-`crates/graph-nexus-cli/src/commands/cypher.rs` 退化成 ~50 LoC，只負責 CLI args、call `core::cypher::execute`、序列化為 JSON/TOON。
+`crates/cgn-cli/src/commands/cypher.rs` 退化成 ~50 LoC，只負責 CLI args、call `core::cypher::execute`、序列化為 JSON/TOON。
 
 ### AST 草圖
 

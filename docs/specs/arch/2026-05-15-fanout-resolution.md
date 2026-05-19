@@ -1,6 +1,6 @@
 # Fan-out Resolution — LLM-First Static Analysis Spec
 
-> **核心定位：** graph-nexus 主要面向是 LLM 消費者。LLM 對「沈默漏網」高度敏感 — 一次 query 拿到的資訊，就是它推理的全部依據。所以 gnx 的設計原則不是「高信心邊優先」，而是 **「完整 universe + confidence 編碼不確定性」**，讓 LLM 一次查完，自己根據 confidence 加權判斷。
+> **核心定位：** code-graph-nexus 主要面向是 LLM 消費者。LLM 對「沈默漏網」高度敏感 — 一次 query 拿到的資訊，就是它推理的全部依據。所以 cgn 的設計原則不是「高信心邊優先」，而是 **「完整 universe + confidence 編碼不確定性」**，讓 LLM 一次查完，自己根據 confidence 加權判斷。
 
 ---
 
@@ -143,7 +143,7 @@ builder 處理時 resolve candidates → 對每個 resolved target emit Edge wit
 
 ### 3.6 LLM-visible 輸出
 
-`gnx inspect dispatch` 應該回：
+`cgn inspect dispatch` 應該回：
 
 ```yaml
 outgoing:
@@ -164,7 +164,7 @@ LLM 看到 3 條 0.29 conf 的 `reflection-getattr-fanout` 邊 →
 ## 4. 實作步驟
 
 ### Task 1 — types & infra
-- Create `RawFanoutRef` in `graph-nexus-core/src/analyzer/types.rs`
+- Create `RawFanoutRef` in `cgn-core/src/analyzer/types.rs`
 - Add `pub fanout_refs: Vec<RawFanoutRef>` 到 `LocalGraph`
 - 修補所有 LocalGraph 建構點（~30 處 parser.rs）`fanout_refs: Vec::new()`
 - Builder Pass 新增 fanout_refs 處理：resolve candidates, emit Edge per candidate with `confidence = base / sqrt(N).max(0.1)`
@@ -208,7 +208,7 @@ LLM 看到 3 條 0.29 conf 的 `reflection-getattr-fanout` 邊 →
 **Real-world test：clone 一個有 dispatcher pattern 的 OSS Python 專案**
 - e.g. `django/django` 內有不少 `getattr(self, "_meta_X")` 模式
 - 或 `home-assistant/core` 內有大量 service handler dispatch
-- 跑 `gnx admin index` 後 `gnx inspect` 看 dispatch method 是否出現 fan-out edges
+- 跑 `cgn admin index` 後 `cgn inspect` 看 dispatch method 是否出現 fan-out edges
 - 用 `--high-trust-only` 確認嚴格模式排除這些
 
 ---

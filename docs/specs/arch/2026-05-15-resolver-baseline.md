@@ -5,7 +5,7 @@ Captured 2026-05-15 via the oracle harness in
 
 ## Methodology
 
-Per language, diff the dump from `gnx admin index --dump-resolver` against an
+Per language, diff the dump from `cgn admin index --dump-resolver` against an
 authoritative oracle (TS Compiler API / `importlib.util.find_spec` /
 workspace-aware Rust module walker) over a real-world corpus:
 
@@ -18,26 +18,26 @@ workspace-aware Rust module walker) over a real-world corpus:
 Diff classes (per
 [harness spec](2026-05-15-resolver-oracle-harness.md#diff-semantics)):
 - **TP** — both resolved, target file equal under extension-equivalence
-- **FP_ghost** — gnx connected to a different file than the oracle
-- **FP_overmatch** — gnx Tier 3 Global produced N edges where oracle says 1
-- **FN_dangling** — oracle resolved, gnx Unresolved
-- **tier_demoted** — TP but gnx fell back to Global instead of ImportScoped
+- **FP_ghost** — cgn connected to a different file than the oracle
+- **FP_overmatch** — cgn Tier 3 Global produced N edges where oracle says 1
+- **FN_dangling** — oracle resolved, cgn Unresolved
+- **tier_demoted** — TP but cgn fell back to Global instead of ImportScoped
 
 ## Known limitations (read first)
 
 1. **Symbol vs. import resolution mismatch.** TS oracle reports where
    `tsc` resolves the *module specifier* (often a barrel `index.ts`),
-   while gnx reports where the *symbol* is *defined*. On re-export-heavy
+   while cgn reports where the *symbol* is *defined*. On re-export-heavy
    codebases (NestJS) this inflates `FP_ghost`. The diff harness does
    not chase re-export chains in v1.
-2. **gnx Python skips `__init__.py` as a source.** The Python parser
+2. **cgn Python skips `__init__.py` as a source.** The Python parser
    produces no `RawNode` from re-export-only `__init__.py` files, so
-   the gnx dump has zero entries for `src/flask/__init__.py` — the
+   the cgn dump has zero entries for `src/flask/__init__.py` — the
    exact place where the most relative imports live. This makes the
    Python harness number a *floor*, not a ceiling.
-3. **`oracle_only` and `gnx_only` are not defects.** They count the
+3. **`oracle_only` and `cgn_only` are not defects.** They count the
    asymmetry of producer scopes (oracle: every import binding;
-   gnx: every callsite / heritage / type / framework-ref resolution).
+   cgn: every callsite / heritage / type / framework-ref resolution).
    The signal is in the intersection — `TP + FP_ghost + FP_overmatch +
    FN_dangling + tier_demoted`.
 4. **Not a CI gate.** Local corpus, hand-curated. Use it to track
@@ -81,7 +81,7 @@ aliased imports (`@nestjs/common` etc.) that need L1 to fix.
 **Reading**: L0 is a no-op on Python in this corpus. Two causes,
 both *outside* L0's design:
 - The Flask corpus's biggest import surface is `src/flask/__init__.py`
-  (a 100-line re-export hub). gnx's Python parser produces zero
+  (a 100-line re-export hub). cgn's Python parser produces zero
   `RawNode` from that file (no defined symbols), so the resolver never
   fires on its imports — they live entirely in `oracle_only` (475).
 - Remaining Tier 3 hits are `from flask import Flask` style absolute
@@ -127,22 +127,22 @@ positives). The harness has now demonstrated three things:
 ## Repro
 
 ```bash
-cargo build -p graph-nexus --release
+cargo build -p code-graph-nexus --release
 
 # TS
-(cd .sample_repo/TypeScript && gnx admin index --repo . --dump-resolver dumps/gnx.ts.jsonl)
+(cd .sample_repo/TypeScript && cgn admin index --repo . --dump-resolver dumps/cgn.ts.jsonl)
 node scripts/parity/oracles/ts_oracle.mjs .sample_repo/TypeScript > dumps/oracle.ts.jsonl
-gnx verify-resolver --lang ts --oracle dumps/oracle.ts.jsonl --gnx dumps/gnx.ts.jsonl --report report.ts.md
+cgn verify-resolver --lang ts --oracle dumps/oracle.ts.jsonl --cgn dumps/cgn.ts.jsonl --report report.ts.md
 
 # Py
-(cd .sample_repo/Python && gnx admin index --repo . --dump-resolver dumps/gnx.py.jsonl)
+(cd .sample_repo/Python && cgn admin index --repo . --dump-resolver dumps/cgn.py.jsonl)
 python3 scripts/parity/oracles/py_oracle.py .sample_repo/Python > dumps/oracle.py.jsonl
-gnx verify-resolver --lang py --oracle dumps/oracle.py.jsonl --gnx dumps/gnx.py.jsonl --report report.py.md
+cgn verify-resolver --lang py --oracle dumps/oracle.py.jsonl --cgn dumps/cgn.py.jsonl --report report.py.md
 
 # Rs
-(cd .sample_repo/Rust && gnx admin index --repo . --dump-resolver dumps/gnx.rs.jsonl)
+(cd .sample_repo/Rust && cgn admin index --repo . --dump-resolver dumps/cgn.rs.jsonl)
 python3 scripts/parity/oracles/rs_oracle.py .sample_repo/Rust > dumps/oracle.rs.jsonl
-gnx verify-resolver --lang rs --oracle dumps/oracle.rs.jsonl --gnx dumps/gnx.rs.jsonl --report report.rs.md
+cgn verify-resolver --lang rs --oracle dumps/oracle.rs.jsonl --cgn dumps/cgn.rs.jsonl --report report.rs.md
 ```
 
 ## Saved reports

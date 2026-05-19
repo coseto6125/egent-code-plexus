@@ -1,14 +1,14 @@
-# Tier B: CLI surface 整理 + `gnx diff` 泛化 diff 命令
+# Tier B: CLI surface 整理 + `cgn diff` 泛化 diff 命令
 
 **Date**: 2026-05-16
 **Status**: Design (spec) — pre-implementation
-**Goal**: 將既有但 hidden 的 `mcp` / `shape_check` / `verify_resolver` 三個 command 重新定位到正確的 CLI 層級；同時為 LLM agent 引入新的 `gnx diff` 命令，對任意兩個 git ref 之間的 graph 結構差異提供結構化輸出。
+**Goal**: 將既有但 hidden 的 `mcp` / `shape_check` / `verify_resolver` 三個 command 重新定位到正確的 CLI 層級；同時為 LLM agent 引入新的 `cgn diff` 命令，對任意兩個 git ref 之間的 graph 結構差異提供結構化輸出。
 
 **Related**:
-- 既有 `crates/graph-nexus-cli/src/commands/{mcp,shape_check,verify_resolver}.rs`
-- `crates/graph-nexus-cli/src/main.rs` 的 `Commands` enum dispatch
-- `~/.claude/skills/gnx/SKILL.md` Tool selection table
-- 既有 `gnx impact --since <ref>` 做為 reference 對照
+- 既有 `crates/cgn-cli/src/commands/{mcp,shape_check,verify_resolver}.rs`
+- `crates/cgn-cli/src/main.rs` 的 `Commands` enum dispatch
+- `~/.claude/skills/cgn/SKILL.md` Tool selection table
+- 既有 `cgn impact --since <ref>` 做為 reference 對照
 
 ---
 
@@ -16,7 +16,7 @@
 
 ### 1.1 Hidden commands surface 落差
 
-`crates/graph-nexus-cli/src/commands/` 內已實作三個 command，但 `gnx --help` 都沒列：
+`crates/cgn-cli/src/commands/` 內已實作三個 command，但 `cgn --help` 都沒列：
 - `mcp.rs`（PR #11 引入）— MCP server 啟動 + tool 列舉
 - `shape_check.rs` — HTTP consumer ↔ Route 的 drift detector，LLM 面向設計
 - `verify_resolver.rs` — Resolver decision 跟 oracle JSONL 對照的 benchmark 工具
@@ -30,7 +30,7 @@
 
 當 agent 在 PR review 場景想知道「這次 commit 對 graph 有什麼結構性影響」時，現有工具不足：
 - `git diff` 只看 source 文字級差異，看不出 graph 結構變化
-- `gnx impact --since <ref>` 是 「source change → 上下游 blast radius」單向 query，不給「整個 graph 的對比視角」
+- `cgn impact --since <ref>` 是 「source change → 上下游 blast radius」單向 query，不給「整個 graph 的對比視角」
 - `verify_resolver --oracle` 需要外部 LSP 跑出來的 oracle.jsonl，agent / 一般 dev 拿不到 → 等同對 agent 不可用
 
 **agent 在 PR review / pre-merge 流程實際需要**：
@@ -38,7 +38,7 @@
 - 「哪些 routes 加減」
 - 「哪些 cross-repo contracts schema 改了」
 
-這三類「graph 結構元素的 diff」就是新 `gnx diff` 要解決的問題。
+這三類「graph 結構元素的 diff」就是新 `cgn diff` 要解決的問題。
 
 ---
 
@@ -48,28 +48,28 @@
 
 | 動作 | 對象 |
 |---|---|
-| Move `mcp` to admin namespace | `gnx admin mcp serve\|tools` |
-| Move `verify_resolver` to admin namespace | `gnx admin verify-resolver --oracle X --gnx Y --lang Z` |
-| Un-hide `shape_check` to top-level | `gnx shape_check --route <path>?` |
+| Move `mcp` to admin namespace | `cgn admin mcp serve\|tools` |
+| Move `verify_resolver` to admin namespace | `cgn admin verify-resolver --oracle X --cgn Y --lang Z` |
+| Un-hide `shape_check` to top-level | `cgn shape_check --route <path>?` |
 | Add `--route <path>` arg to `shape_check` | 過濾單一 route 的 drift |
 | Add `--format` arg to `mcp tools` | `json\|toon\|text` |
-| New `gnx diff --section <bindings\|routes\|contracts\|all> --baseline <ref>` | 泛化 graph diff |
-| Update `~/.claude/skills/gnx/SKILL.md` Tool selection table | 加 `shape_check` 升級版 + `diff` 新 row |
-| Tests covering all dispatch paths + new args | `crates/graph-nexus-cli/tests/` |
+| New `cgn diff --section <bindings\|routes\|contracts\|all> --baseline <ref>` | 泛化 graph diff |
+| Update `~/.claude/skills/cgn/SKILL.md` Tool selection table | 加 `shape_check` 升級版 + `diff` 新 row |
+| Tests covering all dispatch paths + new args | `crates/cgn-cli/tests/` |
 
 ### 2.2 Out of scope（明示延後 / 不做）
 
-- `gnx diff --section symbols`：source-level symbol 加減（git diff 已能拿大部分；可未來加）
-- `gnx diff --section edges`：edge-level diff（噪音太多，需先想 group/filter 策略，獨立 spec）
-- `verify_resolver --baseline <ref>` self-baseline mode：先把 verify_resolver 移到 admin，self-baseline 由 `gnx diff --section bindings` 承擔，無需 verify_resolver 自己加 mode
+- `cgn diff --section symbols`：source-level symbol 加減（git diff 已能拿大部分；可未來加）
+- `cgn diff --section edges`：edge-level diff（噪音太多，需先想 group/filter 策略，獨立 spec）
+- `verify_resolver --baseline <ref>` self-baseline mode：先把 verify_resolver 移到 admin，self-baseline 由 `cgn diff --section bindings` 承擔，無需 verify_resolver 自己加 mode
 - `--auto-oracle` LSP integration：跨語言 LSP adapter 是長期工程，獨立 spec
-- 「agent narrative output」：gnx 不自帶 narrative formatting，JSON / text 已足；narration 由 agent 解讀 JSON 後自做
+- 「agent narrative output」：cgn 不自帶 narrative formatting，JSON / text 已足；narration 由 agent 解讀 JSON 後自做
 
 ### 2.3 Verify_resolver 為何不升 top-level
 
-技術上 `verify_resolver` 需要外部 oracle JSONL（pyright / tsc / rust-analyzer dump）作為 ground truth。短期內無 LSP 整合，agent 拿不到 oracle → 即使 surface 為 top-level，agent 也無法呼叫成功。Self-baseline 模式（用 git ref 作為 baseline）改由新 `gnx diff --section bindings` 涵蓋，職責分離：
-- `gnx diff --section bindings`：agent 用，gnx 自己對比兩 commit
-- `gnx admin verify-resolver`：dev 用，跟外部 LSP oracle 對比
+技術上 `verify_resolver` 需要外部 oracle JSONL（pyright / tsc / rust-analyzer dump）作為 ground truth。短期內無 LSP 整合，agent 拿不到 oracle → 即使 surface 為 top-level，agent 也無法呼叫成功。Self-baseline 模式（用 git ref 作為 baseline）改由新 `cgn diff --section bindings` 涵蓋，職責分離：
+- `cgn diff --section bindings`：agent 用，cgn 自己對比兩 commit
+- `cgn admin verify-resolver`：dev 用，跟外部 LSP oracle 對比
 
 ---
 
@@ -79,13 +79,13 @@
 
 理由：
 - 三個 hidden command 已有完整實作，主要工作是 visibility 跟 dispatch 路徑
-- `gnx diff` 是新加但邊界清楚（3 個 section + baseline resolution + output 格式）
+- `cgn diff` 是新加但邊界清楚（3 個 section + baseline resolution + output 格式）
 - 不動 graph storage / parser / resolver tier 內部邏輯
 - 風險低、tests 容易覆蓋
 
 替代方案（已 rejected）：
 - B. surface + 大幅補 args（如 `mcp serve --port`、`shape_check --consumer <file>` 等）：scope creep，獨立用例可後加
-- C. 把 `gnx diff` 做成全面摘要單一 command：agent ROI 評估顯示「全面摘要 30% 有用 70% 噪音」，拆成 `--section` 後讓 agent 按 task 選
+- C. 把 `cgn diff` 做成全面摘要單一 command：agent ROI 評估顯示「全面摘要 30% 有用 70% 噪音」，拆成 `--section` 後讓 agent 按 task 選
 
 ---
 
@@ -96,7 +96,7 @@
 ```
 Before                              After
 ──────                              ─────
-gnx                                 gnx
+cgn                                 cgn
 ├── (9 visible agent commands)      ├── (9 visible agent commands)
 │   ├── inspect                     │   ├── inspect
 │   ├── search                      │   ├── search
@@ -134,7 +134,7 @@ gnx                                 gnx
 | Command | New arg | Type | Behavior |
 |---|---|---|---|
 | `shape_check` | `--route <path>` | `Option<String>` | 過濾 target Route's path 匹配 `<path>` 的 Fetches edges；None = 全跑 |
-| `admin mcp tools` | `--format <json\|toon\|text>` | `OutputFormat` | 對齊 gnx 其他 command 慣例；default `text` |
+| `admin mcp tools` | `--format <json\|toon\|text>` | `OutputFormat` | 對齊 cgn 其他 command 慣例；default `text` |
 | `diff` | `--section <s>` | required | 接受 `bindings` / `routes` / `contracts` / `all` 或 `,` 分隔多選 |
 | `diff` | `--baseline <ref>` | required, no default | git ref（branch / tag / SHA / `HEAD~N` / `PR/<n>`）|
 | `diff` | `--format <json\|toon\|text>` | `OutputFormat` | default `text` |
@@ -142,26 +142,26 @@ gnx                                 gnx
 
 ---
 
-## 5. `gnx diff` 詳細設計
+## 5. `cgn diff` 詳細設計
 
 ### 5.1 命令樣態
 
 ```bash
 # 必填: --section + --baseline
-gnx diff --section bindings --baseline origin/main
-gnx diff --section routes --baseline v1.2.0
-gnx diff --section contracts --baseline a8b2f54
-gnx diff --section all --baseline PR/13
+cgn diff --section bindings --baseline origin/main
+cgn diff --section routes --baseline v1.2.0
+cgn diff --section contracts --baseline a8b2f54
+cgn diff --section all --baseline PR/13
 
 # 多選 section
-gnx diff --section bindings,routes --baseline origin/main
+cgn diff --section bindings,routes --baseline origin/main
 
 # 輸出格式
-gnx diff --section all --baseline origin/main --format json
-gnx diff --section all --baseline origin/main --format toon
+cgn diff --section all --baseline origin/main --format json
+cgn diff --section all --baseline origin/main --format toon
 
 # 詳細模式（text）
-gnx diff --section all --baseline origin/main --verbose
+cgn diff --section all --baseline origin/main --verbose
 ```
 
 不給 `--baseline` 直接 reject，不 fallback 預設值（防止 silent drift）。
@@ -179,12 +179,12 @@ gnx diff --section all --baseline origin/main --verbose
 | PR number | `PR/13` | `gh pr view 13 --json baseRefOid` → SHA |
 | 預設 | (無) | **reject with error**，不給預設 |
 
-GitHub-only：`PR/<n>` 透過 `gh` CLI（已是 gnx 環境慣例）。GitLab / Gitea / Bitbucket 不支援，user 須自己傳 SHA。錯誤訊息提示用法。
+GitHub-only：`PR/<n>` 透過 `gh` CLI（已是 cgn 環境慣例）。GitLab / Gitea / Bitbucket 不支援，user 須自己傳 SHA。錯誤訊息提示用法。
 
 ### 5.3 內部 data flow
 
 ```
-gnx diff --section bindings --baseline PR/13
+cgn diff --section bindings --baseline PR/13
   ↓
 1. resolve baseline ref → SHA (e.g. "a8b2f54")
    - branch/tag/sha/relative → git rev-parse <ref>
@@ -193,9 +193,9 @@ gnx diff --section bindings --baseline PR/13
 2. ensure working tree clean
    - dirty → git stash push (auto-stash, 結尾 stash pop)
 3. checkout baseline SHA in detached HEAD
-4. gnx index + dump section data → /tmp/gnx-diff-baseline-<sha>.jsonl
+4. cgn index + dump section data → /tmp/cgn-diff-baseline-<sha>.jsonl
 5. checkout 回原 branch / commit
-6. gnx index + dump section data → /tmp/gnx-diff-current-<sha>.jsonl
+6. cgn index + dump section data → /tmp/cgn-diff-current-<sha>.jsonl
 7. diff baseline vs current per section
 8. emit text/json/toon
 9. cleanup tmp files
@@ -204,7 +204,7 @@ gnx diff --section bindings --baseline PR/13
 
 **重要保證**：
 - 步驟 9-10 用 RAII / defer pattern 確保 finally 執行，即使中途失敗也還原 git 狀態
-- baseline graph 用獨立 `~/.gnx/graph-nexus-rs/<branch-slug>-baseline-<sha>/graph.bin` 路徑，避免覆蓋當前 working graph
+- baseline graph 用獨立 `~/.cgn/code-graph-nexus-rs/<branch-slug>-baseline-<sha>/graph.bin` 路徑，避免覆蓋當前 working graph
 
 ### 5.4 Section 內容定義
 
@@ -251,7 +251,7 @@ modified: N           # 同 path 但 handler / response shape 改
    response_shape: +"updated_at"
 ```
 
-對應 `gnx routes` 已有的 RouteShape 抽取。
+對應 `cgn routes` 已有的 RouteShape 抽取。
 
 #### 5.4.3 `contracts` section
 
@@ -271,7 +271,7 @@ modified: N           # signature / schema 改
    payload:        +"tenant_id"
 ```
 
-對應 `gnx contracts` 已有的 cross-repo inventory。
+對應 `cgn contracts` 已有的 cross-repo inventory。
 
 #### 5.4.4 `all` section
 
@@ -328,26 +328,26 @@ modified: N           # signature / schema 改
 
 | File | Change |
 |---|---|
-| `crates/graph-nexus-cli/src/main.rs` | `Commands` enum 移除 `Mcp` / `VerifyResolver` variants；移除 `ShapeCheck` 的 `hide` 屬性；新增 `Diff(commands::diff::DiffArgs)` variant + dispatch |
-| `crates/graph-nexus-cli/src/admin/mod.rs` | `AdminCommand` enum 加 `Mcp(McpArgs)` + `VerifyResolver(VerifyResolverArgs)` variants；dispatch 分支 |
-| `crates/graph-nexus-cli/src/commands/mcp.rs` | `McpAction::Tools` 加 `--format <OutputFormat>` arg；run() 按 format 輸出 |
-| `crates/graph-nexus-cli/src/commands/shape_check.rs` | `ShapeCheckArgs` 加 `--route <Option<String>>`；run() 過濾 Fetches edges by target route path |
-| `crates/graph-nexus-cli/src/commands/verify_resolver.rs` | 不變（內部 logic 保留，僅 dispatch 移到 admin） |
-| **新** `crates/graph-nexus-cli/src/commands/diff/mod.rs` | `DiffArgs` 定義 + dispatch entry |
-| **新** `crates/graph-nexus-cli/src/commands/diff/baseline.rs` | Baseline ref 解析（git rev-parse / gh pr view）+ git stash/checkout/restore RAII helper |
-| **新** `crates/graph-nexus-cli/src/commands/diff/bindings.rs` | bindings section diff logic |
-| **新** `crates/graph-nexus-cli/src/commands/diff/routes.rs` | routes section diff logic |
-| **新** `crates/graph-nexus-cli/src/commands/diff/contracts.rs` | contracts section diff logic |
-| **新** `crates/graph-nexus-cli/src/commands/diff/output.rs` | text / json / toon formatters |
-| `~/.claude/skills/gnx/SKILL.md` | Tool selection table 加 `shape_check`（含 `--route`）+ `diff`（含 sections + baseline）2 rows；admin 區段補 `mcp` / `verify-resolver` 說明 |
-| `crates/graph-nexus-cli/tests/admin_mcp_test.rs` | 驗 `admin mcp tools --format toon` 走通；`admin mcp serve` 啟動 stdio |
-| `crates/graph-nexus-cli/tests/admin_verify_resolver_test.rs` | 驗 `admin verify-resolver` dispatch |
-| `crates/graph-nexus-cli/tests/shape_check_route_filter.rs` | 驗 `--route /api/foo` 過濾正確；無匹配 route 提示 |
-| `crates/graph-nexus-cli/tests/diff_bindings_test.rs` | 各種 baseline ref 形式（branch/tag/SHA/HEAD~N/PR）解析；bindings section diff output |
-| `crates/graph-nexus-cli/tests/diff_routes_test.rs` | routes section 加減改 |
-| `crates/graph-nexus-cli/tests/diff_contracts_test.rs` | contracts section schema diff |
-| `crates/graph-nexus-cli/tests/diff_all_section_test.rs` | `--section all` 跟 `--section bindings,routes,contracts` 結果一致 |
-| `crates/graph-nexus-cli/tests/cli_help_surface_test.rs` | snapshot：`gnx --help` 含 `shape_check` / `diff` 但不含 `mcp` / `verify-resolver`；`admin --help` 含這兩個 |
+| `crates/cgn-cli/src/main.rs` | `Commands` enum 移除 `Mcp` / `VerifyResolver` variants；移除 `ShapeCheck` 的 `hide` 屬性；新增 `Diff(commands::diff::DiffArgs)` variant + dispatch |
+| `crates/cgn-cli/src/admin/mod.rs` | `AdminCommand` enum 加 `Mcp(McpArgs)` + `VerifyResolver(VerifyResolverArgs)` variants；dispatch 分支 |
+| `crates/cgn-cli/src/commands/mcp.rs` | `McpAction::Tools` 加 `--format <OutputFormat>` arg；run() 按 format 輸出 |
+| `crates/cgn-cli/src/commands/shape_check.rs` | `ShapeCheckArgs` 加 `--route <Option<String>>`；run() 過濾 Fetches edges by target route path |
+| `crates/cgn-cli/src/commands/verify_resolver.rs` | 不變（內部 logic 保留，僅 dispatch 移到 admin） |
+| **新** `crates/cgn-cli/src/commands/diff/mod.rs` | `DiffArgs` 定義 + dispatch entry |
+| **新** `crates/cgn-cli/src/commands/diff/baseline.rs` | Baseline ref 解析（git rev-parse / gh pr view）+ git stash/checkout/restore RAII helper |
+| **新** `crates/cgn-cli/src/commands/diff/bindings.rs` | bindings section diff logic |
+| **新** `crates/cgn-cli/src/commands/diff/routes.rs` | routes section diff logic |
+| **新** `crates/cgn-cli/src/commands/diff/contracts.rs` | contracts section diff logic |
+| **新** `crates/cgn-cli/src/commands/diff/output.rs` | text / json / toon formatters |
+| `~/.claude/skills/cgn/SKILL.md` | Tool selection table 加 `shape_check`（含 `--route`）+ `diff`（含 sections + baseline）2 rows；admin 區段補 `mcp` / `verify-resolver` 說明 |
+| `crates/cgn-cli/tests/admin_mcp_test.rs` | 驗 `admin mcp tools --format toon` 走通；`admin mcp serve` 啟動 stdio |
+| `crates/cgn-cli/tests/admin_verify_resolver_test.rs` | 驗 `admin verify-resolver` dispatch |
+| `crates/cgn-cli/tests/shape_check_route_filter.rs` | 驗 `--route /api/foo` 過濾正確；無匹配 route 提示 |
+| `crates/cgn-cli/tests/diff_bindings_test.rs` | 各種 baseline ref 形式（branch/tag/SHA/HEAD~N/PR）解析；bindings section diff output |
+| `crates/cgn-cli/tests/diff_routes_test.rs` | routes section 加減改 |
+| `crates/cgn-cli/tests/diff_contracts_test.rs` | contracts section schema diff |
+| `crates/cgn-cli/tests/diff_all_section_test.rs` | `--section all` 跟 `--section bindings,routes,contracts` 結果一致 |
+| `crates/cgn-cli/tests/cli_help_surface_test.rs` | snapshot：`cgn --help` 含 `shape_check` / `diff` 但不含 `mcp` / `verify-resolver`；`admin --help` 含這兩個 |
 
 ---
 
@@ -355,7 +355,7 @@ modified: N           # signature / schema 改
 
 | Scenario | Behavior |
 |---|---|
-| `gnx diff` 不給 `--baseline` | clap reject + 列接受 ref 格式範例 |
+| `cgn diff` 不給 `--baseline` | clap reject + 列接受 ref 格式範例 |
 | `--baseline <ref>` 解析失敗 | `error: cannot resolve <ref>: <git error>` + hint 列範例 |
 | `gh` CLI 缺（用 `PR/<n>` 時） | `error: gh CLI not found; install gh or pass commit SHA directly` |
 | Baseline commit 本地沒 | 嘗試 `git fetch` 一次；仍沒 → error 含 `git fetch <remote>` hint |
@@ -365,7 +365,7 @@ modified: N           # signature / schema 改
 | `shape_check --route <path>` 無匹配 | text 輸出 `No routes match '<path>'`，exit 0 |
 | `admin mcp tools --format <invalid>` | clap reject + possible values |
 
-新加 error variants（如需）：`GnxError::BaselineResolve(String)`, `GnxError::GitOp(String)`。對齊既有 thiserror pattern。
+新加 error variants（如需）：`CgnError::BaselineResolve(String)`, `CgnError::GitOp(String)`。對齊既有 thiserror pattern。
 
 ---
 
@@ -382,7 +382,7 @@ modified: N           # signature / schema 改
 - `diff --section all` 跟逐 section 跑結果一致
 - `admin mcp tools --format toon` 輸出格式對齊其他 command
 - `shape_check --route` 過濾正確 + 無匹配時 graceful
-- `gnx --help` snapshot 對應 visibility 規則
+- `cgn --help` snapshot 對應 visibility 規則
 - `admin --help` snapshot 對應 namespace 規則
 
 ### 8.2 CI 整合
@@ -404,14 +404,14 @@ modified: N           # signature / schema 改
 | `shape_check` 位置 | top-level visible | LLM-facing drift detector，agent 在 API task 自動會用 |
 | `shape_check` MCP tool 暴露 | 進 mcp tools 清單 | description 夠 specific（HTTP consumer↔Route drift），agent 不會誤呼叫；context cost 換 ROI 划算 |
 | `verify_resolver` 位置 | admin namespace | Oracle JSONL 拿不到 → agent 用不了 → 不該污染 agent surface |
-| `verify_resolver` self-baseline mode | 不做（由 `gnx diff --section bindings` 涵蓋） | 職責分離：oracle mode dev 用，self-baseline agent 用，二者命令分開 |
-| 新 diff 命令名 | `gnx diff` | 跟 gnx 單字命令風格一致；跟 git diff 概念對齊但 context 內無歧義 |
+| `verify_resolver` self-baseline mode | 不做（由 `cgn diff --section bindings` 涵蓋） | 職責分離：oracle mode dev 用，self-baseline agent 用，二者命令分開 |
+| 新 diff 命令名 | `cgn diff` | 跟 cgn 單字命令風格一致；跟 git diff 概念對齊但 context 內無歧義 |
 | Section 結構 | `--section <s>` flag（非 subcommand） | 支援多選 + `all`；CLI help 列 possible values 清楚 |
-| Section 命名 | `bindings` / `routes` / `contracts` / `all` | 跟既有 `gnx routes` / `gnx contracts` 對稱；`bindings`（複數）比 `resolver`（元件名）對 agent / user 直覺 |
+| Section 命名 | `bindings` / `routes` / `contracts` / `all` | 跟既有 `cgn routes` / `cgn contracts` 對稱；`bindings`（複數）比 `resolver`（元件名）對 agent / user 直覺 |
 | `--baseline` 預設 | **無預設，required** | 跨 commit 對比結果取決於 baseline 選擇，silent default 易誤導 |
 | Baseline ref 接受形式 | branch / tag / SHA / HEAD~N / PR/<n> | Cover 常見 use case；PR/<n> 透過 gh CLI |
 | Exit code | 0 if no error（即使有 changes） | diff 是 advisory，CI gate 由 `--strict` 未來加 |
-| Output format | text(default) / json / toon | 對齊 gnx 其他 command 慣例 |
+| Output format | text(default) / json / toon | 對齊 cgn 其他 command 慣例 |
 | Output verbosity | text 預設 top-10/section，`--verbose` 全列 | 平衡資訊密度 vs context cost |
 
 ---
@@ -419,11 +419,11 @@ modified: N           # signature / schema 改
 ## 10. Open questions
 
 1. **`PR/<n>` 解析 fallback**：當 repo 不是 GitHub（GitLab / Gitea），是否提供 `--baseline-cmd <shell-cmd>` 讓 user 自訂解析腳本？Or 一律要求傳 SHA？
-2. **Baseline graph cache 策略**：跑過一次 `--baseline origin/main` 的 graph dump，下次同 SHA 是否快取避免重跑？快取 invalidation 條件（gnx 版本變、analyzer 改動）？
+2. **Baseline graph cache 策略**：跑過一次 `--baseline origin/main` 的 graph dump，下次同 SHA 是否快取避免重跑？快取 invalidation 條件（cgn 版本變、analyzer 改動）？
 3. **Edges section 未來引入時的 grouping 策略**：50-200 edges/PR 噪音多。grouping by `(source_file, target_file)` 還是 by enclosing module？需獨立評估再加。
 4. **Symbols section 未來引入時的 modified 定義**：body 改算 modified？signature 改算 modified？rename 跨 file 算什麼？需 identity tracking 設計。
-5. **`gnx diff` 對 monorepo 多 sub-graph**：當前 `gnx diff` 假設單一 graph；多 repo（`--repo @group`）需獨立評估。
-   - *Status (2026-05-18, PR #146):* `gnx diff` 仍只支援單一 graph；top-level `--repo @<group>` 已被 `check_group_atom` 拒收（hint 指向 `gnx group --help`），未列入 PR-146 的 group verb 範圍。多 repo diff 留作後續獨立 spec。
+5. **`cgn diff` 對 monorepo 多 sub-graph**：當前 `cgn diff` 假設單一 graph；多 repo（`--repo @group`）需獨立評估。
+   - *Status (2026-05-18, PR #146):* `cgn diff` 仍只支援單一 graph；top-level `--repo @<group>` 已被 `check_group_atom` 拒收（hint 指向 `cgn group --help`），未列入 PR-146 的 group verb 範圍。多 repo diff 留作後續獨立 spec。
 
 ---
 
@@ -433,12 +433,12 @@ modified: N           # signature / schema 改
 |---|---|
 | `admin mcp` move + `--format` | ~40 |
 | `shape_check` un-hide + `--route` | ~50 |
-| `gnx diff` shared baseline infra | ~150 |
-| `gnx diff --section bindings` | ~150 |
-| `gnx diff --section routes` | ~80 |
-| `gnx diff --section contracts` | ~120 |
-| `gnx diff` output formatters | ~80 |
-| `~/.claude/skills/gnx/SKILL.md` updates | ~30 lines |
+| `cgn diff` shared baseline infra | ~150 |
+| `cgn diff --section bindings` | ~150 |
+| `cgn diff --section routes` | ~80 |
+| `cgn diff --section contracts` | ~120 |
+| `cgn diff` output formatters | ~80 |
+| `~/.claude/skills/cgn/SKILL.md` updates | ~30 lines |
 | Tests | ~200 |
 | **Total** | **~870 LOC** |
 

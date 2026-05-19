@@ -2,15 +2,15 @@
 
 **Date**: 2026-05-16
 **Status**: Design (spec v2) — pre-implementation, validation-informed
-**Goal**: 在 analyzer pipeline 末段加一支跨語言 post-process pass，從既有的 span 包含關係（+ Rust `build_impl_map`）推導出 `HasMethod` / `HasProperty` edges，讓 LLM agent 對 Class 符號的 `gnx inspect` / `gnx impact` / `gnx cypher` query 不再回空集合。
+**Goal**: 在 analyzer pipeline 末段加一支跨語言 post-process pass，從既有的 span 包含關係（+ Rust `build_impl_map`）推導出 `HasMethod` / `HasProperty` edges，讓 LLM agent 對 Class 符號的 `cgn inspect` / `cgn impact` / `cgn cypher` query 不再回空集合。
 
 **Status note (v2)**: Spec v1 已 squash-merge 進 main（PR #33, commit `e074737`）。本 v2 整合 5 項實測 validation 跟 5-agent design 評估後的修正。
 
 **Related**:
-- `crates/graph-nexus-core/src/graph.rs` — `RelType::HasMethod` / `HasProperty` 已宣告但無人 emit（gnx-rs 自身驗證 297 個 Class 全 0 HasMethod edges）
-- `crates/graph-nexus-analyzer/src/framework_helpers.rs` — **`enclosing_class` / `enumerate_class_methods` 已存在**，目前供 framework detection 使用
-- `crates/graph-nexus-analyzer/src/rust/receiver_types.rs` — **`build_impl_map` 已存在**，目前供 Rust receiver-type call 解析使用
-- `crates/graph-nexus-analyzer/src/resolution/builder.rs` — 實際 graph 構造點（v1 spec 寫錯為 `pipeline.rs`）
+- `crates/cgn-core/src/graph.rs` — `RelType::HasMethod` / `HasProperty` 已宣告但無人 emit（cgn-rs 自身驗證 297 個 Class 全 0 HasMethod edges）
+- `crates/cgn-analyzer/src/framework_helpers.rs` — **`enclosing_class` / `enumerate_class_methods` 已存在**，目前供 framework detection 使用
+- `crates/cgn-analyzer/src/rust/receiver_types.rs` — **`build_impl_map` 已存在**，目前供 Rust receiver-type call 解析使用
+- `crates/cgn-analyzer/src/resolution/builder.rs` — 實際 graph 構造點（v1 spec 寫錯為 `pipeline.rs`）
 - 上游 `gitnexus` 的 `reconcileOwnership` pipeline pass（同設計，已 production 驗證）
 - 後續 PR 2 / PR 3：type-annotation `References` + cross-lang fixture polish
 
@@ -37,7 +37,7 @@ Cypher 驗證：
 
 ### 1.2 對 LLM agent 的影響
 
-`gnx inspect Resolver`（Class）目前回 `incoming={} outgoing={} impact_upstream_1hop=[]` — agent 任何「class 有什麼 method」「誰把它當 type」的問題，inspect 死路 → fallback 到 `Read` 整檔或 `grep <ClassName>`，token expensive、低結構性、不可靠。
+`cgn inspect Resolver`（Class）目前回 `incoming={} outgoing={} impact_upstream_1hop=[]` — agent 任何「class 有什麼 method」「誰把它當 type」的問題，inspect 死路 → fallback 到 `Read` 整檔或 `grep <ClassName>`，token expensive、低結構性、不可靠。
 
 ### 1.3 Root cause（跨語言 parser 模式）
 
@@ -80,13 +80,13 @@ pub fn enumerate_class_methods(nodes: &[RawNode], class_span: Span, exclude_name
 
 | 動作 | 對象 |
 |---|---|
-| 新增 cross-language post-process module | `crates/graph-nexus-analyzer/src/post_process/class_membership.rs` |
-| 整合進 builder 末段（CSR 計算前） | `crates/graph-nexus-analyzer/src/resolution/builder.rs::build()` line 907 附近 |
+| 新增 cross-language post-process module | `crates/cgn-analyzer/src/post_process/class_membership.rs` |
+| 整合進 builder 末段（CSR 計算前） | `crates/cgn-analyzer/src/resolution/builder.rs::build()` line 907 附近 |
 | Emit `RelType::HasMethod` edges | Class span ⊃ Method/**Function** span，innermost enclosing |
 | Emit `RelType::HasMethod` for Rust impl-mapped fns | 用 `build_impl_map` 對 inherent / trait impl 的 fn 補 edge |
 | Emit `RelType::HasProperty` edges | Class span ⊃ Property span |
-| 擴充 `gnx inspect` 對 Class kind 的輸出 | 加 `contained_methods` / `contained_properties` 欄位 |
-| 更新 SKILL.md 加 1-line cypher 慣例提示 | `docs/skills/gnx.md` + `~/.claude/skills/gnx/SKILL.md` |
+| 擴充 `cgn inspect` 對 Class kind 的輸出 | 加 `contained_methods` / `contained_properties` 欄位 |
+| 更新 SKILL.md 加 1-line cypher 慣例提示 | `docs/skills/cgn.md` + `~/.claude/skills/cgn/SKILL.md` |
 | Cross-language fixture tests | TS / Ruby / Python / Rust trait impl / Rust inherent impl（5 種代表） |
 
 ### 2.2 Out of scope（明示延後）
@@ -110,7 +110,7 @@ pub fn enumerate_class_methods(nodes: &[RawNode], class_span: Span, exclude_name
 理由（合議結論）：
 - LLM agents 對 single predictable pattern reliability > 對 multi-edge-type dispatching
 - B.4（HasMethod + Defines 分流）的「語意精確」不 compound 到更好 cypher，反而加 branching 負擔
-- `gnx inspect Class` 是主要 UI 表面、`contained_methods` 已將異質性 hide 掉，cypher 不必重複表達
+- `cgn inspect Class` 是主要 UI 表面、`contained_methods` 已將異質性 hide 掉，cypher 不必重複表達
 
 ---
 
@@ -136,7 +136,7 @@ pub fn enumerate_class_methods(nodes: &[RawNode], class_span: Span, exclude_name
 
 > "a shim for languages whose legacy extractor doesn't resolve `enclosingClassId` at parse time (**Python class-body methods are the canonical case**). It walks `parsed.localDefs[i].ownerId` after `populateOwners` and registers any missed methods/fields into the model. Idempotent — safe to re-run."
 
-上游已 production 驗證此設計可行；gnx-rs 補 post-process pass 等同把上游決策補齊。
+上游已 production 驗證此設計可行；cgn-rs 補 post-process pass 等同把上游決策補齊。
 
 ---
 
@@ -198,7 +198,7 @@ Top-level `def foo():` / `function foo()` — 不被任何 Class 包含 → `enu
 
 ### 4.5 Complexity
 
-`O(F × N_class × N_member)` per file。實測 gnx-rs 6118 symbols / 12532 rels 全建 ~1.5s；post-process 估 < 100ms（Pass 1 線性掃 + Pass 2 Rust files only）。
+`O(F × N_class × N_member)` per file。實測 cgn-rs 6118 symbols / 12532 rels 全建 ~1.5s；post-process 估 < 100ms（Pass 1 線性掃 + Pass 2 Rust files only）。
 
 ---
 
@@ -206,7 +206,7 @@ Top-level `def foo():` / `function foo()` — 不被任何 Class 包含 → `enu
 
 ### 5.1 Insertion point（v2 修正）
 
-**真正的 insertion point** 在 `crates/graph-nexus-analyzer/src/resolution/builder.rs::build()` line 907-919 之間：
+**真正的 insertion point** 在 `crates/cgn-analyzer/src/resolution/builder.rs::build()` line 907-919 之間：
 
 ```rust
 pub fn build(self) -> ZeroCopyGraph {
@@ -226,10 +226,10 @@ pub fn build(self) -> ZeroCopyGraph {
 ### 5.2 接口
 
 ```rust
-// crates/graph-nexus-analyzer/src/post_process/mod.rs
+// crates/cgn-analyzer/src/post_process/mod.rs
 pub mod class_membership;
 
-// crates/graph-nexus-analyzer/src/post_process/class_membership.rs
+// crates/cgn-analyzer/src/post_process/class_membership.rs
 pub fn emit_edges(
     nodes: &[Node],
     edges: &mut Vec<Edge>,
@@ -246,7 +246,7 @@ Rust `impl_maps` 由 caller（`build()`）預先 collect — 因為 `build_impl_
 
 ### 6.1 Class 視角擴充
 
-`gnx inspect <name>` 當 symbol kind = Class 時，現有輸出加 2 個欄位：
+`cgn inspect <name>` 當 symbol kind = Class 時，現有輸出加 2 個欄位：
 
 ```jsonc
 {
@@ -274,8 +274,8 @@ Rust `impl_maps` 由 caller（`build()`）預先 collect — 因為 `build_impl_
 
 ### 6.3 其他工具自動受益
 
-- `gnx cypher "MATCH (a:Class)-[:HasMethod]->(b) RETURN a,b"` 終於有 rows
-- `gnx impact <Class>` upstream BFS 經 HasMethod edge 觸及 method，blast radius 變寬
+- `cgn cypher "MATCH (a:Class)-[:HasMethod]->(b) RETURN a,b"` 終於有 rows
+- `cgn impact <Class>` upstream BFS 經 HasMethod edge 觸及 method，blast radius 變寬
 
 ---
 
@@ -283,7 +283,7 @@ Rust `impl_maps` 由 caller（`build()`）預先 collect — 因為 `build_impl_
 
 ### 7.1 Unit tests（post-process module）
 
-`crates/graph-nexus-analyzer/src/post_process/class_membership.rs`：
+`crates/cgn-analyzer/src/post_process/class_membership.rs`：
 
 | Test | 內容 |
 |---|---|
@@ -299,7 +299,7 @@ Rust `impl_maps` 由 caller（`build()`）預先 collect — 因為 `build_impl_
 
 ### 7.2 Integration tests（cross-language fixtures）
 
-`crates/graph-nexus-cli/tests/class_membership_inspect.rs`：
+`crates/cgn-cli/tests/class_membership_inspect.rs`：
 
 | 語言 | Fixture | 斷言重點 |
 |---|---|---|
@@ -311,7 +311,7 @@ Rust `impl_maps` 由 caller（`build()`）預先 collect — 因為 `build_impl_
 
 ### 7.3 Cypher 行為驗證
 
-`crates/graph-nexus-cli/tests/cypher_has_method.rs`：
+`crates/cgn-cli/tests/cypher_has_method.rs`：
 
 ```rust
 // 驗 B.1 慣例：query 不加 target kind filter 全語言 work
@@ -344,17 +344,17 @@ let rows2 = run(q2);
 
 1. **Constructor 算 method？** 跨語言 ctor 處理：TS `constructor` kind=Method、Python `__init__` kind=Function、Rust `new` 是 associated fn kind=Function。**建議：算**（B.1 全收），統一邏輯，agent 看 `kind` 自己選擇是否區分
 2. **Interface 是否也適用？** `NodeKind::Interface` 在 TS / Java 是另一個 kind。本 PR 先**不**處理 — interface members 通常是 method signature 而非 impl，後續可加 `Interface -[HasMethod]-> Method` 但需另定 spec
-3. **`gnx inspect Method` 反向查 parent class？** Cypher 已能 `MATCH (a:Class)-[:HasMethod]->(b) WHERE b.name='foo' RETURN a`。inspect 視角是否要直接 surface `member_of`？延後 PR 3 評估
+3. **`cgn inspect Method` 反向查 parent class？** Cypher 已能 `MATCH (a:Class)-[:HasMethod]->(b) WHERE b.name='foo' RETURN a`。inspect 視角是否要直接 surface `member_of`？延後 PR 3 評估
 
 ---
 
 ## 10. Acceptance criteria
 
-- [ ] `crates/graph-nexus-analyzer/src/post_process/class_membership.rs` 通過 9 unit tests
-- [ ] `crates/graph-nexus-cli/tests/class_membership_inspect.rs` 通過 5 跨語言 fixture tests
-- [ ] `crates/graph-nexus-cli/tests/cypher_has_method.rs` 通過 B.1 慣例驗證 test
-- [ ] `gnx inspect <Class>` 對至少 5 種語言（TS / Ruby / Python / Rust 兩種 impl）回非空 `contained_methods`
-- [ ] `gnx cypher "MATCH (a:Class)-[:HasMethod]->(b) RETURN a,b"` 在 gnx-rs 自身 repo 跑出 > 200 rows
+- [ ] `crates/cgn-analyzer/src/post_process/class_membership.rs` 通過 9 unit tests
+- [ ] `crates/cgn-cli/tests/class_membership_inspect.rs` 通過 5 跨語言 fixture tests
+- [ ] `crates/cgn-cli/tests/cypher_has_method.rs` 通過 B.1 慣例驗證 test
+- [ ] `cgn inspect <Class>` 對至少 5 種語言（TS / Ruby / Python / Rust 兩種 impl）回非空 `contained_methods`
+- [ ] `cgn cypher "MATCH (a:Class)-[:HasMethod]->(b) RETURN a,b"` 在 cgn-rs 自身 repo 跑出 > 200 rows
 - [ ] 整體 graph build time 增加 < 5%（基線 ~1.5s for 6118 symbols / 12532 rels）
 - [ ] SKILL.md 加入 1 行 cypher 慣例提示（不加 target kind filter）
 
@@ -379,6 +379,6 @@ let rows2 = run(q2);
 - 5/5 選 B.1
 - 共識 1：LLM agents reliability favours single predictable pattern over conditional logic
 - 共識 2：B.4 的兩 edge type 「splits the same semantic concept across two relation names, forcing agents to learn arbitrary language-specific routing rules」
-- 共識 3：`gnx inspect Class` is the primary surface, already hides heterogeneity — cypher 不該重複表達精度
+- 共識 3：`cgn inspect Class` is the primary surface, already hides heterogeneity — cypher 不該重複表達精度
 
 詳細評估 prompt 與回應記錄於 PR description（無 prior bias，純獨立 review）。

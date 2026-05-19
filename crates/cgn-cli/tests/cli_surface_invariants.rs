@@ -79,7 +79,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
 ];
 
 /// `cgn group <subcmd>` — keep in sync with `GroupCommands` enum in
-/// `crates/graph-nexus-cli/src/commands/group/mod.rs`.
+/// `crates/cgn-cli/src/commands/group/mod.rs`.
 const GROUP_SUBCMDS: &[&str] = &["sync", "status", "contracts", "impact", "find", "coverage"];
 
 /// `cgn peers <subcmd>` — keep in sync with `PeersCmd` enum.
@@ -203,7 +203,7 @@ fn mcp_cgn_peers_subcmds_are_real_cli_paths() {
 ///
 /// The expected flag set mirrors the `[subcmd]` tags in the
 /// `cgn_group` schema property descriptions
-/// (`crates/graph-nexus-mcp/src/group.rs`). Both files MUST move together.
+/// (`crates/cgn-mcp/src/group.rs`). Both files MUST move together.
 #[test]
 fn mcp_cgn_group_advertised_flags_exist_in_cli_help() {
     let cases: &[(&str, &[&str])] = &[

@@ -4,8 +4,8 @@
 |---|---|
 | Status | Draft |
 | Date | 2026-05-17 |
-| Scope | `gnx admin index --force` semantic in v2 layout；新增 SessionState first-class concept；query hot-path PureReference fast-path；admin sessions list state column；移除 `--no-cache / --embeddings / --drop-embeddings` |
-| Affects | `graph-nexus-cli::{commands::admin::index, commands::admin::sessions, build::orchestrator, engine}`, `graph-nexus-core::session` (新增 `state.rs`) |
+| Scope | `cgn admin index --force` semantic in v2 layout；新增 SessionState first-class concept；query hot-path PureReference fast-path；admin sessions list state column；移除 `--no-cache / --embeddings / --drop-embeddings` |
+| Affects | `cgn-cli::{commands::admin::index, commands::admin::sessions, build::orchestrator, engine}`, `cgn-core::session` (新增 `state.rs`) |
 | Parent | `docs/superpowers/specs/2026-05-17-index-layout-redesign-design.md` (v2 layout) |
 | Follow-up to | `docs/feat/2026-05-17-index-layout-followups.md` P3 第二項 |
 
@@ -36,7 +36,7 @@ v2 index layout（PR #55）把 storage 改成 commit-content-addressed L2 + sess
 
 - AugmentedReference 的 overlay merge 實作 — 由 P2 (`docs/feat/2026-05-17-index-layout-followups.md` §P2) 處理；本 spec 僅 wire `SessionState::AugmentedReference` 分支，merge 邏輯仍走 P2 完成前的 fallback。
 - `admin index --rev <sha>` — 目前隱式 HEAD；加 `--rev` 與 spec §11.1 query 命令 `--rev` 一併推（後續 PR）。
-- `gnx admin force` 獨立命令 — flag 已足夠，不引入新 subcommand。
+- `cgn admin force` 獨立命令 — flag 已足夠，不引入新 subcommand。
 - 強搶其他 process 的 build lock — `--force` 與其他 builder 並發時走 `wait_for_completion` 等對方 publish，再 drop+rebuild。
 
 ## 3. Session Reference Model
@@ -44,7 +44,7 @@ v2 index layout（PR #55）把 storage 改成 commit-content-addressed L2 + sess
 ### 3.1 SessionState enum
 
 ```rust
-// crates/graph-nexus-core/src/session/state.rs (new)
+// crates/cgn-core/src/session/state.rs (new)
 pub enum SessionState {
     /// dirty_files.json missing or entries 空。
     /// Session 對 base L2 無任何 overlay；query 路徑可直接走 L2-only。
@@ -150,7 +150,7 @@ impl SessionState {
 fn force_rebuild_l2(worktree, target_sha) -> io::Result<BuildResult>:
 
 1. sha_hex + dirname 解析（同現況 build_l2 §1）
-   repo_root = ~/.gnx/<repo_dir_name>/
+   repo_root = ~/.cgn/<repo_dir_name>/
    dirname   = pick_dirname(worktree, sha_hex)
    commit_dir = repo_root.join("commits").join(&dirname)
    building   = repo_root.join("commits").join(format!("{dirname}.building"))
@@ -259,7 +259,7 @@ fn invalidate_matching_l1(
 ### 5.1 Engine::open 分類分支
 
 ```rust
-// crates/graph-nexus-cli/src/engine.rs
+// crates/cgn-cli/src/engine.rs
 pub enum GraphView<'a> {
     L2Only(&'a ArchivedZeroCopyGraph),
     L2WithOverlay(&'a ArchivedZeroCopyGraph, OverlayMerged),
@@ -285,7 +285,7 @@ impl Engine {
             }
             SessionState::Stale { reason } => {
                 Err(io::Error::other(format!(
-                    "session stale: {reason:?}; remove via `gnx admin sessions reset <id>`"
+                    "session stale: {reason:?}; remove via `cgn admin sessions reset <id>`"
                 )))
             }
         }
@@ -306,7 +306,7 @@ impl Engine {
 ### 6.1 STATE 欄
 
 ```
-$ gnx admin sessions list
+$ cgn admin sessions list
 SESSION                  REPO                BASE_SHA  STATE              LAST_TOUCHED
 claude-tab-A             myrepo__a1b2c3d4    abc12345  PureReference      2s ago
 claude-tab-B             myrepo__a1b2c3d4    abc12345  Augmented (3)      now
@@ -318,7 +318,7 @@ broken                   myrepo__a1b2c3d4    --------  Stale(dirty_corr)  5m ago
 
 ### 6.2 JSON output
 
-`gnx admin sessions list --json`（若有）回傳：
+`cgn admin sessions list --json`（若有）回傳：
 
 ```json
 [{
@@ -363,7 +363,7 @@ pub struct IndexArgs {
 
 刪除：`no_cache`, `embeddings`, `drop_embeddings` 三欄 + 對應 warn-no-op 區塊（`admin/index.rs:303–309`）。
 
-### 7.2 `gnx admin index` 行為
+### 7.2 `cgn admin index` 行為
 
 ```rust
 pub fn run(args: IndexArgs) -> Result<(), String> {
@@ -477,7 +477,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 
 - `--force` + base_sha == target 的 PureReference session → session 保留 (F4)
 - `--force` + base_sha == target 的 Augmented session → session rename `.stale-<sha8>`；2.5s 後不存在 (F3)
-- `--force` + base_sha == target 的 dirty_files 損毀 session → 不動（state = Stale）；recovery 走 `gnx admin sessions reset <id>`
+- `--force` + base_sha == target 的 dirty_files 損毀 session → 不動（state = Stale）；recovery 走 `cgn admin sessions reset <id>`
 - `--force` + base_sha != target 的 任意 state session → 不動
 
 ### 10.4 Integration — concurrent --force
@@ -487,17 +487,17 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 
 ### 10.5 Integration — hot-path
 
-- PureReference query `gnx inspect <sym>` → 結果只反映 L2 內容
+- PureReference query `cgn inspect <sym>` → 結果只反映 L2 內容
 - PureReference query → 監控 fd open list 不含 `graph_overlay/` 路徑 (F5)
-- Augmented query `gnx inspect <sym>` → 結果 = L2 fallback（P2 完成前 stub 行為；明寫 expected = L2-only result + 標 ignored-pending-P2 if needed）
+- Augmented query `cgn inspect <sym>` → 結果 = L2 fallback（P2 完成前 stub 行為；明寫 expected = L2-only result + 標 ignored-pending-P2 if needed）
 
 ### 10.6 CLI surface
 
-- `gnx admin index --repo X --no-cache` → clap reject → exit 2
-- `gnx admin index --repo X --embeddings` → clap reject → exit 2
-- `gnx admin index --repo X --drop-embeddings` → clap reject → exit 2
-- `gnx admin sessions list` 輸出含 STATE 欄、值 ∈ {`PureReference`, `Augmented (N)`, `Stale(<reason>)`}
-- `gnx admin sessions list --json` 每筆有 `state.kind ∈ {pure_reference, augmented_reference, stale}`
+- `cgn admin index --repo X --no-cache` → clap reject → exit 2
+- `cgn admin index --repo X --embeddings` → clap reject → exit 2
+- `cgn admin index --repo X --drop-embeddings` → clap reject → exit 2
+- `cgn admin sessions list` 輸出含 STATE 欄、值 ∈ {`PureReference`, `Augmented (N)`, `Stale(<reason>)`}
+- `cgn admin sessions list --json` 每筆有 `state.kind ∈ {pure_reference, augmented_reference, stale}`
 
 ### 10.7 Crash injection
 
@@ -510,7 +510,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 
 - AugmentedReference overlay merge 實作（屬 P2）
 - `admin index --rev <sha>`（後續一併處理）
-- `gnx admin force` 獨立命令（flag 足夠）
+- `cgn admin force` 獨立命令（flag 足夠）
 - 強搶 build lock / abort 對方 builder
 - `--no-cache` deprecation alias（直接刪）
 
@@ -518,20 +518,20 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
 
 ### 新增
 
-- `crates/graph-nexus-core/src/session/state.rs` — `SessionState` enum + `StaleReason`（pure types）
-- `crates/graph-nexus-cli/src/session/state.rs` — `classify()` function（needs `commit_lookup::CommitIndex`，故落 cli 而非 core）
-- `crates/graph-nexus-cli/src/build/force.rs` — `force_rebuild_l2` + `invalidate_matching_l1` + `InvalidateReport`（共用 build_l2 internal helpers）
-- `crates/graph-nexus-cli/src/commands/admin/sessions.rs` — `admin sessions list` subcommand（minimal: list only；reset/sweep 為 parent spec §11.2 後續）
+- `crates/cgn-core/src/session/state.rs` — `SessionState` enum + `StaleReason`（pure types）
+- `crates/cgn-cli/src/session/state.rs` — `classify()` function（needs `commit_lookup::CommitIndex`，故落 cli 而非 core）
+- `crates/cgn-cli/src/build/force.rs` — `force_rebuild_l2` + `invalidate_matching_l1` + `InvalidateReport`（共用 build_l2 internal helpers）
+- `crates/cgn-cli/src/commands/admin/sessions.rs` — `admin sessions list` subcommand（minimal: list only；reset/sweep 為 parent spec §11.2 後續）
 
 ### 修改
 
-- `crates/graph-nexus-core/src/session/mod.rs` — re-export `SessionState` + `StaleReason`
-- `crates/graph-nexus-cli/src/session/mod.rs` — re-export `state::classify`
-- `crates/graph-nexus-cli/src/commands/admin/mod.rs` — `AdminCommands` 加 `Sessions` variant
-- `crates/graph-nexus-cli/src/commands/admin/index.rs` — 刪除 `no_cache / embeddings / drop_embeddings` 欄 + warn-no-op 區塊；`run` 改 match (force, commit_dir) 三分支
-- `crates/graph-nexus-cli/src/engine.rs` — `Engine::open` 改走 `SessionState::classify` + `GraphView` enum dispatch
-- `crates/graph-nexus-cli/src/build/orchestrator.rs` — `build_l2` 簽名不變；`force_rebuild_l2` 共用 internal helpers (source resolution, analyzer, atomic publish)
-- `crates/graph-nexus-cli/src/build/mod.rs` — re-export `force_rebuild_l2`
+- `crates/cgn-core/src/session/mod.rs` — re-export `SessionState` + `StaleReason`
+- `crates/cgn-cli/src/session/mod.rs` — re-export `state::classify`
+- `crates/cgn-cli/src/commands/admin/mod.rs` — `AdminCommands` 加 `Sessions` variant
+- `crates/cgn-cli/src/commands/admin/index.rs` — 刪除 `no_cache / embeddings / drop_embeddings` 欄 + warn-no-op 區塊；`run` 改 match (force, commit_dir) 三分支
+- `crates/cgn-cli/src/engine.rs` — `Engine::open` 改走 `SessionState::classify` + `GraphView` enum dispatch
+- `crates/cgn-cli/src/build/orchestrator.rs` — `build_l2` 簽名不變；`force_rebuild_l2` 共用 internal helpers (source resolution, analyzer, atomic publish)
+- `crates/cgn-cli/src/build/mod.rs` — re-export `force_rebuild_l2`
 
 ### 刪除（程式碼塊）
 

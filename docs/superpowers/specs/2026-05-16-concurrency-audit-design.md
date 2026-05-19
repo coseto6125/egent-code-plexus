@@ -2,13 +2,13 @@
 
 **Date**: 2026-05-16
 **Status**: Design (approved skeleton, awaiting spec review)
-**Parent roadmap**: gnx ↔ gitnexus parity & exceed (7 sub-projects)
+**Parent roadmap**: cgn ↔ gitnexus parity & exceed (7 sub-projects)
 **Blocks**: Sub-projects 1–6
 
 ## 0. Why this exists
 
 The parity roadmap will add ~10 new `Edge` emit sites (Imports / Defines / Implements / CONTAINS / MEMBER_OF / INHERITS / METHOD_OVERRIDES / METHOD_IMPLEMENTS / DECORATES / USES / WRAPS / QUERIES / HANDLES_TOOL). The existing parallel emit path (`pass2_emit_node_edges`, dispatched by rayon in `resolution/builder.rs`) is guarded by exactly **one** equivalence test —
-`pass2_parallel_and_serial_emit_identical_edges` at `crates/graph-nexus-analyzer/src/resolution/builder.rs:1819` — and it asserts only on `(source, target, rel_type)` tuples without per-rel-type stratification.
+`pass2_parallel_and_serial_emit_identical_edges` at `crates/cgn-analyzer/src/resolution/builder.rs:1819` — and it asserts only on `(source, target, rel_type)` tuples without per-rel-type stratification.
 
 Adding emit sites without first auditing the concurrency surface risks:
 - Non-determinism that only fires under specific thread counts or input shapes
@@ -22,13 +22,13 @@ Per project CLAUDE.md §Performance non-negotiables, performance and correctness
 
 ### 1.1 In scope (crate-level)
 
-- `graph-nexus-core` (graph types, algorithms, cypher executor, registry, pool)
-- `graph-nexus-analyzer` (parsers, resolver, builder, post-process)
-- `graph-nexus-cli` (commands, hook spawn, background reindex)
+- `cgn-core` (graph types, algorithms, cypher executor, registry, pool)
+- `cgn-analyzer` (parsers, resolver, builder, post-process)
+- `cgn-cli` (commands, hook spawn, background reindex)
 
 ### 1.2 Out of scope
 
-- `graph-nexus-mcp` — single-process stdio; no shared state with peer processes
+- `cgn-mcp` — single-process stdio; no shared state with peer processes
 - `vendor/` — third-party copies, governed by upstream
 - The MCP `rmcp_tools` cache restructure (separate refactor, tracked via eywa hint)
 - Hand-tuning Rayon thread counts in `search.rs` / `admin/index.rs` — workload is known too small to benefit (eywa-confirmed convention)
@@ -80,8 +80,8 @@ The existing test at `builder.rs:1819` (4.1's predecessor) only asserts on `(u32
 RUSTFLAGS="-Z sanitizer=thread" \
 RUSTDOCFLAGS="-Z sanitizer=thread" \
 cargo +nightly test --tests \
-  -p graph-nexus-core \
-  -p graph-nexus-analyzer \
+  -p cgn-core \
+  -p cgn-analyzer \
   --target x86_64-unknown-linux-gnu \
   -- --test-threads=4
 ```
@@ -92,7 +92,7 @@ Two phases:
 
 Acceptance: zero unfiltered TSan reports.
 
-If TSan toolchain unavailable in CI, the audit script falls back to running B-tests under `MIRIFLAGS="-Zmiri-strict-provenance"` on `graph-nexus-core` only (analyzer has tree-sitter FFI which miri can't run).
+If TSan toolchain unavailable in CI, the audit script falls back to running B-tests under `MIRIFLAGS="-Zmiri-strict-provenance"` on `cgn-core` only (analyzer has tree-sitter FFI which miri can't run).
 
 ## 6. Performance findings — surfaced, not bundled
 
@@ -116,7 +116,7 @@ eywa-confirmed not-to-touch list (start of audit, expand as needed):
 2. **New tests** under `crates/{core,analyzer,cli}/tests/concurrency_*.rs` — five files, one per §4 condition
 3. **`scripts/audit-concurrency.sh`** — one-shot runner: builds with TSan, runs equivalence test suite, diffs serial vs parallel output, reports pass/fail. Wired as a manual `cargo xtask`-style helper, not CI-gated yet (CI gating tracked separately)
 4. **`README.md` section** `## Concurrency invariants` — 5 invariants from §4, frozen as project contract
-5. **Updated `crates/graph-nexus-analyzer/src/resolution/builder.rs:1819` test** — extended per-rel-type stratification (see §4.1)
+5. **Updated `crates/cgn-analyzer/src/resolution/builder.rs:1819` test** — extended per-rel-type stratification (see §4.1)
 
 ## 8. Acceptance criteria
 
@@ -124,7 +124,7 @@ All four MUST hold for audit closure:
 
 1. Inventory tables in §3 list every callsite matched by the grep seeds; each row carries a verdict label
 2. All 5 equivalence tests in §4 PASS under `--test-threads=1` and `--test-threads=$(nproc)` (CI runs both via `cargo test -- --test-threads=...`)
-3. TSan run in §5 produces zero unfiltered reports on `graph-nexus-core` + `graph-nexus-analyzer`
+3. TSan run in §5 produces zero unfiltered reports on `cgn-core` + `cgn-analyzer`
 4. Every bug surfaced in §4 or §5 has a merged fix PR before this audit's design doc is marked `Closed`. Perf findings in §6 may be deferred to follow-up issues, **but must be filed before closure** — they cannot disappear into "we'll see"
 
 ## 9. Effort estimate
@@ -152,7 +152,7 @@ The expected case is the planning anchor; the worst case is when fixes are neede
 
 ## 11. Open questions for spec review
 
-1. **CI gating**: should `scripts/audit-concurrency.sh` block PR merge from Sub-project 1 onwards, or stay manual? Default in this spec: manual + documented + run by maintainer before each `gnx` release tag.
+1. **CI gating**: should `scripts/audit-concurrency.sh` block PR merge from Sub-project 1 onwards, or stay manual? Default in this spec: manual + documented + run by maintainer before each `cgn` release tag.
 2. **TSan in CI**: nightly toolchain in CI is expensive (3-5× build time). Default: don't run in CI yet; run locally per release. Revisit if a race bug ships to users.
 3. **Test 4.3 process model**: `registry_concurrent_writers_converge` mirrors real hook contention via spawned processes — that's heavier than thread-based simulation. Acceptable cost for one test?
 
@@ -161,7 +161,7 @@ The expected case is the planning anchor; the worst case is when fixes are neede
 - Architectural refactor of `pass2` to use a different parallel model (work-stealing queue, etc.)
 - Replacing `rayon` with `tokio::task::spawn_blocking` or any other executor
 - Async-ifying the analyzer (it's CPU-bound, async wouldn't help)
-- `graph-nexus-mcp` audit
+- `cgn-mcp` audit
 - `vendor/` audit
 - Bundling perf refactors into the audit PR (surface to findings, defer to follow-up — see §6)
 

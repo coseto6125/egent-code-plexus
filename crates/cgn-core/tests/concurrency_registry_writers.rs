@@ -28,7 +28,7 @@ fn registry_concurrent_writers_converge() {
     let bin = example_path();
     assert!(
         bin.exists(),
-        "child binary not built — run `cargo build -p graph-nexus-core --example registry_writer_child` first; expected at {}",
+        "child binary not built — run `cargo build -p cgn-core --example registry_writer_child` first; expected at {}",
         bin.display()
     );
 
@@ -70,7 +70,7 @@ fn registry_concurrent_same_repo_last_writer_wins_safely() {
     let bin = example_path();
     assert!(
         bin.exists(),
-        "child binary not built — run `cargo build -p graph-nexus-core --example registry_writer_child` first; expected at {}",
+        "child binary not built — run `cargo build -p cgn-core --example registry_writer_child` first; expected at {}",
         bin.display()
     );
 

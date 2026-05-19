@@ -63,7 +63,7 @@
 ) @function
 
 ;; Delegates — `public delegate ReturnT Name(...);`. No `NodeKind::Delegate`
-;; in gnx-rs; emit as Function (closest semantic — a delegate IS a
+;; in cgn; emit as Function (closest semantic — a delegate IS a
 ;; function-pointer type alias). ref-gitnexus uses a dedicated `Delegate`
 ;; label; the cross-side label mismatch is handled by the parity
 ;; aggregator's LABEL_PAIRS as Delegate↔Function.

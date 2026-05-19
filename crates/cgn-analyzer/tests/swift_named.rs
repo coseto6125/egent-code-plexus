@@ -1,7 +1,7 @@
 //! Swift Named binding dimension — `typealias` and `@objc(extName)` rename.
 //!
 //! Mirrors Java static-import alias convention (see
-//! `crates/graph-nexus-analyzer/src/java/parser.rs:189-296`): each named
+//! `crates/cgn-analyzer/src/java/parser.rs:189-296`): each named
 //! binding emits a `RawImport` with `alias = Some(<bound name>)` so it lands
 //! in the same downstream named-binding pipeline.
 

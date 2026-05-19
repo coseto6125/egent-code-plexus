@@ -203,7 +203,7 @@ fn production_src_routes_to_source() {
 #[test]
 fn production_lib_routes_to_source() {
     assert_eq!(
-        determine_category("crates/graph-nexus-core/src/graph.rs"),
+        determine_category("crates/cgn-core/src/graph.rs"),
         FileCategory::Source
     );
 }

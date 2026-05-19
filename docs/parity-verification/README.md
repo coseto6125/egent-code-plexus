@@ -1,6 +1,6 @@
 # Parity Verification Protocol
 
-跨實作（gnx-rs ↔ ref-gitnexus）的 symbol emission 比對流程。本文件描述
+跨實作（cgn-rs ↔ ref-gitnexus）的 symbol emission 比對流程。本文件描述
 **怎樣的證據才能斷定 parser 有 bug**、以及 **怎樣的證據只是 taxonomy 差**。
 
 目標讀者：要在同樣 corpus 上做 parity 工作的 model / 開發者。
@@ -9,7 +9,7 @@
 
 ## 0. 為什麼要這份文件
 
-`.sample_repo` 有 14 種語言混合 source，是 gnx-rs 和 ref-gitnexus 之間
+`.sample_repo` 有 14 種語言混合 source，是 cgn-rs 和 ref-gitnexus 之間
 的 A/B oracle。但「兩邊算出來的 symbol 數量不同」並不直接等於「parser
 有 bug」。常見幾種「看起來像 bug 但其實不是」的差異：
 
@@ -32,14 +32,14 @@
 
 對每個 lang 從兩邊各 dump `(kind, filePath, name)` 三元組成集合：
 
-- gnx-rs：用 cypher query 走 `~/.gnx/<repo>__*` 索引
+- cgn-rs：用 cypher query 走 `~/.cgn/<repo>__*` 索引
 - ref-gitnexus：用其 Python API 走 `.sample_repo/<Lang>/...`
 
 工具：`scripts/parity/dump_per_lang_symbols.py`
 
 dump 完落地成兩個 set：
-- `symbol_diffs/<Lang>_rs_only.txt`  ← gnx-rs 有、ref 沒有
-- `symbol_diffs/<Lang>_ref_only.txt` ← ref 有、gnx-rs 沒有
+- `symbol_diffs/<Lang>_rs_only.txt`  ← cgn-rs 有、ref 沒有
+- `symbol_diffs/<Lang>_ref_only.txt` ← ref 有、cgn-rs 沒有
 
 ### 1.2 file-extension scoping（重要陷阱）
 
@@ -94,7 +94,7 @@ union-find 合併重疊類（`{Delegate, Function}` 透過 `Function` 跟
 
 aggregator 輸出按 `(path, name)` 配對：
 - 兩邊都有 + kind 同 equiv class → `label`
-- 一邊獨有 + kind 在 model-only set（如 rs 的 `EntryPoint` 是 gnx-rs
+- 一邊獨有 + kind 在 model-only set（如 rs 的 `EntryPoint` 是 cgn-rs
   獨有 NodeKind）→ `model`
 - 其餘 → `real_rs` / `real_ref`，**這才是真正需要驗的 candidate**
 
@@ -108,19 +108,19 @@ unpaired），按 **unique-name 字母順序** 取前 10 個樣本。**順序固
 
 1. `grep -nE "fn\s+${NAME}\b"` 找 declaration line
 2. 看 enclosing context：是 module-level / type-level 還是 block-level
-3. 對照 gnx-rs parser 設計：是 design choice drop 還是 parser gap
+3. 對照 cgn-rs parser 設計：是 design choice drop 還是 parser gap
 
 判定規則（**這條規則本身要寫死，不准每輪換**）：
 
 | 樣本性質 | 判定 |
 |---|---|
-| function/method body 內的 transient declaration（local var、inner fn） | **ref over-emit, gnx-rs design choice** |
-| module-level 但被 arrow-fn 賦值的 const (`const X = () => {...}`) | **ref over-emit**（gnx-rs 把它 emit 成 Function 而非 Const） |
-| type-level permanent 命名實體（struct field、enum variant field、impl method） | **若 gnx-rs 沒 emit 則為真 gnx-rs bug，要修 parser** |
+| function/method body 內的 transient declaration（local var、inner fn） | **ref over-emit, cgn-rs design choice** |
+| module-level 但被 arrow-fn 賦值的 const (`const X = () => {...}`) | **ref over-emit**（cgn-rs 把它 emit 成 Function 而非 Const） |
+| type-level permanent 命名實體（struct field、enum variant field、impl method） | **若 cgn-rs 沒 emit 則為真 cgn-rs bug，要修 parser** |
 | Test/Reference 路徑下被 builder filter 掉 | **design choice**（`is_non_production` filter） |
 
 10/10 全 ref-bug → 該 candidate 通過為 design choice/label diff，不修。
-中途有一個是 gnx-rs bug → **立即停下、進入修補階段、reset round 計數**。
+中途有一個是 cgn-rs bug → **立即停下、進入修補階段、reset round 計數**。
 
 ---
 
@@ -166,11 +166,11 @@ for path, name in unpaired[:20]:
 
 ```bash
 # Step 1: 確保兩邊都已 index 同一份 .sample_repo
-gnx admin index --repo /home/enor/gitnexus-rs/.sample_repo --force
+cgn admin index --repo /home/enor/gitnexus-rs/.sample_repo --force
 # (ref-gitnexus 那邊有自己的 indexer，按 ref repo 文件)
 
 # Step 2: dump 兩邊 symbol 集合
-cd /path/to/gnx-rs/worktree
+cd /path/to/cgn-rs/worktree
 python3 scripts/parity/dump_per_lang_symbols.py    # 全 14 lang
 # 或單 lang:
 python3 scripts/parity/dump_per_lang_symbols.py Rust
@@ -192,15 +192,15 @@ done
 
 # Step 6: 看 enclosing context 分類
 # - 全是 block-scoped transient → design choice → 通過
-# - 出現 type-level permanent → gnx-rs bug → 進入修補
+# - 出現 type-level permanent → cgn-rs bug → 進入修補
 
 # Step 7（若有 bug）: 修 parser 並寫 regression test
-$EDITOR crates/graph-nexus-analyzer/src/<lang>/queries.scm
-$EDITOR crates/graph-nexus-analyzer/tests/<lang>_<dimension>.rs
-cargo test -p graph-nexus-analyzer --test <lang>_<dimension>
+$EDITOR crates/cgn-analyzer/src/<lang>/queries.scm
+$EDITOR crates/cgn-analyzer/tests/<lang>_<dimension>.rs
+cargo test -p cgn-analyzer --test <lang>_<dimension>
 
 # Step 8: 重 index + 重 dump + 重 aggregate 確認 real_ref 下降
-gnx admin index --repo /path/.sample_repo --force
+cgn admin index --repo /path/.sample_repo --force
 python3 scripts/parity/dump_per_lang_symbols.py <Lang>
 PARITY_DIFF_DIR=scripts/parity/symbol_diffs python3 scripts/parity/parity_aggregate.py
 ```
@@ -214,7 +214,7 @@ PARITY_DIFF_DIR=scripts/parity/symbol_diffs python3 scripts/parity/parity_aggreg
 ### 4.1 發現
 
 aggregator 顯示 Rust real_ref = 232，top: `Property-185, Function-47`。
-185 個 Property 是 ref 邊獨有、gnx-rs 邊在同 `(path, name)` 沒任何
+185 個 Property 是 ref 邊獨有、cgn-rs 邊在同 `(path, name)` 沒任何
 equiv class kind。
 
 ### 4.2 抽樣
@@ -250,7 +250,7 @@ enum Response {
 
 ### 4.4 判定
 
-關鍵問題：這算 design choice 還是 gnx-rs bug？
+關鍵問題：這算 design choice 還是 cgn-rs bug？
 
 對比已知 design choice：
 - TS function-local const drop（block-scoped, transient）
@@ -262,14 +262,14 @@ enum variant struct-form field 是 **type-level, permanent**：
 - pattern-match destructure `V { f1, f2 } => ...` 直接依賴 name
 - ref-gitnexus 一致 emit 為 Property
 
-→ **判定為真 gnx-rs gap**，須修 parser。
+→ **判定為真 cgn-rs gap**，須修 parser。
 
 ### 4.5 修補
 
 確認 tree-sitter-rust grammar：`enum_variant body: field_declaration_list`
 與 `struct_item body: field_declaration_list` 同結構，可以套同一 capture。
 
-`crates/graph-nexus-analyzer/src/rust/queries.scm`：
+`crates/cgn-analyzer/src/rust/queries.scm`：
 
 ```scheme
 ;; Enum variant struct-form fields: `enum E { V { f1: T, f2: U } }`. Each named
@@ -284,7 +284,7 @@ enum variant struct-form field 是 **type-level, permanent**：
 
 ### 4.6 regression test
 
-`crates/graph-nexus-analyzer/tests/rust_enum_variant_fields.rs`：
+`crates/cgn-analyzer/tests/rust_enum_variant_fields.rs`：
 
 ```rust
 #[test]
@@ -304,7 +304,7 @@ fn tuple_variant_emits_no_property() {
 
 ### 4.7 驗證
 
-- `cargo test -p graph-nexus-analyzer` → 245+6 tests pass，無 regression
+- `cargo test -p cgn-analyzer` → 245+6 tests pass，無 regression
 - reindex + 重 dump + 重 aggregate：
   - Rust Property real_ref: **185 → 0** ✓
   - Rust 整體 real_ref: 232 → 59（淨減 173）
@@ -326,7 +326,7 @@ fn tuple_variant_emits_no_property() {
 
 ### 5.2 不要用「總數接近 ref」當 accuracy 指標
 
-「gnx-rs 比 ref 多 17000 個 symbol」不等於「gnx-rs 找到更多 symbol」。
+「cgn-rs 比 ref 多 17000 個 symbol」不等於「cgn-rs 找到更多 symbol」。
 可能是 label policy 差（Property = field 的展開）、EntryPoint markers、
 重複 emit 等等。**只有 per-symbol verification 才能講 accuracy**。
 
@@ -344,16 +344,16 @@ test 直接 parse 短字串、檢查 NodeKind 才是 ground truth**。
 
 ### 5.5 parse_cache 陷阱
 
-gnx-rs 有 `parse_cache`（fingerprint = `"v" + CARGO_PKG_VERSION + "+schema1"`），
+cgn-rs 有 `parse_cache`（fingerprint = `"v" + CARGO_PKG_VERSION + "+schema1"`），
 重 build binary 後 cache 仍指 old behavior。修 parser 後必 reindex with
 `--force`：
 
 ```bash
-gnx admin index --repo /path --force
+cgn admin index --repo /path --force
 ```
 
 PR #132 修了 `--force` 不清 parse_cache 的 bug；舊版本可能要手動
-`rm -rf ~/.gnx/<repo>__*/parse_cache`。
+`rm -rf ~/.cgn/<repo>__*/parse_cache`。
 
 ### 5.6 round 紀律
 
@@ -361,7 +361,7 @@ PR #132 修了 `--force` 不清 parse_cache 的 bug；舊版本可能要手動
 無法歸因哪個 fix 對應哪個 real_ref 下降。**修完一個 candidate、重跑
 aggregator 確認該 kind real_ref 歸零、再開下一輪**。
 
-中途若發現 gnx-rs bug，**reset round 計數**。連續 10 輪 ref-bug 才能宣
+中途若發現 cgn-rs bug，**reset round 計數**。連續 10 輪 ref-bug 才能宣
 告該 candidate 為 design choice / 通過。
 
 ---
@@ -370,7 +370,7 @@ aggregator 確認該 kind real_ref 歸零、再開下一輪**。
 
 | 類別 | 證據 | 動作 |
 |---|---|---|
-| **真 bug** | type-level permanent symbol，gnx-rs 在同 (path, name) 完全沒對應 row | 修 parser + 寫 regression test + 重驗 |
+| **真 bug** | type-level permanent symbol，cgn-rs 在同 (path, name) 完全沒對應 row | 修 parser + 寫 regression test + 重驗 |
 | **label diff** | 同 (path, name) 兩邊都有 emit、kind 在 EQUIV class 內 | aggregator 自動處理，不改 parser |
 | **design choice** | block-scoped transient / 跨 lang 一致的 model 取捨 / builder filter（如 Test/Reference Route filter） | 記入文件，不修 |
 | **無害 defensive** | query predicate guard，沒實證 bug | 視情況保留或 revert，不影響 parity |

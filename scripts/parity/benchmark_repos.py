@@ -36,23 +36,23 @@ def clone_repo(name: str, url: str) -> Path:
 def benchmark_analyze(repo_path: Path):
     workspace = Path.cwd()
 
-    # Run original gnx
-    print("  \u251c\u2500 Running original gnx admin index...")
+    # Run original cgn
+    print("  \u251c\u2500 Running original cgn admin index...")
     start_time = time.time()
-    subprocess.run(["gnx", "admin", "index", "--repo", str(repo_path)], cwd=workspace, capture_output=True)
-    gnx_time = time.time() - start_time
+    subprocess.run(["cgn", "admin", "index", "--repo", str(repo_path)], cwd=workspace, capture_output=True)
+    cgn_time = time.time() - start_time
 
-    # Run new graph-nexus
-    print("  \u2514\u2500 Running graph-nexus admin index...")
+    # Run new code-graph-nexus
+    print("  \u2514\u2500 Running code-graph-nexus admin index...")
     start_time = time.time()
     subprocess.run(
-        ["cargo", "run", "--release", "--bin", "graph-nexus", "--", "admin", "index", "--repo", str(repo_path)],
+        ["cargo", "run", "--release", "--bin", "code-graph-nexus", "--", "admin", "index", "--repo", str(repo_path)],
         cwd=workspace,
         capture_output=True,
     )
-    gnx_rs_time = time.time() - start_time
+    cgn_rs_time = time.time() - start_time
 
-    return gnx_time, gnx_rs_time
+    return cgn_time, cgn_rs_time
 
 
 def main():
@@ -63,9 +63,9 @@ def main():
     print("==================================================\n")
 
     # Compile in release mode once before benchmarking
-    print("[*] Pre-compiling graph-nexus in release mode...")
+    print("[*] Pre-compiling code-graph-nexus in release mode...")
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "graph-nexus-cli"], capture_output=True, check=True
+        ["cargo", "build", "--release", "-p", "cgn-cli"], capture_output=True, check=True
     )
 
     results = []
@@ -80,14 +80,14 @@ def main():
             repo_path = clone_repo(lang, url)
             print(f"[\u25b6] Benchmarking {lang} ({repo_path.name})...")
 
-            gnx_time, gnx_rs_time = benchmark_analyze(repo_path)
+            cgn_time, cgn_rs_time = benchmark_analyze(repo_path)
 
-            speedup = gnx_time / gnx_rs_time if gnx_rs_time > 0 else float("inf")
+            speedup = cgn_time / cgn_rs_time if cgn_rs_time > 0 else float("inf")
             print(
-                f"    \u2713 gnx: {gnx_time:.2f}s | graph-nexus: {gnx_rs_time:.2f}s | Speedup: {speedup:.1f}x\n"
+                f"    \u2713 cgn: {cgn_time:.2f}s | code-graph-nexus: {cgn_rs_time:.2f}s | Speedup: {speedup:.1f}x\n"
             )
 
-            results.append((lang, gnx_time, gnx_rs_time, speedup))
+            results.append((lang, cgn_time, cgn_rs_time, speedup))
 
         except Exception as e:
             print(f"    \u274c Failed: {e}\n")

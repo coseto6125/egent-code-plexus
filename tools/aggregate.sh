@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # tools/aggregate.sh
 # Concatenate SKILL.md (frontmatter stripped) + guides/*.md (in lexical order)
-# → stdout. Used to build docs/skills/gnx-onboard/ONBOARDING.md for ShareOnboardingGuide.
+# → stdout. Used to build docs/skills/cgn-onboard/ONBOARDING.md for ShareOnboardingGuide.
 
 set -euo pipefail
 
-ROOT="${1:-docs/skills/gnx-onboard}"
+ROOT="${1:-docs/skills/cgn-onboard}"
 
 skill="$ROOT/SKILL.md"
 [[ -f "$skill" ]] || { echo "aggregate: SKILL.md missing at $skill" >&2; exit 1; }

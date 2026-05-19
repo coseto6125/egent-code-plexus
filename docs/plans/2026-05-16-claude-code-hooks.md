@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a hidden `gnx hook <event> --claude-code` subcommand plus selective install/uninstall/status admin commands, porting `~/bin/gnx.branch-spike/claude-hooks/gitnexus-hook.cjs` to in-process Rust.
+**Goal:** Add a hidden `cgn hook <event> --claude-code` subcommand plus selective install/uninstall/status admin commands, porting `~/bin/cgn.branch-spike/claude-hooks/gitnexus-hook.cjs` to in-process Rust.
 
 **Architecture:** Each Claude Code hook event becomes a self-contained Rust file under `commands/hook/`. The dispatch entry point reads JSON envelope on stdin, routes to the per-event handler, writes JSON response on stdout. Stale-detection reuses existing `auto_ensure`; PreToolUse calls a new `search::compute_hits` helper in-process (no subprocess fork).
 
@@ -19,18 +19,18 @@
 New files:
 
 ```
-crates/graph-nexus-cli/src/commands/hook/
+crates/cgn-cli/src/commands/hook/
   mod.rs                       — dispatch + arg parsing + shared types
   common.rs                    — stdin JSON read, stdout response emit, marker paths
   session_start.rs             — SessionStart handler (template render + worktree detect)
   user_prompt_submit.rs        — UserPromptSubmit (marker file surfacing)
   pre_tool_use.rs              — PreToolUse (pattern extract → search hits)
   post_tool_use.rs             — PostToolUse (git mutation → reindex)
-crates/graph-nexus-cli/src/commands/admin/claude_code.rs
+crates/cgn-cli/src/commands/admin/claude_code.rs
                                — install/uninstall/status for settings.json
-crates/graph-nexus-cli/assets/claude-code/
+crates/cgn-cli/assets/claude-code/
   rules.md                     — bundled SessionStart template
-crates/graph-nexus-cli/tests/
+crates/cgn-cli/tests/
   hook_pre_tool_use.rs
   hook_post_tool_use.rs
   hook_marker_cycle.rs
@@ -40,10 +40,10 @@ crates/graph-nexus-cli/tests/
 Modified files:
 
 ```
-crates/graph-nexus-cli/src/commands/mod.rs    — pub mod hook;
-crates/graph-nexus-cli/src/commands/admin/mod.rs — wire claude_code subcommand
-crates/graph-nexus-cli/src/commands/search.rs — extract compute_hits from run
-crates/graph-nexus-cli/src/main.rs            — +1 Commands variant + dispatch arm
+crates/cgn-cli/src/commands/mod.rs    — pub mod hook;
+crates/cgn-cli/src/commands/admin/mod.rs — wire claude_code subcommand
+crates/cgn-cli/src/commands/search.rs — extract compute_hits from run
+crates/cgn-cli/src/main.rs            — +1 Commands variant + dispatch arm
 ```
 
 ---
@@ -51,33 +51,33 @@ crates/graph-nexus-cli/src/main.rs            — +1 Commands variant + dispatch
 ## Task 0: Foundation — hook subcommand skeleton (SEQUENTIAL — blocks all others)
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/hook/mod.rs`
-- Create: `crates/graph-nexus-cli/src/commands/hook/common.rs`
-- Create: `crates/graph-nexus-cli/src/commands/hook/session_start.rs` (stub)
-- Create: `crates/graph-nexus-cli/src/commands/hook/user_prompt_submit.rs` (stub)
-- Create: `crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs` (stub)
-- Create: `crates/graph-nexus-cli/src/commands/hook/post_tool_use.rs` (stub)
-- Modify: `crates/graph-nexus-cli/src/commands/mod.rs`
-- Modify: `crates/graph-nexus-cli/src/main.rs`
+- Create: `crates/cgn-cli/src/commands/hook/mod.rs`
+- Create: `crates/cgn-cli/src/commands/hook/common.rs`
+- Create: `crates/cgn-cli/src/commands/hook/session_start.rs` (stub)
+- Create: `crates/cgn-cli/src/commands/hook/user_prompt_submit.rs` (stub)
+- Create: `crates/cgn-cli/src/commands/hook/pre_tool_use.rs` (stub)
+- Create: `crates/cgn-cli/src/commands/hook/post_tool_use.rs` (stub)
+- Modify: `crates/cgn-cli/src/commands/mod.rs`
+- Modify: `crates/cgn-cli/src/main.rs`
 
 - [ ] **Step 1: Write the failing dispatch test**
 
-Create `crates/graph-nexus-cli/tests/hook_dispatch_test.rs`:
+Create `crates/cgn-cli/tests/hook_dispatch_test.rs`:
 
 ```rust
-//! Verifies the `gnx hook <event> --claude-code` subcommand parses
+//! Verifies the `cgn hook <event> --claude-code` subcommand parses
 //! and dispatches without panic on a minimal stdin envelope.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn pre_tool_use_no_match_returns_empty_stdout() {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "pre-tool-use", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -97,7 +97,7 @@ fn pre_tool_use_no_match_returns_empty_stdout() {
 
 #[test]
 fn missing_host_flag_errors() {
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args(["hook", "pre-tool-use"])
         .output()
         .unwrap();
@@ -107,7 +107,7 @@ fn missing_host_flag_errors() {
 
 - [ ] **Step 2: Run tests, verify they fail**
 
-Run: `cargo test -p graph-nexus --test hook_dispatch_test`
+Run: `cargo test -p code-graph-nexus --test hook_dispatch_test`
 Expected: FAIL (subcommand not registered)
 
 - [ ] **Step 3: Create commands/hook/common.rs**
@@ -118,7 +118,7 @@ Expected: FAIL (subcommand not registered)
 //! - hookSpecificOutput JSON emission
 //! - marker file paths under .gitnexus-rs/
 
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::Read;
@@ -137,11 +137,11 @@ pub struct HookInput {
     pub tool_output: Value,
 }
 
-pub fn read_stdin_envelope() -> Result<HookInput, GnxError> {
+pub fn read_stdin_envelope() -> Result<HookInput, CgnError> {
     let mut buf = String::new();
     std::io::stdin()
         .read_to_string(&mut buf)
-        .map_err(GnxError::Io)?;
+        .map_err(CgnError::Io)?;
     if buf.trim().is_empty() {
         return Ok(HookInput {
             cwd: String::new(),
@@ -151,7 +151,7 @@ pub fn read_stdin_envelope() -> Result<HookInput, GnxError> {
         });
     }
     serde_json::from_str(&buf)
-        .map_err(|e| GnxError::InvalidArgument(format!("hook stdin parse: {e}")))
+        .map_err(|e| CgnError::InvalidArgument(format!("hook stdin parse: {e}")))
 }
 
 /// Emit `{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}`
@@ -187,9 +187,9 @@ Each file:
 //! Stub — handler logic ported in Task N (see plan).
 
 use super::common::HookInput;
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 
-pub fn handle(_input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(_input: &HookInput) -> Result<(), CgnError> {
     Ok(())
 }
 ```
@@ -197,7 +197,7 @@ pub fn handle(_input: &HookInput) -> Result<(), GnxError> {
 - [ ] **Step 5: Create commands/hook/mod.rs**
 
 ```rust
-//! `gnx hook <event> --claude-code` — Claude Code hook entry point.
+//! `cgn hook <event> --claude-code` — Claude Code hook entry point.
 //!
 //! Reads JSON envelope on stdin, dispatches to per-event handler,
 //! handler writes JSON response on stdout (empty stdout = no-op).
@@ -209,7 +209,7 @@ mod session_start;
 mod user_prompt_submit;
 
 use clap::{Args, ValueEnum};
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 
 #[derive(Args, Debug, Clone)]
 pub struct HookArgs {
@@ -230,10 +230,10 @@ pub enum HookEvent {
     SessionStart,
 }
 
-pub fn run(args: HookArgs) -> Result<(), GnxError> {
+pub fn run(args: HookArgs) -> Result<(), CgnError> {
     if !args.claude_code {
-        return Err(GnxError::InvalidArgument(
-            "gnx hook: exactly one host flag required (e.g. --claude-code)".into(),
+        return Err(CgnError::InvalidArgument(
+            "cgn hook: exactly one host flag required (e.g. --claude-code)".into(),
         ));
     }
     let input = common::read_stdin_envelope()?;
@@ -269,17 +269,17 @@ Also add `Commands::Hook(_)` to the `repo_opt` match's no-repo arm.
 
 - [ ] **Step 7: Run tests, verify they pass**
 
-Run: `cargo test -p graph-nexus --test hook_dispatch_test`
+Run: `cargo test -p code-graph-nexus --test hook_dispatch_test`
 Expected: PASS (both `pre_tool_use_no_match_returns_empty_stdout` and `missing_host_flag_errors`)
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/hook/ \
-        crates/graph-nexus-cli/src/commands/mod.rs \
-        crates/graph-nexus-cli/src/main.rs \
-        crates/graph-nexus-cli/tests/hook_dispatch_test.rs
-git commit -m "feat(hook): T0 — gnx hook <event> --claude-code skeleton
+git add crates/cgn-cli/src/commands/hook/ \
+        crates/cgn-cli/src/commands/mod.rs \
+        crates/cgn-cli/src/main.rs \
+        crates/cgn-cli/tests/hook_dispatch_test.rs
+git commit -m "feat(hook): T0 — cgn hook <event> --claude-code skeleton
 
 Dispatch entry + per-event stub modules. Each handler returns Ok with
 empty stdout (no-op). Tests verify the subcommand parses and rejects
@@ -291,11 +291,11 @@ missing host flag."
 ## Task 1: search::compute_hits helper extraction (PARALLEL — independent file)
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/search.rs`
+- Modify: `crates/cgn-cli/src/commands/search.rs`
 
 - [ ] **Step 1: Read the existing run() to identify hit-building logic**
 
-Run: `grep -n "fn run\|fn compute_single\|fn compute_multi\|fn build_payload" crates/graph-nexus-cli/src/commands/search.rs`
+Run: `grep -n "fn run\|fn compute_single\|fn compute_multi\|fn build_payload" crates/cgn-cli/src/commands/search.rs`
 
 Locate where `Vec<Hit>` is built. (Already split into `compute_single` and `compute_multi` per recent PR — both return `Vec<Hit>` / `(Vec<Hit>, Option<String>)`.)
 
@@ -307,14 +307,14 @@ After `compute_payload`, add:
 /// In-process search entry point for hooks and other internal consumers.
 /// Returns owned `Hit` rows without going through stdout / OutputFormat.
 /// Top-K trimmed identical to `run`.
-pub fn compute_hits(args: SearchArgs, engine: &Engine) -> Result<Vec<Hit>, GnxError> {
+pub fn compute_hits(args: SearchArgs, engine: &Engine) -> Result<Vec<Hit>, CgnError> {
     let targets = resolve_targets(args.repo.as_deref())?;
     if targets.is_empty() {
         compute_single(&args.pattern, &args.mode, args.kind.as_deref(), engine, None)
     } else if targets.len() == 1 {
         let (repo_name, graph_path) = targets.into_iter().next().unwrap();
         let local_engine = Engine::load(std::path::PathBuf::from(&graph_path))
-            .map_err(|e| GnxError::Rkyv(format!("{repo_name}: load: {e}")))?;
+            .map_err(|e| CgnError::Rkyv(format!("{repo_name}: load: {e}")))?;
         compute_single(
             &args.pattern,
             &args.mode,
@@ -353,20 +353,20 @@ Append to existing `#[cfg(test)] mod tests` in search.rs:
     fn compute_hits_returns_owned_hit_rows() {
         // Signature-only check — we can't run search without a graph,
         // but this verifies the public surface stays Send + Sync owned.
-        fn _check(_: fn(SearchArgs, &Engine) -> Result<Vec<Hit>, GnxError>) {}
+        fn _check(_: fn(SearchArgs, &Engine) -> Result<Vec<Hit>, CgnError>) {}
         _check(compute_hits);
     }
 ```
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p graph-nexus search::tests`
+Run: `cargo test -p code-graph-nexus search::tests`
 Expected: all pass, including new compute_hits signature check.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/search.rs
+git add crates/cgn-cli/src/commands/search.rs
 git commit -m "refactor(search): T1 — expose compute_hits for in-process callers
 
 Extracted from run() so hook handlers (PreToolUse) can fetch hits
@@ -378,8 +378,8 @@ without going through stdout. Hit struct is now pub at module level."
 ## Task 2: SessionStart event handler (PARALLEL)
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/session_start.rs`
-- Create: `crates/graph-nexus-cli/tests/hook_session_start_test.rs`
+- Modify: `crates/cgn-cli/src/commands/hook/session_start.rs`
+- Create: `crates/cgn-cli/tests/hook_session_start_test.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -390,14 +390,14 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
 fn no_index_present_yields_empty_output() {
     let tmp = TempDir::new().unwrap();
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "session-start", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -414,21 +414,21 @@ fn no_index_present_yields_empty_output() {
 #[test]
 fn template_placeholders_get_rendered_when_meta_present() {
     let tmp = TempDir::new().unwrap();
-    let gnx_dir = tmp.path().join(".gitnexus-rs");
-    std::fs::create_dir_all(&gnx_dir).unwrap();
+    let cgn_dir = tmp.path().join(".gitnexus-rs");
+    std::fs::create_dir_all(&cgn_dir).unwrap();
     // Minimal meta.json — schema mirrors BranchMeta required fields.
     std::fs::write(
-        gnx_dir.join("meta.json"),
+        cgn_dir.join("meta.json"),
         r#"{"indexed_at":"2026-05-16T00:00:00Z","node_count":1234,"worktree_path":"/x","remote_url":"","schema_version":1}"#,
     ).unwrap();
     let claude_dir = tmp.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
-        claude_dir.join("gnx-rules.md"),
+        claude_dir.join("cgn-rules.md"),
         "stats: {{stats.nodes}} symbols",
     ).unwrap();
 
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "session-start", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -445,7 +445,7 @@ fn template_placeholders_get_rendered_when_meta_present() {
 
 - [ ] **Step 2: Run tests, verify failures**
 
-Run: `cargo test -p graph-nexus --test hook_session_start_test`
+Run: `cargo test -p code-graph-nexus --test hook_session_start_test`
 Expected: FAIL on template-render test (stub returns no output).
 
 - [ ] **Step 3: Implement session_start.rs**
@@ -454,16 +454,16 @@ Expected: FAIL on template-render test (stub returns no output).
 //! SessionStart handler: render rules template, surface worktree-needs-index hints.
 
 use super::common::{emit_additional_context, gitnexus_dir, HookInput};
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     if input.cwd.is_empty() {
         return Ok(());
     }
-    let gnx_dir = match gitnexus_dir(&input.cwd) {
+    let cgn_dir = match gitnexus_dir(&input.cwd) {
         Some(d) => d,
         None => {
             // No index yet — maybe a worktree that needs init.
@@ -474,19 +474,19 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
         }
     };
 
-    let rendered = render_rules(Path::new(&input.cwd), &gnx_dir);
+    let rendered = render_rules(Path::new(&input.cwd), &cgn_dir);
     if !rendered.trim().is_empty() {
         emit_additional_context("SessionStart", &rendered);
     }
     Ok(())
 }
 
-fn render_rules(repo_root: &Path, gnx_dir: &Path) -> String {
+fn render_rules(repo_root: &Path, cgn_dir: &Path) -> String {
     let template = match load_template(repo_root) {
         Some(t) => t,
         None => return String::new(),
     };
-    let (nodes, edges, head) = read_stats(gnx_dir, repo_root);
+    let (nodes, edges, head) = read_stats(cgn_dir, repo_root);
     let has_graphify = repo_root.join("graphify-out").exists();
     let has_wiki = has_graphify && repo_root.join("graphify-out").join("wiki").join("index.md").exists();
 
@@ -501,8 +501,8 @@ fn render_rules(repo_root: &Path, gnx_dir: &Path) -> String {
 
 fn load_template(repo_root: &Path) -> Option<String> {
     let candidates = [
-        repo_root.join(".claude").join("gnx-rules.md"),
-        dirs_home().join(".claude").join("hooks").join("gnx").join("rules.md"),
+        repo_root.join(".claude").join("cgn-rules.md"),
+        dirs_home().join(".claude").join("hooks").join("cgn").join("rules.md"),
     ];
     for c in candidates {
         if let Ok(s) = fs::read_to_string(&c) {
@@ -518,10 +518,10 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn read_stats(gnx_dir: &Path, repo_root: &Path) -> (String, String, String) {
+fn read_stats(cgn_dir: &Path, repo_root: &Path) -> (String, String, String) {
     let mut nodes = "?".to_string();
     let mut edges = "?".to_string();
-    if let Ok(raw) = fs::read_to_string(gnx_dir.join("meta.json")) {
+    if let Ok(raw) = fs::read_to_string(cgn_dir.join("meta.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(n) = v.get("node_count").and_then(|x| x.as_u64()) {
                 nodes = n.to_string();
@@ -584,7 +584,7 @@ fn detect_worktree_needing_index(cwd: &Path) -> Option<String> {
         .unwrap_or_default();
     let base = Path::new(&toplevel).file_name()?.to_string_lossy().to_string();
     Some(format!(
-        "gnx index missing in this worktree ({base} @ {branch}). Run `gnx admin index` to index it."
+        "cgn index missing in this worktree ({base} @ {branch}). Run `cgn admin index` to index it."
     ))
 }
 
@@ -599,14 +599,14 @@ fn git_rev_parse(cwd: &Path, args: &[&str]) -> Option<String> {
 
 - [ ] **Step 4: Run tests, verify pass**
 
-Run: `cargo test -p graph-nexus --test hook_session_start_test`
+Run: `cargo test -p code-graph-nexus --test hook_session_start_test`
 Expected: PASS both tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/hook/session_start.rs \
-        crates/graph-nexus-cli/tests/hook_session_start_test.rs
+git add crates/cgn-cli/src/commands/hook/session_start.rs \
+        crates/cgn-cli/tests/hook_session_start_test.rs
 git commit -m "feat(hook): T2 — SessionStart template render + worktree hint"
 ```
 
@@ -615,8 +615,8 @@ git commit -m "feat(hook): T2 — SessionStart template render + worktree hint"
 ## Task 3: UserPromptSubmit event handler (PARALLEL)
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/user_prompt_submit.rs`
-- Create: `crates/graph-nexus-cli/tests/hook_marker_cycle_test.rs`
+- Modify: `crates/cgn-cli/src/commands/hook/user_prompt_submit.rs`
+- Create: `crates/cgn-cli/tests/hook_marker_cycle_test.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -628,12 +628,12 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run_with_envelope(cwd: &std::path::Path) -> std::process::Output {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "user-prompt-submit", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -648,11 +648,11 @@ fn run_with_envelope(cwd: &std::path::Path) -> std::process::Output {
 #[test]
 fn complete_marker_surfaced_and_unlinked() {
     let tmp = TempDir::new().unwrap();
-    let gnx_dir = tmp.path().join(".gitnexus-rs");
-    std::fs::create_dir_all(&gnx_dir).unwrap();
-    std::fs::write(gnx_dir.join(".rebuild-complete"), "").unwrap();
+    let cgn_dir = tmp.path().join(".gitnexus-rs");
+    std::fs::create_dir_all(&cgn_dir).unwrap();
+    std::fs::write(cgn_dir.join(".rebuild-complete"), "").unwrap();
     std::fs::write(
-        gnx_dir.join("meta.json"),
+        cgn_dir.join("meta.json"),
         r#"{"indexed_at":"2026-05-16T00:00:00Z","node_count":42,"worktree_path":"/x","remote_url":"","schema_version":1}"#,
     ).unwrap();
 
@@ -660,23 +660,23 @@ fn complete_marker_surfaced_and_unlinked() {
     let body = String::from_utf8_lossy(&out.stdout);
     assert!(body.contains("rebuild complete"), "got: {body}");
     assert!(body.contains("42"), "should mention node count");
-    assert!(!gnx_dir.join(".rebuild-complete").exists(), "marker should be unlinked");
+    assert!(!cgn_dir.join(".rebuild-complete").exists(), "marker should be unlinked");
 }
 
 #[test]
 fn failed_marker_takes_priority_over_complete() {
     let tmp = TempDir::new().unwrap();
-    let gnx_dir = tmp.path().join(".gitnexus-rs");
-    std::fs::create_dir_all(&gnx_dir).unwrap();
-    std::fs::write(gnx_dir.join(".rebuild-complete"), "").unwrap();
-    std::fs::write(gnx_dir.join(".rebuild-failed"), "").unwrap();
-    std::fs::write(gnx_dir.join("last-rebuild.log"), "line1\nline2\nfatal error\n").unwrap();
+    let cgn_dir = tmp.path().join(".gitnexus-rs");
+    std::fs::create_dir_all(&cgn_dir).unwrap();
+    std::fs::write(cgn_dir.join(".rebuild-complete"), "").unwrap();
+    std::fs::write(cgn_dir.join(".rebuild-failed"), "").unwrap();
+    std::fs::write(cgn_dir.join("last-rebuild.log"), "line1\nline2\nfatal error\n").unwrap();
 
     let out = run_with_envelope(tmp.path());
     let body = String::from_utf8_lossy(&out.stdout);
     assert!(body.contains("FAILED"));
     assert!(body.contains("fatal error"));
-    assert!(!gnx_dir.join(".rebuild-failed").exists());
+    assert!(!cgn_dir.join(".rebuild-failed").exists());
 }
 
 #[test]
@@ -690,7 +690,7 @@ fn no_markers_yields_silent_no_op() {
 
 - [ ] **Step 2: Run tests, verify failures**
 
-Run: `cargo test -p graph-nexus --test hook_marker_cycle_test`
+Run: `cargo test -p code-graph-nexus --test hook_marker_cycle_test`
 Expected: FAIL (stub).
 
 - [ ] **Step 3: Implement user_prompt_submit.rs**
@@ -700,25 +700,25 @@ Expected: FAIL (stub).
 //! files, then unlink them so each event fires only once.
 
 use super::common::{emit_additional_context, gitnexus_dir, HookInput};
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 use std::fs;
 use std::path::Path;
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
-    let gnx_dir = match gitnexus_dir(&input.cwd) {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
+    let cgn_dir = match gitnexus_dir(&input.cwd) {
         Some(d) => d,
         None => return Ok(()),
     };
-    let complete = gnx_dir.join(".rebuild-complete");
-    let failed = gnx_dir.join(".rebuild-failed");
-    let log = gnx_dir.join("last-rebuild.log");
+    let complete = cgn_dir.join(".rebuild-complete");
+    let failed = cgn_dir.join(".rebuild-failed");
+    let log = cgn_dir.join("last-rebuild.log");
 
     // Failure takes priority — it's more actionable.
     if failed.exists() {
         let tail = read_log_tail(&log, 3);
         let _ = fs::remove_file(&failed);
         let msg = format!(
-            "gnx background reindex FAILED. {} Run `gnx admin index` manually to retry.",
+            "cgn background reindex FAILED. {} Run `cgn admin index` manually to retry.",
             if tail.is_empty() {
                 String::new()
             } else {
@@ -730,10 +730,10 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
     }
 
     if complete.exists() {
-        let stats = read_stats(&gnx_dir);
+        let stats = read_stats(&cgn_dir);
         let _ = fs::remove_file(&complete);
         let msg = format!(
-            "gnx index rebuild complete ({stats}). gnx tools now return fresh data."
+            "cgn index rebuild complete ({stats}). cgn tools now return fresh data."
         );
         emit_additional_context("UserPromptSubmit", &msg);
     }
@@ -756,8 +756,8 @@ fn read_log_tail(log: &Path, lines: usize) -> String {
         .join(" | ")
 }
 
-fn read_stats(gnx_dir: &Path) -> String {
-    let raw = match fs::read_to_string(gnx_dir.join("meta.json")) {
+fn read_stats(cgn_dir: &Path) -> String {
+    let raw = match fs::read_to_string(cgn_dir.join("meta.json")) {
         Ok(s) => s,
         Err(_) => return "?".into(),
     };
@@ -773,14 +773,14 @@ fn read_stats(gnx_dir: &Path) -> String {
 
 - [ ] **Step 4: Run tests, verify pass**
 
-Run: `cargo test -p graph-nexus --test hook_marker_cycle_test`
+Run: `cargo test -p code-graph-nexus --test hook_marker_cycle_test`
 Expected: PASS all 3.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/hook/user_prompt_submit.rs \
-        crates/graph-nexus-cli/tests/hook_marker_cycle_test.rs
+git add crates/cgn-cli/src/commands/hook/user_prompt_submit.rs \
+        crates/cgn-cli/tests/hook_marker_cycle_test.rs
 git commit -m "feat(hook): T3 — UserPromptSubmit marker surfacing + unlink"
 ```
 
@@ -789,8 +789,8 @@ git commit -m "feat(hook): T3 — UserPromptSubmit marker surfacing + unlink"
 ## Task 4: PostToolUse event handler (PARALLEL)
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/post_tool_use.rs`
-- Create: `crates/graph-nexus-cli/tests/hook_post_tool_use_test.rs`
+- Modify: `crates/cgn-cli/src/commands/hook/post_tool_use.rs`
+- Create: `crates/cgn-cli/tests/hook_post_tool_use_test.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -801,12 +801,12 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run_with(envelope: &str) -> std::process::Output {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "post-tool-use", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -851,7 +851,7 @@ fn git_commit_in_dir_without_index_no_op() {
 
 - [ ] **Step 2: Run tests, verify all pass with stub (since stub returns no output)**
 
-Run: `cargo test -p graph-nexus --test hook_post_tool_use_test`
+Run: `cargo test -p code-graph-nexus --test hook_post_tool_use_test`
 Expected: 4/4 PASS even on stub.
 
 This is intentional — these tests pin the no-op branches. The "stale → spawn" branch needs a real git+index fixture and is exercised end-to-end in T8.
@@ -863,12 +863,12 @@ This is intentional — these tests pin the no-op branches. The "stale → spawn
 //! background reindex when the index is stale.
 
 use super::common::{emit_additional_context, gitnexus_dir, HookInput};
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     if input.tool_name != "Bash" {
         return Ok(());
     }
@@ -889,15 +889,15 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
         return Ok(());
     }
 
-    let gnx_dir = match gitnexus_dir(&input.cwd) {
+    let cgn_dir = match gitnexus_dir(&input.cwd) {
         Some(d) => d,
         None => return Ok(()),
     };
-    let repo_root = match gnx_dir.parent() {
+    let repo_root = match cgn_dir.parent() {
         Some(p) => p.to_path_buf(),
         None => return Ok(()),
     };
-    let graph_path = gnx_dir.join("graph.bin");
+    let graph_path = cgn_dir.join("graph.bin");
 
     use crate::auto_ensure::{ensure_index, EnsureResult};
     let result = ensure_index(&graph_path, &repo_root).unwrap_or(EnsureResult::Missing);
@@ -909,14 +909,14 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
         _ => 0,
     };
 
-    if !spawn_background_reindex(&repo_root, &gnx_dir) {
+    if !spawn_background_reindex(&repo_root, &cgn_dir) {
         return Ok(());
     }
 
     emit_additional_context(
         "PostToolUse",
         &format!(
-            "gnx reindex started in background (index stale ~{age}s). Subsequent gnx tools may use stale data until completion (~30-120s). If it appears stuck, run `gnx admin index` manually."
+            "cgn reindex started in background (index stale ~{age}s). Subsequent cgn tools may use stale data until completion (~30-120s). If it appears stuck, run `cgn admin index` manually."
         ),
     );
     Ok(())
@@ -967,16 +967,16 @@ fn strip_shell_quotes(cmd: &str) -> String {
     out
 }
 
-/// Detached background `gnx admin index` under flock at
-/// `<gnx_dir>/.analyze.lock`. Writes `.rebuild-complete` on success,
+/// Detached background `cgn admin index` under flock at
+/// `<cgn_dir>/.analyze.lock`. Writes `.rebuild-complete` on success,
 /// `.rebuild-failed` after MAX=3 attempts. Returns true if the launcher
 /// was spawned successfully (regardless of analyze outcome — that's
 /// surfaced asynchronously via marker files in UserPromptSubmit).
-fn spawn_background_reindex(repo_root: &Path, gnx_dir: &Path) -> bool {
-    let lock = gnx_dir.join(".analyze.lock");
-    let complete = gnx_dir.join(".rebuild-complete");
-    let failed = gnx_dir.join(".rebuild-failed");
-    let log = gnx_dir.join("last-rebuild.log");
+fn spawn_background_reindex(repo_root: &Path, cgn_dir: &Path) -> bool {
+    let lock = cgn_dir.join(".analyze.lock");
+    let complete = cgn_dir.join(".rebuild-complete");
+    let failed = cgn_dir.join(".rebuild-failed");
+    let log = cgn_dir.join("last-rebuild.log");
     let self_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
@@ -990,7 +990,7 @@ MAX=3; ATTEMPT=0
 while [ $ATTEMPT -lt $MAX ]; do
   ATTEMPT=$((ATTEMPT+1))
   echo "=== attempt $ATTEMPT/$MAX ===" >> {log}
-  if {gnx} admin index >> {log} 2>&1; then
+  if {cgn} admin index >> {log} 2>&1; then
     rm -f {failed}
     : > {complete}
     exit 0
@@ -1002,7 +1002,7 @@ rm -f {complete}
 "#,
         lock = shell_quote(&lock),
         log = shell_quote(&log),
-        gnx = shell_quote(&self_exe),
+        cgn = shell_quote(&self_exe),
         complete = shell_quote(&complete),
         failed = shell_quote(&failed),
     );
@@ -1032,18 +1032,18 @@ fn shell_quote<P: AsRef<Path>>(p: P) -> String {
 use std::path::PathBuf as _PathBufUnused;
 ```
 
-Add `regex = "1"` to the `[dependencies]` of `crates/graph-nexus-cli/Cargo.toml` if not already present. (It IS present per current main — verify with `grep regex crates/graph-nexus-cli/Cargo.toml`.)
+Add `regex = "1"` to the `[dependencies]` of `crates/cgn-cli/Cargo.toml` if not already present. (It IS present per current main — verify with `grep regex crates/cgn-cli/Cargo.toml`.)
 
 - [ ] **Step 4: Run tests, verify all still pass**
 
-Run: `cargo test -p graph-nexus --test hook_post_tool_use_test`
+Run: `cargo test -p code-graph-nexus --test hook_post_tool_use_test`
 Expected: 4/4 PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/hook/post_tool_use.rs \
-        crates/graph-nexus-cli/tests/hook_post_tool_use_test.rs
+git add crates/cgn-cli/src/commands/hook/post_tool_use.rs \
+        crates/cgn-cli/tests/hook_post_tool_use_test.rs
 git commit -m "feat(hook): T4 — PostToolUse git-mutation detection + flock-gated reindex"
 ```
 
@@ -1052,13 +1052,13 @@ git commit -m "feat(hook): T4 — PostToolUse git-mutation detection + flock-gat
 ## Task 5: admin/claude_code.rs install/uninstall/status (PARALLEL)
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/admin/claude_code.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/admin/mod.rs`
-- Create: `crates/graph-nexus-cli/tests/hook_install_settings_test.rs`
+- Create: `crates/cgn-cli/src/commands/admin/claude_code.rs`
+- Modify: `crates/cgn-cli/src/commands/admin/mod.rs`
+- Create: `crates/cgn-cli/tests/hook_install_settings_test.rs`
 
 - [ ] **Step 1: Read the existing admin mod.rs to understand AdminCommands shape**
 
-Run: `cat crates/graph-nexus-cli/src/commands/admin/mod.rs | head -60`
+Run: `cat crates/cgn-cli/src/commands/admin/mod.rs | head -60`
 Note the existing enum variants — we'll add new ones following the same pattern.
 
 - [ ] **Step 2: Write the failing settings.json test**
@@ -1069,8 +1069,8 @@ Note the existing enum variants — we'll add new ones following the same patter
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 #[test]
@@ -1086,7 +1086,7 @@ fn install_one_event_creates_entry_preserves_others() {
 }"#;
     std::fs::write(&settings_path, initial).unwrap();
 
-    let out = Command::new(gnx_bin())
+    let out = Command::new(cgn_bin())
         .args([
             "admin",
             "install-hook",
@@ -1114,7 +1114,7 @@ fn install_one_event_creates_entry_preserves_others() {
     let session_start = merged["hooks"]["SessionStart"].as_array().unwrap();
     assert!(
         session_start.iter().any(|e| {
-            e["hooks"][0]["command"].as_str().unwrap_or("").contains("gnx hook session-start --claude-code")
+            e["hooks"][0]["command"].as_str().unwrap_or("").contains("cgn hook session-start --claude-code")
         }),
         "new entry written"
     );
@@ -1127,7 +1127,7 @@ fn reinstalling_same_event_is_idempotent() {
     std::fs::write(&settings_path, "{}").unwrap();
 
     for _ in 0..2 {
-        let out = Command::new(gnx_bin())
+        let out = Command::new(cgn_bin())
             .args(["admin", "install-hook", "--claude-code", "--events", "pre-tool-use", "--settings-path"])
             .arg(&settings_path)
             .output()
@@ -1138,7 +1138,7 @@ fn reinstalling_same_event_is_idempotent() {
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     let pre = merged["hooks"]["PreToolUse"].as_array().unwrap();
     let count = pre.iter().filter(|e| {
-        e["hooks"][0]["command"].as_str().unwrap_or("").contains("gnx hook pre-tool-use")
+        e["hooks"][0]["command"].as_str().unwrap_or("").contains("cgn hook pre-tool-use")
     }).count();
     assert_eq!(count, 1, "duplicate entries should not accumulate");
 }
@@ -1149,14 +1149,14 @@ fn uninstall_removes_only_specified_event() {
     let settings_path = tmp.path().join("settings.json");
     std::fs::write(&settings_path, "{}").unwrap();
 
-    let install = Command::new(gnx_bin())
+    let install = Command::new(cgn_bin())
         .args(["admin", "install-hook", "--claude-code", "--events", "session-start,pre-tool-use", "--settings-path"])
         .arg(&settings_path)
         .output()
         .unwrap();
     assert!(install.status.success());
 
-    let uninstall = Command::new(gnx_bin())
+    let uninstall = Command::new(cgn_bin())
         .args(["admin", "uninstall-hook", "--claude-code", "--events", "session-start", "--settings-path"])
         .arg(&settings_path)
         .output()
@@ -1167,24 +1167,24 @@ fn uninstall_removes_only_specified_event() {
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     assert!(merged["hooks"].get("SessionStart").map(|v| v.as_array().map(|a| a.is_empty()).unwrap_or(true)).unwrap_or(true), "SessionStart removed");
     assert!(merged["hooks"]["PreToolUse"].as_array().unwrap().iter().any(|e| {
-        e["hooks"][0]["command"].as_str().unwrap_or("").contains("gnx hook pre-tool-use")
+        e["hooks"][0]["command"].as_str().unwrap_or("").contains("cgn hook pre-tool-use")
     }), "PreToolUse retained");
 }
 ```
 
 - [ ] **Step 3: Run tests, verify failures**
 
-Run: `cargo test -p graph-nexus --test hook_install_settings_test`
+Run: `cargo test -p code-graph-nexus --test hook_install_settings_test`
 Expected: FAIL ("install-hook" / "uninstall-hook" not recognized subcommand).
 
 - [ ] **Step 4: Implement admin/claude_code.rs**
 
 ```rust
-//! `gnx admin install-hook --claude-code` / `uninstall-hook` / `status`
+//! `cgn admin install-hook --claude-code` / `uninstall-hook` / `status`
 //! for Claude Code hooks.
 
 use clap::{Args, Subcommand};
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1230,9 +1230,9 @@ const ALL_EVENTS: &[&str] = &[
     "post-tool-use",
 ];
 
-pub fn run_install(args: InstallHookArgs) -> Result<(), GnxError> {
+pub fn run_install(args: InstallHookArgs) -> Result<(), CgnError> {
     if !args.claude_code {
-        return Err(GnxError::InvalidArgument(
+        return Err(CgnError::InvalidArgument(
             "--claude-code (or another host flag) required".into(),
         ));
     }
@@ -1254,9 +1254,9 @@ pub fn run_install(args: InstallHookArgs) -> Result<(), GnxError> {
     Ok(())
 }
 
-pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), GnxError> {
+pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), CgnError> {
     if !args.claude_code {
-        return Err(GnxError::InvalidArgument("--claude-code required".into()));
+        return Err(CgnError::InvalidArgument("--claude-code required".into()));
     }
     let events = match &args.events {
         Some(s) => parse_events(s)?,
@@ -1272,9 +1272,9 @@ pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), GnxError> {
     Ok(())
 }
 
-pub fn run_status(args: StatusArgs) -> Result<(), GnxError> {
+pub fn run_status(args: StatusArgs) -> Result<(), CgnError> {
     if !args.claude_code {
-        return Err(GnxError::InvalidArgument("--claude-code required".into()));
+        return Err(CgnError::InvalidArgument("--claude-code required".into()));
     }
     let settings_path = settings_path(args.settings_path.as_deref());
     let settings = read_or_init(&settings_path)?;
@@ -1289,7 +1289,7 @@ pub fn run_status(args: StatusArgs) -> Result<(), GnxError> {
 
 // ─── internals ─────────────────────────────────────────────────────────────
 
-fn parse_events(csv: &str) -> Result<Vec<String>, GnxError> {
+fn parse_events(csv: &str) -> Result<Vec<String>, CgnError> {
     let mut out = Vec::new();
     for raw in csv.split(',') {
         let t = raw.trim();
@@ -1297,7 +1297,7 @@ fn parse_events(csv: &str) -> Result<Vec<String>, GnxError> {
             continue;
         }
         if !ALL_EVENTS.contains(&t) {
-            return Err(GnxError::InvalidArgument(format!(
+            return Err(CgnError::InvalidArgument(format!(
                 "unknown event '{t}' — expected one of: {}",
                 ALL_EVENTS.join(", ")
             )));
@@ -1305,18 +1305,18 @@ fn parse_events(csv: &str) -> Result<Vec<String>, GnxError> {
         out.push(t.to_string());
     }
     if out.is_empty() {
-        return Err(GnxError::InvalidArgument("--events list is empty".into()));
+        return Err(CgnError::InvalidArgument("--events list is empty".into()));
     }
     Ok(out)
 }
 
-fn prompt_events_tui() -> Result<Vec<String>, GnxError> {
+fn prompt_events_tui() -> Result<Vec<String>, CgnError> {
     use dialoguer::{theme::ColorfulTheme, MultiSelect};
     let chosen = MultiSelect::with_theme(&ColorfulTheme::default())
         .with_prompt("Select Claude Code hook events to install")
         .items(ALL_EVENTS)
         .interact()
-        .map_err(|e| GnxError::Output(format!("TUI: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("TUI: {e}")))?;
     Ok(chosen.into_iter().map(|i| ALL_EVENTS[i].to_string()).collect())
 }
 
@@ -1330,23 +1330,23 @@ fn settings_path(override_path: Option<&Path>) -> PathBuf {
     home.join(".claude").join("settings.json")
 }
 
-fn read_or_init(path: &Path) -> Result<Value, GnxError> {
+fn read_or_init(path: &Path) -> Result<Value, CgnError> {
     if !path.exists() {
         return Ok(json!({"hooks": {}}));
     }
     let raw = fs::read_to_string(path)
-        .map_err(|e| GnxError::Output(format!("read {}: {e}", path.display())))?;
+        .map_err(|e| CgnError::Output(format!("read {}: {e}", path.display())))?;
     if raw.trim().is_empty() {
         return Ok(json!({"hooks": {}}));
     }
     serde_json::from_str(&raw)
-        .map_err(|e| GnxError::InvalidArgument(format!("settings.json parse: {e}")))
+        .map_err(|e| CgnError::InvalidArgument(format!("settings.json parse: {e}")))
 }
 
-fn self_exe() -> Result<String, GnxError> {
+fn self_exe() -> Result<String, CgnError> {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| GnxError::Output(format!("current_exe: {e}")))
+        .map_err(|e| CgnError::Output(format!("current_exe: {e}")))
 }
 
 fn event_kebab_to_camel(ev: &str) -> &'static str {
@@ -1391,7 +1391,7 @@ fn merge_entry(settings: &mut Value, ev: &str, exe: &str) {
         .or_insert_with(|| json!([]));
     let arr = arr.as_array_mut().unwrap();
 
-    // Idempotence: drop any existing entry pointing at `gnx hook <ev>`.
+    // Idempotence: drop any existing entry pointing at `cgn hook <ev>`.
     arr.retain(|e| {
         let c = e
             .get("hooks")
@@ -1412,12 +1412,12 @@ fn merge_entry(settings: &mut Value, ev: &str, exe: &str) {
     if matches!(ev, "pre-tool-use") {
         h.insert(
             "statusMessage".into(),
-            Value::String("Enriching with gnx graph context...".into()),
+            Value::String("Enriching with cgn graph context...".into()),
         );
     } else if matches!(ev, "post-tool-use") {
         h.insert(
             "statusMessage".into(),
-            Value::String("Checking gnx index freshness...".into()),
+            Value::String("Checking cgn index freshness...".into()),
         );
     }
     entry.insert("hooks".into(), Value::Array(vec![Value::Object(h)]));
@@ -1465,25 +1465,25 @@ fn is_installed(settings: &Value, ev: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn write_atomic(path: &Path, value: &Value) -> Result<(), GnxError> {
+fn write_atomic(path: &Path, value: &Value) -> Result<(), CgnError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| GnxError::Output(format!("mkdir {}: {e}", parent.display())))?;
+            .map_err(|e| CgnError::Output(format!("mkdir {}: {e}", parent.display())))?;
     }
     let tmp = path.with_extension("json.tmp");
     let serialized = serde_json::to_string_pretty(value)
-        .map_err(|e| GnxError::Output(format!("serialize: {e}")))?;
+        .map_err(|e| CgnError::Output(format!("serialize: {e}")))?;
     fs::write(&tmp, serialized)
-        .map_err(|e| GnxError::Output(format!("write {}: {e}", tmp.display())))?;
+        .map_err(|e| CgnError::Output(format!("write {}: {e}", tmp.display())))?;
     fs::rename(&tmp, path)
-        .map_err(|e| GnxError::Output(format!("rename {} → {}: {e}", tmp.display(), path.display())))?;
+        .map_err(|e| CgnError::Output(format!("rename {} → {}: {e}", tmp.display(), path.display())))?;
     Ok(())
 }
 ```
 
 - [ ] **Step 5: Wire into admin/mod.rs**
 
-Open `crates/graph-nexus-cli/src/commands/admin/mod.rs`.
+Open `crates/cgn-cli/src/commands/admin/mod.rs`.
 
 Add to the file `pub mod claude_code;` near other module declarations.
 
@@ -1497,7 +1497,7 @@ Add to the `AdminCommands` enum (after existing variants):
     Status(claude_code::StatusArgs),
 ```
 
-Add dispatch arms in `pub fn run(cmd: AdminCommands) -> Result<(), GnxError>`:
+Add dispatch arms in `pub fn run(cmd: AdminCommands) -> Result<(), CgnError>`:
 ```rust
         AdminCommands::InstallHook(args) => claude_code::run_install(args),
         AdminCommands::UninstallHook(args) => claude_code::run_uninstall(args),
@@ -1506,15 +1506,15 @@ Add dispatch arms in `pub fn run(cmd: AdminCommands) -> Result<(), GnxError>`:
 
 - [ ] **Step 6: Run tests, verify pass**
 
-Run: `cargo test -p graph-nexus --test hook_install_settings_test`
+Run: `cargo test -p code-graph-nexus --test hook_install_settings_test`
 Expected: 3/3 PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/admin/claude_code.rs \
-        crates/graph-nexus-cli/src/commands/admin/mod.rs \
-        crates/graph-nexus-cli/tests/hook_install_settings_test.rs
+git add crates/cgn-cli/src/commands/admin/claude_code.rs \
+        crates/cgn-cli/src/commands/admin/mod.rs \
+        crates/cgn-cli/tests/hook_install_settings_test.rs
 git commit -m "feat(admin): T5 — install/uninstall/status for Claude Code hooks"
 ```
 
@@ -1523,14 +1523,14 @@ git commit -m "feat(admin): T5 — install/uninstall/status for Claude Code hook
 ## Task 6: assets/claude-code/rules.md bundled template (PARALLEL)
 
 **Files:**
-- Create: `crates/graph-nexus-cli/assets/claude-code/rules.md`
+- Create: `crates/cgn-cli/assets/claude-code/rules.md`
 
 - [ ] **Step 1: Author the template**
 
 ```markdown
-gnx index: {{stats.nodes}} symbols, {{stats.edges}} rels at HEAD {{head}}.
-Use `gnx inspect <name>` for symbol context, `gnx search <term>` for
-fuzzy/semantic lookup, `gnx impact <name>` for blast radius.
+cgn index: {{stats.nodes}} symbols, {{stats.edges}} rels at HEAD {{head}}.
+Use `cgn inspect <name>` for symbol context, `cgn search <term>` for
+fuzzy/semantic lookup, `cgn impact <name>` for blast radius.
 {{#if graphify}}
 graphify-out/ available — use that for narrative architecture context.
 {{/if}}
@@ -1542,19 +1542,19 @@ graphify-out/wiki/index.md is the entry point for the indexed wiki.
 - [ ] **Step 2: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/assets/claude-code/rules.md
+git add crates/cgn-cli/assets/claude-code/rules.md
 git commit -m "feat(hook): T6 — bundled SessionStart rules template"
 ```
 
-Note: installation of this template (copying to `~/.claude/hooks/gnx/rules.md`) happens inside `admin/claude_code.rs::run_install` on first install — out of scope for this asset task.
+Note: installation of this template (copying to `~/.claude/hooks/cgn/rules.md`) happens inside `admin/claude_code.rs::run_install` on first install — out of scope for this asset task.
 
 ---
 
 ## Task 7: PreToolUse event handler (DEPENDS ON T1 — sequential after T1)
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs`
-- Create: `crates/graph-nexus-cli/tests/hook_pre_tool_use_test.rs`
+- Modify: `crates/cgn-cli/src/commands/hook/pre_tool_use.rs`
+- Create: `crates/cgn-cli/tests/hook_pre_tool_use_test.rs`
 
 - [ ] **Step 1: Write failing tests focused on pattern extraction**
 
@@ -1564,12 +1564,12 @@ Note: installation of this template (copying to `~/.claude/hooks/gnx/rules.md`) 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run(envelope: &str) -> std::process::Output {
-    let mut child = Command::new(gnx_bin())
+    let mut child = Command::new(cgn_bin())
         .args(["hook", "pre-tool-use", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1610,7 +1610,7 @@ fn non_search_tool_no_op() {
 
 - [ ] **Step 2: Run tests, verify they pass on the stub**
 
-Run: `cargo test -p graph-nexus --test hook_pre_tool_use_test`
+Run: `cargo test -p code-graph-nexus --test hook_pre_tool_use_test`
 Expected: 4/4 PASS even on stub. These pin "no-op" branches; the
 "with index → emit hits" branch is exercised in T8.
 
@@ -1623,21 +1623,21 @@ Expected: 4/4 PASS even on stub. These pin "no-op" branches; the
 use super::common::{emit_additional_context, gitnexus_dir, HookInput};
 use crate::commands::search::{compute_hits, SearchArgs, SearchMode};
 use crate::engine::Engine;
-use graph_nexus_core::GnxError;
+use cgn_core::CgnError;
 
 const MAX_HITS: usize = 5;
 const MAX_BYTES: usize = 2048;
 
-pub fn handle(input: &HookInput) -> Result<(), GnxError> {
+pub fn handle(input: &HookInput) -> Result<(), CgnError> {
     let pattern = match extract_pattern(&input.tool_name, &input.tool_input) {
         Some(p) if p.len() >= 3 => p,
         _ => return Ok(()),
     };
-    let gnx_dir = match gitnexus_dir(&input.cwd) {
+    let cgn_dir = match gitnexus_dir(&input.cwd) {
         Some(d) => d,
         None => return Ok(()),
     };
-    let graph_path = gnx_dir.join("graph.bin");
+    let graph_path = cgn_dir.join("graph.bin");
     let engine = match Engine::load(&graph_path) {
         Ok(e) => e,
         Err(_) => return Ok(()),
@@ -1666,7 +1666,7 @@ pub fn handle(input: &HookInput) -> Result<(), GnxError> {
 
 fn format_hits(hits: &[crate::commands::search::Hit]) -> String {
     let mut out = String::new();
-    out.push_str("gnx graph hits:\n");
+    out.push_str("cgn graph hits:\n");
     let mut count = 0usize;
     for h in hits.iter().take(MAX_HITS) {
         let line = format!(
@@ -1746,16 +1746,16 @@ Pick the move-to-common option (cleaner): add `pub(super) fn strip_shell_quotes(
 
 - [ ] **Step 4: Run all hook tests**
 
-Run: `cargo test -p graph-nexus --test 'hook_*'`
+Run: `cargo test -p code-graph-nexus --test 'hook_*'`
 Expected: all hook test files pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs \
-        crates/graph-nexus-cli/src/commands/hook/post_tool_use.rs \
-        crates/graph-nexus-cli/src/commands/hook/common.rs \
-        crates/graph-nexus-cli/tests/hook_pre_tool_use_test.rs
+git add crates/cgn-cli/src/commands/hook/pre_tool_use.rs \
+        crates/cgn-cli/src/commands/hook/post_tool_use.rs \
+        crates/cgn-cli/src/commands/hook/common.rs \
+        crates/cgn-cli/tests/hook_pre_tool_use_test.rs
 git commit -m "feat(hook): T7 — PreToolUse pattern extract + in-process search
 
 Shared strip_shell_quotes moved into hook::common for Grep/Glob/Bash
@@ -1768,23 +1768,23 @@ pattern extraction. PreToolUse calls search::compute_hits in-process
 ## Task 8: End-to-end smoke (DEPENDS on T0-T7)
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/hook_e2e_smoke_test.rs`
+- Create: `crates/cgn-cli/tests/hook_e2e_smoke_test.rs`
 
 - [ ] **Step 1: Write the e2e test**
 
 ```rust
-//! E2E: build a tiny git repo, run `gnx admin index`, install the
+//! E2E: build a tiny git repo, run `cgn admin index`, install the
 //! Claude Code hook, simulate envelope flow, verify behaviour.
 
 use std::process::Command;
 use tempfile::TempDir;
 
-fn gnx_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gnx")
+fn cgn_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cgn")
 }
 
 fn run(args: &[&str], cwd: &std::path::Path) -> std::process::Output {
-    Command::new(gnx_bin())
+    Command::new(cgn_bin())
         .args(args)
         .current_dir(cwd)
         .output()
@@ -1796,7 +1796,7 @@ fn smoke_admin_status_reports_missing_then_installed() {
     let tmp = TempDir::new().unwrap();
     let settings = tmp.path().join("settings.json");
 
-    let before = Command::new(gnx_bin())
+    let before = Command::new(cgn_bin())
         .args(["admin", "status", "--claude-code", "--settings-path"])
         .arg(&settings)
         .output()
@@ -1807,7 +1807,7 @@ fn smoke_admin_status_reports_missing_then_installed() {
     }
     assert!(body.contains("missing"));
 
-    let install = Command::new(gnx_bin())
+    let install = Command::new(cgn_bin())
         .args([
             "admin", "install-hook", "--claude-code",
             "--events", "session-start,pre-tool-use",
@@ -1818,7 +1818,7 @@ fn smoke_admin_status_reports_missing_then_installed() {
         .unwrap();
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
 
-    let after = Command::new(gnx_bin())
+    let after = Command::new(cgn_bin())
         .args(["admin", "status", "--claude-code", "--settings-path"])
         .arg(&settings)
         .output()
@@ -1830,7 +1830,7 @@ fn smoke_admin_status_reports_missing_then_installed() {
 
 - [ ] **Step 2: Run**
 
-Run: `cargo test -p graph-nexus --test hook_e2e_smoke_test`
+Run: `cargo test -p code-graph-nexus --test hook_e2e_smoke_test`
 Expected: PASS.
 
 - [ ] **Step 3: Run the full workspace test suite**
@@ -1846,7 +1846,7 @@ Expected: no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/tests/hook_e2e_smoke_test.rs
+git add crates/cgn-cli/tests/hook_e2e_smoke_test.rs
 git commit -m "test(hook): T8 — admin install/status round-trip e2e"
 ```
 
@@ -1863,11 +1863,11 @@ git push -u origin feat/claude-code-hooks
 - [ ] **Step 2: Open PR**
 
 ```bash
-gh pr create --title "feat(hook): Claude Code hooks for Rust gnx — clap-introspection compatible" \
+gh pr create --title "feat(hook): Claude Code hooks for Rust cgn — clap-introspection compatible" \
   --body "$(cat <<'EOF'
 ## Summary
 
-Port `~/bin/gnx.branch-spike/claude-hooks/gitnexus-hook.cjs` to a Rust subcommand `gnx hook <event> --claude-code`. In-process graph access skips the Node + second-subprocess hop the legacy cjs path requires (6× faster cold-start; saves a full subprocess on PreToolUse). Selective install via `gnx admin install-hook --claude-code [--events ...]` (TUI fallback when --events absent).
+Port `~/bin/cgn.branch-spike/claude-hooks/gitnexus-hook.cjs` to a Rust subcommand `cgn hook <event> --claude-code`. In-process graph access skips the Node + second-subprocess hop the legacy cjs path requires (6× faster cold-start; saves a full subprocess on PreToolUse). Selective install via `cgn admin install-hook --claude-code [--events ...]` (TUI fallback when --events absent).
 
 Spec: `docs/specs/2026-05-16-claude-code-hooks-design.md`
 Plan: `docs/plans/2026-05-16-claude-code-hooks.md`
@@ -1877,7 +1877,7 @@ Plan: `docs/plans/2026-05-16-claude-code-hooks.md`
 - [x] cargo test --workspace green
 - [x] cargo clippy -D warnings clean
 - [x] cargo fmt clean
-- [x] gnx admin status --claude-code reports per-event installed/missing
+- [x] cgn admin status --claude-code reports per-event installed/missing
 - [ ] Reviewer: install in their own ~/.claude/settings.json, verify hooks fire as additionalContext
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -1890,7 +1890,7 @@ EOF
 ## Self-Review
 
 **Spec coverage:**
-- §1 motivation → T0 wires `gnx hook` skeleton, perf claim validated in §1 of spec from cold-start measurements
+- §1 motivation → T0 wires `cgn hook` skeleton, perf claim validated in §1 of spec from cold-start measurements
 - §2.1 hook entry point → T0 (skeleton) + T2-T4, T7 (per-event)
 - §2.2 admin subcommands → T5
 - §3.1 SessionStart → T2

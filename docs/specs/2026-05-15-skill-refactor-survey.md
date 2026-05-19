@@ -1,16 +1,16 @@
-# Skill Refactor Survey — gnx-rs vs Upstream gitnexus
+# Skill Refactor Survey — cgn-rs vs Upstream gitnexus
 
 **Date:** 2026-05-15
 **Purpose:** Inventory what we have, what upstream has, where the gaps are.
 Foundation for refactoring upstream skills (`._source_code/gitnexus-claude-plugin/skills/`)
-into gnx-rs-native skills shipped via `.claude-plugin/`.
+into cgn-rs-native skills shipped via `.claude-plugin/`.
 
 ---
 
-## 1. gnx-rs CLI Inventory (Source of Truth)
+## 1. cgn-rs CLI Inventory (Source of Truth)
 
-Read from `crates/graph-nexus-cli/src/commands/*.rs` Args structs.
-Binary name: `graph-nexus` (typically aliased as `gnx`).
+Read from `crates/cgn-cli/src/commands/*.rs` Args structs.
+Binary name: `code-graph-nexus` (typically aliased as `cgn`).
 Global flag: `--graph <path>` (default `.gitnexus-rs/graph.bin`).
 
 ### 1.1 Read-side commands
@@ -41,7 +41,7 @@ Global flag: `--graph <path>` (default `.gitnexus-rs/graph.bin`).
 
 | Cmd | Purpose |
 |---|---|
-| `verify-resolver` (`--oracle --gnx --lang --report`) | Diff resolver dump vs language oracle (TS/Py/Rs) |
+| `verify-resolver` (`--oracle --cgn --lang --report`) | Diff resolver dump vs language oracle (TS/Py/Rs) |
 | `hook-handle`, `hook-watcher` | Internal (hidden) — invoked by the git hook |
 
 ### 1.4 Output formats
@@ -122,44 +122,44 @@ Common skeleton:
 
 ---
 
-## 4. Tool / Capability Delta (Upstream → gnx-rs)
+## 4. Tool / Capability Delta (Upstream → cgn-rs)
 
 ### 4.1 Direct map
 
-| Upstream MCP | gnx-rs CLI | Parity |
+| Upstream MCP | cgn-rs CLI | Parity |
 |---|---|---|
-| `query` | `gnx search --query "..."` | ✅ same intent |
-| `context` | `gnx inspect X` | ✅ |
-| `impact` | `gnx impact X --direction upstream --depth N --high-trust-only` | ✅ + `high-trust-only` is **ours** |
-| `detect_changes` | `gnx impact --since HEAD~1 --kind --include-tests --high-trust-only` | ✅ + scope variants are **ours** |
-| `list_repos` | `gnx coverage` | ✅ |
-| `rename` | `gnx rename --symbol X --new-name Y --repo P --dry-run` | ✅ **Python only (MVP, merged 2026-05-15)** — multi-lang remaining; see `commands/rename.rs` |
-| `cypher` | `gnx cypher "<query>" --repo P --format json` | ✅ **minimal subset (merged)** — supports `MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='Val'] RETURN a,b` |
+| `query` | `cgn search --query "..."` | ✅ same intent |
+| `context` | `cgn inspect X` | ✅ |
+| `impact` | `cgn impact X --direction upstream --depth N --high-trust-only` | ✅ + `high-trust-only` is **ours** |
+| `detect_changes` | `cgn impact --since HEAD~1 --kind --include-tests --high-trust-only` | ✅ + scope variants are **ours** |
+| `list_repos` | `cgn coverage` | ✅ |
+| `rename` | `cgn rename --symbol X --new-name Y --repo P --dry-run` | ✅ **Python only (MVP, merged 2026-05-15)** — multi-lang remaining; see `commands/rename.rs` |
+| `cypher` | `cgn cypher "<query>" --repo P --format json` | ✅ **minimal subset (merged)** — supports `MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='Val'] RETURN a,b` |
 
-### 4.2 Upstream MCP resources → gnx-rs
+### 4.2 Upstream MCP resources → cgn-rs
 
-| Upstream `gitnexus://...` resource | gnx-rs alternative |
+| Upstream `gitnexus://...` resource | cgn-rs alternative |
 |---|---|
-| `/context` (stats, staleness) | `gnx coverage` (md/json) — overlapping intent, richer output |
-| `/clusters` | partly in `gnx coverage` (`--top-communities`) |
+| `/context` (stats, staleness) | `cgn coverage` (md/json) — overlapping intent, richer output |
+| `/clusters` | partly in `cgn coverage` (`--top-communities`) |
 | `/cluster/{name}` | **MISSING** |
-| `/processes` | partly in `gnx coverage` |
+| `/processes` | partly in `cgn coverage` |
 | `/process/{name}` | **MISSING** (no step-by-step trace exposure) |
-| `/schema` | embedded in `gnx coverage` (relations + node kinds) |
+| `/schema` | embedded in `cgn coverage` (relations + node kinds) |
 
-### 4.3 gnx-rs extras (no upstream peer)
+### 4.3 cgn-rs extras (no upstream peer)
 
-| gnx-rs | Why it matters for LLM |
+| cgn-rs | Why it matters for LLM |
 |---|---|
-| `gnx coverage` | Surfaces the **whole contract**: which frameworks are detected with what confidence, which patterns are blind spots, where to look. The single biggest hallucination-reducer we have. |
-| `gnx coverage --detailed` | LLM project overview — meant to be the FIRST thing dropped into the LLM's context window |
-| `gnx routes` | Stand-alone HTTP route inventory (upstream has it implicit in cypher) |
+| `cgn coverage` | Surfaces the **whole contract**: which frameworks are detected with what confidence, which patterns are blind spots, where to look. The single biggest hallucination-reducer we have. |
+| `cgn coverage --detailed` | LLM project overview — meant to be the FIRST thing dropped into the LLM's context window |
+| `cgn routes` | Stand-alone HTTP route inventory (upstream has it implicit in cypher) |
 | Internal resolver validation | Tooling, not LLM-facing |
 | Blind spots, receiver types, path aliases, fan-out, framework gates | (1.5) Surfaced via `doctor`; visible in graph as edges with `reason` tags + decayed confidence |
 
 ### 4.4 Graph schema delta
 
-| Aspect | Upstream | gnx-rs |
+| Aspect | Upstream | cgn-rs |
 |---|---|---|
 | Node kinds | File, Function, Class, Interface, Method, Community, Process | Method, Function, Class, Property, Const, Variable, Route, File, Process |
 | Differences | Has `Interface`, `Community` as nodes | Has `Property`, `Const`, `Variable`, `Route` as nodes; `Community` is metadata, not a node |
@@ -169,7 +169,7 @@ Common skeleton:
 ### 4.5 Confidence model delta
 
 - **Upstream:** edges have confidence; `impact` accepts `minConfidence`.
-- **gnx-rs:** same confidence model PLUS `--high-trust-only` shortcut (≥0.8 cutoff) on `impact` + `detect_changes`. Plus the `reason` string on each edge (`framework-aware-fastapi-depends`, `reflection-getattr-fanout`, etc.) — actionable for LLM to know **why** the resolver picked that target.
+- **cgn-rs:** same confidence model PLUS `--high-trust-only` shortcut (≥0.8 cutoff) on `impact` + `detect_changes`. Plus the `reason` string on each edge (`framework-aware-fastapi-depends`, `reflection-getattr-fanout`, etc.) — actionable for LLM to know **why** the resolver picked that target.
 
 ---
 
@@ -177,24 +177,24 @@ Common skeleton:
 
 | Upstream skill | Refactor verdict | Key edits |
 |---|---|---|
-| `gitnexus-guide` | **Rewrite** | New skill index table pointing at our 6 refactored skills. Replace MCP tool list with `gnx <cmd>` table. Drop resource URIs (we don't have MCP server). Update schema block (our node kinds + relations). Add a "blind spots awareness" callout. |
-| `gitnexus-cli` | **Rewrite + expand** | `gnx admin index` (replace `npx gitnexus analyze`). Add `gnx coverage`, `gnx coverage --detailed`, `gnx admin install-hook`, `gnx admin prune`, `gnx admin rename-branch`. Drop `wiki` (we don't have it). |
-| `gitnexus-exploring` | **Adapt** | Replace `gitnexus_*` calls with `gnx <cmd>`. Replace process-resource reads with `gnx coverage --detailed` snippet or `gnx impact --since HEAD~1`. Add a "Start with `gnx coverage`" preamble so LLM knows what's reliable. |
+| `gitnexus-guide` | **Rewrite** | New skill index table pointing at our 6 refactored skills. Replace MCP tool list with `cgn <cmd>` table. Drop resource URIs (we don't have MCP server). Update schema block (our node kinds + relations). Add a "blind spots awareness" callout. |
+| `gitnexus-cli` | **Rewrite + expand** | `cgn admin index` (replace `npx gitnexus analyze`). Add `cgn coverage`, `cgn coverage --detailed`, `cgn admin install-hook`, `cgn admin prune`, `cgn admin rename-branch`. Drop `wiki` (we don't have it). |
+| `gitnexus-exploring` | **Adapt** | Replace `gitnexus_*` calls with `cgn <cmd>`. Replace process-resource reads with `cgn coverage --detailed` snippet or `cgn impact --since HEAD~1`. Add a "Start with `cgn coverage`" preamble so LLM knows what's reliable. |
 | `gitnexus-impact-analysis` | **Adapt** | Replace tool calls. Add `--high-trust-only` recommendation. Add receiver-type / blind-spot awareness ("if target is in a blind spot, `impact` may show **incomplete** upstream callers — surface that risk"). |
-| `gitnexus-debugging` | **Adapt** | Replace tool calls. Add blind-spot section: "if the suspect symbol is reached only via eval/exec/dynamic-import, `gnx coverage` will list it under blind spots — `gnx impact` won't find those callers." |
-| `gitnexus-refactoring` | **Adapt (Python-only)** | `gnx rename` **landed 2026-05-15 (Python MVP)** — see `commands/rename.rs`. Skill can be written against this for Python projects; other languages need `identifier_finder` peers (per-lang follow-up). |
-| `gitnexus-pr-review` | **Adapt** | Replace tool calls. Add `gnx coverage` step before the review (so LLM knows framework coverage). Add receiver-type / blind-spot awareness in the risk model. Multi-step workflow stays — it's universal. |
+| `gitnexus-debugging` | **Adapt** | Replace tool calls. Add blind-spot section: "if the suspect symbol is reached only via eval/exec/dynamic-import, `cgn coverage` will list it under blind spots — `cgn impact` won't find those callers." |
+| `gitnexus-refactoring` | **Adapt (Python-only)** | `cgn rename` **landed 2026-05-15 (Python MVP)** — see `commands/rename.rs`. Skill can be written against this for Python projects; other languages need `identifier_finder` peers (per-lang follow-up). |
+| `gitnexus-pr-review` | **Adapt** | Replace tool calls. Add `cgn coverage` step before the review (so LLM knows framework coverage). Add receiver-type / blind-spot awareness in the risk model. Multi-step workflow stays — it's universal. |
 
 ### 5.1 New skill we should add (no upstream peer)
 
-**`gnx-onboarding`** (or merge into `gitnexus-guide`):
-> When first encountering an unfamiliar repo: 1) `gnx coverage` to see the contract, 2) `gnx coverage --detailed` to get the project map, 3) only then drop into `gnx search` / `gnx inspect`. Three steps, predictable token cost.
+**`cgn-onboarding`** (or merge into `gitnexus-guide`):
+> When first encountering an unfamiliar repo: 1) `cgn coverage` to see the contract, 2) `cgn coverage --detailed` to get the project map, 3) only then drop into `cgn search` / `cgn inspect`. Three steps, predictable token cost.
 
 ---
 
 ## 6. Open Decisions
 
-1. **Skill name prefix**: keep `gitnexus-*` (back-compat with upstream skill discovery) or switch to `gnx-*` (match our CLI binary)?
+1. **Skill name prefix**: keep `gitnexus-*` (back-compat with upstream skill discovery) or switch to `cgn-*` (match our CLI binary)?
 2. **Refactoring scope**: 7-of-7 in one PR, or land 3 (`-cli`, `-exploring`, `-impact-analysis`) first and follow with 4?
 3. **Rename support**: ✅ **Python MVP merged 2026-05-15** (`commands/rename.rs`). Remaining: extend `identifier_finder` to TS / Rust / Go / Java / JS / C# / Ruby / PHP / Kotlin / Swift / Dart / C / C++ (13 langs). The pattern is repeatable per-language — one commit each per the spec roadmap. |
 4. **Location**: `.claude-plugin/skills/<name>/SKILL.md` (mirror upstream layout) — confirm.
@@ -208,14 +208,14 @@ Common skeleton:
 Per the global `~/.claude/CLAUDE.md` GitNexus Workflow section, the user has been describing
 a richer wrapper command surface. As of 2026-05-15 the gap is narrower than originally noted:
 
-| Mentioned in global CLAUDE.md | Status in gnx-rs |
+| Mentioned in global CLAUDE.md | Status in cgn-rs |
 |---|---|
-| `gnx cypher` | ✅ landed (minimal MATCH subset) |
-| `gnx rename` | ✅ Python MVP landed; multi-lang remaining |
-| `gnx routes /path` | ✅ landed (HTTP route inventory) |
-| `gnx shape_check` | ❌ no subcommand |
-| `gnx coverage --detailed` | ✅ landed (tool inventory) |
-| `gnx coverage` | ✅ landed (repo coverage) |
+| `cgn cypher` | ✅ landed (minimal MATCH subset) |
+| `cgn rename` | ✅ Python MVP landed; multi-lang remaining |
+| `cgn routes /path` | ✅ landed (HTTP route inventory) |
+| `cgn shape_check` | ❌ no subcommand |
+| `cgn coverage --detailed` | ✅ landed (tool inventory) |
+| `cgn coverage` | ✅ landed (repo coverage) |
 | (removed old commands) | ✅ all consolidated into admin/impact/search/inspect/routes/coverage |
 
 The refactored skills should document the four MISSING items as "consider implementing"

@@ -37,7 +37,7 @@ pub struct RoutesArgs {
     /// routes, not test fixtures. When set, the output gains a `test_results`
     /// array listing the test-only routes alongside the regular `results`.
     /// Test classification reuses `File.category = FileCategory::Test` set at
-    /// index time (`graph-nexus-analyzer/src/resolution/builder.rs:32`).
+    /// index time (`cgn-analyzer/src/resolution/builder.rs:32`).
     #[arg(long)]
     pub include_tests: bool,
 

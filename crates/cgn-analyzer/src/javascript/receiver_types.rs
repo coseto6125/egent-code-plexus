@@ -63,7 +63,7 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
     }
 }
 
-/// Tests run as part of `cargo test -p graph-nexus-analyzer`.
+/// Tests run as part of `cargo test -p cgn-analyzer`.
 #[cfg(test)]
 mod tests {
     use crate::javascript::parser::JavaScriptProvider;

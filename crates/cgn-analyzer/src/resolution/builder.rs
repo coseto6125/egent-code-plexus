@@ -569,7 +569,7 @@ impl GraphBuilder {
 
             // File-node index lookup: the source of a Fetches edge is the
             // *file* (per upstream `generateId('File', filePath)`), but
-            // graph-nexus-rs doesn't currently create File nodes. Use the
+            // code-graph-nexus-rs doesn't currently create File nodes. Use the
             // first node in the file as a reasonable proxy (typically a
             // top-level function/class) so the edge has a real `source`.
             // When a file has no nodes we skip it — there's nothing to

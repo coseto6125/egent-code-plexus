@@ -11,7 +11,7 @@
 
 ## 1. Motivation
 
-The README Language Matrix shows graph-nexus has **45 ⚠️ cells** (upstream claims it, we lag) across 14 languages × 9 dimensions. Distribution:
+The README Language Matrix shows code-graph-nexus has **45 ⚠️ cells** (upstream claims it, we lag) across 14 languages × 9 dimensions. Distribution:
 
 | Dimension | ⚠️ Count | Root Cause |
 |---|---:|---|
@@ -39,14 +39,14 @@ The README Language Matrix shows graph-nexus has **45 ⚠️ cells** (upstream c
 
 | ID | Scope | Languages × Dimension | Primary files | Est. LOC |
 |---|---|---|---|---|
-| **A1** | Ctor: TypeScript / JavaScript | `this.foo()` / `obj.method()` | `crates/graph-nexus-analyzer/src/typescript/parser.rs`, `.../javascript/parser.rs` | ~150 |
+| **A1** | Ctor: TypeScript / JavaScript | `this.foo()` / `obj.method()` | `crates/cgn-analyzer/src/typescript/parser.rs`, `.../javascript/parser.rs` | ~150 |
 | **A2** | Ctor: Java / Kotlin / C# | `this.` + `base.` / `super.` | `.../java/parser.rs`, `.../kotlin/parser.rs`, `.../c_sharp/parser.rs` | ~200 |
 | **A3** | Ctor: Go / Rust | struct receiver / `impl` receiver | `.../go/parser.rs`, `.../rust/parser.rs` | ~150 |
 | **A4** | Ctor: PHP / Ruby | `$this->` / `self.` | `.../php/parser.rs`, `.../ruby/parser.rs` | ~120 |
 | **A5** | Ctor: Swift / C / C++ / Dart | `self.` / `obj->` / `obj.` | 4 parser.rs files | ~200 |
 | **E** | Exports: Go / Ruby / C / Dart | naming convention / `library` directive | 4 parser.rs files | ~100 |
-| **G+F1** | Java Named + C# Config | `import static`, csproj, global.json, NuGet.config | `.../java/parser.rs`, `crates/graph-nexus-cli/src/config_parser.rs` | ~120 |
-| **C** | Cross-lang Entry Point scorer | combine `RawRoute` + `RawFrameworkRef` + `main()` detection → scoring | `crates/graph-nexus-analyzer/src/entry_points.rs` (NEW) | ~200 |
+| **G+F1** | Java Named + C# Config | `import static`, csproj, global.json, NuGet.config | `.../java/parser.rs`, `crates/cgn-cli/src/config_parser.rs` | ~120 |
+| **C** | Cross-lang Entry Point scorer | combine `RawRoute` + `RawFrameworkRef` + `main()` detection → scoring | `crates/cgn-analyzer/src/entry_points.rs` (NEW) | ~200 |
 
 **Wave 1 total**: ~1240 LOC across 8 agents. Estimated wall-clock: 30-60 min if agents run truly in parallel.
 
@@ -54,14 +54,14 @@ The README Language Matrix shows graph-nexus has **45 ⚠️ cells** (upstream c
 
 | ID | Scope | Primary files | Est. LOC |
 |---|---|---|---|
-| **B1** | Frameworks: JS (Express, Hapi) | `crates/graph-nexus-analyzer/src/framework_helpers.rs` + `.../javascript/parser.rs` | ~180 |
+| **B1** | Frameworks: JS (Express, Hapi) | `crates/cgn-analyzer/src/framework_helpers.rs` + `.../javascript/parser.rs` | ~180 |
 | **B2** | Frameworks: Kotlin (Ktor) / C# (ASP.NET Core) | `framework_helpers.rs`, `.../kotlin/parser.rs`, `.../c_sharp/parser.rs` | ~200 |
 | **B3** | Frameworks: PHP (Laravel) / Ruby (Rails) / Go (gin / echo) | 3 parser.rs files + `framework_helpers.rs` | ~250 |
 | **B4** | Frameworks: Swift (Vapor) / C++ (Crow) / Dart (shelf) | 3 parser.rs files + `framework_helpers.rs` | ~200 |
 | **D1** | Types: Go (struct fields + signatures) | `.../go/parser.rs` | ~100 |
 | **D2** | Types: Swift / Dart (declared + generics) | 2 parser.rs files | ~150 |
 | **D3** | Types: C / C++ (typedef + function signatures) | 2 parser.rs files | ~150 |
-| **F2+F3** | Config: PHP composer.json + Swift Package.swift | `crates/graph-nexus-cli/src/config_parser.rs` | ~120 |
+| **F2+F3** | Config: PHP composer.json + Swift Package.swift | `crates/cgn-cli/src/config_parser.rs` | ~120 |
 
 **Wave 2 total**: ~1350 LOC. **Must base on merged Wave 1** because Ctor receiver-type binding is a precondition for framework_ref resolution.
 
@@ -72,7 +72,7 @@ The README Language Matrix shows graph-nexus has **45 ⚠️ cells** (upstream c
 Each ⚠️ cell that the task converts to ✓ must satisfy:
 
 1. **Parser code** populates the corresponding field on `RawNode` / `RawEdge` / `EmbeddingProfile` etc. Concretely:
-   - **Constructor Inference**: receiver type bound on method call sites; reference: how `crates/graph-nexus-analyzer/src/python/parser.rs` does it after `4e4fb1b`
+   - **Constructor Inference**: receiver type bound on method call sites; reference: how `crates/cgn-analyzer/src/python/parser.rs` does it after `4e4fb1b`
    - **Frameworks**: `framework_helpers.rs` registers a detector; tests in `tests/<lang>_framework_*.rs` pass
    - **Entry Points**: emit `EntryPoint` node kind (or scored attribute on existing nodes); covered by integration test
    - **Types**: `type_annotation` field set on parameters / returns / variables for declared types
@@ -85,9 +85,9 @@ Each ⚠️ cell that the task converts to ✓ must satisfy:
    - Assert the relevant field is populated correctly
    - NOT duplicate logic under test (call actual parser, not reimplement)
 
-3. **`cargo test -p graph-nexus-analyzer`** passes in the task's worktree.
+3. **`cargo test -p cgn-analyzer`** passes in the task's worktree.
 
-4. **`cargo check --release -p graph-nexus`** passes (downstream CLI still compiles).
+4. **`cargo check --release -p code-graph-nexus`** passes (downstream CLI still compiles).
 
 5. **No regression** in existing tests (full suite must remain green).
 
@@ -111,9 +111,9 @@ You are implementing <Task ID>: <scope description>.
 **Goal**: Close ⚠️ cell(s) <list> in the README Language Matrix.
 
 **Reference implementation** (read first):
-- `crates/graph-nexus-analyzer/src/python/parser.rs` — the Python parser
+- `crates/cgn-analyzer/src/python/parser.rs` — the Python parser
   established the pattern for <relevant dimension> in commit 4e4fb1b.
-- `crates/graph-nexus-analyzer/src/types.rs` — the shared field schema
+- `crates/cgn-analyzer/src/types.rs` — the shared field schema
   every parser must populate.
 
 **Files you'll modify**:
@@ -180,7 +180,7 @@ Each agent flips its own ⚠️ → ✓ cells. When merging 8 branches sequentia
 
 Each worktree has its own `target/` dir. First build per worktree is ~1-2 min (cold). Subsequent builds in the same worktree are seconds. **Total cold-build cost across 8 worktrees ~10-15 min** parallelized (Rust workspaces can build in parallel; disk I/O is the bottleneck).
 
-If disk space matters, set `CARGO_TARGET_DIR=/tmp/gnx-build-cache-<task>` per agent so caches share when possible — but this loses task isolation. Default: keep per-worktree target dirs.
+If disk space matters, set `CARGO_TARGET_DIR=/tmp/cgn-build-cache-<task>` per agent so caches share when possible — but this loses task isolation. Default: keep per-worktree target dirs.
 
 ---
 
@@ -192,8 +192,8 @@ If disk space matters, set `CARGO_TARGET_DIR=/tmp/gnx-build-cache-<task>` per ag
 | Wave-2 `framework_helpers.rs` 4-way conflict (B1-B4 all register helpers) | High | Refactor `framework_helpers.rs` into per-language modules BEFORE Wave 2 dispatch, OR serialize Wave 2 B-tasks (B1 → B2 → B3 → B4) |
 | `types.rs` field schema changes break other parsers | Medium | New fields MUST be `Option<T>` with `#[serde(default)]`. No required-field additions |
 | Acceptance test missing for some cells | Medium | Each agent's brief explicitly lists which cells they're responsible for; reviewer (next-conversation orchestrator) cross-checks against `tests/` |
-| Agent claims "✓" without real evidence | Medium | Spec §3 requires a passing test per dimension. Reviewer verifies `cargo test -p graph-nexus-analyzer -- <test_name>` actually runs the new test |
-| Constructor Inference patterns vary per-lang and agents diverge | High | All A-task agents must Read `crates/graph-nexus-analyzer/src/python/parser.rs` + commit `4e4fb1b` as the reference template. Field names + edge kinds align with Python's |
+| Agent claims "✓" without real evidence | Medium | Spec §3 requires a passing test per dimension. Reviewer verifies `cargo test -p cgn-analyzer -- <test_name>` actually runs the new test |
+| Constructor Inference patterns vary per-lang and agents diverge | High | All A-task agents must Read `crates/cgn-analyzer/src/python/parser.rs` + commit `4e4fb1b` as the reference template. Field names + edge kinds align with Python's |
 | Entry Point scorer (Task C) needs cross-cutting refactor | Medium | Brief explicitly says: emit `EntryPoint` node kind as new addition; do NOT refactor existing route/framework extraction. Pure consumer of existing data |
 
 ---
@@ -260,15 +260,15 @@ Quick sanity check after each agent merge:
 grep -A 1 "<lang>" README.md | grep -c "⚠️"   # should drop by N matching task
 
 # Confirm parser emits the field
-grep -rn "<field>: \|<field>:Some" crates/graph-nexus-analyzer/src/<lang>/parser.rs
+grep -rn "<field>: \|<field>:Some" crates/cgn-analyzer/src/<lang>/parser.rs
 
 # Confirm test exists
 ls tests/<lang>_*.rs
-cargo test -p graph-nexus-analyzer <lang>::<test_name> -- --nocapture
+cargo test -p cgn-analyzer <lang>::<test_name> -- --nocapture
 
 # Confirm no regression
-cargo test -p graph-nexus-analyzer
-cargo check --release -p graph-nexus
+cargo test -p cgn-analyzer
+cargo check --release -p code-graph-nexus
 ```
 
 ---

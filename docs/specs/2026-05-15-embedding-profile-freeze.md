@@ -4,15 +4,15 @@
 **Status**: Draft (handoff from OOM-fix conversation; implementation pending)
 **Related commits**:
 - `3c1123a fix(analyzer): chunk fastembed batch (default 32) to bound peak embedding memory` — landed prerequisite
-- `175c260 feat(cli): gnx config — interactive TUI wizard for repo-local config` — wizard infra
-- Existing `crates/graph-nexus-core/src/config.rs` (EmbeddingConfig: stored-only)
-- Existing `crates/graph-nexus-core/src/registry/meta.rs` (BranchMeta v1)
+- `175c260 feat(cli): cgn config — interactive TUI wizard for repo-local config` — wizard infra
+- Existing `crates/cgn-core/src/config.rs` (EmbeddingConfig: stored-only)
+- Existing `crates/cgn-core/src/registry/meta.rs` (BranchMeta v1)
 
 ---
 
 ## 1. Motivation
 
-`gnx admin index --embeddings` currently hard-wires `BAAI/bge-m3` (1024-dim, ~540 MB INT8). Three problems:
+`cgn admin index --embeddings` currently hard-wires `BAAI/bge-m3` (1024-dim, ~540 MB INT8). Three problems:
 
 1. **Memory pressure on smaller hosts**: peak 3.1 GB resident on 22k-symbol corpora. WSL2 / 8 GB laptops sit dangerously close to OOM (mitigated by `3c1123a` batch chunking, but model size is still the floor).
 2. **No way to opt out / down-shift**: users on constrained hardware have no way to pick a smaller model or skip embeddings entirely without editing source.
@@ -26,7 +26,7 @@ The fix is to make the **embedding model + batch a first-class profile**, frozen
 
 ### Goals
 
-- G1. User can choose embedding model on first `admin index --embeddings` via the existing `gnx admin config` wizard. RAM is probed to suggest a sensible default.
+- G1. User can choose embedding model on first `admin index --embeddings` via the existing `cgn admin config` wizard. RAM is probed to suggest a sensible default.
 - G2. Choice is **frozen** into `meta.json` (schema v2). Subsequent `admin index` / query operations on the same graph use the frozen profile; ignoring `config.toml` if the two disagree (config edits don't silently invalidate a graph).
 - G3. Cross-machine load: if the frozen model isn't available on the loading host, fail-loud with a clear remediation hint (re-analyze with `--drop-embeddings`).
 - G4. Multi-model loader: at minimum `bge-m3-int8` (current) + `off` (no embeddings). `multilingual-e5-small` (118 MB, 384 dim) optional but recommended for memory-constrained users.
@@ -43,7 +43,7 @@ The fix is to make the **embedding model + batch a first-class profile**, frozen
 
 ## 3. Schema changes
 
-### 3.1 `crates/graph-nexus-core/src/registry/meta.rs`
+### 3.1 `crates/cgn-core/src/registry/meta.rs`
 
 Bump `schema_version` from `1` → `2`. Add optional `embedding_profile` (None for v1 graphs, Some(...) for v2 written-by-this-code graphs).
 
@@ -91,7 +91,7 @@ fn default_schema_version() -> u32 { 2 }   // bumped from 1
 
 ## 4. Multi-model registry
 
-### 4.1 `crates/graph-nexus-analyzer/src/embeddings.rs`
+### 4.1 `crates/cgn-analyzer/src/embeddings.rs`
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,7 +142,7 @@ Implementation per variant:
 
 ## 5. CLI surface
 
-### 5.1 `crates/graph-nexus-cli/src/commands/analyze.rs`
+### 5.1 `crates/cgn-cli/src/commands/analyze.rs`
 
 New flags:
 - `--embed-model <MODEL>` — explicit override. Validated against registry. **Forces wizard skip** (non-interactive intent).
@@ -157,7 +157,7 @@ Resolution order at analyze start:
    - If `embedding.model` absent (fresh config) AND TTY → launch wizard with RAM-probed defaults pre-filled.
    - If `embedding.model` absent AND non-TTY → use RAM-tier auto-default, write meta, log a one-liner.
 
-### 5.2 `crates/graph-nexus-cli/src/commands/config.rs` (extend existing wizard)
+### 5.2 `crates/cgn-cli/src/commands/config.rs` (extend existing wizard)
 
 Existing wizard has 6 fields. Two need to swap behavior:
 
@@ -176,8 +176,8 @@ On load, read `meta.json` → `embedding_profile`. If profile exists and the loa
 
 ```
 error: graph.bin was indexed with embedding model "experimental-foo" which
-       isn't compiled into this gnx build. Re-analyze with --drop-embeddings
-       and pick a supported model, or upgrade gnx.
+       isn't compiled into this cgn build. Re-analyze with --drop-embeddings
+       and pick a supported model, or upgrade cgn.
 ```
 
 If `embedding_profile.model_id != "off"` but the query command doesn't actually need embeddings (e.g., pure `MATCH (a)-[r]->(b) RETURN a,b` cypher), the load can proceed without model init — lazy load.
@@ -272,7 +272,7 @@ Total ~650 LOC across 9 commits. Each commit independently reviewable and revert
 
 ### Unit
 - `EmbedModelId::parse` / `slug` round-trip for all variants + aliases
-- `BranchMeta` v1 ↔ v2 JSON round-trip (older `gnx` reads v2 meta by dropping unknown field; newer reads v1 by defaulting `embedding_profile = None`)
+- `BranchMeta` v1 ↔ v2 JSON round-trip (older `cgn` reads v2 meta by dropping unknown field; newer reads v1 by defaulting `embedding_profile = None`)
 - RAM probe: mock `/proc/meminfo` with various MemTotal values, verify tier mapping
 - Migration §3.2: v1 meta + non-empty embeddings → rewrites meta with `BgeM3Int8` profile
 
@@ -281,7 +281,7 @@ Total ~650 LOC across 9 commits. Each commit independently reviewable and revert
 - `admin index --embeddings` (TTY) → wizard shown, selection persisted to both config.toml and meta.json
 - `admin index --embeddings` (non-TTY, no config.toml) → uses RAM-tier auto-default, writes meta, exits with status info
 - Two-machine simulation: indexing on host with `BgeM3Int8`, loading on host where only `E5SmallMultilingual` is registered → fail-loud with hint
-- `gnx admin config` edit model after index → meta still wins; user gets a one-liner warning that the change applies only to next `--drop-embeddings` re-index
+- `cgn admin config` edit model after index → meta still wins; user gets a one-liner warning that the change applies only to next `--drop-embeddings` re-index
 
 ### Manual
 - Wizard UX on actual TTY: select picker keyboard nav, RAM recommendation visible, `^S` persists
@@ -302,8 +302,8 @@ Total ~650 LOC across 9 commits. Each commit independently reviewable and revert
 
 - v1 `meta.json` (no `embedding_profile`): loaded fine via `#[serde(default)]`, migration §3.2 applies on first read under v2 code.
 - v1 `config.toml` (no embedding fields or partial): loaded fine via existing per-field defaults.
-- Older `gnx` binary reading a v2 `meta.json`: unknown `embedding_profile` field tolerated (`#[serde(default)]` in old struct — verify by inspecting `meta.rs` of the older release; if old version uses `deny_unknown_fields`, need a transition release first).
-- Older `gnx` binary loading a graph with new `model_id = "e5-small-multilingual"` embeddings: today's code is hard-wired to bge-m3, so it'll try to encode queries with bge-m3 — silent wrong-model encoding. **Risk**: anyone on stale `gnx` querying a fresh-indexed graph gets garbage results. Mitigation: bump `BranchMeta::schema_version` to 2; old code that reads `schema_version > 1` should refuse to load (verify the old code does this; if not, an intermediate "version-aware refusal" release is needed).
+- Older `cgn` binary reading a v2 `meta.json`: unknown `embedding_profile` field tolerated (`#[serde(default)]` in old struct — verify by inspecting `meta.rs` of the older release; if old version uses `deny_unknown_fields`, need a transition release first).
+- Older `cgn` binary loading a graph with new `model_id = "e5-small-multilingual"` embeddings: today's code is hard-wired to bge-m3, so it'll try to encode queries with bge-m3 — silent wrong-model encoding. **Risk**: anyone on stale `cgn` querying a fresh-indexed graph gets garbage results. Mitigation: bump `BranchMeta::schema_version` to 2; old code that reads `schema_version > 1` should refuse to load (verify the old code does this; if not, an intermediate "version-aware refusal" release is needed).
 
 ---
 
@@ -312,7 +312,7 @@ Total ~650 LOC across 9 commits. Each commit independently reviewable and revert
 - Remote embedding API wiring (`EmbeddingConfig.endpoint` / `api_key`) — already stored, separate spec when needed
 - Custom ONNX upload
 - Per-language embedding model (e.g., code-specific model for Rust source, prose model for markdown)
-- Embedding model performance comparison / benchmark suite (the `benchmark_gnx.py` script in worktree-vendor-dlbuild can be extended in a follow-up)
+- Embedding model performance comparison / benchmark suite (the `benchmark_cgn.py` script in worktree-vendor-dlbuild can be extended in a follow-up)
 - GPU inference path
 
 ---
@@ -326,5 +326,5 @@ Total ~650 LOC across 9 commits. Each commit independently reviewable and revert
 ## Appendix B — Why freeze in meta vs always read config?
 
 - Two analyze runs with different config.toml between them today silently invalidate any cached embeddings (because hashes don't match across model changes). Loud-fail on mismatch beats silent corruption.
-- Cross-machine sync: someone shares `.gnx/<repo>/<branch>/` via tarball. Receiver needs to know which model to encode queries with. config.toml on the receiver's side doesn't have that info; meta.json travels with the graph.
+- Cross-machine sync: someone shares `.cgn/<repo>/<branch>/` via tarball. Receiver needs to know which model to encode queries with. config.toml on the receiver's side doesn't have that info; meta.json travels with the graph.
 - Trust: user runs the wizard once, picks a profile, expects it to stick. config.toml is a tunables surface (batch size adjustment, etc.); meta.json is the contract.

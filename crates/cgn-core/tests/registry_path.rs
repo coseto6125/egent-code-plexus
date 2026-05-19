@@ -37,7 +37,7 @@ fn rejects_special_chars() {
 
 #[test]
 fn accepts_valid_names() {
-    assert_eq!(sanitize_segment("graph-nexus").unwrap(), "graph-nexus");
+    assert_eq!(sanitize_segment("code-graph-nexus").unwrap(), "code-graph-nexus");
     assert_eq!(sanitize_segment("my_repo.2").unwrap(), "my_repo.2");
     assert_eq!(sanitize_segment("ABC-123").unwrap(), "ABC-123");
 }
@@ -46,14 +46,14 @@ use cgn_core::registry::derive_repo_name;
 
 #[test]
 fn derives_from_ssh_url() {
-    let r = derive_repo_name(Some("git@github.com:coseto6125/graph-nexus.git")).unwrap();
-    assert_eq!(r, "graph-nexus");
+    let r = derive_repo_name(Some("git@github.com:coseto6125/code-graph-nexus.git")).unwrap();
+    assert_eq!(r, "code-graph-nexus");
 }
 
 #[test]
 fn derives_from_https_url() {
-    let r = derive_repo_name(Some("https://github.com/coseto6125/graph-nexus.git")).unwrap();
-    assert_eq!(r, "graph-nexus");
+    let r = derive_repo_name(Some("https://github.com/coseto6125/code-graph-nexus.git")).unwrap();
+    assert_eq!(r, "code-graph-nexus");
 }
 
 #[test]
@@ -77,8 +77,8 @@ use std::path::Path;
 
 #[test]
 fn uid_strips_repo_prefix() {
-    let abs = Path::new("/home/enor/graph-nexus/src/auth.ts");
-    let repo = Path::new("/home/enor/graph-nexus");
+    let abs = Path::new("/home/enor/code-graph-nexus/src/auth.ts");
+    let repo = Path::new("/home/enor/code-graph-nexus");
     assert_eq!(uid_path(abs, repo).unwrap(), "src/auth.ts");
 }
 

@@ -19,7 +19,7 @@
 ) @struct
 
 ;; Unions — emitted as NodeKind::Struct (no dedicated `Union` kind in
-;; gnx-rs; ref-gitnexus emits `Union` and the parity aggregator pairs the
+;; cgn; ref-gitnexus emits `Union` and the parity aggregator pairs the
 ;; two via the struct-family EQUIV class). Previously absent from this
 ;; query file: `union X { ... }` and `typedef union X { ... } X;` fell
 ;; through to the typedef path (or were dropped entirely), producing 13

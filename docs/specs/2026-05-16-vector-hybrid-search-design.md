@@ -3,17 +3,17 @@
 **Status:** Draft
 **Owner:** @coseto6125
 **Date:** 2026-05-16
-**Crate:** `graph-nexus-cli`
+**Crate:** `cgn-cli`
 
 ## Goal
 
-Replace the three vector/hybrid stubs in `crates/graph-nexus-cli/src/commands/search.rs` — the `SearchMode::Vector` arm (L215 in `compute_single`), the `SearchMode::Hybrid` arm (L220), and the silently-dropped mode in `scan_repo` (L535) — with a real cosine-similarity path that uses the BGE-M3 embeddings already produced by `graph-nexus-analyzer::embeddings::Embedder` and persisted in `ZeroCopyGraph::embeddings`. Line numbers are anchors as of `06e426e`; refer to the match arms / `let _ = effective_mode;` site by name during implementation.
+Replace the three vector/hybrid stubs in `crates/cgn-cli/src/commands/search.rs` — the `SearchMode::Vector` arm (L215 in `compute_single`), the `SearchMode::Hybrid` arm (L220), and the silently-dropped mode in `scan_repo` (L535) — with a real cosine-similarity path that uses the BGE-M3 embeddings already produced by `cgn-analyzer::embeddings::Embedder` and persisted in `ZeroCopyGraph::embeddings`. Line numbers are anchors as of `06e426e`; refer to the match arms / `let _ = effective_mode;` site by name during implementation.
 
 After this change:
 
-- `gnx search "<phrase>" --mode vector` ranks symbols by cosine similarity between the query embedding and the per-node embedding stored in the graph.
-- `gnx search "<phrase>" --mode hybrid` fuses BM25 + cosine via Reciprocal Rank Fusion (RRF, k=60).
-- `gnx search "<phrase>" --mode auto` continues to route slug-like input to BM25 and phrase input to Hybrid when the graph has embeddings (existing `detect_mode` keeps working — no behavioural change, only the downstream path becomes real).
+- `cgn search "<phrase>" --mode vector` ranks symbols by cosine similarity between the query embedding and the per-node embedding stored in the graph.
+- `cgn search "<phrase>" --mode hybrid` fuses BM25 + cosine via Reciprocal Rank Fusion (RRF, k=60).
+- `cgn search "<phrase>" --mode auto` continues to route slug-like input to BM25 and phrase input to Hybrid when the graph has embeddings (existing `detect_mode` keeps working — no behavioural change, only the downstream path becomes real).
 - Multi-repo fan-out (`scan_repo`) honours the mode instead of silently dropping it.
 
 ## Non-Goals
@@ -27,25 +27,25 @@ After this change:
 
 ## Architecture
 
-### New module: `crates/graph-nexus-cli/src/embedder.rs`
+### New module: `crates/cgn-cli/src/embedder.rs`
 
-Tiny accessor that wraps a process-local `OnceLock<Result<Embedder, String>>`. Returns `&'static Embedder` on success; otherwise an owned `GnxError` so callers can `?`-fallback to BM25 cleanly.
+Tiny accessor that wraps a process-local `OnceLock<Result<Embedder, String>>`. Returns `&'static Embedder` on success; otherwise an owned `CgnError` so callers can `?`-fallback to BM25 cleanly.
 
 ```rust
-use graph_nexus_analyzer::embeddings::Embedder;
-use graph_nexus_core::GnxError;
+use cgn_analyzer::embeddings::Embedder;
+use cgn_core::CgnError;
 use std::sync::OnceLock;
 
-pub fn get_embedder() -> Result<&'static Embedder, GnxError> {
+pub fn get_embedder() -> Result<&'static Embedder, CgnError> {
     static CELL: OnceLock<Result<Embedder, String>> = OnceLock::new();
     let slot = CELL.get_or_init(|| Embedder::new().map_err(|e| e.to_string()));
-    slot.as_ref().map_err(|e| GnxError::Rkyv(format!("embedder init: {e}")))
+    slot.as_ref().map_err(|e| CgnError::Rkyv(format!("embedder init: {e}")))
 }
 ```
 
-Rationale: `OnceLock` (std, stable) keeps a single Embedder per gnx process. For CLI single-shot use the gain is nil (one init either way); for multi-repo rayon fan-out it deduplicates ~1–2 s of cold start across N workers.
+Rationale: `OnceLock` (std, stable) keeps a single Embedder per cgn process. For CLI single-shot use the gain is nil (one init either way); for multi-repo rayon fan-out it deduplicates ~1–2 s of cold start across N workers.
 
-### Changes to `crates/graph-nexus-cli/src/commands/search.rs`
+### Changes to `crates/cgn-cli/src/commands/search.rs`
 
 #### 1. Vector path (replaces the `SearchMode::Vector` arm in `compute_single`)
 
@@ -53,14 +53,14 @@ Add a private helper called from the `SearchMode::Vector` arm of `compute_single
 
 ```rust
 fn vector_hits_from_graph(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     index_dir: Option<&std::path::Path>,
 ) -> Vec<Hit> {
     let Some(embs) = graph.embeddings.as_ref() else {
-        eprintln!("→ vector: graph has no embeddings — falling back to bm25 (rebuild with `gnx admin index --embeddings`)");
+        eprintln!("→ vector: graph has no embeddings — falling back to bm25 (rebuild with `cgn admin index --embeddings`)");
         return bm25_hits_from_graph(graph, pattern, kind_set, repo_label, index_dir);
     };
 
@@ -92,7 +92,7 @@ fn vector_hits_from_graph(
 // Unit tests inject a `&[Vec<f32>]` via a thin wrapper trait so we don't
 // need a rkyv-archived graph in test fixtures.
 fn cosine_top_k(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     embeddings: impl IntoParIter<Item = &[f32]>,
     query: &[f32],
     kind_set: &Option<Vec<String>>,
@@ -145,7 +145,7 @@ The exact `impl IntoParIter` form will be settled during implementation — like
 
 ```rust
 fn hybrid_hits_from_graph(
-    graph: &graph_nexus_core::graph::ArchivedZeroCopyGraph,
+    graph: &cgn_core::graph::ArchivedZeroCopyGraph,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
@@ -233,7 +233,7 @@ fn scan_repo(
 
 ### Auto-mode behaviour (no logic change)
 
-`detect_mode` and `embeddings_available_for` are unchanged. The fallback `eprintln!` already tells users to build with `gnx admin index --embeddings`. Net effect:
+`detect_mode` and `embeddings_available_for` are unchanged. The fallback `eprintln!` already tells users to build with `cgn admin index --embeddings`. Net effect:
 
 - **Slug input + any state** → BM25 (hook fast path stays cheap).
 - **Phrase input + embeddings absent** → BM25 + stderr hint (current behaviour).
@@ -242,7 +242,7 @@ fn scan_repo(
 ## Data Flow
 
 ```
-gnx search "validate user input" --mode hybrid
+cgn search "validate user input" --mode hybrid
   └── compute_single
        ├── effective_mode = Hybrid (explicit)
        ├── hybrid_hits_from_graph
@@ -270,7 +270,7 @@ All failure modes degrade to BM25 + stderr hint. The hook path MUST NOT error ou
 
 ## Testing
 
-All tests live in `crates/graph-nexus-cli/tests/`. They must NOT trigger model download — that means no `Embedder::new()` in tests. Strategy: split `cosine_top_k` and `rrf_merge` so they accept pre-computed embeddings / pre-ranked Hit lists, then test those directly with hand-crafted data. Wire-up code that *does* call `Embedder::new()` is covered by an end-to-end smoke test gated behind a feature flag or `#[ignore]`.
+All tests live in `crates/cgn-cli/tests/`. They must NOT trigger model download — that means no `Embedder::new()` in tests. Strategy: split `cosine_top_k` and `rrf_merge` so they accept pre-computed embeddings / pre-ranked Hit lists, then test those directly with hand-crafted data. Wire-up code that *does* call `Embedder::new()` is covered by an end-to-end smoke test gated behind a feature flag or `#[ignore]`.
 
 ### Unit tests (no network)
 
@@ -288,7 +288,7 @@ All tests live in `crates/graph-nexus-cli/tests/`. They must NOT trigger model d
 
 ### Integration test (network-gated)
 
-7. **`vector_end_to_end_with_real_embedder`** (`#[ignore]` by default) — build a tiny graph with `--embeddings`, run `gnx search "<phrase>" --mode vector`, assert at least one hit and that ordering changes vs BM25 on the same query. Marked `#[ignore]` because the first run downloads ~1.2 GB.
+7. **`vector_end_to_end_with_real_embedder`** (`#[ignore]` by default) — build a tiny graph with `--embeddings`, run `cgn search "<phrase>" --mode vector`, assert at least one hit and that ordering changes vs BM25 on the same query. Marked `#[ignore]` because the first run downloads ~1.2 GB.
 
 ## Risks & Open Questions
 
@@ -296,7 +296,7 @@ All tests live in `crates/graph-nexus-cli/tests/`. They must NOT trigger model d
   A: We do *not* depend on the answer. `cosine_top_k` always divides by `||a|| · ||b||`, so an unnormalised input gives the same ranking as a normalised one. The first vector query logs a one-line `tracing::debug!` reporting `query_norm` so we can confirm empirically post-merge; if norm is reliably ~1.0 we can drop per-pair normalisation in a follow-up for a minor speedup.
 
 - **Risk: Embedder cold start (~1–2 s) hits any CLI invocation that asks for `--mode vector` or `--mode hybrid` with embeddings present.**
-  Mitigation: documented in `gnx search --help`. Auto mode keeps hooks on BM25 unless input is phrase-like.
+  Mitigation: documented in `cgn search --help`. Auto mode keeps hooks on BM25 unless input is phrase-like.
 
 - **Risk: HashMap key in `rrf_merge` uses `(file, line, name)`.**
   Hit currently has no `uid` field. The triple is unique within a single graph but might collide across repos in multi-repo merge. Acceptable for now because `rrf_merge` runs *inside* a single repo's compute path — multi-repo merge happens later in `compute_multi`'s top-K heap, which keys on the full OrderedHit including `repo`.
@@ -304,11 +304,11 @@ All tests live in `crates/graph-nexus-cli/tests/`. They must NOT trigger model d
 ## File Touch List
 
 ```
-crates/graph-nexus-cli/src/embedder.rs        # NEW — OnceLock<Embedder> accessor
-crates/graph-nexus-cli/src/lib.rs             # add `pub mod embedder;`
-crates/graph-nexus-cli/src/commands/search.rs # wire 3 stubs, add 4 private helpers
-crates/graph-nexus-cli/Cargo.toml             # (no change — graph-nexus-analyzer already a dep)
-crates/graph-nexus-cli/tests/search_vector.rs # NEW — 6 unit tests + 1 ignored E2E
+crates/cgn-cli/src/embedder.rs        # NEW — OnceLock<Embedder> accessor
+crates/cgn-cli/src/lib.rs             # add `pub mod embedder;`
+crates/cgn-cli/src/commands/search.rs # wire 3 stubs, add 4 private helpers
+crates/cgn-cli/Cargo.toml             # (no change — cgn-analyzer already a dep)
+crates/cgn-cli/tests/search_vector.rs # NEW — 6 unit tests + 1 ignored E2E
 docs/specs/2026-05-16-vector-hybrid-search-design.md  # THIS DOC
 ```
 
@@ -325,7 +325,7 @@ Estimated total: ~280 LOC added (+ ~220 prod, ~60 tests), 0 LOC removed except t
 7. Add `vector_falls_back_when_embeddings_missing` + `hybrid_falls_back_when_embeddings_missing`.
 8. Add ignored end-to-end test.
 9. `cargo fmt` + `cargo clippy` + `cargo test`.
-10. Manual smoke: `gnx admin index --embeddings` on a small repo, then `gnx search "<phrase>" --mode vector` / `--mode hybrid`.
+10. Manual smoke: `cgn admin index --embeddings` on a small repo, then `cgn search "<phrase>" --mode vector` / `--mode hybrid`.
 
 ## Scope Extension — Phase 1 & 2 (added mid-PR)
 
@@ -333,19 +333,19 @@ Two follow-ups originally planned for separate PRs were folded into this branch 
 
 ### Phase 1 — Preserve embeddings across auto-reindex
 
-**Problem.** Every `git commit` triggered `post_tool_use` to spawn `gnx admin index --repo .` without `--embeddings`, silently demoting a vector-capable graph to BM25-only on the next query. `auto_ensure::ensure_fresh` had the same bug for synchronous rebuilds.
+**Problem.** Every `git commit` triggered `post_tool_use` to spawn `cgn admin index --repo .` without `--embeddings`, silently demoting a vector-capable graph to BM25-only on the next query. `auto_ensure::ensure_fresh` had the same bug for synchronous rebuilds.
 
 **Fix.** New `pub fn auto_ensure::embeddings_present(graph_path: &Path) -> bool` inspects the previous graph. Both reindex spawn sites (`auto_ensure::ensure_fresh` and `post_tool_use::spawn_background_reindex`) call it and conditionally append `--embeddings` to the rebuild args. Any failure (missing / corrupt graph) collapses to `false` so the hook contract is preserved.
 
-**Tests.** `crates/graph-nexus-cli/tests/auto_ensure_embeddings.rs` covers the three branches (with embeddings / without / missing file).
+**Tests.** `crates/cgn-cli/tests/auto_ensure_embeddings.rs` covers the three branches (with embeddings / without / missing file).
 
-### Phase 2 — `gnx search --batch` (stdin amortisation)
+### Phase 2 — `cgn search --batch` (stdin amortisation)
 
-**Problem.** Every `gnx search --mode vector` is a fresh process paying ~1.1 s of BGE-M3 cold start (~1.7 GB RSS for the ONNX session). Scripted batch workloads multiply this linearly.
+**Problem.** Every `cgn search --mode vector` is a fresh process paying ~1.1 s of BGE-M3 cold start (~1.7 GB RSS for the ONNX session). Scripted batch workloads multiply this linearly.
 
 **Fix.** New `--batch` flag on `SearchArgs` reads patterns from stdin (one per line, `#` / blank lines skipped). All queries share the OnceLock-cached Embedder so cold start is paid once. Each query block is preceded by `=== pattern: <pattern> ===` on stdout so downstream scripts can split per-query regardless of `--format`.
 
-**Internal API change.** `SearchArgs::pattern` is now `Option<String>` with `#[arg(required_unless_present = "batch")]`. Internal callers (`pre_tool_use::handle`, integration tests) updated to pass `Some(...)`. `compute_hits()` rejects `pattern == None` with `GnxError::InvalidArgument` — batch is CLI-only, hooks always run one pattern at a time.
+**Internal API change.** `SearchArgs::pattern` is now `Option<String>` with `#[arg(required_unless_present = "batch")]`. Internal callers (`pre_tool_use::handle`, integration tests) updated to pass `Some(...)`. `compute_hits()` rejects `pattern == None` with `CgnError::InvalidArgument` — batch is CLI-only, hooks always run one pattern at a time.
 
 **Measured speedup.** 3 vector queries on the worktree's own graph:
 - Sequential (3× fresh CLI): 3315 ms
@@ -353,4 +353,4 @@ Two follow-ups originally planned for separate PRs were folded into this branch 
 
 The win scales linearly with N: at N=10 expect ~7× speedup.
 
-**Tests.** `crates/graph-nexus-cli/tests/search_batch.rs` covers divider emission, blank/comment line skipping, and the empty-stdin contract (one-line stderr hint, no spurious dividers).
+**Tests.** `crates/cgn-cli/tests/search_batch.rs` covers divider emission, blank/comment line skipping, and the empty-stdin contract (one-line stderr hint, no spurious dividers).

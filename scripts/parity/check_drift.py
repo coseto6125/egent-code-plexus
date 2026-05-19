@@ -11,8 +11,8 @@ Eyeball the `shift` column:
   - Improvements (negative shift) are always OK.
   - Positive shifts that you *intended* (e.g. you tightened a capture)
     mean it's time to regenerate the baseline:
-        gnx admin drop --repo .sample_repo
-        gnx admin index --repo .sample_repo
+        cgn admin drop --repo .sample_repo
+        cgn admin index --repo .sample_repo
         python3 scripts/parity/dump_per_lang_kinds.py > scripts/parity/final_baseline.txt
     Commit the new baseline alongside the parser change.
   - Positive shifts you didn't expect → silent regression candidate.

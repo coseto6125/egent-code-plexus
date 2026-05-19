@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-(language, kind) symbol count dump: gnx-rs vs reference gitnexus.
+"""Per-(language, kind) symbol count dump: cgn-rs vs reference gitnexus.
 
 Run from gitnexus-rs repo root. Assumes `.sample_repo/` contains 14 mainstream
 language subdirectories already indexed by both binaries.
@@ -23,7 +23,7 @@ LANGS = [
 # pollution (e.g., GitHub Actions workflow `.yml` files inside `Rust/`
 # add 62 Class nodes to the Rust count, inflating the apparent delta;
 # Kotlin `build.gradle.kts` inside `Java/` adds Variable nodes).
-# The filter is applied to BOTH gnx-rs and ref-gitnexus queries so the
+# The filter is applied to BOTH cgn-rs and ref-gitnexus queries so the
 # per-lang totals reflect only nodes from real source files in that
 # language's grammar.
 EXTS: dict[str, list[str]] = {
@@ -65,7 +65,7 @@ def run(cmd: list[str]) -> str:
 
 
 def parse_rs(out: str) -> dict[str, int]:
-    """gnx-rs cypher --format json → {kind: count}."""
+    """cgn-rs cypher --format json → {kind: count}."""
     try:
         obj = json.loads(out)
     except json.JSONDecodeError:
@@ -111,7 +111,7 @@ def cypher_rs_per_lang(lang: str) -> dict[str, int]:
         f"{_ext_filter_clause(lang)} "
         "RETURN n.kind AS kind, count(*) AS c ORDER BY c DESC"
     )
-    return parse_rs(run(["gnx", "cypher", "--repo", REPO, q, "--format", "json"]))
+    return parse_rs(run(["cgn", "cypher", "--repo", REPO, q, "--format", "json"]))
 
 
 def cypher_ref_per_lang(lang: str) -> dict[str, int]:
@@ -150,7 +150,7 @@ def sample_kind(lang: str, kind: str, n: int = 8, skip: int = 0) -> list[tuple[s
         f"MATCH (n) WHERE n.kind='{kind}' AND n.filePath STARTS WITH '{lang}/' "
         f"RETURN n.name, n.filePath SKIP {skip} LIMIT {n}"
     )
-    out = run(["gnx", "cypher", "--repo", REPO, q, "--format", "json"])
+    out = run(["cgn", "cypher", "--repo", REPO, q, "--format", "json"])
     try:
         return [(r[0], r[1]) for r in json.loads(out)["rows"]]
     except (json.JSONDecodeError, KeyError, IndexError):

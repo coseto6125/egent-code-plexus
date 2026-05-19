@@ -7,28 +7,28 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$ROOT/tools/lint-skill.sh"
 tmp=$(mktemp_test_dir)
 
-mkdir -p "$tmp/docs/skills/gnx-onboard/guides"
-cat > "$tmp/docs/skills/gnx-onboard/SKILL.md" <<'EOF'
+mkdir -p "$tmp/docs/skills/cgn-onboard/guides"
+cat > "$tmp/docs/skills/cgn-onboard/SKILL.md" <<'EOF'
 ---
-name: gnx-onboard
+name: cgn-onboard
 description: x
 when-to-use: y
 ---
 Jump table:
 - install → guides/01-install.md
 EOF
-cat > "$tmp/docs/skills/gnx-onboard/guides/01-install.md" <<'EOF'
+cat > "$tmp/docs/skills/cgn-onboard/guides/01-install.md" <<'EOF'
 # install
 EOF
 
 # Orphan guide 99-leftover.md → fail
-cat > "$tmp/docs/skills/gnx-onboard/guides/99-leftover.md" <<'EOF'
+cat > "$tmp/docs/skills/cgn-onboard/guides/99-leftover.md" <<'EOF'
 # orphan
 EOF
-assert_exit 1 bash "$LINT" "$tmp/docs/skills/gnx-onboard"
+assert_exit 1 bash "$LINT" "$tmp/docs/skills/cgn-onboard"
 
 # Remove orphan → pass
-rm "$tmp/docs/skills/gnx-onboard/guides/99-leftover.md"
-assert_exit 0 bash "$LINT" "$tmp/docs/skills/gnx-onboard"
+rm "$tmp/docs/skills/cgn-onboard/guides/99-leftover.md"
+assert_exit 0 bash "$LINT" "$tmp/docs/skills/cgn-onboard"
 
 pass

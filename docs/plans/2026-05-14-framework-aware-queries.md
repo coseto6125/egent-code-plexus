@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
-**Goal:** 在 graph-nexus 加入框架感知 edges（FastAPI Depends、Axum Router::route 等），讓 web 後端依賴圖召回率從 ~50% 提升至 ~90%，同時用 `Edge.confidence` 限制誤判風險。
+**Goal:** 在 code-graph-nexus 加入框架感知 edges（FastAPI Depends、Axum Router::route 等），讓 web 後端依賴圖召回率從 ~50% 提升至 ~90%，同時用 `Edge.confidence` 限制誤判風險。
 
 **Architecture:** 沿用既有 Raw* → builder → Edge 的 pipeline。新增 `RawFrameworkRef` 型別（含 confidence + reason tag），各語言 `parser.rs` 用「core queries + framework queries」雙 .scm 合併載入 → 抽出 → builder 解析為 Edge with `confidence < 1.0`。CLI 加 `--high-trust-only` flag 讓下游選擇過濾。
 
-**Tech Stack:** tree-sitter 0.25 query syntax, Rust 2021, 既有 graph-nexus-core/graph-nexus-analyzer crate boundary。
+**Tech Stack:** tree-sitter 0.25 query syntax, Rust 2021, 既有 cgn-core/cgn-analyzer crate boundary。
 
 **Eval reference:** `docs/evals/2026-05-14-framework-aware-queries.md`。
 
@@ -15,30 +15,30 @@
 ## File Structure
 
 **Create:**
-- `crates/graph-nexus-analyzer/src/python/frameworks.scm` — Python 框架 query（FastAPI / Flask 子集）
-- `crates/graph-nexus-analyzer/src/rust/frameworks.scm` — Rust 框架 query（Axum / Actix）
-- `crates/graph-nexus-analyzer/src/typescript/frameworks.scm` — TS 框架 query（Express / NestJS）
-- `crates/graph-nexus-cli/tests/fixtures/fastapi_depends.py` — fixture
-- `crates/graph-nexus-cli/tests/fixtures/axum_router.rs` — fixture
-- `crates/graph-nexus-cli/tests/fixtures/express_app.ts` — fixture
-- `crates/graph-nexus-cli/tests/framework_aware.rs` — 整合測試
+- `crates/cgn-analyzer/src/python/frameworks.scm` — Python 框架 query（FastAPI / Flask 子集）
+- `crates/cgn-analyzer/src/rust/frameworks.scm` — Rust 框架 query（Axum / Actix）
+- `crates/cgn-analyzer/src/typescript/frameworks.scm` — TS 框架 query（Express / NestJS）
+- `crates/cgn-cli/tests/fixtures/fastapi_depends.py` — fixture
+- `crates/cgn-cli/tests/fixtures/axum_router.rs` — fixture
+- `crates/cgn-cli/tests/fixtures/express_app.ts` — fixture
+- `crates/cgn-cli/tests/framework_aware.rs` — 整合測試
 
 **Modify:**
-- `crates/graph-nexus-core/src/analyzer/types.rs` — 加 `RawFrameworkRef` + `LocalGraph.framework_refs`
-- `crates/graph-nexus-analyzer/src/python/parser.rs` — 合併 .scm + 處理 framework captures
-- `crates/graph-nexus-analyzer/src/rust/parser.rs` — 同上
-- `crates/graph-nexus-analyzer/src/typescript/parser.rs` — 同上
-- `crates/graph-nexus-analyzer/src/resolution/builder.rs` — Pass 2 解析 `framework_refs` → `Edge`
-- `crates/graph-nexus-cli/src/commands/detect_changes.rs` — 加 `--high-trust-only` flag
+- `crates/cgn-core/src/analyzer/types.rs` — 加 `RawFrameworkRef` + `LocalGraph.framework_refs`
+- `crates/cgn-analyzer/src/python/parser.rs` — 合併 .scm + 處理 framework captures
+- `crates/cgn-analyzer/src/rust/parser.rs` — 同上
+- `crates/cgn-analyzer/src/typescript/parser.rs` — 同上
+- `crates/cgn-analyzer/src/resolution/builder.rs` — Pass 2 解析 `framework_refs` → `Edge`
+- `crates/cgn-cli/src/commands/detect_changes.rs` — 加 `--high-trust-only` flag
 
 ---
 
 ### Task 1: Infra — `RawFrameworkRef` 型別 + builder pass
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/analyzer/types.rs`
-- Modify: `crates/graph-nexus-analyzer/src/resolution/builder.rs`
-- Test: `crates/graph-nexus-analyzer/src/resolution/builder.rs` (inline `#[cfg(test)]`)
+- Modify: `crates/cgn-core/src/analyzer/types.rs`
+- Modify: `crates/cgn-analyzer/src/resolution/builder.rs`
+- Test: `crates/cgn-analyzer/src/resolution/builder.rs` (inline `#[cfg(test)]`)
 
 **Steps:**
 
@@ -48,7 +48,7 @@
 #[test]
 fn framework_ref_produces_edge_with_confidence_and_reason() {
     use crate::analyzer::types::{LocalGraph, RawFrameworkRef, RawNode};
-    use graph_nexus_core::graph::NodeKind;
+    use cgn_core::graph::NodeKind;
     
     let mut g = LocalGraph {
         file_path: "test.py".into(),
@@ -79,9 +79,9 @@ fn framework_ref_produces_edge_with_confidence_and_reason() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p graph-nexus-analyzer framework_ref_produces_edge` — expect compile FAIL（`RawFrameworkRef` 不存在）。
+- [ ] **Step 2: Run** `cargo test -p cgn-analyzer framework_ref_produces_edge` — expect compile FAIL（`RawFrameworkRef` 不存在）。
 
-- [ ] **Step 3: Add `RawFrameworkRef` type** to `crates/graph-nexus-core/src/analyzer/types.rs`：
+- [ ] **Step 3: Add `RawFrameworkRef` type** to `crates/cgn-core/src/analyzer/types.rs`：
 
 ```rust
 #[derive(Debug, Clone)]
@@ -100,16 +100,16 @@ Add field to `LocalGraph`:
 pub framework_refs: Vec<RawFrameworkRef>,
 ```
 
-- [ ] **Step 4: Update all `LocalGraph` construction sites** to include `framework_refs: Vec::new()`. Use grep `LocalGraph {` across `crates/graph-nexus-analyzer/src/*/parser.rs`. Should be ~20 files; default empty.
+- [ ] **Step 4: Update all `LocalGraph` construction sites** to include `framework_refs: Vec::new()`. Use grep `LocalGraph {` across `crates/cgn-analyzer/src/*/parser.rs`. Should be ~20 files; default empty.
 
 - [ ] **Step 5: Add builder pass** in `builder.rs` build()，緊接 routes processing 之後，掃 `local.framework_refs`，target_name 走既有 same-file / import scoped 解析，emit `Edge { src, dst, rel_type: RelType::References, confidence: ref.confidence, reason: intern(&ref.reason) }`。
 
-- [ ] **Step 6: Run** test — expect PASS。Run 整個 `cargo test -p graph-nexus-analyzer` 確認沒退化。
+- [ ] **Step 6: Run** test — expect PASS。Run 整個 `cargo test -p cgn-analyzer` 確認沒退化。
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/analyzer/types.rs crates/graph-nexus-analyzer/src/resolution/builder.rs crates/graph-nexus-analyzer/src/*/parser.rs
+git add crates/cgn-core/src/analyzer/types.rs crates/cgn-analyzer/src/resolution/builder.rs crates/cgn-analyzer/src/*/parser.rs
 git commit -m "feat(core): add RawFrameworkRef type for confidence-weighted framework edges"
 ```
 
@@ -118,10 +118,10 @@ git commit -m "feat(core): add RawFrameworkRef type for confidence-weighted fram
 ### Task 2: Python — FastAPI `Depends()` + `@app.<method>()`
 
 **Files:**
-- Create: `crates/graph-nexus-analyzer/src/python/frameworks.scm`
-- Modify: `crates/graph-nexus-analyzer/src/python/parser.rs`
-- Create: `crates/graph-nexus-cli/tests/fixtures/fastapi_depends.py`
-- Create or extend test in `crates/graph-nexus-cli/tests/framework_aware.rs`
+- Create: `crates/cgn-analyzer/src/python/frameworks.scm`
+- Modify: `crates/cgn-analyzer/src/python/parser.rs`
+- Create: `crates/cgn-cli/tests/fixtures/fastapi_depends.py`
+- Create or extend test in `crates/cgn-cli/tests/framework_aware.rs`
 
 **Depends on:** Task 1.
 
@@ -151,7 +151,7 @@ def read_user(id: int, user = Depends(get_current_user)):
 #[test]
 fn fastapi_depends_creates_low_confidence_reference() {
     let src = include_str!("fixtures/fastapi_depends.py");
-    let provider = graph_nexus_analyzer::python::PythonProvider::new().unwrap();
+    let provider = cgn_analyzer::python::PythonProvider::new().unwrap();
     let local = provider.parse_file("test.py".as_ref(), src.as_bytes()).unwrap();
     
     // Expect 2 framework_refs:
@@ -211,7 +211,7 @@ let query = Query::new(&language, &query_source)?;
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/graph-nexus-analyzer/src/python/frameworks.scm crates/graph-nexus-analyzer/src/python/parser.rs crates/graph-nexus-cli/tests/fixtures/fastapi_depends.py crates/graph-nexus-cli/tests/framework_aware.rs
+git add crates/cgn-analyzer/src/python/frameworks.scm crates/cgn-analyzer/src/python/parser.rs crates/cgn-cli/tests/fixtures/fastapi_depends.py crates/cgn-cli/tests/framework_aware.rs
 git commit -m "feat(python): emit framework refs for FastAPI Depends() and route decorators"
 ```
 
@@ -220,10 +220,10 @@ git commit -m "feat(python): emit framework refs for FastAPI Depends() and route
 ### Task 3: Rust — Axum `Router::route` + Actix `#[get]`
 
 **Files:**
-- Create: `crates/graph-nexus-analyzer/src/rust/frameworks.scm`
-- Modify: `crates/graph-nexus-analyzer/src/rust/parser.rs`
-- Create: `crates/graph-nexus-cli/tests/fixtures/axum_router.rs.txt` (avoid Cargo picking it up — `.txt` extension; `include_str!` 處用相對路徑)
-- Extend: `crates/graph-nexus-cli/tests/framework_aware.rs`
+- Create: `crates/cgn-analyzer/src/rust/frameworks.scm`
+- Modify: `crates/cgn-analyzer/src/rust/parser.rs`
+- Create: `crates/cgn-cli/tests/fixtures/axum_router.rs.txt` (avoid Cargo picking it up — `.txt` extension; `include_str!` 處用相對路徑)
+- Extend: `crates/cgn-cli/tests/framework_aware.rs`
 
 **Depends on:** Task 1.
 
@@ -275,10 +275,10 @@ git commit -m "feat(rust): emit framework refs for Axum Router::route handlers"
 ### Task 4: TypeScript — Express `app.<method>` + NestJS `@Controller/@Get`
 
 **Files:**
-- Create: `crates/graph-nexus-analyzer/src/typescript/frameworks.scm`
-- Modify: `crates/graph-nexus-analyzer/src/typescript/parser.rs`
-- Create: `crates/graph-nexus-cli/tests/fixtures/express_app.ts`
-- Extend: `crates/graph-nexus-cli/tests/framework_aware.rs`
+- Create: `crates/cgn-analyzer/src/typescript/frameworks.scm`
+- Modify: `crates/cgn-analyzer/src/typescript/parser.rs`
+- Create: `crates/cgn-cli/tests/fixtures/express_app.ts`
+- Extend: `crates/cgn-cli/tests/framework_aware.rs`
 
 **Depends on:** Task 1.
 
@@ -313,9 +313,9 @@ git commit -m "feat(typescript): emit framework refs for Express route handlers"
 ### Task 5: CLI — `--high-trust-only` flag + integration test
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/detect_changes.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/impact.rs`
-- Extend: `crates/graph-nexus-cli/tests/framework_aware.rs`
+- Modify: `crates/cgn-cli/src/commands/detect_changes.rs`
+- Modify: `crates/cgn-cli/src/commands/impact.rs`
+- Extend: `crates/cgn-cli/tests/framework_aware.rs`
 
 **Depends on:** Task 2 (至少一個 lang 有 framework edges，才測得到 filter)。
 

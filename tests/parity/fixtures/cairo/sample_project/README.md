@@ -1,6 +1,6 @@
 # Cairo Sample Project
 
-Minimal Cairo 1.0 fixture for graph-nexus-analyzer parser verification.
+Minimal Cairo 1.0 fixture for cgn-analyzer parser verification.
 
 ## Symbols expected
 
@@ -15,5 +15,5 @@ Minimal Cairo 1.0 fixture for graph-nexus-analyzer parser verification.
 ## Query to verify
 
 ```
-graph-nexus-cli context --repo tests/parity/fixtures/cairo/sample_project --name create_token
+cgn-cli context --repo tests/parity/fixtures/cairo/sample_project --name create_token
 ```

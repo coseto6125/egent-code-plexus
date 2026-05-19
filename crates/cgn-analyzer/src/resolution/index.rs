@@ -602,7 +602,7 @@ mod tests {
     fn file_meta_detects_vendor_segment() {
         assert!(FileMeta::from_path("crates/vendor/tree-sitter-move/x.move").is_vendor);
         assert!(FileMeta::from_path("vendor/x.move").is_vendor);
-        assert!(!FileMeta::from_path("crates/graph-nexus-analyzer/src/x.rs").is_vendor);
+        assert!(!FileMeta::from_path("crates/cgn-analyzer/src/x.rs").is_vendor);
         assert!(!FileMeta::from_path("src/vendored_helper.rs").is_vendor);
     }
 }

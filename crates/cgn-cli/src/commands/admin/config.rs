@@ -617,7 +617,7 @@ mod snapshot_tests {
     use super::*;
 
     /// Render one frame at 100×42 and print it. Run with:
-    ///     cargo test -p graph-nexus --lib config::snapshot_tests -- --nocapture
+    ///     cargo test -p code-graph-nexus --lib config::snapshot_tests -- --nocapture
     #[test]
     fn print_snapshot() {
         let out = snapshot_ansi(100, 42, PathBuf::from("."), 0, 30);

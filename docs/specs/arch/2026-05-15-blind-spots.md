@@ -29,7 +29,7 @@
 ### 2.1 Type
 
 ```rust
-// graph-nexus-core/src/analyzer/types.rs
+// cgn-core/src/analyzer/types.rs
 #[derive(Debug, Clone)]
 pub struct BlindSpot {
     /// 偵測到的模式 kind，例如 "eval", "importlib-dynamic-import", "cross-object-getattr".
@@ -77,14 +77,14 @@ LLM-friendly 句型：
 ```
 "eval(<arg>) — runtime Python code execution; called function is not statically determinable"
 "importlib.import_module(<arg>) — dynamic module loading; imported module name depends on runtime value"
-"getattr(<obj>, name)() with obj != self — cross-object reflection; target class not enumerated by gnx Phase 2"
+"getattr(<obj>, name)() with obj != self — cross-object reflection; target class not enumerated by cgn Phase 2"
 ```
 
 ---
 
 ## 4. CLI 整合
 
-### 4.1 `gnx admin index` summary
+### 4.1 `cgn admin index` summary
 
 跑完 index 印出 footer：
 
@@ -99,7 +99,7 @@ Blind spots detected: 7 across 3 files
   ...
 ```
 
-### 4.2 `gnx inspect X`
+### 4.2 `cgn inspect X`
 
 對 X 所在 file 的 blind_spots 加 `blind_spots[]` section in output：
 
@@ -111,7 +111,7 @@ blind_spots[2]{kind,line,hint}:
   python-dynamic-import,18,"importlib.import_module(...) — dynamic module loading"
 ```
 
-### 4.3 `gnx impact --since HEAD~1`
+### 4.3 `cgn impact --since HEAD~1`
 
 加 `coverage.blind_spots_in_changed_files: N` 欄位，hint LLM「這些改動影響了 N 個 blind spot 站點，建議手動確認」。
 
@@ -140,7 +140,7 @@ blind_spots[2]{kind,line,hint}:
 ## 6. 實作步驟
 
 ### Task A — types + builder pass through
-- `BlindSpot` struct in `graph-nexus-core/src/analyzer/types.rs`
+- `BlindSpot` struct in `cgn-core/src/analyzer/types.rs`
 - `LocalGraph.blind_spots`
 - 修補所有 LocalGraph 建構點 `blind_spots: Vec::new()`
 - `ZeroCopyGraph` 加 archived 對應
@@ -164,7 +164,7 @@ blind_spots[2]{kind,line,hint}:
 **fan-out (Phase 2)：** 反射可列舉部分 → confidence-weighted edges
 **blind_spots (this)：** 反射不可列舉部分 → 明確標記位置 + kind + hint
 
-LLM 拿到 gnx 回應後，邏輯變成：
+LLM 拿到 cgn 回應後，邏輯變成：
 
 ```
 1. 高信心 edges (>0.8) → 確定影響

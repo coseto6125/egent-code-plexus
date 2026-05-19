@@ -36,7 +36,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
-  BIN_NAME: gnx
+  BIN_NAME: cgn
 
 jobs:
   # ==================== ARM64 Binary Builds ====================
@@ -149,5 +149,5 @@ jobs:
             Pick a `.tar.gz` matching your platform from Assets below.
             Each has a `.sha256` for integrity. Verify build provenance with:
             ```
-            gh attestation verify ./gnx --owner coseto6125
+            gh attestation verify ./cgn --owner coseto6125
             ```

@@ -15,7 +15,7 @@ pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord, BUILDER_FINGE
 pub use dirname::{CommitDirName, ParseError as DirNameParseError, SourceType};
 pub use io::{atomic_write_bytes, atomic_write_bytes_no_fsync, atomic_write_json};
 /// Internal implementation detail. Not part of public API.
-/// Use only within graph-nexus-core or in tests.
+/// Use only within cgn-core or in tests.
 #[doc(hidden)]
 pub use lock::FileLock;
 pub use path::{derive_repo_name, resolve_home_cgn, sanitize_segment, uid_path, PathError};

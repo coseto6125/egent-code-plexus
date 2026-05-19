@@ -1,8 +1,8 @@
 # Wave 1 Language Baseline Stats
 
 Captured: 2026-05-14  
-gnx binary: `target/debug/gnx` (dev profile)  
-Command: `gnx admin index --repo .sample_repo/<lang>`
+cgn binary: `target/debug/cgn` (dev profile)  
+Command: `cgn admin index --repo .sample_repo/<lang>`
 
 ## Baseline Results
 
@@ -25,8 +25,8 @@ Only `readme.md` from the http.zig repo was scanned (1 file, 0 Zig-specific node
 The `admin index` command exited 0, but no Zig symbols were extracted.
 
 **Fix required:** Add `"zig"` to the extension match in
-`crates/graph-nexus-cli/src/commands/admin/index.rs` and implement a `ZigProvider` in
-`crates/graph-nexus-analyzer/src/zig/`.
+`crates/cgn-cli/src/commands/admin/index.rs` and implement a `ZigProvider` in
+`crates/cgn-analyzer/src/zig/`.
 
 ### move — sparse checkout
 

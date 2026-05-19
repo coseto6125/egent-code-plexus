@@ -502,7 +502,7 @@ fn split_qualifier(name: &str) -> Option<(&str, &str)> {
 }
 
 /// Extensions probed during L0 candidate enumeration (covers every
-/// language whose parser is wired into graph-nexus-analyzer).
+/// language whose parser is wired into cgn-analyzer).
 const EXT_CANDIDATES: &[&str] = &[
     ".ts", ".tsx", ".jsx", ".js", ".mjs", ".cjs", ".py", ".pyi", ".rs", ".go", ".java", ".kt",
     ".rb", ".php", ".cs", ".swift", ".dart", ".sol", ".sql",
@@ -1053,7 +1053,7 @@ mod tests {
         )]);
         let r = Resolver::new(&st);
         let out = r.resolve_symbol(
-            &PathBuf::from("crates/graph-nexus-cli/src/main.rs"),
+            &PathBuf::from("crates/cgn-cli/src/main.rs"),
             "uniquely_named_helper",
             &[],
             ResolveTarget::Callable,

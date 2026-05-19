@@ -25,7 +25,7 @@ was dismissed — so a future audit doesn't repeat the investigation.
 | cross-cutting | builder.rs `panic!("unexpected tier")` | HIGH (80) | **Verified test-only** — `c93d2f2`, tightened to exhaustive match so a new variant surfaces as compile error |
 | cross-cutting | builder.rs `expect("utf-8")` on `string_pool` | HIGH (80) | **Verified test-only** — production path uses checked conversion |
 | cross-cutting | embedder lock permanently poisoned after panic | HIGH (80) | **Fixed** — `54774c2`, `into_inner()` recovery |
-| cross-cutting | No file size cap → OOM on rogue inputs | MEDIUM (90) | **Fixed** — `6f4012d`, `GNX_MAX_FILE_BYTES` (default 16 MiB) |
+| cross-cutting | No file size cap → OOM on rogue inputs | MEDIUM (90) | **Fixed** — `6f4012d`, `CGN_MAX_FILE_BYTES` (default 16 MiB) |
 | cross-cutting | Embedding 1.2 GiB transient RAM at init | MEDIUM (85) | **POC: no win without upstream change** — `54774c2`, documented in code; fastembed's `UserDefinedEmbeddingModel::new` takes `Vec<u8>` by value, ORT has `commit_from_file(path)` but fastembed never surfaces it. Bypassing fastembed = 200+ LOC rewrite for no steady-state win. |
 | cross-cutting | `row as u32` truncation (>4M lines) | LOW (75) | **Fixed** — `c93d2f2`, `calls::safe_row` saturating helper |
 
@@ -43,9 +43,9 @@ was dismissed — so a future audit doesn't repeat the investigation.
 
 | Var | Default | Effect |
 |---|---|---|
-| `GNX_MAX_FILE_BYTES` | 16 MiB | Skip source files exceeding this size during pipeline ingest (caps worst-case worker RAM at `num_threads × MAX`) |
-| `GNX_CSPROJ_MAX_DEPTH` | 4 | Directory recursion depth for `*.csproj` discovery (`.NET` monorepos commonly nest 3) |
-| `GNX_EMBED_BATCH` | 32 | fastembed inference batch (already existed; documented for completeness) |
+| `CGN_MAX_FILE_BYTES` | 16 MiB | Skip source files exceeding this size during pipeline ingest (caps worst-case worker RAM at `num_threads × MAX`) |
+| `CGN_CSPROJ_MAX_DEPTH` | 4 | Directory recursion depth for `*.csproj` discovery (`.NET` monorepos commonly nest 3) |
+| `CGN_EMBED_BATCH` | 32 | fastembed inference batch (already existed; documented for completeness) |
 
 ## TDD discipline applied
 

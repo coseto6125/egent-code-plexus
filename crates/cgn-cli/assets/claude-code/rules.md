@@ -1,7 +1,7 @@
-gnx index: {{stats.nodes}} symbols, {{stats.edges}} rels at HEAD {{head}}.
-Use `gnx inspect <name>` for symbol context, `gnx find <name>` for
+cgn index: {{stats.nodes}} symbols, {{stats.edges}} rels at HEAD {{head}}.
+Use `cgn inspect <name>` for symbol context, `cgn find <name>` for
 exact-name definition lookup (add `--mode fuzzy` for substring or
-`--mode bm25` for BM25 ranking), `gnx impact <name>` for blast radius.
+`--mode bm25` for BM25 ranking), `cgn impact <name>` for blast radius.
 {{#if graphify}}
 graphify-out/ available — use that for narrative architecture context.
 {{/if}}

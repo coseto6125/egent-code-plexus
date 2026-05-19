@@ -5,16 +5,16 @@
 **Goal**: 描述如何讓 Ruby parser/resolver 能可靠識別 `def_delegator` / `def_delegators` / `delegate` 等 metaprogramming 呼叫，補上 PR [#13](https://github.com/coseto6125/gitnexus-rs/pull/13)（Ruby Named binding）刻意延後的最後一塊——「需要 receiver type 才能判斷的 method-creating call」。
 
 **Status update (post-implementation, 2026-05-16)**：PR #13 後續三個 commit 已完整 ship Option B + Option-A fallback + **Option C resolver tier**：
-- `crates/graph-nexus-analyzer/src/ruby/{parser.rs, queries.scm}` 加入 `def_delegator` / `def_delegators` / `delegate` 三個 metaprogramming 呼叫的識別。除了 RawImport alias 之外，**也同步 materialise 一個 `NodeKind::Method` RawNode** 到 enclosing class — 這是讓跨檔 heritage chain 能找到 delegated method 的關鍵。
-- `crates/graph-nexus-analyzer/src/resolution/heuristics.rs` + `resolver.rs` 新增 **Tier 2.75 `HeritageScoped`**（confidence 0.80，介於 QualifierScoped 0.85 與 Global 0.7）：bare-name callee 在 Tier 1/2/2.5 都 miss 時，把 caller 的 enclosing-class heritage 視為 implicit qualifier，逐一用 `resolve_qualifier_file` 找 parent 檔，再 `lookup_in_file` 找 method。
-- `crates/graph-nexus-analyzer/src/resolution/builder.rs` 新增 `enclosing_class_heritage` helper：對每個 method-level RawNode 找最小 span 包住它的 Class（NodeKind::Class，Ruby module 也是 Class kind）並回傳 heritage 列；Pass-2 call-edge emission 改用新增的 `resolve_symbol_with_heritage` 把 heritage 傳進去。
-- `crates/graph-nexus-cli/tests/ruby_cross_file_mixin.rs` **flipped** — 原 pin 住「跨檔 mixin 不傳遞」的測試現在反向驗證「`bar.rb` 內的 `read` callsite 透過 Bar.heritage=[Foo] 走 Tier 2.75 解到 `lib/foo.rb` 內的 delegated Method」。
+- `crates/cgn-analyzer/src/ruby/{parser.rs, queries.scm}` 加入 `def_delegator` / `def_delegators` / `delegate` 三個 metaprogramming 呼叫的識別。除了 RawImport alias 之外，**也同步 materialise 一個 `NodeKind::Method` RawNode** 到 enclosing class — 這是讓跨檔 heritage chain 能找到 delegated method 的關鍵。
+- `crates/cgn-analyzer/src/resolution/heuristics.rs` + `resolver.rs` 新增 **Tier 2.75 `HeritageScoped`**（confidence 0.80，介於 QualifierScoped 0.85 與 Global 0.7）：bare-name callee 在 Tier 1/2/2.5 都 miss 時，把 caller 的 enclosing-class heritage 視為 implicit qualifier，逐一用 `resolve_qualifier_file` 找 parent 檔，再 `lookup_in_file` 找 method。
+- `crates/cgn-analyzer/src/resolution/builder.rs` 新增 `enclosing_class_heritage` helper：對每個 method-level RawNode 找最小 span 包住它的 Class（NodeKind::Class，Ruby module 也是 Class kind）並回傳 heritage 列；Pass-2 call-edge emission 改用新增的 `resolve_symbol_with_heritage` 把 heritage 傳進去。
+- `crates/cgn-cli/tests/ruby_cross_file_mixin.rs` **flipped** — 原 pin 住「跨檔 mixin 不傳遞」的測試現在反向驗證「`bar.rb` 內的 `read` callsite 透過 Bar.heritage=[Foo] 走 Tier 2.75 解到 `lib/foo.rb` 內的 delegated Method」。
 - 全 workspace 817 tests 全綠（cross-language regression-free），clippy `-D warnings` clean。
 
 **Related**:
 - [[named-binding-ruby]] — PR #13，已加入 `alias` keyword / `alias_method` / 常數別名三類靜態可解析的 named binding。
 - [[matrix-optimization-opportunities]] §A1 Ruby（`attr_*` properties + `include`/`extend` mixin tracking，HEAD `80b77f8`）。
-- `crates/graph-nexus-analyzer/src/ruby/{parser.rs, queries.scm, receiver_types.rs}`。
+- `crates/cgn-analyzer/src/ruby/{parser.rs, queries.scm, receiver_types.rs}`。
 
 ---
 
@@ -104,7 +104,7 @@ end
 
 **Pros**：
 - 對單檔場景精準度顯著優於 A——使用者自定義 `def_delegator` 不會誤殺（因為 host class 沒 `extend Forwardable`）。
-- 不需要動 resolver / graph builder，全部在 `crates/graph-nexus-analyzer/src/ruby/` 內完成。
+- 不需要動 resolver / graph builder，全部在 `crates/cgn-analyzer/src/ruby/` 內完成。
 - 跟既有 mixin pipeline 共用資料結構，沒有 cross-crate 變動。
 
 **Cons**：
@@ -114,7 +114,7 @@ end
 
 ### Option C — Receiver-aware resolver tier（在 resolver pass 做）
 
-把判斷推到 `crates/graph-nexus-resolver/`（或 builder.rs），讓 resolver 在 graph 已建好、所有 `Heritage` / `Mixin` edge 都在的情況下，回頭重訪每個 `call`、查 receiver 的 mixin closure、決定要不要 emit 額外的 method/delegate edge。
+把判斷推到 `crates/code-graph-nexus-resolver/`（或 builder.rs），讓 resolver 在 graph 已建好、所有 `Heritage` / `Mixin` edge 都在的情況下，回頭重訪每個 `call`、查 receiver 的 mixin closure、決定要不要 emit 額外的 method/delegate edge。
 
 **Pros**：
 - 唯一能正確處理跨檔案 / 跨 gem mixin closure 的選項。
@@ -151,12 +151,12 @@ end
 - Tests：`tests/ruby_metaprogramming.rs` 增加 8-10 case，覆蓋四種 in-scope pattern + case (4) negative + 詞法順序 edge case。
 - 預估總 PR diff < 400 LOC。
 
-### Impact radius（gnx impact 預估）
+### Impact radius（cgn impact 預估）
 
-- `crates/graph-nexus-analyzer/src/ruby/parser.rs` — 唯一主要改動點，新增 method-creating call 識別。
-- `crates/graph-nexus-analyzer/src/ruby/queries.scm` — 新增 capture。
-- `crates/graph-nexus-analyzer/src/ruby/receiver_types.rs` — 可能小幅 refactor 把 `ClassContext` 抽到 `mod.rs` 共用。
-- `crates/graph-nexus-analyzer/tests/ruby_metaprogramming.rs` — 增測。
+- `crates/cgn-analyzer/src/ruby/parser.rs` — 唯一主要改動點，新增 method-creating call 識別。
+- `crates/cgn-analyzer/src/ruby/queries.scm` — 新增 capture。
+- `crates/cgn-analyzer/src/ruby/receiver_types.rs` — 可能小幅 refactor 把 `ClassContext` 抽到 `mod.rs` 共用。
+- `crates/cgn-analyzer/tests/ruby_metaprogramming.rs` — 增測。
 
 不動 resolver / builder / graph schema。
 

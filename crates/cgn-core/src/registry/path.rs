@@ -68,7 +68,7 @@ pub fn uid_path(absolute: &Path, repo_root: &Path) -> Result<String, PathError> 
 /// Resolve the cgn home directory used for `registry.json` and per-branch
 /// index dirs. Tries `$HOME/.cgn` first; if HOME is unset or the directory
 /// cannot be created and written to (read-only FS, permission denied, CI
-/// sandbox), falls back to `<temp_dir>/graph-nexus-fallback/.cgn`.
+/// sandbox), falls back to `<temp_dir>/cgn-fallback/.cgn`.
 ///
 /// Reads and writes within a single CLI invocation use the same resolved
 /// path: a project indexed in fallback mode is queryable from the same
@@ -112,7 +112,7 @@ fn resolve_home_cgn_from_env(home: Option<std::ffi::OsString>) -> PathBuf {
 
 fn fallback_home() -> PathBuf {
     std::env::temp_dir()
-        .join("graph-nexus-fallback")
+        .join("cgn-fallback")
         .join(".cgn")
 }
 

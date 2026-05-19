@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Audit the gnx parallel emit surface — Rayon pass2, Registry concurrent writes, StringPool intern, hook flock spawn — and pin invariants via equivalence tests + TSan before downstream parity sub-projects add ~10 new edge emit sites.
+**Goal:** Audit the cgn parallel emit surface — Rayon pass2, Registry concurrent writes, StringPool intern, hook flock spawn — and pin invariants via equivalence tests + TSan before downstream parity sub-projects add ~10 new edge emit sites.
 
 **Architecture:** Test-driven equivalence (lane B, primary) augmented with TSan (lane C) and bounded inspection (lane A) for inventory only. Each parallel hot path gets a `*_parallel_serial_identical` test asserting bit-for-bit identical output regardless of thread count. Findings — including any in-tree race, deferred perf observations, and bugs needing fix — written to a single companion doc that gets closed out before Sub-project 1 starts.
 
@@ -22,10 +22,10 @@
 
 | Path | Responsibility |
 |------|----------------|
-| `crates/graph-nexus-core/tests/concurrency_string_pool_intern.rs` | Test 4.4 — StringPool concurrent intern dedup |
-| `crates/graph-nexus-core/tests/concurrency_registry_writers.rs` | Test 4.3 — Registry concurrent process writers converge |
-| `crates/graph-nexus-analyzer/tests/concurrency_graph_builder_order.rs` | Test 4.2 — `GraphBuilder` ingest-order independence (canonical projection hash) |
-| `crates/graph-nexus-cli/tests/concurrency_hook_flock.rs` | Test 4.5 — Hook flock serialises concurrent spawns |
+| `crates/cgn-core/tests/concurrency_string_pool_intern.rs` | Test 4.4 — StringPool concurrent intern dedup |
+| `crates/cgn-core/tests/concurrency_registry_writers.rs` | Test 4.3 — Registry concurrent process writers converge |
+| `crates/cgn-analyzer/tests/concurrency_graph_builder_order.rs` | Test 4.2 — `GraphBuilder` ingest-order independence (canonical projection hash) |
+| `crates/cgn-cli/tests/concurrency_hook_flock.rs` | Test 4.5 — Hook flock serialises concurrent spawns |
 | `scripts/audit-concurrency.sh` | One-shot audit runner: equivalence tests + TSan + suppressions diff |
 | `tsan-suppressions.txt` (repo root) | Filter third-party noise from TSan; in-tree races NEVER suppressed |
 | `docs/superpowers/specs/2026-05-16-concurrency-audit-findings.md` | Inventory tables (§3), test results (§4), TSan output (§5), perf findings (§6), bugs-found list |
@@ -34,16 +34,16 @@
 
 | Path | Change |
 |------|--------|
-| `crates/graph-nexus-analyzer/src/resolution/builder.rs:1819` | Extend `pass2_parallel_and_serial_emit_identical_edges` — assert per-RelType stratification + include `reason` in equality predicate. Expand fixture to trigger all 12 emit branches |
+| `crates/cgn-analyzer/src/resolution/builder.rs:1819` | Extend `pass2_parallel_and_serial_emit_identical_edges` — assert per-RelType stratification + include `reason` in equality predicate. Expand fixture to trigger all 12 emit branches |
 | `README.md` | New section `## Concurrency invariants` listing the 5 frozen invariants |
 
 **Read-only context (no edits unless bug found):**
 
-- `crates/graph-nexus-core/src/pool.rs` — StringPool API
-- `crates/graph-nexus-core/src/registry/{mod,lock,store,io}.rs` — Registry + FileLock
-- `crates/graph-nexus-cli/src/background.rs` — `spawn_bg` + flock shell template
-- `crates/graph-nexus-analyzer/src/resolution/builder.rs:620-800` — pass2 parallel path
-- `crates/graph-nexus-analyzer/src/resolution/resolver.rs` — `RefCell` decisions, parallel safety
+- `crates/cgn-core/src/pool.rs` — StringPool API
+- `crates/cgn-core/src/registry/{mod,lock,store,io}.rs` — Registry + FileLock
+- `crates/cgn-cli/src/background.rs` — `spawn_bg` + flock shell template
+- `crates/cgn-analyzer/src/resolution/builder.rs:620-800` — pass2 parallel path
+- `crates/cgn-analyzer/src/resolution/resolver.rs` — `RefCell` decisions, parallel safety
 
 ---
 
@@ -114,28 +114,28 @@ Run each command and save to a tmp file (we'll categorize in Task 2):
 ```bash
 mkdir -p /tmp/audit-raw
 grep -rn "par_iter\|into_par_iter\|par_bridge\|par_chunks\|par_extend" \
-  crates/graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
+  crates/code-graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
   > /tmp/audit-raw/3.1-rayon.txt
 
 grep -rn "RefCell\|UnsafeCell\|Cell<" \
-  crates/graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
+  crates/code-graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
   | grep -v "//.*RefCell\|//.*Cell<\|//.*UnsafeCell" \
   > /tmp/audit-raw/3.2-interior-mut.txt
 
 grep -rnE "unsafe[[:space:]]*\{|unsafe[[:space:]]+fn|unsafe[[:space:]]+impl" \
-  crates/graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
+  crates/code-graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
   > /tmp/audit-raw/3.3-unsafe.txt
 
 grep -rnE "Arc<Mutex|Arc<RwLock|Mutex::new|RwLock::new|AtomicU|AtomicI|AtomicBool|AtomicUsize|AtomicPtr|parking_lot|dashmap" \
-  crates/graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
+  crates/code-graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
   > /tmp/audit-raw/3.4-shared-mutex.txt
 
 grep -rnE "flock|fs2::|fd_lock|FileExt::lock|FileLock" \
-  crates/graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
+  crates/code-graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
   > /tmp/audit-raw/3.5-file-locks.txt
 
 grep -rnE "Command::new|Command::spawn|std::thread::spawn|thread::Builder|tokio::spawn|rayon::spawn" \
-  crates/graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
+  crates/code-graph-nexus-{core,analyzer,cli}/src --include="*.rs" \
   > /tmp/audit-raw/3.6-spawn.txt
 
 wc -l /tmp/audit-raw/*.txt
@@ -199,7 +199,7 @@ Goal: existing test at `builder.rs:1819` only asserts on `(source, target, RelTy
 ### Task 3: Read current test + identify rel_type coverage gaps
 
 **Files:**
-- Read: `crates/graph-nexus-analyzer/src/resolution/builder.rs:1819-2010`
+- Read: `crates/cgn-analyzer/src/resolution/builder.rs:1819-2010`
 
 - [ ] **Step 1: Read the existing fixture and trace which RelType branches it triggers**
 
@@ -227,19 +227,19 @@ Append to `docs/superpowers/specs/2026-05-16-concurrency-audit-findings.md` unde
 ### Task 4: Write the extended failing test
 
 **Files:**
-- Modify: `crates/graph-nexus-analyzer/src/resolution/builder.rs` — extend test starting at line 1819
+- Modify: `crates/cgn-analyzer/src/resolution/builder.rs` — extend test starting at line 1819
 
 - [ ] **Step 1: Rename existing test and gut it to expanded fixture**
 
-Replace the test starting at `crates/graph-nexus-analyzer/src/resolution/builder.rs:1819` with this version. Keep the surrounding `#[cfg(test)]` mod intact.
+Replace the test starting at `crates/cgn-analyzer/src/resolution/builder.rs:1819` with this version. Keep the surrounding `#[cfg(test)]` mod intact.
 
 ```rust
     #[test]
     fn pass2_parallel_serial_identical_per_reltype() {
-        use graph_nexus_core::analyzer::types::{
+        use cgn_core::analyzer::types::{
             RawDocument, RawFanoutRef, RawFrameworkRef, RawRoute,
         };
-        use graph_nexus_core::graph::RelType;
+        use cgn_core::graph::RelType;
         use std::collections::BTreeMap;
 
         // Fixture expanded so every emit branch in builder.rs is exercised.
@@ -369,7 +369,7 @@ Replace the test starting at `crates/graph-nexus-analyzer/src/resolution/builder
         // Group edges by RelType so per-branch divergence is localised.
         // Each bucket is a BTreeSet of (source, target, resolved_reason) so
         // the assert message identifies WHICH rel_type diverged.
-        fn bucketize(g: &graph_nexus_core::graph::ZeroCopyGraph)
+        fn bucketize(g: &cgn_core::graph::ZeroCopyGraph)
             -> BTreeMap<String, std::collections::BTreeSet<(u32, u32, String)>> {
             let mut buckets: BTreeMap<String, std::collections::BTreeSet<(u32, u32, String)>> =
                 BTreeMap::new();
@@ -430,14 +430,14 @@ Replace the test starting at `crates/graph-nexus-analyzer/src/resolution/builder
 - [ ] **Step 2: Run test under default thread count to verify it builds and surfaces divergence (if any)**
 
 ```bash
-cargo test -p graph-nexus-analyzer \
+cargo test -p cgn-analyzer \
   --test-name builder \
   pass2_parallel_serial_identical_per_reltype -- --nocapture
 ```
 
 If `cargo test --test-name` syntax not supported, use:
 ```bash
-cargo test -p graph-nexus-analyzer pass2_parallel_serial_identical_per_reltype -- --nocapture
+cargo test -p cgn-analyzer pass2_parallel_serial_identical_per_reltype -- --nocapture
 ```
 
 Expected outcomes:
@@ -448,11 +448,11 @@ Expected outcomes:
 - [ ] **Step 3: Run with `--test-threads=1` and `--test-threads=$(nproc)`**
 
 ```bash
-cargo test -p graph-nexus-analyzer pass2_parallel_serial_identical_per_reltype \
+cargo test -p cgn-analyzer pass2_parallel_serial_identical_per_reltype \
   -- --test-threads=1 --nocapture
 
 NPROC=$(nproc)
-cargo test -p graph-nexus-analyzer pass2_parallel_serial_identical_per_reltype \
+cargo test -p cgn-analyzer pass2_parallel_serial_identical_per_reltype \
   -- --test-threads="$NPROC" --nocapture
 ```
 
@@ -461,7 +461,7 @@ Both MUST pass. If divergence appears only at high thread count, that's a real r
 - [ ] **Step 4: Commit the extended test (if it passes; otherwise commit the new-failing test as TDD-red and proceed to Task 5)**
 
 ```bash
-git add crates/graph-nexus-analyzer/src/resolution/builder.rs
+git add crates/cgn-analyzer/src/resolution/builder.rs
 git add docs/superpowers/specs/2026-05-16-concurrency-audit-findings.md
 git commit -m "audit(concurrency): extend pass2 test — per-RelType stratification + reason equality
 
@@ -516,7 +516,7 @@ Goal: prove that `StringPool` either (a) panics / cannot compile under concurren
 ### Task 6: Read StringPool and design the test
 
 **Files:**
-- Read: `crates/graph-nexus-core/src/pool.rs`
+- Read: `crates/cgn-core/src/pool.rs`
 
 - [ ] **Step 1: Confirm `add()` signature is `&mut self`**
 
@@ -534,7 +534,7 @@ This pins the pattern: "if you share a StringPool across threads, you MUST mutex
 ### Task 7: Write the failing test
 
 **Files:**
-- Create: `crates/graph-nexus-core/tests/concurrency_string_pool_intern.rs`
+- Create: `crates/cgn-core/tests/concurrency_string_pool_intern.rs`
 
 - [ ] **Step 1: Write the test file**
 
@@ -546,7 +546,7 @@ This pins the pattern: "if you share a StringPool across threads, you MUST mutex
 //! anywhere a pool is shared across threads, it MUST be wrapped in
 //! `Mutex`/`RwLock`, and the wrap MUST preserve dedup.
 
-use graph_nexus_core::pool::StringPool;
+use cgn_core::pool::StringPool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -615,9 +615,9 @@ fn string_pool_mutex_wrapped_concurrent_dedupe() {
 - [ ] **Step 2: Run the test under default + N-thread modes**
 
 ```bash
-cargo test -p graph-nexus-core --test concurrency_string_pool_intern -- --nocapture
-cargo test -p graph-nexus-core --test concurrency_string_pool_intern -- --test-threads=1 --nocapture
-cargo test -p graph-nexus-core --test concurrency_string_pool_intern -- --test-threads="$(nproc)" --nocapture
+cargo test -p cgn-core --test concurrency_string_pool_intern -- --nocapture
+cargo test -p cgn-core --test concurrency_string_pool_intern -- --test-threads=1 --nocapture
+cargo test -p cgn-core --test concurrency_string_pool_intern -- --test-threads="$(nproc)" --nocapture
 ```
 
 Expected: PASS on all runs. If `string_pool_mutex_wrapped_concurrent_dedupe` fails, that's a real bug in `StringPool::add` (the `index.get` + `index.insert` sequence must produce the same StrRef under contention; if not, the dedup invariant is broken even with a Mutex).
@@ -640,7 +640,7 @@ Expected: PASS on all runs. If `string_pool_mutex_wrapped_concurrent_dedupe` fai
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/graph-nexus-core/tests/concurrency_string_pool_intern.rs
+git add crates/cgn-core/tests/concurrency_string_pool_intern.rs
 git add docs/superpowers/specs/2026-05-16-concurrency-audit-findings.md
 git commit -m "audit(concurrency): pin StringPool intern invariant (Test 4.4)
 
@@ -656,7 +656,7 @@ Goal: identical canonical projection (sorted nodes/edges/strings → BLAKE3 hash
 ### Task 8: Add blake3 dev-dependency
 
 **Files:**
-- Modify: `crates/graph-nexus-analyzer/Cargo.toml`
+- Modify: `crates/cgn-analyzer/Cargo.toml`
 
 - [ ] **Step 1: Check if blake3 is already a dev-dep anywhere**
 
@@ -664,9 +664,9 @@ Goal: identical canonical projection (sorted nodes/edges/strings → BLAKE3 hash
 grep -rn "^blake3" crates/*/Cargo.toml
 ```
 
-- [ ] **Step 2: Add to graph-nexus-analyzer dev-dependencies if missing**
+- [ ] **Step 2: Add to cgn-analyzer dev-dependencies if missing**
 
-Open `crates/graph-nexus-analyzer/Cargo.toml`, locate `[dev-dependencies]` section, append:
+Open `crates/cgn-analyzer/Cargo.toml`, locate `[dev-dependencies]` section, append:
 
 ```toml
 blake3 = "1.5"
@@ -677,7 +677,7 @@ If `[dev-dependencies]` section doesn't exist, add it at the end of the file.
 - [ ] **Step 3: Verify it compiles**
 
 ```bash
-cargo build -p graph-nexus-analyzer --tests
+cargo build -p cgn-analyzer --tests
 ```
 
 Expected: clean build.
@@ -685,7 +685,7 @@ Expected: clean build.
 ### Task 9: Design canonical projection helper
 
 **Files:**
-- Create: `crates/graph-nexus-analyzer/tests/concurrency_graph_builder_order.rs`
+- Create: `crates/cgn-analyzer/tests/concurrency_graph_builder_order.rs`
 
 - [ ] **Step 1: Write the test file with projection helper**
 
@@ -697,9 +697,9 @@ Expected: clean build.
 //! consumers (after sort-and-archive in `build()`) MUST be byte-identical
 //! across runs and across input permutations.
 
-use graph_nexus_analyzer::resolution::GraphBuilder;
-use graph_nexus_core::analyzer::types::{LocalGraph, RawFanoutRef, RawFrameworkRef, RawNode};
-use graph_nexus_core::graph::{NodeKind, ZeroCopyGraph};
+use cgn_analyzer::resolution::GraphBuilder;
+use cgn_core::analyzer::types::{LocalGraph, RawFanoutRef, RawFrameworkRef, RawNode};
+use cgn_core::graph::{NodeKind, ZeroCopyGraph};
 
 /// Canonical projection: every consumer-visible byte, in a deterministic
 /// order. Excludes rkyv padding bytes (which are stable but not asserted)
@@ -863,10 +863,10 @@ fn hex(b: &[u8]) -> String {
 - [ ] **Step 2: Verify `GraphBuilder` is publicly re-exported**
 
 ```bash
-grep -n "pub use.*GraphBuilder\|pub struct GraphBuilder" crates/graph-nexus-analyzer/src/lib.rs crates/graph-nexus-analyzer/src/resolution/mod.rs
+grep -n "pub use.*GraphBuilder\|pub struct GraphBuilder" crates/cgn-analyzer/src/lib.rs crates/cgn-analyzer/src/resolution/mod.rs
 ```
 
-If `GraphBuilder` is not in the public API, add to `crates/graph-nexus-analyzer/src/resolution/mod.rs`:
+If `GraphBuilder` is not in the public API, add to `crates/cgn-analyzer/src/resolution/mod.rs`:
 ```rust
 pub use builder::GraphBuilder;
 ```
@@ -874,9 +874,9 @@ pub use builder::GraphBuilder;
 - [ ] **Step 3: Run the test under multiple thread counts**
 
 ```bash
-cargo test -p graph-nexus-analyzer --test concurrency_graph_builder_order -- --nocapture
-cargo test -p graph-nexus-analyzer --test concurrency_graph_builder_order -- --test-threads=1 --nocapture
-cargo test -p graph-nexus-analyzer --test concurrency_graph_builder_order -- --test-threads="$(nproc)" --nocapture
+cargo test -p cgn-analyzer --test concurrency_graph_builder_order -- --nocapture
+cargo test -p cgn-analyzer --test concurrency_graph_builder_order -- --test-threads=1 --nocapture
+cargo test -p cgn-analyzer --test concurrency_graph_builder_order -- --test-threads="$(nproc)" --nocapture
 ```
 
 Expected: PASS on all runs. If reversed input produces a different hash, the production path is order-dependent — that's a real determinism bug. Investigate ingest accumulation order (e.g. node IDs assigned in file-add order leak into edge source/target).
@@ -899,11 +899,11 @@ Expected: PASS on all runs. If reversed input produces a different hash, the pro
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-analyzer/Cargo.toml
-git add crates/graph-nexus-analyzer/tests/concurrency_graph_builder_order.rs
+git add crates/cgn-analyzer/Cargo.toml
+git add crates/cgn-analyzer/tests/concurrency_graph_builder_order.rs
 git add docs/superpowers/specs/2026-05-16-concurrency-audit-findings.md
 # Only add resolution/mod.rs if Step 2 modified it
-git add crates/graph-nexus-analyzer/src/resolution/mod.rs 2>/dev/null || true
+git add crates/cgn-analyzer/src/resolution/mod.rs 2>/dev/null || true
 git commit -m "audit(concurrency): pin GraphBuilder order-independence (Test 4.2)
 
 Canonical projection hash (sorted nodes/edges/files → BLAKE3) MUST be
@@ -918,13 +918,13 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ## Phase 5 — Test 4.3: Registry concurrent process writers
 
-Goal: prove `flock`-guarded `Registry::upsert_repo` converges under inter-process contention (the real-world failure mode, since Claude Code may spawn multiple `gnx` invocations simultaneously).
+Goal: prove `flock`-guarded `Registry::upsert_repo` converges under inter-process contention (the real-world failure mode, since Claude Code may spawn multiple `cgn` invocations simultaneously).
 
 ### Task 10: Read Registry::upsert_repo + design the test
 
 **Files:**
-- Read: `crates/graph-nexus-core/src/registry/mod.rs` (already read)
-- Read: `crates/graph-nexus-core/src/registry/store.rs`
+- Read: `crates/cgn-core/src/registry/mod.rs` (already read)
+- Read: `crates/cgn-core/src/registry/store.rs`
 
 - [ ] **Step 1: Confirm upsert flow and lock scope**
 
@@ -932,32 +932,32 @@ Already read `mod.rs:61-76`: `FileLock::acquire_exclusive(registry.json.lock)` h
 
 - [ ] **Step 2: Decide test shape — use child processes, not threads**
 
-flock semantics differ between threads-within-process vs. inter-process. The real production failure mode is **inter-process** (different `gnx` invocations from Claude Code hook). Test must spawn child processes — Rust threads share file descriptors and behaviour differs.
+flock semantics differ between threads-within-process vs. inter-process. The real production failure mode is **inter-process** (different `cgn` invocations from Claude Code hook). Test must spawn child processes — Rust threads share file descriptors and behaviour differs.
 
-We use a small helper binary `registry_writer_child` in `crates/graph-nexus-core/examples/` that takes `(home_gnx_path, repo_name, slot_id)` as args and calls `Registry::upsert_repo`. The parent test spawns N copies in parallel via `Command`.
+We use a small helper binary `registry_writer_child` in `crates/cgn-core/examples/` that takes `(home_cgn_path, repo_name, slot_id)` as args and calls `Registry::upsert_repo`. The parent test spawns N copies in parallel via `Command`.
 
 ### Task 11: Add the child binary
 
 **Files:**
-- Create: `crates/graph-nexus-core/examples/registry_writer_child.rs`
+- Create: `crates/cgn-core/examples/registry_writer_child.rs`
 
 - [ ] **Step 1: Write the child binary**
 
 ```rust
 //! Test helper: opens registry at $1, upserts a `RepoEntry` with name=$2,
 //! marker=$3. Used by `tests/concurrency_registry_writers.rs` to simulate
-//! N concurrent `gnx` invocations.
+//! N concurrent `cgn` invocations.
 
-use graph_nexus_core::registry::{BranchEntry, Registry, RepoEntry};
+use cgn_core::registry::{BranchEntry, Registry, RepoEntry};
 use std::path::PathBuf;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let home_gnx = PathBuf::from(args.next().expect("arg 1: home_gnx path"));
+    let home_cgn = PathBuf::from(args.next().expect("arg 1: home_cgn path"));
     let repo_name = args.next().expect("arg 2: repo name");
     let marker = args.next().expect("arg 3: slot marker");
 
-    let mut reg = Registry::open(&home_gnx).expect("registry open");
+    let mut reg = Registry::open(&home_cgn).expect("registry open");
     reg.upsert_repo(RepoEntry {
         name: repo_name,
         path: PathBuf::from(format!("/tmp/repo-{marker}")),
@@ -973,8 +973,8 @@ fn main() {
 - [ ] **Step 2: Verify `BranchEntry` shape matches the actual struct**
 
 ```bash
-grep -A 6 "pub struct BranchEntry" crates/graph-nexus-core/src/registry/store.rs
-grep -A 6 "pub struct RepoEntry" crates/graph-nexus-core/src/registry/store.rs
+grep -A 6 "pub struct BranchEntry" crates/cgn-core/src/registry/store.rs
+grep -A 6 "pub struct RepoEntry" crates/cgn-core/src/registry/store.rs
 ```
 
 Adjust field names in the child binary to match. If `RepoEntry` requires more fields (e.g. `created_at`, `groups`), add them with reasonable test defaults.
@@ -982,7 +982,7 @@ Adjust field names in the child binary to match. If `RepoEntry` requires more fi
 - [ ] **Step 3: Build the example to confirm it compiles**
 
 ```bash
-cargo build -p graph-nexus-core --example registry_writer_child
+cargo build -p cgn-core --example registry_writer_child
 ```
 
 Expected: clean build. Path to binary: `target/debug/examples/registry_writer_child`.
@@ -990,18 +990,18 @@ Expected: clean build. Path to binary: `target/debug/examples/registry_writer_ch
 ### Task 12: Write the failing test
 
 **Files:**
-- Create: `crates/graph-nexus-core/tests/concurrency_registry_writers.rs`
+- Create: `crates/cgn-core/tests/concurrency_registry_writers.rs`
 
 - [ ] **Step 1: Write test**
 
 ```rust
 //! Concurrency invariant 4.3 — Registry concurrent process writers converge.
 //!
-//! Real production failure mode: multiple `gnx` invocations from Claude
+//! Real production failure mode: multiple `cgn` invocations from Claude
 //! Code hooks race to upsert the registry. flock-guarded read-modify-write
 //! MUST converge to a state containing every writer's contribution.
 
-use graph_nexus_core::registry::Registry;
+use cgn_core::registry::Registry;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -1025,19 +1025,19 @@ fn registry_concurrent_writers_converge() {
     let bin = example_path();
     assert!(
         bin.exists(),
-        "child binary not built — run `cargo build -p graph-nexus-core --example registry_writer_child` first; expected at {}",
+        "child binary not built — run `cargo build -p cgn-core --example registry_writer_child` first; expected at {}",
         bin.display()
     );
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let home_gnx = tmp.path().to_path_buf();
+    let home_cgn = tmp.path().to_path_buf();
 
     // Spawn 8 writers, each upserting a DIFFERENT repo name.
     // After all join, registry MUST contain all 8.
     let mut children: Vec<_> = (0..8)
         .map(|i| {
             Command::new(&bin)
-                .arg(&home_gnx)
+                .arg(&home_cgn)
                 .arg(format!("repo-{i:02}"))
                 .arg(format!("slot-{i:02}"))
                 .stdout(Stdio::null())
@@ -1059,7 +1059,7 @@ fn registry_concurrent_writers_converge() {
         }
     }
 
-    let reg = Registry::open(&home_gnx).expect("open final");
+    let reg = Registry::open(&home_cgn).expect("open final");
     let snap = reg.snapshot();
     let mut names: Vec<_> = snap.repos.iter().map(|r| r.name.clone()).collect();
     names.sort();
@@ -1077,12 +1077,12 @@ fn registry_concurrent_same_repo_last_writer_wins_safely() {
     assert!(bin.exists());
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let home_gnx = tmp.path().to_path_buf();
+    let home_cgn = tmp.path().to_path_buf();
 
     let mut children: Vec<_> = (0..8)
         .map(|i| {
             Command::new(&bin)
-                .arg(&home_gnx)
+                .arg(&home_cgn)
                 .arg("shared-repo")
                 .arg(format!("slot-{i:02}"))
                 .stdout(Stdio::null())
@@ -1095,7 +1095,7 @@ fn registry_concurrent_same_repo_last_writer_wins_safely() {
         assert!(child.wait().unwrap().success());
     }
 
-    let reg = Registry::open(&home_gnx).expect("open final");
+    let reg = Registry::open(&home_cgn).expect("open final");
     let snap = reg.snapshot();
     let shared: Vec<_> = snap.repos.iter().filter(|r| r.name == "shared-repo").collect();
     assert_eq!(shared.len(), 1, "duplicate or lost entry under same-key contention");
@@ -1105,8 +1105,8 @@ fn registry_concurrent_same_repo_last_writer_wins_safely() {
 - [ ] **Step 2: Run the test, building the example first**
 
 ```bash
-cargo build -p graph-nexus-core --example registry_writer_child
-cargo test -p graph-nexus-core --test concurrency_registry_writers -- --nocapture
+cargo build -p cgn-core --example registry_writer_child
+cargo test -p cgn-core --test concurrency_registry_writers -- --nocapture
 ```
 
 Expected: PASS. If it fails because the .bak fallback in `RegistryFile::read_or_empty` masks a write loss, that's a real bug — investigate `registry/io.rs` atomic write semantics.
@@ -1116,8 +1116,8 @@ Expected: PASS. If it fails because the .bak fallback in `RegistryFile::read_or_
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/graph-nexus-core/examples/registry_writer_child.rs
-git add crates/graph-nexus-core/tests/concurrency_registry_writers.rs
+git add crates/cgn-core/examples/registry_writer_child.rs
+git add crates/cgn-core/tests/concurrency_registry_writers.rs
 git add docs/superpowers/specs/2026-05-16-concurrency-audit-findings.md
 git commit -m "audit(concurrency): pin Registry inter-process flock invariant (Test 4.3)
 
@@ -1138,20 +1138,20 @@ Goal: two concurrent hook spawns must result in exactly one reindex side-effect,
 ### Task 13: Design the hook flock test
 
 **Files:**
-- Read: `crates/graph-nexus-cli/src/background.rs` (already read)
+- Read: `crates/cgn-cli/src/background.rs` (already read)
 
 - [ ] **Step 1: Strategy — use `BgJob` directly with a slow no-op as the inner command**
 
-`spawn_bg` runs `sh -c '...flock -n 9...gnx <args>...'`. To test serialisation without depending on a real `gnx admin index`, we invoke a slow noop via `args`: point `args` at a fake binary path that just `sleep 1; echo done > $marker`.
+`spawn_bg` runs `sh -c '...flock -n 9...cgn <args>...'`. To test serialisation without depending on a real `cgn admin index`, we invoke a slow noop via `args`: point `args` at a fake binary path that just `sleep 1; echo done > $marker`.
 
-Actually simpler: write a tiny helper script via the example pattern. Even simpler: use `sh -c 'sleep 1; touch <marker>'` directly — but `spawn_bg` builds the shell template assuming `gnx <args>`. So we either (a) export `current_exe` to a test stub OR (b) test the shell template structure separately.
+Actually simpler: write a tiny helper script via the example pattern. Even simpler: use `sh -c 'sleep 1; touch <marker>'` directly — but `spawn_bg` builds the shell template assuming `cgn <args>`. So we either (a) export `current_exe` to a test stub OR (b) test the shell template structure separately.
 
 **Decision:** test the OUTCOME, not the implementation. Use `spawn_bg` twice with the same `lock` path and a slow no-op binary; assert exactly one increment of a shared counter file.
 
 ### Task 14: Build the slow no-op example
 
 **Files:**
-- Create: `crates/graph-nexus-cli/examples/slow_noop.rs`
+- Create: `crates/cgn-cli/examples/slow_noop.rs`
 
 - [ ] **Step 1: Write a helper that simulates reindex side-effect**
 
@@ -1177,20 +1177,20 @@ fn main() {
 - [ ] **Step 2: Build the example**
 
 ```bash
-cargo build -p graph-nexus-cli --example slow_noop
+cargo build -p cgn-cli --example slow_noop
 ```
 
 ### Task 15: Write the failing test
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/concurrency_hook_flock.rs`
+- Create: `crates/cgn-cli/tests/concurrency_hook_flock.rs`
 
 - [ ] **Step 1: Write test that directly invokes the shell flock pattern**
 
 ```rust
 //! Concurrency invariant 4.5 — hook spawn flock serialises.
 //!
-//! Two concurrent `gnx` hook invocations must converge to exactly ONE
+//! Two concurrent `cgn` hook invocations must converge to exactly ONE
 //! reindex side-effect (the second flock acquirer no-ops cleanly).
 
 use std::path::PathBuf;
@@ -1211,8 +1211,8 @@ fn slow_noop_path() -> PathBuf {
 
 /// Build the shell template used by `spawn_bg`, but parameterised on
 /// arbitrary inner command. This replicates the production flock pattern
-/// from crates/graph-nexus-cli/src/background.rs:73-91 (the markerless
-/// branch) without depending on `gnx` itself.
+/// from crates/cgn-cli/src/background.rs:73-91 (the markerless
+/// branch) without depending on `cgn` itself.
 fn flock_shell(lock: &PathBuf, inner: &str) -> String {
     format!(
         r#"exec 9>'{lock}' || exit 0
@@ -1228,7 +1228,7 @@ fn hook_concurrent_spawn_flock_serializes() {
     let bin = slow_noop_path();
     assert!(
         bin.exists(),
-        "slow_noop not built — run `cargo build -p graph-nexus-cli --example slow_noop`"
+        "slow_noop not built — run `cargo build -p cgn-cli --example slow_noop`"
     );
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1310,8 +1310,8 @@ fn hook_serial_spawn_runs_each_time() {
 - [ ] **Step 2: Build prerequisites + run**
 
 ```bash
-cargo build -p graph-nexus-cli --example slow_noop
-cargo test -p graph-nexus-cli --test concurrency_hook_flock -- --nocapture
+cargo build -p cgn-cli --example slow_noop
+cargo test -p cgn-cli --test concurrency_hook_flock -- --nocapture
 ```
 
 Expected: PASS on both sub-tests. If `hook_concurrent_spawn_flock_serializes` shows 2 marker lines, the flock template is broken (rare — flock semantics on Linux are mature; check WSL `flock` behaviour if running there).
@@ -1319,8 +1319,8 @@ Expected: PASS on both sub-tests. If `hook_concurrent_spawn_flock_serializes` sh
 - [ ] **Step 3: Update §4.5 of findings doc + commit**
 
 ```bash
-git add crates/graph-nexus-cli/examples/slow_noop.rs
-git add crates/graph-nexus-cli/tests/concurrency_hook_flock.rs
+git add crates/cgn-cli/examples/slow_noop.rs
+git add crates/cgn-cli/tests/concurrency_hook_flock.rs
 git add docs/superpowers/specs/2026-05-16-concurrency-audit-findings.md
 git commit -m "audit(concurrency): pin hook flock serialisation (Test 4.5)
 
@@ -1335,7 +1335,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ## Phase 7 — TSan pass (§5 of spec)
 
-Goal: zero unfiltered TSan reports from `graph-nexus-core` + `graph-nexus-analyzer` test suite.
+Goal: zero unfiltered TSan reports from `cgn-core` + `cgn-analyzer` test suite.
 
 ### Task 16: Check nightly + TSan availability
 
@@ -1366,13 +1366,13 @@ If TSan libs missing, document the manual install path (e.g. `apt install` for t
 RUSTFLAGS="-Z sanitizer=thread" \
 RUSTDOCFLAGS="-Z sanitizer=thread" \
 cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu \
-  -p graph-nexus-core --test concurrency_string_pool_intern \
+  -p cgn-core --test concurrency_string_pool_intern \
   -- --test-threads=4 2>&1 | head -50
 ```
 
 If toolchain setup fails, surface the error to user with a fix recommendation; do NOT block the audit on TSan (mark §5 as `deferred, toolchain unavailable` in findings if it can't run).
 
-### Task 17: Run TSan on graph-nexus-core test suite
+### Task 17: Run TSan on cgn-core test suite
 
 **Files:** (no edits; output captured)
 
@@ -1383,7 +1383,7 @@ mkdir -p /tmp/audit-tsan
 RUSTFLAGS="-Z sanitizer=thread" \
 RUSTDOCFLAGS="-Z sanitizer=thread" \
 cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu \
-  -p graph-nexus-core --tests \
+  -p cgn-core --tests \
   -- --test-threads=4 \
   > /tmp/audit-tsan/core.log 2>&1
 echo "exit: $?"
@@ -1400,7 +1400,7 @@ wc -l /tmp/audit-tsan/core-reports.txt
 
 If zero reports, document as PASS in findings §5 and skip to Task 18.
 
-### Task 18: Run TSan on graph-nexus-analyzer test suite
+### Task 18: Run TSan on cgn-analyzer test suite
 
 - [ ] **Step 1: Run TSan against analyzer tests**
 
@@ -1408,7 +1408,7 @@ If zero reports, document as PASS in findings §5 and skip to Task 18.
 RUSTFLAGS="-Z sanitizer=thread" \
 RUSTDOCFLAGS="-Z sanitizer=thread" \
 cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu \
-  -p graph-nexus-analyzer --tests \
+  -p cgn-analyzer --tests \
   -- --test-threads=4 \
   > /tmp/audit-tsan/analyzer.log 2>&1
 echo "exit: $?"
@@ -1422,7 +1422,7 @@ awk '/WARNING: ThreadSanitizer/,/^==================/' /tmp/audit-tsan/analyzer.
 ```
 
 Each report block contains a stack trace. Categorize each by the topmost in-tree frame:
-- In-tree (frame path starts with `crates/graph-nexus-*`) → real bug, add to §7
+- In-tree (frame path starts with `crates/code-graph-nexus-*`) → real bug, add to §7
 - Third-party (`/rayon-core/`, `/.cargo/registry/`, `std::`) → noise, suppress
 
 ### Task 19: Write tsan-suppressions.txt
@@ -1462,7 +1462,7 @@ TSAN_OPTIONS="suppressions=$(pwd)/tsan-suppressions.txt" \
 RUSTFLAGS="-Z sanitizer=thread" \
 RUSTDOCFLAGS="-Z sanitizer=thread" \
 cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu \
-  -p graph-nexus-core --tests \
+  -p cgn-core --tests \
   -- --test-threads=4 \
   2>&1 | grep "WARNING: ThreadSanitizer" | wc -l
 ```
@@ -1576,7 +1576,7 @@ ls scripts/ || mkdir scripts
 ```bash
 #!/usr/bin/env bash
 # scripts/audit-concurrency.sh
-# Re-run the concurrency audit suite. Required before each gnx release tag.
+# Re-run the concurrency audit suite. Required before each cgn release tag.
 # Sub-projects 1-6 of the parity roadmap each extend the equivalence tests
 # below; running this script catches regressions before merge.
 
@@ -1587,24 +1587,24 @@ cd "$REPO_ROOT"
 
 # 0. Build prerequisites (test helper binaries)
 echo "==> Building test helper binaries"
-cargo build -p graph-nexus-core --example registry_writer_child
-cargo build -p graph-nexus-cli --example slow_noop
+cargo build -p cgn-core --example registry_writer_child
+cargo build -p cgn-cli --example slow_noop
 
 # 1. Equivalence tests under serial + parallel
 echo "==> Equivalence tests — --test-threads=1"
-cargo test -p graph-nexus-core --test concurrency_string_pool_intern -- --test-threads=1
-cargo test -p graph-nexus-core --test concurrency_registry_writers -- --test-threads=1
-cargo test -p graph-nexus-analyzer --test concurrency_graph_builder_order -- --test-threads=1
-cargo test -p graph-nexus-analyzer pass2_parallel_serial_identical_per_reltype -- --test-threads=1
-cargo test -p graph-nexus-cli --test concurrency_hook_flock -- --test-threads=1
+cargo test -p cgn-core --test concurrency_string_pool_intern -- --test-threads=1
+cargo test -p cgn-core --test concurrency_registry_writers -- --test-threads=1
+cargo test -p cgn-analyzer --test concurrency_graph_builder_order -- --test-threads=1
+cargo test -p cgn-analyzer pass2_parallel_serial_identical_per_reltype -- --test-threads=1
+cargo test -p cgn-cli --test concurrency_hook_flock -- --test-threads=1
 
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 echo "==> Equivalence tests — --test-threads=$NPROC"
-cargo test -p graph-nexus-core --test concurrency_string_pool_intern -- --test-threads="$NPROC"
-cargo test -p graph-nexus-core --test concurrency_registry_writers -- --test-threads="$NPROC"
-cargo test -p graph-nexus-analyzer --test concurrency_graph_builder_order -- --test-threads="$NPROC"
-cargo test -p graph-nexus-analyzer pass2_parallel_serial_identical_per_reltype -- --test-threads="$NPROC"
-cargo test -p graph-nexus-cli --test concurrency_hook_flock -- --test-threads="$NPROC"
+cargo test -p cgn-core --test concurrency_string_pool_intern -- --test-threads="$NPROC"
+cargo test -p cgn-core --test concurrency_registry_writers -- --test-threads="$NPROC"
+cargo test -p cgn-analyzer --test concurrency_graph_builder_order -- --test-threads="$NPROC"
+cargo test -p cgn-analyzer pass2_parallel_serial_identical_per_reltype -- --test-threads="$NPROC"
+cargo test -p cgn-cli --test concurrency_hook_flock -- --test-threads="$NPROC"
 
 # 2. TSan run (best-effort: nightly + sanitizer libs)
 if rustup toolchain list | grep -q nightly && [ "$(uname -s)" = "Linux" ]; then
@@ -1614,7 +1614,7 @@ if rustup toolchain list | grep -q nightly && [ "$(uname -s)" = "Linux" ]; then
   RUSTFLAGS="-Z sanitizer=thread" \
   RUSTDOCFLAGS="-Z sanitizer=thread" \
   cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu \
-    -p graph-nexus-core --tests -- --test-threads=4 \
+    -p cgn-core --tests -- --test-threads=4 \
     2>&1 | tee /tmp/tsan-core.log | grep "WARNING: ThreadSanitizer" \
     && { echo "TSan reports in core — see /tmp/tsan-core.log"; exit 1; } || true
 
@@ -1622,7 +1622,7 @@ if rustup toolchain list | grep -q nightly && [ "$(uname -s)" = "Linux" ]; then
   RUSTFLAGS="-Z sanitizer=thread" \
   RUSTDOCFLAGS="-Z sanitizer=thread" \
   cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu \
-    -p graph-nexus-analyzer --tests -- --test-threads=4 \
+    -p cgn-analyzer --tests -- --test-threads=4 \
     2>&1 | tee /tmp/tsan-analyzer.log | grep "WARNING: ThreadSanitizer" \
     && { echo "TSan reports in analyzer — see /tmp/tsan-analyzer.log"; exit 1; } || true
 else
@@ -1650,7 +1650,7 @@ git commit -m "audit(concurrency): scripts/audit-concurrency.sh one-shot runner
 Builds test helper binaries, runs all 5 hot-path equivalence tests
 under --test-threads=1 and --test-threads=N, optionally runs TSan
 on Linux if nightly toolchain is installed. Required before each
-gnx release tag and before each parity sub-project merge.
+cgn release tag and before each parity sub-project merge.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -1761,7 +1761,7 @@ git push -u origin feat/concurrency-audit
 gh pr create --title "audit(concurrency): Sub-project 0 — pin parallel-emit invariants before parity work" --body "$(cat <<'EOF'
 ## Summary
 
-Sub-project 0 of the gnx ↔ gitnexus parity roadmap. Audits the parallel emit surface — Rayon pass2, Registry concurrent writes, StringPool intern, hook flock spawn — and pins invariants via equivalence tests + TSan **before** downstream sub-projects (1-6) add ~10 new edge emit sites (Imports / Defines / Implements / CONTAINS / MEMBER_OF / INHERITS / METHOD_OVERRIDES / METHOD_IMPLEMENTS / DECORATES / USES / WRAPS / QUERIES / HANDLES_TOOL) that would amplify any latent race.
+Sub-project 0 of the cgn ↔ gitnexus parity roadmap. Audits the parallel emit surface — Rayon pass2, Registry concurrent writes, StringPool intern, hook flock spawn — and pins invariants via equivalence tests + TSan **before** downstream sub-projects (1-6) add ~10 new edge emit sites (Imports / Defines / Implements / CONTAINS / MEMBER_OF / INHERITS / METHOD_OVERRIDES / METHOD_IMPLEMENTS / DECORATES / USES / WRAPS / QUERIES / HANDLES_TOOL) that would amplify any latent race.
 
 ## What changed
 

@@ -8,7 +8,7 @@ you can walk through them one-by-one without re-typing `grep -nE
 
 For each diff entry the packet shows:
 
-1. 哪邊 emit 了什麼 (`gnx-rs emits: Class` / `ref-gitnexus emits: —`)
+1. 哪邊 emit 了什麼 (`cgn-rs emits: Class` / `ref-gitnexus emits: —`)
 2. `.sample_repo/<Lang>/<path>` 該 declaration 的源碼，以 first
    `\b<name>\b` 為中心 ±N 行 context（grep heuristic — 不是 parser-grade
    line resolution，但夠快、夠準）
@@ -28,7 +28,7 @@ emission，而非「前後檔案 diff」。
 
 ```bash
 # 1. 兩邊都 index 同一份 corpus
-gnx admin index --repo /home/enor/gitnexus-rs/.sample_repo --force
+cgn admin index --repo /home/enor/gitnexus-rs/.sample_repo --force
 # (ref-gitnexus 端按其文件 index)
 
 # 2. dump (kind, path, name) 三元組
@@ -65,11 +65,11 @@ review packet 的目的是把人類眼睛聚焦在還需判斷的 entry，預設
 都是「兩邊在同 `(path, name)` 對不上」的 row；label / model 因為已自動
 分類為「同 declaration、不同 label」或「設計差異」，預設不進 packet。
 
-`real_rs`：gnx-rs 有 emit、ref-gitnexus 同 `(path, name)` 沒有任何 EQUIV
-class kind。即「gnx-rs over-emit 或 ref-gitnexus under-emit」。**收進
+`real_rs`：cgn-rs 有 emit、ref-gitnexus 同 `(path, name)` 沒有任何 EQUIV
+class kind。即「cgn-rs over-emit 或 ref-gitnexus under-emit」。**收進
 packet（default）**。
 
-`real_ref`：相反方向。即「ref 有、gnx-rs 沒抓到」— 通常是 gnx-rs parser
+`real_ref`：相反方向。即「ref 有、cgn-rs 沒抓到」— 通常是 cgn-rs parser
 gap candidate（要修的目標）。**收進 packet（default）**。
 
 `label`：兩邊都有同 `(path, name)`，但 kind 不同（且都落在同一 EQUIV
@@ -118,7 +118,7 @@ python3 scripts/parity/review_diffs.py \
     --lang Swift --bucket real_rs,real_ref --limit 30
 ```
 
-兩邊都收進來。real_rs 通常是「gnx-rs 太敏感、額外 emit 了 ref 沒抓的東
+兩邊都收進來。real_rs 通常是「cgn-rs 太敏感、額外 emit 了 ref 沒抓的東
 西」— 多半是 EQUIV class 設定漏 / inclusive design。real_ref 才是
 parser fix candidate。
 
@@ -143,7 +143,7 @@ function declaration，而 EQUIV 已含 `{Method, Constructor, ...}`，就是
 ```markdown
 ### `ManuallyFailedException` @ src/Illuminate/Console/ManuallyFailedException.php:7
 
-`real_rs` · gnx-rs **Class** vs ref **—**
+`real_rs` · cgn-rs **Class** vs ref **—**
 
 ​```php
       1 │ <?php
@@ -166,7 +166,7 @@ verdict: _____  (real_bug / label_diff / design / defensive)
 | 元素 | 用途 |
 |---|---|
 | `### `name` @ path:line` | 一行 locator — `vim +7 .sample_repo/PHP/src/.../ManuallyFailedException.php` 直接跳 |
-| `bucket · gnx-rs X vs ref Y` | diff 摘要一行打完（不一致才會出現在 packet，所以兩邊 kind 一定有差） |
+| `bucket · cgn-rs X vs ref Y` | diff 摘要一行打完（不一致才會出現在 packet，所以兩邊 kind 一定有差） |
 | fenced code (±N lines) | **packet 的核心** — 實際源碼，`>>` 標 grep 命中行 |
 | `verdict: _____` | 待填空格 |
 
@@ -182,7 +182,7 @@ verdict: _____  (real_bug / label_diff / design / defensive)
 | 樣本性質 | verdict |
 |---|---|
 | function/method body 內的 transient declaration（local var、inner fn） | `design` |
-| module-level 但被 arrow-fn 賦值的 const (`const X = () => {…}`) | `design`（gnx-rs 故意 emit 成 Function 而非 Const） |
+| module-level 但被 arrow-fn 賦值的 const (`const X = () => {…}`) | `design`（cgn-rs 故意 emit 成 Function 而非 Const） |
 | type-level permanent 命名實體（struct field、enum variant field、impl method、class constant…） | `real_bug` |
 | 同 declaration、兩邊 kind 不同但屬同 EQIUV class | `label_diff` |
 | Test/Reference 路徑下被 builder filter 掉 | `design`（`is_non_production` filter） |

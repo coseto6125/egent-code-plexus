@@ -1,6 +1,6 @@
 # Zig Sample Project Fixture
 
-This fixture exercises the ZigProvider parser for graph-nexus-analyzer.
+This fixture exercises the ZigProvider parser for cgn-analyzer.
 
 ## Files
 

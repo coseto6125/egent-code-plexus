@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the regex-based `gnx cypher` minimal-pattern parser with a proper recursive-descent Cypher parser + executor under `graph-nexus-core/cypher/`, supporting multi-hop chains, OPTIONAL MATCH, rich WHERE, aggregation, DISTINCT/ORDER/LIMIT, UNION, and column-based output (JSON default + TOON option).
+**Goal:** Replace the regex-based `cgn cypher` minimal-pattern parser with a proper recursive-descent Cypher parser + executor under `cgn-core/cypher/`, supporting multi-hop chains, OPTIONAL MATCH, rich WHERE, aggregation, DISTINCT/ORDER/LIMIT, UNION, and column-based output (JSON default + TOON option).
 
-**Architecture:** New `crates/graph-nexus-core/src/cypher/` module owns lexer → parser → AST → executor → `QueryResult { columns, rows }`. CLI shim in `crates/graph-nexus-cli/src/commands/cypher.rs` reduces to argument parsing + serialization (JSON / TOON). All existing cypher e2e tests rewrite to the new column shape.
+**Architecture:** New `crates/cgn-core/src/cypher/` module owns lexer → parser → AST → executor → `QueryResult { columns, rows }`. CLI shim in `crates/cgn-cli/src/commands/cypher.rs` reduces to argument parsing + serialization (JSON / TOON). All existing cypher e2e tests rewrite to the new column shape.
 
 **Tech Stack:** Rust 2021, no new deps (zero external parser crate), serde_json (existing), regex (existing — used by `=~` operator at exec time).
 
@@ -14,11 +14,11 @@
 
 ## API Conventions Used in This Plan
 
-Where this plan writes `graph.nodes[idx]` / `graph.out_offsets` / `graph.edges[i]`, the real API is the rkyv-archived view from `graph_nexus_core::graph::ArchivedZeroCopyGraph` — slice indexing already works since `rkyv` makes archived `Vec<T>` slice-indexable. `node.name.resolve(&graph.string_pool)` is the canonical way to get a string out of `StrRef`. `NodeKind` / `RelType` `.parse()` already implements `FromStr` (used by current cypher.rs).
+Where this plan writes `graph.nodes[idx]` / `graph.out_offsets` / `graph.edges[i]`, the real API is the rkyv-archived view from `cgn_core::graph::ArchivedZeroCopyGraph` — slice indexing already works since `rkyv` makes archived `Vec<T>` slice-indexable. `node.name.resolve(&graph.string_pool)` is the canonical way to get a string out of `StrRef`. `NodeKind` / `RelType` `.parse()` already implements `FromStr` (used by current cypher.rs).
 
-`GnxError` variants referenced (`InvalidArgument`, `Rkyv`): see `crates/graph-nexus-core/src/error.rs`. Wrap CypherError as `GnxError::InvalidArgument(format!("cypher: {e}"))` at the CLI boundary.
+`CgnError` variants referenced (`InvalidArgument`, `Rkyv`): see `crates/cgn-core/src/error.rs`. Wrap CypherError as `CgnError::InvalidArgument(format!("cypher: {e}"))` at the CLI boundary.
 
-`graph_nexus_core::graph_query::callees_of` / `callers_of` already exist — Task C4 generalizes them.
+`cgn_core::graph_query::callees_of` / `callers_of` already exist — Task C4 generalizes them.
 
 The `BindingValue` and `Bindings` types defined in Task C1 are used across Tasks C2–C12. Re-read C1 if a later task references them.
 
@@ -40,23 +40,23 @@ Both must pass before starting Task A1.
 ## File Structure
 
 **Create:**
-- `crates/graph-nexus-core/src/cypher/mod.rs` — public API: `parse`, `execute`, `Query`, `QueryResult`, `CypherError`
-- `crates/graph-nexus-core/src/cypher/lexer.rs` — `Token`, `tokenize(&str) -> Result<Vec<Token>>`
-- `crates/graph-nexus-core/src/cypher/ast.rs` — AST types (`Query`, `MatchClause`, `Pattern`, `NodePat`, `RelPat`, `Expr`, …)
-- `crates/graph-nexus-core/src/cypher/parser.rs` — recursive-descent parser
-- `crates/graph-nexus-core/src/cypher/executor.rs` — `execute(&Query, &Graph, &PathBuf) -> Result<QueryResult>`
-- `crates/graph-nexus-core/src/cypher/value.rs` — `Value`, `QueryResult`
-- `crates/graph-nexus-core/src/cypher/error.rs` — `CypherError`
-- `crates/graph-nexus-cli/tests/cypher_multi_hop.rs` — new e2e
-- `crates/graph-nexus-cli/tests/cypher_aggregation.rs` — new e2e
-- `crates/graph-nexus-cli/tests/cypher_toon_format.rs` — new e2e
-- `crates/graph-nexus-cli/tests/cypher_error_messages.rs` — new e2e
+- `crates/cgn-core/src/cypher/mod.rs` — public API: `parse`, `execute`, `Query`, `QueryResult`, `CypherError`
+- `crates/cgn-core/src/cypher/lexer.rs` — `Token`, `tokenize(&str) -> Result<Vec<Token>>`
+- `crates/cgn-core/src/cypher/ast.rs` — AST types (`Query`, `MatchClause`, `Pattern`, `NodePat`, `RelPat`, `Expr`, …)
+- `crates/cgn-core/src/cypher/parser.rs` — recursive-descent parser
+- `crates/cgn-core/src/cypher/executor.rs` — `execute(&Query, &Graph, &PathBuf) -> Result<QueryResult>`
+- `crates/cgn-core/src/cypher/value.rs` — `Value`, `QueryResult`
+- `crates/cgn-core/src/cypher/error.rs` — `CypherError`
+- `crates/cgn-cli/tests/cypher_multi_hop.rs` — new e2e
+- `crates/cgn-cli/tests/cypher_aggregation.rs` — new e2e
+- `crates/cgn-cli/tests/cypher_toon_format.rs` — new e2e
+- `crates/cgn-cli/tests/cypher_error_messages.rs` — new e2e
 
 **Modify:**
-- `crates/graph-nexus-core/src/lib.rs` — `pub mod cypher;`
-- `crates/graph-nexus-cli/src/commands/cypher.rs` — replace body with thin wrapper (~50 LoC)
-- `crates/graph-nexus-cli/tests/cypher_content.rs` — assertions migrate to `{columns, rows}`
-- `crates/graph-nexus-cli/tests/context_cypher_edge_metadata.rs` — same
+- `crates/cgn-core/src/lib.rs` — `pub mod cypher;`
+- `crates/cgn-cli/src/commands/cypher.rs` — replace body with thin wrapper (~50 LoC)
+- `crates/cgn-cli/tests/cypher_content.rs` — assertions migrate to `{columns, rows}`
+- `crates/cgn-cli/tests/context_cypher_edge_metadata.rs` — same
 
 ---
 
@@ -65,14 +65,14 @@ Both must pass before starting Task A1.
 ### Task A1: Create cypher module skeleton + register in lib.rs
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/cypher/mod.rs`
-- Create: `crates/graph-nexus-core/src/cypher/value.rs`
-- Create: `crates/graph-nexus-core/src/cypher/error.rs`
-- Modify: `crates/graph-nexus-core/src/lib.rs`
+- Create: `crates/cgn-core/src/cypher/mod.rs`
+- Create: `crates/cgn-core/src/cypher/value.rs`
+- Create: `crates/cgn-core/src/cypher/error.rs`
+- Modify: `crates/cgn-core/src/lib.rs`
 
 - [ ] **Step 1: Add module declaration to lib.rs**
 
-Open `crates/graph-nexus-core/src/lib.rs` and after line 7 (`pub mod graph_query;`) add:
+Open `crates/cgn-core/src/lib.rs` and after line 7 (`pub mod graph_query;`) add:
 
 ```rust
 pub mod cypher;
@@ -170,7 +170,7 @@ impl std::error::Error for CypherError {}
 
 - [ ] **Step 5: Create empty stubs for the rest so cargo build compiles**
 
-`crates/graph-nexus-core/src/cypher/ast.rs`:
+`crates/cgn-core/src/cypher/ast.rs`:
 
 ```rust
 use crate::graph::{NodeKind, RelType};
@@ -242,7 +242,7 @@ pub struct OrderItem { pub expr: ReturnExpr, pub desc: bool }
 pub struct WithClause { pub items: Vec<ReturnItem>, pub where_: Option<Expr> }
 ```
 
-`crates/graph-nexus-core/src/cypher/lexer.rs`:
+`crates/cgn-core/src/cypher/lexer.rs`:
 
 ```rust
 use crate::cypher::error::CypherError;
@@ -255,7 +255,7 @@ pub fn tokenize(_input: &str) -> Result<Vec<Token>, CypherError> {
 }
 ```
 
-`crates/graph-nexus-core/src/cypher/parser.rs`:
+`crates/cgn-core/src/cypher/parser.rs`:
 
 ```rust
 use crate::cypher::ast::Query;
@@ -267,7 +267,7 @@ pub fn parse_query(_tokens: &[Token]) -> Result<Query, CypherError> {
 }
 ```
 
-`crates/graph-nexus-core/src/cypher/executor.rs`:
+`crates/cgn-core/src/cypher/executor.rs`:
 
 ```rust
 use crate::cypher::ast::Query;
@@ -283,13 +283,13 @@ pub fn execute(_query: &Query, _graph: &ArchivedZeroCopyGraph, _repo_root: &Path
 
 - [ ] **Step 6: Verify build**
 
-Run: `cargo build -p graph-nexus-core`
+Run: `cargo build -p cgn-core`
 Expected: PASS (warnings about unused fields are OK).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/lib.rs crates/graph-nexus-core/src/cypher/
+git add crates/cgn-core/src/lib.rs crates/cgn-core/src/cypher/
 git commit -m "feat(cypher): scaffold cypher module (ast/lexer/parser/executor stubs)"
 ```
 
@@ -298,7 +298,7 @@ git commit -m "feat(cypher): scaffold cypher module (ast/lexer/parser/executor s
 ### Task A2: Lexer — tokens + tests
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/lexer.rs`
+- Modify: `crates/cgn-core/src/cypher/lexer.rs`
 - Test: inline `#[cfg(test)] mod tests` inside `lexer.rs`
 
 - [ ] **Step 1: Write failing tests (table-driven)**
@@ -382,7 +382,7 @@ mod tests {
 
 - [ ] **Step 2: Run tests, verify they fail**
 
-Run: `cargo test -p graph-nexus-core cypher::lexer`
+Run: `cargo test -p cgn-core cypher::lexer`
 Expected: FAIL — every test errors on placeholder `tokenize`.
 
 - [ ] **Step 3: Implement Token enum + tokenize**
@@ -560,13 +560,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CypherError> {
 
 - [ ] **Step 4: Run tests, verify they pass**
 
-Run: `cargo test -p graph-nexus-core cypher::lexer`
+Run: `cargo test -p cgn-core cypher::lexer`
 Expected: PASS (9/9).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/lexer.rs
+git add crates/cgn-core/src/cypher/lexer.rs
 git commit -m "feat(cypher): lexer with case-insensitive keywords + tests"
 ```
 
@@ -579,7 +579,7 @@ For Phase B, each task follows the same shape: tests first, then parser fn, then
 ### Task B1: Parser scaffolding (cursor + helpers)
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Define cursor struct + helpers**
 
@@ -648,13 +648,13 @@ fn parse_single_query(_c: &mut Cursor) -> Result<Query, CypherError> {
 
 - [ ] **Step 2: Verify build**
 
-Run: `cargo build -p graph-nexus-core`
+Run: `cargo build -p cgn-core`
 Expected: PASS (warnings about unused functions are OK).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parser cursor + helpers"
 ```
 
@@ -663,7 +663,7 @@ git commit -m "feat(cypher): parser cursor + helpers"
 ### Task B2: Parse NodePat + RelPat (the building blocks)
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Tests**
 
@@ -738,7 +738,7 @@ mod tests {
 
 - [ ] **Step 2: Verify tests fail**
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: FAIL — `parse_node_pat` / `parse_rel_pat` not defined.
 
 - [ ] **Step 3: Implement parse_node_pat + parse_rel_pat + helpers**
@@ -852,13 +852,13 @@ Confirm `NodeKind::FromStr` and `RelType::FromStr` exist. They do — current `c
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: PASS (7/7).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse NodePat + RelPat (label alternation, inline props, variable-length)"
 ```
 
@@ -867,7 +867,7 @@ git commit -m "feat(cypher): parse NodePat + RelPat (label alternation, inline p
 ### Task B3: Parse chained Pattern + arrow direction
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Tests**
 
@@ -918,7 +918,7 @@ fn pattern_anonymous_rel() {
 
 - [ ] **Step 2: Verify failures**
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: FAIL — `parse_pattern` not defined.
 
 - [ ] **Step 3: Implement parse_pattern**
@@ -965,13 +965,13 @@ pub fn parse_pattern(c: &mut Cursor) -> Result<Pattern, CypherError> {
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: PASS (12/12 including B2 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse chained patterns + arrow direction (Out/In/Both)"
 ```
 
@@ -980,7 +980,7 @@ git commit -m "feat(cypher): parse chained patterns + arrow direction (Out/In/Bo
 ### Task B4: Parse MATCH / OPTIONAL MATCH clause
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Tests**
 
@@ -1013,7 +1013,7 @@ fn match_optional() {
 
 - [ ] **Step 2: Verify failures**
 
-Run: `cargo test -p graph-nexus-core cypher::parser::tests::match_`
+Run: `cargo test -p cgn-core cypher::parser::tests::match_`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement parse_match_clause**
@@ -1032,11 +1032,11 @@ pub fn parse_match_clause(c: &mut Cursor) -> Result<MatchClause, CypherError> {
 
 - [ ] **Step 4: Run tests + commit**
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: PASS (15/15).
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse MATCH / OPTIONAL MATCH clause"
 ```
 
@@ -1045,7 +1045,7 @@ git commit -m "feat(cypher): parse MATCH / OPTIONAL MATCH clause"
 ### Task B5: Parse Expr — Pratt-style precedence climbing
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Tests**
 
@@ -1123,7 +1123,7 @@ fn expr_paren() {
 
 - [ ] **Step 2: Verify failures**
 
-Run: `cargo test -p graph-nexus-core cypher::parser::tests::expr_`
+Run: `cargo test -p cgn-core cypher::parser::tests::expr_`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement parse_expr (Pratt)**
@@ -1264,11 +1264,11 @@ fn parse_primary(c: &mut Cursor) -> Result<Expr, CypherError> {
 
 - [ ] **Step 4: Run tests + commit**
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: PASS (22/22).
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse Expr (Pratt-style; AND/OR/NOT, =/<>/cmp, IN, =~, STARTS/ENDS/CONTAINS, FunCall)"
 ```
 
@@ -1277,7 +1277,7 @@ git commit -m "feat(cypher): parse Expr (Pratt-style; AND/OR/NOT, =/<>/cmp, IN, 
 ### Task B6: Parse WHERE clause (trivial wrapper)
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Test + impl + commit in one go (single-line wrapper)**
 
@@ -1302,11 +1302,11 @@ pub fn parse_where(c: &mut Cursor) -> Result<Expr, CypherError> {
 }
 ```
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: PASS (23/23).
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse WHERE clause"
 ```
 
@@ -1315,7 +1315,7 @@ git commit -m "feat(cypher): parse WHERE clause"
 ### Task B7: Parse RETURN clause + items / alias / DISTINCT / `*`
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Tests**
 
@@ -1415,11 +1415,11 @@ fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
 }
 ```
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: PASS (27/27).
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse RETURN clause (items, alias, DISTINCT, *)"
 ```
 
@@ -1428,7 +1428,7 @@ git commit -m "feat(cypher): parse RETURN clause (items, alias, DISTINCT, *)"
 ### Task B8: Parse ORDER BY / SKIP / LIMIT
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Tests + impl + commit**
 
@@ -1481,11 +1481,11 @@ pub fn parse_limit(c: &mut Cursor) -> Result<Option<u64>, CypherError> {
 }
 ```
 
-Run: `cargo test -p graph-nexus-core cypher::parser`
+Run: `cargo test -p cgn-core cypher::parser`
 Expected: PASS (29/29).
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/parser.rs
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse ORDER BY / SKIP / LIMIT"
 ```
 
@@ -1494,7 +1494,7 @@ git commit -m "feat(cypher): parse ORDER BY / SKIP / LIMIT"
 ### Task B9: Parse WITH clause
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Test + impl + commit**
 
@@ -1523,8 +1523,8 @@ pub fn parse_with(c: &mut Cursor) -> Result<WithClause, CypherError> {
 Run + commit:
 
 ```bash
-cargo test -p graph-nexus-core cypher::parser
-git add crates/graph-nexus-core/src/cypher/parser.rs
+cargo test -p cgn-core cypher::parser
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse WITH clause (items + inner WHERE)"
 ```
 
@@ -1533,7 +1533,7 @@ git commit -m "feat(cypher): parse WITH clause (items + inner WHERE)"
 ### Task B10: Wire up parse_single_query (entry point)
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/parser.rs`
+- Modify: `crates/cgn-core/src/cypher/parser.rs`
 
 - [ ] **Step 1: Tests**
 
@@ -1620,8 +1620,8 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
 - [ ] **Step 3: Run + commit**
 
 ```bash
-cargo test -p graph-nexus-core cypher::parser
-git add crates/graph-nexus-core/src/cypher/parser.rs
+cargo test -p cgn-core cypher::parser
+git add crates/cgn-core/src/cypher/parser.rs
 git commit -m "feat(cypher): parse_query — full top-level grammar (MATCH/WITH/WHERE/RETURN/ORDER/SKIP/LIMIT/UNION)"
 ```
 
@@ -1632,7 +1632,7 @@ git commit -m "feat(cypher): parse_query — full top-level grammar (MATCH/WITH/
 ### Task C1: Executor scaffolding + Bindings type
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/executor.rs`
+- Modify: `crates/cgn-core/src/cypher/executor.rs`
 
 - [ ] **Step 1: Define Bindings + helpers**
 
@@ -1656,7 +1656,7 @@ struct Binding {
 }
 
 /// Reading file content for `.content` projection. Same shape as the current
-/// `ContentCache` in `crates/graph-nexus-cli/src/commands/cypher.rs`.
+/// `ContentCache` in `crates/cgn-cli/src/commands/cypher.rs`.
 struct ContentCache {
     repo_root: PathBuf,
     files: HashMap<u32, Option<String>>,
@@ -1692,8 +1692,8 @@ fn execute_inner(query: &Query, graph: &ArchivedZeroCopyGraph, cache: &mut Conte
 - [ ] **Step 2: Verify compile + commit**
 
 ```bash
-cargo build -p graph-nexus-core
-git add crates/graph-nexus-core/src/cypher/executor.rs
+cargo build -p cgn-core
+git add crates/cgn-core/src/cypher/executor.rs
 git commit -m "feat(cypher): executor scaffolding (Bindings + ContentCache)"
 ```
 
@@ -1702,7 +1702,7 @@ git commit -m "feat(cypher): executor scaffolding (Bindings + ContentCache)"
 ### Task C2: Execute single-hop MATCH (smallest end-to-end slice)
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/cypher/executor.rs`
+- Modify: `crates/cgn-core/src/cypher/executor.rs`
 
 - [ ] **Step 1: Tests** (new file `executor_tests.rs` won't compile yet; put tests inline)
 
@@ -1772,11 +1772,11 @@ mod tests {
 }
 ```
 
-**Note on fixture API:** the exact `ZeroCopyGraph` field list must match `crates/graph-nexus-core/src/graph.rs`. The implementer should re-read that file before this step and fill in any required fields the snippet above missed. If `StringPool::intern` doesn't exist by that name, use whatever the canonical method is (search for `intern` or `push` in graph.rs).
+**Note on fixture API:** the exact `ZeroCopyGraph` field list must match `crates/cgn-core/src/graph.rs`. The implementer should re-read that file before this step and fill in any required fields the snippet above missed. If `StringPool::intern` doesn't exist by that name, use whatever the canonical method is (search for `intern` or `push` in graph.rs).
 
 - [ ] **Step 2: Verify failure**
 
-Run: `cargo test -p graph-nexus-core cypher::executor::tests::exec_single_hop`
+Run: `cargo test -p cgn-core cypher::executor::tests::exec_single_hop`
 Expected: FAIL (stub returns error).
 
 - [ ] **Step 3: Implement minimal single-hop execute_inner**
@@ -2072,11 +2072,11 @@ fn return_item_default_col(item: &ReturnItem) -> String {
 
 - [ ] **Step 4: Run + commit**
 
-Run: `cargo test -p graph-nexus-core cypher::executor::tests::exec_single_hop`
+Run: `cargo test -p cgn-core cypher::executor::tests::exec_single_hop`
 Expected: PASS.
 
 ```bash
-git add crates/graph-nexus-core/src/cypher/executor.rs
+git add crates/cgn-core/src/cypher/executor.rs
 git commit -m "feat(cypher): execute single-hop MATCH + minimal WHERE + RETURN projection"
 ```
 
@@ -2144,7 +2144,7 @@ Tests cover all six functions + `COUNT(DISTINCT)`.
 
 **C12: `.content` projection.** Add `ReturnExpr::Prop(var, "content")` handling in `project_item`: read from `cache.body_for_file(graph, n.file_idx)` then `slice_by_span` (port slice fn from `cli/commands/cypher.rs:96-132`).
 
-Each task ends with `cargo test -p graph-nexus-core cypher::executor` + commit:
+Each task ends with `cargo test -p cgn-core cypher::executor` + commit:
 
 ```bash
 git commit -m "feat(cypher): <one-line summary of C#>"
@@ -2157,7 +2157,7 @@ git commit -m "feat(cypher): <one-line summary of C#>"
 ### Task D1: Rewrite cli/commands/cypher.rs as thin wrapper
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/cypher.rs`
+- Modify: `crates/cgn-cli/src/commands/cypher.rs`
 
 - [ ] **Step 1: Replace body with thin wrapper**
 
@@ -2165,8 +2165,8 @@ git commit -m "feat(cypher): <one-line summary of C#>"
 use crate::engine::Engine;
 use crate::repo_selector;
 use clap::Args;
-use graph_nexus_core::cypher;
-use graph_nexus_core::registry::RegistryFile;
+use cgn_core::cypher;
+use cgn_core::registry::RegistryFile;
 use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
@@ -2187,9 +2187,9 @@ pub struct CypherArgs {
 }
 
 impl CypherArgs {
-    fn resolved_query(&self) -> Result<&str, graph_nexus_core::GnxError> {
+    fn resolved_query(&self) -> Result<&str, cgn_core::CgnError> {
         self.query.as_deref().or(self.query_positional.as_deref())
-            .ok_or_else(|| graph_nexus_core::GnxError::InvalidArgument(
+            .ok_or_else(|| cgn_core::CgnError::InvalidArgument(
                 "cypher requires a query — pass it positionally or via --query".into(),
             ))
     }
@@ -2200,33 +2200,33 @@ fn resolve_repo_root(repo_arg: Option<&str>) -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), graph_nexus_core::GnxError> {
+pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), cgn_core::CgnError> {
     // Multi-repo gate identical to before.
     if let Some(repo_sel) = args.repo.as_deref() {
-        let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
-        let registry = RegistryFile::read_or_empty(&home_gnx.join("registry.json"))
-            .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("registry read: {e}")))?;
+        let home_cgn = cgn_core::registry::resolve_home_cgn();
+        let registry = RegistryFile::read_or_empty(&home_cgn.join("registry.json"))
+            .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("registry read: {e}")))?;
         let selector = repo_selector::parse(repo_sel)
-            .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("--repo selector: {e}")))?;
+            .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("--repo selector: {e}")))?;
         let cwd = std::env::current_dir().unwrap_or_default();
         let repos = repo_selector::resolve(&selector, &registry, cwd.to_str().unwrap_or("."))
-            .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format!("--repo: {e}")))?;
+            .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("--repo: {e}")))?;
         if repos.len() > 1 {
-            return Err(graph_nexus_core::GnxError::InvalidArgument(format!(
+            return Err(cgn_core::CgnError::InvalidArgument(format!(
                 "cypher is single-repo only (graph identity); --repo resolved to {} repos.",
                 repos.len()
             )));
         }
     }
 
-    let graph = engine.graph().map_err(|e| graph_nexus_core::GnxError::Rkyv(e.to_string()))?;
+    let graph = engine.graph().map_err(|e| cgn_core::CgnError::Rkyv(e.to_string()))?;
 
     let query_str = args.resolved_query()?;
     let query = cypher::parse(query_str)
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e)))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format_cypher_error(query_str, &e)))?;
 
     let result = cypher::execute(&query, graph, &resolve_repo_root(args.repo.as_deref()))
-        .map_err(|e| graph_nexus_core::GnxError::InvalidArgument(format_cypher_error(query_str, &e)))?;
+        .map_err(|e| cgn_core::CgnError::InvalidArgument(format_cypher_error(query_str, &e)))?;
 
     match args.format.as_str() {
         "toon" => println!("{}", serialize_toon(&result)),
@@ -2246,13 +2246,13 @@ fn serialize_toon(_r: &cypher::QueryResult) -> String { unimplemented!("D3") }
 
 - [ ] **Step 2: Verify build (with `unimplemented!`s)**
 
-Run: `cargo build -p graph-nexus-cli`
+Run: `cargo build -p cgn-cli`
 Expected: PASS (unused-warning OK).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/cypher.rs
+git add crates/cgn-cli/src/commands/cypher.rs
 git commit -m "refactor(cypher): cli wrapper delegates to core::cypher"
 ```
 
@@ -2261,7 +2261,7 @@ git commit -m "refactor(cypher): cli wrapper delegates to core::cypher"
 ### Task D2: JSON serializer
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/cypher.rs`
+- Modify: `crates/cgn-cli/src/commands/cypher.rs`
 
 - [ ] **Step 1: Test (smoke test inside cypher.rs)**
 
@@ -2269,7 +2269,7 @@ git commit -m "refactor(cypher): cli wrapper delegates to core::cypher"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_nexus_core::cypher::{QueryResult, Value};
+    use cgn_core::cypher::{QueryResult, Value};
 
     #[test]
     fn json_serialization_shape() {
@@ -2314,11 +2314,11 @@ fn value_to_json(v: &cypher::Value) -> serde_json::Value {
 
 - [ ] **Step 3: Run + commit**
 
-Run: `cargo test -p graph-nexus-cli commands::cypher`
+Run: `cargo test -p cgn-cli commands::cypher`
 Expected: PASS.
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/cypher.rs
+git add crates/cgn-cli/src/commands/cypher.rs
 git commit -m "feat(cypher): JSON serializer (column-based shape)"
 ```
 
@@ -2327,7 +2327,7 @@ git commit -m "feat(cypher): JSON serializer (column-based shape)"
 ### Task D3: TOON serializer
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/cypher.rs`
+- Modify: `crates/cgn-cli/src/commands/cypher.rs`
 
 - [ ] **Step 1: Test**
 
@@ -2384,11 +2384,11 @@ Note: TOON cell escaping is intentionally minimal (matches existing toToon usage
 
 - [ ] **Step 3: Run + commit**
 
-Run: `cargo test -p graph-nexus-cli commands::cypher`
+Run: `cargo test -p cgn-cli commands::cypher`
 Expected: PASS.
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/cypher.rs
+git add crates/cgn-cli/src/commands/cypher.rs
 git commit -m "feat(cypher): TOON serializer (--format toon)"
 ```
 
@@ -2397,7 +2397,7 @@ git commit -m "feat(cypher): TOON serializer (--format toon)"
 ### Task D4: Error display with `^` pointer
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/cypher.rs`
+- Modify: `crates/cgn-cli/src/commands/cypher.rs`
 
 - [ ] **Step 1: Replace format_cypher_error**
 
@@ -2429,7 +2429,7 @@ Note on offset accuracy: the lexer records byte offsets accurately; the parser r
 - [ ] **Step 2: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/cypher.rs
+git add crates/cgn-cli/src/commands/cypher.rs
 git commit -m "feat(cypher): CLI error display with `^` pointer (best-effort)"
 ```
 
@@ -2440,7 +2440,7 @@ git commit -m "feat(cypher): CLI error display with `^` pointer (best-effort)"
 ### Task E1: Rewrite cypher_content.rs to column shape
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/tests/cypher_content.rs`
+- Modify: `crates/cgn-cli/tests/cypher_content.rs`
 
 - [ ] **Step 1: Update assertions in all 3 tests**
 
@@ -2467,8 +2467,8 @@ Repeat for the other two tests in the file: assert columns/rows shape instead of
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus-cli --test cypher_content
-git add crates/graph-nexus-cli/tests/cypher_content.rs
+cargo test -p cgn-cli --test cypher_content
+git add crates/cgn-cli/tests/cypher_content.rs
 git commit -m "test(cypher): migrate cypher_content.rs to column-based output"
 ```
 
@@ -2477,7 +2477,7 @@ git commit -m "test(cypher): migrate cypher_content.rs to column-based output"
 ### Task E2: Rewrite context_cypher_edge_metadata.rs
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/tests/context_cypher_edge_metadata.rs`
+- Modify: `crates/cgn-cli/tests/context_cypher_edge_metadata.rs`
 
 - [ ] **Step 1: Adjust cypher assertion**
 
@@ -2492,8 +2492,8 @@ Then assert columns contain `r.confidence` + `r.reason` and rows[0] entries are 
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus-cli --test context_cypher_edge_metadata
-git add crates/graph-nexus-cli/tests/context_cypher_edge_metadata.rs
+cargo test -p cgn-cli --test context_cypher_edge_metadata
+git add crates/cgn-cli/tests/context_cypher_edge_metadata.rs
 git commit -m "test(cypher): migrate context_cypher_edge_metadata.rs to column shape"
 ```
 
@@ -2502,7 +2502,7 @@ git commit -m "test(cypher): migrate context_cypher_edge_metadata.rs to column s
 ### Task E3: New cypher_multi_hop.rs
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/cypher_multi_hop.rs`
+- Create: `crates/cgn-cli/tests/cypher_multi_hop.rs`
 
 - [ ] **Step 1: Write file**
 
@@ -2516,8 +2516,8 @@ Test queries:
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus-cli --test cypher_multi_hop
-git add crates/graph-nexus-cli/tests/cypher_multi_hop.rs
+cargo test -p cgn-cli --test cypher_multi_hop
+git add crates/cgn-cli/tests/cypher_multi_hop.rs
 git commit -m "test(cypher): e2e multi-hop chain + variable-length + reverse arrow"
 ```
 
@@ -2526,7 +2526,7 @@ git commit -m "test(cypher): e2e multi-hop chain + variable-length + reverse arr
 ### Task E4: New cypher_aggregation.rs
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/cypher_aggregation.rs`
+- Create: `crates/cgn-cli/tests/cypher_aggregation.rs`
 
 - [ ] **Step 1: Write file**
 
@@ -2539,8 +2539,8 @@ Fixture has 4 functions: `a -> b`, `a -> c`, `d -> b`. Tests:
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus-cli --test cypher_aggregation
-git add crates/graph-nexus-cli/tests/cypher_aggregation.rs
+cargo test -p cgn-cli --test cypher_aggregation
+git add crates/cgn-cli/tests/cypher_aggregation.rs
 git commit -m "test(cypher): e2e aggregation (COUNT, DISTINCT, ORDER BY)"
 ```
 
@@ -2549,17 +2549,17 @@ git commit -m "test(cypher): e2e aggregation (COUNT, DISTINCT, ORDER BY)"
 ### Task E5: New cypher_toon_format.rs
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/cypher_toon_format.rs`
+- Create: `crates/cgn-cli/tests/cypher_toon_format.rs`
 
 - [ ] **Step 1: Write file**
 
-Run `gnx cypher "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a.name, b.name" --format toon`, assert stdout contains `columns: a.name, b.name` and `rows[N]:` lines.
+Run `cgn cypher "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a.name, b.name" --format toon`, assert stdout contains `columns: a.name, b.name` and `rows[N]:` lines.
 
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus-cli --test cypher_toon_format
-git add crates/graph-nexus-cli/tests/cypher_toon_format.rs
+cargo test -p cgn-cli --test cypher_toon_format
+git add crates/cgn-cli/tests/cypher_toon_format.rs
 git commit -m "test(cypher): e2e --format toon output"
 ```
 
@@ -2568,24 +2568,24 @@ git commit -m "test(cypher): e2e --format toon output"
 ### Task E6: New cypher_error_messages.rs
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/cypher_error_messages.rs`
+- Create: `crates/cgn-cli/tests/cypher_error_messages.rs`
 
 - [ ] **Step 1: Write file**
 
 Run failing queries and assert stderr / non-zero exit + presence of `^` marker:
 
-- `gnx cypher "MATCH"` → ParseError (early EOF).
-- `gnx cypher "MATCH (a:Foo) RETURN a"` → Semantic (unknown NodeKind).
-- `gnx cypher "MATCH (a)-[r:NOSUCH]->(b) RETURN a, b"` → Semantic (unknown RelType).
-- `gnx cypher "MATCH (a) RETURN a.confidence > 'foo'"` → Exec at runtime (type mismatch).
+- `cgn cypher "MATCH"` → ParseError (early EOF).
+- `cgn cypher "MATCH (a:Foo) RETURN a"` → Semantic (unknown NodeKind).
+- `cgn cypher "MATCH (a)-[r:NOSUCH]->(b) RETURN a, b"` → Semantic (unknown RelType).
+- `cgn cypher "MATCH (a) RETURN a.confidence > 'foo'"` → Exec at runtime (type mismatch).
 
 For each, assert exit != 0 and stderr contains the relevant keyword (`parse error` / `unknown` / `mismatch`).
 
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cargo test -p graph-nexus-cli --test cypher_error_messages
-git add crates/graph-nexus-cli/tests/cypher_error_messages.rs
+cargo test -p cgn-cli --test cypher_error_messages
+git add crates/cgn-cli/tests/cypher_error_messages.rs
 git commit -m "test(cypher): e2e error message paths (parse/semantic/exec)"
 ```
 
@@ -2621,7 +2621,7 @@ git commit -m "chore(cypher): cargo fmt + clippy clean"
 ### Task F2: Update cypher --help text
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/cypher.rs`
+- Modify: `crates/cgn-cli/src/commands/cypher.rs`
 
 - [ ] **Step 1: Expand the `CypherArgs` doc comment**
 
@@ -2646,13 +2646,13 @@ pub query_positional: Option<String>,
 
 - [ ] **Step 2: Verify --help still passes the cli_surface test**
 
-Run: `cargo test -p graph-nexus-cli --test cli_surface`
+Run: `cargo test -p cgn-cli --test cli_surface`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/cypher.rs
+git add crates/cgn-cli/src/commands/cypher.rs
 git commit -m "docs(cypher): expand --help with full supported grammar"
 ```
 
@@ -2667,7 +2667,7 @@ git push -u origin worktree-feat+cypher-expansion:feat/cypher-expansion
 gh pr create --title "feat(cypher): full openCypher read-only subset (parser + executor)" \
   --body "$(cat <<'EOF'
 ## Summary
-- Replaces regex-based cypher with hand-rolled recursive-descent parser in `graph-nexus-core/cypher/`
+- Replaces regex-based cypher with hand-rolled recursive-descent parser in `cgn-core/cypher/`
 - Supports multi-hop chains, label alternation, OPTIONAL MATCH, rich WHERE (IN/=~/CONTAINS/AND-OR-NOT/edge props), WITH + aggregation (COUNT/SUM/MIN/MAX/AVG/COLLECT, COUNT(DISTINCT)), DISTINCT/ORDER BY/SKIP/LIMIT, UNION [ALL]
 - Column-based `QueryResult { columns, rows }`; CLI supports `--format json` (default) and `--format toon`
 - Spec: `docs/specs/2026-05-16-cypher-expansion-design.md`

@@ -5,11 +5,11 @@
 **Goal**: 在 analyzer pipeline 末段補上 `Imports` edge emission，讓 `MATCH (f:File)-[:Imports]->(s) RETURN s` 不再回空集合。配套新增 `NodeKind::File`，給 module-level dependency 一個乾淨的 source 端。
 
 **Related**:
-- `crates/graph-nexus-core/src/graph.rs` — `RelType::Imports` 已宣告，但 14 語言全 codebase 0 個 emission 點
-- `crates/graph-nexus-core/src/analyzer/types.rs:44` — `RawImport { source, imported_name, alias, binding_kind }` 已存在
-- `crates/graph-nexus-core/src/analyzer/types.rs:121` — `LocalGraph.imports: Vec<RawImport>` 14 語言 parser 全部都有填
-- `crates/graph-nexus-analyzer/src/resolution/resolver.rs:148,528` — resolver 已會用 imports 解析 callee/type 但不 emit edge
-- `crates/graph-nexus-analyzer/src/resolution/builder.rs:925` — HasMethod 的 emit 接點，Imports 接同位置
+- `crates/cgn-core/src/graph.rs` — `RelType::Imports` 已宣告，但 14 語言全 codebase 0 個 emission 點
+- `crates/cgn-core/src/analyzer/types.rs:44` — `RawImport { source, imported_name, alias, binding_kind }` 已存在
+- `crates/cgn-core/src/analyzer/types.rs:121` — `LocalGraph.imports: Vec<RawImport>` 14 語言 parser 全部都有填
+- `crates/cgn-analyzer/src/resolution/resolver.rs:148,528` — resolver 已會用 imports 解析 callee/type 但不 emit edge
+- `crates/cgn-analyzer/src/resolution/builder.rs:925` — HasMethod 的 emit 接點，Imports 接同位置
 - `docs/superpowers/specs/2026-05-16-class-membership-postprocess.md` — 同款 post-process pattern
 
 ---
@@ -21,7 +21,7 @@
 實測（HEAD `019256c` on `.sample_repo`，14343 files 涵蓋 14 主流語言）：
 
 ```
-gnx Imports edge：14 語言全 0
+cgn Imports edge：14 語言全 0
 gitnexus IMPORTS edge：49,161 條（TypeScript 4616 / Java 18106 / Swift 10920 / PHP 9029 / ...）
 ```
 
@@ -29,7 +29,7 @@ Grep 整 codebase 確認：`RelType::Imports` 只出現在 `FromStr` parsing / f
 
 ### 1.2 對 LLM agent 的影響
 
-「誰 import 了 module X」「這個 file 依賴哪些 module」這類最常見的 module-level 查詢在 gnx 上**沒邊可走**。agent 只能 fallback 到 grep `import.*X`，token expensive、結果含註解 / string literal 雜訊。
+「誰 import 了 module X」「這個 file 依賴哪些 module」這類最常見的 module-level 查詢在 cgn 上**沒邊可走**。agent 只能 fallback 到 grep `import.*X`，token expensive、結果含註解 / string literal 雜訊。
 
 ---
 
@@ -70,11 +70,11 @@ graph.bin                              Imports edges + File nodes 上線
 
 ### 4.1 `NodeKind::File` 新增
 
-**`crates/graph-nexus-core/src/graph.rs`**：
+**`crates/cgn-core/src/graph.rs`**：
 - enum `NodeKind` 增 `File` variant
 - `FromStr` / Display impl 補 `File`
 
-**`crates/graph-nexus-analyzer/src/resolution/builder.rs`**：
+**`crates/cgn-analyzer/src/resolution/builder.rs`**：
 - Pass 1 註冊每個 `local_graph` 時，**先 push 一個 File node**（在 register nodes 之前），uid = `File:<path>`，name = file basename。`current_node_idx` 從 1 起算給 raw nodes 用。
 - File node 不進 SymbolTable.register_node（File 不是 symbol，不該被 callee/type lookup 命中）；另存一張 `file_node_idx: FxHashMap<&str, u32>` 給 emit_imports_edges 用。
 
@@ -154,7 +154,7 @@ resolver 目前的 `ResolveTarget` 變體（`Callable` / `Type`）不適合 impo
 
 ## 5. 14-language test matrix
 
-仿 `class_membership_inspect.rs` 的 E2E pattern，新建 `crates/graph-nexus-cli/tests/imports_edge_inspect.rs`，14 個 fixture：
+仿 `class_membership_inspect.rs` 的 E2E pattern，新建 `crates/cgn-cli/tests/imports_edge_inspect.rs`，14 個 fixture：
 
 | Lang | Fixture | Import statement | 期望邊 |
 |---|---|---|---|
@@ -174,7 +174,7 @@ resolver 目前的 `ResolveTarget` 變體（`Callable` / `Type`）不適合 impo
 | Dart | `a.dart` + `b.dart` | `import 'a.dart';` | 同上 |
 
 每個 fixture：
-1. `gnx admin index` → graph.bin
+1. `cgn admin index` → graph.bin
 2. cypher 驗證 `MATCH (f:File {name:'b.<ext>'})-[:Imports]->(t) RETURN count(*) >= 1`
 
 外加一個 **cross-language collision test**：
@@ -206,14 +206,14 @@ resolver 目前的 `ResolveTarget` 變體（`Callable` / `Type`）不適合 impo
 | Cross-language false positive | 0 (e.g. `.mjs → Path.java`) | ✓ 0 |
 | Imports edge count | (revised) ≥ 15k | ✓ 20,056 |
 
-**為何 ≥ 30k 下修為 ≥ 15k**：原 spec 用 gitnexus `.sample_repo` 49k 邊作 baseline 估「60% 下限」。實測 gitnexus 49k 內含**大量跨語言 false positive**（驗證樣本：solidity `eslint.config.mjs → Rust/tokio-util/tests/compat.rs`、Dart `astro.config.mjs → Go/fs.go`、Kotlin `mjs → TypeScript`），主要來自 gitnexus 的 suffix-match 對同名 basename 不分語言/目錄全 emit。實際 gitnexus signal 邊量估 ~30k；gnx 20k 邊精度 98% ≈ 19.6k high-purity signal，符合 LLM-first「refuse to fabricate」原則。
+**為何 ≥ 30k 下修為 ≥ 15k**：原 spec 用 gitnexus `.sample_repo` 49k 邊作 baseline 估「60% 下限」。實測 gitnexus 49k 內含**大量跨語言 false positive**（驗證樣本：solidity `eslint.config.mjs → Rust/tokio-util/tests/compat.rs`、Dart `astro.config.mjs → Go/fs.go`、Kotlin `mjs → TypeScript`），主要來自 gitnexus 的 suffix-match 對同名 basename 不分語言/目錄全 emit。實際 gitnexus signal 邊量估 ~30k；cgn 20k 邊精度 98% ≈ 19.6k high-purity signal，符合 LLM-first「refuse to fabricate」原則。
 
 **剩餘 known gap 全部不可補**：
 - External system framework (`import Foundation` / `import { Code } from '@astrojs/...'`) — target file 不在 indexed corpus
 - External library (`import 'package:flutter/material.dart'` / `use std::io` / `import jakarta.servlet.*`) — 同上
 - Template/macro 字串 (`import '{{name.snakeCase()}}.dart'`) — 不是真實路徑
 
-gnx 對這三類**故意不 emit**，避免 gitnexus 那種 false positive。
+cgn 對這三類**故意不 emit**，避免 gitnexus 那種 false positive。
 
 ---
 

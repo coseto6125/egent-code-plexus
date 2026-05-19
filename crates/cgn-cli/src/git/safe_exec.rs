@@ -1,4 +1,4 @@
-//! Hardened git subprocess wrapper. Every git invocation in graph-nexus-cli MUST
+//! Hardened git subprocess wrapper. Every git invocation in cgn-cli MUST
 //! go through `safe_exec::git()` to ensure hostile repo configs cannot
 //! escalate to code execution. See spec §8 H4.
 

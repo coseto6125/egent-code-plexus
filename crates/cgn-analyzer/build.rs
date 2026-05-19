@@ -66,7 +66,7 @@ fn main() {
     // Opt-in via `CGN_BUILD_VERBOSE=1`; env var above keeps the fingerprint
     // available to runtime code regardless.
     if std::env::var_os("CGN_BUILD_VERBOSE").is_some() {
-        println!("cargo:warning=graph-nexus-analyzer parser fingerprint: {hex}");
+        println!("cargo:warning=cgn-analyzer parser fingerprint: {hex}");
     }
 }
 

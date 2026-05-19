@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace `~/.gnx/<repo>/<branch>/` index layout with `~/.gnx/<repo>/{commits/<sha-dir>, sessions/<sid>}` two-tier model — commit-content-addressed L2 + session-local incremental L1.
+**Goal:** Replace `~/.cgn/<repo>/<branch>/` index layout with `~/.cgn/<repo>/{commits/<sha-dir>, sessions/<sid>}` two-tier model — commit-content-addressed L2 + session-local incremental L1.
 
 **Architecture:** Branch removed from storage key. Commit SHA is sole L2 identity. Per-session L1 holds dirty-worktree overlay (graph fragments + tantivy delta). Promotion handles HEAD drift via content-equivalence (Case A fast-forward) or atomic invalidate (Case B cross-refactor).
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-05-17-index-layout-redesign-design.md`
 
-**Blast radius:** ~30 files across `graph-nexus-core::registry` + `graph-nexus-cli::{graph_path, repo_selector, auto_ensure, engine, commands::admin::*, commands::hook::*}`. Net **+300 LOC** (del ~600, add ~900). No migration code — `gnx admin reset` wipes `~/.gnx/` and auto-rebuild kicks in.
+**Blast radius:** ~30 files across `cgn-core::registry` + `cgn-cli::{graph_path, repo_selector, auto_ensure, engine, commands::admin::*, commands::hook::*}`. Net **+300 LOC** (del ~600, add ~900). No migration code — `cgn admin reset` wipes `~/.cgn/` and auto-rebuild kicks in.
 
 **Phase ordering (strict dependency):**
 
@@ -45,15 +45,15 @@ Goal: introduce new types, remove dead `branch`-keyed types. After this phase co
 ### Task 1.1: Add `SourceType` enum + `CommitDirName` parser
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/registry/dirname.rs`
-- Modify: `crates/graph-nexus-core/src/registry/mod.rs:1-30` (re-export)
-- Test: `crates/graph-nexus-core/tests/commit_dirname.rs`
+- Create: `crates/cgn-core/src/registry/dirname.rs`
+- Modify: `crates/cgn-core/src/registry/mod.rs:1-30` (re-export)
+- Test: `crates/cgn-core/tests/commit_dirname.rs`
 
 - [ ] **Step 1: Write the failing test**
 
 ```rust
-// crates/graph-nexus-core/tests/commit_dirname.rs
-use graph_nexus_core::registry::{CommitDirName, SourceType, ParseError};
+// crates/cgn-core/tests/commit_dirname.rs
+use cgn_core::registry::{CommitDirName, SourceType, ParseError};
 
 #[test]
 fn parse_branch_simple() {
@@ -118,7 +118,7 @@ fn round_trip_format_parse() {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cargo test -p graph-nexus-core --test commit_dirname
+cargo test -p cgn-core --test commit_dirname
 ```
 
 Expected: compile error — module `registry::dirname` does not exist.
@@ -126,7 +126,7 @@ Expected: compile error — module `registry::dirname` does not exist.
 - [ ] **Step 3: Implement `dirname.rs`**
 
 ```rust
-// crates/graph-nexus-core/src/registry/dirname.rs
+// crates/cgn-core/src/registry/dirname.rs
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -209,7 +209,7 @@ impl CommitDirName {
 }
 ```
 
-Add to `crates/graph-nexus-core/src/registry/mod.rs`:
+Add to `crates/cgn-core/src/registry/mod.rs`:
 
 ```rust
 pub mod dirname;
@@ -219,7 +219,7 @@ pub use dirname::{CommitDirName, ParseError as DirNameParseError, SourceType};
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-cargo test -p graph-nexus-core --test commit_dirname
+cargo test -p cgn-core --test commit_dirname
 ```
 
 Expected: all 8 tests pass.
@@ -227,9 +227,9 @@ Expected: all 8 tests pass.
 - [ ] **Step 5: Clippy + format**
 
 ```bash
-cargo clippy -p graph-nexus-core --tests
-rustfmt --edition 2021 crates/graph-nexus-core/src/registry/dirname.rs
-rustfmt --edition 2021 crates/graph-nexus-core/tests/commit_dirname.rs
+cargo clippy -p cgn-core --tests
+rustfmt --edition 2021 crates/cgn-core/src/registry/dirname.rs
+rustfmt --edition 2021 crates/cgn-core/tests/commit_dirname.rs
 ```
 
 Expected: no warnings.
@@ -237,24 +237,24 @@ Expected: no warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/registry/dirname.rs \
-        crates/graph-nexus-core/src/registry/mod.rs \
-        crates/graph-nexus-core/tests/commit_dirname.rs
+git add crates/cgn-core/src/registry/dirname.rs \
+        crates/cgn-core/src/registry/mod.rs \
+        crates/cgn-core/tests/commit_dirname.rs
 git commit -m "feat(registry): CommitDirName parser + SourceType enum"
 ```
 
 ### Task 1.2: Add `CommitBuildMeta` (replaces `BranchMeta`)
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/registry/commit_meta.rs`
-- Modify: `crates/graph-nexus-core/src/registry/mod.rs` (add `pub mod commit_meta;`)
-- Test: `crates/graph-nexus-core/tests/commit_meta.rs`
+- Create: `crates/cgn-core/src/registry/commit_meta.rs`
+- Modify: `crates/cgn-core/src/registry/mod.rs` (add `pub mod commit_meta;`)
+- Test: `crates/cgn-core/tests/commit_meta.rs`
 
 - [ ] **Step 1: Write failing test**
 
 ```rust
-// crates/graph-nexus-core/tests/commit_meta.rs
-use graph_nexus_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
+// crates/cgn-core/tests/commit_meta.rs
+use cgn_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
 use tempfile::NamedTempFile;
 
 #[test]
@@ -305,7 +305,7 @@ fn atomic_write_round_trip() {
 - [ ] **Step 2: Run to verify fails**
 
 ```bash
-cargo test -p graph-nexus-core --test commit_meta
+cargo test -p cgn-core --test commit_meta
 ```
 
 Expected: compile error — `CommitBuildMeta` undefined.
@@ -313,7 +313,7 @@ Expected: compile error — `CommitBuildMeta` undefined.
 - [ ] **Step 3: Implement `commit_meta.rs`**
 
 ```rust
-// crates/graph-nexus-core/src/registry/commit_meta.rs
+// crates/cgn-core/src/registry/commit_meta.rs
 use crate::registry::dirname::SourceType;
 use crate::registry::io::atomic_write_json;
 use serde::{Deserialize, Serialize};
@@ -361,7 +361,7 @@ impl CommitBuildMeta {
 }
 ```
 
-Update `crates/graph-nexus-core/src/registry/mod.rs`:
+Update `crates/cgn-core/src/registry/mod.rs`:
 
 ```rust
 pub mod commit_meta;
@@ -371,7 +371,7 @@ pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord};
 - [ ] **Step 4: Run test pass**
 
 ```bash
-cargo test -p graph-nexus-core --test commit_meta
+cargo test -p cgn-core --test commit_meta
 ```
 
 Expected: 2 tests pass.
@@ -379,23 +379,23 @@ Expected: 2 tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-core/src/registry/commit_meta.rs \
-        crates/graph-nexus-core/src/registry/mod.rs \
-        crates/graph-nexus-core/tests/commit_meta.rs
+git add crates/cgn-core/src/registry/commit_meta.rs \
+        crates/cgn-core/src/registry/mod.rs \
+        crates/cgn-core/tests/commit_meta.rs
 git commit -m "feat(registry): CommitBuildMeta + EmbeddingStatus + RefRecord"
 ```
 
 ### Task 1.3: Add `RepoMeta`
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/registry/repo_meta.rs`
-- Test: `crates/graph-nexus-core/tests/repo_meta.rs`
+- Create: `crates/cgn-core/src/registry/repo_meta.rs`
+- Test: `crates/cgn-core/tests/repo_meta.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-core/tests/repo_meta.rs
-use graph_nexus_core::registry::RepoMeta;
+// crates/cgn-core/tests/repo_meta.rs
+use cgn_core::registry::RepoMeta;
 use std::collections::BTreeMap;
 use tempfile::NamedTempFile;
 
@@ -445,13 +445,13 @@ fn atomic_write_read() {
 - [ ] **Step 2: Verify fail**
 
 ```bash
-cargo test -p graph-nexus-core --test repo_meta
+cargo test -p cgn-core --test repo_meta
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-core/src/registry/repo_meta.rs
+// crates/cgn-core/src/registry/repo_meta.rs
 use crate::registry::io::atomic_write_json;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -493,27 +493,27 @@ pub use repo_meta::RepoMeta;
 - [ ] **Step 4: Verify pass + commit**
 
 ```bash
-cargo test -p graph-nexus-core --test repo_meta
-git add crates/graph-nexus-core/src/registry/repo_meta.rs \
-        crates/graph-nexus-core/src/registry/mod.rs \
-        crates/graph-nexus-core/tests/repo_meta.rs
+cargo test -p cgn-core --test repo_meta
+git add crates/cgn-core/src/registry/repo_meta.rs \
+        crates/cgn-core/src/registry/mod.rs \
+        crates/cgn-core/tests/repo_meta.rs
 git commit -m "feat(registry): RepoMeta with BTreeMap deterministic serialization"
 ```
 
 ### Task 1.4: Add `session/` module — `SessionMeta` + `DirtyFiles`
 
 **Files:**
-- Create: `crates/graph-nexus-core/src/session/mod.rs`
-- Create: `crates/graph-nexus-core/src/session/meta.rs`
-- Create: `crates/graph-nexus-core/src/session/overlay.rs`
-- Modify: `crates/graph-nexus-core/src/lib.rs` (add `pub mod session;`)
-- Test: `crates/graph-nexus-core/tests/session_meta.rs`
+- Create: `crates/cgn-core/src/session/mod.rs`
+- Create: `crates/cgn-core/src/session/meta.rs`
+- Create: `crates/cgn-core/src/session/overlay.rs`
+- Modify: `crates/cgn-core/src/lib.rs` (add `pub mod session;`)
+- Test: `crates/cgn-core/tests/session_meta.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-core/tests/session_meta.rs
-use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+// crates/cgn-core/tests/session_meta.rs
+use cgn_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use std::collections::BTreeMap;
 use tempfile::NamedTempFile;
 
@@ -587,13 +587,13 @@ fn atomic_write_session_meta() {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus-core --test session_meta
+cargo test -p cgn-core --test session_meta
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-core/src/session/mod.rs
+// crates/cgn-core/src/session/mod.rs
 pub mod meta;
 pub mod overlay;
 pub use meta::SessionMeta;
@@ -601,7 +601,7 @@ pub use overlay::{DirtyEntry, DirtyFiles};
 ```
 
 ```rust
-// crates/graph-nexus-core/src/session/meta.rs
+// crates/cgn-core/src/session/meta.rs
 use crate::registry::io::atomic_write_json;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -632,7 +632,7 @@ impl SessionMeta {
 ```
 
 ```rust
-// crates/graph-nexus-core/src/session/overlay.rs
+// crates/cgn-core/src/session/overlay.rs
 use crate::registry::io::atomic_write_json;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -669,7 +669,7 @@ impl DirtyFiles {
 }
 ```
 
-Update `crates/graph-nexus-core/src/lib.rs`:
+Update `crates/cgn-core/src/lib.rs`:
 
 ```rust
 pub mod session;
@@ -678,20 +678,20 @@ pub mod session;
 - [ ] **Step 4: Verify pass + commit**
 
 ```bash
-cargo test -p graph-nexus-core --test session_meta
-git add crates/graph-nexus-core/src/session/ crates/graph-nexus-core/src/lib.rs \
-        crates/graph-nexus-core/tests/session_meta.rs
+cargo test -p cgn-core --test session_meta
+git add crates/cgn-core/src/session/ crates/cgn-core/src/lib.rs \
+        crates/cgn-core/tests/session_meta.rs
 git commit -m "feat(session): SessionMeta + DirtyFiles overlay manifest"
 ```
 
 ### Task 1.5: Delete `IndexLayout` + `sanitize_branch` + `BranchMeta`
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/registry/path.rs` (delete `IndexLayout` + `sanitize_branch`)
-- Delete: `crates/graph-nexus-core/src/registry/meta.rs` (BranchMeta → CommitBuildMeta done; file gone)
-- Modify: `crates/graph-nexus-core/src/registry/mod.rs` (drop re-exports)
-- Delete: `crates/graph-nexus-core/tests/registry_meta.rs`
-- Delete: `crates/graph-nexus-core/tests/registry_path.rs` (IndexLayout-specific cases; keep sanitize_segment tests if exist by moving)
+- Modify: `crates/cgn-core/src/registry/path.rs` (delete `IndexLayout` + `sanitize_branch`)
+- Delete: `crates/cgn-core/src/registry/meta.rs` (BranchMeta → CommitBuildMeta done; file gone)
+- Modify: `crates/cgn-core/src/registry/mod.rs` (drop re-exports)
+- Delete: `crates/cgn-core/tests/registry_meta.rs`
+- Delete: `crates/cgn-core/tests/registry_path.rs` (IndexLayout-specific cases; keep sanitize_segment tests if exist by moving)
 
 - [ ] **Step 1: List call sites that will break (snapshot for next tasks)**
 
@@ -699,16 +699,16 @@ git commit -m "feat(session): SessionMeta + DirtyFiles overlay manifest"
 grep -rn "IndexLayout\|sanitize_branch\|BranchMeta" crates/ --include="*.rs" | grep -v "// removed"
 ```
 
-Expected output: locations in `graph-nexus-cli/src/graph_path.rs`, `commands/admin/index.rs`, `commands/admin/rename_branch.rs`, hook common.rs, tests. Capture this list — Phase 3 / 4 / 8 will rewrite each.
+Expected output: locations in `cgn-cli/src/graph_path.rs`, `commands/admin/index.rs`, `commands/admin/rename_branch.rs`, hook common.rs, tests. Capture this list — Phase 3 / 4 / 8 will rewrite each.
 
 - [ ] **Step 2: Remove `IndexLayout` struct + impl from `path.rs`**
 
 ```bash
-# Surgical: keep sanitize_segment, derive_repo_name, uid_path, resolve_home_gnx, hash8.
+# Surgical: keep sanitize_segment, derive_repo_name, uid_path, resolve_home_cgn, hash8.
 # Delete: IndexLayout struct (line ~87 to ~139), sanitize_branch fn (line ~42 to ~55).
 ```
 
-Open `crates/graph-nexus-core/src/registry/path.rs` and delete:
+Open `crates/cgn-core/src/registry/path.rs` and delete:
 - the `IndexLayout` struct + `impl IndexLayout`
 - the `sanitize_branch` function
 - any test cases that test these (move sanitize_segment cases to remain)
@@ -716,13 +716,13 @@ Open `crates/graph-nexus-core/src/registry/path.rs` and delete:
 - [ ] **Step 3: Delete `meta.rs` (replaced by `commit_meta.rs`)**
 
 ```bash
-git rm crates/graph-nexus-core/src/registry/meta.rs
-git rm crates/graph-nexus-core/tests/registry_meta.rs
+git rm crates/cgn-core/src/registry/meta.rs
+git rm crates/cgn-core/tests/registry_meta.rs
 ```
 
 - [ ] **Step 4: Update `mod.rs` re-exports**
 
-Remove from `crates/graph-nexus-core/src/registry/mod.rs`:
+Remove from `crates/cgn-core/src/registry/mod.rs`:
 
 ```rust
 // DELETE:
@@ -734,37 +734,37 @@ Remove from `crates/graph-nexus-core/src/registry/mod.rs`:
 Keep:
 
 ```rust
-pub use path::{derive_repo_name, resolve_home_gnx, sanitize_segment, uid_path, PathError};
+pub use path::{derive_repo_name, resolve_home_cgn, sanitize_segment, uid_path, PathError};
 ```
 
-- [ ] **Step 5: Verify `graph-nexus-core` still compiles standalone**
+- [ ] **Step 5: Verify `cgn-core` still compiles standalone**
 
 ```bash
-cargo build -p graph-nexus-core
+cargo build -p cgn-core
 ```
 
 Expected: PASS (CLI hasn't switched yet, but core is clean).
 
-- [ ] **Step 6: Commit (graph-nexus-cli intentionally broken — fixed in next tasks)**
+- [ ] **Step 6: Commit (cgn-cli intentionally broken — fixed in next tasks)**
 
 ```bash
-git add -u crates/graph-nexus-core/
+git add -u crates/cgn-core/
 git commit -m "refactor(registry): delete IndexLayout + sanitize_branch + BranchMeta
 
-graph-nexus-cli won't compile until Phase 3/4/8 rewires call sites."
+cgn-cli won't compile until Phase 3/4/8 rewires call sites."
 ```
 
 ### Task 1.6: Migrate `RegistryFile` to v2 schema (`RepoAlias` + `BTreeMap`)
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/registry/store.rs`
-- Modify: `crates/graph-nexus-core/tests/registry_store.rs`
+- Modify: `crates/cgn-core/src/registry/store.rs`
+- Modify: `crates/cgn-core/tests/registry_store.rs`
 
 - [ ] **Step 1: Update test to v2 expectations**
 
 ```rust
-// crates/graph-nexus-core/tests/registry_store.rs
-use graph_nexus_core::registry::{RegistryFile, RepoAlias, GroupEntry};
+// crates/cgn-core/tests/registry_store.rs
+use cgn_core::registry::{RegistryFile, RepoAlias, GroupEntry};
 use std::collections::BTreeMap;
 
 #[test]
@@ -805,13 +805,13 @@ fn v1_rejected_clearly() {
 - [ ] **Step 2: Verify fails (expected — code still v1)**
 
 ```bash
-cargo test -p graph-nexus-core --test registry_store
+cargo test -p cgn-core --test registry_store
 ```
 
 - [ ] **Step 3: Rewrite `store.rs`**
 
 ```rust
-// crates/graph-nexus-core/src/registry/store.rs
+// crates/cgn-core/src/registry/store.rs
 use crate::registry::io::atomic_write_json;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -869,7 +869,7 @@ impl RegistryFile {
         let parsed: RegistryFile = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         if parsed.version != CURRENT_VERSION {
             return Err(io::Error::other(format!(
-                "registry schema v{} (expected v{CURRENT_VERSION}); run `gnx admin reset` to wipe and rebuild",
+                "registry schema v{} (expected v{CURRENT_VERSION}); run `cgn admin reset` to wipe and rebuild",
                 parsed.version
             )));
         }
@@ -877,15 +877,15 @@ impl RegistryFile {
     }
 }
 
-/// Last-resort recovery: walk `~/.gnx/*/meta.json` and rebuild RegistryFile
+/// Last-resort recovery: walk `~/.cgn/*/meta.json` and rebuild RegistryFile
 /// as alias cache. Filesystem is source of truth — group memberships are LOST
-/// (registry-only data), operator must re-apply via `gnx admin group add`.
+/// (registry-only data), operator must re-apply via `cgn admin group add`.
 impl RegistryFile {
-    pub fn rebuild_from_disk(home_gnx: &Path) -> io::Result<Self> {
+    pub fn rebuild_from_disk(home_cgn: &Path) -> io::Result<Self> {
         use crate::registry::repo_meta::RepoMeta;
 
         let mut repos = BTreeMap::new();
-        let it = match fs::read_dir(home_gnx) {
+        let it = match fs::read_dir(home_cgn) {
             Ok(d) => d,
             Err(_) => return Ok(RegistryFile::empty()),
         };
@@ -949,32 +949,32 @@ pub use store::{strip_credentials, GroupEntry, RegistryFile, RepoAlias, CURRENT_
 - [ ] **Step 4: Run tests**
 
 ```bash
-cargo test -p graph-nexus-core --test registry_store
-cargo build -p graph-nexus-core
+cargo test -p cgn-core --test registry_store
+cargo build -p cgn-core
 ```
 
-Expected: tests pass; `graph-nexus-core` builds clean.
+Expected: tests pass; `cgn-core` builds clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -u crates/graph-nexus-core/
+git add -u crates/cgn-core/
 git commit -m "refactor(registry): RegistryFile v2 — BTreeMap repos, RepoAlias, drop RepoEntry/BranchEntry
 
-v1 detection now returns clear 'run gnx admin reset' error; rebuild_from_disk
+v1 detection now returns clear 'run cgn admin reset' error; rebuild_from_disk
 walks <repo>/meta.json (per-repo source of truth)."
 ```
 
 ### Task 1.7: Delete `incremental_cache.rs` (replaced by L1 overlay)
 
 **Files:**
-- Delete: `crates/graph-nexus-cli/src/incremental_cache.rs`
-- Modify: `crates/graph-nexus-cli/src/lib.rs` (drop module decl)
+- Delete: `crates/cgn-cli/src/incremental_cache.rs`
+- Modify: `crates/cgn-cli/src/lib.rs` (drop module decl)
 
 - [ ] **Step 1: Snapshot callers**
 
 ```bash
-grep -rn "incremental_cache" crates/graph-nexus-cli/src/ --include="*.rs"
+grep -rn "incremental_cache" crates/cgn-cli/src/ --include="*.rs"
 ```
 
 Capture caller locations — Phase 4/5 will replace each.
@@ -982,18 +982,18 @@ Capture caller locations — Phase 4/5 will replace each.
 - [ ] **Step 2: Delete file + module decl**
 
 ```bash
-git rm crates/graph-nexus-cli/src/incremental_cache.rs
+git rm crates/cgn-cli/src/incremental_cache.rs
 ```
 
-Edit `crates/graph-nexus-cli/src/lib.rs` and delete the line `pub mod incremental_cache;` (or `mod incremental_cache;`).
+Edit `crates/cgn-cli/src/lib.rs` and delete the line `pub mod incremental_cache;` (or `mod incremental_cache;`).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -u crates/graph-nexus-cli/src/lib.rs
+git add -u crates/cgn-cli/src/lib.rs
 git commit -m "refactor(cli): delete incremental_cache.rs (replaced by L1 overlay)
 
-graph-nexus-cli still won't compile until L1 overlay lands in Phase 5."
+cgn-cli still won't compile until L1 overlay lands in Phase 5."
 ```
 
 ---
@@ -1005,14 +1005,14 @@ Goal: collapse three `write_atomic` copies into one canonical helper.
 ### Task 2.1: Audit existing `write_atomic` implementations
 
 **Files (read only):**
-- `crates/graph-nexus-core/src/registry/io.rs:1-50`
-- `crates/graph-nexus-core/src/registry/store.rs` (search `write_atomic`)
-- `crates/graph-nexus-cli/src/commands/admin/claude_code.rs` (search `write_atomic`)
+- `crates/cgn-core/src/registry/io.rs:1-50`
+- `crates/cgn-core/src/registry/store.rs` (search `write_atomic`)
+- `crates/cgn-cli/src/commands/admin/claude_code.rs` (search `write_atomic`)
 
 - [ ] **Step 1: Compare implementations**
 
 ```bash
-grep -A 20 "fn write_atomic\|fn atomic_write" crates/graph-nexus-core/src/registry/io.rs crates/graph-nexus-core/src/registry/store.rs crates/graph-nexus-cli/src/commands/admin/claude_code.rs
+grep -A 20 "fn write_atomic\|fn atomic_write" crates/cgn-core/src/registry/io.rs crates/cgn-core/src/registry/store.rs crates/cgn-cli/src/commands/admin/claude_code.rs
 ```
 
 Document differences (some may have fsync, some may not; some may use tempfile, some manual `<path>.tmp`).
@@ -1020,14 +1020,14 @@ Document differences (some may have fsync, some may not; some may use tempfile, 
 ### Task 2.2: Promote canonical `atomic_write_json` in `registry/io.rs`
 
 **Files:**
-- Modify: `crates/graph-nexus-core/src/registry/io.rs`
-- Test: `crates/graph-nexus-core/tests/atomic_write.rs` (likely exists; extend)
+- Modify: `crates/cgn-core/src/registry/io.rs`
+- Test: `crates/cgn-core/tests/atomic_write.rs` (likely exists; extend)
 
 - [ ] **Step 1: Verify / extend test**
 
 ```rust
-// crates/graph-nexus-core/tests/atomic_write.rs (extend)
-use graph_nexus_core::registry::io::atomic_write_json;
+// crates/cgn-core/tests/atomic_write.rs (extend)
+use cgn_core::registry::io::atomic_write_json;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
@@ -1058,10 +1058,10 @@ fn atomic_write_no_partial_file_on_concurrent_read() {
 
 - [ ] **Step 2: Ensure `atomic_write_json` is canonical (tmp file + fsync + rename)**
 
-Open `crates/graph-nexus-core/src/registry/io.rs`. If implementation doesn't already match this pattern, replace:
+Open `crates/cgn-core/src/registry/io.rs`. If implementation doesn't already match this pattern, replace:
 
 ```rust
-// crates/graph-nexus-core/src/registry/io.rs
+// crates/cgn-core/src/registry/io.rs
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -1091,15 +1091,15 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()>
 - [ ] **Step 3: Run tests pass**
 
 ```bash
-cargo test -p graph-nexus-core --test atomic_write
+cargo test -p cgn-core --test atomic_write
 ```
 
 - [ ] **Step 4: Delete duplicate in `claude_code.rs`**
 
-In `crates/graph-nexus-cli/src/commands/admin/claude_code.rs`, find the local `write_atomic` (or similar) function and replace all its callers with:
+In `crates/cgn-cli/src/commands/admin/claude_code.rs`, find the local `write_atomic` (or similar) function and replace all its callers with:
 
 ```rust
-use graph_nexus_core::registry::io::atomic_write_json;
+use cgn_core::registry::io::atomic_write_json;
 // ... at call site:
 atomic_write_json(path, &value)?;
 ```
@@ -1109,13 +1109,13 @@ Then delete the local function.
 - [ ] **Step 5: Verify build + commit**
 
 ```bash
-cargo build -p graph-nexus-core
-# graph-nexus-cli build still pending Phase 3+
+cargo build -p cgn-core
+# cgn-cli build still pending Phase 3+
 git add -u
 git commit -m "refactor(registry): consolidate atomic_write_json — single canonical helper
 
 Deletes duplicate write_atomic in commands/admin/claude_code.rs; all callers
-now use graph_nexus_core::registry::io::atomic_write_json."
+now use cgn_core::registry::io::atomic_write_json."
 ```
 
 ---
@@ -1127,15 +1127,15 @@ Goal: rewrite repo resolution + graph_path::resolve to use commit-SHA layout. Af
 ### Task 3.1: Repo identity — `repo_dir_name_for_cwd` helper
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/repo_identity.rs`
-- Modify: `crates/graph-nexus-cli/src/lib.rs` (add `pub mod repo_identity;`)
-- Test: `crates/graph-nexus-cli/tests/repo_identity.rs`
+- Create: `crates/cgn-cli/src/repo_identity.rs`
+- Modify: `crates/cgn-cli/src/lib.rs` (add `pub mod repo_identity;`)
+- Test: `crates/cgn-cli/tests/repo_identity.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/repo_identity.rs
-use graph_nexus_cli::repo_identity::repo_dir_name_for_cwd;
+// crates/cgn-cli/tests/repo_identity.rs
+use cgn_cli::repo_identity::repo_dir_name_for_cwd;
 use std::process::Command;
 
 #[test]
@@ -1176,7 +1176,7 @@ fn cwd_not_in_repo_errors() {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus -p graph-nexus-cli --test repo_identity 2>&1 | head -20
+cargo test -p code-graph-nexus -p cgn-cli --test repo_identity 2>&1 | head -20
 ```
 
 Expected: compile error — `repo_identity` module missing.
@@ -1184,9 +1184,9 @@ Expected: compile error — `repo_identity` module missing.
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/repo_identity.rs
+// crates/cgn-cli/src/repo_identity.rs
 use crate::git::safe_exec;
-use graph_nexus_core::registry::sanitize_segment;
+use cgn_core::registry::sanitize_segment;
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
@@ -1233,7 +1233,7 @@ fn sha256_hex8(bytes: &[u8]) -> String {
 }
 ```
 
-Update `crates/graph-nexus-cli/src/lib.rs`:
+Update `crates/cgn-cli/src/lib.rs`:
 
 ```rust
 pub mod repo_identity;
@@ -1242,28 +1242,28 @@ pub mod repo_identity;
 - [ ] **Step 4: Run tests pass**
 
 ```bash
-cargo test -p graph-nexus --test repo_identity
+cargo test -p code-graph-nexus --test repo_identity
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/repo_identity.rs crates/graph-nexus-cli/src/lib.rs \
-        crates/graph-nexus-cli/tests/repo_identity.rs
+git add crates/cgn-cli/src/repo_identity.rs crates/cgn-cli/src/lib.rs \
+        crates/cgn-cli/tests/repo_identity.rs
 git commit -m "feat(cli): repo_dir_name_for_cwd — git common-dir based identity"
 ```
 
 ### Task 3.2: SHA → dirname lookup helper
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commit_lookup.rs`
-- Test: `crates/graph-nexus-cli/tests/commit_lookup.rs`
+- Create: `crates/cgn-cli/src/commit_lookup.rs`
+- Test: `crates/cgn-cli/tests/commit_lookup.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/commit_lookup.rs
-use graph_nexus_cli::commit_lookup::CommitIndex;
+// crates/cgn-cli/tests/commit_lookup.rs
+use cgn_cli::commit_lookup::CommitIndex;
 
 #[test]
 fn empty_dir_returns_none() {
@@ -1301,14 +1301,14 @@ fn skips_unparseable_names() {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test commit_lookup
+cargo test -p code-graph-nexus --test commit_lookup
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/commit_lookup.rs
-use graph_nexus_core::registry::CommitDirName;
+// crates/cgn-cli/src/commit_lookup.rs
+use cgn_core::registry::CommitDirName;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
@@ -1345,7 +1345,7 @@ impl CommitIndex {
 }
 ```
 
-Update `crates/graph-nexus-cli/src/lib.rs`:
+Update `crates/cgn-cli/src/lib.rs`:
 
 ```rust
 pub mod commit_lookup;
@@ -1354,22 +1354,22 @@ pub mod commit_lookup;
 - [ ] **Step 4: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test commit_lookup
-git add crates/graph-nexus-cli/src/commit_lookup.rs crates/graph-nexus-cli/src/lib.rs \
-        crates/graph-nexus-cli/tests/commit_lookup.rs
+cargo test -p code-graph-nexus --test commit_lookup
+git add crates/cgn-cli/src/commit_lookup.rs crates/cgn-cli/src/lib.rs \
+        crates/cgn-cli/tests/commit_lookup.rs
 git commit -m "feat(cli): CommitIndex — scan commits/ to build sha→dirname map"
 ```
 
 ### Task 3.3: Rewrite `graph_path::resolve`
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/graph_path.rs` (full rewrite)
-- Modify: `crates/graph-nexus-cli/tests/` — adjust whatever tests touched this
+- Modify: `crates/cgn-cli/src/graph_path.rs` (full rewrite)
+- Modify: `crates/cgn-cli/tests/` — adjust whatever tests touched this
 
 - [ ] **Step 1: Read existing resolve to capture caller expectations**
 
 ```bash
-grep -rn "graph_path::resolve\|graph_path::Resolve" crates/graph-nexus-cli/src/ --include="*.rs"
+grep -rn "graph_path::resolve\|graph_path::Resolve" crates/cgn-cli/src/ --include="*.rs"
 ```
 
 Callers expect: input `(graph: &Path, cwd: &Path) → PathBuf`. We preserve signature; semantics change to commit-SHA layout.
@@ -1377,12 +1377,12 @@ Callers expect: input `(graph: &Path, cwd: &Path) → PathBuf`. We preserve sign
 - [ ] **Step 2: Write test for new behavior**
 
 ```rust
-// crates/graph-nexus-cli/tests/graph_path_resolve.rs (new)
-use graph_nexus_cli::graph_path;
+// crates/cgn-cli/tests/graph_path_resolve.rs (new)
+use cgn_cli::graph_path;
 use std::path::Path;
 use std::process::Command;
 
-const LEGACY_DEFAULT: &str = ".gnx/graph.bin";
+const LEGACY_DEFAULT: &str = ".cgn/graph.bin";
 
 #[test]
 fn custom_path_passes_through() {
@@ -1400,14 +1400,14 @@ fn legacy_default_in_git_repo_resolves_to_commits_dir() {
     Command::new("git").arg("-C").arg(tmp.path()).args(["add", "."]).status().unwrap();
     Command::new("git").arg("-C").arg(tmp.path()).args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"]).status().unwrap();
 
-    // override HOME so we don't touch user's ~/.gnx/
+    // override HOME so we don't touch user's ~/.cgn/
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
 
     let resolved = graph_path::resolve(Path::new(LEGACY_DEFAULT), tmp.path());
-    // Expected shape: <home>/.gnx/<repo>__<hash8>/commits/<dirname>/graph.bin
+    // Expected shape: <home>/.cgn/<repo>__<hash8>/commits/<dirname>/graph.bin
     let s = resolved.to_string_lossy();
-    assert!(s.contains(".gnx"), "got: {s}");
+    assert!(s.contains(".cgn"), "got: {s}");
     assert!(s.contains("commits"), "got: {s}");
     assert!(s.ends_with("graph.bin"), "got: {s}");
 }
@@ -1424,14 +1424,14 @@ fn legacy_default_not_in_git_repo_falls_through() {
 - [ ] **Step 3: Rewrite `graph_path.rs`**
 
 ```rust
-// crates/graph-nexus-cli/src/graph_path.rs
+// crates/cgn-cli/src/graph_path.rs
 use crate::commit_lookup::CommitIndex;
 use crate::git::safe_exec;
 use crate::repo_identity;
-use graph_nexus_core::registry::resolve_home_gnx;
+use cgn_core::registry::resolve_home_cgn;
 use std::path::{Path, PathBuf};
 
-const LEGACY_DEFAULT: &str = ".gnx/graph.bin";
+const LEGACY_DEFAULT: &str = ".cgn/graph.bin";
 
 /// Resolve the `--graph` arg. If user passed legacy default, route through
 /// the v2 commit-content-addressed layout based on cwd's current HEAD SHA.
@@ -1444,9 +1444,9 @@ pub fn resolve(graph: &Path, cwd: &Path) -> PathBuf {
 }
 
 fn resolve_v2(cwd: &Path) -> Option<PathBuf> {
-    let home_gnx = resolve_home_gnx();
+    let home_cgn = resolve_home_cgn();
     let repo_dir_name = repo_identity::repo_dir_name_for_cwd(cwd).ok()?;
-    let repo_root = home_gnx.join(&repo_dir_name);
+    let repo_root = home_cgn.join(&repo_dir_name);
     let commits = repo_root.join("commits");
 
     let head_sha = head_sha(cwd)?;
@@ -1473,7 +1473,7 @@ fn head_sha(cwd: &Path) -> Option<[u8; 20]> {
 - [ ] **Step 4: Tests pass**
 
 ```bash
-cargo test -p graph-nexus --test graph_path_resolve
+cargo test -p code-graph-nexus --test graph_path_resolve
 ```
 
 Note: only the first + third tests are expected pass at this phase. The second (resolves to commits/) will only succeed once Phase 4 builds; for now, it falls through. Mark it `#[ignore]` until Phase 4 with a clear comment.
@@ -1487,19 +1487,19 @@ fn legacy_default_in_git_repo_resolves_to_commits_dir() { /* ... */ }
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/graph_path.rs crates/graph-nexus-cli/tests/graph_path_resolve.rs
+git add crates/cgn-cli/src/graph_path.rs crates/cgn-cli/tests/graph_path_resolve.rs
 git commit -m "refactor(cli): graph_path::resolve walks commit-SHA layout
 
-Legacy default (.gnx/graph.bin) now resolves to:
-  <home>/.gnx/<repo>/commits/<dirname>/graph.bin via cwd → common-dir hash + HEAD SHA.
+Legacy default (.cgn/graph.bin) now resolves to:
+  <home>/.cgn/<repo>/commits/<dirname>/graph.bin via cwd → common-dir hash + HEAD SHA.
 Custom paths pass through unchanged."
 ```
 
 ### Task 3.4: Update `repo_selector::find_by_path` to common-dir match
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/repo_selector.rs` (find_by_path)
-- Modify: `crates/graph-nexus-cli/tests/repo_selector.rs`
+- Modify: `crates/cgn-cli/src/repo_selector.rs` (find_by_path)
+- Modify: `crates/cgn-cli/tests/repo_selector.rs`
 
 - [ ] **Step 1: Test new behavior**
 
@@ -1508,8 +1508,8 @@ Add to `tests/repo_selector.rs`:
 ```rust
 #[test]
 fn find_by_path_matches_via_common_dir() {
-    use graph_nexus_cli::repo_selector;
-    use graph_nexus_core::registry::{RegistryFile, RepoAlias};
+    use cgn_cli::repo_selector;
+    use cgn_core::registry::{RegistryFile, RepoAlias};
     use std::collections::BTreeMap;
     use std::process::Command;
 
@@ -1538,8 +1538,8 @@ fn find_by_path_matches_via_common_dir() {
 - [ ] **Step 2: Rewrite `find_by_path` (and adapt `resolve` to v2 schema)**
 
 ```rust
-// crates/graph-nexus-cli/src/repo_selector.rs (modify resolver section)
-use graph_nexus_core::registry::{RegistryFile, RepoAlias};
+// crates/cgn-cli/src/repo_selector.rs (modify resolver section)
+use cgn_core::registry::{RegistryFile, RepoAlias};
 use std::path::Path;
 use crate::git::safe_exec;
 use std::collections::HashSet;
@@ -1648,11 +1648,11 @@ fn push_unique(seen: &mut HashSet<String>, out: &mut Vec<ResolvedRepo>, alias: &
 - [ ] **Step 3: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test repo_selector
+cargo test -p code-graph-nexus --test repo_selector
 git add -u
 git commit -m "refactor(cli): repo_selector — common-dir-based matching, v2 RegistryFile
 
-ResolvedRepo no longer carries index_dir_root (derived from <home>/.gnx/<dir_name>);
+ResolvedRepo no longer carries index_dir_root (derived from <home>/.cgn/<dir_name>);
 find_by_path matches by canonical git common-dir, so multiple worktrees of the
 same repo resolve to one alias."
 ```
@@ -1660,14 +1660,14 @@ same repo resolve to one alias."
 ### Task 3.5: Update `Engine::load` to support L1 overlay (parameter only; merge logic comes in Phase 5)
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/engine.rs`
+- Modify: `crates/cgn-cli/src/engine.rs`
 - Test: extend existing engine tests
 
 - [ ] **Step 1: Add optional overlay path parameter (no merge yet)**
 
 ```rust
-// crates/graph-nexus-cli/src/engine.rs (modify)
-use graph_nexus_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+// crates/cgn-cli/src/engine.rs (modify)
+use cgn_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::{self, File};
@@ -1723,7 +1723,7 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
     if version != GRAPH_FORMAT_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("graph.bin: incompatible format version {version} (this reader expects {GRAPH_FORMAT_VERSION}) — run `gnx analyze` to regenerate"),
+            format!("graph.bin: incompatible format version {version} (this reader expects {GRAPH_FORMAT_VERSION}) — run `cgn analyze` to regenerate"),
         ));
     }
     Ok(())
@@ -1733,13 +1733,13 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
 - [ ] **Step 2: Verify build**
 
 ```bash
-cargo build -p graph-nexus
+cargo build -p code-graph-nexus
 ```
 
-If `graph-nexus-cli` is still uncompilable from Phase 1's deletions, narrow to:
+If `cgn-cli` is still uncompilable from Phase 1's deletions, narrow to:
 
 ```bash
-cargo check -p graph-nexus 2>&1 | head -30
+cargo check -p code-graph-nexus 2>&1 | head -30
 ```
 
 Note remaining compilation errors — they'll be fixed in subsequent tasks. We're tracking progress, not requiring green build until Phase 8.
@@ -1747,7 +1747,7 @@ Note remaining compilation errors — they'll be fixed in subsequent tasks. We'r
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/engine.rs
+git add crates/cgn-cli/src/engine.rs
 git commit -m "feat(cli): Engine::with_overlay accepts L1 session dir (merge logic in Phase 5)"
 ```
 
@@ -1760,14 +1760,14 @@ Goal: rewrite `commands/admin/index::run` to use new layout. After this phase, b
 ### Task 4.1: Helper — pick dirname from SHA
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/build/dirname_picker.rs`
-- Test: `crates/graph-nexus-cli/tests/dirname_picker.rs`
+- Create: `crates/cgn-cli/src/build/dirname_picker.rs`
+- Test: `crates/cgn-cli/tests/dirname_picker.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/dirname_picker.rs
-use graph_nexus_cli::build::dirname_picker::pick_dirname;
+// crates/cgn-cli/tests/dirname_picker.rs
+use cgn_cli::build::dirname_picker::pick_dirname;
 use std::process::Command;
 
 #[test]
@@ -1808,20 +1808,20 @@ fn git_head_sha(p: &std::path::Path) -> String {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test dirname_picker
+cargo test -p code-graph-nexus --test dirname_picker
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/build/mod.rs (new)
+// crates/cgn-cli/src/build/mod.rs (new)
 pub mod dirname_picker;
 ```
 
 ```rust
-// crates/graph-nexus-cli/src/build/dirname_picker.rs
+// crates/cgn-cli/src/build/dirname_picker.rs
 use crate::git::safe_exec;
-use graph_nexus_core::registry::sanitize_segment;
+use cgn_core::registry::sanitize_segment;
 use std::io;
 use std::path::Path;
 
@@ -1867,7 +1867,7 @@ fn sanitize_for_dir(s: &str) -> String {
 }
 ```
 
-Update `crates/graph-nexus-cli/src/lib.rs`:
+Update `crates/cgn-cli/src/lib.rs`:
 
 ```rust
 pub mod build;
@@ -1876,23 +1876,23 @@ pub mod build;
 - [ ] **Step 4: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test dirname_picker
-git add crates/graph-nexus-cli/src/build/ crates/graph-nexus-cli/src/lib.rs \
-        crates/graph-nexus-cli/tests/dirname_picker.rs
+cargo test -p code-graph-nexus --test dirname_picker
+git add crates/cgn-cli/src/build/ crates/cgn-cli/src/lib.rs \
+        crates/cgn-cli/tests/dirname_picker.rs
 git commit -m "feat(build): pick_dirname — most-specific ref selection for L2 dir naming"
 ```
 
 ### Task 4.2: Build mode binary rule (Sync iff no commits)
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/build/mode.rs`
-- Test: `crates/graph-nexus-cli/tests/build_mode.rs`
+- Create: `crates/cgn-cli/src/build/mode.rs`
+- Test: `crates/cgn-cli/tests/build_mode.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/build_mode.rs
-use graph_nexus_cli::build::mode::{build_mode, BuildMode};
+// crates/cgn-cli/tests/build_mode.rs
+use cgn_cli::build::mode::{build_mode, BuildMode};
 
 #[test]
 fn first_build_is_sync() {
@@ -1943,13 +1943,13 @@ fn building_suffix_excluded_from_count() {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test build_mode
+cargo test -p code-graph-nexus --test build_mode
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/build/mode.rs
+// crates/cgn-cli/src/build/mode.rs
 use crate::commit_lookup::CommitIndex;
 use std::path::Path;
 
@@ -1990,7 +1990,7 @@ pub fn build_mode(repo_root: &Path, target_sha: &[u8; 20]) -> BuildMode {
 }
 ```
 
-Update `crates/graph-nexus-cli/src/build/mod.rs`:
+Update `crates/cgn-cli/src/build/mod.rs`:
 
 ```rust
 pub mod mode;
@@ -1999,7 +1999,7 @@ pub mod mode;
 - [ ] **Step 4: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test build_mode
+cargo test -p code-graph-nexus --test build_mode
 git add -u
 git commit -m "feat(build): BuildMode binary rule — Sync iff no completed commits exist"
 ```
@@ -2007,14 +2007,14 @@ git commit -m "feat(build): BuildMode binary rule — Sync iff no completed comm
 ### Task 4.3: Build orchestrator — `build_l2`
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/build/orchestrator.rs`
-- Test: `crates/graph-nexus-cli/tests/build_orchestrator.rs`
+- Create: `crates/cgn-cli/src/build/orchestrator.rs`
+- Test: `crates/cgn-cli/tests/build_orchestrator.rs`
 
 - [ ] **Step 1: Failing test (end-to-end: tiny repo → first build succeeds)**
 
 ```rust
-// crates/graph-nexus-cli/tests/build_orchestrator.rs
-use graph_nexus_cli::build::orchestrator;
+// crates/cgn-cli/tests/build_orchestrator.rs
+use cgn_cli::build::orchestrator;
 use std::process::Command;
 
 #[test]
@@ -2042,19 +2042,19 @@ fn first_build_writes_commit_dir_atomically() {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test build_orchestrator
+cargo test -p code-graph-nexus --test build_orchestrator
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/build/orchestrator.rs
+// crates/cgn-cli/src/build/orchestrator.rs
 use crate::build::dirname_picker::pick_dirname;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use crate::git::safe_exec;
 use fs2::FileExt;
-use graph_nexus_core::registry::{
-    resolve_home_gnx, CommitBuildMeta, EmbeddingStatus, RefRecord, RepoMeta, SourceType,
+use cgn_core::registry::{
+    resolve_home_cgn, CommitBuildMeta, EmbeddingStatus, RefRecord, RepoMeta, SourceType,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -2075,9 +2075,9 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
         return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
     }
 
-    let home_gnx = resolve_home_gnx();
+    let home_cgn = resolve_home_cgn();
     let repo_dir_name = repo_dir_name_for_cwd(worktree)?;
-    let repo_root = home_gnx.join(&repo_dir_name);
+    let repo_root = home_cgn.join(&repo_dir_name);
     fs::create_dir_all(repo_root.join("commits"))?;
 
     let dirname = pick_dirname(worktree, &sha_hex)?;
@@ -2170,7 +2170,7 @@ fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
 
 fn run_analyzer_pipeline(src_root: &Path, out_dir: &Path) -> io::Result<usize> {
     // Delegate to existing analyzer pipeline. Real impl: call into
-    // graph_nexus_analyzer with src_root, write graph.bin + tantivy/ into out_dir.
+    // cgn_analyzer with src_root, write graph.bin + tantivy/ into out_dir.
     // For now this is the integration point — concrete API depends on existing
     // pipeline signature (see commands/admin/index.rs::run for current shape).
     crate::commands::admin::index::run_analyzer_for_paths(src_root, out_dir)
@@ -2315,7 +2315,7 @@ fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Result<BuildRe
 
 NOTE: this orchestrator calls `crate::commands::admin::index::run_analyzer_for_paths` which doesn't exist yet — it'll be carved out of existing `commands/admin/index::run` in Task 4.4.
 
-Update `crates/graph-nexus-cli/src/build/mod.rs`:
+Update `crates/cgn-cli/src/build/mod.rs`:
 
 ```rust
 pub mod orchestrator;
@@ -2337,17 +2337,17 @@ Pipeline integration deferred to next task (run_analyzer_for_paths)."
 ### Task 4.4: Carve `run_analyzer_for_paths` out of `commands/admin/index::run`
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/admin/index.rs`
+- Modify: `crates/cgn-cli/src/commands/admin/index.rs`
 
 - [ ] **Step 1: Locate parser pipeline section**
 
 ```bash
-grep -n "tree_sitter\|analyzer\|graph.bin\|tantivy" crates/graph-nexus-cli/src/commands/admin/index.rs | head -30
+grep -n "tree_sitter\|analyzer\|graph.bin\|tantivy" crates/cgn-cli/src/commands/admin/index.rs | head -30
 ```
 
 Identify the function or block that:
 1. takes a source root path
-2. runs tree-sitter via graph_nexus_analyzer
+2. runs tree-sitter via cgn_analyzer
 3. writes graph.bin
 4. writes tantivy/ index
 
@@ -2374,8 +2374,8 @@ The `todo!()` is unacceptable in final code. Engineer doing this task: read exis
 - [ ] **Step 3: Build + test**
 
 ```bash
-cargo build -p graph-nexus
-cargo test -p graph-nexus --test build_orchestrator
+cargo build -p code-graph-nexus
+cargo test -p code-graph-nexus --test build_orchestrator
 ```
 
 Expected: passes once extraction is correct.
@@ -2383,7 +2383,7 @@ Expected: passes once extraction is correct.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/commands/admin/index.rs
+git add crates/cgn-cli/src/commands/admin/index.rs
 git commit -m "refactor(admin): extract run_analyzer_for_paths from index::run
 
 build_l2 orchestrator can now drive the analyzer over arbitrary source/output dirs."
@@ -2392,7 +2392,7 @@ build_l2 orchestrator can now drive the analyzer over arbitrary source/output di
 ### Task 4.5: Rewire `commands/admin/index::run` to use `build_l2`
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/admin/index.rs::run`
+- Modify: `crates/cgn-cli/src/commands/admin/index.rs::run`
 
 - [ ] **Step 1: Replace path-derivation logic with `build_l2` call**
 
@@ -2417,11 +2417,11 @@ Delete old branch-based path logic.
 - [ ] **Step 2: Build + run smoke**
 
 ```bash
-cargo build -p graph-nexus
-cargo run -p graph-nexus -- admin index --repo /tmp/sample-repo
+cargo build -p code-graph-nexus
+cargo run -p code-graph-nexus -- admin index --repo /tmp/sample-repo
 ```
 
-Expected: success, produces `~/.gnx/<repo>/commits/<dirname>/graph.bin`.
+Expected: success, produces `~/.cgn/<repo>/commits/<dirname>/graph.bin`.
 
 - [ ] **Step 3: Commit**
 
@@ -2439,16 +2439,16 @@ Goal: when a file is edited, write per-file fragment to `<repo>/sessions/<sid>/g
 ### Task 5.1: Session resolution (env / hook / MCP / fallback)
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/session/resolver.rs`
-- Modify: `crates/graph-nexus-cli/src/lib.rs` (`pub mod session;`)
-- Create: `crates/graph-nexus-cli/src/session/mod.rs`
-- Test: `crates/graph-nexus-cli/tests/session_resolver.rs`
+- Create: `crates/cgn-cli/src/session/resolver.rs`
+- Modify: `crates/cgn-cli/src/lib.rs` (`pub mod session;`)
+- Create: `crates/cgn-cli/src/session/mod.rs`
+- Test: `crates/cgn-cli/tests/session_resolver.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/session_resolver.rs
-use graph_nexus_cli::session::resolver::resolve_session_id;
+// crates/cgn-cli/tests/session_resolver.rs
+use cgn_cli::session::resolver::resolve_session_id;
 
 #[test]
 fn env_takes_precedence() {
@@ -2477,19 +2477,19 @@ fn fallback_to_cli_pid() {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test session_resolver
+cargo test -p code-graph-nexus --test session_resolver
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/session/mod.rs
+// crates/cgn-cli/src/session/mod.rs
 pub mod resolver;
 pub mod overlay_writer;
 ```
 
 ```rust
-// crates/graph-nexus-cli/src/session/resolver.rs
+// crates/cgn-cli/src/session/resolver.rs
 use sha2::{Digest, Sha256};
 
 pub fn resolve_session_id(explicit: Option<&str>) -> String {
@@ -2511,24 +2511,24 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
 - [ ] **Step 4: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test session_resolver
-git add crates/graph-nexus-cli/src/session/ crates/graph-nexus-cli/src/lib.rs \
-        crates/graph-nexus-cli/tests/session_resolver.rs
+cargo test -p code-graph-nexus --test session_resolver
+git add crates/cgn-cli/src/session/ crates/cgn-cli/src/lib.rs \
+        crates/cgn-cli/tests/session_resolver.rs
 git commit -m "feat(session): resolve_session_id — explicit > env > pid fallback"
 ```
 
 ### Task 5.2: L1 overlay writer — per-file fragment
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/session/overlay_writer.rs`
-- Test: `crates/graph-nexus-cli/tests/overlay_writer.rs`
+- Create: `crates/cgn-cli/src/session/overlay_writer.rs`
+- Test: `crates/cgn-cli/tests/overlay_writer.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/overlay_writer.rs
-use graph_nexus_cli::session::overlay_writer::{write_dirty_fragment, FragmentInput};
-use graph_nexus_core::session::{DirtyFiles, SessionMeta};
+// crates/cgn-cli/tests/overlay_writer.rs
+use cgn_cli::session::overlay_writer::{write_dirty_fragment, FragmentInput};
+use cgn_core::session::{DirtyFiles, SessionMeta};
 
 #[test]
 fn dirty_file_first_time_creates_fragment_and_updates_manifest() {
@@ -2585,15 +2585,15 @@ fn parse_failed_persists_old_fragment() {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test overlay_writer
+cargo test -p code-graph-nexus --test overlay_writer
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/session/overlay_writer.rs
-use graph_nexus_core::registry::io::atomic_write_json;
-use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+// crates/cgn-cli/src/session/overlay_writer.rs
+use cgn_core::registry::io::atomic_write_json;
+use cgn_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
@@ -2644,11 +2644,11 @@ pub fn write_dirty_fragment(session_dir: &Path, input: &FragmentInput) -> io::Re
 }
 
 fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
-    // Integration point — call into graph_nexus_analyzer to parse a single file
+    // Integration point — call into cgn_analyzer to parse a single file
     // and return rkyv-archived Vec<u8> of the node/edge fragment.
     //
     // Real signature TBD by analyzer crate API. For implementing engineer:
-    // examine graph_nexus_analyzer::parse_file(rel_path, content) → Fragment,
+    // examine cgn_analyzer::parse_file(rel_path, content) → Fragment,
     // then rkyv::to_bytes::<_, 256>(&fragment).
     crate::commands::scan::parse_single_file_to_fragment(rel_path, content)
 }
@@ -2695,18 +2695,18 @@ NOTE: `parse_single_file_to_fragment` is the integration point. The engineer doi
 
 - [ ] **Step 4: Implement `parse_single_file_to_fragment` shim**
 
-In `crates/graph-nexus-cli/src/commands/scan.rs` (or new helper):
+In `crates/cgn-cli/src/commands/scan.rs` (or new helper):
 
 ```rust
 pub fn parse_single_file_to_fragment(rel_path: &str, content: &[u8]) -> std::io::Result<Vec<u8>> {
     // Call analyzer with single-file content; serialize result.
-    // Specific signature depends on graph_nexus_analyzer's public API.
+    // Specific signature depends on cgn_analyzer's public API.
     // The engineer doing this task should:
-    //   1. Read graph-nexus-analyzer's lib.rs to find the public parse entry
+    //   1. Read cgn-analyzer's lib.rs to find the public parse entry
     //   2. Call it with (rel_path, content)
     //   3. Take the returned graph fragment, run rkyv::to_bytes
     //   4. Return Vec<u8>
-    todo!("integrate with graph_nexus_analyzer public API")
+    todo!("integrate with cgn_analyzer public API")
 }
 ```
 
@@ -2715,18 +2715,18 @@ This `todo!()` MUST be replaced before commit. Implementing engineer: do the int
 - [ ] **Step 5: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test overlay_writer
+cargo test -p code-graph-nexus --test overlay_writer
 git add -u
 git commit -m "feat(session): write_dirty_fragment + manifest update + version bump
 
 Per-file rkyv fragment, atomic rename, BTreeMap manifest update, session_meta heartbeat.
-parse_single_file_to_fragment shim integrates with graph_nexus_analyzer."
+parse_single_file_to_fragment shim integrates with cgn_analyzer."
 ```
 
 ### Task 5.3: auto_ensure wire-up — emit overlay updates for dirty files
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/auto_ensure.rs` (extend `ensure_fresh`)
+- Modify: `crates/cgn-cli/src/auto_ensure.rs` (extend `ensure_fresh`)
 
 - [ ] **Step 1: Identify integration point**
 
@@ -2739,7 +2739,7 @@ Current `auto_ensure::ensure_fresh` decides Ready / Stale / Missing and invokes 
 - [ ] **Step 2: Rewrite `ensure_fresh`**
 
 ```rust
-// crates/graph-nexus-cli/src/auto_ensure.rs (sketch — preserves signature)
+// crates/cgn-cli/src/auto_ensure.rs (sketch — preserves signature)
 use crate::build::orchestrator;
 use crate::session::{overlay_writer, resolver};
 
@@ -2755,10 +2755,10 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
         EnsureResult::Stale { .. } => {
             // Per-file overlay update
             let session_id = resolver::resolve_session_id(None);
-            let home_gnx = graph_nexus_core::registry::resolve_home_gnx();
+            let home_cgn = cgn_core::registry::resolve_home_cgn();
             let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(worktree_root)
                 .map_err(|e| format!("repo identity: {e}"))?;
-            let session_dir = home_gnx.join(&repo_dir).join("sessions").join(&session_id);
+            let session_dir = home_cgn.join(&repo_dir).join("sessions").join(&session_id);
             std::fs::create_dir_all(&session_dir).map_err(|e| format!("session dir: {e}"))?;
             ensure_session_meta_exists(&session_dir, worktree_root)?;
 
@@ -2806,8 +2806,8 @@ Engineer doing this task fills in both `todo!()`s with concrete implementations.
 - [ ] **Step 3: Run integration test**
 
 ```bash
-cargo build -p graph-nexus
-cargo run -p graph-nexus -- inspect --name FooBar --repo /tmp/sample
+cargo build -p code-graph-nexus
+cargo run -p code-graph-nexus -- inspect --name FooBar --repo /tmp/sample
 ```
 
 Expected: first call builds L2 (sync), subsequent edits trigger L1 overlay.
@@ -2825,13 +2825,13 @@ fragment dir under the current session."
 ### Task 5.4: Engine query merges L1 fragments
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/engine.rs` (graph() merges overlay)
-- Test: `crates/graph-nexus-cli/tests/engine_overlay.rs`
+- Modify: `crates/cgn-cli/src/engine.rs` (graph() merges overlay)
+- Test: `crates/cgn-cli/tests/engine_overlay.rs`
 
 - [ ] **Step 1: Failing test (end-to-end: edit reflected in query)**
 
 ```rust
-// crates/graph-nexus-cli/tests/engine_overlay.rs
+// crates/cgn-cli/tests/engine_overlay.rs
 #[test]
 #[ignore = "end-to-end query — wire up after merge logic"]
 fn edit_reflected_in_subsequent_query() {
@@ -2882,14 +2882,14 @@ Goal: when HEAD changes mid-session, transition L1 + L2 correctly.
 ### Task 6.1: Promotion case detection (merge-base)
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/session/promotion.rs`
-- Test: `crates/graph-nexus-cli/tests/promotion.rs`
+- Create: `crates/cgn-cli/src/session/promotion.rs`
+- Test: `crates/cgn-cli/tests/promotion.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/promotion.rs
-use graph_nexus_cli::session::promotion::{promotion_case, PromotionCase};
+// crates/cgn-cli/tests/promotion.rs
+use cgn_cli::session::promotion::{promotion_case, PromotionCase};
 use std::process::Command;
 
 #[test]
@@ -2940,13 +2940,13 @@ fn head(p: &std::path::Path) -> String {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test promotion
+cargo test -p code-graph-nexus --test promotion
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/session/promotion.rs
+// crates/cgn-cli/src/session/promotion.rs
 use crate::git::safe_exec;
 use std::path::Path;
 
@@ -2974,7 +2974,7 @@ fn merge_base(a: &str, b: &str, worktree: &Path) -> Option<String> {
 - [ ] **Step 4: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test promotion
+cargo test -p code-graph-nexus --test promotion
 git add -u
 git commit -m "feat(promotion): merge-base-based case detection (A=fast-forward, B=diverged)"
 ```
@@ -2982,7 +2982,7 @@ git commit -m "feat(promotion): merge-base-based case detection (A=fast-forward,
 ### Task 6.2: Case A promotion — content-equivalence drop
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/session/promotion.rs` (add `promote_case_a`)
+- Modify: `crates/cgn-cli/src/session/promotion.rs` (add `promote_case_a`)
 - Test: extend `tests/promotion.rs`
 
 - [ ] **Step 1: Failing test**
@@ -3009,10 +3009,10 @@ fn case_a_keeps_fragment_when_content_diverges() {
 - [ ] **Step 2: Implement**
 
 ```rust
-// Add to crates/graph-nexus-cli/src/session/promotion.rs
+// Add to crates/cgn-cli/src/session/promotion.rs
 use crate::git::safe_exec;
-use graph_nexus_core::registry::io::atomic_write_json;
-use graph_nexus_core::session::{DirtyFiles, SessionMeta};
+use cgn_core::registry::io::atomic_write_json;
+use cgn_core::session::{DirtyFiles, SessionMeta};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
@@ -3075,7 +3075,7 @@ fn git_cat_file_sha256(worktree: &Path, sha: &str, rel_path: &str) -> io::Result
 - [ ] **Step 3: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test promotion
+cargo test -p code-graph-nexus --test promotion
 git add -u
 git commit -m "feat(promotion): Case A content-equivalence — drop fragment iff sha256(L1)==sha256(L2 blob)"
 ```
@@ -3083,7 +3083,7 @@ git commit -m "feat(promotion): Case A content-equivalence — drop fragment iff
 ### Task 6.3: Case B promotion — atomic L1 invalidate + delayed GC
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/session/promotion.rs` (add `promote_case_b`)
+- Modify: `crates/cgn-cli/src/session/promotion.rs` (add `promote_case_b`)
 - Test: extend `tests/promotion.rs`
 
 - [ ] **Step 1: Failing test**
@@ -3140,7 +3140,7 @@ pub fn promote_case_b(
 - [ ] **Step 3: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test promotion
+cargo test -p code-graph-nexus --test promotion
 git add -u
 git commit -m "feat(promotion): Case B atomic L1 invalidate + delayed stale GC"
 ```
@@ -3148,7 +3148,7 @@ git commit -m "feat(promotion): Case B atomic L1 invalidate + delayed stale GC"
 ### Task 6.4: Wire promotion into auto_ensure
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/auto_ensure.rs` (detect HEAD drift before overlay update)
+- Modify: `crates/cgn-cli/src/auto_ensure.rs` (detect HEAD drift before overlay update)
 
 - [ ] **Step 1: Add drift detection**
 
@@ -3175,14 +3175,14 @@ if session_meta.base_sha != current_head {
 - [ ] **Step 2: Run smoke**
 
 ```bash
-cargo build -p graph-nexus
+cargo build -p code-graph-nexus
 # Manual test: build L2, edit file, commit, run query → should see Case A audit line
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/src/auto_ensure.rs
+git add crates/cgn-cli/src/auto_ensure.rs
 git commit -m "feat(auto_ensure): detect HEAD drift → invoke promotion before overlay update"
 ```
 
@@ -3195,14 +3195,14 @@ Goal: GC reachability + LRU; orphan / dead pid sweep; multi-session safety verif
 ### Task 7.1: Reachability computation
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/admin/gc.rs`
-- Test: `crates/graph-nexus-cli/tests/gc.rs`
+- Create: `crates/cgn-cli/src/admin/gc.rs`
+- Test: `crates/cgn-cli/tests/gc.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/gc.rs
-use graph_nexus_cli::admin::gc::reachability;
+// crates/cgn-cli/tests/gc.rs
+use cgn_cli::admin::gc::reachability;
 use std::process::Command;
 
 #[test]
@@ -3220,7 +3220,7 @@ fn reachability_includes_branches_and_sessions() {
     std::fs::create_dir_all(repo_root.join("sessions").join("sid1")).unwrap();
     // Write a session_meta pinning a different sha
     let session_sha = "0".repeat(40);
-    let sm = graph_nexus_core::session::SessionMeta {
+    let sm = cgn_core::session::SessionMeta {
         version: 1,
         session_id: "sid1".into(),
         pid: None,
@@ -3230,7 +3230,7 @@ fn reachability_includes_branches_and_sessions() {
         source_worktree: wt.to_string_lossy().into(),
         overlay_version: 0,
     };
-    graph_nexus_core::session::SessionMeta::write_atomic(
+    cgn_core::session::SessionMeta::write_atomic(
         &repo_root.join("sessions").join("sid1").join("session_meta.json"),
         &sm,
     ).unwrap();
@@ -3249,15 +3249,15 @@ fn git_head_sha(p: &std::path::Path) -> String {
 - [ ] **Step 2: Verify fails**
 
 ```bash
-cargo test -p graph-nexus --test gc
+cargo test -p code-graph-nexus --test gc
 ```
 
 - [ ] **Step 3: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/admin/gc.rs
+// crates/cgn-cli/src/admin/gc.rs
 use crate::git::safe_exec;
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::session::SessionMeta;
 use std::collections::HashSet;
 use std::io;
 use std::path::Path;
@@ -3294,7 +3294,7 @@ pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<HashSet<Str
 - [ ] **Step 4: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test gc
+cargo test -p code-graph-nexus --test gc
 git add -u
 git commit -m "feat(admin/gc): reachability = git refs ∪ active session base_shas"
 ```
@@ -3302,7 +3302,7 @@ git commit -m "feat(admin/gc): reachability = git refs ∪ active session base_s
 ### Task 7.2: LRU eviction
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/admin/gc.rs` (add `enforce_quota`)
+- Modify: `crates/cgn-cli/src/admin/gc.rs` (add `enforce_quota`)
 - Test: extend `tests/gc.rs`
 
 - [ ] **Step 1: Failing test**
@@ -3332,9 +3332,9 @@ pub fn enforce_quota(repo_root: &Path, worktree: &Path, quota: u64) -> io::Resul
         if !e.file_type()?.is_dir() { continue; }
         let name = e.file_name().to_string_lossy().to_string();
         if name.contains(".building") || name.contains(".stale") { continue; }
-        let Ok(parsed) = graph_nexus_core::registry::CommitDirName::parse(&name) else { continue };
+        let Ok(parsed) = cgn_core::registry::CommitDirName::parse(&name) else { continue };
         let meta_path = e.path().join("meta.json");
-        let Ok(cm) = graph_nexus_core::registry::CommitBuildMeta::read(&meta_path) else { continue };
+        let Ok(cm) = cgn_core::registry::CommitBuildMeta::read(&meta_path) else { continue };
         let size = crate::admin::utils::dir_size(&e.path()).unwrap_or(0);
         let built_at_epoch = chrono::DateTime::parse_from_rfc3339(&cm.built_at)
             .map(|d| d.timestamp() as u64).unwrap_or(0);
@@ -3366,7 +3366,7 @@ pub struct EvictStats { pub evicted: usize, pub freed_bytes: u64 }
 - [ ] **Step 3: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test gc
+cargo test -p code-graph-nexus --test gc
 git add -u
 git commit -m "feat(admin/gc): LRU quota enforcement — evict oldest unreachable to 80% load"
 ```
@@ -3374,7 +3374,7 @@ git commit -m "feat(admin/gc): LRU quota enforcement — evict oldest unreachabl
 ### Task 7.3: Session orphan sweep
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/admin/gc.rs` (add `sweep_sessions`)
+- Modify: `crates/cgn-cli/src/admin/gc.rs` (add `sweep_sessions`)
 
 - [ ] **Step 1: Test**
 
@@ -3455,14 +3455,14 @@ git commit -m "feat(admin/gc): sweep_sessions — pid liveness + 24h heartbeat �
 ### Task 7.4: Background GC heartbeat
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/main.rs` (early-startup heartbeat check)
+- Modify: `crates/cgn-cli/src/main.rs` (early-startup heartbeat check)
 
 - [ ] **Step 1: Add check at CLI entry**
 
 ```rust
 // In main(), before command dispatch:
 fn maybe_spawn_background_gc() {
-    let home = graph_nexus_core::registry::resolve_home_gnx();
+    let home = cgn_core::registry::resolve_home_cgn();
     let stamp = home.join(".last-gc");
     let age_ok = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok()
         .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
@@ -3474,7 +3474,7 @@ fn maybe_spawn_background_gc() {
     let _ = std::fs::write(&stamp, b"");
 
     // Spawn background gc
-    let _ = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "gnx".into()))
+    let _ = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "cgn".into()))
         .args(["admin", "gc", "--quiet"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -3486,7 +3486,7 @@ fn maybe_spawn_background_gc() {
 
 ```bash
 git add -u
-git commit -m "feat(cli): background GC heartbeat — auto-spawn gnx admin gc when stamp >24h"
+git commit -m "feat(cli): background GC heartbeat — auto-spawn cgn admin gc when stamp >24h"
 ```
 
 ---
@@ -3499,18 +3499,18 @@ Goal: add new flags + commands, remove obsolete ones, rewire hook resolution.
 
 **Files:**
 - Modify: query commands (`inspect`, `impact`, `cypher`, `search`, `scan`, `contracts`, `coverage`, `routes`, `shape-check`, `diff`)
-- Test: `crates/graph-nexus-cli/tests/rev_flag.rs`
+- Test: `crates/cgn-cli/tests/rev_flag.rs`
 
 - [ ] **Step 1: Failing test**
 
 ```rust
-// crates/graph-nexus-cli/tests/rev_flag.rs
+// crates/cgn-cli/tests/rev_flag.rs
 use std::process::Command;
 
 #[test]
 fn inspect_with_rev_branch_resolves_correctly() {
     // Build L2 at SHA A on branch main, switch to branch dev (different SHA),
-    // run `gnx inspect Foo --rev main` → should use L2 at A, not current HEAD's L2.
+    // run `cgn inspect Foo --rev main` → should use L2 at A, not current HEAD's L2.
     todo!()
 }
 ```
@@ -3530,7 +3530,7 @@ pub struct InspectArgs {
 
 - [ ] **Step 3: Translate `--rev` to SHA in command handler**
 
-Add helper `crates/graph-nexus-cli/src/rev_resolve.rs`:
+Add helper `crates/cgn-cli/src/rev_resolve.rs`:
 
 ```rust
 use crate::git::safe_exec;
@@ -3560,7 +3560,7 @@ let sha = crate::rev_resolve::resolve_rev_to_sha(&worktree, args.rev.as_deref())
 - [ ] **Step 4: Tests pass + commit**
 
 ```bash
-cargo test -p graph-nexus --test rev_flag
+cargo test -p code-graph-nexus --test rev_flag
 git add -u
 git commit -m "feat(cli): --rev flag on all query commands
 
@@ -3595,19 +3595,19 @@ git add -u
 git commit -m "feat(cli): --session-id flag — explicit > env > pid fallback"
 ```
 
-### Task 8.3: New `gnx admin sessions` subcommand
+### Task 8.3: New `cgn admin sessions` subcommand
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/admin/sessions.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/admin/mod.rs` (add subcommand)
+- Create: `crates/cgn-cli/src/commands/admin/sessions.rs`
+- Modify: `crates/cgn-cli/src/commands/admin/mod.rs` (add subcommand)
 
 - [ ] **Step 1: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/commands/admin/sessions.rs
+// crates/cgn-cli/src/commands/admin/sessions.rs
 use clap::Subcommand;
-use graph_nexus_core::registry::resolve_home_gnx;
-use graph_nexus_core::session::SessionMeta;
+use cgn_core::registry::resolve_home_cgn;
+use cgn_core::session::SessionMeta;
 
 #[derive(Subcommand)]
 pub enum SessionsCmd {
@@ -3628,7 +3628,7 @@ pub fn run(cmd: SessionsCmd) -> Result<(), String> {
 }
 
 fn list_sessions() -> Result<(), String> {
-    let home = resolve_home_gnx();
+    let home = resolve_home_cgn();
     let it = std::fs::read_dir(&home).map_err(|e| format!("{e}"))?;
     println!("repo\tsession_id\tbase_sha\tlast_touched\tdirty_count");
     for repo_entry in it.flatten() {
@@ -3641,7 +3641,7 @@ fn list_sessions() -> Result<(), String> {
             let sm_path = s_entry.path().join("session_meta.json");
             let Ok(sm) = SessionMeta::read(&sm_path) else { continue };
             let df_path = s_entry.path().join("dirty_files.json");
-            let dirty_count = graph_nexus_core::session::DirtyFiles::read(&df_path)
+            let dirty_count = cgn_core::session::DirtyFiles::read(&df_path)
                 .map(|d| d.entries.len()).unwrap_or(0);
             println!("{}\t{}\t{}\t{}\t{}", repo_name, sm.session_id, &sm.base_sha[..8], sm.last_touched, dirty_count);
         }
@@ -3650,7 +3650,7 @@ fn list_sessions() -> Result<(), String> {
 }
 
 fn reset_session(sid: &str) -> Result<(), String> {
-    let home = resolve_home_gnx();
+    let home = resolve_home_cgn();
     let it = std::fs::read_dir(&home).map_err(|e| format!("{e}"))?;
     for repo_entry in it.flatten() {
         let candidate = repo_entry.path().join("sessions").join(sid);
@@ -3665,7 +3665,7 @@ fn reset_session(sid: &str) -> Result<(), String> {
 }
 
 fn sweep_all() -> Result<(), String> {
-    let home = resolve_home_gnx();
+    let home = resolve_home_cgn();
     let it = std::fs::read_dir(&home).map_err(|e| format!("{e}"))?;
     for repo_entry in it.flatten() {
         if !repo_entry.path().is_dir() { continue; }
@@ -3681,23 +3681,23 @@ Register in admin mod.
 
 ```bash
 git add -u
-git commit -m "feat(admin): gnx admin sessions list/reset/sweep"
+git commit -m "feat(admin): cgn admin sessions list/reset/sweep"
 ```
 
-### Task 8.4: `gnx admin reset`
+### Task 8.4: `cgn admin reset`
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/admin/reset.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/admin/mod.rs`
+- Create: `crates/cgn-cli/src/commands/admin/reset.rs`
+- Modify: `crates/cgn-cli/src/commands/admin/mod.rs`
 
 - [ ] **Step 1: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/commands/admin/reset.rs
-use graph_nexus_core::registry::resolve_home_gnx;
+// crates/cgn-cli/src/commands/admin/reset.rs
+use cgn_core::registry::resolve_home_cgn;
 
 pub fn run(force: bool) -> Result<(), String> {
-    let home = resolve_home_gnx();
+    let home = resolve_home_cgn();
     if !home.exists() { return Ok(()); }
     if !force {
         eprintln!("This will wipe {} (all indexed graphs + sessions).", home.display());
@@ -3708,7 +3708,7 @@ pub fn run(force: bool) -> Result<(), String> {
         if line.trim() != "reset" { return Err("aborted".into()); }
     }
     std::fs::remove_dir_all(&home).map_err(|e| format!("{e}"))?;
-    eprintln!("✓ ~/.gnx/ wiped. Next query auto-rebuilds.");
+    eprintln!("✓ ~/.cgn/ wiped. Next query auto-rebuilds.");
     Ok(())
 }
 ```
@@ -3717,21 +3717,21 @@ pub fn run(force: bool) -> Result<(), String> {
 
 ```bash
 git add -u
-git commit -m "feat(admin): gnx admin reset — wipe ~/.gnx/ with confirm prompt"
+git commit -m "feat(admin): cgn admin reset — wipe ~/.cgn/ with confirm prompt"
 ```
 
-### Task 8.5: `gnx admin gc` command
+### Task 8.5: `cgn admin gc` command
 
 **Files:**
-- Create: `crates/graph-nexus-cli/src/commands/admin/gc_cmd.rs`
+- Create: `crates/cgn-cli/src/commands/admin/gc_cmd.rs`
 - Modify: `commands/admin/mod.rs`
 
 - [ ] **Step 1: Implement**
 
 ```rust
-// crates/graph-nexus-cli/src/commands/admin/gc_cmd.rs
+// crates/cgn-cli/src/commands/admin/gc_cmd.rs
 use crate::admin::gc;
-use graph_nexus_core::registry::resolve_home_gnx;
+use cgn_core::registry::resolve_home_cgn;
 
 pub struct GcArgs {
     pub repo: Option<String>,
@@ -3741,7 +3741,7 @@ pub struct GcArgs {
 }
 
 pub fn run(args: GcArgs) -> Result<(), String> {
-    let home = resolve_home_gnx();
+    let home = resolve_home_cgn();
     let repos: Vec<_> = if let Some(r) = args.repo.as_deref() {
         vec![home.join(r)]
     } else {
@@ -3770,7 +3770,7 @@ pub fn run(args: GcArgs) -> Result<(), String> {
 
 fn derive_worktree_for_repo(repo_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
     // Read repo_meta.json.common_dir → infer worktree.
-    let rm = graph_nexus_core::registry::RepoMeta::read(&repo_root.join("meta.json"))
+    let rm = cgn_core::registry::RepoMeta::read(&repo_root.join("meta.json"))
         .map_err(|e| format!("{e}"))?;
     std::fs::canonicalize(rm.common_dir.trim_end_matches("/.git").trim_end_matches("/.git/"))
         .map_err(|e| format!("{e}"))
@@ -3781,20 +3781,20 @@ fn derive_worktree_for_repo(repo_root: &std::path::Path) -> Result<std::path::Pa
 
 ```bash
 git add -u
-git commit -m "feat(admin): gnx admin gc — LRU eviction + session sweep, per-repo or all"
+git commit -m "feat(admin): cgn admin gc — LRU eviction + session sweep, per-repo or all"
 ```
 
 ### Task 8.6: Remove `--branch` flag and `rename_branch` command
 
 **Files:**
 - Modify: all query command structs (remove `--branch`)
-- Delete: `crates/graph-nexus-cli/src/commands/admin/rename_branch.rs`
-- Modify: `crates/graph-nexus-cli/src/commands/admin/mod.rs`
+- Delete: `crates/cgn-cli/src/commands/admin/rename_branch.rs`
+- Modify: `crates/cgn-cli/src/commands/admin/mod.rs`
 
 - [ ] **Step 1: Sweep `--branch` usage**
 
 ```bash
-grep -rn "branch:\s*Option<String>\|--branch" crates/graph-nexus-cli/src/commands/ --include="*.rs"
+grep -rn "branch:\s*Option<String>\|--branch" crates/cgn-cli/src/commands/ --include="*.rs"
 ```
 
 For each match: delete the `pub branch: Option<String>` field; remove `--branch` handling in run fn.
@@ -3802,7 +3802,7 @@ For each match: delete the `pub branch: Option<String>` field; remove `--branch`
 - [ ] **Step 2: Delete rename_branch**
 
 ```bash
-git rm crates/graph-nexus-cli/src/commands/admin/rename_branch.rs
+git rm crates/cgn-cli/src/commands/admin/rename_branch.rs
 # Edit mod.rs to remove the subcommand registration
 ```
 
@@ -3818,20 +3818,20 @@ Branch is no longer in storage. Use --rev <branch-name> for branch-pointed SHA."
 ### Task 8.7: Rewire `commands/hook/common.rs::lookup_index_dir`
 
 **Files:**
-- Modify: `crates/graph-nexus-cli/src/commands/hook/common.rs::lookup_index_dir`
+- Modify: `crates/cgn-cli/src/commands/hook/common.rs::lookup_index_dir`
 
 - [ ] **Step 1: Replace branch-based lookup**
 
 ```rust
-// crates/graph-nexus-cli/src/commands/hook/common.rs
+// crates/cgn-cli/src/commands/hook/common.rs
 use crate::commit_lookup::CommitIndex;
 use crate::repo_identity::repo_dir_name_for_cwd;
-use graph_nexus_core::registry::resolve_home_gnx;
+use cgn_core::registry::resolve_home_cgn;
 use std::path::Path;
 
 /// Resolve cwd → <repo>/commits/<dirname>/ path, or None if no L2 yet.
 pub fn lookup_index_dir(cwd: &Path) -> Option<std::path::PathBuf> {
-    let home = resolve_home_gnx();
+    let home = resolve_home_cgn();
     let repo_dir = repo_dir_name_for_cwd(cwd).ok()?;
     let commits = home.join(&repo_dir).join("commits");
     let head_sha = head_sha_bytes(cwd)?;
@@ -3865,7 +3865,7 @@ git commit -m "refactor(hook): lookup_index_dir uses commit-SHA layout"
 - [ ] **Step 1: Build**
 
 ```bash
-cargo build -p graph-nexus --release
+cargo build -p code-graph-nexus --release
 ```
 
 Expected: success.
@@ -3873,8 +3873,8 @@ Expected: success.
 - [ ] **Step 2: Run all tests**
 
 ```bash
-cargo test -p graph-nexus --tests
-cargo test -p graph-nexus-core --tests
+cargo test -p code-graph-nexus --tests
+cargo test -p cgn-core --tests
 ```
 
 Expected: all pass. If any fail, fix before continuing.
@@ -3882,8 +3882,8 @@ Expected: all pass. If any fail, fix before continuing.
 - [ ] **Step 3: Clippy + format**
 
 ```bash
-cargo clippy -p graph-nexus --tests
-cargo clippy -p graph-nexus-core --tests
+cargo clippy -p code-graph-nexus --tests
+cargo clippy -p cgn-core --tests
 rustfmt --edition 2021 $(git diff --name-only --diff-filter=AM HEAD~30 | grep '\.rs$')
 ```
 
@@ -3903,12 +3903,12 @@ Goal: verify layout change doesn't break any language's build/query flow; update
 ### Task 9.1: 14-language smoke test
 
 **Files:**
-- Create: `crates/graph-nexus-cli/tests/multi_language_smoke.rs`
+- Create: `crates/cgn-cli/tests/multi_language_smoke.rs`
 
 - [ ] **Step 1: Write smoke test**
 
 ```rust
-// crates/graph-nexus-cli/tests/multi_language_smoke.rs
+// crates/cgn-cli/tests/multi_language_smoke.rs
 use std::process::Command;
 
 const LANGUAGES: &[(&str, &str, &str)] = &[
@@ -3943,7 +3943,7 @@ fn smoke_build_and_query_each_language() {
         std::env::set_var("HOME", &home);
 
         // Build L2 + query
-        let bin = env!("CARGO_BIN_EXE_gnx");
+        let bin = env!("CARGO_BIN_EXE_cgn");
         let build = Command::new(bin)
             .args(["admin", "index", "--repo", wt.to_str().unwrap()])
             .output().unwrap();
@@ -3972,7 +3972,7 @@ fn smoke_edit_reflects_in_overlay_each_language() {
         let home = tmp.path().join("home");
         std::env::set_var("HOME", &home);
 
-        let bin = env!("CARGO_BIN_EXE_gnx");
+        let bin = env!("CARGO_BIN_EXE_cgn");
         Command::new(bin).args(["admin", "index", "--repo", wt.to_str().unwrap()]).status().unwrap();
 
         // Edit: rename hello → renamed
@@ -3992,7 +3992,7 @@ fn smoke_edit_reflects_in_overlay_each_language() {
 - [ ] **Step 2: Run**
 
 ```bash
-cargo test -p graph-nexus --test multi_language_smoke --release -- --nocapture
+cargo test -p code-graph-nexus --test multi_language_smoke --release -- --nocapture
 ```
 
 Expected: both tests pass for all 14 languages. If any language fails, investigate before declaring victory.
@@ -4000,7 +4000,7 @@ Expected: both tests pass for all 14 languages. If any language fails, investiga
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/graph-nexus-cli/tests/multi_language_smoke.rs
+git add crates/cgn-cli/tests/multi_language_smoke.rs
 git commit -m "test: 14-language smoke — build + query + L1 overlay edit-visibility"
 ```
 
@@ -4012,7 +4012,7 @@ git commit -m "test: 14-language smoke — build + query + L1 overlay edit-visib
 - [ ] **Step 1: Audit**
 
 ```bash
-grep -n "<branch>\|\.gnx/<repo>/<branch>\|IndexLayout\|sanitize_branch\|BranchMeta" CLAUDE.md docs/
+grep -n "<branch>\|\.cgn/<repo>/<branch>\|IndexLayout\|sanitize_branch\|BranchMeta" CLAUDE.md docs/
 ```
 
 - [ ] **Step 2: Update wording**
@@ -4031,22 +4031,22 @@ git commit -m "docs: update CLAUDE.md + skill docs for v2 storage layout"
 - [ ] **Step 1: Full test sweep**
 
 ```bash
-cargo test -p graph-nexus -p graph-nexus-core --release
-cargo clippy -p graph-nexus -p graph-nexus-core --tests
+cargo test -p code-graph-nexus -p cgn-core --release
+cargo clippy -p code-graph-nexus -p cgn-core --tests
 ```
 
 - [ ] **Step 2: Manual smoke**
 
 ```bash
 # Wipe + cold start
-gnx admin reset --force  # if implemented; else manually rm -rf ~/.gnx/
+cgn admin reset --force  # if implemented; else manually rm -rf ~/.cgn/
 cd /path/to/real/repo
-gnx inspect SomeSymbol     # should trigger first-time build, sync
-gnx search foo             # subsequent should be fast
+cgn inspect SomeSymbol     # should trigger first-time build, sync
+cgn search foo             # subsequent should be fast
 echo "fn new() {}" >> src/something.rs
-gnx inspect new            # L1 overlay should reflect edit immediately
+cgn inspect new            # L1 overlay should reflect edit immediately
 git commit -am "test"
-gnx inspect new            # promotion Case A — fragment dropped
+cgn inspect new            # promotion Case A — fragment dropped
 ```
 
 - [ ] **Step 3: PR prep**
@@ -4063,7 +4063,7 @@ gh pr create --title "Index Layout Redesign — commit-content-addressed L2 + se
 - L2: commit-SHA-keyed, immutable, cross-session shared
 - L1: per-session, incremental dirty overlay (graph fragments + tantivy delta)
 - Promotion: Case A (fast-forward, content-equivalence drop) vs Case B (cross-refactor, atomic invalidate)
-- No migration — `gnx admin reset` wipes and rebuilds; pre-1.0
+- No migration — `cgn admin reset` wipes and rebuilds; pre-1.0
 
 Spec: docs/superpowers/specs/2026-05-17-index-layout-redesign-design.md
 Plan: docs/superpowers/plans/2026-05-17-index-layout-redesign.md

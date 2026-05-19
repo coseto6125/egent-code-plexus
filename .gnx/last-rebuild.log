@@ -1,0 +1,3 @@
+=== attempt 1/3 ===
+[2m2026-05-19T03:28:31.618325Z[0m [33m WARN[0m [2mgnx::commands::admin::index[0m[2m:[0m Skipped 3 files > 512 KB during analysis of "/home/enor/gitnexus-rs/.claude/worktrees/rename-acn"
+l2.built sha=885f8327 type=Branch elapsed=0.32s

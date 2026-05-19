@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Per-language per-symbol parity diff: gnx-rs vs reference gitnexus.
+"""Per-language per-symbol parity diff: cgn-rs vs reference gitnexus.
 
 Dumps `(kind, filePath, name)` tuples from both indices per language, then
 emits `<lang>_rs_only.txt` / `<lang>_ref_only.txt` + `summary.md` showing
 diff counts. Sampling those text files surfaces which side parsed wrong.
 
 Assumes both binaries have already indexed `.sample_repo/<Lang>/...` —
-gnx-rs registers each lang sub-dir separately (cd into it to query), while
+cgn-rs registers each lang sub-dir separately (cd into it to query), while
 ref-gitnexus uses a single `.sample_repo/` registration with `<Lang>/` path
 prefix filtering.
 
@@ -43,7 +43,7 @@ LANGS = [
 # Per-lang file extensions for cypher scoping. The previous dir-prefix
 # scheme (cwd=REPO/lang for rs; STARTS WITH 'lang/' for ref) had two
 # defects:
-#   1. cwd-based rs queries hit a per-lang partial index (gnx treated
+#   1. cwd-based rs queries hit a per-lang partial index (cgn treated
 #      sub-dirs as separate repos), returning only a fraction of the
 #      true rs-side emissions and inflating ref_only counts.
 #   2. dir-prefix collides (`Java/` ↔ `JavaScript/`), and Kotlin sample
@@ -63,8 +63,8 @@ LANG_EXTS: dict[str, list[str]] = {
     "Ruby":       [".rb"],
     "Swift":      [".swift"],
     "C":          [".c"],
-    # `.h` belongs to Cpp here — both gnx-rs and ref-gitnexus route `.h` through
-    # the C++ parser (gnx-rs `Language::from_normalized_path`, ref-gitnexus
+    # `.h` belongs to Cpp here — both cgn-rs and ref-gitnexus route `.h` through
+    # the C++ parser (cgn-rs `Language::from_normalized_path`, ref-gitnexus
     # `language-detection.ts` EXTENSION_MAP). Routing through C would silently
     # drop every class/template/method declaration in C++ headers that ship
     # with `.h`.
@@ -89,7 +89,7 @@ def is_anon(name: str) -> bool:
         return True
     # `_` is the blank-discard identifier in every mainstream lang
     # (Go `var _ I = (*T)(nil)` interface assertion, Rust `let _ = ...`,
-    # Python `_, x = ...`, Swift `for _ in 0..<n`, etc.). gnx-rs filters
+    # Python `_, x = ...`, Swift `for _ in 0..<n`, etc.). cgn-rs filters
     # these at parse time; ref-gitnexus retains them. Without this
     # exclusion Go alone produced 19 ref_over `Variable:_` rows that
     # had no LLM-useful semantics.
@@ -118,7 +118,7 @@ def dump_rs(lang: str) -> set[tuple[str, str, str]]:
         return set()
     where = _ext_clause(exts, "n")
     q = f"MATCH (n) WHERE {where} RETURN n.kind, n.filePath, n.name"
-    out = run(["gnx", "cypher", "--repo", str(REPO), q, "--format", "json"])
+    out = run(["cgn", "cypher", "--repo", str(REPO), q, "--format", "json"])
     try:
         obj = json.loads(out)
     except json.JSONDecodeError:

@@ -14,7 +14,7 @@ Two or more Claude sessions working on the same repository (typically across git
 This feature lets sessions:
 
 - **Detect symbol-level conflicts in real time** — when peer A modifies a function I am also editing, my next tool call surfaces the conflict before I commit.
-- **Exchange short messages** (Ƀ beta) — `gnx peers say "..."` to broadcast intent, request coordination, or hand off work.
+- **Exchange short messages** (Ƀ beta) — `cgn peers say "..."` to broadcast intent, request coordination, or hand off work.
 
 The underlying constraint that shapes the entire design: **LLMs have no event loop**. They cannot subscribe, poll, or be interrupted mid-generation. The only reliable injection point is *just before* the next tool call. All transport latency below that boundary is wasted — sub-100ms event delivery is meaningless if the LLM only checks at turn boundaries.
 
@@ -32,7 +32,7 @@ The underlying constraint that shapes the entire design: **LLMs have no event lo
 Extends the layout established by `#55` (index layout redesign). Per-session directory:
 
 ```
-~/.gnx/graph-nexus/<repo>/sessions/<session_id>/
+~/.cgn/code-graph-nexus/<repo>/sessions/<session_id>/
   ├─ meta.json              # SessionMeta (existing) + watcher_pid field
   ├─ dirty.json             # DirtyFiles (existing) + dirty_symbols field
   ├─ inbox.jsonl            # NEW — transport, drain-and-truncate
@@ -43,14 +43,14 @@ Extends the layout established by `#55` (index layout redesign). Per-session dir
   └─ watcher.lock           # NEW — flock for single-instance watcher
 ```
 
-All new files inherit the existing `0700` directory mode from `~/.gnx/`.
+All new files inherit the existing `0700` directory mode from `~/.cgn/`.
 
 ## 4. Rust Types
 
 ### 4.1 Extended (existing types)
 
 ```rust
-// crates/graph-nexus-core/src/session/overlay.rs
+// crates/cgn-core/src/session/overlay.rs
 pub struct DirtyEntry {
     pub mtime_ns: u64,
     pub content_hash: String,
@@ -61,7 +61,7 @@ pub struct DirtyEntry {
     pub dirty_symbols: Vec<SymbolRef>,
 }
 
-// crates/graph-nexus-core/src/session/meta.rs
+// crates/cgn-core/src/session/meta.rs
 pub struct SessionMeta {
     // ... existing fields
     // NEW:
@@ -80,7 +80,7 @@ pub struct SymbolRef {
 ### 4.2 New (peer module)
 
 ```rust
-// crates/graph-nexus-core/src/peer/inbox.rs
+// crates/cgn-core/src/peer/inbox.rs
 pub enum InboxEntry {
     DirtyEvent {
         ts: String,
@@ -104,7 +104,7 @@ pub enum InboxEntry {
 
 pub enum ConcernKind { Hard, Soft }
 
-// crates/graph-nexus-core/src/peer/registry.rs
+// crates/cgn-core/src/peer/registry.rs
 pub struct PeerSession {
     pub session_id: String,
     pub pid: u32,
@@ -115,7 +115,7 @@ pub struct PeerSession {
 
 pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession>;
 
-// crates/graph-nexus-core/src/peer/concern.rs
+// crates/cgn-core/src/peer/concern.rs
 pub fn classify(
     peer_symbols: &[SymbolRef],
     my_dirty_symbols: &[SymbolRef],
@@ -128,7 +128,7 @@ pub enum ConcernResult {
     Ignore,
 }
 
-// crates/graph-nexus-core/src/peer/retention.rs
+// crates/cgn-core/src/peer/retention.rs
 pub const MSG_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 pub const MSG_LOG_KEEP_ROTATED: usize = 7;
 pub const WATCHER_LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
@@ -155,7 +155,7 @@ Triggered by `post_tool_use` hook after any Edit / Write / NotebookEdit.
    → peer watchers receive inotify IN_MODIFY
 ```
 
-Cost: 5–20 ms per edit (dominated by analyzer parse). Already in hook path that includes other gnx operations; net addition is the symbol-diff step (~2 ms).
+Cost: 5–20 ms per edit (dominated by analyzer parse). Already in hook path that includes other cgn operations; net addition is the symbol-diff step (~2 ms).
 
 ## 6. Read Path — Hook Drain
 
@@ -187,7 +187,7 @@ Cost: < 1 ms empty case; < 10 ms non-empty case.
 
 ## 7. Watcher Loop
 
-Background process forked at session start (auto, opt-in via `<repo>/.gnx/auto-watch` marker file) or on demand (`gnx watch --start`).
+Background process forked at session start (auto, opt-in via `<repo>/.cgn/auto-watch` marker file) or on demand (`cgn watch --start`).
 
 ### 7.1 Lifecycle
 
@@ -247,7 +247,7 @@ If analyzer cannot parse (unsupported language, syntax error, missing graph node
 ## 8. Message Path (Ƀ)
 
 ```
-gnx peers say "body" [--to <peer>] [--reply <msg_id>]
+cgn peers say "body" [--to <peer>] [--reply <msg_id>]
   generate msg_id (uuid v7)
   build Message { from = me, to, reply_to, body }
   if to.is_some():
@@ -267,32 +267,32 @@ hook drains inbox → renders message section → also appends entry to msg.log 
 ## 9. CLI Surface
 
 ```
-gnx watch --start [--concern touched|all] [--foreground]
-gnx watch --stop
-gnx watch --status
+cgn watch --start [--concern touched|all] [--foreground]
+cgn watch --stop
+cgn watch --status
 
-gnx peers status                       # default toon
-gnx peers diff <peer> [<symbol>]       # default text (unified diff)
-gnx peers log [--since <duration>]     # tail msg.log
+cgn peers status                       # default toon
+cgn peers diff <peer> [<symbol>]       # default text (unified diff)
+cgn peers log [--since <duration>]     # tail msg.log
             [--peer <id>]
             [--direction sent|recv]
             [--limit N]
-gnx peers say <text>  Ƀ                # fire-and-forget
+cgn peers say <text>  Ƀ                # fire-and-forget
             [--to <peer>]
             [--reply <msg_id>]
-gnx peers inbox [--limit N]  Ƀ         # debug: read without drain
-gnx peers thread <msg_id>    Ƀ         # debug: print thread (current session msg.log only)
-gnx peers gc                           # rotate logs + archive stale sessions
+cgn peers inbox [--limit N]  Ƀ         # debug: read without drain
+cgn peers thread <msg_id>    Ƀ         # debug: print thread (current session msg.log only)
+cgn peers gc                           # rotate logs + archive stale sessions
 ```
 
-Auto-spawn (opt-in): create empty `<repo>/.gnx/auto-watch` file; `session_start` hook spawns the watcher automatically.
+Auto-spawn (opt-in): create empty `<repo>/.cgn/auto-watch` file; `session_start` hook spawns the watcher automatically.
 
-### 9.1 MCP tools (extend `graph-nexus-mcp` crate)
+### 9.1 MCP tools (extend `cgn-mcp` crate)
 
 ```
-mcp__gnx__gnx_peers_status
-mcp__gnx__gnx_peers_log
-mcp__gnx__gnx_peers_say   Ƀ
+mcp__cgn__cgn_peers_status
+mcp__cgn__cgn_peers_log
+mcp__cgn__cgn_peers_say   Ƀ
 ```
 
 These mirror CLI commands so an LLM can query peer state mid-conversation without shelling out.
@@ -311,12 +311,12 @@ These mirror CLI commands so an LLM can query peer state mid-conversation withou
 
 | Failure | Detection | Recovery |
 |---|---|---|
-| Watcher process dies, stale `watcher_pid` | Hook checks `/proc/<pid>` (Linux) / `kill(pid, 0)` (cross-platform) | `gnx peers status` shows `⚠ watcher dead`. Auto-watch mode re-spawns on next `session_start` |
+| Watcher process dies, stale `watcher_pid` | Hook checks `/proc/<pid>` (Linux) / `kill(pid, 0)` (cross-platform) | `cgn peers status` shows `⚠ watcher dead`. Auto-watch mode re-spawns on next `session_start` |
 | `inotify` queue overflow | `IN_Q_OVERFLOW` event | Log warn + full rescan of peer dirty.json files |
 | `inbox.jsonl` partial JSON line | `serde_json::Error` during drain | Skip line, log warn. Should not occur given atomic append discipline |
 | `inbox.jsonl` deleted externally | `ENOENT` on drain | Treat as empty inbox; continue |
 | `last_drained_offset > file size` | Inbox shrank externally | Reset offset to 0, drain full file |
-| Stale peer `dirty.json` (PID dead > 24 h) | Periodic check | `gnx peers status` shows `stale`; `gnx peers gc` archives |
+| Stale peer `dirty.json` (PID dead > 24 h) | Periodic check | `cgn peers status` shows `stale`; `cgn peers gc` archives |
 | Analyzer parse failure on dirty file | `Result::Err` from analyzer | `dirty_symbols = []`, file-level fallback |
 | Watcher main-loop panic | `std::panic::catch_unwind` wrapper around event handler | Log full backtrace to `watcher.log` (via `std::backtrace::Backtrace::capture()`), continue loop. **Fail-open.** |
 
@@ -343,13 +343,13 @@ Rotation mechanism: classic `mv` chain (`log.6 → log.7`, `log.5 → log.6`, �
 
 Triggered at:
 - `session_start` hook entry (cost: 2 × `fs::metadata().len()`)
-- `gnx watch --start`
+- `cgn watch --start`
 - Inside watcher loop every `ROTATE_CHECK_EVERY_N_EVENTS` (100)
-- `gnx peers gc`
+- `cgn peers gc`
 
 **Not** in hot path: per-message append, per-drain, per-classify. Hot paths assume rotation already handled.
 
-Cross-session GC: `SessionMeta.last_touched > 30 days` → archive to `sessions/.archive/<id>-<date>/`. Archive entries > 90 days → delete. Performed only by explicit `gnx peers gc` or piggybacked on existing `gnx admin gc` (currently dead-code scaffolding; this PR does not wire it up, only reserves the interface).
+Cross-session GC: `SessionMeta.last_touched > 30 days` → archive to `sessions/.archive/<id>-<date>/`. Archive entries > 90 days → delete. Performed only by explicit `cgn peers gc` or piggybacked on existing `cgn admin gc` (currently dead-code scaffolding; this PR does not wire it up, only reserves the interface).
 
 ## 13. Testing Strategy
 
@@ -381,7 +381,7 @@ Every PR landing peer-sync changes must include three tiers, all green:
 ### 13.3 Cross-session harness
 
 ```rust
-// crates/graph-nexus-cli/tests/common/peer_harness.rs (~120 LOC)
+// crates/cgn-cli/tests/common/peer_harness.rs (~120 LOC)
 pub struct PeerHarness {
     repo_root: TempDir,
     sessions: Vec<SpawnedSession>,
@@ -416,7 +416,7 @@ bench/peers_concern_classify.rs   # 1000 entries → < 5 ms total
 bench/peers_inbox_drain.rs        # 100 entries → < 10 ms
 ```
 
-Runs under existing `python scripts/benchmark_gnx.py --peers` flag.
+Runs under existing `python scripts/benchmark_cgn.py --peers` flag.
 
 ## 14. Invariants
 
@@ -428,13 +428,13 @@ Runs under existing `python scripts/benchmark_gnx.py --peers` flag.
 6. **No write to peer's directory other than `inbox.jsonl`** — message delivery never modifies peer's `dirty.json`, `meta.json`, or `msg.log`.
 7. **All `Err` in watcher loop is logged + continued** — never propagated; never panics out of the loop.
 8. **Symbol-level filtering uses live graph** — IMPACT is computed from current `ZeroCopyGraph`, not stale snapshots.
-9. **Auto-watch opt-in only** — absence of `<repo>/.gnx/auto-watch` marker means no background process is spawned.
+9. **Auto-watch opt-in only** — absence of `<repo>/.cgn/auto-watch` marker means no background process is spawned.
 
 ## 15. Out of Scope (v1)
 
 | Item | Reason / Deferred to |
 |---|---|
-| Cross-repo peers | v1 limited to same `common_dir`. v2 may add `GNX_PEER_REPO=<path>` env |
+| Cross-repo peers | v1 limited to same `common_dir`. v2 may add `CGN_PEER_REPO=<path>` env |
 | Explicit groups | User-rejected during brainstorming. Auto by `common_dir` is sufficient. Permanent decision. |
 | `claim` / `release` coordination primitives | Introduces global locks + deadlock risk. Wait for concrete demand. |
 | Daemon / socket transport | LLM has no event loop; low-latency advantage cannot reach the LLM |
@@ -444,7 +444,7 @@ Runs under existing `python scripts/benchmark_gnx.py --peers` flag.
 | Web UI / TUI peer panel | Existing admin TUI is a v2 extension candidate, not this PR |
 | Auto conflict resolution (merging peer delta) | Too dangerous; notify only, never modify |
 | Message search index | `grep msg.log` is enough; indexing into Tantivy is over-engineered |
-| Cross-host / network peers | Permanent no — gnx is local code intelligence, not a collab platform |
+| Cross-host / network peers | Permanent no — cgn is local code intelligence, not a collab platform |
 | Rotation config via CLI flag | v1 uses compile-time constants in `peer/retention.rs`; change at source |
 
 ## 16. File-Level Change Inventory
@@ -453,19 +453,19 @@ Runs under existing `python scripts/benchmark_gnx.py --peers` flag.
 
 | File | Approx LOC |
 |---|---|
-| `crates/graph-nexus-core/src/peer/mod.rs` | 5 |
-| `crates/graph-nexus-core/src/peer/registry.rs` | 100 |
-| `crates/graph-nexus-core/src/peer/concern.rs` | 150 |
-| `crates/graph-nexus-core/src/peer/inbox.rs` | 120 |
-| `crates/graph-nexus-core/src/peer/retention.rs` | 80 |
-| `crates/graph-nexus-cli/src/peer/mod.rs` | 5 |
-| `crates/graph-nexus-cli/src/peer/watcher.rs` | 200 |
-| `crates/graph-nexus-cli/src/peer/dispatch.rs` | 80 |
-| `crates/graph-nexus-cli/src/peer/render.rs` | 150 |
-| `crates/graph-nexus-cli/src/commands/peers.rs` | 180 |
-| `crates/graph-nexus-cli/src/commands/watch.rs` | 120 |
-| `crates/graph-nexus-mcp/src/tools/peers.rs` | 60 |
-| `crates/graph-nexus-cli/tests/common/peer_harness.rs` | 120 |
+| `crates/cgn-core/src/peer/mod.rs` | 5 |
+| `crates/cgn-core/src/peer/registry.rs` | 100 |
+| `crates/cgn-core/src/peer/concern.rs` | 150 |
+| `crates/cgn-core/src/peer/inbox.rs` | 120 |
+| `crates/cgn-core/src/peer/retention.rs` | 80 |
+| `crates/cgn-cli/src/peer/mod.rs` | 5 |
+| `crates/cgn-cli/src/peer/watcher.rs` | 200 |
+| `crates/cgn-cli/src/peer/dispatch.rs` | 80 |
+| `crates/cgn-cli/src/peer/render.rs` | 150 |
+| `crates/cgn-cli/src/commands/peers.rs` | 180 |
+| `crates/cgn-cli/src/commands/watch.rs` | 120 |
+| `crates/cgn-mcp/src/tools/peers.rs` | 60 |
+| `crates/cgn-cli/tests/common/peer_harness.rs` | 120 |
 | **Test files** (see §13.2) | 680 |
 | **Subtotal new** | 1250 (impl) + 800 (tests + harness) = 2050 |
 
@@ -473,25 +473,25 @@ Runs under existing `python scripts/benchmark_gnx.py --peers` flag.
 
 | File | Δ LOC | Change |
 |---|---|---|
-| `crates/graph-nexus-core/src/session/overlay.rs` | +30 | `DirtyEntry::dirty_symbols` field |
-| `crates/graph-nexus-core/src/session/overlay_writer.rs` | +40 | symbol extraction at write-time |
-| `crates/graph-nexus-core/src/session/meta.rs` | +5 | `watcher_pid` field |
-| `crates/graph-nexus-core/src/lib.rs` | +1 | `pub mod peer;` |
-| `crates/graph-nexus-cli/src/lib.rs` | +1 | `pub mod peer;` |
-| `crates/graph-nexus-cli/src/commands/hook/pre_tool_use.rs` | +60 | drain inbox + render + emit |
-| `crates/graph-nexus-cli/src/commands/hook/session_start.rs` | +40 | auto-watch opt-in spawn |
-| `crates/graph-nexus-cli/src/commands/hook/user_prompt_submit.rs` | +30 | drain inbox (secondary injection point) |
-| `crates/graph-nexus-cli/src/commands/hook/mod.rs` | +5 | register handlers |
-| `crates/graph-nexus-cli/src/commands/mod.rs` | +5 | wire `peers` + `watch` |
-| `crates/graph-nexus-cli/src/main.rs` | +15 | top-level dispatch |
-| `crates/graph-nexus-mcp/src/lib.rs` | +5 | register new tools |
+| `crates/cgn-core/src/session/overlay.rs` | +30 | `DirtyEntry::dirty_symbols` field |
+| `crates/cgn-core/src/session/overlay_writer.rs` | +40 | symbol extraction at write-time |
+| `crates/cgn-core/src/session/meta.rs` | +5 | `watcher_pid` field |
+| `crates/cgn-core/src/lib.rs` | +1 | `pub mod peer;` |
+| `crates/cgn-cli/src/lib.rs` | +1 | `pub mod peer;` |
+| `crates/cgn-cli/src/commands/hook/pre_tool_use.rs` | +60 | drain inbox + render + emit |
+| `crates/cgn-cli/src/commands/hook/session_start.rs` | +40 | auto-watch opt-in spawn |
+| `crates/cgn-cli/src/commands/hook/user_prompt_submit.rs` | +30 | drain inbox (secondary injection point) |
+| `crates/cgn-cli/src/commands/hook/mod.rs` | +5 | register handlers |
+| `crates/cgn-cli/src/commands/mod.rs` | +5 | wire `peers` + `watch` |
+| `crates/cgn-cli/src/main.rs` | +15 | top-level dispatch |
+| `crates/cgn-mcp/src/lib.rs` | +5 | register new tools |
 | **Subtotal modified** | ~237 | |
 
 ### 16.3 Documentation / config
 
 | File | Change |
 |---|---|
-| `~/.claude/SKILL.md` (gnx skill) | Add `peers` capability row |
+| `~/.claude/SKILL.md` (cgn skill) | Add `peers` capability row |
 | `CLAUDE.md` (project) | Note auto-watch marker file behavior |
 | `docs/superpowers/specs/2026-05-17-multi-agent-peer-sync-design.md` | This file |
 

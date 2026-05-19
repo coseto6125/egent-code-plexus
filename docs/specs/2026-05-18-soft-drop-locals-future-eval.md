@@ -6,7 +6,7 @@
 
 ## Context
 
-gnx-rs **hard-drops** function-body / class-body / nested-fn locals in every language parser. queries.scm anchors symbol captures at `(source_file)` / `(module)` / `(mod_item)` direct children. Inside a `function_item` / `def f():` body, `let x = ...` / `x = ...` is invisible to the graph.
+cgn-rs **hard-drops** function-body / class-body / nested-fn locals in every language parser. queries.scm anchors symbol captures at `(source_file)` / `(module)` / `(mod_item)` direct children. Inside a `function_item` / `def f():` body, `let x = ...` / `x = ...` is invisible to the graph.
 
 The 5-angle panel (token cost, graph correctness, peer tools, use-case grounding, steelman) returned 4 × strong-agree + 1 × qualified-disagree. The steelman raised one principled objection worth holding:
 
@@ -18,7 +18,7 @@ The proposed alternative: **emit locals but tag with `scope: Local`**, default-f
 
 ### Storage layer
 
-Add a `scope` field to `Node` (in `crates/graph-nexus-core/src/graph.rs`):
+Add a `scope` field to `Node` (in `crates/cgn-core/src/graph.rs`):
 
 ```rust
 pub enum Scope {
@@ -45,7 +45,7 @@ Cypher / find / inspect default to `WHERE n.scope IN ['Module', 'Class']`. CLI e
 
 ### MCP exposure
 
-MCP `gnx_search` / `gnx_inspect` accept an optional `include_locals: bool` argument; default `false`. Keeps token cost identical to today.
+MCP `cgn_search` / `cgn_inspect` accept an optional `include_locals: bool` argument; default `false`. Keeps token cost identical to today.
 
 ### Parser-side
 
@@ -55,7 +55,7 @@ queries.scm in each language relaxes the anchor; parser-side annotates the captu
 
 | Concern | Severity |
 |---|---|
-| `Node` rkyv schema bump → every existing `graph.bin` invalidated, `gnx admin index --force` mandatory | High blast radius |
+| `Node` rkyv schema bump → every existing `graph.bin` invalidated, `cgn admin index --force` mandatory | High blast radius |
 | 14 languages × queries.scm changes + scope-inference per node | Large surgical surface |
 | `is_callable` / `is_type` / Pass 2 edge emission / Pass 3 post-process / search ranking / EQUIV map / parity dump tool — all touch NodeKind, scope-aware variants would cascade | Cross-cutting |
 | Index file size grows ~2× on .sample_repo (Java/C dominated by function-body locals) | Persistence overhead |
@@ -67,9 +67,9 @@ The cost is concrete; the upside is hypothetical. **Wait for a real use case** b
 
 Implement only when one of these surfaces:
 
-- A user / agent flow concretely needs to ask "what locals exist in function `foo`" via gnx (not "I want it for completeness").
-- gnx adds an IDE-like consumer (LSP server, hover, outline view) where document-symbol fidelity matters.
-- A single-file summarisation tool wants gnx's structural index instead of raw AST.
+- A user / agent flow concretely needs to ask "what locals exist in function `foo`" via cgn (not "I want it for completeness").
+- cgn adds an IDE-like consumer (LSP server, hover, outline view) where document-symbol fidelity matters.
+- A single-file summarisation tool wants cgn's structural index instead of raw AST.
 - A refactor tool needs scope-aware rename within function bodies.
 
 ## When you DO implement
@@ -87,8 +87,8 @@ Hard-rule: **default-on filter must keep current behaviour byte-stable**. Any co
 
 - Memory: `project_drop_locals_is_design.md` — the validated philosophy this defers from.
 - queries.scm comments justifying anchors:
-  - `crates/graph-nexus-analyzer/src/python/queries.scm:64-74`
-  - `crates/graph-nexus-analyzer/src/typescript/queries.scm:47-50`
-  - `crates/graph-nexus-analyzer/src/rust/queries.scm:16-29`
+  - `crates/cgn-analyzer/src/python/queries.scm:64-74`
+  - `crates/cgn-analyzer/src/typescript/queries.scm:47-50`
+  - `crates/cgn-analyzer/src/rust/queries.scm:16-29`
 - Round 78 parity audit conclusion: top ref_over Variable / Function gaps are design, not bugs.
 - Steelman verdict transcript (2026-05-18, agent `a0e42c6a00db23a2a`).

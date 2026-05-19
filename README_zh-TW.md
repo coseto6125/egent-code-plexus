@@ -1,4 +1,4 @@
-# Graph Nexus for LLM
+# Code Graph Nexus for LLM
 
 給 **LLM 與 AI 程式碼代理（AI code agents）** 用的代碼智能圖譜 — **不是給人類 IDE 整合用的**。31 種語言、毫秒級建圖，然後可以問它「誰呼叫了這個」、「我改這個函式的爆炸半徑多大」、「跟 auth flow 相關的有哪些」這類結構性問題。
 
@@ -8,9 +8,9 @@
 
 ## 跟上游 GitNexus 的差別
 
-> **不是 drop-in 替代品。** 上游是範圍更大的 Node/TypeScript agent platform（MCP server、resources、hooks、generated skills）；graph-nexus 是無狀態 Rust CLI，專為 shell-mediated LLM 調用優化 — 不同 scope、不同 trade-off。
+> **不是 drop-in 替代品。** 上游是範圍更大的 Node/TypeScript agent platform（MCP server、resources、hooks、generated skills）；code-graph-nexus 是無狀態 Rust CLI，專為 shell-mediated LLM 調用優化 — 不同 scope、不同 trade-off。
 
-| 維度 | GitNexus | graph-nexus | 為什麼對 LLM agent 更合適 |
+| 維度 | GitNexus | code-graph-nexus | 為什麼對 LLM agent 更合適 |
 |---|---|---|---|
 | **受眾** | 人類開發者 + IDE 整合 | AI 程式碼代理 | 優化目標決定下面每一行 |
 | **運行模式** | 長駐 MCP server | One-shot CLI、rkyv mmap zero-copy | 每次查詢亞秒級；agent 一個任務內可發 30+ 查詢、無 warm-up 成本 |
@@ -18,11 +18,11 @@
 | **輸出格式** | Wiki / UI 豐富渲染 | `etoon` / `cypher` / compact JSON | 沒有 UI 樣板吃 context window，token 全花在圖本身 |
 | **支援語言數** | 14 (TypeScript, JavaScript, Python, Java, Kotlin, C#, Go, Rust, PHP, Ruby, Swift, C, C++, Dart) | 31 — 上面 14 種 + Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig | Mixed-stack repo（DevOps config / Web3 合約 / infra-as-code）不再是盲區 |
 
-> 語言深度有差。graph-nexus 在 31 種語言做結構層級（function / class / method / imports）解析，但**還沒**追上 GitNexus 在每種語言提供的完整 9 維度覆蓋（Named Bindings、Heritage、Constructor Inference、Config 等）。31 是廣度，不是 parity。
+> 語言深度有差。code-graph-nexus 在 31 種語言做結構層級（function / class / method / imports）解析，但**還沒**追上 GitNexus 在每種語言提供的完整 9 維度覆蓋（Named Bindings、Heritage、Constructor Inference、Config 等）。31 是廣度，不是 parity。
 
 ### 工具與整合對照
 
-| LLM 面向 | 原版 GitNexus (`._source_code`) | Graph Nexus Rust (`gnx`) |
+| LLM 面向 | 原版 GitNexus (`._source_code`) | Code Graph Nexus Rust (`cgn`) |
 | :--- | :--- | :--- |
 | **Agent 整合** | MCP server、resources、prompts、setup、hooks、generated skills | 無狀態 CLI，可透過 shell/tool wrapper 調用。**目前沒有內建 MCP server。** |
 | **核心查詢工具** | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `inspect`, `search`, `impact`, `routes`, `cypher`, `coverage`, `rename`（agent）；`admin index/drop/prune/…`（admin） |
@@ -31,13 +31,13 @@
 | **Runtime / 儲存** | Node.js + LadybugDB | Rust + mmap `rkyv` graph 檔 |
 | **最適合場景** | 有強 MCP/editor 整合的 agent runtime | 想要小執行檔、少零件的 local LLM harness / scripts |
 
-底層細節：rkyv + mmap 的 zero-copy 硬碟儲存、Tantivy BM25 全文檢索、框架路由自動抽取。CLI 命令是 `gnx`。
+底層細節：rkyv + mmap 的 zero-copy 硬碟儲存、Tantivy BM25 全文檢索、框架路由自動抽取。CLI 命令是 `cgn`。
 
 [English README](./README.md)
 
 ## 🚀 核心亮點
 
-*   **極速與零拷貝 (Zero-Copy)**：冷啟動索引 `.sample_repo` — **22,772 檔、25 種偵測到的語言，僅 4.9 秒**（Java 3535、PHP 2907、TypeScript 1704、C# 945、Rust 870、C 801、Markdown 783、Dart 616、Bash 487、C++ 476、JavaScript 466、Solidity 403、Move 367、YAML 343、Ruby 156、Python 134、Swift 105、Go 99、Crystal 72、Kotlin 49、Lua 32、Zig 31、Dockerfile 20、Docker Compose 8、SQL 4）。同一張 graph 的查詢延遲：cypher 9 ms · context 9 ms · impact 5–6 ms · route-map 13 ms · BM25 query 24 ms · summarize 38 ms · detect-changes 230 ms。硬體：**AMD Ryzen 9 9950X（WSL2 內 8 顆邏輯 CPU、11.7 GiB RAM）**、Linux 6.6.87。Tree-sitter + Rayon 平行解析、`rkyv` mmap 零拷貝 `graph.bin`。重現：`python scripts/benchmark_gnx.py`。
+*   **極速與零拷貝 (Zero-Copy)**：冷啟動索引 `.sample_repo` — **22,772 檔、25 種偵測到的語言，僅 4.9 秒**（Java 3535、PHP 2907、TypeScript 1704、C# 945、Rust 870、C 801、Markdown 783、Dart 616、Bash 487、C++ 476、JavaScript 466、Solidity 403、Move 367、YAML 343、Ruby 156、Python 134、Swift 105、Go 99、Crystal 72、Kotlin 49、Lua 32、Zig 31、Dockerfile 20、Docker Compose 8、SQL 4）。同一張 graph 的查詢延遲：cypher 9 ms · context 9 ms · impact 5–6 ms · route-map 13 ms · BM25 query 24 ms · summarize 38 ms · detect-changes 230 ms。硬體：**AMD Ryzen 9 9950X（WSL2 內 8 顆邏輯 CPU、11.7 GiB RAM）**、Linux 6.6.87。Tree-sitter + Rayon 平行解析、`rkyv` mmap 零拷貝 `graph.bin`。重現：`python scripts/benchmark_cgn.py`。
 *   **LLM 原生輸出**：產出極度節省 Token 的格式（[TOON](https://crates.io/crates/etoon)）與簡潔的字串摘要，杜絕複雜 JSON 括號引發的 LLM 幻覺。
 *   **全文關鍵字檢索 (Lexical)**：內建 **Tantivy (BM25)** 搜尋引擎，提供零延遲的精確關鍵字分詞比對；尚未建立索引時自動 fallback 到 substring 評分（1.0 完全相等 / 0.7 prefix / 0.4 contains），讓剛 clone 的 repo 也能立刻出結果。
 *   **增量快取 (Incremental Caching)**：透過 SHA-256 檔案雜湊比對，只有被修改的檔案才會重新解析 AST。這讓圖譜重構時間從 50 秒（冷啟動）瞬間暴跌至 **小於 0.25 秒**！
@@ -51,7 +51,7 @@
 ### 全平台通用（今天就能用，不需 Release）
 
 ```bash
-cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx --locked
+cargo install --git https://github.com/coseto6125/code-graph-nexus --bin cgn --locked
 ```
 
 需要 Rust toolchain（[rustup.rs](https://rustup.rs)）。原始碼編譯，首次數分鐘，之後 incremental 快。
@@ -60,12 +60,12 @@ cargo install --git https://github.com/coseto6125/graph-nexus --bin gnx --locked
 
 | 平台 | 指令 | 備註 |
 | :--- | :--- | :--- |
-| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/graph-nexus/main/install.sh \| sh` | 先試預編 Release；沒 Release 時自動 fallback 到 `cargo install --git`。預設裝到 `~/.local/bin/gnx`，自訂用 `GNX_INSTALL_DIR=~/bin curl ... \| sh`。`GNX_FORCE_CARGO=1` 跳過 Release 偵測。 |
-| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/graph-nexus/main/install.ps1 -UseBasicParsing \| iex` | 同樣 Release 優先 / cargo fallback。預設裝到 `%LOCALAPPDATA%\Programs\gnx\gnx.exe`，自訂用 `$env:GNX_INSTALL_DIR='...'`。`$env:GNX_FORCE_CARGO='1'` 強制 cargo。 |
-| **macOS Homebrew** | `brew tap coseto6125/tap && brew install graph-nexus` | 首個 Release 帶出 tap formula 後可用。 |
-| **手動下載** | [GitHub Releases](https://github.com/coseto6125/graph-nexus/releases) | 挑選對應 target 的 archive 並驗證 `.sha256`。 |
+| **Linux / macOS** | `curl -sSfL https://raw.githubusercontent.com/coseto6125/code-graph-nexus/main/install.sh \| sh` | 先試預編 Release；沒 Release 時自動 fallback 到 `cargo install --git`。預設裝到 `~/.local/bin/cgn`，自訂用 `CGN_INSTALL_DIR=~/bin curl ... \| sh`。`CGN_FORCE_CARGO=1` 跳過 Release 偵測。 |
+| **Windows PowerShell** | `iwr https://raw.githubusercontent.com/coseto6125/code-graph-nexus/main/install.ps1 -UseBasicParsing \| iex` | 同樣 Release 優先 / cargo fallback。預設裝到 `%LOCALAPPDATA%\Programs\cgn\cgn.exe`，自訂用 `$env:CGN_INSTALL_DIR='...'`。`$env:CGN_FORCE_CARGO='1'` 強制 cargo。 |
+| **macOS Homebrew** | `brew tap coseto6125/tap && brew install code-graph-nexus` | 首個 Release 帶出 tap formula 後可用。 |
+| **手動下載** | [GitHub Releases](https://github.com/coseto6125/code-graph-nexus/releases) | 挑選對應 target 的 archive 並驗證 `.sha256`。 |
 
-> 安裝後 binary 是 `gnx`（crates.io 上的套件未來會是 `graph-nexus`）。`cargo install graph-nexus` 故意不列：crates.io publish 仍被卡，要等所有 analyzer grammar 依賴都能在 crates.io 上發布。
+> 安裝後 binary 是 `cgn`（crates.io 上的套件未來會是 `code-graph-nexus`）。`cargo install code-graph-nexus` 故意不列：crates.io publish 仍被卡，要等所有 analyzer grammar 依賴都能在 crates.io 上發布。
 
 > 一旦有 tag 化 Release，安裝腳本同時也會從 `…/releases/latest/download/install.{sh,ps1}` 提供 — 兩種 URL 皆可用；`raw.githubusercontent.com` 形式只是在**首個 Release 之前**也能 work。
 
@@ -77,29 +77,29 @@ GitNexus 採用為 LLM agent 設計的**雙層 CLI**：
 
 - **9 個 agent 命令**（查詢 / 重構 / 驗證），位於頂層：
   inspect、search、impact、rename、cypher、coverage、routes、scan、contracts
-- **7 個 admin 命令**（registry / hooks / 破壞性操作），位於 `gnx admin` 下：
+- **7 個 admin 命令**（registry / hooks / 破壞性操作），位於 `cgn admin` 下：
   install-hook、drop、prune、rename-branch、config、group、index
 
-執行 `gnx --help` 查看 agent 命令列表。執行 `gnx admin --help` 查看 admin 操作。
-完整設計見 `docs/specs/2026-05-15-gnx-cli-redesign-design.md`。
+執行 `cgn --help` 查看 agent 命令列表。執行 `cgn admin --help` 查看 admin 操作。
+完整設計見 `docs/specs/2026-05-15-cgn-cli-redesign-design.md`。
 
 ### 快速上手
 
 ```bash
 # 1. 為當前專案建立程式碼圖譜 (極速，低於 1 秒)
-gnx admin index --repo .
+cgn admin index --repo .
 
 # 2. 定位符號 — 預設精準名稱比對；`--mode bm25` 改走 Tantivy BM25 排序
-gnx find "DatabaseConnection"
+cgn find "DatabaseConnection"
 
 # 3. 一鍵萃取微服務中所有的 API 路由
-gnx routes --repo .
+cgn routes --repo .
 
 # 4. 尋找特定符號的爆炸半徑 / 上游呼叫鏈 (Refactor 前必備)
-gnx impact validateUser --direction upstream
+cgn impact validateUser --direction upstream
 
 # 5. 探索上下文 (包含 Metadata、裝飾器、簽名)
-gnx inspect validateUser
+cgn inspect validateUser
 ```
 
 每個讀取端命令都接受 `--format text|json|toon`。預設值為各命令最省 token 的表示：多數命令採 `toon`、`find` 採 `text`、`cypher`/`coverage` 採 `json`/`compact`。
@@ -108,28 +108,28 @@ gnx inspect validateUser
 
 | 目的 | 用什麼 |
 |---|---|
-| 為全新專案建立索引 | `gnx admin index --repo .`（第一次查詢也會自動建索引） |
+| 為全新專案建立索引 | `cgn admin index --repo .`（第一次查詢也會自動建索引） |
 | 修改檔案後更新 | 同上 — `admin index` 走 SHA-256 內容雜湊增量 |
-| 符號是否存在？在哪？ | `gnx find <name>`（精準名稱），或 `gnx find <fragment> --mode bm25`（排序） |
-| 取得符號的 metadata、呼叫者、被呼叫者 | `gnx inspect <name>` |
-| 編輯 X 會壞掉什麼？ | `gnx impact <name> --direction upstream` |
-| X 依賴了什麼？ | `gnx impact <name> --direction downstream` |
-| 圖譜任意 traversal / 取原始碼 body | `gnx cypher 'MATCH (m:Method) WHERE … RETURN m.content'` |
-| 列出全部 HTTP route | `gnx routes` |
-| 誰呼叫 `POST /api/users`？ | `gnx routes /api/users --method POST` |
-| 何處呼叫外部 HTTP / DB / Redis / queue？ | `gnx coverage --detailed` |
-| 追蹤單一執行流（從起點到終點） | `gnx cypher`（使用 Cypher 查詢語言） |
-| 架構摘要 / 熱門檔案 / 重要符號 | `gnx coverage` |
-| 框架覆蓋率與盲區報表 | `gnx coverage` |
-| 這個 commit 改了什麼 + 影響範圍 | `gnx impact --since HEAD~1` |
-| 跨檔安全 rename 一個符號（14 語言 — 見矩陣 Rename 欄） | `gnx rename --symbol old --new-name new --dry-run` 再去掉 `--dry-run` |
-| 列出本機所有已索引的 repo | `gnx coverage`（不帶 `--repo` 時顯示 registry 總覽） |
-| 重新註冊一個搬過家的 `.gitnexus-rs/` | `gnx admin index --repo <path>` |
-| 完全刪除索引 | `gnx admin drop --repo <path>` |
-| Multi-branch / multi-worktree 流程 | `gnx admin install-hook`、`gnx admin prune --branch X`、`gnx admin rename-branch --from A --to B` |
-| 互動式設定精靈 | `gnx admin config` |
-| 檢查磁碟上的圖譜是否過期 | `gnx coverage`（輸出中含新鮮度資訊） |
-| 列出某個 community/cluster 的成員 | `gnx cypher`（使用 Cypher 查詢語言） |
+| 符號是否存在？在哪？ | `cgn find <name>`（精準名稱），或 `cgn find <fragment> --mode bm25`（排序） |
+| 取得符號的 metadata、呼叫者、被呼叫者 | `cgn inspect <name>` |
+| 編輯 X 會壞掉什麼？ | `cgn impact <name> --direction upstream` |
+| X 依賴了什麼？ | `cgn impact <name> --direction downstream` |
+| 圖譜任意 traversal / 取原始碼 body | `cgn cypher 'MATCH (m:Method) WHERE … RETURN m.content'` |
+| 列出全部 HTTP route | `cgn routes` |
+| 誰呼叫 `POST /api/users`？ | `cgn routes /api/users --method POST` |
+| 何處呼叫外部 HTTP / DB / Redis / queue？ | `cgn coverage --detailed` |
+| 追蹤單一執行流（從起點到終點） | `cgn cypher`（使用 Cypher 查詢語言） |
+| 架構摘要 / 熱門檔案 / 重要符號 | `cgn coverage` |
+| 框架覆蓋率與盲區報表 | `cgn coverage` |
+| 這個 commit 改了什麼 + 影響範圍 | `cgn impact --since HEAD~1` |
+| 跨檔安全 rename 一個符號（14 語言 — 見矩陣 Rename 欄） | `cgn rename --symbol old --new-name new --dry-run` 再去掉 `--dry-run` |
+| 列出本機所有已索引的 repo | `cgn coverage`（不帶 `--repo` 時顯示 registry 總覽） |
+| 重新註冊一個搬過家的 `.gitnexus-rs/` | `cgn admin index --repo <path>` |
+| 完全刪除索引 | `cgn admin drop --repo <path>` |
+| Multi-branch / multi-worktree 流程 | `cgn admin install-hook`、`cgn admin prune --branch X`、`cgn admin rename-branch --from A --to B` |
+| 互動式設定精靈 | `cgn admin config` |
+| 檢查磁碟上的圖譜是否過期 | `cgn coverage`（輸出中含新鮮度資訊） |
+| 列出某個 community/cluster 的成員 | `cgn cypher`（使用 Cypher 查詢語言） |
 
 ### 命令參考
 
@@ -149,7 +149,7 @@ gnx inspect validateUser
 | `scan` | 對已知 HTTP / DB / Redis / queue client 的呼叫；變更偵測。 | `--since <ref>` · `--category http,db,redis,queue` |
 | `contracts` | 驗證 API contracts。 | — |
 
-#### Admin 命令（`gnx admin`）
+#### Admin 命令（`cgn admin`）
 
 | 命令 | 用途 | 重點 flag |
 |---|---|---|
@@ -161,11 +161,11 @@ gnx inspect validateUser
 | `admin config` | 互動式 TOML 編輯精靈（`.gitnexus-rs/config.toml`）。 | `--repo <p>` |
 | `admin group` | 跨 repo group 管理。 | — |
 
-> 每個命令的完整 flag 可用 `gnx <command> --help` 確認。CLI 採非互動式設計（LLM 友善）：所有 flag 透過 `--help` 暴露，所有輸出走 stdout 且可解析。
+> 每個命令的完整 flag 可用 `cgn <command> --help` 確認。CLI 採非互動式設計（LLM 友善）：所有 flag 透過 `--help` 暴露，所有輸出走 stdout 且可解析。
 
 ## 語言矩陣
 
-graph-nexus 自己的「31 種語言 × 各維度實作狀態」清單。每個 cell 回答一個問題：**這個語言、這個維度，我們今天有沒有做？**
+code-graph-nexus 自己的「31 種語言 × 各維度實作狀態」清單。每個 cell 回答一個問題：**這個語言、這個維度，我們今天有沒有做？**
 
 這份矩陣**不是**用來跟任何其他工具對 parity。我們從 GitNexus 的 9 維度切分得到設計啟發（致敬段在最上方），但每個 cell 描述的是**自己的實作狀態**，對照的是自己的 roadmap，不是任何外部宣稱。
 
@@ -221,12 +221,12 @@ Bash Imports 是 `source`/`.`；Lua Imports 是 `require` + binding alias；Lua 
 **近期完成**（脈絡備查）：
 - 跨語言 Constructor Inference（14 種），以 Python `4e4fb1b` receiver-type binding 為原型。
 - Java static import named bindings、C# `csproj` / `global.json` config、Go/Ruby/C/Dart 各自慣例的 Exports、跨語言 Entry Point scorer（整合 routes + `main()` + framework 裝飾器）。
-- Wave 2（PR [#2](https://github.com/coseto6125/graph-nexus/pull/2)）：Go/C/C++ 的 Types（參數 / 回傳值 / 欄位 / 變數的宣告類型）、PHP（`composer.json`）+ Swift（`Package.swift`）的 Config、JS（Express + Hapi）/ Kotlin（Ktor）/ Go（gin + echo）/ PHP（Laravel）的 Frameworks。
+- Wave 2（PR [#2](https://github.com/coseto6125/code-graph-nexus/pull/2)）：Go/C/C++ 的 Types（參數 / 回傳值 / 欄位 / 變數的宣告類型）、PHP（`composer.json`）+ Swift（`Package.swift`）的 Config、JS（Express + Hapi）/ Kotlin（Ktor）/ Go（gin + echo）/ PHP（Laravel）的 Frameworks。
 - Matrix-opt batch（HEAD `86e65a7`）：Go 每個 struct field visibility、Dart underscore 慣例、Ruby `attr_*` metaprogramming + mixin 追蹤、TS/JS re-export alias 保留；額外 17 種裡，Bash 增 `source`/`.` imports、Lua 增 `require` aliases + metatable inheritance + table-assigned methods、Solidity 增 state-variable visibility。詳見 `docs/specs/2026-05-15-matrix-optimization-opportunities.md`。
 
 ### Call 偵測設計
 
-Call 偵測集中在 `crates/graph-nexus-analyzer/src/calls.rs`。熱路徑 helper 是 `extract_calls(root, source, nodes, call_kinds)`：
+Call 偵測集中在 `crates/cgn-analyzer/src/calls.rs`。熱路徑 helper 是 `extract_calls(root, source, nodes, call_kinds)`：
 
 - 每個語言 parser 傳入該 grammar 中代表 call 的 tree-sitter node kind — 例如 JS/TS 的 `["call_expression"]`、Lua 的 `["function_call"]`、Python 的 `["call"]`。
 - Walker 對 grammar 無感：一次走完 AST、收集所有 call site、用 `callee_name_from(node, source)` 拿 callee 文字、用 `attach_to_enclosing(line, callee, nodes)`（最小 span 包覆）把每個 call 掛到對應的 enclosing `Function` / `Method`。
@@ -238,9 +238,9 @@ Call 偵測集中在 `crates/graph-nexus-analyzer/src/calls.rs`。熱路徑 help
 
 ```
 crates/
-├── graph-nexus-core        # 零拷貝圖譜定義 (rkyv)、增量快取演算法、圖譜檢索 helper
-├── graph-nexus-analyzer    # Tree-sitter 解析器、HTTP 路由偵測、Framework Confidence
-└── graph-nexus-cli         # `gnx` 命令列、Tantivy BM25 全文引擎、Token 最佳化輸出
+├── cgn-core        # 零拷貝圖譜定義 (rkyv)、增量快取演算法、圖譜檢索 helper
+├── cgn-analyzer    # Tree-sitter 解析器、HTTP 路由偵測、Framework Confidence
+└── cgn-cli         # `cgn` 命令列、Tantivy BM25 全文引擎、Token 最佳化輸出
 ```
 
 解析器 (Analyzer) 透過 MPSC 通道將 AST 節點傳遞給單一的 Builder 執行緒。Builder 負責組裝圖譜、推導 API 路由與文件分類，最後將其序列化為零拷貝的 `.gitnexus-rs/graph.bin`。讀取端（如 `context` 或 `query`）透過 mmap 直接映射硬碟檔案，達成零延遲查詢。
@@ -249,8 +249,8 @@ crates/
 
 | 環境變數 | 預設值 | 作用 |
 |---|---|---|
-| `GNX_MAX_FILE_BYTES` | `16777216` (16 MiB) | 解析時跳過超過此大小的原始碼檔案，將 worker 最壞情況 RAM 控制在 `num_threads × MAX`。索引含產生器/編譯輸出時可調高；記憶體受限機器可調低。 |
-| `GNX_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 掃描遞迴深度。深層 .NET monorepo 可調高。 |
+| `CGN_MAX_FILE_BYTES` | `16777216` (16 MiB) | 解析時跳過超過此大小的原始碼檔案，將 worker 最壞情況 RAM 控制在 `num_threads × MAX`。索引含產生器/編譯輸出時可調高；記憶體受限機器可調低。 |
+| `CGN_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 掃描遞迴深度。深層 .NET monorepo 可調高。 |
 
 ## 📄 授權條款
 
