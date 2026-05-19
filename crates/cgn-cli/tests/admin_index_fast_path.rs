@@ -128,8 +128,8 @@ fn fast_path_rebuilds_on_fingerprint_mismatch() {
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    let _ = orchestrator::build_l2(&worktree, None).unwrap();
-    let after = read_meta(&first.commit_dir);
+    let rebuilt = orchestrator::build_l2(&worktree, None).unwrap();
+    let after = read_meta(&rebuilt.commit_dir);
 
     assert_ne!(
         after.builder_fingerprint.as_deref(),
@@ -163,8 +163,8 @@ fn fast_path_rebuilds_when_fingerprint_missing() {
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    let _ = orchestrator::build_l2(&worktree, None).unwrap();
-    let after = read_meta(&first.commit_dir);
+    let rebuilt = orchestrator::build_l2(&worktree, None).unwrap();
+    let after = read_meta(&rebuilt.commit_dir);
 
     assert!(
         after.builder_fingerprint.is_some(),

@@ -33,6 +33,43 @@ fn finds_existing_commit_dir_by_sha() {
 }
 
 #[test]
+fn picks_newest_generation_for_same_sha() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir(&commits).unwrap();
+    let sha_hex = "abc123def4567890abc123def4567890abc123de";
+    let old_dir = format!("branch_main__{sha_hex}");
+    let new_dir = format!("branch_main__{sha_hex}.gen.2");
+    std::fs::create_dir(commits.join(&old_dir)).unwrap();
+    std::fs::write(commits.join(&old_dir).join("meta.json"), b"old").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::create_dir(commits.join(&new_dir)).unwrap();
+    std::fs::write(commits.join(&new_dir).join("meta.json"), b"new").unwrap();
+
+    let idx = CommitIndex::scan(&commits).unwrap();
+    let mut sha = [0u8; 20];
+    hex::decode_to_slice(sha_hex, &mut sha).unwrap();
+
+    assert_eq!(idx.find(&sha), Some(new_dir.as_str()));
+}
+
+#[test]
+fn recovery_filter_does_not_skip_source_id_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir(&commits).unwrap();
+    let sha_hex = "abc123def4567890abc123def4567890abc123de";
+    let dir = format!("branch_feature.deadlock__{sha_hex}");
+    std::fs::create_dir(commits.join(&dir)).unwrap();
+
+    let idx = CommitIndex::scan(&commits).unwrap();
+    let mut sha = [0u8; 20];
+    hex::decode_to_slice(sha_hex, &mut sha).unwrap();
+
+    assert_eq!(idx.find(&sha), Some(dir.as_str()));
+}
+
+#[test]
 fn scan_cached_matches_uncached_scan() {
     let tmp = tempfile::tempdir().unwrap();
     let commits = tmp.path().join("commits");
@@ -82,6 +119,9 @@ fn skips_unparseable_and_inflight_dirs() {
         commits.join("branch_x__abc123def4567890abc123def4567890abc123de.building"),
     )
     .unwrap();
+    // retired dir leftover
+    std::fs::create_dir(commits.join("branch_x__abc123def4567890abc123def4567890abc123de.dead.1"))
+        .unwrap();
     // promotion stale dir
     std::fs::create_dir(commits.join("branch_y.stale-abc123def4567890abc123def4567890abc123de"))
         .unwrap();
@@ -89,7 +129,7 @@ fn skips_unparseable_and_inflight_dirs() {
     assert_eq!(
         idx.len(),
         0,
-        "all 3 entries must be skipped, got: {} entries",
+        "all entries must be skipped, got: {} entries",
         idx.len()
     );
 }

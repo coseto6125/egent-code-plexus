@@ -30,9 +30,7 @@ pub fn run(args: DropArgs) -> Result<(), cgn_core::CgnError> {
         let snapshot = registry.snapshot().clone();
         for dir_name in snapshot.repos.keys() {
             let index_dir = home_cgn.join(dir_name);
-            if index_dir.exists() {
-                std::fs::remove_dir_all(&index_dir)?;
-            }
+            let _ = cgn_core::registry::retire_dir_async(&index_dir)?;
         }
         // Rewrite registry removing all entries under exclusive lock.
         drop(registry);
@@ -55,9 +53,7 @@ pub fn run(args: DropArgs) -> Result<(), cgn_core::CgnError> {
             .map_err(|e| cgn_core::CgnError::InvalidArgument(format!("repo_identity: {e}")))?;
 
         let index_dir = home_cgn.join(&dir_name);
-        if index_dir.exists() {
-            std::fs::remove_dir_all(&index_dir)?;
-        }
+        let _ = cgn_core::registry::retire_dir_async(&index_dir)?;
 
         // Drop registry handle before acquiring exclusive flock.
         drop(registry);

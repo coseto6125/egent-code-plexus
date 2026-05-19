@@ -40,7 +40,7 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    fs::rename(&tmp, path)?;
+    super::replace_file(&tmp, path)?;
     Ok(())
 }
 
@@ -77,7 +77,7 @@ pub fn atomic_write_bytes_no_fsync(path: &Path, bytes: &[u8]) -> io::Result<()> 
         f.write_all(bytes)?;
         // Intentional: no sync_all. See doc comment.
     }
-    fs::rename(&tmp, path)?;
+    super::replace_file(&tmp, path)?;
     Ok(())
 }
 

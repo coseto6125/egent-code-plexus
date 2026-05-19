@@ -53,11 +53,7 @@ fn run_orphan_sweep_in(home_cgn: &std::path::Path) -> Result<(), cgn_core::CgnEr
         let common_dir = std::path::Path::new(&alias.common_dir);
         if !common_dir.exists() {
             let index_root = home_cgn.join(dir_name);
-            match std::fs::remove_dir_all(&index_root) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
+            let _ = cgn_core::registry::retire_dir_async(&index_root)?;
             orphan_names.push(dir_name.clone());
         }
     }
