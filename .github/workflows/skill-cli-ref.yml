@@ -6,8 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
 
-env:
-
 jobs:
   regen:
     runs-on: ubuntu-latest

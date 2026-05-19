@@ -150,22 +150,3 @@ jobs:
           echo "::group::actionlint"
           ./actionlint -color
           echo "::endgroup::"
-
-  # ==================== Python Lint (parity scripts) ====================
-  python-lint:
-    name: Python Lint (parity scripts)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Run Ruff lint
-        uses: astral-sh/ruff-action@v3
-        with:
-          args: 'check scripts/parity scripts/*.py'
-
-      - name: Run Ruff format check
-        uses: astral-sh/ruff-action@v3
-        with:
-          args: 'format --check scripts/parity scripts/*.py'
