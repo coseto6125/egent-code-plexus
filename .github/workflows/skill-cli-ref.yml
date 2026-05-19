@@ -23,7 +23,7 @@ jobs:
             ./target/release/cgn \
             docs/skills/cgn-onboard/_shared/cli
       - name: Open PR if anything changed
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           branch: skill/cli-ref-regen-${{ github.ref_name }}
           title: "chore(skill): regenerate CLI ref for ${{ github.ref_name }}"

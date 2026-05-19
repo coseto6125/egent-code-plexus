@@ -36,7 +36,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.8.0
+        uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: linux-build   # 與 test-ubuntu 共用 target/，避免互相覆蓋
           cache-on-failure: true
@@ -80,7 +80,7 @@ jobs:
         run: bash scripts/parity/bootstrap_sample_repos.sh
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.8.0
+        uses: Swatinem/rust-cache@v2.9.1
         with:
           # ubuntu 與 code-quality 共用 cache，macos/windows 獨立
           shared-key: ${{ matrix.os == 'ubuntu-latest' && 'linux-build' || matrix.os }}
@@ -106,7 +106,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry & advisory-db
-        uses: Swatinem/rust-cache@v2.8.0
+        uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: audit-${{ hashFiles('Cargo.lock') }}
           # audit/deny 只讀 lockfile，不需快取 target/
