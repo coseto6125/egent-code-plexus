@@ -64,7 +64,7 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
         return wait_for_completion(&building, &commit_dir);
     }
 
-    build_inside_locked(worktree, &sha_hex, &repo_root, &building, &commit_dir)
+    build_inside_locked(worktree, &sha_hex, &repo_root, &building, &commit_dir, lock)
 }
 
 /// Run the analyzer pipeline, write metadata, atomic-publish.
@@ -77,12 +77,18 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
 /// Shared between `build_l2` (first build / SHA drift) and
 /// `force_rebuild_l2` (after L1 invalidate + L2 drop). Both paths land in
 /// the same atomic publish + repo_meta update.
+///
+/// `lock_guard` is the open `File` for `.build.lock` inside `building/`.
+/// It is dropped (fd closed) immediately before the atomic rename so that
+/// Windows does not reject the rename with os error 5 (Access Denied) due
+/// to an open handle inside the directory being renamed.
 pub(crate) fn build_inside_locked(
     worktree: &Path,
     sha_hex: &str,
     repo_root: &Path,
     building: &Path,
     commit_dir: &Path,
+    lock_guard: File,
 ) -> io::Result<BuildResult> {
     let src_root = if worktree_clean_and_head_matches(worktree, sha_hex)? {
         worktree.to_path_buf()
@@ -132,6 +138,10 @@ pub(crate) fn build_inside_locked(
     if commit_dir.exists() {
         fs::remove_dir_all(commit_dir)?;
     }
+    // Windows refuses to rename a directory that contains any open file
+    // handles (os error 5). Drop the lock fd now — the rename is the
+    // publication event, so the lock is no longer needed after this point.
+    drop(lock_guard);
     fs::rename(building, commit_dir)?;
     let _ = fs::remove_dir_all(commit_dir.join("_src"));
 

@@ -219,9 +219,17 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         sha_hex,
         source_type,
         commit_dir,
-    } = build_inside_locked(worktree, &sha_hex, &repo_root, &building, &commit_dir)?;
+    } = build_inside_locked(
+        worktree,
+        &sha_hex,
+        &repo_root,
+        &building,
+        &commit_dir,
+        lock_guard,
+    )?;
 
-    drop(lock_guard); // explicit release after publish
+    // lock_guard is explicitly dropped inside build_inside_locked just before rename,
+    // so no need to drop here.
 
     Ok(ForceRebuildResult {
         sha_hex,
