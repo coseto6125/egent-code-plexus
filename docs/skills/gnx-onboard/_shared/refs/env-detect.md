@@ -1,51 +1,117 @@
 # Environment Detection
 
-Shared snippets used by Phase 01 (install) and Phase 04 (mcp). The agent
-runs these probes via its existing shell-execution tool — they are
-plain `command -v` / `uname` invocations that produce no side effects.
+Single bundled probe — replaces N×Bash-tool round-trips with **one call**
+emitting structured JSON. The agent runs this script ONCE at Phase 01
+Step 1 and re-uses the result for the rest of the wizard.
 
-## Probes
+## Privacy & safety guarantees
 
-### OS + architecture
+This script is intentionally minimal. The agent must NOT modify it or
+add probes beyond this list before showing the script body to the user.
 
-```bash
-uname -sm
-# → "Darwin arm64"  / "Linux x86_64"  / "Linux aarch64"
-```
+| Guarantee | How |
+|---|---|
+| **Read-only** | No writes outside `$(mktemp -d)`; no network calls; no `eval` |
+| **No path leakage** | Output contains booleans (`true` / `false`) for tool presence — never the absolute path that `command -v` returned |
+| **No file content read** | `test -f` / `test -d` only — never opens / pipes file contents |
+| **No env-var inspection** | Only `$HOME` (for path construction); not exported, not in output |
+| **No PID / hostname / username / git config** | Skipped on purpose |
+| **Public version string only** | `gnx --version` reveals only the binary's own self-reported version, which is the same as any public release tag |
+| **Auto-cleanup** | `trap ... EXIT` removes the tmpdir |
 
-### Package managers (one line each, exit 0 = present)
+The output JSON contains ONLY these fields:
+`os` · `arch` · `installers.{cargo,cargo_binstall,brew,curl,wget}` (bool) ·
+`ides.{claude_code,cursor,zed,vscode_continue}` (bool) ·
+`gnx.{installed,version,registry_exists}`.
 
-```bash
-command -v cargo
-command -v cargo-binstall
-command -v brew
-command -v curl
-command -v wget
-```
+## The probe script
 
-### IDEs (configuration paths exist?)
-
-```bash
-# Claude Code
-test -d "$HOME/.claude"
-
-# Cursor (macOS / Linux)
-test -d "$HOME/Library/Application Support/Cursor" || test -d "$HOME/.config/Cursor"
-
-# Zed
-test -d "$HOME/.config/zed"
-
-# VS Code (with Continue.dev plugin convention)
-test -d "$HOME/.vscode" || test -d "$HOME/.continue"
-```
-
-### Existing gnx state
+Paste **this whole block** into a single Bash tool call. Independent
+probes run in parallel via background subshells (`&` + `wait`); the
+final `jq` assembles the JSON from per-probe tmp files.
 
 ```bash
-command -v gnx && gnx --version
-test -d "$HOME/.gnx"
-test -f "$HOME/.gnx/registry.json"
+bash <<'PROBE'
+set -u
+umask 077
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# --- run all probes concurrently ---
+( uname -s > "$tmp/os" ) &
+( uname -m > "$tmp/arch" ) &
+
+for tool in cargo cargo-binstall brew curl wget gnx; do
+    ( command -v "$tool" >/dev/null 2>&1 && echo true || echo false ) > "$tmp/has_$tool" &
+done
+
+( command -v gnx >/dev/null 2>&1 && gnx --version 2>/dev/null | awk '{print $NF}' || echo "" ) > "$tmp/gnx_ver" &
+
+( test -d "$HOME/.claude" && echo true || echo false )                           > "$tmp/ide_claude_code" &
+( ( test -d "$HOME/Library/Application Support/Cursor" || test -d "$HOME/.config/Cursor" ) \
+        && echo true || echo false )                                              > "$tmp/ide_cursor" &
+( test -d "$HOME/.config/zed" && echo true || echo false )                       > "$tmp/ide_zed" &
+( ( test -d "$HOME/.vscode" || test -d "$HOME/.continue" ) \
+        && echo true || echo false )                                              > "$tmp/ide_vscode_continue" &
+
+( test -f "$HOME/.gnx/registry.json" && echo true || echo false )                > "$tmp/gnx_registry" &
+
+wait
+
+# --- assemble JSON (no paths, only booleans + public version) ---
+jq -n \
+  --rawfile os         "$tmp/os" \
+  --rawfile arch       "$tmp/arch" \
+  --rawfile gnx_ver    "$tmp/gnx_ver" \
+  --argjson c_cargo    "$(cat "$tmp/has_cargo")" \
+  --argjson c_binstall "$(cat "$tmp/has_cargo-binstall")" \
+  --argjson c_brew     "$(cat "$tmp/has_brew")" \
+  --argjson c_curl     "$(cat "$tmp/has_curl")" \
+  --argjson c_wget     "$(cat "$tmp/has_wget")" \
+  --argjson c_gnx      "$(cat "$tmp/has_gnx")" \
+  --argjson i_claude   "$(cat "$tmp/ide_claude_code")" \
+  --argjson i_cursor   "$(cat "$tmp/ide_cursor")" \
+  --argjson i_zed      "$(cat "$tmp/ide_zed")" \
+  --argjson i_vscode   "$(cat "$tmp/ide_vscode_continue")" \
+  --argjson g_reg      "$(cat "$tmp/gnx_registry")" \
+  '{
+     os:    ($os   | rtrimstr("\n")),
+     arch:  ($arch | rtrimstr("\n")),
+     installers: {
+       cargo:           $c_cargo,
+       cargo_binstall:  $c_binstall,
+       brew:            $c_brew,
+       curl:            $c_curl,
+       wget:            $c_wget
+     },
+     ides: {
+       claude_code:      $i_claude,
+       cursor:           $i_cursor,
+       zed:              $i_zed,
+       vscode_continue:  $i_vscode
+     },
+     gnx: {
+       installed:        $c_gnx,
+       version:          ($gnx_ver | rtrimstr("\n")),
+       registry_exists:  $g_reg
+     }
+   }'
+PROBE
 ```
+
+### Reading the result
+
+Parse the JSON once and stash into the in-memory `config_inventory`:
+
+```
+config_inventory.system_probe = <parsed json>
+```
+
+All downstream phases read from this object — **do not re-run individual
+`command -v` / `test -d` calls**. If the user changes something
+(installs cargo-binstall mid-wizard), re-run the WHOLE probe to refresh
+the snapshot; never patch the JSON manually.
 
 ## Common-cause table
 

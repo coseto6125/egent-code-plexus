@@ -20,7 +20,10 @@ permission-seeking, no "shall I begin?", no summarizing the SKILL back
 to the user**:
 
 1. Check whether `~/.gnx/onboarding-summary.md` exists (Directive 6 — resume).
-2. If not resuming: read `_shared/refs/env-detect.md` and run its probes.
+2. If not resuming: read `_shared/refs/env-detect.md` and run its **single
+   bundled probe script** as ONE Bash tool call. Stash the JSON result
+   in `config_inventory.system_probe`. Do NOT call `command -v` / `test
+   -d` one tool at a time — that's the old anti-pattern.
 3. Derive the persona per `_shared/refs/persona-inference.md` rules.
 4. Read `guides/01-install.md` and emit its 3-choice menu.
 

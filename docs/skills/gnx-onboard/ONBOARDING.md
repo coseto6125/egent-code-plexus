@@ -12,7 +12,10 @@ permission-seeking, no "shall I begin?", no summarizing the SKILL back
 to the user**:
 
 1. Check whether `~/.gnx/onboarding-summary.md` exists (Directive 6 — resume).
-2. If not resuming: read `_shared/refs/env-detect.md` and run its probes.
+2. If not resuming: read `_shared/refs/env-detect.md` and run its **single
+   bundled probe script** as ONE Bash tool call. Stash the JSON result
+   in `config_inventory.system_probe`. Do NOT call `command -v` / `test
+   -d` one tool at a time — that's the old anti-pattern.
 3. Derive the persona per `_shared/refs/persona-inference.md` rules.
 4. Read `guides/01-install.md` and emit its 3-choice menu.
 
@@ -111,33 +114,35 @@ its output as ground truth — never invent flags.
 Goal: produce a verified `gnx` binary on PATH. Start the install in the
 background and advance to Phase 02 without waiting.
 
-## Step 1: Probe the system
+## Step 1: Probe the system (single call)
 
-Run the probes from `_shared/refs/env-detect.md`:
+Run the **bundled probe script** in `_shared/refs/env-detect.md` —
+paste the whole `bash <<'PROBE' … PROBE` block into ONE Bash tool
+call. It runs all probes concurrently and emits one JSON object in
+~100ms (vs ~10s if you call `command -v` one tool at a time).
 
-```bash
-uname -sm
-command -v cargo
-command -v cargo-binstall
-command -v brew
-command -v curl
+Stash the result:
+
+```
+config_inventory.system_probe = <parsed JSON>
 ```
 
-Record results in `config_inventory.install_probe`:
-
-- `os`, `arch` from `uname -sm`
-- `has_cargo_binstall`, `has_brew`, `has_curl` booleans
-- `gnx_already_installed`: `command -v gnx && gnx --version`
+All downstream phases (02 / 03 / 04 / 05) re-use `config_inventory.system_probe`.
+**Do not re-run `command -v` / `test -d` individually anywhere in the wizard.**
+If the user installs something mid-wizard, re-run the whole probe to
+refresh the snapshot.
 
 ## Step 2: Apply persona × probe → recommendation
 
-| persona.install_pref | probes | Recommendation |
+Read fields off `config_inventory.system_probe`:
+
+| persona.install_pref | probe fields | Recommendation |
 |---|---|---|
-| `cargo-binstall` | `has_cargo_binstall = true` | `cargo binstall graph-nexus` |
-| `cargo-binstall` | `has_cargo_binstall = false`, `has_cargo = true` | `cargo install graph-nexus` (slower; source build) + suggest installing cargo-binstall next time |
-| `brew` | `has_brew = true` | `brew install <tap>/graph-nexus` (substitute the actual tap name from the README) |
-| `github-release-tarball` (or fallback) | `has_curl = true` | `curl -L https://github.com/<owner>/graph-nexus/releases/latest/download/gnx-<target>.tar.gz \| tar -xz -C ~/bin/` |
-| (gnx already installed) | `gnx_already_installed = true` | Verification only; skip download |
+| `cargo-binstall` | `installers.cargo_binstall = true` | `cargo binstall graph-nexus` |
+| `cargo-binstall` | `installers.cargo_binstall = false`, `installers.cargo = true` | `cargo install graph-nexus` (slower; source build) + suggest installing cargo-binstall next time |
+| `brew` | `installers.brew = true` | `brew install <tap>/graph-nexus` (substitute the actual tap name from the README) |
+| `github-release-tarball` (or fallback) | `installers.curl = true` | `curl -L https://github.com/<owner>/graph-nexus/releases/latest/download/gnx-<target>.tar.gz \| tar -xz -C ~/bin/` |
+| (gnx already installed) | `gnx.installed = true` | Verification only; skip download. Use `gnx.version` to display "Detected gnx 0.1.5". |
 
 ## Step 3: Present 3-choice menu
 
@@ -336,16 +341,20 @@ server into. **Do not write the MCP config files here** — record into
 
 ## Step 1: Detect installed IDEs
 
-Run probes from `_shared/refs/env-detect.md` (the IDEs section).
-Record into `config_inventory.mcp_probe`:
+**Do not re-run probes.** Phase 01 already ran the bundled probe and
+stashed the result in `config_inventory.system_probe`. Read the IDE
+booleans off it directly:
 
-```yaml
-mcp_probe:
-  claude_code: true|false
-  cursor: true|false
-  zed: true|false
-  vscode_continue: true|false
 ```
+ides.claude_code      → config_inventory.system_probe.ides.claude_code
+ides.cursor           → config_inventory.system_probe.ides.cursor
+ides.zed              → config_inventory.system_probe.ides.zed
+ides.vscode_continue  → config_inventory.system_probe.ides.vscode_continue
+```
+
+If for some reason the snapshot is missing (resume edge-case), re-run
+the **full** probe from `_shared/refs/env-detect.md` and re-stash —
+never call `test -d` individually.
 
 ## Step 2: Apply persona → recommendation
 

@@ -6,16 +6,20 @@ server into. **Do not write the MCP config files here** — record into
 
 ## Step 1: Detect installed IDEs
 
-Run probes from `_shared/refs/env-detect.md` (the IDEs section).
-Record into `config_inventory.mcp_probe`:
+**Do not re-run probes.** Phase 01 already ran the bundled probe and
+stashed the result in `config_inventory.system_probe`. Read the IDE
+booleans off it directly:
 
-```yaml
-mcp_probe:
-  claude_code: true|false
-  cursor: true|false
-  zed: true|false
-  vscode_continue: true|false
 ```
+ides.claude_code      → config_inventory.system_probe.ides.claude_code
+ides.cursor           → config_inventory.system_probe.ides.cursor
+ides.zed              → config_inventory.system_probe.ides.zed
+ides.vscode_continue  → config_inventory.system_probe.ides.vscode_continue
+```
+
+If for some reason the snapshot is missing (resume edge-case), re-run
+the **full** probe from `_shared/refs/env-detect.md` and re-stash —
+never call `test -d` individually.
 
 ## Step 2: Apply persona → recommendation
 
