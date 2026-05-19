@@ -209,7 +209,7 @@ pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Res
         return Err(io::Error::other("git archive failed"));
     }
     let mut child = std::process::Command::new("tar")
-        .args(["-x", "-C", dest.to_str().unwrap()])
+        .args(["-x", "-f", "-", "-C", dest.to_string_lossy().as_ref()])
         .stdin(std::process::Stdio::piped())
         .spawn()?;
     use std::io::Write;
