@@ -118,14 +118,14 @@ def _bench(name: str, cmd: list[str], cwd: Path, runs: int) -> Sample:
 def _probe_symbols(binary: Path, repo: Path) -> dict[str, str]:
     """Pick one Class + one Method from the graph for context/impact/query tests.
 
-    Strategy: cypher `Class-CONTAINS->Method` first row supplies the names;
+    Strategy: cypher `Class-[:HasMethod]->Method` first row supplies the names;
     `context --name <class>` resolves the canonical uid.
     """
     out: dict[str, str] = {}
-    elapsed, rc, stdout, _ = _run(
+    elapsed, rc, stdout, stderr = _run(
         [
             str(binary), "cypher",
-            "MATCH (a:Class)-[r:CONTAINS]->(b:Method) RETURN a,b",
+            "MATCH (a:Class)-[:HasMethod]->(b:Method) RETURN a,b",
             "--format", "json",
             "--repo", str(repo),
         ],
@@ -134,18 +134,18 @@ def _probe_symbols(binary: Path, repo: Path) -> dict[str, str]:
     if rc != 0:
         return out
     try:
-        rows = json.loads(stdout).get("results", [])
-    except json.JSONDecodeError:
+        data = json.loads(stdout)
+        rows = data.get("rows", [])
+    except (json.JSONDecodeError, AttributeError):
         return out
     if not rows:
         return out
+
+    # columns: ["a.name", "a.kind", "a.filePath", "b.name", "b.kind", "b.filePath"]
     first = rows[0]
-    if (cn := first.get("source", {}).get("name")) and isinstance(cn, str):
-        out["class_name"] = cn
-    target = first.get("target", {})
-    if all(k in target for k in ("filePath", "kind", "name")):
-        out["method_name"] = target["name"]
-        out["method_uid"] = f"{target['kind']}:{target['filePath']}:{target['name']}"
+    out["class_name"] = first[0]
+    out["method_name"] = first[3]
+    out["method_uid"] = f"{first[4]}:{first[5]}:{first[3]}"
 
     if name := out.get("class_name"):
         _, rc2, stdout2, _ = _run(
@@ -250,9 +250,6 @@ def main() -> int:
     ap.add_argument("--json", type=Path, help="Write JSON result to this path")
     ap.add_argument("--skip-cold", action="store_true",
                     help="Don't delete the registry index dir before the first analyze")
-    ap.add_argument("--with-embeddings", action="store_true",
-                    help="After the no-embedding sweep, rebuild with --embeddings and re-run query commands "
-                         "to measure BGE-M3 INT8 dense-vector overhead (slow: minutes)")
     ap.add_argument("--no-build", action="store_true",
                     help="Skip the auto `cargo build --release` step (use the existing binary as-is)")
     args = ap.parse_args()
@@ -306,6 +303,11 @@ def main() -> int:
     samples.append(s)
     print(f"  {s.median_s:.3f}s" if s.runs else f"  FAIL: {s.err}")
 
+    # Phase 2b: ensure git-repo is indexed for impact tests
+    if args.git_repo.is_dir() and (args.git_repo / ".git").exists() and args.git_repo != args.repo:
+        print(f"→ analyze git-repo: {args.git_repo}")
+        _run([str(args.binary), "admin", "index", "--repo", str(args.git_repo)], cwd=args.git_repo)
+
     # Phase 3: probe a Class + Method for downstream tests
     print("→ probing graph for sample symbols")
     sym = _probe_symbols(args.binary, args.repo)
@@ -319,7 +321,7 @@ def main() -> int:
     # cypher is "minimal cypher": single MATCH path with optional WHERE a.name='Val'.
     # No LIMIT / no count() / no aggregation.
     cypher_class_contains = (
-        "MATCH (a:Class)-[r:CONTAINS]->(b:Method) "
+        "MATCH (a:Class)-[:HasMethod]->(b:Method) "
         f"WHERE a.name='{sym.get('class_name', 'AppController')}' RETURN a,b"
     )
     queries: list[tuple[str, list[str], Path]] = [
@@ -327,9 +329,9 @@ def main() -> int:
          [str(args.binary), "cypher", cypher_class_contains,
           "--repo", str(args.repo)],
          args.repo),
-        ("cypher Method-CALLS->Method",
+        ("cypher Method-Calls->Method",
          [str(args.binary), "cypher",
-          "MATCH (a:Method)-[r:CALLS]->(b:Method) "
+          "MATCH (a:Method)-[:Calls]->(b:Method) "
           f"WHERE a.name='{sym.get('method_name', 'main')}' RETURN a,b",
           "--repo", str(args.repo)],
          args.repo),
@@ -351,8 +353,8 @@ def main() -> int:
         ))
     if name := sym.get("method_name"):
         queries.append((
-            "search (lexical)",
-            [str(args.binary), "search", "--query", name, "--repo", str(args.repo)],
+            "find (bm25)",
+            [str(args.binary), "find", name, "--mode", "bm25", "--repo", str(args.repo)],
             args.repo,
         ))
     if uid := sym.get("class_uid"):
@@ -372,8 +374,8 @@ def main() -> int:
 
     if args.git_repo.is_dir() and (args.git_repo / ".git").exists():
         queries.append((
-            "impact --since HEAD~1",
-            [str(args.binary), "impact", "--since", "HEAD~1",
+            "impact --baseline HEAD~1",
+            [str(args.binary), "impact", "--baseline", "HEAD~1",
              "--repo", str(args.git_repo)],
             args.git_repo,
         ))
@@ -389,59 +391,6 @@ def main() -> int:
                 f"  median {_fmt(s.median_s).strip()}  "
                 f"(min {_fmt(min(s.runs)).strip()}, max {_fmt(max(s.runs)).strip()})"
             )
-
-    # Phase 5: optional --embeddings sweep
-    if args.with_embeddings:
-        print()
-        print(f"→ cgn admin drop --repo {args.repo}  (rebuild with embeddings)")
-        _admin_drop(args.binary, args.repo)
-        print("→ admin index --embeddings (cold)")
-        s = _bench(
-            "admin index --embeddings (cold)",
-            [str(args.binary), "admin", "index", "--repo", str(args.repo), "--embeddings"],
-            cwd=args.repo, runs=1,
-        )
-        samples.append(s)
-        if s.runs:
-            print(f"  {s.median_s:.2f}s")
-        else:
-            print(f"  FAIL: {s.err}")
-
-        print("→ admin index --embeddings (incremental, embed cache hot)")
-        s = _bench(
-            "admin index --embeddings (incremental)",
-            [str(args.binary), "admin", "index", "--repo", str(args.repo), "--embeddings"],
-            cwd=args.repo, runs=1,
-        )
-        samples.append(s)
-        if s.runs:
-            print(f"  {s.median_s:.2f}s")
-        else:
-            print(f"  FAIL: {s.err}")
-
-        emb_queries: list[tuple[str, list[str], Path]] = [
-            ("search (hybrid, w/ emb)",
-             [str(args.binary), "search", "--query",
-              sym.get("method_name", "main"), "--repo", str(args.repo)],
-             args.repo),
-        ]
-        if name := sym.get("class_name"):
-            emb_queries.append((
-                "inspect (w/ emb graph)",
-                [str(args.binary), "inspect", "--name", name, "--repo", str(args.repo)],
-                args.repo,
-            ))
-        for name, cmd, cwd in emb_queries:
-            print(f"→ {name}")
-            s = _bench(name, cmd, cwd, args.runs)
-            samples.append(s)
-            if s.err:
-                print(f"  FAIL: {s.err}")
-            else:
-                print(
-                    f"  median {_fmt(s.median_s).strip()}  "
-                    f"(min {_fmt(min(s.runs)).strip()}, max {_fmt(max(s.runs)).strip()})"
-                )
 
     _print_summary(samples)
 
