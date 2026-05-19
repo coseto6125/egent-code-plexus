@@ -1,6 +1,6 @@
 [package]
-name = "graph-nexus-mcp"
-description = "MCP server library backing `gnx mcp serve` — tools derived by clap::Command introspection"
+name = "cgn-mcp"
+description = "MCP server library backing `cgn mcp serve` — tools derived by clap::Command introspection"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

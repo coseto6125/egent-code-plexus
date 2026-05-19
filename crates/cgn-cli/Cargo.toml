@@ -1,13 +1,13 @@
 [package]
-name = "graph-nexus"
-description = "Graph Nexus for LLM — code intelligence graph for AI agents and LLMs (multi-language AST analysis)"
-version = "0.1.5"
+name = "code-graph-nexus"
+description = "code-graph-nexus — code intelligence graph for AI agents and LLMs (multi-language AST analysis)"
+version = "0.2.0"
 edition = "2021"
 default-run = "gnx"
 license.workspace = true
 repository.workspace = true
 
-# cargo-binstall 元資料：使 `cargo binstall graph-nexus` 直接抓 GitHub Release 預編 binary，
+# cargo-binstall 元資料：使 `cargo binstall code-graph-nexus` 直接抓 GitHub Release 預編 binary，
 # 跳過 source compile。{ target } / { archive-suffix } / { binary-ext } 由 binstall 依平台自動代入。
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/gnx-v{ version }-{ target }{ archive-suffix }"
@@ -21,13 +21,13 @@ name = "gnx"
 path = "src/main.rs"
 
 [lib]
-name = "graph_nexus_cli"
+name = "cgn_cli"
 path = "src/lib.rs"
 
 [dependencies]
-graph-nexus-core = { path = "../graph-nexus-core", version = "0.1.0" }
-graph-nexus-analyzer = { path = "../graph-nexus-analyzer", version = "0.1.0" }
-graph-nexus-mcp = { path = "../graph-nexus-mcp", version = "0.1.0" }
+cgn-core = { path = "../cgn-core", version = "0.2.0" }
+cgn-analyzer = { path = "../cgn-analyzer", version = "0.2.0" }
+cgn-mcp = { path = "../cgn-mcp", version = "0.2.0" }
 tokio = { version = "1", features = ["rt"] }
 clap = { version = "4.5.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }

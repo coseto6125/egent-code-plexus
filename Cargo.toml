@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/graph-nexus-core",
-    "crates/graph-nexus-analyzer",
-    "crates/graph-nexus-cli",
-    "crates/graph-nexus-mcp",
+    "crates/cgn-core",
+    "crates/cgn-analyzer",
+    "crates/cgn-cli",
+    "crates/cgn-mcp",
 ]
 # vendor 內 grammar crates 仍透過 path dep 引用，但不視為 workspace member ──
 # 避免 cargo / clippy --workspace --all-targets 編到 vendor 自身的 #[cfg(test)] 區塊
@@ -18,7 +18,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 authors = ["E-NoR"]
 license = "MIT OR Apache-2.0"
