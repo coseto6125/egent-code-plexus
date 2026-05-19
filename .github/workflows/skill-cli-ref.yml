@@ -25,6 +25,7 @@ jobs:
       - name: Open PR if anything changed
         uses: peter-evans/create-pull-request@v8
         with:
+          base: main
           branch: skill/cli-ref-regen-${{ github.ref_name }}
           title: "chore(skill): regenerate CLI ref for ${{ github.ref_name }}"
           commit-message: "chore(skill): regenerate CLI ref for ${{ github.ref_name }}"
