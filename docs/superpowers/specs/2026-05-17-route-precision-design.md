@@ -24,7 +24,7 @@ Comparison to gitnexus is **not** a strict over/under judgement — gitnexus's f
 
 ## Goals
 
-- **Precision target**: ≥95% on framework-idiomatic code (committed fixtures), ≥98% on the cgn-rs self-corpus.
+- **Precision target**: ≥95% on framework-idiomatic code (committed fixtures), ≥98% on the cgn self-corpus.
 - **Recall preservation**: idiomatic FastAPI / Flask / Django / Express / NestJS / Laravel patterns must still extract.
 - **No hardcoded receiver allowlist**. Receiver legitimacy is established structurally — via framework-constructor tracking — not by enumerating identifier names.
 - **User-tunable precision**: `--route-confidence high|certain|all` CLI flag with `high` as default.
@@ -79,9 +79,9 @@ pub enum RouteConfidence {
 ```
 
 `--route-confidence` CLI flag drops emissions below the threshold:
-- `certain` → only Tier-Certain  (paranoid; expected ~7 routes on cgn-rs)
-- `high`    → Tier-Certain + High (default; expected ~10-15 on cgn-rs)
-- `all`     → all three           (recall-leaning; expected ~30-50 on cgn-rs)
+- `certain` → only Tier-Certain  (paranoid; expected ~7 routes on cgn)
+- `high`    → Tier-Certain + High (default; expected ~10-15 on cgn)
+- `all`     → all three           (recall-leaning; expected ~30-50 on cgn)
 
 Files with **no HTTP framework import are never emitted Routes** under any threshold — S2 is mandatory. This single gate eliminates the `dict.get("key")` FP class universally.
 
@@ -112,7 +112,7 @@ Structural (S7): in the same file, walk for assignments where RHS is a construct
 
 ## Verification strategy
 
-**All verification is internal to the cgn-rs repo. No external scripts under `scripts/`. No CI dependency on external repos.**
+**All verification is internal to the cgn repo. No external scripts under `scripts/`. No CI dependency on external repos.**
 
 ### Layer 1 — committed fixture tests (CI-blocking)
 
@@ -133,7 +133,7 @@ Required fixtures (minimum for PR 1):
 
 ### Layer 2 — self-corpus regression check (PR body, not committed test)
 
-Run `cgn admin index --repo .` on cgn-rs itself before + after. Assert in PR body:
+Run `cgn admin index --repo .` on cgn itself before + after. Assert in PR body:
 - Before: 49 routes, 42 FP (86%)
 - After (default `high`): ≤ 15 routes, ≤ 2 FP (≤ 15%)
 - After (`certain`): ≤ 10 routes, 0 FP
@@ -160,7 +160,7 @@ PR body posts:
 
 ### Layer 4 — gitnexus cross-validation: **infeasible, explicitly skipped**
 
-Cannot run gitnexus inside cgn-rs CI (different runtime, dep conflicts, nondeterministic indexing). Cross-validation is a future-PR exercise if/when an isolation harness exists. Stated here so we don't silently drop it.
+Cannot run gitnexus inside cgn CI (different runtime, dep conflicts, nondeterministic indexing). Cross-validation is a future-PR exercise if/when an isolation harness exists. Stated here so we don't silently drop it.
 
 ## Trade-offs accepted
 

@@ -6,7 +6,7 @@
 
 ## Context
 
-cgn-rs **hard-drops** function-body / class-body / nested-fn locals in every language parser. queries.scm anchors symbol captures at `(source_file)` / `(module)` / `(mod_item)` direct children. Inside a `function_item` / `def f():` body, `let x = ...` / `x = ...` is invisible to the graph.
+cgn **hard-drops** function-body / class-body / nested-fn locals in every language parser. queries.scm anchors symbol captures at `(source_file)` / `(module)` / `(mod_item)` direct children. Inside a `function_item` / `def f():` body, `let x = ...` / `x = ...` is invisible to the graph.
 
 The 5-angle panel (token cost, graph correctness, peer tools, use-case grounding, steelman) returned 4 × strong-agree + 1 × qualified-disagree. The steelman raised one principled objection worth holding:
 

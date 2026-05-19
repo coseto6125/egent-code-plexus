@@ -1,5 +1,5 @@
 //! Repro for nlohmann/json.hpp `template<...> class basic_json { reference at(...) {...} }`:
-//! cgn-rs emits 18 Method nodes for json.hpp but completely misses `at`, `accept`,
+//! cgn emits 18 Method nodes for json.hpp but completely misses `at`, `accept`,
 //! `count`, `contains`, `emplace`, `erase`, `compute_boundaries`, ... — all template
 //! class members whose body contains `JSON_TRY/JSON_CATCH/JSON_THROW` macros plus
 //! K&R-style brace-on-newline.

@@ -2,7 +2,7 @@
 """Manual verification helper — `dump_per_lang_kinds.py` wrapper that
 prints a per-lang shift table against `final_baseline.txt`.
 
-Run from gitnexus-rs repo root before pushing a parser change:
+Run from code-graph-nexus repo root before pushing a parser change:
 
     python3 scripts/parity/check_drift.py
 

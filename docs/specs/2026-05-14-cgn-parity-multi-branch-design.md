@@ -45,7 +45,7 @@ graph TB
     HOME --> REG["registry.json<br/>+ .lock + .bak"]
     HOME --> AUD["audit.log<br/>+ .1 + .2"]
     HOME --> MOD["_module/<br/>embeddings cache"]
-    HOME --> R1["gitnexus-rs/"]
+    HOME --> R1["code-graph-nexus/"]
     HOME --> R2["neptune/"]
     HOME --> R3["tokio-a1b2c3d4/<br/>(撞名 hash 後綴)"]
 
@@ -72,8 +72,8 @@ graph TB
 
 從 `git remote get-url origin` 解析 repo name：
 
-- `git@github.com:coseto6125/code-graph-nexus.git` → `<repo>=gitnexus-rs`
-- `https://github.com/coseto6125/code-graph-nexus.git` → `gitnexus-rs`
+- `git@github.com:coseto6125/code-graph-nexus.git` → `<repo>=code-graph-nexus`
+- `https://github.com/coseto6125/code-graph-nexus.git` → `code-graph-nexus`
 - 無 remote → `<repo>=<working-tree basename>`
 - 多 remote → 用 `origin`，否則第一個 alphabetic
 - `user`/`org` 資訊保留在 registry 的 `remote_url` 欄位，`cgn coverage` 顯示時即時解析 — 不放進 path
@@ -469,14 +469,14 @@ fn uid_path(absolute: &Path, repo_root: &Path) -> String {
   "version": 1,
   "repos": [
     {
-      "name": "gitnexus-rs",                                       // 路徑用名（撞名可加 hash）
+      "name": "code-graph-nexus",                                       // 路徑用名（撞名可加 hash）
       "remote_url": "git@github.com:coseto6125/code-graph-nexus.git",        // credential 已剝除；list-repos 顯示時 parse 出 owner
       "worktree_path": "/home/enor/code-graph-nexus",                   // canonical absolute
-      "index_dir_root": "/home/enor/.cgn/gitnexus-rs",             // = ~/.cgn/<name>
+      "index_dir_root": "/home/enor/.cgn/code-graph-nexus",             // = ~/.cgn/<name>
       "branches": [
         {
           "name": "main",
-          "index_dir": "/home/enor/.cgn/gitnexus-rs/main",
+          "index_dir": "/home/enor/.cgn/code-graph-nexus/main",
           "indexed_at": "2026-05-14T03:00:00Z",
           "node_count": 12453,
           "delta_size": 0,
@@ -983,10 +983,10 @@ cgn find --name-prefix login --include-body --kind Method
 `~/.cgn/audit.log`，JSON Lines：
 
 ```json
-{"ts":"2026-05-14T03:21:00Z","event":"analyze.complete","repo":"gitnexus-rs","branch":"main","files":234,"nodes":12453,"duration_ms":4521}
+{"ts":"2026-05-14T03:21:00Z","event":"analyze.complete","repo":"code-graph-nexus","branch":"main","files":234,"nodes":12453,"duration_ms":4521}
 {"ts":"2026-05-14T03:25:11Z","event":"rename.execute","target":"oldName","kind":"Function","affected_files":12,"dry_run":false}
-{"ts":"2026-05-14T03:30:00Z","event":"hook.fired","type":"rename","from":"old-feat","to":"new-feat","repo":"gitnexus-rs"}
-{"ts":"2026-05-14T03:30:05Z","event":"registry.mutate","op":"update","repo":"gitnexus-rs","branch":"main"}
+{"ts":"2026-05-14T03:30:00Z","event":"hook.fired","type":"rename","from":"old-feat","to":"new-feat","repo":"code-graph-nexus"}
+{"ts":"2026-05-14T03:30:05Z","event":"registry.mutate","op":"update","repo":"code-graph-nexus","branch":"main"}
 ```
 
 ### 9.1 上限

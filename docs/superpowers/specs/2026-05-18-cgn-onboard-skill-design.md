@@ -33,14 +33,14 @@ through the `cgn` CLI.
 
 ## § 1 Architecture
 
-The SKILL pack lives **inside the `gitnexus-rs` repo itself**, not in a
+The SKILL pack lives **inside the `code-graph-nexus` repo itself**, not in a
 separate `cgn-onboard` repo. This keeps the SKILL and the `cgn` CLI on the
 same release cycle (zero drift) and halves maintenance burden. The cost —
 distribution outlets (c) and (d) pulling extra repo weight — is mitigated
 with `--depth=1` + sparse-checkout instructions in the README.
 
 ```
-gitnexus-rs/                                      ← existing repo; new content added in two locations
+code-graph-nexus/                                      ← existing repo; new content added in two locations
 │
 ├── docs/skills/
 │   ├── cgn.md                                     ← existing — agent cheatsheet for already-installed cgn
@@ -94,7 +94,7 @@ gitnexus-rs/                                      ← existing repo; new content
 |---|---|---|
 | (a) URL bootstrap | Any LLM agent | User pastes `Fetch <raw URL>/docs/skills/cgn-onboard/SKILL.md and follow it` into chat |
 | (b) ShareOnboardingGuide | Claude Code, lowest friction | Run from `docs/skills/cgn-onboard/` cwd → short-code link → recipient opens in Claude Code |
-| (c) Plugin (`/plugin install`) | Claude Code power user | Pulls full repo into `~/.claude/plugins/gitnexus-rs/`; SKILL is a subpath. **Recommended:** README documents `--depth=1` + sparse-checkout to pull only `docs/skills/cgn-onboard/` |
+| (c) Plugin (`/plugin install`) | Claude Code power user | Pulls full repo into `~/.claude/plugins/code-graph-nexus/`; SKILL is a subpath. **Recommended:** README documents `--depth=1` + sparse-checkout to pull only `docs/skills/cgn-onboard/` |
 | (d) `git clone` | Offline / hacker | Sparse-checkout `docs/skills/cgn-onboard/` to corresponding agent's skill / rule directory |
 
 All 4 outlets derive from the same `docs/skills/cgn-onboard/` source. The
@@ -336,7 +336,7 @@ SKILL must handle this gracefully:
    - [x] cargo binstall code-graph-nexus
    - [x] verified cgn --version → 0.1.5
    ## Phase 02 first-index
-   - [x] indexed: ~/gitnexus-rs
+   - [x] indexed: ~/code-graph-nexus
    ...
    ```
 
@@ -472,4 +472,4 @@ Runs pre-release; not per-PR (cost).
 | 2026-05-18 | Batch-collect-then-apply (don't block on install) | Reduce wait time; user answers later phases while binary downloads |
 | 2026-05-18 | CLI reference cards auto-generated per cgn version | Avoid hand-written drift; supports older-version recipients |
 | 2026-05-18 | CI is future work; manual generator runs first | Get to MVP fast; wire CI after pattern stabilizes |
-| 2026-05-18 | Same-repo (live in `gitnexus-rs/docs/skills/cgn-onboard/`), not a separate `cgn-onboard` repo | Zero version drift between cgn CLI and SKILL, single CI, single PR; cost on outlets (c)/(d) mitigated by sparse-checkout instructions |
+| 2026-05-18 | Same-repo (live in `code-graph-nexus/docs/skills/cgn-onboard/`), not a separate `cgn-onboard` repo | Zero version drift between cgn CLI and SKILL, single CI, single PR; cost on outlets (c)/(d) mitigated by sparse-checkout instructions |

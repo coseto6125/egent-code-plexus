@@ -124,7 +124,7 @@ cgn inspect validateUser
 | 這個 commit 改了什麼 + 影響範圍 | `cgn impact --since HEAD~1` |
 | 跨檔安全 rename 一個符號（14 語言 — 見矩陣 Rename 欄） | `cgn rename --symbol old --new-name new --dry-run` 再去掉 `--dry-run` |
 | 列出本機所有已索引的 repo | `cgn coverage`（不帶 `--repo` 時顯示 registry 總覽） |
-| 重新註冊一個搬過家的 `.gitnexus-rs/` | `cgn admin index --repo <path>` |
+| 重新註冊一個搬過家的 `.cgn/` | `cgn admin index --repo <path>` |
 | 完全刪除索引 | `cgn admin drop --repo <path>` |
 | Multi-branch / multi-worktree 流程 | `cgn admin install-hook`、`cgn admin prune --branch X`、`cgn admin rename-branch --from A --to B` |
 | 互動式設定精靈 | `cgn admin config` |
@@ -133,7 +133,7 @@ cgn inspect validateUser
 
 ### 命令參考
 
-所有命令預設從當前目錄讀取 `.gitnexus-rs/graph.bin`，可用 `--graph <path>` 覆寫。讀取端命令用 `--repo <name-or-path>` 在多 repo 註冊表中指定目標。
+所有命令預設從當前目錄讀取 `.cgn/graph.bin`，可用 `--graph <path>` 覆寫。讀取端命令用 `--repo <name-or-path>` 在多 repo 註冊表中指定目標。
 
 #### Agent 命令（頂層）
 
@@ -155,10 +155,10 @@ cgn inspect validateUser
 |---|---|---|
 | `admin index --repo <path>` | 建立 / 刷新 `<path>` 的圖譜。預設增量（內容雜湊快取）。 | `--force`（強制全量重建） · `--dump-resolver <file>` · `--no-cache` |
 | `admin install-hook` | 安裝 git reference-transaction hook，分支切換自動追蹤索引。 | `--force` · `--no-chain` |
-| `admin drop [--repo <p>] [--all]` | 刪除一個或全部的 `.gitnexus-rs/` 及其 registry 記錄。 | — |
+| `admin drop [--repo <p>] [--all]` | 刪除一個或全部的 `.cgn/` 及其 registry 記錄。 | — |
 | `admin prune --branch <name> --repo <p>` | 刪除過時的 branch-scoped 索引目錄。 | — |
 | `admin rename-branch --from <a> --to <b> --repo <p>` | 重命名 branch 索引目錄。 | — |
-| `admin config` | 互動式 TOML 編輯精靈（`.gitnexus-rs/config.toml`）。 | `--repo <p>` |
+| `admin config` | 互動式 TOML 編輯精靈（`.cgn/config.toml`）。 | `--repo <p>` |
 | `admin group` | 跨 repo group 管理。 | — |
 
 > 每個命令的完整 flag 可用 `cgn <command> --help` 確認。CLI 採非互動式設計（LLM 友善）：所有 flag 透過 `--help` 暴露，所有輸出走 stdout 且可解析。
@@ -243,7 +243,7 @@ crates/
 └── cgn-cli         # `cgn` 命令列、Tantivy BM25 全文引擎、Token 最佳化輸出
 ```
 
-解析器 (Analyzer) 透過 MPSC 通道將 AST 節點傳遞給單一的 Builder 執行緒。Builder 負責組裝圖譜、推導 API 路由與文件分類，最後將其序列化為零拷貝的 `.gitnexus-rs/graph.bin`。讀取端（如 `context` 或 `query`）透過 mmap 直接映射硬碟檔案，達成零延遲查詢。
+解析器 (Analyzer) 透過 MPSC 通道將 AST 節點傳遞給單一的 Builder 執行緒。Builder 負責組裝圖譜、推導 API 路由與文件分類，最後將其序列化為零拷貝的 `.cgn/graph.bin`。讀取端（如 `context` 或 `query`）透過 mmap 直接映射硬碟檔案，達成零延遲查詢。
 
 ## ⚙️ 調校
 

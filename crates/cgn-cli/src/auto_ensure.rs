@@ -201,7 +201,7 @@ fn git_head_sha(worktree: &Path) -> io::Result<String> {
 /// belt-and-suspenders guard: `WalkBuilder` already filters it, but
 /// `filter_entry` runs before that, and a project with no `.gitignore` at
 /// all would otherwise walk `.git/` mtimes (noisy as hell).
-const SKIP_DIRS: &[&str] = &[".git", ".cgn", ".gitnexus-rs"];
+const SKIP_DIRS: &[&str] = &[".git", ".cgn", ".cgn"];
 
 /// Short-circuits on the first source file newer than `graph_mtime`.
 /// Walking the full tree only happens when the graph is genuinely

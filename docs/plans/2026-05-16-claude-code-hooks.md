@@ -116,7 +116,7 @@ Expected: FAIL (subcommand not registered)
 //! Shared utilities for Claude Code hook event handlers:
 //! - stdin JSON envelope parsing
 //! - hookSpecificOutput JSON emission
-//! - marker file paths under .gitnexus-rs/
+//! - marker file paths under .cgn/
 
 use cgn_core::CgnError;
 use serde::Deserialize;
@@ -167,14 +167,14 @@ pub fn emit_additional_context(event: &str, context: &str) {
     println!("{}", payload);
 }
 
-/// Resolve `.gitnexus-rs/` relative to cwd. Returns None if cwd is not
-/// absolute or has no `.gitnexus-rs/` subdir.
+/// Resolve `.cgn/` relative to cwd. Returns None if cwd is not
+/// absolute or has no `.cgn/` subdir.
 pub fn gitnexus_dir(cwd: &str) -> Option<PathBuf> {
     let path = Path::new(cwd);
     if !path.is_absolute() {
         return None;
     }
-    let candidate = path.join(".gitnexus-rs");
+    let candidate = path.join(".cgn");
     candidate.exists().then_some(candidate)
 }
 ```
@@ -408,13 +408,13 @@ fn no_index_present_yields_empty_output() {
     child.stdin.as_mut().unwrap().write_all(envelope.as_bytes()).unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
-    assert!(out.stdout.is_empty(), "no .gitnexus-rs/ → no-op expected");
+    assert!(out.stdout.is_empty(), "no .cgn/ → no-op expected");
 }
 
 #[test]
 fn template_placeholders_get_rendered_when_meta_present() {
     let tmp = TempDir::new().unwrap();
-    let cgn_dir = tmp.path().join(".gitnexus-rs");
+    let cgn_dir = tmp.path().join(".cgn");
     std::fs::create_dir_all(&cgn_dir).unwrap();
     // Minimal meta.json — schema mirrors BranchMeta required fields.
     std::fs::write(
@@ -577,7 +577,7 @@ fn detect_worktree_needing_index(cwd: &Path) -> Option<String> {
     if !git_path.is_file() {
         return None;
     }
-    if Path::new(&toplevel).join(".gitnexus-rs").exists() {
+    if Path::new(&toplevel).join(".cgn").exists() {
         return None;
     }
     let branch = git_rev_parse(Path::new(&toplevel), &["branch", "--show-current"])
@@ -648,7 +648,7 @@ fn run_with_envelope(cwd: &std::path::Path) -> std::process::Output {
 #[test]
 fn complete_marker_surfaced_and_unlinked() {
     let tmp = TempDir::new().unwrap();
-    let cgn_dir = tmp.path().join(".gitnexus-rs");
+    let cgn_dir = tmp.path().join(".cgn");
     std::fs::create_dir_all(&cgn_dir).unwrap();
     std::fs::write(cgn_dir.join(".rebuild-complete"), "").unwrap();
     std::fs::write(
@@ -666,7 +666,7 @@ fn complete_marker_surfaced_and_unlinked() {
 #[test]
 fn failed_marker_takes_priority_over_complete() {
     let tmp = TempDir::new().unwrap();
-    let cgn_dir = tmp.path().join(".gitnexus-rs");
+    let cgn_dir = tmp.path().join(".cgn");
     std::fs::create_dir_all(&cgn_dir).unwrap();
     std::fs::write(cgn_dir.join(".rebuild-complete"), "").unwrap();
     std::fs::write(cgn_dir.join(".rebuild-failed"), "").unwrap();
@@ -682,7 +682,7 @@ fn failed_marker_takes_priority_over_complete() {
 #[test]
 fn no_markers_yields_silent_no_op() {
     let tmp = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp.path().join(".gitnexus-rs")).unwrap();
+    std::fs::create_dir_all(tmp.path().join(".cgn")).unwrap();
     let out = run_with_envelope(tmp.path());
     assert!(out.stdout.is_empty());
 }
@@ -843,7 +843,7 @@ fn git_commit_in_dir_without_index_no_op() {
         tmp.path().display()
     );
     let out = run_with(&envelope);
-    // No .gitnexus-rs/ → still surface a hint or remain silent? Per spec §3.4
+    // No .cgn/ → still surface a hint or remain silent? Per spec §3.4
     // Missing index → no-op (handler doesn't auto-bootstrap).
     assert!(out.stdout.is_empty());
 }
@@ -1589,12 +1589,12 @@ fn short_pattern_no_op() {
 #[test]
 fn missing_graph_no_op() {
     let out = run(r#"{"cwd":"/tmp","tool_name":"Grep","tool_input":{"pattern":"validateUser"}}"#);
-    assert!(out.stdout.is_empty(), "no .gitnexus-rs/ → no-op");
+    assert!(out.stdout.is_empty(), "no .cgn/ → no-op");
 }
 
 #[test]
 fn bash_grep_extracts_first_non_flag_arg() {
-    // Stdin envelope only — actual graph call is gated on .gitnexus-rs/ existing.
+    // Stdin envelope only — actual graph call is gated on .cgn/ existing.
     // This test pins that we correctly identify the pattern but bail without index.
     let out = run(r#"{"cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"rg -n 'validateUser' src/"}}"#);
     assert!(out.stdout.is_empty(), "no index → no-op even with valid pattern");

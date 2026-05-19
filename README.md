@@ -135,7 +135,7 @@ Every read-side command accepts `--format text|json|toon`. The default is the to
 | What changed in this commit and what it ripples to | `cgn impact --since HEAD~1` |
 | Rename a symbol across files (14 languages — see matrix `Rename` column) | `cgn rename --symbol old --new-name new --dry-run` then drop `--dry-run` |
 | List repos this machine has indexed | `cgn coverage` (registry overview without `--repo`) |
-| Re-register a `.gitnexus-rs/` folder after moving the repo | `cgn admin index --repo <path>` |
+| Re-register a `.cgn/` folder after moving the repo | `cgn admin index --repo <path>` |
 | Drop an index entirely | `cgn admin drop --repo <path>` |
 | Multi-branch / multi-worktree workflows | `cgn admin install-hook`, `cgn admin prune --branch X`, `cgn admin rename-branch --from A --to B` |
 | Interactive setup wizard | `cgn admin config` |
@@ -175,7 +175,7 @@ ships in a follow-up release.
 
 ### Command reference
 
-All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--graph <path>` is given. Read-only commands take `--repo <name-or-path>` to disambiguate when multiple repos are registered.
+All commands resolve `.cgn/graph.bin` from the current dir unless `--graph <path>` is given. Read-only commands take `--repo <name-or-path>` to disambiguate when multiple repos are registered.
 
 #### Agent commands (top-level)
 
@@ -197,10 +197,10 @@ All commands resolve `.gitnexus-rs/graph.bin` from the current dir unless `--gra
 |---|---|---|
 | `admin index --repo <path>` | Build / refresh the graph for `<path>`. Incremental by default (content-hash cache). | `--force` (full rebuild) · `--dump-resolver <file>` · `--no-cache` |
 | `admin install-hook` | Install the git reference-transaction hook so branch switches auto-track. | `--force` · `--no-chain` |
-| `admin drop [--repo <p>] [--all]` | Delete the `.gitnexus-rs/` for a repo (or all) and its registry entry. | — |
+| `admin drop [--repo <p>] [--all]` | Delete the `.cgn/` for a repo (or all) and its registry entry. | — |
 | `admin prune --branch <name> --repo <p>` | Drop a stale branch-scoped index dir. | — |
 | `admin rename-branch --from <a> --to <b> --repo <p>` | Rename a branch's on-disk index. | — |
-| `admin config` | Interactive TOML wizard for `.gitnexus-rs/config.toml`. | `--repo <p>` |
+| `admin config` | Interactive TOML wizard for `.cgn/config.toml`. | `--repo <p>` |
 | `admin group` | Cross-repo group management. | — |
 
 > Every command's flags can be re-confirmed with `cgn <command> --help`. The CLI is non-interactive by design (LLM-friendly): all flags surface via `--help`, all output goes to stdout in a parseable format.
@@ -292,7 +292,7 @@ crates/
 └── cgn-cli         # `cgn` binary, Tantivy BM25 Engine, Token-optimized Output
 ```
 
-The analyzer streams parsed nodes through an MPSC channel into a single builder thread that assembles the graph, applies Route & Document extraction rules, and writes a zero-copy `.gitnexus-rs/graph.bin`. Read operations (like `context` and `query`) memory-map this file directly for zero-latency lookups.
+The analyzer streams parsed nodes through an MPSC channel into a single builder thread that assembles the graph, applies Route & Document extraction rules, and writes a zero-copy `.cgn/graph.bin`. Read operations (like `context` and `query`) memory-map this file directly for zero-latency lookups.
 
 ## ⚙️ Tuning
 
@@ -345,7 +345,7 @@ Four ways to use it:
 Paste into your agent chat:
 
 ```
-Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/cgn-onboard/ONBOARDING.md
+Fetch https://raw.githubusercontent.com/<owner>/code-graph-nexus/main/docs/skills/cgn-onboard/ONBOARDING.md
 and follow it as my onboarding wizard for code-graph-nexus.
 ```
 
@@ -378,7 +378,7 @@ and the wizard auto-loads.
 ```bash
 # Pull only the SKILL pack — avoids downloading the whole Rust workspace
 git clone --depth=1 --filter=blob:none --sparse \
-    https://github.com/<owner>/gitnexus-rs ~/.claude/plugins/cgn-onboard-src
+    https://github.com/<owner>/code-graph-nexus ~/.claude/plugins/cgn-onboard-src
 cd ~/.claude/plugins/cgn-onboard-src
 git sparse-checkout set docs/skills/cgn-onboard
 ln -s docs/skills/cgn-onboard ~/.claude/skills/cgn-onboard

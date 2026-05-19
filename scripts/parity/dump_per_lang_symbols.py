@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Per-language per-symbol parity diff: cgn-rs vs reference gitnexus.
+"""Per-language per-symbol parity diff: cgn vs reference gitnexus.
 
 Dumps `(kind, filePath, name)` tuples from both indices per language, then
 emits `<lang>_rs_only.txt` / `<lang>_ref_only.txt` + `summary.md` showing
 diff counts. Sampling those text files surfaces which side parsed wrong.
 
 Assumes both binaries have already indexed `.sample_repo/<Lang>/...` —
-cgn-rs registers each lang sub-dir separately (cd into it to query), while
+cgn registers each lang sub-dir separately (cd into it to query), while
 ref-gitnexus uses a single `.sample_repo/` registration with `<Lang>/` path
 prefix filtering.
 
@@ -63,8 +63,8 @@ LANG_EXTS: dict[str, list[str]] = {
     "Ruby":       [".rb"],
     "Swift":      [".swift"],
     "C":          [".c"],
-    # `.h` belongs to Cpp here — both cgn-rs and ref-gitnexus route `.h` through
-    # the C++ parser (cgn-rs `Language::from_normalized_path`, ref-gitnexus
+    # `.h` belongs to Cpp here — both cgn and ref-gitnexus route `.h` through
+    # the C++ parser (cgn `Language::from_normalized_path`, ref-gitnexus
     # `language-detection.ts` EXTENSION_MAP). Routing through C would silently
     # drop every class/template/method declaration in C++ headers that ship
     # with `.h`.
@@ -89,7 +89,7 @@ def is_anon(name: str) -> bool:
         return True
     # `_` is the blank-discard identifier in every mainstream lang
     # (Go `var _ I = (*T)(nil)` interface assertion, Rust `let _ = ...`,
-    # Python `_, x = ...`, Swift `for _ in 0..<n`, etc.). cgn-rs filters
+    # Python `_, x = ...`, Swift `for _ in 0..<n`, etc.). cgn filters
     # these at parse time; ref-gitnexus retains them. Without this
     # exclusion Go alone produced 19 ref_over `Variable:_` rows that
     # had no LLM-useful semantics.

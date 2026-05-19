@@ -1007,7 +1007,7 @@ fn newest_source_mtime(root: &Path) -> io::Result<Option<SystemTime>> {
             let name = e.file_name().to_string_lossy();
             !matches!(
                 name.as_ref(),
-                ".git" | "target" | "node_modules" | ".gitnexus-rs"
+                ".git" | "target" | "node_modules" | ".cgn"
             )
         })
         .filter_map(Result::ok)

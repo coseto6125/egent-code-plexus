@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the cgn-onboard SKILL pack — a personalized installation + configuration wizard for `code-graph-nexus` distributed as a layered markdown SKILL — entirely inside the existing `gitnexus-rs` repo, ready for the 4 distribution outlets defined in the spec.
+**Goal:** Build the cgn-onboard SKILL pack — a personalized installation + configuration wizard for `code-graph-nexus` distributed as a layered markdown SKILL — entirely inside the existing `code-graph-nexus` repo, ready for the 4 distribution outlets defined in the spec.
 
 **Architecture:** Three-layer SKILL pack under `docs/skills/cgn-onboard/` (SKILL.md + guides/ + _shared/), bash tooling under `tools/`, tests + smoke playbook under `tests/skill/`, CI workflows under `.github/workflows/`. The pack reuses the existing `cgn` CLI release cycle (single repo, zero drift). Implementation TDDs all bash tools (each tool ships with a `tests/skill/test-<tool>.sh` integration test); markdown content is validated by the lint tool + aggregator round-trip.
 
@@ -14,7 +14,7 @@
 
 ## File Structure
 
-This plan creates the following files (all paths relative to `gitnexus-rs/` repo root):
+This plan creates the following files (all paths relative to `code-graph-nexus/` repo root):
 
 ```
 docs/skills/cgn-onboard/                            ← Layer 1 + 2 + 3 SKILL pack
@@ -2280,7 +2280,7 @@ matrix is out of scope).
 ### Case A: Cross-agent URL bootstrap (any LLM)
 
 1. Paste into a fresh chat session of the target agent (Cursor / Aider / Gemini CLI / etc.):
-   > "Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/cgn-onboard/SKILL.md and follow it as my onboarding wizard for code-graph-nexus."
+   > "Fetch https://raw.githubusercontent.com/<owner>/code-graph-nexus/main/docs/skills/cgn-onboard/SKILL.md and follow it as my onboarding wizard for code-graph-nexus."
 2. **Expect:** agent reads SKILL.md, runs probes, emits Phase 01 3-choice menu.
 3. Pick `accept`.
 4. **Expect:** download starts in background; agent advances to Phase 02 immediately (does not wait).
@@ -2368,7 +2368,7 @@ Four ways to use it:
 Paste into your agent chat:
 
 ```
-Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/cgn-onboard/SKILL.md
+Fetch https://raw.githubusercontent.com/<owner>/code-graph-nexus/main/docs/skills/cgn-onboard/SKILL.md
 and follow it as my onboarding wizard for code-graph-nexus.
 ```
 
@@ -2394,7 +2394,7 @@ and the wizard auto-loads.
 ```bash
 # Pull only the SKILL pack — avoids downloading the whole Rust workspace
 git clone --depth=1 --filter=blob:none --sparse \
-    https://github.com/<owner>/gitnexus-rs ~/.claude/plugins/cgn-onboard-src
+    https://github.com/<owner>/code-graph-nexus ~/.claude/plugins/cgn-onboard-src
 cd ~/.claude/plugins/cgn-onboard-src
 git sparse-checkout set docs/skills/cgn-onboard
 ln -s docs/skills/cgn-onboard ~/.claude/skills/cgn-onboard
@@ -2515,5 +2515,5 @@ EOF
   - CI: `.github/workflows/skill-<verb>.yml`
 
 - The `<owner>` placeholder in README and smoke-playbook URLs is the
-  GitHub org / user of the gitnexus-rs repo. Replace with the actual
+  GitHub org / user of the code-graph-nexus repo. Replace with the actual
   value at PR time (not parametric — just edit before merging).

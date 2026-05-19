@@ -2,14 +2,14 @@
 //!
 //! Round 76 (PR #149) discovered that bumping tree-sitter-swift from
 //! 0.21 → 0.25 silently changed the ERROR-recovery shape for `#if`
-//! guarded class headers, so cgn-rs stopped emitting those classes
+//! guarded class headers, so cgn stopped emitting those classes
 //! without any test failing. The other 13 mainstream langs had no
 //! equivalent canary, meaning the next vendor grammar bump could ship
 //! the same regression for any of them.
 //!
 //! This file pins a minimal AST shape per lang: a top-level function,
 //! a class-like declaration, and (when the lang has it) a const-style
-//! binding. The assertions verify the `(kind, name)` tuples cgn-rs
+//! binding. The assertions verify the `(kind, name)` tuples cgn
 //! emits — if a grammar bump renames a node (`class_declaration` →
 //! `class_definition`) or changes the field name (`name:` → `id:`),
 //! the relevant test fails immediately rather than masking a parity
@@ -215,7 +215,7 @@ class Box\n  def add(a, b)\n    a + b\n  end\nend\n\n\
 def pi\n  3.14\nend\n";
     let p = RubyProvider::new().expect("provider");
     let g = p.parse_file(Path::new("box.rb"), src.as_bytes()).expect("parse");
-    // Ruby `def` is always a Method in cgn-rs's taxonomy — Ruby has no
+    // Ruby `def` is always a Method in cgn's taxonomy — Ruby has no
     // "free function" concept (top-level `def` binds to Kernel /
     // main:Object), so both inside-class and top-level `def` emit Method.
     assert_has(

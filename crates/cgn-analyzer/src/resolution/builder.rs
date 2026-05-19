@@ -1475,7 +1475,7 @@ mod determine_category_tests {
         // "how to wire routes" content that LLM consumers want to navigate
         // (Express's `examples/auth/`, NestJS's `sample/`, Flask's
         // `examples/tutorial/`). Previously these collapsed into `Test`,
-        // which the builder skipped — cgn-rs emitted zero Routes for the
+        // which the builder skipped — cgn emitted zero Routes for the
         // 82-row JS examples corpus. Now they classify as `Example` and
         // routes flow through normally; `/tests/` / `.spec.` / Cypress
         // `/e2e/` stay as Test (test fixtures still must not pollute the

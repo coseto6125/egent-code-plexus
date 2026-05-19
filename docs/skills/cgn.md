@@ -87,7 +87,7 @@ Supports the openCypher read subset commonly used for graph queries: boolean WHE
 
 1. **`--repo` is required for cross-repo modes**. `@group / @all / csv` only work when explicit.
 2. **Top-level commands reject `--repo @<group>`** — the error points at the matching `cgn group <verb>`. `cypher / inspect / rename` have no group analog; group queries live under `cgn group <verb>` only.
-3. **Default `--graph .gitnexus-rs/graph.bin`** is a cwd-relative legacy path. If you don't have a checked-in graph file, pass `--repo` (preferred) or absolute `--graph`.
+3. **Default `--graph .cgn/graph.bin`** is a cwd-relative legacy path. If you don't have a checked-in graph file, pass `--repo` (preferred) or absolute `--graph`.
 4. **Auto-ensure on every agent command** — first query after a source change pays a brief re-index cost. The stderr `✓ Index refreshed` line is informational, not an error.
 5. **`rename --markdown`** is OFF by default — code-only rename. Add the flag to sweep `.md / .rst / .txt`.
 

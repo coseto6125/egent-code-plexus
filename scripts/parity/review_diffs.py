@@ -189,7 +189,7 @@ def classify_lang(lang: str) -> dict[str, list[dict]]:
     rs_only = rs_set - ref_set
     ref_only = ref_set - rs_set
     rs_only, ref_only, route_pairs = _pair_route_aliases(rs_only, ref_only)
-    # Mirror of parity_aggregate `_pair_route_method_prefix`: cgn-rs emits
+    # Mirror of parity_aggregate `_pair_route_method_prefix`: cgn emits
     # Route names as `"METHOD path"` (e.g., `"GET /users"`) while ref emits
     # the bare path. Strip method prefix to surface as label_diff instead of
     # appearing as both rs_over (METHOD-prefixed) and ref_over (bare path).
@@ -230,7 +230,7 @@ def classify_lang(lang: str) -> dict[str, list[dict]]:
     ref_only -= drop_ref_route
     # Mirror of parity_aggregate `_pair_ref_const_function_double_emit`:
     # ref-gitnexus double-emits `Const` + `Function` for TS/JS arrow-fn
-    # bindings (`export const fn = (...) => ...`); cgn-rs emits only
+    # bindings (`export const fn = (...) => ...`); cgn emits only
     # `Function`. The Const-side leftover is a label mismatch, not a
     # missing symbol. Narrow scope — requires ref-side AND rs-side
     # Function at same `(p, n)` so plain `const x = 42; function x() {}`
@@ -249,7 +249,7 @@ def classify_lang(lang: str) -> dict[str, list[dict]]:
 
     # Mirror of parity_aggregate `_pair_ref_template_class_double_emit`:
     # ref-gitnexus double-emits `Class` + `Template` for Cpp
-    # `template<typename T> class Foo`; cgn-rs emits only `Class`. The
+    # `template<typename T> class Foo`; cgn emits only `Class`. The
     # Template-side leftover is a label mismatch, not a missing symbol.
     # Same shape as Const/Function: require ref-side type-family kind AND
     # rs-side type-family kind at same `(p, n)` so we only pair true
@@ -434,7 +434,7 @@ def render_entry(lang: str, bucket: str, e: dict, context: int) -> list[str]:
     out = [
         f"### `{name}` @ {path}{line_marker}",
         "",
-        f"`{bucket}` · cgn-rs **{rs_label}** vs ref **{ref_label}**",
+        f"`{bucket}` · cgn **{rs_label}** vs ref **{ref_label}**",
         "",
     ]
     if file_path is None:
@@ -521,7 +521,7 @@ def render_lang(
         f"limit_per_kind={limit_per_kind or '∞'}, context=±{context}.",
         "",
         "Verdict legend:",
-        "- **real_bug** — type-level permanent symbol, cgn-rs (or ref) misses it. Fix parser.",
+        "- **real_bug** — type-level permanent symbol, cgn (or ref) misses it. Fix parser.",
         "- **label_diff** — same declaration, kind label differs (EQUIV class miss). Update EQUIV map.",
         "- **design** — intentional drop (block-scoped transient, builder filter, etc).",
         "- **defensive** — predicate guard with no observed bug. Cosmetic.",

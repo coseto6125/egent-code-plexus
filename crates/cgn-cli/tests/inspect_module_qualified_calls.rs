@@ -4,7 +4,7 @@
 //! qualifier as a Type lookup, so calls like `auto_ensure::ensure_fresh(...)`
 //! never produced incoming edges — `auto_ensure` is a *module* (a `mod foo;`
 //! declaration corresponding to `foo.rs` in the same crate), not a Type. On
-//! the actual `gitnexus-rs` repo this left ≥40% of internal `fn`s with zero
+//! the actual `code-graph-nexus` repo this left ≥40% of internal `fn`s with zero
 //! reported callers, masking the real blast radius for any LLM driving
 //! `cgn inspect`.
 

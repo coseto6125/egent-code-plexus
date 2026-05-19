@@ -1,6 +1,6 @@
 """Unit tests for `_pair_route_method_prefix` in parity_aggregate.py.
 
-cgn-rs emits Route node names as `"METHOD path"` (e.g., `"GET /users"`),
+cgn emits Route node names as `"METHOD path"` (e.g., `"GET /users"`),
 flattened from the underlying `RawRoute { method, path }`. ref-gitnexus emits
 the bare path (`"/users"`). The helper strips the leading HTTP-method prefix
 from rs-side names and pairs `(p, normalized_name)` against ref side. Verified

@@ -2,7 +2,7 @@
 
 **Date**: 2026-05-16
 **Status**: Both phases landed in PR #13 — single-file emit + Option C (resolver Tier 2.75 `HeritageScoped`) closes the cross-file mixin gap. The pin test was flipped to verify positive resolution.
-**Goal**: 描述如何讓 Ruby parser/resolver 能可靠識別 `def_delegator` / `def_delegators` / `delegate` 等 metaprogramming 呼叫，補上 PR [#13](https://github.com/coseto6125/gitnexus-rs/pull/13)（Ruby Named binding）刻意延後的最後一塊——「需要 receiver type 才能判斷的 method-creating call」。
+**Goal**: 描述如何讓 Ruby parser/resolver 能可靠識別 `def_delegator` / `def_delegators` / `delegate` 等 metaprogramming 呼叫，補上 PR [#13](https://github.com/coseto6125/code-graph-nexus/pull/13)（Ruby Named binding）刻意延後的最後一塊——「需要 receiver type 才能判斷的 method-creating call」。
 
 **Status update (post-implementation, 2026-05-16)**：PR #13 後續三個 commit 已完整 ship Option B + Option-A fallback + **Option C resolver tier**：
 - `crates/cgn-analyzer/src/ruby/{parser.rs, queries.scm}` 加入 `def_delegator` / `def_delegators` / `delegate` 三個 metaprogramming 呼叫的識別。除了 RawImport alias 之外，**也同步 materialise 一個 `NodeKind::Method` RawNode** 到 enclosing class — 這是讓跨檔 heritage chain 能找到 delegated method 的關鍵。

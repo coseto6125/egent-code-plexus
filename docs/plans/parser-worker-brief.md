@@ -213,7 +213,7 @@ cargo build -p cgn-cli 2>&1 | tail -20
 
 # 2. Indexing must succeed (produce a non-empty graph.bin)
 target/debug/cgn-cli analyze --repo tests/parity/fixtures/<lang>/sample_project
-ls -la tests/parity/fixtures/<lang>/sample_project/.gitnexus-rs/graph.bin
+ls -la tests/parity/fixtures/<lang>/sample_project/.cgn/graph.bin
 
 # 3. One symbol must resolve
 target/debug/cgn-cli context \
@@ -237,7 +237,7 @@ If `cargo build` fails, fix it before continuing. Do not commit a build-broken s
 ## 8. Hard constraints
 
 1. **You must `cargo build -p cgn-analyzer` and `cargo build -p cgn-cli` and both must succeed before declaring done.** Report the last 20 lines of each build's output in your response.
-2. **You must run `cgn-cli analyze` on your fixture and confirm `.gitnexus-rs/graph.bin` exists.** Report `ls -la` of the output.
+2. **You must run `cgn-cli analyze` on your fixture and confirm `.cgn/graph.bin` exists.** Report `ls -la` of the output.
 3. **You must run `cgn-cli context --name <some_symbol>` on your fixture and get a non-error response.** Report the JSON output.
 4. **You must commit your changes** on the worktree branch with a clear commit message like `feat(analyzer): add <Lang>Provider`.
 5. **You must not modify existing language parsers.** Only your new `<lang>/` directory + the 4 wiring sites (Cargo.toml, lib.rs, analyze.rs ×2).

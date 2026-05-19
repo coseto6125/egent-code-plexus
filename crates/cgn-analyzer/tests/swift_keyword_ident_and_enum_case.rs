@@ -10,7 +10,7 @@
 //!
 //! 2. **Enum cases** — `case foo` / `case a, b, c` were not captured at all
 //!    (no query in queries.scm). ref-gitnexus emits each case name as
-//!    Property; cgn-rs missed every one.
+//!    Property; cgn missed every one.
 
 use cgn_analyzer::swift::parser::SwiftProvider;
 use cgn_core::analyzer::provider::LanguageProvider;

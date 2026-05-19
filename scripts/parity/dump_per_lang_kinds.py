@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Per-(language, kind) symbol count dump: cgn-rs vs reference gitnexus.
+"""Per-(language, kind) symbol count dump: cgn vs reference gitnexus.
 
-Run from gitnexus-rs repo root. Assumes `.sample_repo/` contains 14 mainstream
+Run from code-graph-nexus repo root. Assumes `.sample_repo/` contains 14 mainstream
 language subdirectories already indexed by both binaries.
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ LANGS = [
 # pollution (e.g., GitHub Actions workflow `.yml` files inside `Rust/`
 # add 62 Class nodes to the Rust count, inflating the apparent delta;
 # Kotlin `build.gradle.kts` inside `Java/` adds Variable nodes).
-# The filter is applied to BOTH cgn-rs and ref-gitnexus queries so the
+# The filter is applied to BOTH cgn and ref-gitnexus queries so the
 # per-lang totals reflect only nodes from real source files in that
 # language's grammar.
 EXTS: dict[str, list[str]] = {
@@ -65,7 +65,7 @@ def run(cmd: list[str]) -> str:
 
 
 def parse_rs(out: str) -> dict[str, int]:
-    """cgn-rs cypher --format json → {kind: count}."""
+    """cgn cypher --format json → {kind: count}."""
     try:
         obj = json.loads(out)
     except json.JSONDecodeError:

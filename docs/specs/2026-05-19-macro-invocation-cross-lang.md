@@ -30,9 +30,9 @@ that produce no semantic symbol.
 
 ## Current state
 
-### cgn-rs (no emission)
+### cgn (no emission)
 
-cgn-rs does not emit anything for macro **invocations**, only for
+cgn does not emit anything for macro **invocations**, only for
 macro **definitions** (`#define X` → `NodeKind::Macro`). The C / Cpp
 queries.scm capture `preproc_def` and `preproc_function_def` for the
 declaration site but have no `call_expression` query gated on
@@ -128,7 +128,7 @@ treat the row as "macro family not yet on the framework allowlist."
 Cpp ref_over (macros):
   Function-10 (NLOHMANN_*, DOCTEST_*)
   Variable-12 (DOCTEST_CLANG_SUPPRESS_WARNING)
-  Macro-2     (TSDN_NULL, DOCTEST_CMP_GE — these are #define macros cgn-rs DOES support,
+  Macro-2     (TSDN_NULL, DOCTEST_CMP_GE — these are #define macros cgn DOES support,
                separate bug, file under "C/Cpp queries.scm coverage gap")
 
 C ref_over (macros):
@@ -144,7 +144,7 @@ C ref_over (macros):
   as a binding from the struct to "serialization" would help the
   LLM answer "is `person` JSON-serializable?" without reading the
   macro body.
-- **`#define` macros cgn-rs misses (the 4 Macro-2 ref_over rows
+- **`#define` macros cgn misses (the 4 Macro-2 ref_over rows
   above)**. Investigate whether they're inside `#if` guards or other
   preprocessor branches that the tree-sitter query doesn't enter.
 

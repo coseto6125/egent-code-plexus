@@ -300,7 +300,7 @@ Commands:
 | `drop <repo>` | `--yes` (skip confirm) | Delete index data + registry entry (destructive) |
 | `prune` | `--dry-run` | Remove orphan index dirs not in registry |
 | `rename-branch <old> <new>` | — | Rename a branch's index dir + registry entry |
-| `config` | — | Interactive TUI for `.gitnexus-rs/config.toml` |
+| `config` | — | Interactive TUI for `.cgn/config.toml` |
 | `index <path>` | `--embeddings` `--patch <file>` `--branch <name>` `--format <fmt>` | Explicit build/refresh (agent uses auto-ensure §5 instead) |
 
 ### 4.2 Admin nested group ops
@@ -565,7 +565,7 @@ Brainstorm sequence that produced this spec:
 2. Considered four grouping strategies (display_order + after_help / `cgn admin` namespace / hide-by-default / docs-only). Picked nested `cgn admin` with `hide = true` at top.
 3. User insight: pre-release status (v0.1.0) means hard break is acceptable; no aliases.
 4. User insight: rename for clarity goes deeper than admin — `analyze` should be `index` (commit `c08b3e9` already partial). Drove full rename pass.
-5. User insight: many commands are obsolete because Python-era constraints disappeared (e.g., `register` exists because Python `analyze` was slow; cgn-rs is fast → `register` unnecessary).
+5. User insight: many commands are obsolete because Python-era constraints disappeared (e.g., `register` exists because Python `analyze` was slow; cgn is fast → `register` unnecessary).
 6. User insight: collapse name-based variants into one command with flags (no separate `signature`, `exists`, `callers`, `overrides` — all flags of `inspect`).
 7. User insight: don't worry about tokens — return rich info by default; agent never types flags.
 8. User insight: agent CLI should never see admin (not even hint at its existence).

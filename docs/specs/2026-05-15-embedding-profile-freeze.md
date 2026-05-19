@@ -151,7 +151,7 @@ New flags:
 
 Resolution order at analyze start:
 1. If `--embed-model` provided → use it. If `--embed-batch` provided → use it. Skip wizard.
-2. Else load `.gitnexus-rs/config.toml`:
+2. Else load `.cgn/config.toml`:
    - If `embedding.model` is set AND `meta.json` already has `embedding_profile` → use frozen profile (don't re-prompt).
    - If `embedding.model` is set AND no meta yet → freeze it.
    - If `embedding.model` absent (fresh config) AND TTY → launch wizard with RAM-probed defaults pre-filled.

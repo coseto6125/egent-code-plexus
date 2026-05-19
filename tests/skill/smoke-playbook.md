@@ -17,7 +17,7 @@ matrix is out of scope).
 ### Case A: Cross-agent URL bootstrap (any LLM)
 
 1. Paste into a fresh chat session of the target agent (Cursor / Aider / Gemini CLI / etc.):
-   > "Fetch https://raw.githubusercontent.com/<owner>/gitnexus-rs/main/docs/skills/cgn-onboard/SKILL.md and follow it as my onboarding wizard for code-graph-nexus."
+   > "Fetch https://raw.githubusercontent.com/<owner>/code-graph-nexus/main/docs/skills/cgn-onboard/SKILL.md and follow it as my onboarding wizard for code-graph-nexus."
 2. **Expect:** agent reads SKILL.md, runs probes, emits Phase 01 3-choice menu.
 3. Pick `accept`.
 4. **Expect:** download starts in background; agent advances to Phase 02 immediately (does not wait).

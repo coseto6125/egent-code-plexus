@@ -9,7 +9,7 @@
 //! builder's File-node emission loop used a HashMap length as a proxy for the
 //! iteration index. When `self.local_graphs` contained duplicate paths (which
 //! does happen in practice — measured 699/3470 mismatched File nodes on the
-//! `gitnexus-rs` index), `.len()` lagged behind the iteration index and every
+//! `code-graph-nexus` index), `.len()` lagged behind the iteration index and every
 //! File node after the first duplicate received a file_idx pointing at the
 //! wrong `files[]` entry.
 

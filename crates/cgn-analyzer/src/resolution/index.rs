@@ -260,7 +260,7 @@ pub struct SymbolTable {
     /// module-file fallback reads it via [`SymbolTable::files_by_stem`].
     ///
     /// Without this index, Tier 4 would scan every `file_scoped.keys()`
-    /// per failed-qualifier resolution (~3 k entries on the gitnexus-rs
+    /// per failed-qualifier resolution (~3 k entries on the code-graph-nexus
     /// index, fires once per unresolved qualified call → millions of
     /// stem comparisons on cold-index build). The map collapses that to
     /// an O(1) lookup + O(candidates-per-stem) inner walk.

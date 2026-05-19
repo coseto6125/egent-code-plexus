@@ -37,20 +37,20 @@ MODEL_REF_ONLY = {"Section", "Folder", "File", "Document"}
 
 # Undirected equivalence classes. Two kinds are label-equivalent if they
 # share a class. Classes were derived from cross-side observation of the
-# `.sample_repo` corpus + ref-gitnexus / cgn-rs source.
+# `.sample_repo` corpus + ref-gitnexus / cgn source.
 _EQUIV_CLASSES: list[set[str]] = [
     # ref-gitnexus emits TS / JS / Dart constructors as Method (their
-    # underlying tree-sitter node is method_definition); cgn-rs promotes
+    # underlying tree-sitter node is method_definition); cgn promotes
     # to a dedicated Constructor kind. Verified per-file: both sides
     # find the same declarations, just labeled differently.
     {"Method", "Function", "Template", "Constructor"},
     {"Typedef", "TypeAlias"},
     {"Const", "Variable", "Property", "Static"},
-    # Trait joins this class so Swift `protocol P {}` (cgn-rs emits Trait,
+    # Trait joins this class so Swift `protocol P {}` (cgn emits Trait,
     # ref emits Interface) pairs as label_diff. Rust `trait` still falls
     # through to MODEL_RS_ONLY because ref-gitnexus emits no equiv-class
     # kind for Rust traits — model_diff classification kicks in after
-    # EQUIV pairing fails. Union joins the class because cgn-rs C parser
+    # EQUIV pairing fails. Union joins the class because cgn C parser
     # emits `union T {}` as Struct (queries.scm:28 explicit design) while
     # ref-gitnexus emits Union; without pairing, every C/Cpp union shows
     # as ref_over (7 C + 7 Cpp in current `.sample_repo`).
@@ -109,7 +109,7 @@ EQUIV = _build_equiv_map()
 # ref-side double-emit: `export const fn = (...) => ...` (TS / JS arrow-
 # function-bound const) surfaces twice on ref-gitnexus — once as `Const`
 # at the binding declaration, once as `Function` at the arrow expression.
-# cgn-rs collapses both into a single `Function` node (the callable view,
+# cgn collapses both into a single `Function` node (the callable view,
 # which is what `cgn search "fn"` should resolve to). The leftover ref-
 # only `(Const, p, n)` row is a label mismatch, not a missing symbol.
 #
@@ -143,7 +143,7 @@ def _pair_ref_const_function_double_emit(
 
 # ref-side double-emit: `template<typename T> class Foo { ... }` surfaces twice
 # on ref-gitnexus — once as `Class` at the class_specifier, once as `Template`
-# at the enclosing `template_declaration` wrapper. cgn-rs emits only `Class`
+# at the enclosing `template_declaration` wrapper. cgn emits only `Class`
 # (the inner kind). The leftover ref-only `(Template, p, n)` row is a label
 # mismatch, not a missing symbol. Same shape as the Const/Function double-emit
 # pairer above.
@@ -184,7 +184,7 @@ def _pair_ref_template_class_double_emit(
 
 
 # rs-side `Route` name format is `"METHOD path"` (e.g., `"GET /users"`),
-# inherited from cgn-rs's `RawRoute { method, path }` flattening to a single
+# inherited from cgn's `RawRoute { method, path }` flattening to a single
 # Route node name. ref-gitnexus emits `Route` with name = bare path (e.g.,
 # `"/users"`). For routes detected by both sides this surfaces as paired
 # rs_over (1 row per METHOD-flavor) + ref_over (1 row per path) at the same

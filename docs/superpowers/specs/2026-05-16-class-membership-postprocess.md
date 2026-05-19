@@ -7,7 +7,7 @@
 **Status note (v2)**: Spec v1 已 squash-merge 進 main（PR #33, commit `e074737`）。本 v2 整合 5 項實測 validation 跟 5-agent design 評估後的修正。
 
 **Related**:
-- `crates/cgn-core/src/graph.rs` — `RelType::HasMethod` / `HasProperty` 已宣告但無人 emit（cgn-rs 自身驗證 297 個 Class 全 0 HasMethod edges）
+- `crates/cgn-core/src/graph.rs` — `RelType::HasMethod` / `HasProperty` 已宣告但無人 emit（cgn 自身驗證 297 個 Class 全 0 HasMethod edges）
 - `crates/cgn-analyzer/src/framework_helpers.rs` — **`enclosing_class` / `enumerate_class_methods` 已存在**，目前供 framework detection 使用
 - `crates/cgn-analyzer/src/rust/receiver_types.rs` — **`build_impl_map` 已存在**，目前供 Rust receiver-type call 解析使用
 - `crates/cgn-analyzer/src/resolution/builder.rs` — 實際 graph 構造點（v1 spec 寫錯為 `pipeline.rs`）
@@ -136,7 +136,7 @@ pub fn enumerate_class_methods(nodes: &[RawNode], class_span: Span, exclude_name
 
 > "a shim for languages whose legacy extractor doesn't resolve `enclosingClassId` at parse time (**Python class-body methods are the canonical case**). It walks `parsed.localDefs[i].ownerId` after `populateOwners` and registers any missed methods/fields into the model. Idempotent — safe to re-run."
 
-上游已 production 驗證此設計可行；cgn-rs 補 post-process pass 等同把上游決策補齊。
+上游已 production 驗證此設計可行；cgn 補 post-process pass 等同把上游決策補齊。
 
 ---
 
@@ -198,7 +198,7 @@ Top-level `def foo():` / `function foo()` — 不被任何 Class 包含 → `enu
 
 ### 4.5 Complexity
 
-`O(F × N_class × N_member)` per file。實測 cgn-rs 6118 symbols / 12532 rels 全建 ~1.5s；post-process 估 < 100ms（Pass 1 線性掃 + Pass 2 Rust files only）。
+`O(F × N_class × N_member)` per file。實測 cgn 6118 symbols / 12532 rels 全建 ~1.5s；post-process 估 < 100ms（Pass 1 線性掃 + Pass 2 Rust files only）。
 
 ---
 
@@ -354,7 +354,7 @@ let rows2 = run(q2);
 - [ ] `crates/cgn-cli/tests/class_membership_inspect.rs` 通過 5 跨語言 fixture tests
 - [ ] `crates/cgn-cli/tests/cypher_has_method.rs` 通過 B.1 慣例驗證 test
 - [ ] `cgn inspect <Class>` 對至少 5 種語言（TS / Ruby / Python / Rust 兩種 impl）回非空 `contained_methods`
-- [ ] `cgn cypher "MATCH (a:Class)-[:HasMethod]->(b) RETURN a,b"` 在 cgn-rs 自身 repo 跑出 > 200 rows
+- [ ] `cgn cypher "MATCH (a:Class)-[:HasMethod]->(b) RETURN a,b"` 在 cgn 自身 repo 跑出 > 200 rows
 - [ ] 整體 graph build time 增加 < 5%（基線 ~1.5s for 6118 symbols / 12532 rels）
 - [ ] SKILL.md 加入 1 行 cypher 慣例提示（不加 target kind filter）
 

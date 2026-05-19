@@ -1,17 +1,17 @@
-# Skill Refactor Survey — cgn-rs vs Upstream gitnexus
+# Skill Refactor Survey — cgn vs Upstream gitnexus
 
 **Date:** 2026-05-15
 **Purpose:** Inventory what we have, what upstream has, where the gaps are.
 Foundation for refactoring upstream skills (`._source_code/gitnexus-claude-plugin/skills/`)
-into cgn-rs-native skills shipped via `.claude-plugin/`.
+into cgn-native skills shipped via `.claude-plugin/`.
 
 ---
 
-## 1. cgn-rs CLI Inventory (Source of Truth)
+## 1. cgn CLI Inventory (Source of Truth)
 
 Read from `crates/cgn-cli/src/commands/*.rs` Args structs.
 Binary name: `code-graph-nexus` (typically aliased as `cgn`).
-Global flag: `--graph <path>` (default `.gitnexus-rs/graph.bin`).
+Global flag: `--graph <path>` (default `.cgn/graph.bin`).
 
 ### 1.1 Read-side commands
 
@@ -122,11 +122,11 @@ Common skeleton:
 
 ---
 
-## 4. Tool / Capability Delta (Upstream → cgn-rs)
+## 4. Tool / Capability Delta (Upstream → cgn)
 
 ### 4.1 Direct map
 
-| Upstream MCP | cgn-rs CLI | Parity |
+| Upstream MCP | cgn CLI | Parity |
 |---|---|---|
 | `query` | `cgn search --query "..."` | ✅ same intent |
 | `context` | `cgn inspect X` | ✅ |
@@ -136,9 +136,9 @@ Common skeleton:
 | `rename` | `cgn rename --symbol X --new-name Y --repo P --dry-run` | ✅ **Python only (MVP, merged 2026-05-15)** — multi-lang remaining; see `commands/rename.rs` |
 | `cypher` | `cgn cypher "<query>" --repo P --format json` | ✅ **minimal subset (merged)** — supports `MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE a.name='Val'] RETURN a,b` |
 
-### 4.2 Upstream MCP resources → cgn-rs
+### 4.2 Upstream MCP resources → cgn
 
-| Upstream `gitnexus://...` resource | cgn-rs alternative |
+| Upstream `gitnexus://...` resource | cgn alternative |
 |---|---|
 | `/context` (stats, staleness) | `cgn coverage` (md/json) — overlapping intent, richer output |
 | `/clusters` | partly in `cgn coverage` (`--top-communities`) |
@@ -147,9 +147,9 @@ Common skeleton:
 | `/process/{name}` | **MISSING** (no step-by-step trace exposure) |
 | `/schema` | embedded in `cgn coverage` (relations + node kinds) |
 
-### 4.3 cgn-rs extras (no upstream peer)
+### 4.3 cgn extras (no upstream peer)
 
-| cgn-rs | Why it matters for LLM |
+| cgn | Why it matters for LLM |
 |---|---|
 | `cgn coverage` | Surfaces the **whole contract**: which frameworks are detected with what confidence, which patterns are blind spots, where to look. The single biggest hallucination-reducer we have. |
 | `cgn coverage --detailed` | LLM project overview — meant to be the FIRST thing dropped into the LLM's context window |
@@ -159,7 +159,7 @@ Common skeleton:
 
 ### 4.4 Graph schema delta
 
-| Aspect | Upstream | cgn-rs |
+| Aspect | Upstream | cgn |
 |---|---|---|
 | Node kinds | File, Function, Class, Interface, Method, Community, Process | Method, Function, Class, Property, Const, Variable, Route, File, Process |
 | Differences | Has `Interface`, `Community` as nodes | Has `Property`, `Const`, `Variable`, `Route` as nodes; `Community` is metadata, not a node |
@@ -169,7 +169,7 @@ Common skeleton:
 ### 4.5 Confidence model delta
 
 - **Upstream:** edges have confidence; `impact` accepts `minConfidence`.
-- **cgn-rs:** same confidence model PLUS `--high-trust-only` shortcut (≥0.8 cutoff) on `impact` + `detect_changes`. Plus the `reason` string on each edge (`framework-aware-fastapi-depends`, `reflection-getattr-fanout`, etc.) — actionable for LLM to know **why** the resolver picked that target.
+- **cgn:** same confidence model PLUS `--high-trust-only` shortcut (≥0.8 cutoff) on `impact` + `detect_changes`. Plus the `reason` string on each edge (`framework-aware-fastapi-depends`, `reflection-getattr-fanout`, etc.) — actionable for LLM to know **why** the resolver picked that target.
 
 ---
 
@@ -208,7 +208,7 @@ Common skeleton:
 Per the global `~/.claude/CLAUDE.md` GitNexus Workflow section, the user has been describing
 a richer wrapper command surface. As of 2026-05-15 the gap is narrower than originally noted:
 
-| Mentioned in global CLAUDE.md | Status in cgn-rs |
+| Mentioned in global CLAUDE.md | Status in cgn |
 |---|---|
 | `cgn cypher` | ✅ landed (minimal MATCH subset) |
 | `cgn rename` | ✅ Python MVP landed; multi-lang remaining |

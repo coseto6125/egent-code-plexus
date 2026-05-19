@@ -18,7 +18,7 @@ Acceptance criteria are explicit in the predicate docstrings — anyone
 maintaining the README can read what `✓` means for each dimension
 without guessing.
 
-Usage (from gitnexus-rs repo root):
+Usage (from code-graph-nexus repo root):
 
     python3 scripts/parity/readme_verifier.py
     python3 scripts/parity/readme_verifier.py --generate  # emit a fresh table
@@ -146,7 +146,7 @@ def dim_imports(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
 
     Imports are tracked as edges (file -[:Imports]-> module), not as a
     standalone `NodeKind::Import`. ref-gitnexus emits `Import` nodes
-    but cgn-rs models them as relationships.
+    but cgn models them as relationships.
     """
     where = _ext_clause(file_exts, "a")
     n = ctx.cypher_count(

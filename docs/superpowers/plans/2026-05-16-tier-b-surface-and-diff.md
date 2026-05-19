@@ -1639,7 +1639,7 @@ Add helper:
 fn resolve_current_graph_bin(repo_dir: &std::path::Path) -> Result<std::path::PathBuf, CgnError> {
     // Reuse existing graph_path::resolve logic from cgn
     // Or call cgn admin index --dump-graph if needed
-    let path = repo_dir.join(".gitnexus-rs/graph.bin");
+    let path = repo_dir.join(".cgn/graph.bin");
     if !path.exists() {
         return Err(CgnError::Output(format!(
             "graph.bin not found at {}; run `cgn admin index` first",

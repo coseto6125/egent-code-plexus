@@ -84,7 +84,7 @@ Template lookup order:
 
 Placeholders rendered:
 - `{{stats.nodes}}` / `{{stats.edges}}` — read from rkyv-archived
-  `ArchivedZeroCopyGraph` in `.gitnexus-rs/graph.bin` (in-process via
+  `ArchivedZeroCopyGraph` in `.cgn/graph.bin` (in-process via
   `engine::Engine::load(...).graph()`)
 - `{{head}}` — short SHA from `git rev-parse HEAD` (subprocess; no graph
   schema dependency)
@@ -93,7 +93,7 @@ Placeholders rendered:
   `graphify-out/wiki/index.md` existing
 
 Worktree-needs-index detection: when cwd's git toplevel is a worktree
-(`.git` is a file, not a dir) and `.gitnexus-rs/` is missing, emit a
+(`.git` is a file, not a dir) and `.cgn/` is missing, emit a
 hint suggesting `cgn admin index` (or whatever the per-worktree
 indexing command is in the new tooling — referenced in the rules
 template, not by literal string here, so future renames don't bit-rot
@@ -103,7 +103,7 @@ the hook).
 
 Mirror of legacy `handleUserPromptSubmit()`.
 
-Marker files live in `.gitnexus-rs/`:
+Marker files live in `.cgn/`:
 - `.rebuild-complete` — written by PostToolUse spawn on success
 - `.rebuild-failed`   — written by PostToolUse spawn on terminal failure
 - `last-rebuild.log`  — accumulated stdout/stderr of the spawn
@@ -145,7 +145,7 @@ Cap at 5 hits OR 2 KB serialized additionalContext, whichever fires
 first, to keep token cost bounded (each fire adds to the agent's
 context window).
 
-If `.gitnexus-rs/graph.bin` is missing → no-op (don't block agent;
+If `.cgn/graph.bin` is missing → no-op (don't block agent;
 the agent will still run Grep). Same for any error path: the hook
 must never block tool execution.
 
@@ -169,8 +169,8 @@ change SHA but should trigger stale (which mtime detects).
 
 If `EnsureResult::Stale { age_seconds }`:
 1. Spawn detached `cgn admin index` under flock at
-   `.gitnexus-rs/.analyze.lock` (port flock pattern from cjs).
-2. On terminal success write `.gitnexus-rs/.rebuild-complete`; on
+   `.cgn/.analyze.lock` (port flock pattern from cjs).
+2. On terminal success write `.cgn/.rebuild-complete`; on
    final failure (after MAX=3 attempts) write `.rebuild-failed`.
    Both clear the opposite marker.
 3. Surface to agent:
@@ -243,7 +243,7 @@ default for "no pattern matched", "graph missing", "marker absent", etc.
 
 | Scenario | Hook behaviour |
 |---|---|
-| `.gitnexus-rs/` doesn't exist | Silent no-op (don't block agent) |
+| `.cgn/` doesn't exist | Silent no-op (don't block agent) |
 | `graph.bin` corrupt / version mismatch | Silent no-op, log to stderr |
 | Detached spawn fails to start | Surface error in PostToolUse response, don't write `.rebuild-failed` (that marker is for the spawn process's exit code, not the launcher) |
 | settings.json missing on install | Create with just our entries |
@@ -259,7 +259,7 @@ Per-event integration test crate (`tests/hook_*.rs`):
   run `cgn hook pre-tool-use --claude-code`, assert stdout JSON
   contains expected `additionalContext` for Grep / Glob / Bash patterns
   AND that ≤3 char patterns or missing patterns produce empty output.
-- **hook_post_tool_use** — set up a tempfs git repo + `.gitnexus-rs/`
+- **hook_post_tool_use** — set up a tempfs git repo + `.cgn/`
   with a stale-marker-eligible graph, feed `git commit` envelope,
   assert spawned analyze process exists (e.g. via PID file or
   `pgrep -f`). Test the no-spawn paths: non-git Bash, failed
@@ -290,7 +290,7 @@ installs to `~/.claude/hooks/cgn/` (different directory) and writes
 
 Coexistence behaviour:
 - Both hooks fire on every event.
-- Old hook writes markers to `.gitnexus/`, new to `.gitnexus-rs/`.
+- Old hook writes markers to `.gitnexus/`, new to `.cgn/`.
 - Both surface their own `additionalContext` — agent sees both. This
   is acceptable noise; users who want to silence the legacy can
   manually edit `settings.json` (or run `gitnexus uninstall-hook`

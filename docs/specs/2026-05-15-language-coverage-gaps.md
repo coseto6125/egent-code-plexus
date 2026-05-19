@@ -30,7 +30,7 @@ The README Language Matrix shows code-graph-nexus has **45 ⚠️ cells** (upstr
 ## 2. Task partitioning
 
 22 sub-tasks total, organized into 2 dispatch waves. Each task gets:
-- A dedicated git worktree at `~/gitnexus-rs/.claude/worktrees/task-<id>/`
+- A dedicated git worktree at `~/code-graph-nexus/.claude/worktrees/task-<id>/`
 - A feature branch `feat/<scope>` based on main HEAD
 - A sub-agent (general-purpose) with the brief in §4
 - Acceptance criteria (§3) verified before merge

@@ -8,7 +8,7 @@
 //! tokens but **drop the `preproc_def` wrapper**, so a `(preproc_def name:
 //! (identifier))` query returns nothing for those regions.
 //!
-//! Verified on 2026-05-19 against `.sample_repo`: cgn-rs emits 11 of 29
+//! Verified on 2026-05-19 against `.sample_repo`: cgn emits 11 of 29
 //! macros in `tsd.h`, 137 of 673 in `doctest.h`. The remaining 18 / 536
 //! land inside ERROR regions despite being syntactically straightforward
 //! `#define NAME body` lines.
