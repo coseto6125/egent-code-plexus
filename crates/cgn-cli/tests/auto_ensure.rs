@@ -148,6 +148,31 @@ fn ensure_returns_ready_when_only_gitignored_files_are_newer() {
     );
 }
 
+#[test]
+fn ensure_returns_ready_when_only_cgnignored_files_are_newer() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join(".cgnignore"), "vendor/**/*.c\n").unwrap();
+    fs::write(tmp.path().join("src.rs"), "fn foo() {}").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let graph_path = tmp.path().join("graph.bin");
+    write_valid_empty_graph(&graph_path);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::create_dir_all(tmp.path().join("vendor/tree-sitter-nim/src")).unwrap();
+    fs::write(
+        tmp.path().join("vendor/tree-sitter-nim/src/parser.c"),
+        "void generated(void) {}",
+    )
+    .unwrap();
+
+    let result = ensure_index(&graph_path, tmp.path()).unwrap();
+    assert!(
+        matches!(result, EnsureResult::Ready),
+        "expected Ready (cgnignored files ignored), got {:?}",
+        result
+    );
+}
+
 /// HEAD-SHA sidecar must short-circuit the mtime walk: a source file
 /// re-touched after graph build (newer mtime, identical content) would
 /// trip the old walk into Stale, but the fingerprint shortcut says

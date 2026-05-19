@@ -290,8 +290,8 @@ fn git_head_sha(worktree: &Path) -> io::Result<String> {
 /// cgn-owned cache dirs that callers can't be expected to list in their
 /// own `.gitignore`. Everything else — `target/`, `node_modules/`,
 /// `__pycache__/`, `dist/`, `.venv/`, etc — is honoured via `.git_ignore(true)`
-/// on the `WalkBuilder`, so the project's own `.gitignore` is the source
-/// of truth for what counts as a "source change". `.git` stays here as a
+/// plus `.cgnignore` on the `WalkBuilder`, so project ignore files are the
+/// source of truth for what counts as a "source change". `.git` stays here as a
 /// belt-and-suspenders guard: `WalkBuilder` already filters it, but
 /// `filter_entry` runs before that, and a project with no `.gitignore` at
 /// all would otherwise walk `.git/` mtimes (noisy as hell).
@@ -310,6 +310,7 @@ fn any_source_newer_than(
     for entry in WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
+        .add_custom_ignore_filename(crate::CGN_IGNORE_FILE)
         .require_git(false)
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
@@ -351,6 +352,7 @@ fn collect_dirty_files(
     for entry in WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
+        .add_custom_ignore_filename(crate::CGN_IGNORE_FILE)
         .require_git(false)
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();

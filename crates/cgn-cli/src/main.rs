@@ -31,6 +31,8 @@ mod repo_selector;
 pub mod search;
 mod session;
 
+pub(crate) const CGN_IGNORE_FILE: &str = ".cgnignore";
+
 use engine::Engine;
 
 #[derive(Parser)]
