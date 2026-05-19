@@ -33,7 +33,7 @@ fn raw_fn(name: &str) -> RawNode {
 fn local_graph(path: &str, fn_name: &str, content_byte: u8) -> LocalGraph {
     LocalGraph {
         file_path: path.into(),
-        content_hash: [content_byte; 32],
+        content_hash: [content_byte; 8],
         nodes: vec![raw_fn(fn_name)],
         documents: vec![],
         imports: vec![],

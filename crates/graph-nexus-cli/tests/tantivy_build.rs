@@ -45,7 +45,7 @@ fn make_graph_with_names(names: &[&str]) -> ZeroCopyGraph {
         files: vec![File {
             path: file_path_ref,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: graph_nexus_core::graph::FileCategory::Source,
         }],
         nodes,

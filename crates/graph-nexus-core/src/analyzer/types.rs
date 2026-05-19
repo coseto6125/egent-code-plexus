@@ -115,7 +115,7 @@ pub struct BlindSpot {
 pub struct LocalGraph {
     #[rkyv(with = rkyv::with::AsString)]
     pub file_path: PathBuf,
-    pub content_hash: [u8; 32],
+    pub content_hash: [u8; 8],
     pub nodes: Vec<RawNode>,
     pub documents: Vec<RawDocumentBlock>,
     pub imports: Vec<RawImport>,

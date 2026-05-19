@@ -57,7 +57,7 @@ fn build_graph_with_calls_edge() -> Vec<u8> {
         files: vec![File {
             path: file_ref,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         }],
         nodes: vec![

@@ -1,5 +1,5 @@
 use graph_nexus_core::registry::CommitDirName;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -11,7 +11,7 @@ use std::time::SystemTime;
 /// Unparseable dir names (garbage / partial `.building` / `.stale` leftovers)
 /// are skipped, not surfaced — they are recovery debris, not query targets.
 pub struct CommitIndex {
-    by_sha: HashMap<[u8; 20], String>,
+    by_sha: FxHashMap<[u8; 20], String>,
 }
 
 /// Process-level cache for `scan_cached`. Keyed by commits dir path, valued by
@@ -23,12 +23,12 @@ pub struct CommitIndex {
 /// lock — concurrent queries don't serialize. Arc avoids cloning the inner
 /// HashMap on every hit. Bounded by repo count seen in this process; not
 /// LRU-evicted today because typical MCP / CLI usage tops out at <20 repos.
-static SCAN_CACHE: OnceLock<RwLock<HashMap<PathBuf, (SystemTime, Arc<CommitIndex>)>>> =
+static SCAN_CACHE: OnceLock<RwLock<FxHashMap<PathBuf, (SystemTime, Arc<CommitIndex>)>>> =
     OnceLock::new();
 
 impl CommitIndex {
     pub fn scan(commits_dir: &Path) -> io::Result<Self> {
-        let mut by_sha = HashMap::new();
+        let mut by_sha = FxHashMap::default();
         let it = match std::fs::read_dir(commits_dir) {
             Ok(d) => d,
             // commits/ dir absent on first build for a new repo — empty index, not error
@@ -68,7 +68,7 @@ impl CommitIndex {
         else {
             return Ok(Arc::new(Self::scan(commits_dir)?));
         };
-        let cache = SCAN_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        let cache = SCAN_CACHE.get_or_init(|| RwLock::new(FxHashMap::default()));
         {
             let map = cache.read().unwrap_or_else(|e| e.into_inner());
             if let Some((cached_mt, idx)) = map.get(commits_dir) {

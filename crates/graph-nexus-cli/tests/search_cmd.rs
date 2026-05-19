@@ -44,7 +44,7 @@ fn seed_repo(home_gnx: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]
     let files = vec![File {
         path: pool.add(&format!("{dir_name}.rs")),
         mtime: 0,
-        content_hash: [0; 32],
+        content_hash: [0; 8],
         category: FileCategory::Source,
     }];
     let n = nodes.len() as u32;

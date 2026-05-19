@@ -1,7 +1,7 @@
 use super::provider::LanguageProvider;
 use super::types::LocalGraph;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -258,7 +258,7 @@ impl AnalyzerPipeline {
         cache_lookup: F,
     ) -> Vec<LocalGraph>
     where
-        F: Fn(&std::path::Path, &[u8; 32]) -> Option<LocalGraph> + Send + Sync,
+        F: Fn(&std::path::Path, &[u8; 8]) -> Option<LocalGraph> + Send + Sync,
     {
         let (tx, rx) = crossbeam_channel::unbounded::<LocalGraph>();
         let cache_lookup = &cache_lookup;
@@ -267,8 +267,8 @@ impl AnalyzerPipeline {
         // Per-provider (count, total_ns) when GNX_PROF=1. Mutex is fine —
         // critical section is just a HashMap update, negligible vs the
         // parse_file work it brackets.
-        let times_owned: Option<Mutex<HashMap<&'static str, (u64, u64)>>> = if prof {
-            Some(Mutex::new(HashMap::new()))
+        let times_owned: Option<Mutex<FxHashMap<&'static str, (u64, u64)>>> = if prof {
+            Some(Mutex::new(FxHashMap::default()))
         } else {
             None
         };
@@ -299,10 +299,8 @@ impl AnalyzerPipeline {
                             Err(_) => return,
                         };
 
-                        use sha2::{Digest, Sha256};
-                        let mut hasher = Sha256::new();
-                        hasher.update(&source);
-                        let content_hash: [u8; 32] = hasher.finalize().into();
+                        let content_hash: [u8; 8] =
+                            xxhash_rust::xxh3::xxh3_64(&source).to_le_bytes();
 
                         // Cache fast-path: skip parse if a hit comes back
                         // with the exact same content hash. Path is the

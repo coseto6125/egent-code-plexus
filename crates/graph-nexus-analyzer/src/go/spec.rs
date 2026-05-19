@@ -13,5 +13,6 @@ impl LangSpec for GoSpec {
         "interface.name" => NodeKind::Interface,
         "method.name"    => NodeKind::Method,
         "function.name"  => NodeKind::Function,
+        "const.name"     => NodeKind::Const,
     };
 }

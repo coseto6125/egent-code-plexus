@@ -3,7 +3,7 @@ use graph_nexus_cli::peer::dispatch::dispatch_peer_dirty_event;
 use graph_nexus_core::peer::concern::ImpactCache;
 use graph_nexus_core::peer::inbox::{drain, InboxEntry};
 use graph_nexus_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use tempfile::tempdir;
 
 fn sym(name: &str) -> SymbolRef {
@@ -35,7 +35,7 @@ fn hard_dispatches_event() {
 
     let peer_entry = entry_with(vec![sym("verify_token")]);
     let my_dirty = vec![sym("verify_token")];
-    let cache = ImpactCache::from_set(HashSet::new());
+    let cache = ImpactCache::from_set(FxHashSet::default());
 
     dispatch_peer_dirty_event(
         &receiver_dir,
@@ -61,7 +61,7 @@ fn soft_dispatches_event() {
 
     let peer_entry = entry_with(vec![sym("login_handler")]);
     let my_dirty = vec![sym("verify_token")];
-    let mut impacted = HashSet::new();
+    let mut impacted = FxHashSet::default();
     impacted.insert("login_handler".to_string());
     let cache = ImpactCache::from_set(impacted);
 
@@ -88,7 +88,7 @@ fn ignore_writes_nothing() {
 
     let peer_entry = entry_with(vec![sym("unrelated")]);
     let my_dirty = vec![sym("verify_token")];
-    let cache = ImpactCache::from_set(HashSet::new());
+    let cache = ImpactCache::from_set(FxHashSet::default());
 
     dispatch_peer_dirty_event(
         &receiver_dir,
@@ -113,7 +113,7 @@ fn empty_dirty_symbols_writes_nothing() {
 
     let peer_entry = entry_with(vec![]); // peer parse_failed scenario
     let my_dirty = vec![sym("foo")];
-    let cache = ImpactCache::from_set(HashSet::new());
+    let cache = ImpactCache::from_set(FxHashSet::default());
 
     dispatch_peer_dirty_event(
         &receiver_dir,

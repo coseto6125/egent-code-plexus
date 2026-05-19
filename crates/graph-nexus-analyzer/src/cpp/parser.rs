@@ -414,8 +414,16 @@ impl LanguageProvider for CppProvider {
 
         let framework_refs = detect_ast_framework_patterns(source, CPP_FRAMEWORKS);
 
+        // `#define NAME` regex fallback — tree-sitter-cpp (0.23.x) ERROR-
+        // recovers around deeply nested templates / `JEMALLOC_ALWAYS_INLINE`-
+        // style attribute macros stacked on function declarations and drops
+        // the `preproc_def` wrapper. Verified on `.sample_repo`: gnx-rs
+        // emitted 137/673 macros in `doctest.h` and 11/29 in `tsd.h`; the
+        // fallback restores full recall.
+        emit_macro_fallback(source, &mut nodes);
+
         Ok(LocalGraph {
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             routes: vec![],
             file_path: path.to_path_buf(),
             nodes,
@@ -425,5 +433,31 @@ impl LanguageProvider for CppProvider {
             fanout_refs: vec![],
             blind_spots: vec![],
         })
+    }
+}
+
+/// Augment `nodes` with `#define NAME` Macros that tree-sitter ERROR-
+/// recovery dropped. Mirror of the C parser's pass — same `preproc_fallback`
+/// scanner; same NodeKind::Macro shape; same dedup-against-existing rule.
+fn emit_macro_fallback(source: &[u8], nodes: &mut Vec<RawNode>) {
+    let existing: std::collections::HashSet<String> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Macro)
+        .map(|n| n.name.clone())
+        .collect();
+    for hit in crate::preproc_fallback::scan_define_macros(source) {
+        if existing.contains(&hit.name) {
+            continue;
+        }
+        nodes.push(RawNode {
+            decorators: vec![],
+            is_exported: true,
+            heritage: vec![],
+            type_annotation: None,
+            name: hit.name,
+            kind: NodeKind::Macro,
+            span: (hit.line, hit.col_start, hit.line, hit.col_end),
+            calls: Vec::new(),
+        });
     }
 }

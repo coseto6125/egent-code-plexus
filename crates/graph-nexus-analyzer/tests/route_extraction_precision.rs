@@ -957,3 +957,73 @@ fn php_facade_get_emits_zero_routes() {
         "Cache/Config/Auth/Log/Storage::get facades without router scope",
     );
 }
+
+// ─── TypeScript — NestJS decorator routes ────────────────────────────
+
+#[test]
+fn ts_nestjs_decorator_routes_emit_with_bare_paths() {
+    // `@Get('users')` / `@Post('users/:id')` shapes — bare-path NestJS
+    // convention. Without the lax helper + `@nestjs/*` gate added in
+    // parity-r3 PR #152, all 89 corpus-side NestJS decorator routes
+    // surfaced as ref_over.
+    let src = r#"
+        import { Controller, Get, Post, Delete } from '@nestjs/common';
+
+        @Controller('users')
+        export class UsersController {
+            @Get('list')
+            findAll() { return []; }
+
+            @Post('create')
+            createOne() {}
+
+            @Delete(':id')
+            removeOne() {}
+        }
+    "#;
+    assert_routes(
+        &ts_routes(src),
+        &[
+            ("GET", "/list"),
+            ("POST", "/create"),
+            ("DELETE", "/:id"),
+        ],
+    );
+}
+
+#[test]
+fn ts_nestjs_decorator_route_without_nestjs_import_emits_zero() {
+    // Custom `@Get(...)` decorator in non-NestJS code must not surface as
+    // a Route. `has_nestjs` gate is the load-bearing signal — without
+    // `@nestjs/*` imports the same shape is just user metadata.
+    let src = r#"
+        function Get(path: string): MethodDecorator {
+            return () => {};
+        }
+
+        export class Helper {
+            @Get('configKey')
+            getConfig() {}
+        }
+    "#;
+    assert_no_routes(
+        &ts_routes(src),
+        "@Get decorator without @nestjs/* import",
+    );
+}
+
+#[test]
+fn ts_nestjs_decorator_route_preserves_leading_slash() {
+    // Some NestJS code writes the leading `/` explicitly; the lax helper
+    // must NOT double-prepend.
+    let src = r#"
+        import { Controller, Get } from '@nestjs/common';
+
+        @Controller()
+        export class RootController {
+            @Get('/health')
+            health() { return 'ok'; }
+        }
+    "#;
+    assert_routes(&ts_routes(src), &[("GET", "/health")]);
+}

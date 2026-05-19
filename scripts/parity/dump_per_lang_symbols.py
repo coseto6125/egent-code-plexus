@@ -87,8 +87,14 @@ ROW_RE = re.compile(r"\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|")
 def is_anon(name: str) -> bool:
     if not name:
         return True
+    # `_` is the blank-discard identifier in every mainstream lang
+    # (Go `var _ I = (*T)(nil)` interface assertion, Rust `let _ = ...`,
+    # Python `_, x = ...`, Swift `for _ in 0..<n`, etc.). gnx-rs filters
+    # these at parse time; ref-gitnexus retains them. Without this
+    # exclusion Go alone produced 19 ref_over `Variable:_` rows that
+    # had no LLM-useful semantics.
     return name.startswith(("__anon_", "anonymous_")) or name in {
-        "<lambda>", "<anon>", "anonymous",
+        "<lambda>", "<anon>", "anonymous", "_",
     }
 
 
@@ -170,12 +176,12 @@ def dump_ref(lang: str) -> set[tuple[str, str, str]]:
     and ref-gitnexus's executor returns rows in a hash-table iteration
     order that changes between pages — that caused inconsistent ref totals
     across consecutive runs (observed 3032 vs 2625 vs 3323 for the same
-    corpus). Ordering by `(filePath, name, head(labels))` makes pages
-    stable; we use `head(labels(n))` rather than bare `labels(n)` because
-    Cypher list-as-sort-key comparison is engine-defined (some engines
-    sort element-wise stably, some don't), while `head(...)` always
-    returns a scalar string — matches the kind the downstream parser
-    extracts via `.split(',')[0]`.
+    corpus). Ordering by `(filePath, name, startLine)` makes pages stable
+    on a scalar tie-breaker. The previous `head(labels(n))` form silently
+    broke against ref-gitnexus 1.6.4-rc.41 (no `HEAD` function in catalog)
+    — ref returned `error` for every page and the script wrote empty
+    `_ref_only.txt` dumps. `n.startLine` is a property the engine always
+    accepts and gives the same scalar-string-comparable stability.
     """
     exts = LANG_EXTS.get(lang, [])
     if not exts:
@@ -188,7 +194,7 @@ def dump_ref(lang: str) -> set[tuple[str, str, str]]:
         q = (
             f"MATCH (n) WHERE {where} "
             f"RETURN labels(n), n.filePath, n.name "
-            f"ORDER BY n.filePath, n.name, head(labels(n)) "
+            f"ORDER BY n.filePath, n.name, n.startLine "
             f"SKIP {skip} LIMIT {REF_PAGE}"
         )
         out = run(["gitnexus", "cypher", "--repo", str(REPO), q])
@@ -213,6 +219,11 @@ def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
     """Re-read previously dumped `<Lang>_ref_all.txt` so we can skip the
     expensive paginated cypher round-trip. Returns None if the cache file
     doesn't exist or is empty; the caller falls back to `dump_ref`.
+
+    Applies the same `DROP_KINDS` / `is_anon` filters as `dump_rs` and
+    `_parse_ref_md` — otherwise a cache written before the filter rules
+    were tightened (e.g. before `_` was added to the blank-discard set)
+    keeps surfacing the old rows on every aggregator run.
     """
     path = OUT_DIR / f"{lang}_ref_all.txt"
     if not path.exists():
@@ -221,7 +232,10 @@ def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
     for line in path.read_text(errors="replace").splitlines():
         parts = line.split("\t", 2)
         if len(parts) == 3 and parts[2]:
-            rows.add((parts[0], parts[1], parts[2]))
+            kind, fp, name = parts
+            if kind in DROP_KINDS or is_anon(name):
+                continue
+            rows.add((kind, fp, name))
     return rows if rows else None
 
 

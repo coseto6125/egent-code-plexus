@@ -22,7 +22,6 @@ use graph_nexus_core::registry::atomic_write_json;
 use graph_nexus_core::session::overlay::{SymbolKind, SymbolRef};
 use graph_nexus_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -127,8 +126,8 @@ fn write_fragment_file(
     input_idx: u64,
     input: &FragmentInput,
 ) -> io::Result<(String, DirtyEntry, FragmentOutcome)> {
-    let content_hash = sha256_hex(&input.content);
-    let fragment_id = content_hash[..16].to_string();
+    let content_hash = content_hash_hex(&input.content);
+    let fragment_id = content_hash.clone();
     let fragment_path = overlay_dir.join(format!("{fragment_id}.bin"));
 
     let parse_failed = match parse_to_fragment(&input.rel_path, &input.content) {
@@ -166,8 +165,8 @@ fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
     Ok(vec![])
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+fn content_hash_hex(bytes: &[u8]) -> String {
+    crate::repo_identity::xxh3_hex16(bytes)
 }
 
 static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);

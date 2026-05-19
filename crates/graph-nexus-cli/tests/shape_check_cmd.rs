@@ -108,13 +108,13 @@ fn build_graph(
             File {
                 path: file_ref,
                 mtime: 0,
-                content_hash: [0; 32],
+                content_hash: [0; 8],
                 category: FileCategory::Source,
             },
             File {
                 path: route_file_ref,
                 mtime: 0,
-                content_hash: [0; 32],
+                content_hash: [0; 8],
                 category: FileCategory::Source,
             },
         ],

@@ -2,6 +2,7 @@ use crate::fetch_shape::{consumer_keys, fetch_urls, format_reason, response_shap
 use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
+use aho_corasick::{AhoCorasick, MatchKind};
 use graph_nexus_core::analyzer::types::{LocalGraph, RawNode};
 use graph_nexus_core::graph::{
     BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
@@ -9,6 +10,93 @@ use graph_nexus_core::graph::{
 use graph_nexus_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::sync::OnceLock;
+
+#[derive(Copy, Clone)]
+enum PathPatternKind {
+    Reference,
+    Example,
+    Test,
+}
+
+/// Substring patterns used by `determine_category`, scanned in one
+/// Aho-Corasick pass instead of N independent `contains()` calls. The
+/// 25k-file cold index used to spend ~150k substring scans here
+/// (35 patterns × 4286 files-per-cpu-core); a single AC pass collapses
+/// that to one scan per file with constant-time per-character work,
+/// surfaced by the PR #149 simplify review.
+///
+/// The PascalCase test suffixes (`Test.java`, `Tests.kt`, `Spec.scala`)
+/// stay on `ends_with` — they're suffix-anchored and need case-sensitive
+/// comparison against the original-cased path (`Manifest.java`
+/// lowercased ends with `test.java`, so a case-insensitive scan would
+/// mis-classify it).
+static PATH_PATTERN_AC: OnceLock<(AhoCorasick, Vec<PathPatternKind>)> = OnceLock::new();
+
+fn path_pattern_ac() -> &'static (AhoCorasick, Vec<PathPatternKind>) {
+    PATH_PATTERN_AC.get_or_init(|| {
+        // (kind, pattern) — kept verbatim from the original cascade so
+        // the diff against the pre-AC implementation stays mechanical.
+        const PATTERNS: &[(PathPatternKind, &str)] = &[
+            // Reference — vendored / installed deps, never user-authored source.
+            (PathPatternKind::Reference, "/vendor/"),
+            (PathPatternKind::Reference, "/node_modules/"),
+            (PathPatternKind::Reference, "/.venv/"),
+            (PathPatternKind::Reference, "/venv/"),
+            (PathPatternKind::Reference, "/site-packages/"),
+            (PathPatternKind::Reference, "/.tox/"),
+            (PathPatternKind::Reference, "/.bundle/"),
+            (PathPatternKind::Reference, "/gems/"),
+            (PathPatternKind::Reference, "/.pub-cache/"),
+            (PathPatternKind::Reference, "/.gradle/"),
+            (PathPatternKind::Reference, "/.m2/"),
+            (PathPatternKind::Reference, "/pods/"),
+            (PathPatternKind::Reference, "/carthage/"),
+            (PathPatternKind::Reference, "/.build/"),
+            (PathPatternKind::Reference, "/third_party/"),
+            (PathPatternKind::Reference, "/external/"),
+            (PathPatternKind::Reference, "/deps/"),
+            // Example / sample / demo — canonical "how to use this framework"
+            // content. Surfaced separately from Test so routes / tools /
+            // handlers under `/examples/` stay visible to LLM consumers
+            // (Express's `examples/auth/`, NestJS `sample/`, Flask
+            // `examples/tutorial/`). `/tests/` stays as Test because test
+            // fixtures (`@app.route('/test_setup')`, helper test endpoints)
+            // would pollute the production-route surface.
+            (PathPatternKind::Example, "/examples/"),
+            (PathPatternKind::Example, "/example/"),
+            (PathPatternKind::Example, "/sample/"),
+            (PathPatternKind::Example, "/samples/"),
+            (PathPatternKind::Example, "/demo/"),
+            (PathPatternKind::Example, "/demos/"),
+            // Test — substring forms. Suffix forms (`_test.go`, etc.) are
+            // handled separately because `ends_with` already runs in
+            // constant time against the path tail.
+            (PathPatternKind::Test, ".test."),
+            (PathPatternKind::Test, ".spec."),
+            // NestJS / Angular `.e2e-spec.ts` etc.
+            (PathPatternKind::Test, "-spec."),
+            (PathPatternKind::Test, "__tests__/"),
+            (PathPatternKind::Test, "__mocks__/"),
+            (PathPatternKind::Test, "/test/"),
+            (PathPatternKind::Test, "/tests/"),
+            (PathPatternKind::Test, "/testing/"),
+            (PathPatternKind::Test, "/fixtures/"),
+            // Cypress / NestJS / Playwright e2e dirs.
+            (PathPatternKind::Test, "/e2e/"),
+            (PathPatternKind::Test, "/spec/"),
+            (PathPatternKind::Test, "/test_"),
+            (PathPatternKind::Test, "/conftest."),
+        ];
+        let strings: Vec<&str> = PATTERNS.iter().map(|(_, s)| *s).collect();
+        let kinds: Vec<PathPatternKind> = PATTERNS.iter().map(|(k, _)| *k).collect();
+        let ac = AhoCorasick::builder()
+            .match_kind(MatchKind::Standard)
+            .build(strings)
+            .expect("path-pattern AC build");
+        (ac, kinds)
+    })
+}
 
 pub fn determine_category(path: &str) -> FileCategory {
     let normalized_path = path.replace('\\', "/");
@@ -16,61 +104,35 @@ pub fn determine_category(path: &str) -> FileCategory {
     // segments AND top-level paths (e.g. `vendor/foo` → `/vendor/foo`).
     let lower_path = format!("/{}", normalized_path.to_lowercase());
 
-    let is_reference = lower_path.contains("/vendor/")
-        || lower_path.contains("/node_modules/")
-        || lower_path.contains("/.venv/")
-        || lower_path.contains("/venv/")
-        || lower_path.contains("/site-packages/")
-        || lower_path.contains("/.tox/")
-        || lower_path.contains("/.bundle/")
-        || lower_path.contains("/gems/")
-        || lower_path.contains("/.pub-cache/")
-        || lower_path.contains("/.gradle/")
-        || lower_path.contains("/.m2/")
-        || lower_path.contains("/pods/")
-        || lower_path.contains("/carthage/")
-        || lower_path.contains("/.build/")
-        || lower_path.contains("/third_party/")
-        || lower_path.contains("/external/")
-        || lower_path.contains("/deps/");
-    if is_reference {
+    let (ac, kinds) = path_pattern_ac();
+    let mut hit_reference = false;
+    let mut hit_example = false;
+    let mut hit_test_substring = false;
+    for m in ac.find_iter(&lower_path) {
+        match kinds[m.pattern().as_usize()] {
+            PathPatternKind::Reference => {
+                // Reference outranks Example and Test (vendored sample
+                // dirs still classify as Reference). Bail early — no
+                // later match can override.
+                hit_reference = true;
+                break;
+            }
+            PathPatternKind::Example => hit_example = true,
+            PathPatternKind::Test => hit_test_substring = true,
+        }
+    }
+    if hit_reference {
         return FileCategory::Reference;
     }
-
-    // Example / sample / demo: canonical "how to use this framework" content.
-    // Surfaced separately from Test so routes / tools / handlers under
-    // `/examples/` stay visible to LLM consumers (Express's `examples/auth/`,
-    // NestJS `sample/`, Flask `examples/tutorial/` — these are the canonical
-    // references users want to navigate). `/tests/` stays as Test because
-    // test fixtures (`@app.route('/test_setup')`, helper test endpoints)
-    // would pollute the production-route surface.
-    let is_example = lower_path.contains("/examples/")
-        || lower_path.contains("/example/")
-        || lower_path.contains("/sample/")
-        || lower_path.contains("/samples/")
-        || lower_path.contains("/demo/")
-        || lower_path.contains("/demos/");
-    if is_example {
+    if hit_example {
         return FileCategory::Example;
     }
 
-    let is_test = lower_path.contains(".test.")
-        || lower_path.contains(".spec.")
-        || lower_path.contains("-spec.") // NestJS/Angular `.e2e-spec.ts` etc.
-        || lower_path.contains("__tests__/")
-        || lower_path.contains("__mocks__/")
-        || lower_path.contains("/test/")
-        || lower_path.contains("/tests/")
-        || lower_path.contains("/testing/")
-        || lower_path.contains("/fixtures/")
-        || lower_path.contains("/e2e/") // Cypress / NestJS / Playwright e2e dirs
+    let is_test = hit_test_substring
         || lower_path.ends_with("_test.go")
         || lower_path.ends_with("_test.py")
         || lower_path.ends_with("_spec.rb")
         || lower_path.ends_with("_test.rb")
-        || lower_path.contains("/spec/")
-        || lower_path.contains("/test_")
-        || lower_path.contains("/conftest.")
         // PascalCase test-class suffixes (Java/JUnit, Kotlin, Swift XCTest,
         // .NET MSTest/xUnit/NUnit, PHPUnit, ScalaTest/specs2). Case-sensitive
         // intentionally: `Manifest.java` lowercased ends with `test.java`, so
@@ -88,7 +150,6 @@ pub fn determine_category(path: &str) -> FileCategory {
         || normalized_path.ends_with("Test.php")
         || normalized_path.ends_with("Spec.scala")
         || normalized_path.ends_with("Test.scala");
-
     if is_test {
         return FileCategory::Test;
     }
@@ -132,7 +193,7 @@ fn sanitize_id(s: &str) -> String {
 
 pub struct GraphBuilder {
     local_graphs: Vec<LocalGraph>,
-    old_file_hashes: HashMap<String, [u8; 32]>,
+    old_file_hashes: HashMap<String, [u8; 8]>,
     /// When `Some`, the resolver pass 2 buffers every decision and writes a
     /// JSONL line per resolution attempt to this path. Used by the oracle
     /// verification harness (see specs/2026-05-15-resolver-oracle-harness.md).
@@ -179,7 +240,7 @@ impl GraphBuilder {
         self
     }
 
-    pub fn with_cache(mut self, hashes: HashMap<String, [u8; 32]>) -> Self {
+    pub fn with_cache(mut self, hashes: HashMap<String, [u8; 8]>) -> Self {
         self.old_file_hashes = hashes;
         self
     }
@@ -1477,7 +1538,7 @@ mod tests {
     fn l0_relative_import_produces_import_scoped_edge() {
         let caller = LocalGraph {
             file_path: "src/a.ts".into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![RawNode {
                 name: "useThing".into(),
                 kind: NodeKind::Function,
@@ -1502,7 +1563,7 @@ mod tests {
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![RawNode {
                 name: "thing".into(),
                 kind: NodeKind::Function,
@@ -1613,7 +1674,7 @@ mod tests {
 
         let g = LocalGraph {
             file_path: "test.py".into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![
                 RawNode {
                     name: "dispatch".into(),
@@ -1736,7 +1797,7 @@ mod tests {
         }
         let g = LocalGraph {
             file_path: "test.py".into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes,
             documents: vec![],
             imports: vec![],
@@ -1775,7 +1836,7 @@ mod tests {
     fn framework_ref_produces_edge_with_confidence_and_reason() {
         let g = LocalGraph {
             file_path: "test.py".into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![
                 RawNode {
                     name: "handler".into(),
@@ -1834,7 +1895,7 @@ mod tests {
     fn mk_file(path: &str, name: &str, kind: NodeKind, calls: Vec<String>) -> LocalGraph {
         LocalGraph {
             file_path: path.into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![RawNode {
                 name: name.into(),
                 kind,
@@ -1926,7 +1987,7 @@ mod tests {
 
         let g = LocalGraph {
             file_path: "test.py".into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![],
             documents: vec![],
             imports: vec![],
@@ -2011,7 +2072,7 @@ mod tests {
             vec![
                 LocalGraph {
                     file_path: "src/foo.rs".into(),
-                    content_hash: [0; 32],
+                    content_hash: [0; 8],
                     nodes: vec![RawNode {
                         name: "Foo".into(),
                         kind: NodeKind::Class,
@@ -2043,7 +2104,7 @@ mod tests {
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
-                    content_hash: [0; 32],
+                    content_hash: [0; 8],
                     nodes: vec![
                         RawNode {
                             name: "Bar".into(),
@@ -2184,7 +2245,7 @@ mod tests {
     ) -> LocalGraph {
         LocalGraph {
             file_path: rel_path.into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![RawNode {
                 name: handler.into(),
                 kind: NodeKind::Function,
@@ -2212,7 +2273,7 @@ mod tests {
     fn consumer_local_graph(rel_path: &str) -> LocalGraph {
         LocalGraph {
             file_path: rel_path.into(),
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             nodes: vec![RawNode {
                 name: "loadUsers".into(),
                 kind: NodeKind::Function,

@@ -18,7 +18,7 @@
 //!   - Large graphs: drop degree-1 nodes (singletons just add iteration cost)
 
 use crate::graph::{Edge, Node, NodeKind, RelType};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone)]
 pub struct LeidenConfig {
@@ -148,7 +148,7 @@ pub fn detect_communities(nodes: &[Node], edges: &[Edge], config: &LeidenConfig)
     leiden_recursive(&adj, &degree, two_m, &mut community, config, 0);
 
     // Renumber active communities densely to u16.
-    let mut remap: HashMap<u32, u16> = HashMap::new();
+    let mut remap: FxHashMap<u32, u16> = FxHashMap::default();
     let mut next_id: u32 = 1;
     for i in 0..n {
         if !connected[i] {
@@ -188,7 +188,7 @@ fn leiden_recursive(
     let refined = refine(adj, degree, two_m, community, config);
 
     // Renumber refined → dense 0..M.
-    let mut refined_id_map: HashMap<u32, u32> = HashMap::new();
+    let mut refined_id_map: FxHashMap<u32, u32> = FxHashMap::default();
     let mut next_refined: u32 = 0;
     for &r in &refined {
         refined_id_map.entry(r).or_insert_with(|| {
@@ -200,7 +200,7 @@ fn leiden_recursive(
     let m_super = next_refined as usize;
 
     // Fixed point check: if refinement produced no new groups, stop.
-    let mut community_id_count: HashMap<u32, u32> = HashMap::new();
+    let mut community_id_count: FxHashMap<u32, u32> = FxHashMap::default();
     for &c in community.iter() {
         *community_id_count.entry(c).or_insert(0) += 1;
     }
@@ -355,7 +355,7 @@ fn refine(
     let mut refined: Vec<u32> = (0..n as u32).collect();
 
     // Group nodes by current partition.
-    let mut groups: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut groups: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
     for (i, &c) in partition.iter().enumerate() {
         groups.entry(c).or_default().push(i as u32);
     }
@@ -460,10 +460,10 @@ fn aggregate(
     adj: &[Vec<(u32, f64)>],
     degree: &[f64],
     refined: &[u32],
-    refined_id_map: &HashMap<u32, u32>,
+    refined_id_map: &FxHashMap<u32, u32>,
 ) -> (Vec<Vec<(u32, f64)>>, Vec<f64>) {
     let m = refined_id_map.len();
-    let mut super_adj_map: Vec<HashMap<u32, f64>> = vec![HashMap::new(); m];
+    let mut super_adj_map: Vec<FxHashMap<u32, f64>> = vec![FxHashMap::default(); m];
     let mut super_degree: Vec<f64> = vec![0.0; m];
 
     for (i, nbrs) in adj.iter().enumerate() {

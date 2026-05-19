@@ -9,7 +9,7 @@
 //! not a CI gate.
 
 use clap::Args;
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
@@ -192,7 +192,7 @@ fn diff(
     oracle: &[Record],
     gnx: &[Record],
     normalize: Normalizer,
-) -> (Counts, Vec<WorstOffender>, HashMap<String, Counts>) {
+) -> (Counts, Vec<WorstOffender>, FxHashMap<String, Counts>) {
     // Index gnx by (src_file, name) — there may be multiple gnx attempts per
     // key (e.g. heritage + type annotation + call). Pick the BEST attempt:
     //   resolved (tier != Unresolved) > unresolved
@@ -200,7 +200,7 @@ fn diff(
     // AmbiguousGlobal ranks above Unresolved because it carries diagnostic
     // signal (candidates were found, just suppressed) — preferring it on
     // dedup surfaces "defence fired" over the silent "nothing found".
-    let mut gnx_by_key: HashMap<(String, String), &Record> = HashMap::new();
+    let mut gnx_by_key: FxHashMap<(String, String), &Record> = FxHashMap::default();
     let tier_rank = |t: &str| -> u8 {
         match t {
             "SameFile" => 0,
@@ -220,13 +220,13 @@ fn diff(
         }
     }
 
-    let oracle_keys: std::collections::HashSet<_> = oracle
+    let oracle_keys: FxHashSet<_> = oracle
         .iter()
         .map(|r| (r.src_file.clone(), r.name.clone()))
         .collect();
 
     let mut counts = Counts::default();
-    let mut per_tier: HashMap<String, Counts> = HashMap::new();
+    let mut per_tier: FxHashMap<String, Counts> = FxHashMap::default();
     let mut offenders: Vec<WorstOffender> = Vec::new();
 
     for o in oracle {
@@ -341,7 +341,7 @@ fn render_report(
     lang: &str,
     counts: &Counts,
     worst: &[WorstOffender],
-    per_tier: &HashMap<String, Counts>,
+    per_tier: &FxHashMap<String, Counts>,
     oracle_total: usize,
     gnx_total: usize,
     oracle_bad: u32,

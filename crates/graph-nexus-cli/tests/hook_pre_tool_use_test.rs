@@ -138,7 +138,7 @@ fn make_graph() -> ZeroCopyGraph {
         files: vec![File {
             path: file_path,
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: FileCategory::Source,
         }],
         nodes: vec![

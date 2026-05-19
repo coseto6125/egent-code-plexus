@@ -334,7 +334,7 @@ impl LanguageProvider for CSharpProvider {
         let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
 
         Ok(LocalGraph {
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             routes: vec![],
             file_path: path.to_path_buf(),
             nodes,

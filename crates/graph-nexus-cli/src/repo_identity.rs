@@ -1,12 +1,12 @@
 use crate::git::safe_exec;
 use graph_nexus_core::registry::sanitize_segment;
-use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
+use xxhash_rust::xxh3::xxh3_64;
 
 /// Compute the stable per-repo directory name under `~/.gnx/`.
 ///
-/// Identity rule: `<sanitize(basename(common_dir))>__<sha256(canonical_common_dir)[:8]>`.
+/// Identity rule: `<sanitize(basename(common_dir))>__<xxh3_64(canonical_common_dir)[:8]>`.
 /// All worktrees of the same git repo share the same `--git-common-dir`,
 /// so this naturally collapses `git worktree add` siblings onto a single
 /// `<repo>/` namespace — solving v1's per-worktree duplication.
@@ -27,7 +27,7 @@ pub fn repo_dir_name_for_cwd(cwd: &Path) -> io::Result<String> {
     let cleaned = basename.trim_start_matches(['.', '-']);
     let safe = sanitize_segment(if cleaned.is_empty() { "repo" } else { cleaned })
         .unwrap_or_else(|_| "repo".to_string());
-    let h = sha256_hex8(canonical.to_string_lossy().as_bytes());
+    let h = short_hash_hex8(canonical.to_string_lossy().as_bytes());
     Ok(format!("{safe}__{h}"))
 }
 
@@ -50,12 +50,20 @@ fn git_common_dir(cwd: &Path) -> io::Result<std::path::PathBuf> {
     }
 }
 
-/// First 8 hex chars of `sha256(bytes)` — short, filesystem-safe digest.
+/// First 8 hex chars of `xxh3_64(bytes)` — short, filesystem-safe digest.
 /// Used by `repo_dir_name_for_cwd` to disambiguate repos by canonical
 /// git common-dir, and by `parse_cache` to scope cache entries by
 /// `BUILDER_FINGERPRINT`. Shared so a future hash-collision tweak lands
 /// in one place.
-pub(crate) fn sha256_hex8(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    hex::encode(&digest[..4])
+pub(crate) fn short_hash_hex8(bytes: &[u8]) -> String {
+    let h = xxh3_64(bytes) as u32;
+    hex::encode(h.to_le_bytes())
+}
+
+/// 16-char big-endian hex of `xxh3_64(bytes)`. Used for content / blob
+/// fingerprints whose hex is logged and compared across sessions — keep
+/// all 16-hex sites going through here so `grep <hash>` finds every site.
+#[inline]
+pub(crate) fn xxh3_hex16(bytes: &[u8]) -> String {
+    format!("{:016x}", xxh3_64(bytes))
 }

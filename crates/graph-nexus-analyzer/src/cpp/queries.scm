@@ -18,6 +18,19 @@
     (_ (type_identifier) @heritage))?
 ) @struct
 
+;; Unions — emitted as NodeKind::Struct (no dedicated `Union` kind in
+;; gnx-rs; ref-gitnexus emits `Union` and the parity aggregator pairs the
+;; two via the struct-family EQUIV class). Previously absent from this
+;; query file: `union X { ... }` and `typedef union X { ... } X;` fell
+;; through to the typedef path (or were dropped entirely), producing 13
+;; unpaired ref_over rows on the `.sample_repo` C++/header corpus
+;; (lua/lobject.h GCObject/TString/Udata/Closure/TKey, lstate.h, luaconf.h
+;; luai_Cast, nlohmann/json.hpp json_value, jemalloc/emap.h
+;; emap_batch_lookup_result_u, redis/cluster_legacy.h clusterMsgData).
+(union_specifier
+  name: (type_identifier) @name.struct
+) @struct
+
 ;; Functions
 ;;
 ;; Two outer shapes for return type:

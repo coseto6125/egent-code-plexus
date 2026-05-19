@@ -81,6 +81,7 @@ impl LanguageProvider for GoProvider {
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_function = self.query.capture_index_for_name("function");
+        let idx_const = self.query.capture_index_for_name("const");
 
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
@@ -184,6 +185,7 @@ impl LanguageProvider for GoProvider {
                     || cap_idx == idx_interface
                     || cap_idx == idx_method
                     || cap_idx == idx_function
+                    || cap_idx == idx_const
                 {
                     root_node = Some(cap.node);
                 } else if cap_idx == idx_heritage {
@@ -560,7 +562,7 @@ impl LanguageProvider for GoProvider {
         }
 
         Ok(LocalGraph {
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             routes,
             file_path: path.to_path_buf(),
             nodes,

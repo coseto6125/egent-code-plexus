@@ -52,7 +52,7 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
         .map(|&path| File {
             path: pool.add(path),
             mtime: 0,
-            content_hash: [0; 32],
+            content_hash: [0; 8],
             category: nodes_spec
                 .iter()
                 .find(|n| n.file == path)

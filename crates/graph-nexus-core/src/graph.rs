@@ -264,7 +264,7 @@ impl From<&ArchivedFileCategory> for FileCategory {
 pub struct File {
     pub path: StrRef,
     pub mtime: u64,
-    pub content_hash: [u8; 32],
+    pub content_hash: [u8; 8],
     pub category: FileCategory,
 }
 
@@ -351,7 +351,7 @@ mod tests {
             files: vec![File {
                 path: name_ref,
                 mtime: 0,
-                content_hash: [0; 32],
+                content_hash: [0; 8],
                 category: FileCategory::Source,
             }],
             nodes: vec![Node {
