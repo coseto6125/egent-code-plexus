@@ -87,25 +87,24 @@ Same conceptual model, different audience. `cgn` is **not** a drop-in replacemen
 
 ## 📦 Install
 
-`cargo install --git` always works. Prebuilt binaries land per-platform once a tagged Release is published; the installer scripts auto-fall back to the cargo path until then.
+Until the first tagged Release is published, the installer scripts fall back to a cargo source build. Prebuilt binaries will become the fastest path after release assets exist.
 
 ```bash
-# Cross-platform (needs rustup — first build is a few minutes, cached after)
-cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus --bin cgn --locked
-
-# Linux / macOS one-liner (Release-first, cargo fallback)
+# Linux / macOS (shortest path; needs cargo/rustup until Release assets exist)
 curl -sSfL https://raw.githubusercontent.com/coseto6125/code-graph-nexus/main/install.sh | sh
 
 # Windows PowerShell
 iwr https://raw.githubusercontent.com/coseto6125/code-graph-nexus/main/install.ps1 -UseBasicParsing | iex
+
+# Explicit cargo path (same source build, no installer wrapper)
+cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus --bin cgn --locked
 ```
 
-Self-install tuned for your CPU (fat LTO + native ISA):
+Optional CPU-tuned source build:
 
 ```bash
-RUSTFLAGS="-C target-cpu=native" \
-  cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus \
-  --bin cgn --locked --profile release-dist
+repo=https://github.com/coseto6125/code-graph-nexus
+RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" code-graph-nexus --bin cgn --locked --profile release-dist
 ```
 
 ---
@@ -232,10 +231,14 @@ Built on:
 - [tree-sitter](https://tree-sitter.github.io/) — robust incremental AST parsing
 - [rkyv](https://rkyv.org/) — zero-copy deserialization framework
 - [Tantivy](https://github.com/quickwit-oss/tantivy) — blazing fast Rust full-text search engine
-- **Rayon** — data parallelism for multi-core concurrent AST parsing
-- **xxhash (xxh3_64)** — extremely fast non-cryptographic hashing for content-based incremental indexing
-- **DashMap** — high-performance concurrent hash maps for graph assembly
-- **memmap2** — zero-copy memory mapping for sub-millisecond graph access
-- **msgspec** — high-performance JSON serialization for inter-process communication
+- [Rayon](https://github.com/rayon-rs/rayon) — data parallelism for multi-core concurrent AST parsing
+- [xxhash (xxh3_64)](https://xxhash.com/) — extremely fast non-cryptographic hashing for content-based incremental indexing
+- [DashMap](https://github.com/xacrimon/dashmap) — high-performance concurrent hash maps for graph assembly
+- [memmap2](https://github.com/RazrFalcon/memmap2-rs) — zero-copy memory mapping for sub-millisecond graph access
+- [msgspec](https://github.com/jcrist/msgspec) — high-performance JSON serialization for inter-process communication
 
 Onboarding for AI agents (URL bootstrap, Claude Code skill, plugin install) lives at `docs/skills/cgn-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit-concurrency.sh`.
+
+## Release status
+
+The current verified install path is `cargo install --git ...`, which builds `cgn` from source. Release installers already contain the checksum and provenance-verification flow, but they require a published tag and release assets before the binary download path can be end-to-end verified. The agent-facing onboarding skill is documented in [docs/skills/cgn-onboard/ONBOARDING.md](./docs/skills/cgn-onboard/ONBOARDING.md); it is intended to guide users through install, first index, optional groups, MCP wiring, and next steps. The assisted configuration/setup flow is still being refined.
