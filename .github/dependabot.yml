@@ -1,71 +1,133 @@
 version: 2
+
+# Dependabot groups minor + patch bumps into a single PR per ecosystem-directory
+# pair (the `all-minor-patch` group). Major bumps still open one PR each so we
+# review them individually. Auto-merge for patch/minor is handled by
+# .github/workflows/dependabot-auto-merge.yml once CI is green.
+
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: cargo
     directory: /crates/vendor/tree-sitter-move
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: gomod
     directory: /crates/vendor/tree-sitter-move/bindings/go
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /crates/vendor/tree-sitter-move
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: cargo
     directory: /crates/vendor/tree-sitter-nim
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: gomod
     directory: /crates/vendor/tree-sitter-nim/bindings/go
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: gomod
     directory: /crates/vendor/tree-sitter-nim
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /crates/vendor/tree-sitter-nim
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: gomod
     directory: /crates/vendor/tree-sitter-swift
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /crates/vendor/tree-sitter-swift
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /crates/vendor/tree-sitter-swift/test-npm-package
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: gomod
     directory: /crates/vendor/tree-sitter-vyper
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /crates/vendor/tree-sitter-vyper
     schedule:
       interval: daily
+    groups:
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

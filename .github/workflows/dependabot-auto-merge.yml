@@ -1,0 +1,45 @@
+name: Dependabot auto-merge
+
+# Auto-merges Dependabot PRs that touch patch + minor bumps once branch
+# protection's required status checks are all green. Major bumps still
+# require manual review.
+#
+# Uses `pull_request_target` so the workflow runs in the base repo's
+# context and has write permission to merge — `pull_request` from a
+# Dependabot fork wouldn't.
+#
+# Requires the repo to have `allow_auto_merge: true` (set via
+# repo settings). Branch protection's "Require status checks to pass"
+# guards against merging red PRs even if this workflow fires.
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependabot:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for patch + minor
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-patch'
+          || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
