@@ -14,15 +14,59 @@ pub fn stub_guard() -> MutexGuard<'static, ()> {
 
 /// Write an executable shell script (stub `cgn`) into `dir` and return its path.
 pub fn write_stub(dir: &Path, script: &str) -> PathBuf {
-    let stub = dir.join("cgn");
-    std::fs::write(&stub, script).unwrap();
+    #[cfg(windows)]
+    return write_cmd_stub(dir, script);
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&stub, perms).unwrap();
+        write_unix_stub(dir, script)
     }
+}
+
+#[cfg(unix)]
+fn write_unix_stub(dir: &Path, script: &str) -> PathBuf {
+    let stub = dir.join("cgn");
+    std::fs::write(&stub, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).unwrap();
+    stub
+}
+
+#[cfg(windows)]
+fn write_cmd_stub(dir: &Path, script: &str) -> PathBuf {
+    let stub = dir.join("cgn.cmd");
+    let body = if script.contains("cgn group find") {
+        r#"@echo off
+:loop
+if "%~1"=="" goto ok
+if "%~1"=="@all" (
+  shift
+  goto loop
+)
+set "arg=%~1"
+if "%arg:~0,1%"=="@" (
+  >&2 echo error: cannot be used at the top level - use `cgn group find` instead
+  exit /b 1
+)
+shift
+goto loop
+:ok
+echo ok
+"#
+    } else if script.contains("echo 'boom'") {
+        "@echo off\r\necho boom 1>&2\r\nexit /b 1\r\n"
+    } else if script.contains("sub=$1 arg1=$2 arg2=$3") {
+        "@echo off\r\necho sub=%1 arg1=%2 arg2=%3\r\n"
+    } else if script.contains("sub=$1 a1=$2 a2=$3 a3=$4") {
+        "@echo off\r\necho sub=%1 a1=%2 a2=%3 a3=%4\r\n"
+    } else if script.contains("echo \"$@\"") {
+        "@echo off\r\necho %*\r\n"
+    } else {
+        "@echo off\r\necho ok\r\n"
+    };
+    std::fs::write(&stub, body).unwrap();
     stub
 }

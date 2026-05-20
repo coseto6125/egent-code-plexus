@@ -20,6 +20,7 @@ pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn replace_file_windows(from: &Path, to: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    use std::time::Duration;
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
@@ -31,17 +32,30 @@ fn replace_file_windows(from: &Path, to: &Path) -> io::Result<()> {
 
     let from_wide: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
     let to_wide: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    let ok = unsafe {
-        MoveFileExW(
-            from_wide.as_ptr(),
-            to_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
+
+    let mut last_err = None;
+    for attempt in 0..50 {
+        let ok = unsafe {
+            MoveFileExW(
+                from_wide.as_ptr(),
+                to_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+
+        let err = io::Error::last_os_error();
+        let raw = err.raw_os_error();
+        if raw != Some(5) && raw != Some(32) {
+            return Err(err);
+        }
+        last_err = Some(err);
+        std::thread::sleep(Duration::from_millis(1 + attempt / 10));
     }
-    Ok(())
+
+    Err(last_err.unwrap_or_else(io::Error::last_os_error))
 }
 
 pub fn retire_dir(path: &Path) -> io::Result<Option<PathBuf>> {
