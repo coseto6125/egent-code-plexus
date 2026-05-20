@@ -7,15 +7,15 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 GEN="$ROOT/tools/gen-cli-ref.sh"
 tmp=$(mktemp_test_dir)
 
-# Mock cgn: prints version and stub --help output for a fixed set of subcommands.
+# Mock ecp: prints version and stub --help output for a fixed set of subcommands.
 mkdir -p "$tmp"
-cat > "$tmp/mock-cgn" <<'EOF'
+cat > "$tmp/mock-ecp" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
-  --version) echo "cgn 9.9.9-test" ;;
+  --version) echo "ecp 9.9.9-test" ;;
   find)
     [[ "$2" == "--help" ]] && cat <<HELP
-Usage: cgn find <pattern>
+Usage: ecp find <pattern>
 
 Find symbols by exact name (default) or BM25 mode.
 
@@ -26,7 +26,7 @@ HELP
     ;;
   impact)
     [[ "$2" == "--help" ]] && cat <<HELP
-Usage: cgn impact [TARGET] [OPTIONS]
+Usage: ecp impact [TARGET] [OPTIONS]
 
 Blast radius for a symbol.
 
@@ -38,7 +38,7 @@ HELP
   admin)
     if [[ "$2" == "index" && "$3" == "--help" ]]; then
       cat <<HELP
-Usage: cgn admin index --repo <PATH>
+Usage: ecp admin index --repo <PATH>
 
 Build the graph index for a repo.
 
@@ -50,19 +50,19 @@ HELP
     ;;
 esac
 EOF
-chmod +x "$tmp/mock-cgn"
+chmod +x "$tmp/mock-ecp"
 
 OUT="$tmp/skill/_shared/cli"
 mkdir -p "$OUT"
-bash "$GEN" "$tmp/mock-cgn" "$OUT"
+bash "$GEN" "$tmp/mock-ecp" "$OUT"
 
 # Expect: 9.9.9-test version directory with per-command .md files
 assert_file_exists "$OUT/9.9.9-test/find.md"
 assert_file_exists "$OUT/9.9.9-test/impact.md"
 assert_file_exists "$OUT/9.9.9-test/admin-index.md"
-assert_grep '^Usage: cgn find' "$OUT/9.9.9-test/find.md"
-assert_grep '^Usage: cgn impact' "$OUT/9.9.9-test/impact.md"
-assert_grep '^Usage: cgn admin index' "$OUT/9.9.9-test/admin-index.md"
+assert_grep '^Usage: ecp find' "$OUT/9.9.9-test/find.md"
+assert_grep '^Usage: ecp impact' "$OUT/9.9.9-test/impact.md"
+assert_grep '^Usage: ecp admin index' "$OUT/9.9.9-test/admin-index.md"
 
 # Manifest.json present and lists the version
 assert_file_exists "$OUT/manifest.json"

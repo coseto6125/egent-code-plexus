@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-`code-graph-nexus` is a derivative work of [GitNexus](https://github.com/abhigyanpatwari/GitNexus)
+`egent-code-plexus` is a derivative work of [GitNexus](https://github.com/abhigyanpatwari/GitNexus)
 and bundles tree-sitter grammars as path dependencies under `crates/vendor/`.
 This document collects required attribution and license pointers per
 [SPDX REUSE](https://reuse.software/) conventions. Canonical license texts

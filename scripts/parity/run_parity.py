@@ -97,7 +97,7 @@ def print_diff(dict1: Any, dict2: Any, name1: str, name2: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run shadow parity validation between ref gitnexus and code-graph-nexus"
+        description="Run shadow parity validation between ref gitnexus and egent-code-plexus"
     )
     parser.add_argument(
         "fixture_path", type=Path, help="Path to the TypeScript fixture file or directory"
@@ -118,11 +118,11 @@ def main() -> None:
 
     print("\n[Analyze Phase]")
     ref_analyze_cmd = ["gitnexus", "admin", "index", "--repo", str(fixture_path)]
-    cgn_analyze_cmd = [
+    ecp_analyze_cmd = [
         "cargo",
         "run",
         "--bin",
-        "cgn",
+        "ecp",
         "--",
         "admin",
         "index",
@@ -133,8 +133,8 @@ def main() -> None:
     print("Running ref gitnexus admin index...")
     subprocess.run(ref_analyze_cmd, cwd=workspace_root, capture_output=True, check=False)
 
-    print("Running code-graph-nexus admin index...")
-    subprocess.run(cgn_analyze_cmd, cwd=workspace_root, capture_output=True, check=False)
+    print("Running egent-code-plexus admin index...")
+    subprocess.run(ecp_analyze_cmd, cwd=workspace_root, capture_output=True, check=False)
 
     print(f"\n[Inspect Phase: {symbol}]")
     ref_context_cmd = [
@@ -147,11 +147,11 @@ def main() -> None:
         "--format",
         "json",
     ]
-    cgn_context_cmd = [
+    ecp_context_cmd = [
         "cargo",
         "run",
         "--bin",
-        "cgn",
+        "ecp",
         "--",
         "inspect",
         "--name",
@@ -165,28 +165,28 @@ def main() -> None:
     print("Running ref gitnexus inspect...")
     ref_output = run_command(ref_context_cmd, cwd=workspace_root)
 
-    print("Running code-graph-nexus inspect...")
-    cgn_output = run_command(cgn_context_cmd, cwd=workspace_root)
+    print("Running egent-code-plexus inspect...")
+    ecp_output = run_command(ecp_context_cmd, cwd=workspace_root)
 
     normalized_ref = normalize_json(ref_output)
-    normalized_cgn = normalize_json(cgn_output)
+    normalized_ecp = normalize_json(ecp_output)
 
-    errors = is_subset(normalized_ref, normalized_cgn)
+    errors = is_subset(normalized_ref, normalized_ecp)
 
     if not errors:
         print(
-            "\n✅ SUCCESS: 100% Parity Achieved! (code-graph-nexus is a superset of ref gitnexus)"
+            "\n✅ SUCCESS: 100% Parity Achieved! (egent-code-plexus is a superset of ref gitnexus)"
         )
     else:
         print(
-            "\n❌ FAILURE: Mismatch detected. code-graph-nexus is missing expected fields or values."
+            "\n❌ FAILURE: Mismatch detected. egent-code-plexus is missing expected fields or values."
         )
         for error in errors:
             print(f"  - {error}")
         print(
-            "\n--- Diff (Note: Extra fields in code-graph-nexus are ACCEPTABLE, look for missing/changed fields) ---"
+            "\n--- Diff (Note: Extra fields in egent-code-plexus are ACCEPTABLE, look for missing/changed fields) ---"
         )
-        print_diff(normalized_ref, normalized_cgn, "ref gitnexus", "code-graph-nexus")
+        print_diff(normalized_ref, normalized_ecp, "ref gitnexus", "egent-code-plexus")
         sys.exit(1)
 
 

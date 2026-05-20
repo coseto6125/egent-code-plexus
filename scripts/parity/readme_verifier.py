@@ -18,7 +18,7 @@ Acceptance criteria are explicit in the predicate docstrings — anyone
 maintaining the README can read what `✓` means for each dimension
 without guessing.
 
-Usage (from code-graph-nexus repo root):
+Usage (from egent-code-plexus repo root):
 
     python3 scripts/parity/readme_verifier.py
     python3 scripts/parity/readme_verifier.py --generate  # emit a fresh table
@@ -42,7 +42,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SAMPLE_REPO = REPO_ROOT / ".sample_repo"
 DEFAULT_README = REPO_ROOT / "README.md"
-ANALYZER_SRC = REPO_ROOT / "crates" / "cgn-analyzer" / "src"
+ANALYZER_SRC = REPO_ROOT / "crates" / "ecp-analyzer" / "src"
 
 # README lang name → (spec/parser dir name, list of file extensions).
 #
@@ -105,18 +105,18 @@ class Verdict:
 @dataclass
 class AuditCtx:
     sample_repo: str
-    cgn_bin: str
+    ecp_bin: str
 
     def cypher_count(self, query: str) -> int:
         """Run a `RETURN count(*)`-shaped cypher; return the integer.
 
-        cgn cypher's JSON output is inconsistent for single-column results
+        ecp cypher's JSON output is inconsistent for single-column results
         (sometimes `rows: [N]`, sometimes `rows: [[N]]`); this handles both.
         Returns 0 on any error — the verifier treats 0 as `NO`, the user
         re-runs the predicate manually to investigate.
         """
         r = subprocess.run(
-            [self.cgn_bin, "cypher", "--repo", self.sample_repo, query, "--format=json"],
+            [self.ecp_bin, "cypher", "--repo", self.sample_repo, query, "--format=json"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -148,7 +148,7 @@ def dim_imports(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
 
     Imports are tracked as edges (file -[:Imports]-> module), not as a
     standalone `NodeKind::Import`. ref-gitnexus emits `Import` nodes
-    but cgn models them as relationships.
+    but ecp models them as relationships.
     """
     where = _ext_clause(file_exts, "a")
     n = ctx.cypher_count(f"MATCH (a)-[:Imports]->(b) WHERE {where} RETURN count(*)")
@@ -219,7 +219,7 @@ def dim_call(file_exts: list[str], _lang_dir: str, ctx: AuditCtx) -> Verdict:
 def dim_rename(_file_exts: list[str], lang_dir: str, _ctx: AuditCtx) -> Verdict:
     """'Rename' = identifier_finder module exists for this lang.
 
-    Code-level check: `cgn rename` dispatches per-lang via the
+    Code-level check: `ecp rename` dispatches per-lang via the
     `identifier_finder/<lang>.rs` module. Presence of that file is the
     proxy for rename support — without it the rename command lacks the
     lang-specific identifier-range table and exits no-op.
@@ -333,7 +333,7 @@ def main() -> int:
         help="Path to .sample_repo (default: <repo>/.sample_repo)",
     )
     ap.add_argument(
-        "--cgn-bin", type=str, default="cgn", help="cgn binary (default: 'cgn' from PATH)"
+        "--ecp-bin", type=str, default="ecp", help="ecp binary (default: 'ecp' from PATH)"
     )
     ap.add_argument(
         "--readme",
@@ -344,7 +344,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    ctx = AuditCtx(sample_repo=str(args.sample_repo), cgn_bin=args.cgn_bin)
+    ctx = AuditCtx(sample_repo=str(args.sample_repo), ecp_bin=args.ecp_bin)
     readme_claims = parse_readme_claims(args.readme)
     if not readme_claims:
         sys.stderr.write(f"!! could not parse README Language Matrix from {args.readme}\n")

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # tools/lint-skill.sh
-# T1 structural lint for the cgn-onboard SKILL pack.
-# Usage: lint-skill.sh [path-to-skill-root]   # default: docs/skills/cgn-onboard
+# T1 structural lint for the ecp-onboard SKILL pack.
+# Usage: lint-skill.sh [path-to-skill-root]   # default: docs/skills/ecp-onboard
 
 set -euo pipefail
 
-ROOT="${1:-docs/skills/cgn-onboard}"
+ROOT="${1:-docs/skills/ecp-onboard}"
 
 fail() { echo "lint FAIL: $1" >&2; exit 1; }
 

@@ -1,6 +1,6 @@
 # Vyper Sample Project
 
-Minimal ERC20-like Vyper contract for cgn-analyzer fixture testing.
+Minimal ERC20-like Vyper contract for ecp-analyzer fixture testing.
 
 ## Expected symbols
 

@@ -9,7 +9,7 @@ Security fixes are provided for the latest released version.
 ## Reporting a Vulnerability / 回報漏洞
 
 Preferred channel — GitHub private vulnerability reporting:
-<https://github.com/coseto6125/code-graph-nexus/security/advisories/new>
+<https://github.com/coseto6125/egent-code-plexus/security/advisories/new>
 
 Backup channel — email the maintainer: <enor@j-tcg.com>
 
@@ -17,7 +17,7 @@ If neither is available, open a minimal public issue that states a security
 contact is needed, without including exploit details.
 
 優先管道：請使用 GitHub private vulnerability reporting
-<https://github.com/coseto6125/code-graph-nexus/security/advisories/new>
+<https://github.com/coseto6125/egent-code-plexus/security/advisories/new>
 
 備用管道：寄信至維護者 <enor@j-tcg.com>
 

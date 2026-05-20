@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/cgn-core",
-    "crates/cgn-analyzer",
-    "crates/cgn-cli",
-    "crates/cgn-mcp",
+    "crates/ecp-core",
+    "crates/ecp-analyzer",
+    "crates/ecp-cli",
+    "crates/ecp-mcp",
 ]
 # vendor 內 grammar crates 仍透過 path dep 引用，但不視為 workspace member ──
 # 避免 cargo / clippy --workspace --all-targets 編到 vendor 自身的 #[cfg(test)] 區塊
@@ -23,8 +23,8 @@ edition = "2021"
 authors = ["E-NoR"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/coseto6125/code-graph-nexus"
-homepage = "https://github.com/coseto6125/code-graph-nexus"
+repository = "https://github.com/coseto6125/egent-code-plexus"
+homepage = "https://github.com/coseto6125/egent-code-plexus"
 keywords = ["git", "code-intelligence", "graph"]
 categories = ["development-tools"]
 

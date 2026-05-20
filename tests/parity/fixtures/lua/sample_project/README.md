@@ -1,6 +1,6 @@
 # Lua Sample Project
 
-This fixture exercises the `LuaProvider` for `cgn-analyzer`.
+This fixture exercises the `LuaProvider` for `ecp-analyzer`.
 
 ## Files
 

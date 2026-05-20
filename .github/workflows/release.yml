@@ -23,8 +23,8 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
-  BIN_NAME: cgn
-  CGN_BUILD_VERBOSE: 1
+  BIN_NAME: ecp
+  ECP_BUILD_VERBOSE: 1
 
 jobs:
   # ==================== Multi-platform binary builds ====================
@@ -154,8 +154,8 @@ jobs:
       - name: Stage install scripts into dist
         run: |
           version="${GITHUB_REF_NAME#v}"
-          sed "s/CGN_VERSION=\"\${CGN_VERSION:-latest}\"/CGN_VERSION=\"\${CGN_VERSION:-$version}\"/" install.sh > dist/install.sh
-          sed "s/\$version = if (\$env:CGN_VERSION) { \$env:CGN_VERSION } else { 'latest' }/\$version = if (\$env:CGN_VERSION) { \$env:CGN_VERSION } else { '$version' }/" install.ps1 > dist/install.ps1
+          sed "s/ECP_VERSION=\"\${ECP_VERSION:-latest}\"/ECP_VERSION=\"\${ECP_VERSION:-$version}\"/" install.sh > dist/install.sh
+          sed "s/\$version = if (\$env:ECP_VERSION) { \$env:ECP_VERSION } else { 'latest' }/\$version = if (\$env:ECP_VERSION) { \$env:ECP_VERSION } else { '$version' }/" install.ps1 > dist/install.ps1
           ls -la dist/
 
       - name: Install cosign
@@ -195,22 +195,22 @@ jobs:
             ### macOS Homebrew
             ```
             brew tap coseto6125/tap
-            brew install code-graph-nexus
+            brew install egent-code-plexus
             ```
 
             ### One-shot installer scripts (Linux / macOS)
             ```
-            curl -sSfL https://github.com/coseto6125/code-graph-nexus/releases/download/${{ github.ref_name }}/install.sh | sh
+            curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/download/${{ github.ref_name }}/install.sh | sh
             ```
 
             ### One-shot installer (Windows PowerShell)
             ```
-            irm https://github.com/coseto6125/code-graph-nexus/releases/download/${{ github.ref_name }}/install.ps1 | iex
+            irm https://github.com/coseto6125/egent-code-plexus/releases/download/${{ github.ref_name }}/install.ps1 | iex
             ```
 
             ### From git tag (source build)
             ```
-            cargo install --git https://github.com/coseto6125/code-graph-nexus --tag ${{ github.ref_name }} --bin cgn
+            cargo install --git https://github.com/coseto6125/egent-code-plexus --tag ${{ github.ref_name }} --bin ecp
             ```
 
             ### Manual download
@@ -218,7 +218,7 @@ jobs:
             Each has a `.sha256` for integrity and `.sig` / `.pem` files for
             keyless signature verification. Verify build provenance with:
             ```
-            gh attestation verify ./cgn --owner coseto6125
+            gh attestation verify ./ecp --owner coseto6125
             ```
 
   # ==================== Homebrew Tap ====================
@@ -261,8 +261,8 @@ jobs:
           fi
 
           version="${GITHUB_REF_NAME#v}"
-          arm_sha_file="dist/cgn-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz.sha256"
-          x86_sha_file="dist/cgn-${GITHUB_REF_NAME}-x86_64-apple-darwin.tar.gz.sha256"
+          arm_sha_file="dist/ecp-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz.sha256"
+          x86_sha_file="dist/ecp-${GITHUB_REF_NAME}-x86_64-apple-darwin.tar.gz.sha256"
 
           if [ ! -f "$arm_sha_file" ] || [ ! -f "$x86_sha_file" ]; then
             echo "::error::Missing macOS sha256 files in dist/."
@@ -278,8 +278,8 @@ jobs:
             -e "s/@VERSION@/${version}/g" \
             -e "s/@SHA256_ARM64_DARWIN@/${arm_sha}/g" \
             -e "s/@SHA256_X86_64_DARWIN@/${x86_sha}/g" \
-            packaging/homebrew/code-graph-nexus.rb.template \
-            > generated/Formula/code-graph-nexus.rb
+            packaging/homebrew/egent-code-plexus.rb.template \
+            > generated/Formula/egent-code-plexus.rb
 
       - name: Push formula to tap
         if: steps.formula.outputs.skip != 'true'
@@ -287,30 +287,30 @@ jobs:
         run: |
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/coseto6125/homebrew-tap.git" tap
           mkdir -p tap/Formula
-          cp generated/Formula/code-graph-nexus.rb tap/Formula/code-graph-nexus.rb
+          cp generated/Formula/egent-code-plexus.rb tap/Formula/egent-code-plexus.rb
 
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- Formula/code-graph-nexus.rb; then
+          if git diff --quiet -- Formula/egent-code-plexus.rb; then
             echo "Homebrew formula is already up to date."
             exit 0
           fi
 
-          git add Formula/code-graph-nexus.rb
-          git commit -m "code-graph-nexus ${GITHUB_REF_NAME}"
+          git add Formula/egent-code-plexus.rb
+          git commit -m "egent-code-plexus ${GITHUB_REF_NAME}"
           git push
 
   # ==================== Publish to crates.io ====================
   # 狀態：
-  #   cgn-core ── publish-ready (cargo publish --dry-run 通過)
-  #   cgn-analyzer ── 阻塞於 git/vendor deps 沒 version：
+  #   ecp-core ── publish-ready (cargo publish --dry-run 通過)
+  #   ecp-analyzer ── 阻塞於 git/vendor deps 沒 version：
   #     - tree-sitter-crystal (git dep) 需給 version 或改 crates.io 版
   #     - tree-sitter-kotlin (git dep) 同上
   #     - tree-sitter-move / tree-sitter-swift (vendored path dep) 需先發到
   #       crates.io 或標 publish = false 在 vendor side
-  #   code-graph-nexus ── 需 cgn-core + cgn-analyzer 先 publish
+  #   egent-code-plexus ── 需 ecp-core + ecp-analyzer 先 publish
   # Token 設定：repo Settings → Secrets → CARGO_REGISTRY_TOKEN
   # 解掉上述阻塞後，到 repo Settings → Variables → Actions
   # 新增 `PUBLISH_CRATES = 1` 即可啟用。預設不存在 = 跳過 publish。
@@ -342,11 +342,11 @@ jobs:
           cache-on-failure: true
           cache-workspace-crates: true
 
-      - name: Publish cgn-core
-        run: cargo publish -p cgn-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish ecp-core
+        run: cargo publish -p ecp-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Publish cgn-analyzer
-        run: cargo publish -p cgn-analyzer --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish ecp-analyzer
+        run: cargo publish -p ecp-analyzer --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Publish code-graph-nexus (cli)
-        run: cargo publish -p code-graph-nexus --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish egent-code-plexus (cli)
+        run: cargo publish -p egent-code-plexus --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

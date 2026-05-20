@@ -4,7 +4,7 @@ This document provides more context on the data used to derive the performance c
 
 ## The `.sample_repo` Dataset
 
-To ensure `cgn` remains stable and fast across a wide variety of coding styles and languages, we use a custom-curated dataset called `.sample_repo`. 
+To ensure `ecp` remains stable and fast across a wide variety of coding styles and languages, we use a custom-curated dataset called `.sample_repo`. 
 
 - **Total Size**: 2.1 GB on disk.
 - **File Count**: 17,903 files (excluding >512KB and gitignored).
@@ -20,7 +20,7 @@ To ensure `cgn` remains stable and fast across a wide variety of coding styles a
 
 ### Why this dataset?
 
-Most benchmarks use a single monolingual repo. While `cgn` is extremely fast on those, our goal is **Polyglot Intelligence**. `.sample_repo` forces the tool to handle:
+Most benchmarks use a single monolingual repo. While `ecp` is extremely fast on those, our goal is **Polyglot Intelligence**. `.sample_repo` forces the tool to handle:
 1.  **Context switching**: Switching between 25 different Tree-sitter parsers in parallel.
 2.  **Cross-repo resolution**: Testing how the graph handles shared symbols across disparate projects.
 3.  **Large-file stress**: Identifying bottlenecks in files > 1MB.
@@ -43,7 +43,7 @@ You can re-run the scalability suite on your own hardware:
 ls -d .sample_repo
 
 # 2. Run the benchmark script
-python3 scripts/benchmark_cgn.py
+python3 scripts/benchmark_ecp.py
 ```
 
 To compare directly with the original Node.js implementation:

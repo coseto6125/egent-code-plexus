@@ -1,7 +1,7 @@
-# Code Graph Nexus
+# EgentCodePlexus
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coseto6125/code-graph-nexus/badge)](https://scorecard.dev/viewer/?uri=github.com/coseto6125/code-graph-nexus)
-[![Star History Chart](https://api.star-history.com/svg?repos=coseto6125/code-graph-nexus&type=Date)](https://star-history.com/#coseto6125/code-graph-nexus&Date)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coseto6125/egent-code-plexus/badge)](https://scorecard.dev/viewer/?uri=github.com/coseto6125/egent-code-plexus)
+[![Star History Chart](https://api.star-history.com/svg?repos=coseto6125/egent-code-plexus&type=Date)](https://star-history.com/#coseto6125/egent-code-plexus&Date)
 
 A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero-copy mmap, sub-second per query.
 
@@ -11,14 +11,14 @@ A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero
 
 ## 🎯 Mission
 
-`cgn` exists to be the structural-knowledge layer that an autonomous AI coding agent calls 20–50 times per task. Every design decision falls out of that one premise:
+`ecp` exists to be the structural-knowledge layer that an autonomous AI coding agent calls 20–50 times per task. Every design decision falls out of that one premise:
 
 - **Built for agents, not IDEs.** Output is token-cheap (TOON / compact JSON), every flag surfaces via `--help`, every command is non-interactive and stdout-parseable. No UI, no human-skim layout cruft eating the agent's context window.
 - **No warm-up, no daemon.** Each invocation `mmap`s a zero-copy `rkyv` graph file and exits. Read queries return in **~140–170 ms** *including process startup*; a 22k-file repo cold-indexes in under 3 s. An agent can fire dozens of queries per task without amortising a server boot, and there is no "daemon died, please restart" failure mode.
-- **Honest answers over readable graphs.** When a call site can't be statically resolved (dynamic dispatch, unresolved import, reflection), `cgn` emits a `BlindSpot` record — not a guessed edge. An agent that acts on a hallucinated dependency is much more expensive than one that gets an "I don't know" it can route around.
+- **Honest answers over readable graphs.** When a call site can't be statically resolved (dynamic dispatch, unresolved import, reflection), `ecp` emits a `BlindSpot` record — not a guessed edge. An agent that acts on a hallucinated dependency is much more expensive than one that gets an "I don't know" it can route around.
 - **Polyglot reach.** 31 languages parsed at the structural level so modern multi-stack repos (service code + Dockerfiles + GitHub Actions + Terraform + SQL + smart contracts) stop being black holes the moment you leave the main language.
 
-🎙️ **[Agent Interviews](./interviews/README.md)** — See how real AI agents (Gemini CLI, Codex) use and evaluate `cgn` in autonomous workflows.
+🎙️ **[Agent Interviews](./interviews/README.md)** — See how real AI agents (Gemini CLI, Codex) use and evaluate `ecp` in autonomous workflows.
 
 Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model (a structural knowledge graph of a repo), rewritten in Rust for a different audience. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE); see [NOTICES.md](./NOTICES.md) for required attribution.
 
@@ -26,20 +26,20 @@ Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhi
 
 ## ⚡ Performance
 
-The Mission section above is *why* `cgn` is built the way it is. This section is the receipts.
+The Mission section above is *why* `ecp` is built the way it is. This section is the receipts.
 
 ### Head-to-head vs. upstream GitNexus
 
 Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase (TypeScript) using `scripts/parity/benchmark_vs_gitnexus.py`:
 
-| Phase | cgn (Rust) | gitnexus (Node) | Speedup |
+| Phase | ecp (Rust) | gitnexus (Node) | Speedup |
 |---|---|---|---|
 | **Cold Index** | **~970 ms** | ~58 s | **60×** |
 | **Symbol Context** | **~70 ms** | ~430 ms | **6×** |
 | **Blast Radius** | **~70 ms** | ~460 ms | **6×** |
 | **Cypher Query** | **~70 ms** | ~400 ms | **5×** |
 
-*Note: `cgn` query latency includes full process startup (no daemon). GitNexus (v1.6.5) query latency is against a warm, indexed repo via its CLI.*
+*Note: `ecp` query latency includes full process startup (no daemon). GitNexus (v1.6.5) query latency is against a warm, indexed repo via its CLI.*
 
 ### Scalability — single run on `.sample_repo` (a 2.1 GB polyglot collection of ~40 real-world open source projects across 25+ languages, used for cross-language stress testing)
 
@@ -66,15 +66,15 @@ Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase
 | `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **174.2 ms** | broader pattern, more matches |
 | `impact --baseline HEAD~1` (change-set blast radius) | **359.0 ms** | git diff + parallel per-file parse + BFS |
 
-Reproduce: `python scripts/benchmark_cgn.py`.
+Reproduce: `python scripts/benchmark_ecp.py`.
 
 ---
 
 ## vs. upstream GitNexus
 
-Same conceptual model, different audience. `cgn` is **not** a drop-in replacement — choose based on who reads the graph and what they do with it.
+Same conceptual model, different audience. `ecp` is **not** a drop-in replacement — choose based on who reads the graph and what they do with it.
 
-| Dimension | Code Graph Nexus | GitNexus |
+| Dimension | EgentCodePlexus | GitNexus |
 |---|---|---|
 | Primary consumer | Autonomous AI code agents | Human devs + IDE integration |
 | Runtime | Stateless one-shot CLI (zero warm-up) | Long-running MCP server |
@@ -94,20 +94,20 @@ Prebuilt binaries are published with each GitHub Release. The installer scripts 
 
 ```bash
 # Linux / macOS
-curl -sSfL https://github.com/coseto6125/code-graph-nexus/releases/latest/download/install.sh | sh
+curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh
 
 # Windows PowerShell
-iwr https://github.com/coseto6125/code-graph-nexus/releases/latest/download/install.ps1 -UseBasicParsing | iex
+iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.ps1 -UseBasicParsing | iex
 
 # Explicit cargo path (same source build, no installer wrapper)
-cargo install --git https://github.com/coseto6125/code-graph-nexus code-graph-nexus --bin cgn --locked
+cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked
 ```
 
 Optional CPU-tuned source build:
 
 ```bash
-repo=https://github.com/coseto6125/code-graph-nexus
-RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" code-graph-nexus --bin cgn --locked --profile release-dist
+repo=https://github.com/coseto6125/egent-code-plexus
+RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" egent-code-plexus --bin ecp --locked --profile release-dist
 ```
 
 ---
@@ -116,21 +116,21 @@ RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" code-graph-nexus --
 
 ```bash
 # 1. Index the current repo (incremental; first query also auto-indexes)
-cgn admin index --repo .
+ecp admin index --repo .
 
 # 2. Locate a symbol — exact name by default
-cgn find loginUser
-cgn find login --mode bm25       # ranked BM25, top-K partitioned by source/tests/ref/doc/config
+ecp find loginUser
+ecp find login --mode bm25       # ranked BM25, top-K partitioned by source/tests/ref/doc/config
 
 # 3. Blast radius — who breaks if I change this?
-cgn impact validateUser --direction upstream
+ecp impact validateUser --direction upstream
 
 # 4. Full symbol context (signature, body, callers, callees, 1-hop impact)
-cgn inspect validateUser
+ecp inspect validateUser
 
 # 5. Every HTTP route in the repo (declarative @Get + imperative app.get())
-cgn routes
-cgn routes /api/users --method POST     # route → handler → caller chain
+ecp routes
+ecp routes /api/users --method POST     # route → handler → caller chain
 ```
 
 Read-side commands accept `--format text|json|toon`. Default per command is the token-cheapest representation (mostly `toon`; `find` defaults to `text`; `cypher`/`coverage` default to `json`).
@@ -139,7 +139,7 @@ Read-side commands accept `--format text|json|toon`. Default per command is the 
 
 ## CLI surface
 
-Two tiers — **agent commands** at top level (query/refactor/verify) and **admin commands** under `cgn admin` (registry/hooks/destructive). Run `cgn --help` and `cgn admin --help` for full flag matrices.
+Two tiers — **agent commands** at top level (query/refactor/verify) and **admin commands** under `ecp admin` (registry/hooks/destructive). Run `ecp --help` and `ecp admin --help` for full flag matrices.
 
 | Command | Purpose |
 |---|---|
@@ -157,28 +157,28 @@ Two tiers — **agent commands** at top level (query/refactor/verify) and **admi
 | `peers` | Multi-session peer collaboration (status / diff / log / gc). |
 | `review` | Aggregated LLM-workflow audit: runs impact + coverage + tool-map + shape-check + diff in one shot, filtered to high-confidence signals. |
 
-Admin namespace (`cgn admin <cmd>` — hidden from top-level help):
+Admin namespace (`ecp admin <cmd>` — hidden from top-level help):
 
 | Command | Purpose |
 |---|---|
 | `index --repo <path>` | Build / refresh the graph; incremental via xxh3_64 content cache. `--force` for full rebuild. |
 | `drop / prune / rename-branch` | Index lifecycle: delete, prune stale branch dirs, rename branch on-disk. |
 | `install-hook` | Install the git reference-transaction hook (auto-track branch switches). |
-| `config` | Interactive TOML wizard for `.cgn/config.toml`. |
+| `config` | Interactive TOML wizard for `.ecp/config.toml`. |
 | `mcp serve` / `mcp tools` | MCP server (stdio) for LLM hosts; `tools` lists the exposed tool surface. |
 
-All commands resolve `.cgn/graph.bin` from CWD unless `--graph <path>` is given. Agent-facing commands are non-interactive by design — every flag surfaces via `--help`, every output stream is parseable.
-Run `cgn admin` with no subcommand to open the interactive admin TUI for index maintenance, host integrations, config, groups, and diagnostics.
+All commands resolve `.ecp/graph.bin` from CWD unless `--graph <path>` is given. Agent-facing commands are non-interactive by design — every flag surfaces via `--help`, every output stream is parseable.
+Run `ecp admin` with no subcommand to open the interactive admin TUI for index maintenance, host integrations, config, groups, and diagnostics.
 
 ---
 
 ## MCP server (for LLM hosts)
 
-`cgn` ships an MCP server exposing core commands as MCP tools. Hosts that speak MCP (Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI) can register `cgn` and call the tools autonomously.
+`ecp` ships an MCP server exposing core commands as MCP tools. Hosts that speak MCP (Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI) can register `ecp` and call the tools autonomously.
 
 ```bash
-cgn admin mcp tools          # inspect what tools will be exposed
-cgn admin mcp serve          # run the server (default: spawn mode, fresh subprocess per call)
+ecp admin mcp tools          # inspect what tools will be exposed
+ecp admin mcp serve          # run the server (default: spawn mode, fresh subprocess per call)
 ```
 
 Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.json`):
@@ -186,7 +186,7 @@ Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.j
 ```json
 {
   "mcpServers": {
-    "cgn": { "command": "cgn", "args": ["admin", "mcp", "serve"] }
+    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
   }
 }
 ```
@@ -194,7 +194,7 @@ Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.j
 Progressive path for human operators:
 
 ```text
-cgn admin
+ecp admin
 → Agent Integrations
 → MCP
 → <host>
@@ -208,7 +208,7 @@ The Codex native path is separate from MCP. It prepares a patch for an `openai/c
 Progressive path for human operators:
 
 ```text
-cgn admin
+ecp admin
 → Agent Integrations
 → Codex CLI
 → install
@@ -218,56 +218,56 @@ cgn admin
 Bundled skills use the same progressive path:
 
 ```text
-cgn admin
+ecp admin
 → Agent Integrations
 → Codex CLI
 → install
 → skills
-→ all | cgn | simplify
+→ all | ecp | simplify
 ```
 
 Scripted path for AI agents and automation:
 
 ```bash
-cgn admin codex install native-tools
-cgn admin codex install skills all
-cgn admin codex install skills cgn
-cgn admin codex install skills simplify
+ecp admin codex install native-tools
+ecp admin codex install skills all
+ecp admin codex install skills ecp
+ecp admin codex install skills simplify
 ```
 
 The bundled skills teach workflow selection that command help cannot infer by itself:
 
 | Skill | Use when |
 |---|---|
-| `cgn` | The agent needs to decide whether graph-aware symbol, impact, route, contract, or rename workflows are better than grep / file reads. |
-| `simplify` | The agent is reviewing changed code and should start from cgn impact, blind spots, egress, shape drift, and resolver deltas before reading raw diffs. |
+| `ecp` | The agent needs to decide whether graph-aware symbol, impact, route, contract, or rename workflows are better than grep / file reads. |
+| `simplify` | The agent is reviewing changed code and should start from ecp impact, blind spots, egress, shape drift, and resolver deltas before reading raw diffs. |
 
 The `native-tools` component writes:
 
 ```text
-~/.config/cgn/host-integration/codex-cli.patch
+~/.config/ecp/host-integration/codex-cli.patch
 ```
 
 Apply the patch in your Codex CLI fork, then wire the generated module into Codex's tool registry:
 
 ```bash
 cd /path/to/openai-codex-fork
-git apply ~/.config/cgn/host-integration/codex-cli.patch
+git apply ~/.config/ecp/host-integration/codex-cli.patch
 ```
 
-To verify a fork that already has the native marker, set `CGN_CODEX_CLI_CHECKOUT` before checking status in the TUI:
+To verify a fork that already has the native marker, set `ECP_CODEX_CLI_CHECKOUT` before checking status in the TUI:
 
 ```bash
-CGN_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork cgn admin
+ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin
 # Agent Integrations → Codex CLI → status
 ```
 
 The equivalent scripted checks are:
 
 ```bash
-CGN_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork cgn admin codex status
-cgn admin codex uninstall native-tools
-cgn admin codex uninstall skills all
+ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin codex status
+ecp admin codex uninstall native-tools
+ecp admin codex uninstall skills all
 ```
 
 ---
@@ -276,13 +276,13 @@ cgn admin codex uninstall skills all
 
 ```
 crates/
-├── cgn-core        # Zero-copy graph (rkyv + mmap), incremental cache, graph queries
-├── cgn-analyzer    # Tree-sitter parsers, HTTP route detector, framework confidence
-├── cgn-mcp         # MCP server (stdio) — exposes core commands as tools
-└── cgn-cli         # `cgn` binary, Tantivy BM25 engine, token-optimized output
+├── ecp-core        # Zero-copy graph (rkyv + mmap), incremental cache, graph queries
+├── ecp-analyzer    # Tree-sitter parsers, HTTP route detector, framework confidence
+├── ecp-mcp         # MCP server (stdio) — exposes core commands as tools
+└── ecp-cli         # `ecp` binary, Tantivy BM25 engine, token-optimized output
 ```
 
-Parse → resolve → serialize runs through an MPSC channel into a single builder thread that assembles the graph and writes a zero-copy `.cgn/graph.bin`. Read paths (`inspect`, `cypher`, `impact`, …) mmap this file directly. The xxh3_64 content cache keeps incremental rebuilds at sub-second on a 22k-file repo.
+Parse → resolve → serialize runs through an MPSC channel into a single builder thread that assembles the graph and writes a zero-copy `.ecp/graph.bin`. Read paths (`inspect`, `cypher`, `impact`, …) mmap this file directly. The xxh3_64 content cache keeps incremental rebuilds at sub-second on a 22k-file repo.
 
 ---
 
@@ -298,8 +298,8 @@ Parse → resolve → serialize runs through an MPSC channel into a single build
 
 | Env var | Default | Effect |
 |---|---|---|
-| `CGN_MAX_FILE_BYTES` | `16777216` (16 MiB) | Skip source files larger than this during ingest. Caps worst-case worker RAM at `num_threads × MAX`. |
-| `CGN_CSPROJ_MAX_DEPTH` | `4` | Directory recursion depth for `*.csproj` discovery. Raise for deeply-nested .NET monorepos. |
+| `ECP_MAX_FILE_BYTES` | `16777216` (16 MiB) | Skip source files larger than this during ingest. Caps worst-case worker RAM at `num_threads × MAX`. |
+| `ECP_CSPROJ_MAX_DEPTH` | `4` | Directory recursion depth for `*.csproj` discovery. Raise for deeply-nested .NET monorepos. |
 
 ---
 
@@ -318,8 +318,8 @@ Built on:
 - [memmap2](https://github.com/RazrFalcon/memmap2-rs) — zero-copy memory mapping for sub-millisecond graph access
 - [msgspec](https://github.com/jcrist/msgspec) — high-performance JSON serialization for inter-process communication
 
-Onboarding for AI agents (URL bootstrap, Claude Code skill, plugin install) lives at `docs/skills/cgn-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit-concurrency.sh`.
+Onboarding for AI agents (URL bootstrap, Claude Code skill, plugin install) lives at `docs/skills/ecp-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit-concurrency.sh`.
 
 ## Release status
 
-The current verified install path is `cargo install --git ...`, which builds `cgn` from source. Release installers already contain the checksum and provenance-verification flow, but they require a published tag and release assets before the binary download path can be end-to-end verified. The agent-facing onboarding skill is documented in [docs/skills/cgn-onboard/ONBOARDING.md](./docs/skills/cgn-onboard/ONBOARDING.md); it is intended to guide users through install, first index, optional groups, MCP wiring, and next steps. The assisted configuration/setup flow is still being refined.
+The current verified install path is `cargo install --git ...`, which builds `ecp` from source. Release installers already contain the checksum and provenance-verification flow, but they require a published tag and release assets before the binary download path can be end-to-end verified. The agent-facing onboarding skill is documented in [docs/skills/ecp-onboard/ONBOARDING.md](./docs/skills/ecp-onboard/ONBOARDING.md); it is intended to guide users through install, first index, optional groups, MCP wiring, and next steps. The assisted configuration/setup flow is still being refined.

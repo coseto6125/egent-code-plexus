@@ -106,11 +106,11 @@ Absence of a language-level `main` convention (per `entry_points.rs` coverage ta
 
 **Rename `n/a` on markup/config rows**
 
-Markdown, GitHub Actions, Docker Compose, Dockerfile, and YAML carry keys / literal strings, not re-bindable code identifiers — `cgn rename` would have nothing to rewrite.
+Markdown, GitHub Actions, Docker Compose, Dockerfile, and YAML carry keys / literal strings, not re-bindable code identifiers — `ecp rename` would have nothing to rewrite.
 
 ## Call detection design
 
-Call detection is centralised in `crates/cgn-analyzer/src/calls.rs`. The hot helper is `extract_calls(root, source, nodes, call_kinds)`:
+Call detection is centralised in `crates/ecp-analyzer/src/calls.rs`. The hot helper is `extract_calls(root, source, nodes, call_kinds)`:
 
 - Each language parser passes the tree-sitter node kinds that represent a call in its grammar — e.g., `["call_expression"]` for JS/TS, `["function_call"]` for Lua, `["call"]` for Python.
 - The walker is grammar-agnostic: descends the AST once, collects every call site, extracts the callee text via `callee_name_from(node, source)`, and attaches each call to its enclosing `Function` / `Method` via `attach_to_enclosing(line, callee, nodes)` (smallest-span containment).

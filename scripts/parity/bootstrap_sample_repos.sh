@@ -101,7 +101,7 @@ fi
 
 # ── Entry-point fixtures ──────────────────────────────────────────────────────
 # The Wave 1 Go / Swift clones above are libraries (no `func main()` / `@main`),
-# so `cgn cypher` returns 0 EntryPoint nodes for these langs and the
+# so `ecp cypher` returns 0 EntryPoint nodes for these langs and the
 # `readme_verifier.py` (ext-scoping) drift report flags them as ☐ on cells the
 # parser actually supports. These two clones add a Go binary + a Swift example
 # repo with @main so the verifier sees real EntryPoint emissions.

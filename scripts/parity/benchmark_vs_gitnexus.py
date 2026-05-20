@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Head-to-head perf benchmark: gitnexus (upstream Node CLI) vs cgn (this Rust port).
+"""Head-to-head perf benchmark: gitnexus (upstream Node CLI) vs ecp (this Rust port).
 
 Verb mapping (commands compared side-by-side):
 
-    cold index         gitnexus analyze        cgn admin index
-    one-symbol context gitnexus context <n>    cgn inspect <n>
-    blast radius       gitnexus impact <n>     cgn impact <n> --direction up
-    raw cypher         gitnexus cypher '<q>'   cgn cypher '<q>'
+    cold index         gitnexus analyze        ecp admin index
+    one-symbol context gitnexus context <n>    ecp inspect <n>
+    blast radius       gitnexus impact <n>     ecp impact <n> --direction up
+    raw cypher         gitnexus cypher '<q>'   ecp cypher '<q>'
 
 Usage:
     python scripts/parity/benchmark_vs_gitnexus.py
@@ -28,16 +28,16 @@ from statistics import median
 
 CMD_TIMEOUT_S = 1800  # cold-analyze can take 10+ min for gitnexus on 22k-file corpus
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_CGN = WORKSPACE_ROOT / "target" / "release" / "cgn"
+DEFAULT_ECP = WORKSPACE_ROOT / "target" / "release" / "ecp"
 DEFAULT_GITNEXUS = Path.home() / ".npm-global" / "bin" / "gitnexus"
-DEFAULT_REPO = Path("/home/enor/code-graph-nexus/.sample_repo")
+DEFAULT_REPO = Path("/home/enor/egent-code-plexus/.sample_repo")
 
 
 @dataclass
 class Sample:
     """One benched command (one tool × one phase × N runs)."""
 
-    tool: str  # "cgn" | "gitnexus"
+    tool: str  # "ecp" | "gitnexus"
     phase: str  # "cold-index" | "context" | "impact" | "cypher"
     cmd: list[str]
     cwd: str | None = None
@@ -81,9 +81,9 @@ def _bench(
     return s
 
 
-def _drop_cgn(cgn: Path, repo: Path) -> None:
+def _drop_ecp(ecp: Path, repo: Path) -> None:
     subprocess.run(
-        [str(cgn), "admin", "drop", "--repo", str(repo)], capture_output=True, timeout=30
+        [str(ecp), "admin", "drop", "--repo", str(repo)], capture_output=True, timeout=30
     )
 
 
@@ -93,17 +93,17 @@ def _drop_gitnexus(repo: Path) -> None:
     subprocess.run(["gitnexus", "clean", "--force"], cwd=repo, capture_output=True, timeout=60)
 
 
-def _probe_shared_symbol(cgn: Path, gn: Path, repo: Path) -> dict[str, str]:
+def _probe_shared_symbol(ecp: Path, gn: Path, repo: Path) -> dict[str, str]:
     """Find a symbol both tools have indexed under their own schema.
 
-    gitnexus and cgn label Rust types differently: cgn folds Rust `struct` /
+    gitnexus and ecp label Rust types differently: ecp folds Rust `struct` /
     `enum` / `trait` into `Class`, while gitnexus keeps them separate as
-    `Struct` / `Enum` / `Trait`. Iterate cgn's `Class` candidates and pick
+    `Struct` / `Enum` / `Trait`. Iterate ecp's `Class` candidates and pick
     the first one gitnexus can find (probably under `Struct`).
     """
     proc = subprocess.run(
         [
-            str(cgn),
+            str(ecp),
             "cypher",
             "MATCH (a:Class) RETURN a.name LIMIT 50",
             "--format",
@@ -121,7 +121,7 @@ def _probe_shared_symbol(cgn: Path, gn: Path, repo: Path) -> dict[str, str]:
         rows = json.loads(proc.stdout).get("rows", [])
     except json.JSONDecodeError:
         return {}
-    # When SELECT returns a single column, cgn cypher rows are flat strings
+    # When SELECT returns a single column, ecp cypher rows are flat strings
     # (not nested arrays). Drop single-char names + names with spaces /
     # special chars — those are typically workflow-name labels rather than
     # canonical code symbols both tools will agree on.
@@ -178,7 +178,7 @@ def _hardware() -> dict[str, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--cgn-binary", type=Path, default=DEFAULT_CGN)
+    ap.add_argument("--ecp-binary", type=Path, default=DEFAULT_ECP)
     ap.add_argument("--gitnexus-binary", type=Path, default=DEFAULT_GITNEXUS)
     ap.add_argument("--repo", type=Path, default=DEFAULT_REPO)
     ap.add_argument("--runs", type=int, default=3, help="runs per query phase")
@@ -193,8 +193,8 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not args.cgn_binary.exists():
-        print(f"error: cgn binary not at {args.cgn_binary}", file=sys.stderr)
+    if not args.ecp_binary.exists():
+        print(f"error: ecp binary not at {args.ecp_binary}", file=sys.stderr)
         return 1
     if not args.gitnexus_binary.exists():
         print(f"error: gitnexus binary not at {args.gitnexus_binary}", file=sys.stderr)
@@ -204,7 +204,7 @@ def main() -> int:
         return 1
 
     hw = _hardware()
-    print(f"cgn       : {args.cgn_binary}")
+    print(f"ecp       : {args.ecp_binary}")
     print(
         f"gitnexus  : {args.gitnexus_binary}  (v{subprocess.run([str(args.gitnexus_binary), '--version'], capture_output=True, text=True).stdout.strip()})"
     )
@@ -218,14 +218,14 @@ def main() -> int:
     # ── Phase 1: cold index ────────────────────────────────────────────────
     if not args.skip_cold:
         print("→ drop both indexes")
-        _drop_cgn(args.cgn_binary, args.repo)
+        _drop_ecp(args.ecp_binary, args.repo)
         _drop_gitnexus(args.repo)
 
-        print("→ cgn cold index")
+        print("→ ecp cold index")
         s = _bench(
-            "cgn",
+            "ecp",
             "cold-index",
-            [str(args.cgn_binary), "admin", "index", "--repo", str(args.repo)],
+            [str(args.ecp_binary), "admin", "index", "--repo", str(args.repo)],
             cwd=args.repo,
             runs=1,
         )
@@ -249,8 +249,8 @@ def main() -> int:
         class_name = args.symbol
         print(f"→ using explicit --symbol {class_name}")
     else:
-        print("→ probe shared symbol (cgn Class ⇄ gitnexus Class|Struct|Enum)")
-        sym = _probe_shared_symbol(args.cgn_binary, args.gitnexus_binary, args.repo)
+        print("→ probe shared symbol (ecp Class ⇄ gitnexus Class|Struct|Enum)")
+        sym = _probe_shared_symbol(args.ecp_binary, args.gitnexus_binary, args.repo)
         if not sym:
             print("  FAIL: no shared symbol; can't run per-query phases")
             _print_summary(samples)
@@ -264,13 +264,13 @@ def main() -> int:
     gn_repo = ["--repo", str(args.repo)]
 
     # ── Phase 3: per-query latency ─────────────────────────────────────────
-    # Unified phase names (`symbol-context`, `blast-radius`, `cypher`) so cgn
+    # Unified phase names (`symbol-context`, `blast-radius`, `cypher`) so ecp
     # and gitnexus rows merge into a single row per phase in the summary.
     queries: list[tuple[str, str, list[str], Path]] = [
         (
-            "cgn",
+            "ecp",
             "symbol-context",
-            [str(args.cgn_binary), "inspect", "--name", class_name, "--repo", str(args.repo)],
+            [str(args.ecp_binary), "inspect", "--name", class_name, "--repo", str(args.repo)],
             args.repo,
         ),
         (
@@ -280,10 +280,10 @@ def main() -> int:
             args.repo,
         ),
         (
-            "cgn",
+            "ecp",
             "blast-radius",
             [
-                str(args.cgn_binary),
+                str(args.ecp_binary),
                 "impact",
                 class_name,
                 "--direction",
@@ -300,12 +300,12 @@ def main() -> int:
             args.repo,
         ),
         # cypher — use a schema-agnostic `MATCH (a)` so both tools answer
-        # against their own labeling (cgn: Class; gitnexus: Struct/Class/Enum).
+        # against their own labeling (ecp: Class; gitnexus: Struct/Class/Enum).
         (
-            "cgn",
+            "ecp",
             "cypher",
             [
-                str(args.cgn_binary),
+                str(args.ecp_binary),
                 "cypher",
                 f"MATCH (a) WHERE a.name='{class_name}' RETURN a",
                 "--repo",
@@ -351,29 +351,29 @@ def main() -> int:
 
 
 def _print_summary(samples: list[Sample]) -> None:
-    # Group by phase, then show cgn vs gitnexus side-by-side.
+    # Group by phase, then show ecp vs gitnexus side-by-side.
     phases: dict[str, dict[str, Sample]] = {}
     for s in samples:
         phases.setdefault(s.phase, {})[s.tool] = s
 
     print(f"{'─' * 78}")
-    print(f"{'phase':<14} {'cgn':>22} {'gitnexus':>22} {'speedup':>14}")
+    print(f"{'phase':<14} {'ecp':>22} {'gitnexus':>22} {'speedup':>14}")
     print(f"{'─' * 78}")
     for phase, tools in phases.items():
-        cgn = tools.get("cgn")
+        ecp = tools.get("ecp")
         gn = tools.get("gitnexus")
-        cgn_med = cgn.median_s if cgn and cgn.runs else None
+        ecp_med = ecp.median_s if ecp and ecp.runs else None
         gn_med = gn.median_s if gn and gn.runs else None
         speedup = "—"
-        if cgn_med and gn_med:
-            speedup = f"{gn_med / cgn_med:.1f}×"
-        cgn_str = _fmt(cgn_med) if cgn else " (skipped)"
+        if ecp_med and gn_med:
+            speedup = f"{gn_med / ecp_med:.1f}×"
+        ecp_str = _fmt(ecp_med) if ecp else " (skipped)"
         gn_str = _fmt(gn_med) if gn else " (skipped)"
-        if cgn and cgn.stdout_bytes:
-            cgn_str = f"{cgn_str} ({cgn.stdout_bytes}B)"
+        if ecp and ecp.stdout_bytes:
+            ecp_str = f"{ecp_str} ({ecp.stdout_bytes}B)"
         if gn and gn.stdout_bytes:
             gn_str = f"{gn_str} ({gn.stdout_bytes}B)"
-        print(f"{phase:<14} {cgn_str:>22} {gn_str:>22} {speedup:>14}")
+        print(f"{phase:<14} {ecp_str:>22} {gn_str:>22} {speedup:>14}")
     print(f"{'─' * 78}")
 
 

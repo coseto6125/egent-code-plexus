@@ -44,8 +44,8 @@ def benchmark_analyze(repo_path: Path):
     )
     ref_time = time.time() - start_time
 
-    # Run code-graph-nexus
-    print("  \u2514\u2500 Running code-graph-nexus admin index...")
+    # Run egent-code-plexus
+    print("  \u2514\u2500 Running egent-code-plexus admin index...")
     start_time = time.time()
     subprocess.run(
         [
@@ -53,7 +53,7 @@ def benchmark_analyze(repo_path: Path):
             "run",
             "--release",
             "--bin",
-            "cgn",
+            "ecp",
             "--",
             "admin",
             "index",
@@ -63,22 +63,22 @@ def benchmark_analyze(repo_path: Path):
         cwd=workspace,
         capture_output=True,
     )
-    cgn_time = time.time() - start_time
+    ecp_time = time.time() - start_time
 
-    return ref_time, cgn_time
+    return ref_time, ecp_time
 
 
 def main():
     SAMPLE_DIR.mkdir(exist_ok=True)
 
     print("==================================================")
-    print("   code-graph-nexus Real-World Performance Benchmark   ")
+    print("   egent-code-plexus Real-World Performance Benchmark   ")
     print("==================================================\n")
 
     # Compile in release mode once before benchmarking
-    print("[*] Pre-compiling code-graph-nexus in release mode...")
+    print("[*] Pre-compiling egent-code-plexus in release mode...")
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "cgn-cli"], capture_output=True, check=True
+        ["cargo", "build", "--release", "-p", "ecp-cli"], capture_output=True, check=True
     )
 
     results = []
@@ -93,14 +93,14 @@ def main():
             repo_path = clone_repo(lang, url)
             print(f"[\u25b6] Benchmarking {lang} ({repo_path.name})...")
 
-            ref_time, cgn_time = benchmark_analyze(repo_path)
+            ref_time, ecp_time = benchmark_analyze(repo_path)
 
-            speedup = ref_time / cgn_time if cgn_time > 0 else float("inf")
+            speedup = ref_time / ecp_time if ecp_time > 0 else float("inf")
             print(
-                f"    \u2713 ref gitnexus: {ref_time:.2f}s | code-graph-nexus: {cgn_time:.2f}s | Speedup: {speedup:.1f}x\n"
+                f"    \u2713 ref gitnexus: {ref_time:.2f}s | egent-code-plexus: {ecp_time:.2f}s | Speedup: {speedup:.1f}x\n"
             )
 
-            results.append((lang, ref_time, cgn_time, speedup))
+            results.append((lang, ref_time, ecp_time, speedup))
 
         except Exception as e:
             print(f"    \u274c Failed: {e}\n")

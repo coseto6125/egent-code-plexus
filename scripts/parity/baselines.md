@@ -1,8 +1,8 @@
 # Wave 1 Language Baseline Stats
 
 Captured: 2026-05-14  
-cgn binary: `target/debug/cgn` (dev profile)  
-Command: `cgn admin index --repo .sample_repo/<lang>`
+ecp binary: `target/debug/ecp` (dev profile)  
+Command: `ecp admin index --repo .sample_repo/<lang>`
 
 ## Baseline Results
 
@@ -25,8 +25,8 @@ Only `readme.md` from the http.zig repo was scanned (1 file, 0 Zig-specific node
 The `admin index` command exited 0, but no Zig symbols were extracted.
 
 **Fix required:** Add `"zig"` to the extension match in
-`crates/cgn-cli/src/commands/admin/index.rs` and implement a `ZigProvider` in
-`crates/cgn-analyzer/src/zig/`.
+`crates/ecp-cli/src/commands/admin/index.rs` and implement a `ZigProvider` in
+`crates/ecp-analyzer/src/zig/`.
 
 ### move — sparse checkout
 

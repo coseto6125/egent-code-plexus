@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Per-(language, kind) symbol count dump: cgn vs reference gitnexus.
+"""Per-(language, kind) symbol count dump: ecp vs reference gitnexus.
 
-Run from code-graph-nexus repo root. Assumes `.sample_repo/` contains 14 mainstream
+Run from egent-code-plexus repo root. Assumes `.sample_repo/` contains 14 mainstream
 language subdirectories already indexed by both binaries.
 """
 
@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 
-REPO = "/home/enor/code-graph-nexus/.sample_repo"
+REPO = "/home/enor/egent-code-plexus/.sample_repo"
 LANGS = [
     "TypeScript",
     "JavaScript",
@@ -34,7 +34,7 @@ LANGS = [
 # pollution (e.g., GitHub Actions workflow `.yml` files inside `Rust/`
 # add 62 Class nodes to the Rust count, inflating the apparent delta;
 # Kotlin `build.gradle.kts` inside `Java/` adds Variable nodes).
-# The filter is applied to BOTH cgn and ref-gitnexus queries so the
+# The filter is applied to BOTH ecp and ref-gitnexus queries so the
 # per-lang totals reflect only nodes from real source files in that
 # language's grammar.
 EXTS: dict[str, list[str]] = {
@@ -77,7 +77,7 @@ def run(cmd: list[str]) -> str:
 
 
 def parse_rs(out: str) -> dict[str, int]:
-    """cgn cypher --format json → {kind: count}."""
+    """ecp cypher --format json → {kind: count}."""
     try:
         obj = json.loads(out)
     except json.JSONDecodeError:
@@ -123,7 +123,7 @@ def cypher_rs_per_lang(lang: str) -> dict[str, int]:
         f"{_ext_filter_clause(lang)} "
         "RETURN n.kind AS kind, count(*) AS c ORDER BY c DESC"
     )
-    return parse_rs(run(["cgn", "cypher", "--repo", REPO, q, "--format", "json"]))
+    return parse_rs(run(["ecp", "cypher", "--repo", REPO, q, "--format", "json"]))
 
 
 def cypher_ref_per_lang(lang: str) -> dict[str, int]:
@@ -164,7 +164,7 @@ def sample_kind(lang: str, kind: str, n: int = 8, skip: int = 0) -> list[tuple[s
         f"MATCH (n) WHERE n.kind='{kind}' AND n.filePath STARTS WITH '{lang}/' "
         f"RETURN n.name, n.filePath SKIP {skip} LIMIT {n}"
     )
-    out = run(["cgn", "cypher", "--repo", REPO, q, "--format", "json"])
+    out = run(["ecp", "cypher", "--repo", REPO, q, "--format", "json"])
     try:
         return [(r[0], r[1]) for r in json.loads(out)["rows"]]
     except (json.JSONDecodeError, KeyError, IndexError):

@@ -1,8 +1,8 @@
 # AI Agent Interviews & Case Studies
 
-To understand how `cgn` performs in real-world autonomous workflows, we conduct regular "interviews" with the AI agents (Gemini CLI, Codex, etc.) that use it. These transcripts provide deep dives into performance, reliability, and architectural choices from the perspective of the primary consumer: the agent.
+To understand how `ecp` performs in real-world autonomous workflows, we conduct regular "interviews" with the AI agents (Gemini CLI, Codex, etc.) that use it. These transcripts provide deep dives into performance, reliability, and architectural choices from the perspective of the primary consumer: the agent.
 
-> **Naming note:** Older interview transcripts may use `gnx` or `graph-nexus`. Those are historical names; the current CLI and project name are `cgn` and Code Graph Nexus.
+> **Naming note:** Older interview transcripts use `gnx` / `graph-nexus` / `GitNexus` — historical names from the `gnx` era. The current CLI and project name are `ecp` and EgentCodePlexus.
 
 ## 📁 Interview Categories
 

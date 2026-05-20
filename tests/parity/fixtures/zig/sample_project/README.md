@@ -1,6 +1,6 @@
 # Zig Sample Project Fixture
 
-This fixture exercises the ZigProvider parser for cgn-analyzer.
+This fixture exercises the ZigProvider parser for ecp-analyzer.
 
 ## Files
 

@@ -1,4 +1,4 @@
-# Contributing to code-graph-nexus
+# Contributing to egent-code-plexus
 
 Thanks for your interest. To contribute:
 - Fork the repo and open a topic branch.

@@ -1,8 +1,8 @@
 # AI Agent 訪談紀錄與案例研究
 
-為了瞭解 `cgn` 在真實自主工作流中的表現，我們會定期對使用它的 AI Agent（如 Gemini CLI、Codex 等）進行「訪談」。這些對話紀錄從主要受眾（Agent）的角度，深入探討了效能、可靠性與架構選擇。
+為了瞭解 `ecp` 在真實自主工作流中的表現，我們會定期對使用它的 AI Agent（如 Gemini CLI、Codex 等）進行「訪談」。這些對話紀錄從主要受眾（Agent）的角度，深入探討了效能、可靠性與架構選擇。
 
-> **名稱註記：** 較早期的訪談紀錄可能使用 `gnx` 或 `graph-nexus`。這些是舊名稱；目前 CLI 與專案名稱為 `cgn` 與 Code Graph Nexus。
+> **名稱註記：** 較早期的訪談紀錄使用 `gnx` / `graph-nexus` / `GitNexus`，是 `gnx` 時代的舊名稱。目前 CLI 與專案名稱為 `ecp` 與 EgentCodePlexus。
 
 ## 📁 訪談分類
 

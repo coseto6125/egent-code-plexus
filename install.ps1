@@ -1,28 +1,28 @@
-# code-graph-nexus 一鍵安裝（Windows PowerShell 5.1+）
+# egent-code-plexus 一鍵安裝（Windows PowerShell 5.1+）
 #
-#   irm https://github.com/coseto6125/code-graph-nexus/releases/latest/download/install.ps1 | iex
-#   irm https://github.com/coseto6125/code-graph-nexus/releases/download/v0.2.0/install.ps1 | iex
+#   irm https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/coseto6125/egent-code-plexus/releases/download/v0.2.0/install.ps1 | iex
 #
 # 環境變數：
-#   $env:CGN_VERSION        指定版本（不含 v）。預設 latest。
-#   $env:CGN_INSTALL_DIR    安裝目錄。預設 $env:LOCALAPPDATA\Programs\cgn。
-#   $env:CGN_NO_VERIFY = 1  跳過 SHA256 驗證（不建議）。
-#   $env:CGN_FORCE_CARGO=1  跳過 release binary，強制走 `cargo install --git`。
+#   $env:ECP_VERSION        指定版本（不含 v）。預設 latest。
+#   $env:ECP_INSTALL_DIR    安裝目錄。預設 $env:LOCALAPPDATA\Programs\ecp。
+#   $env:ECP_NO_VERIFY = 1  跳過 SHA256 驗證（不建議）。
+#   $env:ECP_FORCE_CARGO=1  跳過 release binary，強制走 `cargo install --git`。
 #
 # 沒有 GitHub Release 或當前架構沒 prebuilt 時，會自動 fallback 到
 # `cargo install --git`（需要 cargo / rustup）。
 
 $ErrorActionPreference = 'Stop'
 
-$repo = 'coseto6125/code-graph-nexus'
-$bin  = 'cgn'
-$version = if ($env:CGN_VERSION) { $env:CGN_VERSION } else { 'latest' }
+$repo = 'coseto6125/egent-code-plexus'
+$bin  = 'ecp'
+$version = if ($env:ECP_VERSION) { $env:ECP_VERSION } else { 'latest' }
 
 # ---- 安裝目錄 ---- (resolved up-front so cargo fallback respects it too)
-if (-not $env:CGN_INSTALL_DIR) {
-    $installDir = Join-Path $env:LOCALAPPDATA "Programs\cgn"
+if (-not $env:ECP_INSTALL_DIR) {
+    $installDir = Join-Path $env:LOCALAPPDATA "Programs\ecp"
 } else {
-    $installDir = $env:CGN_INSTALL_DIR
+    $installDir = $env:ECP_INSTALL_DIR
 }
 
 function Invoke-CargoFallback([string]$reason) {
@@ -36,11 +36,11 @@ function Invoke-CargoFallback([string]$reason) {
     Write-Host "==> Falling back to ``cargo install --git`` (source build, may take a few minutes)"
 
     # Build into a private --root then move the .exe to $installDir so the
-    # cargo fallback honors CGN_INSTALL_DIR (the workspace package name is
+    # cargo fallback honors ECP_INSTALL_DIR (the workspace package name is
     # required now that more than one bin exists in the workspace).
     $buildRoot = Join-Path $env:TEMP ([System.IO.Path]::GetRandomFileName())
     try {
-        $cargoArgs = @('install', '--root', $buildRoot, '--git', "https://github.com/$repo", 'code-graph-nexus', '--bin', $bin, '--locked')
+        $cargoArgs = @('install', '--root', $buildRoot, '--git', "https://github.com/$repo", 'egent-code-plexus', '--bin', $bin, '--locked')
         if ($script:version -ne 'latest') {
             $cargoArgs += @('--tag', "v$($script:version.TrimStart('v'))")
         }
@@ -56,8 +56,8 @@ function Invoke-CargoFallback([string]$reason) {
     exit 0
 }
 
-if ($env:CGN_FORCE_CARGO -eq '1') {
-    Invoke-CargoFallback 'CGN_FORCE_CARGO=1 set'
+if ($env:ECP_FORCE_CARGO -eq '1') {
+    Invoke-CargoFallback 'ECP_FORCE_CARGO=1 set'
 }
 
 # ---- 偵測 ARCH → target triple ----
@@ -111,10 +111,10 @@ $ver = $tag.TrimStart('v')
 
 # ---- 預處理：檢查進程佔用 ----
 try {
-    $runningCgn = Get-Process -Name $bin -ErrorAction SilentlyContinue
-    if ($runningCgn) {
+    $runningEcp = Get-Process -Name $bin -ErrorAction SilentlyContinue
+    if ($runningEcp) {
         Write-Host "==> Found running $bin process. Attempting to stop..." -ForegroundColor Yellow
-        $runningCgn | Stop-Process -Force -ErrorAction SilentlyContinue
+        $runningEcp | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1 # 等待 OS 釋放文件鎖
     }
 } catch {
@@ -129,7 +129,7 @@ $archive = "$name.zip"
 $url     = "https://github.com/$repo/releases/download/$tag/$archive"
 $shaUrl  = "$url.sha256"
 
-$tmp = Join-Path $env:TEMP "cgn-install-$([guid]::NewGuid().ToString('N'))"
+$tmp = Join-Path $env:TEMP "ecp-install-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 try {
@@ -141,7 +141,7 @@ try {
         Invoke-CargoFallback "release asset for $target not found (tag $tag)"
     }
 
-    if ($env:CGN_NO_VERIFY -ne '1') {
+    if ($env:ECP_NO_VERIFY -ne '1') {
         Invoke-WebRequest -UseBasicParsing -Uri $shaUrl -OutFile (Join-Path $tmp "$archive.sha256")
         Write-Host "==> Verifying SHA256"
         $expected = (Get-Content (Join-Path $tmp "$archive.sha256") -Raw).Trim().Split()[0].ToLower()

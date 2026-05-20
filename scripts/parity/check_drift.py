@@ -2,7 +2,7 @@
 """Manual verification helper — `dump_per_lang_kinds.py` wrapper that
 prints a per-lang shift table against `final_baseline.txt`.
 
-Run from code-graph-nexus repo root before pushing a parser change:
+Run from egent-code-plexus repo root before pushing a parser change:
 
     python3 scripts/parity/check_drift.py
 
@@ -11,8 +11,8 @@ Eyeball the `shift` column:
   - Improvements (negative shift) are always OK.
   - Positive shifts that you *intended* (e.g. you tightened a capture)
     mean it's time to regenerate the baseline:
-        cgn admin drop --repo .sample_repo
-        cgn admin index --repo .sample_repo
+        ecp admin drop --repo .sample_repo
+        ecp admin index --repo .sample_repo
         python3 scripts/parity/dump_per_lang_kinds.py > scripts/parity/final_baseline.txt
     Commit the new baseline alongside the parser change.
   - Positive shifts you didn't expect → silent regression candidate.

@@ -1,0 +1,35 @@
+# Homebrew tap formula template for coseto6125/homebrew-tap.
+#
+# Release automation should replace:
+#   @VERSION@
+#   @SHA256_ARM64_DARWIN@
+#   @SHA256_X86_64_DARWIN@
+#
+# Expected GitHub Release assets:
+#   ecp-v@VERSION@-aarch64-apple-darwin.tar.gz
+#   ecp-v@VERSION@-x86_64-apple-darwin.tar.gz
+
+class GraphNexus < Formula
+  desc "Code intelligence graph CLI for LLM agents"
+  homepage "https://github.com/coseto6125/egent-code-plexus"
+  license "MIT OR Apache-2.0"
+  version "@VERSION@"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/coseto6125/egent-code-plexus/releases/download/v#{version}/ecp-v#{version}-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_ARM64_DARWIN@"
+    else
+      url "https://github.com/coseto6125/egent-code-plexus/releases/download/v#{version}/ecp-v#{version}-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_X86_64_DARWIN@"
+    end
+  end
+
+  def install
+    bin.install "ecp"
+  end
+
+  test do
+    system "#{bin}/ecp", "--version"
+  end
+end

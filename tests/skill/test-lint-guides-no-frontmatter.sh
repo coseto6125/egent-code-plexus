@@ -7,10 +7,10 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$ROOT/tools/lint-skill.sh"
 tmp=$(mktemp_test_dir)
 
-mkdir -p "$tmp/docs/skills/cgn-onboard/guides"
-cat > "$tmp/docs/skills/cgn-onboard/SKILL.md" <<'EOF'
+mkdir -p "$tmp/docs/skills/ecp-onboard/guides"
+cat > "$tmp/docs/skills/ecp-onboard/SKILL.md" <<'EOF'
 ---
-name: cgn-onboard
+name: ecp-onboard
 description: x
 when-to-use: y
 ---
@@ -19,18 +19,18 @@ when-to-use: y
 EOF
 
 # A guide with frontmatter → lint must fail
-cat > "$tmp/docs/skills/cgn-onboard/guides/01-install.md" <<'EOF'
+cat > "$tmp/docs/skills/ecp-onboard/guides/01-install.md" <<'EOF'
 ---
 name: install
 ---
 # install
 EOF
-assert_exit 1 bash "$LINT" "$tmp/docs/skills/cgn-onboard"
+assert_exit 1 bash "$LINT" "$tmp/docs/skills/ecp-onboard"
 
 # Remove frontmatter → passes
-cat > "$tmp/docs/skills/cgn-onboard/guides/01-install.md" <<'EOF'
+cat > "$tmp/docs/skills/ecp-onboard/guides/01-install.md" <<'EOF'
 # install
 EOF
-assert_exit 0 bash "$LINT" "$tmp/docs/skills/cgn-onboard"
+assert_exit 0 bash "$LINT" "$tmp/docs/skills/ecp-onboard"
 
 pass

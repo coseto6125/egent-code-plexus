@@ -1,7 +1,7 @@
 # verify-resolver report (py)
 
 Oracle records: 677
-Cgn records: 4299
+Ecp records: 4299
 
 ## Summary
 
@@ -10,13 +10,13 @@ Cgn records: 4299
 | TP (correct) | 34 |
 | FP_ghost (wrong target) | 78 |
 | FP_overmatch (Global with alts) | 1 |
-| FN_dangling (oracle resolved, cgn didn't) | 42 |
+| FN_dangling (oracle resolved, ecp didn't) | 42 |
 | tier_demoted (correct but fell back to Global) | 34 |
-| oracle_only (oracle imports cgn never saw) | 475 |
-| cgn_only same-file (excluded from diff) | 619 |
-| cgn_only other (no oracle counterpart) | 3316 |
+| oracle_only (oracle imports ecp never saw) | 475 |
+| ecp_only same-file (excluded from diff) | 619 |
+| ecp_only other (no oracle counterpart) | 3316 |
 
-## Per-tier breakdown (cgn side)
+## Per-tier breakdown (ecp side)
 
 | tier | TP | FP_ghost | FP_overmatch | tier_demoted | FN_dangling |
 |---|---|---|---|---|---|

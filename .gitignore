@@ -22,8 +22,8 @@ venv/
 CLAUDE.md
 .fastembed_cache/
 
-# --- Project Specific (CGN) ---
-/.cgn/
+# --- Project Specific (ECP) ---
+/.ecp/
 /.codegraph/
 /.gnx/
 /.sample_repo/

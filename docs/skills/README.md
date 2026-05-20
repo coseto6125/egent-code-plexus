@@ -11,8 +11,8 @@ There is no symlink or auto-sync hook by design — installing the skill on a
 new machine is a one-liner:
 
 ```bash
-mkdir -p ~/.claude/skills/cgn
-cp docs/skills/cgn.md ~/.claude/skills/cgn/SKILL.md
+mkdir -p ~/.claude/skills/ecp
+cp docs/skills/ecp.md ~/.claude/skills/ecp/SKILL.md
 ```
 
 When editing, change the repo copy first, commit, then propagate to
