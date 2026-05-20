@@ -234,7 +234,7 @@ pub struct RawTxScope {
 ### T1-4: Promote `owner_class` to `Node` struct (StrRef)
 
 **Touches:** `crates/ecp-core/src/graph.rs:228-235` — add `pub owner_class: Option<StrRef>`; builder interns via `string_pool.add()`
-**Pre:** T1-3
+**Pre:** T1-1 (14-lang owner_class plumbing — was T1-3 before D5 merge)
 **Test:** `tests/node_owner_class_field.rs` — rkyv round-trip
 **Perf:** `Option<StrRef>` = `Option<u32>` = 8B with niche. ~9k symbols × 8 = 72 KB negligible
 **Accuracy:** rkyv layout change → format bump in T1-7
@@ -305,7 +305,7 @@ pub struct RawTxScope {
 ### T1-12: Cleanup — remove sentinel + bool flags
 
 **Touches:** `rust/parser.rs:336-351` (`__impl_target__:Type`), `python/parser.rs:368-380` (`is_class_method` bool), class_membership fallback
-**Pre:** T1-3
+**Pre:** T1-1 (was T1-3 before D5 merge)
 **Test:** All 14 `owner_class_<lang>.rs` still pass + `no_impl_target_sentinel_regression.rs`
 **Accuracy:** Single source of truth
 
