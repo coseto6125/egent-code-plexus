@@ -41,6 +41,7 @@ tests/parity/fixtures/basic/.gitnexus-rs/
 crates/vendor/*/node_modules/
 crates/vendor/*/.git/
 crates/vendor/*/build/
+crates/vendor/**/package-lock.json
 
 # --- Local Backups & Temporary Files ---
 .local-backups-*/
