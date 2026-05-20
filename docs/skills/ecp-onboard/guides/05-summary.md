@@ -31,8 +31,9 @@ For each repo in `config_inventory.first_index.repos`:
 ecp admin index --repo <repo_path>
 ```
 
-Use `_shared/cli/<version>/admin-index.md` for exact flag syntax. If
-the version is missing, fall back to `ecp admin index --help`.
+Use `_shared/cli/admin-index.md` for exact flag syntax. If the
+reference card is missing or outdated, fall back to `ecp admin index
+--help` and treat its output as ground truth.
 
 On success, mark `status: done` in the inventory. On failure, follow
 the common-cause table → retry / change-method / skip.
@@ -48,31 +49,48 @@ ecp admin group add --repo <repo_path> <group_name>
 (See `_shared/cli/admin-group.md` for the exact subcommand
 shape — `add` vs `create` etc.)
 
-## Step 4: Write MCP configs
+## Step 4: Apply IDE integrations
 
 For each target in `config_inventory.mcp_targets` (user already
 consented in Phase 04 Step 5):
 
-- **Idempotency:** if the config file already exists, **merge** the
-  `ecp` entry into the existing `mcpServers` object rather than
-  overwriting the file. Use `jq` for JSON files.
-- **Backup:** before any write, copy the existing file to
-  `<path>.bak.<timestamp>`.
+- **Scripted IDEs (`mode: scripted`):** run the recorded `command`.
+  `ecp admin <agent> install` handles idempotency, backup, and
+  config-merging for you — the wizard does not touch the IDE config
+  file directly.
 
-```bash
-# Example: Claude Code
-target=~/.claude/.mcp.json
-if [[ -f "$target" ]]; then
-    cp "$target" "$target.bak.$(date +%s)"
-    jq '.mcpServers.ecp = {"command":"ecp","args":["admin","mcp","serve"]}' \
-        "$target" > "$target.tmp" && mv "$target.tmp" "$target"
-else
-    mkdir -p "$(dirname "$target")"
-    cat > "$target" <<'JSON'
-{ "mcpServers": { "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] } } }
-JSON
-fi
-```
+  ```bash
+  # claude / codex / gemini
+  $target.command
+  # e.g., ecp admin claude install mcp-server
+  ```
+
+  On success, mark `status: done` in the inventory. On failure,
+  surface stderr → consult the common-cause table → offer
+  retry / skip.
+
+- **Paste-snippet IDEs (`mode: paste-snippet`):** emit the snippet to
+  the user with its target path; the user pastes manually. Standard
+  `mcpServers` schema (Cursor, generic clients):
+
+  ```text
+  Paste into ~/.cursor/mcp.json (merge into the existing "mcpServers"
+  object if the file is non-empty):
+
+      {
+        "mcpServers": {
+          "ecp": {
+            "command": "ecp",
+            "args": ["admin", "mcp", "serve"]
+          }
+        }
+      }
+  ```
+
+  Mark `status: snippet-emitted` in the inventory once the snippet has
+  been shown. IDEs with a different schema (Zed `context_servers`,
+  Continue.dev mixed config) — look up the exact shape in the IDE's
+  docs at apply time rather than guessing.
 
 ## Step 5: Persist summary
 
@@ -104,8 +122,9 @@ generated_at: {ISO 8601 timestamp}
 - [ ] skipped — single-repo workflow
 
 ## Phase 04 mcp
-- [x] wrote ~/.claude/.mcp.json (Claude Code)
-- [x] wrote ~/.cursor/mcp.json (Cursor)
+- [x] ran `ecp admin claude install mcp-server`
+- [x] ran `ecp admin gemini install skills`
+- [x] emitted paste snippet for ~/.cursor/mcp.json (Cursor)
 
 ## Phase 05 summary
 - [x] this file
@@ -150,6 +169,4 @@ Last session got to Phase {N}. What would you like to do?
 - Resume from Phase {N+1}
 - Redo a specific phase (which?)
 - Start over (this will overwrite the summary)
-```
-rwrite the summary)
 ```

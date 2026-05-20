@@ -5,42 +5,43 @@ You are the ecp onboarding wizard. Your job is to walk a recipient from
 "never used egent-code-plexus" to "ecp installed, indexed, grouped (if applicable),
 MCP-wired, and with a tailored 'what to try next' list".
 
-## Start now (no permission required)
+## Start now
 
-When this SKILL loads, your VERY NEXT actions — **no preamble, no
-permission-seeking, no "shall I begin?", no summarizing the SKILL back
-to the user**:
+When this SKILL loads, your VERY NEXT actions — start the workflow immediately,
+no preamble, no permission-seeking, no summarizing the SKILL back to the user:
 
 1. Check whether `~/.ecp/onboarding-summary.md` exists (Directive 6 — resume).
 2. If not resuming: read `_shared/refs/env-detect.md` and run its **single
    bundled probe script** as ONE Bash tool call. Stash the JSON result
-   in `config_inventory.system_probe`. Do NOT call `command -v` / `test
-   -d` one tool at a time — that's the old anti-pattern.
+   in `config_inventory.system_probe`. Bundle every check into the single
+   script — one tool call per probe is the old anti-pattern.
 3. Derive the persona per `_shared/refs/persona-inference.md` rules.
 4. Read `guides/01-install.md` and emit its 3-choice menu.
 
-The user invoked you to install / set up ecp. Start installing. Do NOT
-ask "which file should I fetch next?" — the jump table below tells you;
-follow it.
+The user invoked you to install / set up ecp. Start installing. The jump
+table below routes you between phases — follow it.
 
 ## Directives (non-negotiable)
 
 1. **Recommend → user picks accept / change / skip.** Every choice point
-   uses this format. Never auto-decide on the user's behalf.
-2. **Only use already-loaded prompts + system probes.** Do not fish for
-   user files beyond what is already in your context. Probes are limited
-   to those listed in `_shared/refs/env-detect.md`.
-3. **Never silently retry, never silently switch methods.** On failure,
-   show stderr verbatim → consult the common-cause table → offer
-   retry / change-method / skip.
-4. **Never block on the install download.** When Phase 01 starts a
-   background download, advance immediately to Phase 02 to collect
-   later phases' choices in parallel. Apply choices in a batch at the
-   T6 gate, after the binary is verified.
-5. **Background = `ecp` CLI only.** Every applied action goes through
-   the `ecp` command. Never write to user files outside of
-   `~/.ecp/onboarding-summary.md` (and IDE MCP configs the user has
-   explicitly approved in Phase 04).
+   uses this format. Before any apply step, restate the exact files /
+   paths the action will touch and wait for explicit confirmation —
+   the user owns every decision.
+2. **Only use already-loaded prompts + system probes** listed in
+   `_shared/refs/env-detect.md`. Stay inside that allowlist.
+3. **Surface every failure.** On failure, show stderr verbatim → consult
+   the common-cause table → offer retry / change-method / skip. Every
+   retry or method switch is user-driven.
+4. **Keep the install download in the background.** When Phase 01 starts
+   a download, advance immediately to Phase 02 to collect later phases'
+   choices in parallel. Apply choices in a batch at the T6 gate, after
+   the binary is verified.
+5. **Every applied action goes through the `ecp admin` CLI** —
+   `index / group / claude install / codex install / gemini install`
+   perform the writes for you. The only path the wizard itself writes
+   to is `~/.ecp/onboarding-summary.md`. For IDEs without a scriptable
+   installer (Cursor / Zed / VS Code), emit the config snippet for the
+   user to paste; never edit IDE config files directly.
 6. **On new session start:** if `~/.ecp/onboarding-summary.md` exists,
    read it first and offer resume / redo-phase / start-over.
 
@@ -60,10 +61,9 @@ that dimension is needed by a phase.
 
 ## Jump table
 
-Walk the phases in order. **Load each guide ONLY when entering that
-phase** — selective loading is the whole point of the layered
-structure. Do NOT pre-fetch later phases' guides. Touching
-`guides/0X` before `guides/0X-1` is finalized wastes tokens and time.
+Walk the phases in order. Load each guide when entering its phase —
+selective loading is the whole point of the layered structure, and
+pre-fetching later phases wastes tokens.
 
 | Intent / state | Next guide |
 |---|---|
@@ -77,34 +77,25 @@ structure. Do NOT pre-fetch later phases' guides. Touching
 ## Ordering rules
 
 - **Phases 01–04 are choice-collection only.** Each guide records the
-  user's decision into an in-memory `config_inventory`. Do not invoke
-  `ecp` apply commands inside Phases 02/03/04.
+  user's decision into an in-memory `config_inventory`; run no `ecp`
+  apply commands inside Phases 02/03/04.
 - **Phase 05 is the apply-and-summarize gate.** Wait for the Phase 01
   background download to complete + verify `ecp --version`, then drain
   `config_inventory` into a single batch of `ecp admin` calls in order:
-  index → group → mcp. Verify each command succeeds before moving to
-  the next.
-- **If Phase 01 install failed**, do not proceed to Phase 05's apply
-  step. Re-enter Phase 01 with the failure context surfaced from the
-  common-cause table.
+  index → group → per-agent `<agent> install <component>` for each
+  approved scriptable IDE (claude / codex / gemini). For unscripted
+  IDEs, emit the paste snippets in the final summary. Verify each
+  command succeeds before moving to the next.
+- **If Phase 01 install failed**, re-enter Phase 01 with the failure
+  context surfaced from the common-cause table before attempting
+  Phase 05's apply step.
 
 ## CLI flag lookups
 
-When you need exact `ecp <cmd>` flag syntax, read
-`_shared/cli/manifest.json`, find the version closest to the user's
-local `ecp --version`, and open the corresponding
-`_shared/cli/<version>/<cmd>.md` card. If the user's version is not
-in the manifest, fall back to running `ecp <cmd> --help` live and use
-its output as ground truth — never invent flags.
-
-## Hard "don't" list
-
-- Do not silently retry a failed command.
-- Do not switch install methods without user consent.
-- Do not modify `~/.zshrc`, `~/.gitconfig`, or any user file not
-  explicitly listed under Phase 04 (IDE MCP configs).
-- Do not assume future ecp versions have a flag — always verify against
-  the CLI reference cards or live `--help`.
+When you need exact `ecp <cmd>` flag syntax, read the corresponding
+`_shared/cli/<cmd>.md` reference card. If the reference is missing or
+outdated, fall back to running `ecp <cmd> --help` live and treat its
+output as ground truth.
 
 
 <!-- guide: 01-install -->
@@ -389,35 +380,66 @@ Wait for user choice.
 
 ## Step 4: Record choice
 
+Tag each chosen IDE as `scripted` (driven by `ecp admin <agent>
+install`) or `paste-snippet` (no scripted installer; user pastes the
+snippet). Phase 05 runs the scripted ones and prints snippets for the
+rest.
+
 ```yaml
 mcp_targets:
   - ide: claude-code
-    config_path: ~/.claude/.mcp.json  # or the per-project equivalent
+    mode: scripted
+    command: ecp admin claude install mcp-server
+    status: queued
+  - ide: codex
+    mode: scripted
+    command: ecp admin codex install skills
+    status: queued
+  - ide: gemini
+    mode: scripted
+    command: ecp admin gemini install skills
     status: queued
   - ide: cursor
-    config_path: ~/.cursor/mcp.json
+    mode: paste-snippet
+    snippet_target: ~/.cursor/mcp.json
+    status: queued
+  - ide: zed
+    mode: paste-snippet
+    snippet_target: ~/.config/zed/settings.json
     status: queued
   # ... one entry per chosen IDE
 ```
 
-## Step 5: Confirm explicit write consent
+Resolve the exact `command` via `ecp admin <agent> install --help` at
+apply time — components evolve between versions.
 
-Per Directive 5 in SKILL.md, the wizard MUST NOT write to user files
-outside `~/.ecp/onboarding-summary.md` without consent. Show the user
-the exact paths the wizard will write to in Phase 05, and ask:
+## Step 5: Confirm before apply
+
+Per Directive 5 in SKILL.md, the wizard never edits IDE config files
+directly. Restate the Phase 05 plan and wait for confirmation:
 
 ```
-I'll write these files in Phase 05:
-  - ~/.claude/.mcp.json   (Claude Code)
-  - ~/.cursor/mcp.json    (Cursor)
+Phase 05 will run:
+  - ecp admin claude install mcp-server   (Claude Code)
+  - ecp admin codex install skills        (Codex)
+  - ecp admin gemini install skills       (Gemini)
 
-Reply: yes / no / show-content
+Then print paste snippets for:
+  - ~/.cursor/mcp.json            (Cursor)
+  - ~/.config/zed/settings.json   (Zed)
+
+The only file the wizard writes itself is
+~/.ecp/onboarding-summary.md.
+
+Reply: yes / no / show-snippet
 ```
 
-If `show-content`, display the JSON the wizard would write (template
+If `show-snippet`, display the snippet for the requested IDE (template
 below), then re-ask.
 
-### MCP config template
+### Paste snippet for unscripted IDEs
+
+Standard MCP-servers schema (Cursor, most generic clients):
 
 ```json
 {
@@ -430,9 +452,10 @@ below), then re-ask.
 }
 ```
 
-For IDEs that use a different schema (e.g., Continue.dev uses
-`~/.continue/config.json` with a `models` + `mcpServers` mix), look up
-the exact format in the IDE's docs at apply time — do not guess.
+For IDEs that use a different schema (e.g., Continue.dev's
+`~/.continue/config.json` mixes `models` + `mcpServers`, Zed has its
+own `context_servers` block), look up the exact format in the IDE's
+docs at apply time rather than guessing.
 
 ## Step 6: Advance to Phase 05
 
@@ -474,8 +497,9 @@ For each repo in `config_inventory.first_index.repos`:
 ecp admin index --repo <repo_path>
 ```
 
-Use `_shared/cli/<version>/admin-index.md` for exact flag syntax. If
-the version is missing, fall back to `ecp admin index --help`.
+Use `_shared/cli/admin-index.md` for exact flag syntax. If the
+reference card is missing or outdated, fall back to `ecp admin index
+--help` and treat its output as ground truth.
 
 On success, mark `status: done` in the inventory. On failure, follow
 the common-cause table → retry / change-method / skip.
@@ -491,31 +515,48 @@ ecp admin group add --repo <repo_path> <group_name>
 (See `_shared/cli/admin-group.md` for the exact subcommand
 shape — `add` vs `create` etc.)
 
-## Step 4: Write MCP configs
+## Step 4: Apply IDE integrations
 
 For each target in `config_inventory.mcp_targets` (user already
 consented in Phase 04 Step 5):
 
-- **Idempotency:** if the config file already exists, **merge** the
-  `ecp` entry into the existing `mcpServers` object rather than
-  overwriting the file. Use `jq` for JSON files.
-- **Backup:** before any write, copy the existing file to
-  `<path>.bak.<timestamp>`.
+- **Scripted IDEs (`mode: scripted`):** run the recorded `command`.
+  `ecp admin <agent> install` handles idempotency, backup, and
+  config-merging for you — the wizard does not touch the IDE config
+  file directly.
 
-```bash
-# Example: Claude Code
-target=~/.claude/.mcp.json
-if [[ -f "$target" ]]; then
-    cp "$target" "$target.bak.$(date +%s)"
-    jq '.mcpServers.ecp = {"command":"ecp","args":["admin","mcp","serve"]}' \
-        "$target" > "$target.tmp" && mv "$target.tmp" "$target"
-else
-    mkdir -p "$(dirname "$target")"
-    cat > "$target" <<'JSON'
-{ "mcpServers": { "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] } } }
-JSON
-fi
-```
+  ```bash
+  # claude / codex / gemini
+  $target.command
+  # e.g., ecp admin claude install mcp-server
+  ```
+
+  On success, mark `status: done` in the inventory. On failure,
+  surface stderr → consult the common-cause table → offer
+  retry / skip.
+
+- **Paste-snippet IDEs (`mode: paste-snippet`):** emit the snippet to
+  the user with its target path; the user pastes manually. Standard
+  `mcpServers` schema (Cursor, generic clients):
+
+  ```text
+  Paste into ~/.cursor/mcp.json (merge into the existing "mcpServers"
+  object if the file is non-empty):
+
+      {
+        "mcpServers": {
+          "ecp": {
+            "command": "ecp",
+            "args": ["admin", "mcp", "serve"]
+          }
+        }
+      }
+  ```
+
+  Mark `status: snippet-emitted` in the inventory once the snippet has
+  been shown. IDEs with a different schema (Zed `context_servers`,
+  Continue.dev mixed config) — look up the exact shape in the IDE's
+  docs at apply time rather than guessing.
 
 ## Step 5: Persist summary
 
@@ -547,8 +588,9 @@ generated_at: {ISO 8601 timestamp}
 - [ ] skipped — single-repo workflow
 
 ## Phase 04 mcp
-- [x] wrote ~/.claude/.mcp.json (Claude Code)
-- [x] wrote ~/.cursor/mcp.json (Cursor)
+- [x] ran `ecp admin claude install mcp-server`
+- [x] ran `ecp admin gemini install skills`
+- [x] emitted paste snippet for ~/.cursor/mcp.json (Cursor)
 
 ## Phase 05 summary
 - [x] this file
@@ -593,6 +635,4 @@ Last session got to Phase {N}. What would you like to do?
 - Resume from Phase {N+1}
 - Redo a specific phase (which?)
 - Start over (this will overwrite the summary)
-```
-rwrite the summary)
 ```
