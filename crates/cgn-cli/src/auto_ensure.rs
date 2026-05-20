@@ -306,6 +306,7 @@ fn any_source_newer_than(
     graph_mtime: SystemTime,
 ) -> io::Result<bool> {
     let graph_canonical = fs::canonicalize(graph_path).ok();
+    let sidecar_canonical = fs::canonicalize(head_sha_sidecar_path(graph_path)).ok();
 
     for entry in WalkBuilder::new(root)
         .hidden(false)
@@ -320,9 +321,10 @@ fn any_source_newer_than(
         .filter_map(Result::ok)
         .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
     {
-        let skip = graph_canonical
-            .as_deref()
-            .is_some_and(|gc| fs::canonicalize(entry.path()).ok().as_deref() == Some(gc));
+        let entry_canonical = fs::canonicalize(entry.path()).ok();
+        let skip = entry_canonical.as_deref().is_some_and(|entry| {
+            graph_canonical.as_deref() == Some(entry) || sidecar_canonical.as_deref() == Some(entry)
+        });
         if skip {
             continue;
         }

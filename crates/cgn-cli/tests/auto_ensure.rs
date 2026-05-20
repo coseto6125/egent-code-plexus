@@ -247,6 +247,7 @@ fn shortcut_falls_through_when_sidecar_sha_mismatch() {
     let _head_sha = git_init_with_commit(tmp.path());
 
     let graph_path = tmp.path().join("graph.bin");
+    std::thread::sleep(Duration::from_millis(20));
     write_valid_empty_graph(&graph_path);
     // Write a sidecar with a bogus SHA (40 hex zeros).
     write_head_sha_sidecar_with_sha(&graph_path, "0".repeat(40).as_str());
