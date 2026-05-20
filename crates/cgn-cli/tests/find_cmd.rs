@@ -279,7 +279,7 @@ fn find_all_returns_all_matches() {
 }
 
 #[test]
-fn find_skips_test_files_by_default() {
+fn find_fuzzy_skips_test_files_by_default() {
     let (_dir, graph) = build_graph(
         &[NodeSpec {
             name: "my_func",
@@ -290,7 +290,7 @@ fn find_skips_test_files_by_default() {
         }],
         &[],
     );
-    let out = run_find(&graph, &["my_func", "--format", "json"]);
+    let out = run_find(&graph, &["my_func", "--mode", "fuzzy", "--format", "json"]);
     assert!(out.status.success());
     let json = parse_json_stdout(&out);
     // Test file only — should not be returned by default
@@ -309,7 +309,17 @@ fn find_include_tests_surfaces_test_hits() {
         }],
         &[],
     );
-    let out = run_find(&graph, &["my_func", "--include-tests", "--format", "json"]);
+    let out = run_find(
+        &graph,
+        &[
+            "my_func",
+            "--mode",
+            "fuzzy",
+            "--include-tests",
+            "--format",
+            "json",
+        ],
+    );
     assert!(out.status.success());
     let json = parse_json_stdout(&out);
     assert_eq!(json["found"], true);

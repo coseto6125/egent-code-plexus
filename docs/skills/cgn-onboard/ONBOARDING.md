@@ -488,8 +488,8 @@ For each group in `config_inventory.groups`:
 cgn admin group add --repo <repo_path> <group_name>
 ```
 
-(See `_shared/cli/<version>/admin-group.md` for the exact subcommand
-shape — `add` vs `create` etc. depending on version.)
+(See `_shared/cli/admin-group.md` for the exact subcommand
+shape — `add` vs `create` etc.)
 
 ## Step 4: Write MCP configs
 
@@ -593,4 +593,6 @@ Last session got to Phase {N}. What would you like to do?
 - Resume from Phase {N+1}
 - Redo a specific phase (which?)
 - Start over (this will overwrite the summary)
+```
+rwrite the summary)
 ```

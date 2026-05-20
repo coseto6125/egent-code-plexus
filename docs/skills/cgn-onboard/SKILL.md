@@ -98,12 +98,10 @@ structure. Do NOT pre-fetch later phases' guides. Touching
 
 ## CLI flag lookups
 
-When you need exact `cgn <cmd>` flag syntax, read
-`_shared/cli/manifest.json`, find the version closest to the user's
-local `cgn --version`, and open the corresponding
-`_shared/cli/<version>/<cmd>.md` card. If the user's version is not
-in the manifest, fall back to running `cgn <cmd> --help` live and use
-its output as ground truth — never invent flags.
+When you need exact `cgn <cmd>` flag syntax, read the corresponding
+`_shared/cli/<cmd>.md` reference card. If the reference is missing or
+outdated, fall back to running `cgn <cmd> --help` live and use its output
+as ground truth — never invent flags.
 
 ## Hard "don't" list
 

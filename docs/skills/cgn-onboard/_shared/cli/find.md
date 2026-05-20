@@ -24,7 +24,7 @@ Options:
           Return all matches instead of the single top-ranked one. Affects `exact` and `fuzzy` modes; `bm25` always returns top-K buckets
 
       --include-tests
-          Include hits from test files in `exact` / `fuzzy` modes (skipped by default). `bm25` mode bucketises into a separate `tests` array and is unaffected by this flag
+          Include hits from test files in `fuzzy` mode (skipped by default). `exact` mode automatically searches tests without needing this flag. `bm25` mode bucketises into a separate `tests` array and is unaffected by this flag
 
       --kind <KIND>
           Filter by node kinds (csv: function,method,class,...)

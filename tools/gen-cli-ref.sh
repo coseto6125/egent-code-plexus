@@ -10,8 +10,7 @@
 #   output-dir   = docs/skills/cgn-onboard/_shared/cli
 #
 # Output layout:
-#   <output-dir>/<version>/<cmd>.md            (one per top-level + selected sub-commands)
-#   <output-dir>/manifest.json                  {"latest": "<ver>", "versions": [...]}
+#   <output-dir>/<cmd>.md            (one per top-level + selected sub-commands)
 
 set -euo pipefail
 
@@ -27,11 +26,7 @@ OUT="${2:-docs/skills/cgn-onboard/_shared/cli}"
 
 [[ -n "$CGN" ]] || { echo "gen-cli-ref: no cgn binary found" >&2; exit 1; }
 
-# Version: "cgn 0.2.0" → 0.2.0  (also matches "cgn 9.9.9-test")
-VER=$("$CGN" --version | awk '{print $2}')
-[[ -n "$VER" ]] || { echo "gen-cli-ref: could not determine cgn version" >&2; exit 1; }
-
-mkdir -p "$OUT/$VER"
+mkdir -p "$OUT"
 
 # Commands to capture: top-level + curated sub-commands actually used in guides.
 # When new guides reference a new command, add it here.
@@ -46,29 +41,15 @@ declare -a SUB=(
 )
 
 for cmd in "${TOPLEVEL[@]}"; do
-    out="$OUT/$VER/$cmd.md"
+    out="$OUT/$cmd.md"
     timeout 10 "$CGN" "$cmd" --help > "$out" 2>/dev/null || { echo "warn: $cmd has no --help; skipped" >&2; rm -f "$out"; }
 done
 
 for entry in "${SUB[@]}"; do
     parent="${entry%%:*}"
     child="${entry##*:}"
-    out="$OUT/$VER/${parent}-${child}.md"
+    out="$OUT/${parent}-${child}.md"
     timeout 10 "$CGN" "$parent" "$child" --help > "$out" 2>/dev/null || { echo "warn: $parent $child has no --help; skipped" >&2; rm -f "$out"; }
 done
 
-# Build/update manifest.json. No `generated_at` field — git history tracks
-# regen events; embedding a timestamp produces a spurious diff on every run.
-manifest="$OUT/manifest.json"
-if [[ -f "$manifest" ]]; then
-    versions=$(jq -r --arg v "$VER" '(.versions // []) + [$v] | unique' "$manifest")
-else
-    versions=$(jq -n --arg v "$VER" '[$v]')
-fi
-jq -n \
-    --arg v "$VER" \
-    --argjson vs "$versions" \
-    '{latest: $v, versions: $vs}' \
-    > "$manifest"
-
-echo "gen-cli-ref: wrote $OUT/$VER/ + manifest"
+echo "gen-cli-ref: wrote updated references to $OUT/"

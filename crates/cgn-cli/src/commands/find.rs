@@ -84,8 +84,9 @@ pub struct FindArgs {
     #[arg(long)]
     pub all: bool,
 
-    /// Include hits from test files in `exact` / `fuzzy` modes
-    /// (skipped by default). `bm25` mode bucketises into a separate
+    /// Include hits from test files in `fuzzy` mode
+    /// (skipped by default). `exact` mode automatically searches tests
+    /// without needing this flag. `bm25` mode bucketises into a separate
     /// `tests` array and is unaffected by this flag.
     #[arg(long)]
     pub include_tests: bool,
@@ -268,7 +269,11 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             }
 
             let file = &graph.files[node.file_idx.to_native() as usize];
-            if !args.include_tests && matches!(file.category, ArchivedFileCategory::Test) {
+            let is_exact = matches!(mode, FindMode::Exact);
+            if !args.include_tests
+                && !is_exact
+                && matches!(file.category, ArchivedFileCategory::Test)
+            {
                 return None;
             }
 
