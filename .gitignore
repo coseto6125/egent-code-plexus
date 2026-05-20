@@ -55,3 +55,6 @@ crates/vendor/*/build/
 /refactor_*.py
 /optimize_*.py
 /update_*.py
+
+# Cache and node artifacts
+.codegraph

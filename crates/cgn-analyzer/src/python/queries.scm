@@ -9,11 +9,7 @@
 ;; Classes
 (class_definition
   name: (identifier) @class.name
-  superclasses: (argument_list (identifier) @heritage)) @class
-
-(class_definition
-  name: (identifier) @class.name
-  superclasses: (argument_list (attribute) @heritage)) @class
+  superclasses: (argument_list (expression) @heritage)) @class
 
 (class_definition
   name: (identifier) @class.name) @class
@@ -76,5 +72,5 @@
 ;; Routes
 (call
   function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|route|add_route|add_url_rule|add_api_route|GET|POST|PUT|DELETE|PATCH|ROUTE)$"))
-  arguments: (argument_list (string) @route.path)
+  arguments: (argument_list [(string) @route.path (MISSING) @route.path])
 ) @route.call

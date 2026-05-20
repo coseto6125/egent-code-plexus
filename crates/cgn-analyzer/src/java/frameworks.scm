@@ -35,6 +35,9 @@
     (method_declaration
       (modifiers
         [(marker_annotation name: (identifier) @_verb)
-         (annotation name: (identifier) @_verb)]
+         (annotation
+           name: (identifier) @_verb
+           arguments: (annotation_argument_list
+             [(string_literal) @spring.route.path (MISSING) @spring.route.path])?)]
         (#match? @_verb "^(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)$"))
       name: (identifier) @spring.route.handler)))

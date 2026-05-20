@@ -79,7 +79,7 @@
 (scoped_call_expression
   scope: (name) @route.scope
   name: (name) @route.method (#match? @route.method "(?i)^(get|post|put|delete|patch)$")
-  arguments: (arguments . (argument [(string) (encapsed_string)] @route.path))
+  arguments: (arguments . (argument [(string) (encapsed_string) (MISSING)] @route.path))
 ) @route.call
 
 ;; Chained-call routes — `Route::middleware(['auth'])->get('/path', ...)`,
@@ -91,7 +91,7 @@
 (member_call_expression
   object: (_) @route.chained.object
   name: (name) @route.method (#match? @route.method "(?i)^(get|post|put|delete|patch)$")
-  arguments: (arguments . (argument [(string) (encapsed_string)] @route.path))
+  arguments: (arguments . (argument [(string) (encapsed_string) (MISSING)] @route.path))
 ) @route.chained.call
 
 ;; ---- Laravel ----

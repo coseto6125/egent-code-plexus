@@ -80,12 +80,12 @@
 ) @export
 
 ;; Classes — heritage lives inside class_heritage, not directly on class_declaration.
-;; extends_clause carries `value: identifier`; implements_clause lists type_identifiers.
+;; extends_clause carries `value: expression`; implements_clause lists type_identifiers.
 ;; Both extend and implements are optional and can coexist in one class_heritage block.
 (class_declaration
   (decorator)* @decorator
   name: (type_identifier) @class.name
-  (class_heritage (extends_clause value: (identifier) @heritage))?
+  (class_heritage (extends_clause value: (expression) @heritage))?
   (class_heritage (implements_clause (type_identifier) @heritage))?
 ) @class
 
@@ -93,7 +93,7 @@
   (class_declaration
     (decorator)* @decorator
     name: (type_identifier) @class.name
-    (class_heritage (extends_clause value: (identifier) @heritage))?
+    (class_heritage (extends_clause value: (expression) @heritage))?
     (class_heritage (implements_clause (type_identifier) @heritage))?
   ) @class
 ) @export
@@ -105,7 +105,7 @@
 (abstract_class_declaration
   (decorator)* @decorator
   name: (type_identifier) @class.name
-  (class_heritage (extends_clause value: (identifier) @heritage))?
+  (class_heritage (extends_clause value: (expression) @heritage))?
   (class_heritage (implements_clause (type_identifier) @heritage))?
 ) @class
 
@@ -113,7 +113,7 @@
   (abstract_class_declaration
     (decorator)* @decorator
     name: (type_identifier) @class.name
-    (class_heritage (extends_clause value: (identifier) @heritage))?
+    (class_heritage (extends_clause value: (expression) @heritage))?
     (class_heritage (implements_clause (type_identifier) @heritage))?
   ) @class
 ) @export
@@ -247,6 +247,6 @@
 (call_expression
   function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|GET|POST|PUT|DELETE|PATCH)$"))
   arguments: (arguments
-    (string (string_fragment) @route.path)
+    [(string (string_fragment) @route.path) (MISSING) @route.path]
     (identifier)? @route.handler)
 ) @route.call

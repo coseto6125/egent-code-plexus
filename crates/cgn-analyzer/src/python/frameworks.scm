@@ -6,7 +6,7 @@
 (call
   function: (identifier) @_depends_fn (#eq? @_depends_fn "Depends")
   arguments: (argument_list
-    (identifier) @fastapi.depends.target))
+    [(identifier) @fastapi.depends.target (MISSING) @fastapi.depends.target]))
 
 ;; FastAPI: route decorators `@app.<method>("/path")` on function definitions.
 ;; Captures the decorator object (app/router), HTTP method, and decorated function name.
@@ -36,19 +36,7 @@
         .
         (string)
         .
-        (identifier) @django.url.handler))))
-
-(assignment
-  left: (identifier) @_pats (#eq? @_pats "urlpatterns")
-  right: (list
-    (call
-      function: (identifier) @_path_fn (#eq? @_path_fn "path")
-      arguments: (argument_list
-        .
-        (string)
-        .
-        (attribute
-          attribute: (identifier) @django.url.handler)))))
+        [(identifier) @django.url.handler (attribute attribute: (identifier) @django.url.handler) (MISSING) @django.url.handler]))))
 
 ;; Django signals — Pattern A: `@receiver(<signal>, ...)` decorator on def.
 ;; Capture signal name (first positional arg) and decorated function name.

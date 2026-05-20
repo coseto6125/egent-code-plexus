@@ -20,12 +20,12 @@
 ;; Classes
 (class_declaration
   name: (identifier) @name.class
-  (class_heritage (identifier) @heritage)?) @class
+  (class_heritage (expression) @heritage)?) @class
 
 (export_statement
   declaration: (class_declaration
     name: (identifier) @name.class
-    (class_heritage (identifier) @heritage)?) @class) @export
+    (class_heritage (expression) @heritage)?) @class) @export
 
 ;; Variables — module-level only (var / let / const not assigned to an arrow function).
 ;; Anchored to direct children of `program`; function-body / block-scope locals
@@ -108,7 +108,7 @@
 ;; parser (clean_route_path) strips non-route strings so Map.get("key") is suppressed.
 (call_expression
   function: (member_expression property: (property_identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|use|GET|POST|PUT|DELETE|PATCH)$"))
-  arguments: (arguments (string (string_fragment) @route.path))
+  arguments: (arguments [(string (string_fragment) @route.path) (MISSING) @route.path])
 ) @route.call
 
 ;; ---- framework queries ----
@@ -131,7 +131,7 @@
     property: (property_identifier) @express.route.method
     (#match? @express.route.method "^(get|post|put|delete|patch|all|options|head)$"))
   arguments: (arguments
-    (string) @express.route.path
+    [(string) @express.route.path (MISSING) @express.route.path]
     [
       (identifier)
       (member_expression)

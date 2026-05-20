@@ -7,7 +7,7 @@
   function: (field_expression
     field: (field_identifier) @_route (#eq? @_route "route"))
   arguments: (arguments
-    (string_literal) @axum.route.path
+    [(string_literal) @axum.route.path (MISSING) @axum.route.path]
     (call_expression
       function: (identifier) @axum.route.method
       arguments: (arguments
@@ -20,6 +20,8 @@
   (attribute_item
     (attribute
       (identifier) @actix.route.method
+      arguments: (token_tree
+        [(string_literal) @actix.route.path (MISSING) @actix.route.path])?
       (#match? @actix.route.method "^(get|post|put|delete|patch|head)$")))
   .
   (function_item

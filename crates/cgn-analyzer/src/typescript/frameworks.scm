@@ -8,7 +8,7 @@
     property: (property_identifier) @express.route.method
     (#match? @express.route.method "^(get|post|put|delete|patch|use)$"))
   arguments: (arguments
-    (string) @express.route.path
+    [(string) @express.route.path (MISSING) @express.route.path]
     (identifier) @express.route.handler))
 
 ;; NestJS: @Controller-decorated class with @Get/@Post/@Put/@Delete/@Patch
@@ -63,4 +63,4 @@
     function: (identifier) @nestjs.decorator.verb
     (#match? @nestjs.decorator.verb "^(Get|Post|Put|Delete|Patch|Options|Head|All)$")
     arguments: (arguments
-      (string (string_fragment) @nestjs.decorator.path))))
+      [(string (string_fragment) @nestjs.decorator.path) (MISSING) @nestjs.decorator.path])))
