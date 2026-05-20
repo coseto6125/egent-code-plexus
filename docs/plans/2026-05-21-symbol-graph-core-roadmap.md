@@ -63,6 +63,16 @@ Two key revisions from Haiku review (5/5 agreement):
 1. **Check breakdown shown structurally** — `checks: name✓ type✓ class✗ bidir✓` per candidate. Tier label alone is insufficient; LLMs need to see WHICH checks passed to calibrate trust.
 2. **`requires_verification: true` is a structural field** (JSON/TOON), NOT prose. Agent execution engines can gate programmatically on this field; prose labels get ignored under loop pressure.
 
+**Why `rename` hard-exclude is safe (not signal loss):**
+
+Agents using `ecp rename --symbol users.email --new-name email_address` do NOT lose visibility on possible mirrors — they have multiple deterministic fallback paths:
+
+1. **`grep`** — `grep -rn "users\.email" .` finds string-literal references the AST can't see
+2. **`ecp find-schema-bindings users.email`** — explicit pull-CLI returns LIKELY_RELATED + BLIND_SPOT candidates with check breakdown
+3. **`ecp inspect users.email`** — shows `Possible mirrors` section (heuristic visible, just not actioned)
+
+Rename hard-excludes heuristic edges because **mutation cannot be undone**, not because heuristic info is unavailable. Agent workflow: rename → verify scope via grep / find-schema-bindings → propagate manually if confirmed.
+
 ### 2.3 Tier model
 
 Internal confidence computed but never surfaced. Maps to tier label:
@@ -588,10 +598,13 @@ Format identical, varies only in (lib, lang) tuple. Each is **one PR**. Coverage
 
 ### T-H2: `rename` hard-exclude heuristic
 
-**Touches:** `crates/ecp-cli/src/commands/rename.rs` — when planner walks inbound edges, skip `rel_type.is_heuristic()`. Add assertion test that fails if heuristic edge ever reaches the file-collection set
+**Touches:** `crates/ecp-cli/src/commands/rename.rs` — when planner walks inbound edges, skip `rel_type.is_heuristic()`. Add assertion test that fails if heuristic edge ever reaches the file-collection set.
+
+Output post-rename includes a one-line guidance: `// post-rename hint: grep "<old-name>" or 'ecp find-schema-bindings <old-name>' to verify heuristic mirrors`. Keeps agent workflow obvious without making rename do guesswork.
+
 **Pre:** T0-1
-**Test:** `tests/rename_excludes_heuristic.rs` — `MirrorsField` from `User.email` Pydantic → `User.email` SQLAlchemy; renaming Pydantic does NOT touch SQLAlchemy file
-**Accuracy:** **Rename is 100% deterministic. Heuristic edges represent guesses; rename mutates files and cannot guess.**
+**Test:** `tests/rename_excludes_heuristic.rs` — `MirrorsField` from `User.email` Pydantic → `User.email` SQLAlchemy; renaming Pydantic does NOT touch SQLAlchemy file. Output contains grep/find-schema-bindings hint line
+**Accuracy:** **Rename is 100% deterministic. Heuristic edges represent guesses; rename mutates files and cannot guess.** Agent workflow for cross-schema rename: (1) `ecp rename` deterministic core, (2) `ecp find-schema-bindings` or `grep` to enumerate heuristic mirrors, (3) per-mirror manual rename decision
 
 ### T-H3: `inspect` separate heuristic section
 
