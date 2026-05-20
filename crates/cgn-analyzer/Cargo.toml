@@ -12,7 +12,7 @@ sha2 = "0.11.0"
 
 [dependencies]
 cgn-core = { path = "../cgn-core", version = "0.2.4" }
-phf = { version = "0.11", features = ["macros"] }
+phf = { version = "0.13", features = ["macros"] }
 tree-sitter = "0.25"
 tree-sitter-typescript = "*"
 rayon = "1.10.0"
