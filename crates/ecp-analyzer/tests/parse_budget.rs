@@ -3,6 +3,15 @@ use tree_sitter::Parser;
 
 use ecp_analyzer::parse_budget::{parse_with_budget, ParseBudget};
 
+// Match the production `ecp` binary's allocator (`crates/ecp-cli/src/main.rs`).
+// Without this, Windows test binaries fall back to HeapAlloc, which is
+// significantly slower than mimalloc for tree-sitter's alloc-heavy parse
+// path — `generous_budget_completes_large_source` then flakes around the
+// 1s budget edge while production users on the same hardware comfortably
+// stay under it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn rust_parser() -> Parser {
     let mut p = Parser::new();
     p.set_language(&tree_sitter_rust::LANGUAGE.into())

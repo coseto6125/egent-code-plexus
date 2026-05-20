@@ -806,6 +806,7 @@ dependencies = [
  "blake3",
  "ecp-core",
  "ignore",
+ "mimalloc",
  "phf 0.13.1",
  "rayon",
  "regex",
