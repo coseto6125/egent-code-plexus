@@ -345,6 +345,9 @@ pub(crate) fn sync_all_files(dir: &Path) -> io::Result<()> {
         .filter_map(Result::ok)
     {
         if entry.file_type().is_file() {
+            if entry.file_name() == ".build.lock" {
+                continue;
+            }
             let f = File::open(entry.path())?;
             f.sync_all()?;
         }

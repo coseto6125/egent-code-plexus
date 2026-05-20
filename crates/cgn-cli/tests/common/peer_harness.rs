@@ -161,6 +161,10 @@ impl Drop for PeerHarness {
                     use nix::unistd::Pid;
                     let _ = kill(Pid::from_raw(w.pid as i32), Signal::SIGTERM);
                 }
+                #[cfg(windows)]
+                {
+                    let _ = child.kill();
+                }
                 let _ = child.wait();
             }
         }
