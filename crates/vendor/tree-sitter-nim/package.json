@@ -15,7 +15,7 @@
   "devDependencies": {
     "eslint": "^9.29.0",
     "nan": "^2.27.0",
-    "node-gyp": "^11.2.0"
+    "node-gyp": "^12.3.0"
   },
   "dependencies": {
     "node-gyp-build": "^4.8.4"
