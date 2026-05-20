@@ -30,7 +30,8 @@
 | `Node.uid: u64` (was `StrRef`) | 8B inline; `FxHashMap<u64, NodeId>` 1-cycle lookup; resolver ~15× faster |
 | `xxh3_64` streaming, no alloc | Already in deps (parse_cache); deterministic, cross-version stable |
 | Canonical bytes | `[kind_tag \0 path \0 owner_class_or_empty \0 name]` — locked by golden test |
-| Collision policy | `<10⁷ symbols` → ~2.7e-6 global risk. Builder triple-check `(uid, name, owner_class)` on insert; panic+log on real collision |
+| Collision risk at scale (D2) | `10⁷ symbols → 2.7e-6` / `5×10⁷ → 6.9e-5` / `10⁸ → 2.8e-4`. Acceptable to ecp's deployment scale ceiling |
+| Collision recovery (D1) | Builder triple-check `(name, owner_class, path)` on insert. On detected collision → emit `BlindSpot { kind: "uid-collision", offending_nodes: [...] }` + continue indexing. **No panic in background indexer**; user sees "N symbols couldn't be uniquely identified, run `ecp blindspots`" in CLI summary |
 
 ### 2.2 Surface model — hybrid by command + structural verification
 
@@ -63,15 +64,22 @@ Two key revisions from Haiku review (5/5 agreement):
 1. **Check breakdown shown structurally** — `checks: name✓ type✓ class✗ bidir✓` per candidate. Tier label alone is insufficient; LLMs need to see WHICH checks passed to calibrate trust.
 2. **`requires_verification: true` is a structural field** (JSON/TOON), NOT prose. Agent execution engines can gate programmatically on this field; prose labels get ignored under loop pressure.
 
-**Why `rename` hard-exclude is safe (not signal loss):**
+**Why `rename` action excludes heuristic, but count surfaces (revised):**
 
-Agents using `ecp rename --symbol users.email --new-name email_address` do NOT lose visibility on possible mirrors — they have multiple deterministic fallback paths:
+Rename hard-excludes heuristic edges from the **mutation set** because mutation cannot be undone. However, the rename **output** must surface the COUNT of heuristic mirrors via structural field `heuristic_mirrors_not_touched: N` — without this, the LLM has no trigger to investigate and assumes rename is complete.
+
+The split:
+- **Action**: 100% deterministic. `rename` only mutates files reachable via non-heuristic edges
+- **Output**: surfaces `heuristic_mirrors_not_touched: N` count when N>0, with hint to `ecp find-schema-bindings` or `--show-heuristic-mirrors`
+- **Flag** `--show-heuristic-mirrors`: opt-in expansion to include full candidate list in output (same format as `find-schema-bindings`)
+
+Agents have multiple deterministic fallback paths regardless:
 
 1. **`grep`** — `grep -rn "users\.email" .` finds string-literal references the AST can't see
-2. **`ecp find-schema-bindings users.email`** — explicit pull-CLI returns LIKELY_RELATED + BLIND_SPOT candidates with check breakdown
-3. **`ecp inspect users.email`** — shows `Possible mirrors` section (heuristic visible, just not actioned)
+2. **`ecp find-schema-bindings users.email`** — explicit pull-CLI returns LIKELY_RELATED + BLIND_SPOT candidates
+3. **`ecp inspect users.email`** — shows `Possible mirrors` section (heuristic visible, not actioned)
 
-Rename hard-excludes heuristic edges because **mutation cannot be undone**, not because heuristic info is unavailable. Agent workflow: rename → verify scope via grep / find-schema-bindings → propagate manually if confirmed.
+The count surface is the trigger; the follow-up commands are the means.
 
 ### 2.3 Tier model
 
@@ -80,8 +88,10 @@ Internal confidence computed but never surfaced. Maps to tier label:
 | Internal confidence | Tier | Default visibility |
 |---|---|---|
 | `≥ 0.85` (all 4 strict checks) | `LIKELY_RELATED` | shown |
-| `0.65 – 0.85` (3/4 checks) | `BLIND_SPOT` | hidden unless `--include-blindspot` |
-| `< 0.65` (≤2/4) | not emitted | — |
+| `0.70 – 0.85` (3/4 checks) | `BLIND_SPOT` | hidden unless `--include-blindspot` |
+| `< 0.70` (≤2/4) | not emitted | — |
+
+Floor at `0.70` is set by CLAUDE.md `Heuristic edges with <0.7 confidence must be tagged, not promoted` — anything sub-0.70 must drop, not surface. Confidence band `0.65 – 0.70` is intentionally empty; if the four-check scoring math ever produces a value in that range, the candidate is treated as "not emitted" rather than BlindSpot.
 
 Strict checks differ per edge type:
 
@@ -112,11 +122,11 @@ Architect outputs initially used legacy `cgn-*` crate names. The rename `cgn →
 
 ## 4. Phase 0 — Schema preamble (blocks everything)
 
-### T0-1: Append schema variants + heuristic classifier
+### T0-1: Append schema variants + heuristic classifier + structural ordering test
 
 **Touches:**
-- `crates/ecp-core/src/graph.rs:75-132` — append to `NodeKind`: `SchemaField`, `EventTopic`, `TransactionScope`
-- `crates/ecp-core/src/graph.rs:206-224` — append to `RelType`: `MirrorsField`, `Publishes`, `Subscribes`, `EventTopicMirror`, `OpensTxScope`
+- `crates/ecp-core/src/graph.rs` — **append AFTER `Impl` (currently discriminant 23, last variant of `NodeKind`)**: `SchemaField` (24), `EventTopic` (25), `TransactionScope` (26). Do NOT insert mid-enum (rkyv discriminants are append-only per CLAUDE.md).
+- `crates/ecp-core/src/graph.rs` — **append AFTER `Fetches` (currently discriminant 11, last variant of `RelType`)**: `MirrorsField` (12), `Publishes` (13), `Subscribes` (14), `EventTopicMirror` (15), `OpensTxScope` (16)
 - Extend `NodeKind::as_str` + `RelType::from_str` for new variants
 - Add `RelType::is_heuristic` accessor:
 
@@ -131,7 +141,16 @@ impl RelType {
 Each new variant carries doc comment naming its LLM-query benefit (per CLAUDE.md `graph.rs:101-103` precedent).
 
 **Pre:** none
-**Test:** `crates/ecp-core/tests/graph_schema.rs` — `from_str` round-trip per variant; hard-code discriminant indices to lock append-only
+**Test:** `crates/ecp-core/tests/graph_schema.rs`:
+- `test_from_str_roundtrip_all_new_variants`
+- `test_node_kind_discriminants_locked` — hard-code expected `as u8` value for every variant (SchemaField=24, EventTopic=25, TransactionScope=26); locks append-only
+- `test_rel_type_discriminants_locked` — same (MirrorsField=12, Publishes=13, Subscribes=14, EventTopicMirror=15, OpensTxScope=16)
+- `test_is_heuristic_classification` — `MirrorsField.is_heuristic()` and `EventTopicMirror.is_heuristic()` return true; all others false
+
+**Plus structural ordering gate** (`crates/ecp-cli/tests/heuristic_filter_structural.rs`):
+- `test_impact_default_hides_mirrors_field` — build a synthetic graph containing a `MirrorsField` edge → `ecp impact <node>` default output MUST NOT contain that edge
+- **This test fails until T-H1's filter exists** — making the T-H1 → T4-7 ordering structurally enforced rather than procedural. PRs merging T4-7 before T-H1 will fail CI
+
 **Perf:** enum widening only
 **Surface:** internal
 
@@ -142,22 +161,25 @@ Each new variant carries doc comment naming its LLM-query benefit (per CLAUDE.md
 - Same file ~line 92 — three new `Raw*` structs with rkyv derives
 
 ```rust
+// D4: All identifier-bearing fields use StrRef (string-pool indirect, 4-byte
+// offset+len) from day-1 to avoid per-parse heap allocs on the hot path.
+// `framework` / `source_pattern` / `lib` stay &'static str (compile-time constants).
 pub struct RawSchemaField {
-    pub name: String,
+    pub name: StrRef,
     pub type_class: SchemaType,         // String / Int / Float / Bool / Datetime / Json / Other
-    pub owner_class: String,
+    pub owner_class: StrRef,
     pub framework: &'static str,
     pub span: (u32, u32, u32, u32),
 }
 pub struct RawEventTopic {
-    pub topic_literal: Option<String>,  // None = dynamic; emit BlindSpot
+    pub topic_literal: Option<StrRef>,  // None = dynamic; emit BlindSpot
     pub direction: PubSub,
     pub lib: &'static str,
-    pub enclosing_fn: String,
+    pub enclosing_fn: StrRef,
     pub span: (u32, u32, u32, u32),
 }
 pub struct RawTxScope {
-    pub enclosing_fn: String,
+    pub enclosing_fn: StrRef,
     pub source_pattern: &'static str,   // "java-transactional" / "django-atomic" / ...
     pub span: (u32, u32, u32, u32),
 }
@@ -172,13 +194,28 @@ pub struct RawTxScope {
 
 ## 5. Feature #1 — Symbol Identity with FQN (12 tasks)
 
-### T1-1: Add `owner_class` to `RawNode` IR + scaffold
+### T1-1: Add `owner_class` to `RawNode` IR + 14-lang plumbing (merged with former T1-3)
 
-**Touches:** `crates/ecp-core/src/analyzer/types.rs` (RawNode), `crates/ecp-analyzer/src/post_process/class_membership.rs`
+**D5 resolution:** T1-1 and former T1-3 collapsed into single PR. CLAUDE.md "Single-language tests for a multi-language change get rejected" applies to `RawNode` (shared parser IR). Cannot split owner_class addition across two PRs.
+
+**Touches:**
+- `crates/ecp-core/src/analyzer/types.rs` — add `RawNode.owner_class: Option<StrRef>` (StrRef per D4; no `String` intermediate stage)
+- 14 parsers each emit `owner_class` for methods/properties:
+  - Rust: `rust/parser.rs:336-351` — replace `__impl_target__:Type` sentinel with direct field
+  - Python: `python/parser.rs:368-380` — return class name from `is_class_method()` (or new helper)
+  - TypeScript: `typescript/parser.rs` — capture class-name at emit, not via post-pass span containment
+  - JavaScript, Java, Kotlin, C#, Go (receiver type), PHP, Ruby, Swift, C (struct via function-pointer assignment), C++, Dart — same shape
+- `crates/ecp-analyzer/src/post_process/class_membership.rs` — keep as fallback only for langs without direct parser emission (none expected after this lands)
 **Pre:** none
-**Test:** `tests/owner_class_scaffold.rs` — `RawNode.owner_class` field exists, defaults `None`; `class_membership` post-pass populates for Python/TS/JS (3-lang min; full 14 in T1-3)
-**Perf:** IR-only, `Option<String>` heap-pointer; promoted to `StrRef` in T1-4
-**Accuracy:** No semantic change yet — owner_class read but not hashed
+**Test:** `tests/owner_class_<lang>.rs` × 14 + aggregate `owner_class_parity_14lang.rs`
+- Per-lang: two methods of same name on different classes → owner_class distinguishes
+- C special (OQ-2 → struct type): `static struct foo_ops = { .open = my_open }` → `my_open.owner_class = Some("foo_ops_t")`
+- Aggregate: `from_str` on `NodeKind` vs `RelType` (Rust corpus) both present, owner_class differs
+- Negative: module-level functions get `owner_class = None`
+**Perf:** Parser hot path; reuse existing tree-sitter capture buffers, no extra walks. StrRef interning amortized via `string_pool.add()`
+**Accuracy:** 14-lang parity per CLAUDE.md mandate
+
+### ~~T1-3~~ (merged into T1-1)
 
 ### T1-2: Streaming xxh3 UID helper (zero-alloc)
 
@@ -192,15 +229,7 @@ pub struct RawTxScope {
 **Perf:** `Xxh3::new().update(...).digest()` streaming. `\0` separator (cannot appear in any valid input)
 **Accuracy:** Canonical byte order locked by golden test
 
-### T1-3: 14-lang parser owner_class extraction
-
-**Touches:** per-parser owner_class emission for Rust (`rust/parser.rs:336-351`), Python (`python/parser.rs:368-380`), TS, JS, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart
-**Pre:** T1-1, T1-2
-**Test:** `tests/owner_class_<lang>.rs` × 14 + aggregate `owner_class_parity_14lang.rs`
-- Per-lang: two methods of same name on different classes → owner_class distinguishes
-- C special: `static struct foo_ops = { .open = my_open }` → `my_open.owner_class = Some("foo_ops_t")` (struct TYPE, see OQ-2)
-**Perf:** Parser hot path; reuse tree-sitter capture buffers, no extra walks
-**Accuracy:** 14-lang parity per CLAUDE.md mandate
+### ~~T1-3~~ — Merged into T1-1 per D5
 
 ### T1-4: Promote `owner_class` to `Node` struct (StrRef)
 
@@ -212,13 +241,15 @@ pub struct RawTxScope {
 
 ### T1-5: Switch `Node.uid` from `StrRef` to `u64`
 
-**Touches:** `crates/ecp-core/src/graph.rs:228-235` (uid type); `crates/ecp-analyzer/src/resolution/builder.rs:344-368` (drop `uid_buf` + StringPool insert; call `uid::compute(kind, path, owner_class, name)`)
-**Pre:** T1-2, T1-4
+**Touches:** `crates/ecp-core/src/graph.rs:228-235` (uid type); `crates/ecp-analyzer/src/resolution/builder.rs:344-368` (drop `uid_buf` + StringPool insert; call `uid::compute(kind, path, owner_class, name)`); builder gains `(name, owner_class, path) → uid` triple-check `FxHashMap`; on detected collision → emit `BlindSpot { kind: "uid-collision" }` + log, **do NOT panic** (D1)
+**Pre:** T1-2, T1-4 (T1-1 already 14-lang per D5 merge)
 **Test:** `tests/uid_u64_builder.rs`:
 - `test_builder_uid_matches_helper` for every Node
 - `test_real_collisions_resolved_in_ecp_self` — index ecp itself, `default×3` in config.rs now 3 distinct u64s
-**Perf:** Eliminates 1 string-pool insert + 1 StrRef lookup per node per query — load-bearing win
-**Accuracy:** Collision risk 2.7e-6 acceptable; contingency triple-check in T1-11
+- `test_assert_unique_uid_in_self_index` — index ecp itself, walk every Node, assert `FxHashMap<u64, NodeId>::insert` never reports collision (guards window before T1-11 wires the triple-check map)
+- `test_synthetic_collision_emits_blindspot_not_panic` — force hash collision via test harness, assert BlindSpot record + indexer completes (no panic, no abort)
+**Perf:** Eliminates 1 string-pool insert + 1 StrRef lookup per node per query — load-bearing win. Triple-check map insert+lookup amortized O(1)
+**Accuracy:** Collision risk 2.7e-6 @ 10⁷ / 6.9e-5 @ 5×10⁷ / 2.8e-4 @ 10⁸ (D2 keeps u64). Graceful BlindSpot recovery (D1)
 
 ### T1-6: Resolver `HashMap<String, NodeId>` → `FxHashMap<u64, NodeId>`
 
@@ -227,13 +258,21 @@ pub struct RawTxScope {
 **Test:** `tests/resolver_fxhash_uid.rs` + `benches/resolver_lookup.rs` asserting ≥2× speedup vs baseline
 **Perf:** Hot path for `compute_hits` (find.rs:964). u64 key = zero string hash, zero String alloc
 
-### T1-7: Bump `GRAPH_FORMAT_VERSION` 4 → 5 + auto-reindex
+### T1-7: Bump `GRAPH_FORMAT_VERSION` 4 → 5 + auto-reindex + rollback safety
 
-**Touches:** `crates/ecp-core/src/graph.rs` const; `crates/ecp-cli/src/engine.rs:122-170` version-check branch (inline blocking reindex on v4 detect)
-**Pre:** T1-5, T1-6
-**Test:** `tests/format_upgrade_v4_to_v5.rs` — synthetic v4 graph.bin → `ecp inspect foo` → reindex spawned, result `format_version == 5`
-**Perf:** One-time post-upgrade cost
-**⚠️ FORMAT BUMP**
+**Touches:**
+- `crates/ecp-core/src/graph.rs` const bump
+- `crates/ecp-cli/src/engine.rs:122-170` — distinguish "stale v5" (overlay path OK) from "version-incompatible v4" (full rebuild required)
+- `crates/ecp-cli/src/auto_ensure.rs:37-42` — when `header_compatible == false`, must call `build_l2`, NOT `apply_l1_overlay_updates` (overlay against v4-incompatible base = corruption)
+- Rollback safety: before triggering reindex, atomically rename `graph.bin` → `graph.bin.v4.bak`. If reindex exits non-zero, surface hard CLI error with reindex stderr — do NOT loop into another auto-ensure on the same broken state. Keep `.v4.bak` until next successful reindex completes (manual recovery path)
+
+**Pre:** T1-4 (Node struct layout change already breaks format), T1-5, T1-6
+**Test:** `tests/format_upgrade_v4_to_v5.rs`:
+- `test_v4_graph_triggers_full_rebuild_not_overlay` — synthetic v4 graph.bin → `ecp inspect foo` → `build_l2` invoked, NOT overlay
+- `test_v5_graph_no_reindex` — fresh v5, no reindex
+- `test_reindex_failure_keeps_backup_and_errors` — simulated reindex exit-1 → `.v4.bak` exists, CLI returns non-zero with stderr, no auto-ensure loop
+**Perf:** One-time post-upgrade cost; no degraded-mode fallback. Backup file kept until next successful reindex
+**⚠️ FORMAT BUMP** — note T1-4 alone (adding owner_class field) already changes rkyv Node layout, so T1-7 must land in a PR-pair with T1-4 OR T1-7 must precede T1-4 in merge order
 
 ### T1-8: FQN render in `inspect`
 
@@ -277,7 +316,7 @@ pub struct RawTxScope {
 ### T7-1: `parse_to_fragment()` real implementation
 
 **Touches:** `crates/ecp-cli/src/session/overlay_writer.rs:163-166` (stub returning `vec![]`); reuse `extract_symbols()` line 276-299
-**Pre:** none
+**Pre:** T0-2 (R1-F3: T7-1's fragment format must include the new `schema_fields`/`event_topics`/`tx_scopes` vectors from T0-2, otherwise T7-7 parity gate fails on struct shape mismatch between incremental and full-reindex paths)
 **Test:** `tests/parse_to_fragment.rs` — Python 3-def file → 3 fragments with correct byte spans; empty file → empty; syntax error → partial; 14-lang fixture coverage
 **Perf:** Reuse existing parser instance
 **Accuracy:** Fragment boundaries byte-equal to full-reindex symbol boundaries
@@ -297,14 +336,18 @@ pub struct RawTxScope {
 **Perf:** Once per incremental batch, not per query
 **Accuracy:** Without this, per-file incremental produces stale Calls edges (proven by ref-gitnexus PR #1479 review)
 
-### T7-4: Wire `reanalyze_files()` into agent commands + hook
+### T7-4: Wire `reanalyze_files()` into `auto_ensure` (centralized refresh path)
 
-**Touches:** call sites in `commands/{impact,inspect,find}.rs`; hook `pre_tool_use.rs:23`
+**Touches:** `crates/ecp-cli/src/auto_ensure.rs:37-42` `ensure_index` / `ensure_fresh` — **NOT** `pre_tool_use::handle`. The hook does BM25 search per tool-use; reanalyze must hook at the per-CLI-invocation refresh layer (auto_ensure), not per-tool-use.
+
+The path: `main.rs:203` calls `ensure_fresh` once per CLI command. When `header_compatible == false` OR overlay says dirty, `ensure_fresh` currently calls `apply_l1_overlay_updates`. T7-4 changes the dirty-Stale branch to invoke `reanalyze_files(repo, scope, rel_paths)` for the changed-file set when (a) the change is incremental (overlay knows), or (b) fall through to full `build_l2` when version-incompatible. **Per CLAUDE.md hot-path rule: `pre_tool_use::handle` stays untouched.**
+
 **Pre:** T7-1, T7-2, T7-3
 **Test:** `tests/incremental_wired.rs`:
-- `test_edit_file_then_impact_sees_new_symbol_without_full_reindex`
-- `test_pre_tool_use_hook_no_alloc_hot_path` — `dhat` asserts zero new allocs ⚠️ **CLAUDE.md hot-path**
-**Perf:** Dirty-set check = single FxHashSet lookup, no I/O, no String build. `compute_hits` reads overlay via rkyv archived access only
+- `test_edit_file_then_impact_sees_new_symbol_without_full_reindex` — touch file, run `ecp impact`, new symbol visible, no full-reindex marker fires
+- `test_auto_ensure_dispatches_incremental_for_overlay_dirty` — assert `reanalyze_files` was called (AtomicUsize counter under `#[cfg(test)]`), `build_l2` was not
+- `test_pre_tool_use_hook_unchanged_path` — verify `pre_tool_use::handle` does not gain new code in this PR
+**Perf:** All work happens inside `auto_ensure::ensure_fresh`, called at most once per CLI invocation. `pre_tool_use::handle` hot-path untouched
 
 ### T7-5: Working-tree overlay zero-copy merge
 
@@ -317,9 +360,14 @@ pub struct RawTxScope {
 
 **Touches:** `crates/ecp-cli/src/reanalyze.rs:67` — diff per-symbol hashes (T7-2); re-run only changed-hash subset
 **Pre:** T7-2, T7-4
-**Test:** `tests/incremental_skips_unchanged_symbols.rs` — mtime touch skips resolver; 1-of-5 edit processes 1; AtomicUsize counter
+**Test:** `tests/incremental_skips_unchanged_symbols.rs`:
+- `test_mtime_touch_skips_resolver` — `touch file.py`, AtomicUsize counter confirms resolver not invoked
+- `test_one_of_five_edit_only_resolves_one`
+- `test_skip_guarded_when_import_set_changes` (a)
+- `test_skip_guarded_when_shadow_candidates_change` (b)
+- `test_skip_guarded_when_schemafield_bucket_membership_changes` (c, R3-F7) — when `UserResponse.email` added in unchanged file's bucket, peer `UserRequest.email`'s MirrorsField re-emission must trigger even though `UserRequest.email`'s body hash didn't move
 **Perf:** Largest incremental win
-**Accuracy:** Must NOT skip when (a) file's import set changed OR (b) shadow-candidates set changed — explicit guards
+**Accuracy:** Must NOT skip when (a) file's import set changed OR (b) shadow-candidates set changed OR **(c, R3-F7) SchemaFieldIndex / EventTopicIndex bucket gains or loses members** — re-emit mirrors for affected buckets only (O(k²) k<10), not full N² re-bind
 
 ### T7-7: Incremental vs full-reindex parity gate (CI)
 
@@ -398,10 +446,15 @@ pub struct RawTxScope {
 - `crates/ecp-analyzer/src/resolution/builder.rs` — new Pass-2 sub-pass `pass2_emit_schema_field_mirrors` after framework+fanout (~line 1440)
 - Bucketing: `FxHashMap<(name_lowercase, SchemaType), SmallVec<[NodeId; 4]>>` (inline cap=4 covers >90% buckets)
 - Per pair `(a, b)` in bucket: score 4 strict checks; ≥4 → MirrorsField confidence 0.9; 3/4 → BlindSpot record `kind: "schema-field-mirror-candidate"`; ≤2 → drop silently
+- **Cluster semantics (D3)** — when k ≥ 3 fields share the same `(name, type, class)` triple and all pair-checks pass, the bidirectional-top-1 check is considered satisfied for **every pair in the cluster**, not just k=2. Implementation: if bucket subset has uniform `(name, type, owner_class)`, emit MirrorsField pairwise (k×(k-1)/2 edges) at 0.9. Without this, k=3+ same-class same-name fields all drop to BLIND_SPOT (silent accuracy loss)
 **Pre:** T0-1, T0-2, T4-2..T4-6
-**Test:** `tests/schema_field_mirror.rs` — Pydantic `User.email: str` + SQLA `User.email = Column(String)` → MirrorsField 0.9; Pydantic `User.email` + protobuf `User.user_email` (3/4: name differs) → BlindSpot
-**Perf:** O(N) bucket build + O(k²) per bucket (k<10). Offline only, never on hot paths
-**Accuracy:** Four-point strict rubric is the entire confidence model — no learned weights, fully deterministic
+**Test:** `tests/schema_field_mirror.rs`:
+- `test_pair_strict_match_emits_mirrorsfield` — Pydantic `User.email: str` + SQLA `User.email = Column(String)` → MirrorsField 0.9
+- `test_three_way_cluster_all_pairs_emit_mirrorsfield` (D3) — Pydantic `User.email` + SQLA `User.email` + protobuf `User.email` → 3 pairs, each 0.9
+- `test_partial_match_emits_blindspot` — Pydantic `User.email` + protobuf `User.user_email` (3/4: name differs) → BlindSpot
+- `test_different_class_name_blindspot` — `User.email` + `Admin.email` same type → BlindSpot
+**Perf:** O(N) bucket build + O(k²) per bucket (k<10). Cluster check adds one extra pass over bucket for uniform-triple detection: still O(k²). Offline only, never on hot paths
+**Accuracy:** Four-point strict rubric + cluster semantics for k≥3. Fully deterministic
 **Surface:** edge stored; hidden by default in `impact`/`rename`; shown in `inspect` and `find-schema-bindings`
 
 ### T4-8: `ecp find-schema-bindings` CLI
@@ -444,7 +497,10 @@ Normalization rules (locked):
 6. Camel→snake per segment (`OrderCreated` → `order/created`)
 
 **Pre:** none
-**Test:** `tests/event_topic_normalize.rs` — 30-row table-driven covering all 6 transformations
+**Test:** `tests/event_topic_normalize.rs` — 30-row table-driven covering all 6 transformations. **Include negative documentation cases** (R3-F6):
+- `order-created` (hyphens) and `order/created` (slashes) BOTH normalize to `order/created` — **this is intentional**; consumers using different separators ARE expected to mirror. Locked by `test_hyphen_and_slash_collapse_to_same_canonical`
+- `eu-west-1.order.created` → `eu-west-1/order/created`, `eu-west-2.order.created` → `eu-west-2/order/created` — distinct (correct, region prefixes preserved)
+- `tenant-123.order.created` and `tenant-456.order.created` — distinct (correct, tenant IDs preserved)
 **Perf:** Pure function
 
 ### T5-1: `RawEventTopic` collector + flush
@@ -520,9 +576,14 @@ Format identical, varies only in (lib, lang) tuple. Each is **one PR**. Coverage
 ### T5-33: `EventTopicMirror` heuristic edges
 
 **Touches:** `crates/ecp-analyzer/src/resolution/builder.rs` — new Pass-2 sub-pass `pass2_emit_event_topic_mirrors` after T4-7. Group `EventTopic` by `canonicalize(topic_literal)`; within group, Publisher↔Subscriber pairs with differing raw literals get `EventTopicMirror` confidence 0.9. Cross-lib pairs explicit (Kafka↔RabbitMQ same normalized name → mirror)
-**Pre:** T5-1, T5-2..T5-31 subset
-**Test:** `tests/event_topic_mirror.rs` — Kafka producer `"order.created"` + RabbitMQ consumer `"OrderCreated"` → both normalize to `order/created` → one mirror edge
-**Perf:** O(N) group + O(k²) intra-group (k<5 typical)
+
+**Cluster semantics (D3 parity with T4-7)**: when k≥3 EventTopic nodes share canonical key + direction-pair, emit pairwise (k×(k-1)/2 edges) at 0.9; do NOT silently drop to BLIND_SPOT just because top-1 is ambiguous in larger cluster
+**Pre:** T-H1 (per §10 sequencing — heuristic filter must exist); T5-1; **T5-33 subset gate (D7)**: at least 1 Publish detector + 1 Subscribe detector merged for each lib that the test fixture exercises. Concrete: Kafka needs T5-2 (Python Publish) AND any Kafka Subscribe detector; same for RabbitMQ/SQS/Celery/Redis. Does NOT require all 25 detectors merged
+**Test:** `tests/event_topic_mirror.rs`:
+- `test_kafka_to_rabbitmq_cross_lib_mirror` — Kafka producer `"order.created"` + RabbitMQ consumer `"OrderCreated"` → both normalize to `order/created` → one mirror edge
+- `test_three_way_event_cluster_emits_all_pairs` (D3) — 3 systems publishing/subscribing `order.created` → 3 mirror edges
+- `test_subset_gate_kafka_only` — only Kafka detectors merged; Kafka↔Kafka mirrors emit; no RabbitMQ mirrors expected
+**Perf:** O(N) group + O(k²) intra-group (k<5 typical). Pass runs once per offline reindex
 **Accuracy:** Edge `reason` carries normalized key + lib pair for verification
 **Surface:** heuristic, hybrid-routed per surface rules
 
@@ -596,15 +657,48 @@ Format identical, varies only in (lib, lang) tuple. Each is **one PR**. Coverage
 **Test:** `tests/impact_heuristic_filter.rs` — default does not traverse; `--include-heuristic` traverses with two sections never merged
 **Perf:** One extra `is_heuristic()` branch per edge in BFS — `const fn`, zero alloc
 
-### T-H2: `rename` hard-exclude heuristic
+### T-H2: `rename` hard-exclude heuristic (action) + structural count surface
 
-**Touches:** `crates/ecp-cli/src/commands/rename.rs` — when planner walks inbound edges, skip `rel_type.is_heuristic()`. Add assertion test that fails if heuristic edge ever reaches the file-collection set.
+**Touches:**
+- `crates/ecp-cli/src/commands/rename.rs` — when planner walks inbound edges, skip `rel_type.is_heuristic()`. Add assertion test that fails if heuristic edge ever reaches the file-collection set
+- Compute (do NOT traverse for action) the count of heuristic edges touching the renamed symbol; emit as structural field `heuristic_mirrors_not_touched: <N>` in output
+- New flag `--show-heuristic-mirrors` — opt-in expansion to embed full candidate list (same format as `find-schema-bindings`) in rename output
 
-Output post-rename includes a one-line guidance: `// post-rename hint: grep "<old-name>" or 'ecp find-schema-bindings <old-name>' to verify heuristic mirrors`. Keeps agent workflow obvious without making rename do guesswork.
+**Why count must surface (revised from prior draft):**
+
+Earlier draft had rename output stay silent on heuristic mirrors, relying on agent to remember to call `ecp find-schema-bindings`. **This is wrong** — silent output gives LLM no trigger, so it assumes rename is complete. Surfacing the count as a structural field:
+
+- Costs ~1 graph-edge filter pass (no action, no traversal of heuristic cascade)
+- Triggers agent investigation when `count > 0`
+- Action stays 100% deterministic (count is informational, never used to mutate)
+- Symmetric with hidden-edges pattern already established in T-H1's `hidden_heuristic_edges` field
+
+Default output:
+```
+Renamed:
+  - models/user.py:42
+  - tests/test_user.py:18
+heuristic_mirrors_not_touched: 3
+hint: "ecp find-schema-bindings User.email" or rerun with --show-heuristic-mirrors
+```
+
+With `--show-heuristic-mirrors`:
+```
+Renamed: [...]
+heuristic_mirrors:
+  - UserResponse.email   [LIKELY_RELATED]   checks: name✓ type✓ class✓ bidir✓
+                                              requires_verification: true
+  - Admin.email          [BLIND_SPOT]       checks: name✓ type✓ class✗ bidir✗
+                                              requires_verification: true
+```
 
 **Pre:** T0-1
-**Test:** `tests/rename_excludes_heuristic.rs` — `MirrorsField` from `User.email` Pydantic → `User.email` SQLAlchemy; renaming Pydantic does NOT touch SQLAlchemy file. Output contains grep/find-schema-bindings hint line
-**Accuracy:** **Rename is 100% deterministic. Heuristic edges represent guesses; rename mutates files and cannot guess.** Agent workflow for cross-schema rename: (1) `ecp rename` deterministic core, (2) `ecp find-schema-bindings` or `grep` to enumerate heuristic mirrors, (3) per-mirror manual rename decision
+**Test:** `tests/rename_excludes_heuristic.rs`:
+- `test_rename_does_not_touch_heuristic_files` — `MirrorsField` from `User.email` Pydantic → `User.email` SQLAlchemy; renaming Pydantic does NOT touch SQLAlchemy file
+- `test_rename_output_surfaces_count_default` — output has `heuristic_mirrors_not_touched: 1` structural field
+- `test_rename_show_flag_embeds_candidate_list` — `--show-heuristic-mirrors` output has full candidate list with check breakdown
+- `test_rename_zero_count_omits_hint_line` — when no heuristic mirrors exist, count=0 field shown but no hint line (avoid noise)
+**Accuracy:** **Rename mutation is 100% deterministic. Heuristic count is informational — it never participates in the file-collection set.**
 
 ### T-H3: `inspect` separate heuristic section
 
@@ -650,11 +744,11 @@ Per CLAUDE.md priority-1 "per-query latency <30ms" + "hot path no new alloc / fi
 
 | # | Question | Recommendation |
 |---|---|---|
-| **OQ-1** | xxh3_64 vs xxh3_128 for `Node.uid` | **64-bit** + T1-11 contingency triple-check. 2.7e-6 collision risk acceptable; 128-bit doubles uid memory with no real-world payoff |
+| **OQ-1** | xxh3_64 vs xxh3_128 for `Node.uid` | **RESOLVED (D2): 64-bit** + D1 graceful collision → BlindSpot recovery. Doubling to 128-bit doesn't justify 2× memory + 2× compare cycles at ecp's scale ceiling |
 | **OQ-2** | C function-pointer vtables — owner_class = struct type or instance? | **Struct type** (`foo_ops_t` not `foo_ops`). LLM queries "what implements foo_ops_t" more common |
 | **OQ-3** | C++/Java/C# method overloads (same name, owner, different signatures) | **Defer.** UID inputs don't include parameter types. If parity tests hit collisions, dedicated mini-spec post-T1-10 |
-| **OQ-4** | Overlay durability — persist or rebuild per CLI call? | **Rebuild v1**, persist as follow-up. Simpler; rebuild cost ~ms per edited file |
-| **OQ-5** | Format v4→v5 reindex strategy | **Inline blocking** on first query post-upgrade. v4 schema unreadable under v5; cannot degrade-mode |
+| **OQ-4** | Overlay durability — persist or rebuild per CLI call? | **RESOLVED (D6): Persist + zero-copy merge** (T7-5 as written). Aligns with perf-first; rebuild-per-CLI is wasteful |
+| **OQ-5** | Format v4→v5 reindex strategy | **Inline blocking** on first query post-upgrade + atomic backup `graph.bin.v4.bak` + hard error on reindex failure (no auto-ensure loop) per R3-F1 |
 | **OQ-6** | Tier granularity — 2 (LIKELY/BLIND) or 3 (+ POSSIBLY)? | **2 tiers**. Haiku review consensus: granularity via per-candidate check breakdown, not more tiers |
 | **OQ-7** | TS `number` → `SchemaType::Int` or `Float`? | **Float**. TS has no integer/float split. Float avoids silent type-mismatch when bound to Java `int` |
 | **OQ-8** | OpenAPI: scan inline `paths.*.responses.*` schemas? | **`components.schemas` only v1**. Add `--include-inline` follow-up. Inline schemas 3× node count, mostly redundant |
@@ -663,24 +757,42 @@ Per CLAUDE.md priority-1 "per-query latency <30ms" + "hot path no new alloc / fi
 | **OQ-11** | C# `[Transaction]` (Spring.NET) | **Defer**. No canonical attribute; EF uses `using` (closer to T10-2 model). Half-implementing risks confusion |
 | **OQ-12** | TransactionScope node vs `Function.is_transactional` bool | **Node**, not bool. ~1% transactional functions → sparse edge wins over per-Node byte overhead |
 
+**Reviewer-correlated decisions applied (D1-D7):**
+
+- **D1 (R3-F3)** UID collision recovery → graceful BlindSpot, no panic (applied in §2.1 + T1-5)
+- **D2 (OQ-1)** Hash width → 64-bit (saves 8B/node + 1 cycle per compare; D1 handles 50M+ scale)
+- **D3 (R3-F5)** MirrorsField k≥3 cluster semantics → pairwise emit at 0.9 (applied in T4-7 + T5-33)
+- **D4 (R2-F3)** RawSchemaField → StrRef from day-1 (applied in T0-2)
+- **D5 (R2-F4)** T1-1+T1-3 merged into single 14-lang PR (applied in §5)
+- **D6 (OQ-4)** Overlay durability → persist + zero-copy (T7-5 as written, no scope reduction)
+- **D7 (R1-F5)** T5-33 subset → ≥1 Publish + ≥1 Subscribe per lib used in fixture (applied in T5-33)
+
 ---
 
 ## 14. Dependency graph + PR ordering
 
 ```
-T0-1 ──┬──→ T0-2 ──→ T-H1, T-H2, T-H3 (hybrid surface, MUST land before any heuristic edge does)
+T0-1 ──┬──→ T0-2 ──→ T-H1 ──┬──→ T4-7        (T-H1 → T4-7 enforces hybrid filter exists before heuristic edge enters graph)
+       │            ├──→ T-H2 ──→ T5-33      (T-H1 → T5-33 same enforcement)
+       │            └──→ T-H3
        │
-       └──→ T1-1, T1-2 ──→ T1-3 ──→ T1-4 ──→ T1-5 ──┬──→ T1-6 ──→ T1-11
-                                                     ├──→ T1-7 (format bump)
-                                                     ├──→ T1-8, T1-9
-                                                     ├──→ T1-10
-                                                     └──→ T1-12
+       │      Note: T0-1 ships with structural CI gate (`test_impact_default_hides_mirrors_field`)
+       │      that FAILS until T-H1 lands. PR merging T4-7 before T-H1 fails CI mechanically,
+       │      not procedurally.
+       │
+       └──→ T1-1 (14-lang, was T1-1+T1-3 merged per D5) ─┐
+            T1-2 ──→ T1-4 ──→ T1-5 ──┬──→ T1-6 ──→ T1-11
+                                      ├──→ T1-7 (format bump; also dep T1-4)
+                                      ├──→ T1-8, T1-9
+                                      ├──→ T1-10
+                                      └──→ T1-12
 
-T7-1 ──→ T7-2 ──┬──→ T7-4 ──→ T7-5 ──→ T7-6 ──→ T7-7
-T7-3 ───────────┘
+T0-2 ──→ T7-1 ──→ T7-2 ──┬──→ T7-4 ──→ T7-5 ──→ T7-6 ──→ T7-7  (T7-1 dep T0-2 per R1-F3: LocalGraph new vecs)
+        T7-3 ─────────────┘
 
-T0-2 ──→ T4-1 ──→ T4-2..T4-6 (parallel) ──→ T4-7 ──→ T4-8
-T0-2 ──→ T5-0 ──→ T5-1 ──→ T5-2..T5-31 (25 parallel) ──→ T5-32 → T5-33 → T5-34
+T0-2 ──→ T4-1 ──→ T4-2..T4-6 (5 parallel) ──→ T4-7 ──→ T4-8
+T0-2 ──→ T5-0 ──→ T5-1 ──→ T5-2..T5-31 (25 parallel) ──→ T5-33 (subset gate per D7: at least 1 Publish + 1 Subscribe detector per lib) ──→ T5-34
+                                                          └──→ T5-32 (coverage doc)
 T0-2 ──→ T10-1, T10-2 (parallel) ──→ T10-3 ──→ T10-4
 
 Phase 5: T-P1, T-P2 (after all phases done)
