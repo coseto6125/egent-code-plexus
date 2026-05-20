@@ -586,6 +586,19 @@ impl LanguageProvider for GoProvider {
             }
         }
 
+        let file_category = if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with("_test.go"))
+            .unwrap_or(false)
+        {
+            ecp_core::graph::FileCategory::Test
+        } else {
+            ecp_core::graph::FileCategory::Source
+        };
+        let raw_function_metas =
+            crate::function_meta::go::extract(tree.root_node(), source, &nodes, file_category);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -600,7 +613,7 @@ impl LanguageProvider for GoProvider {
             event_topics: None,
             tx_scopes: None,
             call_metas: vec![],
-            raw_function_metas: vec![],
+            raw_function_metas,
         })
     }
 }

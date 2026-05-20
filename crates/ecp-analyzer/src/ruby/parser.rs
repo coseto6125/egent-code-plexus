@@ -625,6 +625,23 @@ impl LanguageProvider for RubyProvider {
             None => false,
         });
 
+        // Ruby test files: spec/*_spec.rb (RSpec) or test/*_test.rb (Minitest).
+        let file_category = {
+            let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let path_str = path.to_str().unwrap_or("");
+            if basename.ends_with("_spec.rb")
+                || basename.ends_with("_test.rb")
+                || path_str.contains("/spec/")
+                || path_str.contains("/test/")
+            {
+                ecp_core::graph::FileCategory::Test
+            } else {
+                ecp_core::graph::FileCategory::Source
+            }
+        };
+        let raw_function_metas =
+            crate::function_meta::ruby::extract(tree.root_node(), source, &nodes, file_category);
+
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
         Ok(LocalGraph {
@@ -641,7 +658,7 @@ impl LanguageProvider for RubyProvider {
             event_topics: None,
             tx_scopes: None,
             call_metas: vec![],
-            raw_function_metas: vec![],
+            raw_function_metas,
         })
     }
 }

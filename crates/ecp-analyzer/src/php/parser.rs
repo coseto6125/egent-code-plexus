@@ -571,6 +571,22 @@ impl LanguageProvider for PhpProvider {
             routes.clear();
         }
 
+        // PHPUnit test files are typically named *Test.php or placed in tests/ directories.
+        let file_category = {
+            let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let path_str = path.to_str().unwrap_or("");
+            if basename.ends_with("Test.php")
+                || path_str.contains("/tests/")
+                || path_str.contains("/test/")
+            {
+                ecp_core::graph::FileCategory::Test
+            } else {
+                ecp_core::graph::FileCategory::Source
+            }
+        };
+        let raw_function_metas =
+            crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);
+
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
@@ -586,7 +602,7 @@ impl LanguageProvider for PhpProvider {
             event_topics: None,
             tx_scopes: None,
             call_metas: vec![],
-            raw_function_metas: vec![],
+            raw_function_metas,
         })
     }
 }
