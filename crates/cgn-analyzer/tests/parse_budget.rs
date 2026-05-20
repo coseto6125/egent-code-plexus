@@ -1,10 +1,3 @@
-//! Verify `parse_with_budget` aborts on tight budgets and allows normal parses.
-//!
-//! The intent of the helper is to keep a single pathological file from
-//! pinning a rayon worker indefinitely. These tests exercise both limit
-//! axes (wall-clock duration + byte advance) and confirm the happy path
-//! still works on a trivial input.
-
 use std::time::Duration;
 use tree_sitter::Parser;
 

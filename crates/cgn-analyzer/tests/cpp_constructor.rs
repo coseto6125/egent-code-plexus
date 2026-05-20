@@ -71,15 +71,11 @@ fn test_regular_method_stays_method() {
 
 // ── Out-of-class `= default;` / `= delete;` (ABI 15 grammar quirk) ───────────
 
+// Out-of-class definitions surface as Method (not Constructor) — same
+// convention the cpp/queries.scm workaround for tree-sitter-cpp#357
+// preserves for the regressed `= default;` AST shape.
 #[test]
 fn out_of_class_constructor_eq_default_emits_method() {
-    // tree-sitter-cpp ABI 15 reparses `Foo::Foo() = default;` as
-    // `expression_statement > assignment_expression > call_expression`
-    // instead of `function_definition + default_method_clause`. The patch
-    // in cpp/queries.scm Methods section captures the new shape so the
-    // constructor name still surfaces as a Method (matching existing
-    // convention: out-of-class definitions go through the Method query,
-    // only in-class definitions emit Constructor).
     let g = parse("Foo::Foo() = default;\n");
     assert!(
         has(&g, "Foo", NodeKind::Method),
@@ -90,9 +86,6 @@ fn out_of_class_constructor_eq_default_emits_method() {
 
 #[test]
 fn out_of_class_constructor_eq_delete_emits_method() {
-    // ABI 15 still parses `= delete;` as function_definition. Guard against
-    // future grammar drift that would push `= delete;` into the same
-    // expression_statement shape as `= default;`.
     let g = parse("Foo::Foo() = delete;\n");
     assert!(
         has(&g, "Foo", NodeKind::Method),
