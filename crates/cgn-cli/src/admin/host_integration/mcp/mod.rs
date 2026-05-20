@@ -1,4 +1,7 @@
-//! MCP sub-menu — pick a host, then install / uninstall / status.
+//! "Other Code Agents" sub-menu — agents without a host-first entry, plus
+//! the Codex CLI MCP-mode path (distinct from its native-tools patch). Claude
+//! Code and Gemini CLI are fully covered by host-first scriptable commands
+//! and no longer appear here.
 
 pub mod claude_code;
 pub mod cline_roo;
@@ -14,7 +17,6 @@ use cgn_core::CgnError;
 use dialoguer::theme::ColorfulTheme;
 
 const HOSTS: &[menu::Item<'_>] = &[
-    ("Claude Code", "Anthropic CLI — ~/.claude/settings.json"),
     ("Cursor", "Cursor editor — ~/.cursor/mcp.json"),
     (
         "Windsurf",
@@ -24,11 +26,7 @@ const HOSTS: &[menu::Item<'_>] = &[
         "Cline / Roo Code",
         "VS Code extensions — cline_mcp_settings.json",
     ),
-    ("Codex CLI", "Codex CLI in MCP mode — ~/.codex/config.toml"),
-    (
-        "Gemini CLI",
-        "Gemini CLI in MCP mode — ~/.gemini/settings.json",
-    ),
+    ("Codex CLI (MCP mode)", "Codex CLI — ~/.codex/config.toml"),
     ("Copilot", "GitHub Copilot — VS Code settings.json"),
     (
         "Generic (any MCP host)",
@@ -47,65 +45,51 @@ const ACTIONS: &[menu::Item<'_>] = &[
 /// Entry point called from `host_integration::run`.
 pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
-        let choice = select(theme, "MCP — pick a host", HOSTS)?;
+        let choice = select(theme, "Other Code Agents — pick one", HOSTS)?;
         match choice {
             Some(0) => host_menu(
-                theme,
-                "Claude Code",
-                claude_code::install,
-                claude_code::uninstall,
-                claude_code::status,
-            )?,
-            Some(1) => host_menu(
                 theme,
                 "Cursor",
                 cursor::install,
                 cursor::uninstall,
                 cursor::status,
             )?,
-            Some(2) => host_menu(
+            Some(1) => host_menu(
                 theme,
                 "Windsurf",
                 windsurf::install,
                 windsurf::uninstall,
                 windsurf::status,
             )?,
-            Some(3) => host_menu(
+            Some(2) => host_menu(
                 theme,
                 "Cline / Roo Code",
                 cline_roo::install,
                 cline_roo::uninstall,
                 cline_roo::status,
             )?,
-            Some(4) => host_menu(
+            Some(3) => host_menu(
                 theme,
-                "Codex CLI (MCP)",
+                "Codex CLI (MCP mode)",
                 codex::install,
                 codex::uninstall,
                 codex::status,
             )?,
-            Some(5) => host_menu(
-                theme,
-                "Gemini CLI (MCP)",
-                gemini::install,
-                gemini::uninstall,
-                gemini::status,
-            )?,
-            Some(6) => host_menu(
+            Some(4) => host_menu(
                 theme,
                 "Copilot",
                 copilot::install,
                 copilot::uninstall,
                 copilot::status,
             )?,
-            Some(7) => host_menu(
+            Some(5) => host_menu(
                 theme,
                 "Generic MCP host",
                 generic::install,
                 generic::uninstall,
                 generic::status,
             )?,
-            Some(8) | None => return Ok(()),
+            Some(6) | None => return Ok(()),
             _ => unreachable!(),
         }
     }

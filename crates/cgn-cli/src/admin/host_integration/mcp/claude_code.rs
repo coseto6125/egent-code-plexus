@@ -1,28 +1,16 @@
-//! Claude Code MCP integration.
+//! Claude Code MCP integration — called from `cgn admin claude` via
+//! `install_scripted` / `uninstall_scripted` / `status`. No interactive
+//! `install(_theme)` wrapper: Claude Code is host-first elevated, so all
+//! entry points go through the scriptable surface.
 
 use crate::admin::status::HostStatus;
 use cgn_core::CgnError;
-use dialoguer::theme::ColorfulTheme;
 use serde_json::json;
 use std::ffi::OsString;
 use std::io;
 use std::process::Command;
 
 const SERVER_NAME: &str = "cgn";
-
-pub fn install(_theme: &ColorfulTheme) {
-    match run_install() {
-        Ok(()) => println!("Claude Code MCP server `cgn` installed via `claude mcp`."),
-        Err(e) => eprintln!("Claude Code MCP install failed: {e}"),
-    }
-}
-
-pub fn uninstall(_theme: &ColorfulTheme) {
-    match run_uninstall() {
-        Ok(()) => println!("Claude Code MCP server `cgn` removed via `claude mcp`."),
-        Err(e) => eprintln!("Claude Code MCP uninstall failed: {e}"),
-    }
-}
 
 pub fn status() -> HostStatus {
     match claude_mcp(["mcp", "get", SERVER_NAME]) {
@@ -34,7 +22,7 @@ pub fn status() -> HostStatus {
     }
 }
 
-fn run_install() -> Result<(), CgnError> {
+pub(crate) fn install_scripted() -> Result<(), CgnError> {
     let exe = std::env::current_exe()
         .map_err(|e| CgnError::Output(format!("current_exe: {e}")))?
         .to_string_lossy()
@@ -52,7 +40,7 @@ fn run_install() -> Result<(), CgnError> {
     }
 }
 
-fn run_uninstall() -> Result<(), CgnError> {
+pub(crate) fn uninstall_scripted() -> Result<(), CgnError> {
     let output = claude_mcp(["mcp", "remove", SERVER_NAME])
         .map_err(|e| CgnError::Output(format!("spawn claude: {e}")))?;
     if output.status.success() {

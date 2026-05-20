@@ -96,6 +96,7 @@ const ADMIN_SUBCMDS: &[&str] = &[
     "group",
     "index",
     "sessions",
+    "claude",
     "codex",
     "gemini",
     "mcp",
@@ -128,6 +129,18 @@ const ADMIN_GEMINI_INSTALL_SUBCMDS: &[&str] = &["native-skill", "mcp-server"];
 
 /// `cgn admin gemini uninstall <component>` — removable Gemini components.
 const ADMIN_GEMINI_UNINSTALL_SUBCMDS: &[&str] = &["native-skill", "mcp-server"];
+
+/// `cgn admin claude <action>` — Claude Code host integration actions.
+const ADMIN_CLAUDE_SUBCMDS: &[&str] = &["install", "uninstall", "status"];
+
+/// `cgn admin claude install <component>` — installable Claude Code components.
+const ADMIN_CLAUDE_INSTALL_SUBCMDS: &[&str] = &["hooks", "mcp-server", "skills"];
+
+/// `cgn admin claude uninstall <component>` — removable Claude Code components.
+const ADMIN_CLAUDE_UNINSTALL_SUBCMDS: &[&str] = &["hooks", "mcp-server", "skills"];
+
+/// `cgn admin claude install skills <target>` — installable Claude skill targets.
+const ADMIN_CLAUDE_SKILL_TARGETS: &[&str] = &["all", "simplify"];
 
 /// `cgn admin sessions <subcmd>` — L1 session inspection.
 const ADMIN_SESSIONS_SUBCMDS: &[&str] = &["list"];
@@ -227,6 +240,41 @@ fn every_admin_gemini_install_subcommand_has_help() {
 fn every_admin_gemini_uninstall_subcommand_has_help() {
     for sub in ADMIN_GEMINI_UNINSTALL_SUBCMDS {
         assert_help_ok(&["admin", "gemini", "uninstall", sub]);
+    }
+}
+
+#[test]
+fn every_admin_claude_subcommand_has_help() {
+    for sub in ADMIN_CLAUDE_SUBCMDS {
+        assert_help_ok(&["admin", "claude", sub]);
+    }
+}
+
+#[test]
+fn every_admin_claude_install_subcommand_has_help() {
+    for sub in ADMIN_CLAUDE_INSTALL_SUBCMDS {
+        assert_help_ok(&["admin", "claude", "install", sub]);
+    }
+}
+
+#[test]
+fn every_admin_claude_uninstall_subcommand_has_help() {
+    for sub in ADMIN_CLAUDE_UNINSTALL_SUBCMDS {
+        assert_help_ok(&["admin", "claude", "uninstall", sub]);
+    }
+}
+
+#[test]
+fn every_admin_claude_install_skills_target_has_help() {
+    for sub in ADMIN_CLAUDE_SKILL_TARGETS {
+        assert_help_ok(&["admin", "claude", "install", "skills", sub]);
+    }
+}
+
+#[test]
+fn every_admin_claude_uninstall_skills_target_has_help() {
+    for sub in ADMIN_CLAUDE_SKILL_TARGETS {
+        assert_help_ok(&["admin", "claude", "uninstall", "skills", sub]);
     }
 }
 

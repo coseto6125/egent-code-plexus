@@ -67,6 +67,7 @@ fn admin_help_lists_expected_entries() {
         "config",
         "group",
         "index",
+        "claude",
         "codex",
         "gemini",
     ] {

@@ -1,23 +1,23 @@
-//! Agent integration menu — host-first installers plus MCP / native / hooks.
+//! Agent integration menu — host-first installers per supported code agent.
 
 pub(crate) mod gemini_cli;
 pub mod mcp;
 pub mod native;
 
 use crate::admin::menu::{self, select};
+use crate::commands::admin::claude::{self, ClaudeComponent, ClaudeSkillTarget};
 use crate::commands::admin::codex::{install_skills, print_status, uninstall_skills, SkillTarget};
 use crate::commands::admin::gemini::{self, GeminiComponent};
-use crate::commands::admin::{claude_code, install_hook};
 use cgn_core::CgnError;
 use dialoguer::theme::ColorfulTheme;
 
 const MECHANISMS: &[menu::Item<'_>] = &[
-    ("Codex CLI", "install native tools, hooks, and skills"),
+    ("Claude Code", "install hooks, MCP server, and skills"),
+    ("Codex CLI", "install native tools and skills"),
     ("Gemini CLI", "install native skill and MCP server"),
-    ("MCP", "shared side-car for any MCP-capable host"),
     (
-        "Hooks",
-        "shell hooks (Claude Code) for auto-reindex on edits",
+        "Other Code Agents",
+        "Cursor, Windsurf, Cline, Copilot, generic MCP host",
     ),
     ("← Back", ""),
 ];
@@ -27,11 +27,108 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
     loop {
         let choice = select(theme, "Agent Integrations", MECHANISMS)?;
         match choice {
-            Some(0) => codex_menu(theme)?,
-            Some(1) => gemini_menu(theme)?,
-            Some(2) => mcp::run(theme)?,
-            Some(3) => hooks_menu(theme)?,
+            Some(0) => claude_menu(theme)?,
+            Some(1) => codex_menu(theme)?,
+            Some(2) => gemini_menu(theme)?,
+            Some(3) => mcp::run(theme)?,
             Some(4) | None => return Ok(()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+const CLAUDE_ACTIONS: &[menu::Item<'_>] = &[
+    ("install", "install a Claude Code integration component"),
+    ("uninstall", "remove a Claude Code integration component"),
+    ("status", "show all Claude Code integration statuses"),
+    ("← Back", ""),
+];
+
+const CLAUDE_COMPONENTS: &[menu::Item<'_>] = &[
+    ("hooks", "settings.json event hooks for auto-reindex"),
+    (
+        "mcp-server",
+        "register cgn as an MCP server via `claude mcp`",
+    ),
+    ("skills", "Claude skill packs for graph-aware workflows"),
+    ("← Back", ""),
+];
+
+const CLAUDE_SKILLS: &[menu::Item<'_>] = &[
+    ("all", "install every bundled Claude skill"),
+    (
+        "simplify",
+        "when reviews should start from cgn impact and risk signals",
+    ),
+    ("← Back", ""),
+];
+
+fn claude_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
+    loop {
+        let choice = select(theme, "Claude Code — action", CLAUDE_ACTIONS)?;
+        match choice {
+            Some(0) => claude_install_menu(theme)?,
+            Some(1) => claude_uninstall_menu(theme)?,
+            Some(2) => claude::print_status()?,
+            Some(3) | None => return Ok(()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn claude_install_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
+    loop {
+        let choice = select(theme, "Claude Code — install", CLAUDE_COMPONENTS)?;
+        match choice {
+            Some(0) => claude::install(ClaudeComponent::Hooks { events: None })?,
+            Some(1) => claude::install(ClaudeComponent::McpServer)?,
+            Some(2) => claude_install_skills_menu(theme)?,
+            Some(3) | None => return Ok(()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn claude_uninstall_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
+    loop {
+        let choice = select(theme, "Claude Code — uninstall", CLAUDE_COMPONENTS)?;
+        match choice {
+            Some(0) => claude::uninstall(ClaudeComponent::Hooks { events: None })?,
+            Some(1) => claude::uninstall(ClaudeComponent::McpServer)?,
+            Some(2) => claude_uninstall_skills_menu(theme)?,
+            Some(3) | None => return Ok(()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn claude_install_skills_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
+    loop {
+        let choice = select(theme, "Claude Code — install skills", CLAUDE_SKILLS)?;
+        match choice {
+            Some(0) => claude::install(ClaudeComponent::Skills {
+                target: ClaudeSkillTarget::All,
+            })?,
+            Some(1) => claude::install(ClaudeComponent::Skills {
+                target: ClaudeSkillTarget::Simplify,
+            })?,
+            Some(2) | None => return Ok(()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn claude_uninstall_skills_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
+    loop {
+        let choice = select(theme, "Claude Code — uninstall skills", CLAUDE_SKILLS)?;
+        match choice {
+            Some(0) => claude::uninstall(ClaudeComponent::Skills {
+                target: ClaudeSkillTarget::All,
+            })?,
+            Some(1) => claude::uninstall(ClaudeComponent::Skills {
+                target: ClaudeSkillTarget::Simplify,
+            })?,
+            Some(2) | None => return Ok(()),
             _ => unreachable!(),
         }
     }
@@ -179,70 +276,22 @@ fn gemini_uninstall_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
     }
 }
 
-const HOOK_HOSTS: &[menu::Item<'_>] = &[
-    (
-        "Claude Code hooks",
-        "PreToolUse + PostToolUse for auto-reindex",
-    ),
-    ("← Back", ""),
-];
-const HOOK_ACTIONS: &[menu::Item<'_>] = &[
-    ("install", "write hook entries to ~/.claude/settings.json"),
-    (
-        "uninstall",
-        "remove cgn hook entries from the host settings",
-    ),
-    ("status", "show whether cgn hooks are registered"),
-    ("← Back", ""),
-];
-
-fn hooks_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
-    loop {
-        let choice = select(theme, "Hooks", HOOK_HOSTS)?;
-        match choice {
-            Some(0) => claude_code_hooks_menu(theme)?,
-            Some(1) | None => return Ok(()),
-            _ => unreachable!(),
-        }
-    }
-}
-
-fn claude_code_hooks_menu(theme: &ColorfulTheme) -> Result<(), CgnError> {
-    loop {
-        let choice = select(theme, "Claude Code hooks — action", HOOK_ACTIONS)?;
-        match choice {
-            Some(0) => install_hook::run(install_hook::InstallHookArgs {
-                force: false,
-                no_chain: false,
-                claude_code: true,
-                events: None,
-                settings_path: None,
-            })?,
-            Some(1) => claude_code::run_uninstall(claude_code::UninstallHookArgs {
-                claude_code: true,
-                events: None,
-                settings_path: None,
-            })?,
-            Some(2) => claude_code::run_status(claude_code::StatusArgs {
-                claude_code: true,
-                settings_path: None,
-            })?,
-            Some(3) | None => return Ok(()),
-            _ => unreachable!(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn agent_integrations_menu_groups_mechanisms_and_hooks() {
+    fn agent_integrations_menu_is_host_first() {
         let labels: Vec<&str> = MECHANISMS.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
-            vec!["Codex CLI", "Gemini CLI", "MCP", "Hooks", "← Back"]
+            vec![
+                "Claude Code",
+                "Codex CLI",
+                "Gemini CLI",
+                "Other Code Agents",
+                "← Back",
+            ]
         );
     }
 }

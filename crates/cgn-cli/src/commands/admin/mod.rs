@@ -3,6 +3,7 @@
 
 use clap::Subcommand;
 
+pub mod claude;
 pub mod claude_code;
 pub mod codex;
 pub mod config;
@@ -39,6 +40,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: sessions::SessionsCommand,
     },
+    /// Scriptable Claude Code host integration commands
+    Claude {
+        #[command(subcommand)]
+        command: claude::ClaudeCommands,
+    },
     /// Scriptable Codex host integration commands
     Codex {
         #[command(subcommand)]
@@ -68,6 +74,7 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), cgn_core::
         AdminCommands::Sessions { command } => {
             sessions::run(command).map_err(cgn_core::CgnError::Output)
         }
+        AdminCommands::Claude { command } => claude::run(command),
         AdminCommands::Codex { command } => codex::run(command),
         AdminCommands::Gemini { command } => gemini::run(command),
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),

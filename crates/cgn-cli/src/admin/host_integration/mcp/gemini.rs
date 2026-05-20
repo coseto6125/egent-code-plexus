@@ -1,24 +1,14 @@
-//! Gemini CLI MCP integration.
+//! Gemini CLI MCP integration — called from `cgn admin gemini` via
+//! `install_scripted` / `uninstall_scripted` / `status`. No interactive
+//! `install(_theme)` wrapper: Gemini CLI is host-first elevated, so all
+//! entry points go through the scriptable surface.
 
 use crate::admin::host_integration::gemini_cli;
 use crate::admin::status::HostStatus;
 use cgn_core::CgnError;
-use dialoguer::theme::ColorfulTheme;
 use std::env;
 
 const SERVER_NAME: &str = "cgn";
-
-pub fn install(_theme: &ColorfulTheme) {
-    if let Err(e) = install_scripted() {
-        eprintln!("Gemini CLI MCP install failed: {e}");
-    }
-}
-
-pub fn uninstall(_theme: &ColorfulTheme) {
-    if let Err(e) = uninstall_scripted() {
-        eprintln!("Gemini CLI MCP uninstall failed: {e}");
-    }
-}
 
 pub(crate) fn install_scripted() -> Result<(), CgnError> {
     let exe = env::current_exe()
