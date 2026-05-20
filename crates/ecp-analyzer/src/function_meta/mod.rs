@@ -20,9 +20,14 @@ use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, NodeKind};
 use tree_sitter::Node;
 
+pub mod csharp;
+pub mod dart;
+pub mod java;
 pub mod javascript;
+pub mod kotlin;
 pub mod python;
 pub mod rust_lang;
+pub mod swift;
 pub mod typescript;
 
 /// Span-keyed index entry: `(span, &RawNode)`.

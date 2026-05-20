@@ -327,6 +327,11 @@ impl LanguageProvider for DartProvider {
 
         let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
 
+        let file_category =
+            crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
+        let raw_function_metas =
+            crate::function_meta::dart::extract(tree.root_node(), source, &nodes, file_category);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -341,7 +346,7 @@ impl LanguageProvider for DartProvider {
             event_topics: None,
             tx_scopes: None,
             call_metas: vec![],
-            raw_function_metas: vec![],
+            raw_function_metas,
         })
     }
 }

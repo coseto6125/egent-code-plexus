@@ -410,6 +410,11 @@ impl LanguageProvider for JavaProvider {
         // `super.foo()`, and typed-variable `obj.foo()` patterns.
         extract_java_calls(tree.root_node(), source, &mut nodes);
 
+        let file_category =
+            crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
+        let raw_function_metas =
+            crate::function_meta::java::extract(tree.root_node(), source, &nodes, file_category);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -424,7 +429,7 @@ impl LanguageProvider for JavaProvider {
             event_topics: None,
             tx_scopes: None,
             call_metas: vec![],
-            raw_function_metas: vec![],
+            raw_function_metas,
         })
     }
 }
