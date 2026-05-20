@@ -1,10 +1,33 @@
 name: CI
 
+# Skip CI only when no source-relevant files change. Docs / license / config
+# (.gitignore, .editorconfig) edits don't need a full build+test cycle.
+# Anything outside paths-ignore — crates/, src/, tests/, Cargo.{toml,lock},
+# build scripts, .github/workflows/* — runs CI. This catches "chore(...)"
+# PRs that incidentally touch parser queries / source code (see #226).
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'interviews/**'
+      - 'LICENSE'
+      - 'LICENSES/**'
+      - '.gitignore'
+      - '.editorconfig'
+      - '.gitattributes'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'interviews/**'
+      - 'LICENSE'
+      - 'LICENSES/**'
+      - '.gitignore'
+      - '.editorconfig'
+      - '.gitattributes'
 
 permissions:
   contents: read
@@ -28,7 +51,7 @@ jobs:
   code-quality:
     name: Code Quality (Linting & Formatting)
     runs-on: ubuntu-latest
-    if: ${{ !(startsWith(github.event.pull_request.title, 'chore(') || startsWith(github.event.head_commit.message, 'chore(') || contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -73,7 +96,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    if: ${{ !(startsWith(github.event.pull_request.title, 'chore(') || startsWith(github.event.head_commit.message, 'chore(') || contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -116,7 +139,7 @@ jobs:
   audit:
     name: Supply-chain (audit & deny)
     runs-on: ubuntu-latest
-    if: ${{ !(startsWith(github.event.pull_request.title, 'chore(') || startsWith(github.event.head_commit.message, 'chore(') || contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -161,7 +184,7 @@ jobs:
   actionlint:
     name: Lint GitHub Actions workflows
     runs-on: ubuntu-latest
-    if: ${{ !(startsWith(github.event.pull_request.title, 'chore(') || startsWith(github.event.head_commit.message, 'chore(') || contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
