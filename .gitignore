@@ -1,5 +1,6 @@
-.source_code/
+.gitnexus/
 .sample_repo/
+.codegraph
 
 # Parity test fixtures (dev-local, generated per language)
 tests/parity/fixtures/*/sample_project/
@@ -23,8 +24,6 @@ target/
 CLAUDE.md
 
 # Local index
-.gitnexus-rs/
-.gnx/
 .cgn/
 
 # Vendored 3rd-party grammar repos: keep src/queries/bindings, drop bloat

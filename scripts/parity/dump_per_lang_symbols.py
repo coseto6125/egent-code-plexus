@@ -32,7 +32,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path("/home/enor/code-graph-nexus/.sample_repo")
+REPO = Path(os.environ.get("PARITY_REPO", "/home/enor/code-graph-nexus/.sample_repo"))
 OUT_DIR = Path(__file__).parent / "symbol_diffs"
 REFRESH_REF = os.environ.get("PARITY_REFRESH_REF", "").strip().lower() in {"1", "true", "yes"}
 LANGS = [
@@ -216,7 +216,10 @@ def dump_ref(lang: str) -> set[tuple[str, str, str]]:
         md = ""
         try:
             obj = json.loads(out)
-            md = obj.get("markdown", "")
+            if isinstance(obj, dict):
+                md = obj.get("markdown", "")
+            else:
+                md = ""
         except json.JSONDecodeError:
             m = re.search(r'markdown:\s*"(.*?)"\s*(?:row_count|$)', out, re.DOTALL)
             if m:

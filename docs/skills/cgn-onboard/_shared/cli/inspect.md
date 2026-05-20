@@ -1,10 +1,13 @@
 Show symbol's full context: signature, body, edges, callers, overrides, and 1-hop upstream impact
 
-Usage: cgn inspect [OPTIONS]
+Usage: cgn inspect [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  Target symbol name (equivalent to `--name` flag)
 
 Options:
       --name <NAME>
-          Name of the symbol to inspect
+          Named alias for the positional NAME argument — kept for parity with old MCP / wrapper habits
       --repo <REPO>
           Repository path
       --format <FORMAT>

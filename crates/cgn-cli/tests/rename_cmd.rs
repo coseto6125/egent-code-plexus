@@ -409,3 +409,47 @@ fn rename_zero_occurrences_explicit_message() {
         "missing explicit no-occurrences message:\n{combined}"
     );
 }
+
+#[test]
+fn execute_renames_with_positional_args() {
+    let repo = setup_repo();
+    let root = repo.path();
+    let home = root.join(".home");
+
+    let out = Command::new(cgn_bin())
+        .args([
+            "rename",
+            "old_name",
+            "fresh_name",
+            "--repo",
+            root.to_str().unwrap(),
+        ])
+        .env("HOME", &home)
+        .current_dir(root)
+        .output()
+        .expect("cgn rename failed to spawn");
+    assert!(
+        out.status.success(),
+        "rename execute with positional args failed: stderr={}, stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout),
+    );
+
+    let def_after = std::fs::read_to_string(root.join("rename_def.py")).unwrap();
+    let user_after = std::fs::read_to_string(root.join("rename_user.py")).unwrap();
+
+    // Def site renamed
+    assert!(
+        def_after.contains("def fresh_name"),
+        "def site should be renamed; got:\n{def_after}",
+    );
+    assert!(
+        !def_after.contains("old_name"),
+        "no `old_name` should remain in def file; got:\n{def_after}",
+    );
+    // Cross-file caller renamed
+    assert!(
+        user_after.contains("fresh_name()"),
+        "cross-file caller should be renamed; got:\n{user_after}",
+    );
+}
