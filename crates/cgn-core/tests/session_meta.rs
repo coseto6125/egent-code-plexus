@@ -1,6 +1,5 @@
 use cgn_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use std::collections::BTreeMap;
-use tempfile::NamedTempFile;
 
 #[test]
 fn session_meta_round_trip() {
@@ -65,7 +64,8 @@ fn dirty_files_deterministic_btreemap_order() {
 
 #[test]
 fn atomic_write_session_meta_full_equality() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("session_meta.json");
     let sm = SessionMeta {
         version: 1,
         session_id: "x".into(),
@@ -78,8 +78,8 @@ fn atomic_write_session_meta_full_equality() {
         watcher_pid: None,
         last_drained_offset: 0,
     };
-    SessionMeta::write_atomic(tmp.path(), &sm).unwrap();
-    let r = SessionMeta::read(tmp.path()).unwrap();
+    SessionMeta::write_atomic(&path, &sm).unwrap();
+    let r = SessionMeta::read(&path).unwrap();
     assert_eq!(r, sm);
 }
 

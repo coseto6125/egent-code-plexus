@@ -24,20 +24,35 @@ fn example_path() -> PathBuf {
     } else {
         "release"
     };
-    target_dir
+    let mut path = target_dir
         .join(profile)
         .join("examples")
-        .join("registry_writer_child")
+        .join("registry_writer_child");
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
+    if !path.exists() {
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-p",
+                "cgn-core",
+                "--example",
+                "registry_writer_child",
+            ])
+            .status()
+            .expect("spawn cargo build --example registry_writer_child");
+        assert!(
+            status.success(),
+            "cargo build --example registry_writer_child failed"
+        );
+    }
+    path
 }
 
 #[test]
 fn registry_concurrent_writers_converge() {
     let bin = example_path();
-    assert!(
-        bin.exists(),
-        "child binary not built — run `cargo build -p cgn-core --example registry_writer_child` first; expected at {}",
-        bin.display()
-    );
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home_cgn = tmp.path().to_path_buf();
@@ -78,11 +93,6 @@ fn registry_concurrent_writers_converge() {
 #[test]
 fn registry_concurrent_same_repo_last_writer_wins_safely() {
     let bin = example_path();
-    assert!(
-        bin.exists(),
-        "child binary not built — run `cargo build -p cgn-core --example registry_writer_child` first; expected at {}",
-        bin.display()
-    );
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home_cgn = tmp.path().to_path_buf();

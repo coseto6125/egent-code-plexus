@@ -1,6 +1,5 @@
 use cgn_core::registry::RepoMeta;
 use std::collections::BTreeMap;
-use tempfile::NamedTempFile;
 
 #[test]
 fn round_trip_btreemap_deterministic() {
@@ -31,7 +30,8 @@ fn round_trip_btreemap_deterministic() {
 
 #[test]
 fn atomic_write_round_trip_full_struct_equality() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("repo_meta.json");
     let m = RepoMeta {
         version: 1,
         common_dir: "/x".into(),
@@ -42,14 +42,14 @@ fn atomic_write_round_trip_full_struct_equality() {
         total_size_bytes: 0,
         last_touched: "2026-05-17T10:00:00Z".into(),
     };
-    RepoMeta::write_atomic(tmp.path(), &m).unwrap();
-    let r = RepoMeta::read(tmp.path()).unwrap();
+    RepoMeta::write_atomic(&path, &m).unwrap();
+    let r = RepoMeta::read(&path).unwrap();
     assert_eq!(r, m);
 }
 
 #[test]
 fn missing_aliases_and_known_refs_default_to_empty() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
     // Hand-crafted JSON without aliases / known_refs fields — should still deserialize
     let json = r#"{
         "version": 1,

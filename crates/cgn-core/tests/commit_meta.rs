@@ -1,5 +1,4 @@
 use cgn_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
-use tempfile::NamedTempFile;
 
 #[test]
 fn round_trip_deterministic_json() {
@@ -29,7 +28,8 @@ fn round_trip_deterministic_json() {
 
 #[test]
 fn atomic_write_round_trip() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("commit_meta.json");
     let meta = CommitBuildMeta {
         version: 1,
         sha: "abc123def4567890abc123def4567890abc123de".into(),
@@ -44,8 +44,8 @@ fn atomic_write_round_trip() {
         refs_seen_since: vec![],
         builder_fingerprint: None,
     };
-    CommitBuildMeta::write_atomic(tmp.path(), &meta).unwrap();
-    let read = CommitBuildMeta::read(tmp.path()).unwrap();
+    CommitBuildMeta::write_atomic(&path, &meta).unwrap();
+    let read = CommitBuildMeta::read(&path).unwrap();
     assert_eq!(read, meta);
 }
 

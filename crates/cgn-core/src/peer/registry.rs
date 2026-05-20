@@ -62,8 +62,34 @@ pub fn pid_alive(pid: u32) -> bool {
         use nix::unistd::Pid;
         signal::kill(Pid::from_raw(pid as i32), None).is_ok()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        false
+        use std::ffi::c_void;
+
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(
+                desired_access: u32,
+                inherit_handle: i32,
+                process_id: u32,
+            ) -> *mut c_void;
+            fn GetExitCodeProcess(process: *mut c_void, exit_code: *mut u32) -> i32;
+            fn CloseHandle(object: *mut c_void) -> i32;
+        }
+
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+
+        let mut exit_code = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        ok != 0 && exit_code == STILL_ACTIVE
     }
 }

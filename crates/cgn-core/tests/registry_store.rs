@@ -111,16 +111,16 @@ fn missing_repos_field_defaults_to_empty() {
 
 #[test]
 fn write_atomic_does_not_create_bak() {
-    let tmp = NamedTempFile::new().unwrap();
-    let path = tmp.path();
-    std::fs::write(path, r#"{"version":2,"repos":{},"groups":[]}"#).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("registry.json");
+    std::fs::write(&path, r#"{"version":2,"repos":{},"groups":[]}"#).unwrap();
     let mut bak_buf = path.as_os_str().to_owned();
     bak_buf.push(".bak");
     let bak = std::path::PathBuf::from(bak_buf);
     let _ = std::fs::remove_file(&bak); // ensure clean
 
     let reg = RegistryFile::empty();
-    RegistryFile::write_atomic(path, &reg).unwrap();
+    RegistryFile::write_atomic(&path, &reg).unwrap();
     assert!(
         !bak.exists(),
         ".bak must NOT be created — spec §3 layout has no .bak; recovery goes through rebuild_from_disk"
