@@ -32,7 +32,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(os.environ.get("PARITY_REPO", "/home/enor/egent-code-plexus/.sample_repo"))
+REPO = Path(os.environ.get("PARITY_REPO", "/home/enor/code-graph-nexus/.sample_repo"))
 OUT_DIR = Path(__file__).parent / "symbol_diffs"
 REFRESH_REF = os.environ.get("PARITY_REFRESH_REF", "").strip().lower() in {"1", "true", "yes"}
 LANGS = [
