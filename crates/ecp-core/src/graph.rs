@@ -11,7 +11,7 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// the new reader (or vice-versa). The reader refuses any version it
 /// does not recognize, so a stale CLI does not segfault on a fresh
 /// `graph.bin` and a fresh CLI does not silently misinterpret old data.
-pub const GRAPH_FORMAT_VERSION: u32 = 4;
+pub const GRAPH_FORMAT_VERSION: u32 = 5;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -298,6 +298,134 @@ pub struct BlindSpotRecord {
     pub hint: StrRef,
 }
 
+/// Per-Calls-edge dispatch metadata. Sparse: only present for `Edge` whose
+/// `rel_type` is `RelType::Calls`. Sorted by `edge_idx` for binary-search
+/// lookup in `graph_query.rs` hot paths.
+///
+/// LLM utility filter (CLAUDE.md): passes (C) Edge semantics — without
+/// `is_direct`, an LLM refactor of a virtual / vtable-dispatched callee
+/// would miss every dynamic callsite. The graph today is forced to either
+/// emit ambiguous Calls edges or drop indirect dispatch entirely; this
+/// distinguishes them at query time.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct CallMeta {
+    /// Index into `ZeroCopyGraph.edges`. The edge at this index MUST have
+    /// `rel_type == RelType::Calls`; population code is responsible.
+    pub edge_idx: u32,
+    /// Packed flags:
+    /// - bit 0: `is_direct` (1 = direct call resolved statically; 0 = indirect)
+    /// - bit 1: `is_dynamic_dispatch` (1 = vtable / virtual / trait-object / interface call)
+    /// - bit 2: `is_callback` (1 = invoked through function-pointer / closure passed as argument)
+    /// - bit 3: `is_constructor_call` (1 = invoking a constructor / `new` / Class())
+    /// - bits 4-7: reserved (zero)
+    pub flags: u8,
+    /// When the call goes through a known dispatch type, name of that
+    /// type as it appears in source (e.g. `"Box<dyn Trait>"`, `"FnPtr"`,
+    /// `"foo_ops_t"` for a C struct of fn-ptrs). Empty `StrRef::NONE`-equivalent
+    /// when N/A (direct call) or unknown.
+    pub dispatch_type: StrRef,
+}
+
+impl CallMeta {
+    pub const FLAG_DIRECT: u8 = 0b0000_0001;
+    pub const FLAG_DYNAMIC_DISPATCH: u8 = 0b0000_0010;
+    pub const FLAG_CALLBACK: u8 = 0b0000_0100;
+    pub const FLAG_CONSTRUCTOR_CALL: u8 = 0b0000_1000;
+
+    pub const fn is_direct(&self) -> bool {
+        self.flags & Self::FLAG_DIRECT != 0
+    }
+    pub const fn is_dynamic_dispatch(&self) -> bool {
+        self.flags & Self::FLAG_DYNAMIC_DISPATCH != 0
+    }
+    pub const fn is_callback(&self) -> bool {
+        self.flags & Self::FLAG_CALLBACK != 0
+    }
+    pub const fn is_constructor_call(&self) -> bool {
+        self.flags & Self::FLAG_CONSTRUCTOR_CALL != 0
+    }
+}
+
+/// Per-Function/Method/Constructor-node metadata. Sparse: only present
+/// for `Node` whose `kind` is `Function`, `Method`, or `Constructor`.
+/// Sorted by `node_idx` for binary-search lookup.
+///
+/// LLM utility filter (CLAUDE.md): passes (C) Edge semantics for `is_test`
+/// (excluding test callers from prod refactor queries) and (A) Graph
+/// completeness for `params` / `return_type` (signature-aware resolution,
+/// e.g. distinguishing overloaded methods).
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct FunctionMeta {
+    /// Index into `ZeroCopyGraph.nodes`. Population code MUST verify the
+    /// node's kind is `Function`, `Method`, or `Constructor`.
+    pub node_idx: u32,
+    /// Packed flags (16-bit because we encode visibility):
+    /// - bit 0: `is_test`     (test framework annotation OR file is `Test` category)
+    /// - bit 1: `is_async`    (async / coroutine / suspend)
+    /// - bit 2: `is_static`   (no implicit receiver — class method in OO langs)
+    /// - bit 3: `is_abstract` (no body — interface / pure-virtual / abstract)
+    /// - bit 4: `is_generator` (yield / function* / iterator)
+    /// - bit 5: `is_extern`   (FFI declared, no Rust/native body)
+    /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6-7=reserved)
+    /// - bits 9-15: reserved (zero)
+    pub flags: u16,
+    /// Parameter list, flat-encoded as alternating name/type StrRefs:
+    /// `[name1, type1, name2, type2, ...]`. Empty Vec when zero params or
+    /// signature was not parseable. Type StrRef may be `StrRef::NONE`-equivalent
+    /// when annotation absent (dynamic-typed langs).
+    pub params: Vec<StrRef>,
+    /// Return type as written in source. `StrRef::NONE`-equivalent when
+    /// void / unit / not annotated.
+    pub return_type: StrRef,
+    /// Decorator / annotation names attached to the function, in source
+    /// order. E.g. `["property", "cached_property"]`, `["app.get"]`,
+    /// `["@Override", "@Nullable"]`. Empty Vec when none.
+    pub decorators: Vec<StrRef>,
+}
+
+impl FunctionMeta {
+    pub const FLAG_TEST: u16 = 0b0000_0000_0000_0001;
+    pub const FLAG_ASYNC: u16 = 0b0000_0000_0000_0010;
+    pub const FLAG_STATIC: u16 = 0b0000_0000_0000_0100;
+    pub const FLAG_ABSTRACT: u16 = 0b0000_0000_0000_1000;
+    pub const FLAG_GENERATOR: u16 = 0b0000_0000_0001_0000;
+    pub const FLAG_EXTERN: u16 = 0b0000_0000_0010_0000;
+
+    pub const fn is_test(&self) -> bool {
+        self.flags & Self::FLAG_TEST != 0
+    }
+    pub const fn is_async(&self) -> bool {
+        self.flags & Self::FLAG_ASYNC != 0
+    }
+    pub const fn is_static(&self) -> bool {
+        self.flags & Self::FLAG_STATIC != 0
+    }
+    pub const fn is_abstract(&self) -> bool {
+        self.flags & Self::FLAG_ABSTRACT != 0
+    }
+    pub const fn is_generator(&self) -> bool {
+        self.flags & Self::FLAG_GENERATOR != 0
+    }
+    pub const fn is_extern(&self) -> bool {
+        self.flags & Self::FLAG_EXTERN != 0
+    }
+    /// 3-bit visibility code (0-7). 0 = public (default).
+    pub const fn visibility(&self) -> u8 {
+        ((self.flags >> 6) & 0b111) as u8
+    }
+}
+
+pub enum Visibility {
+    Public = 0,
+    Protected = 1,
+    Private = 2,
+    Crate = 3,
+    Package = 4,
+    FilePrivate = 5,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug)]
 #[rkyv(derive(Debug))]
 pub struct ZeroCopyGraph {
@@ -329,6 +457,30 @@ pub struct ZeroCopyGraph {
     /// `json_encode([...])` payload appear here. `shape_check` joins this
     /// against `RelType::Fetches` edge reasons to find consumer drift.
     pub route_shapes: Vec<RouteShape>,
+
+    // ── Schema v5 additions ──────────────────────────────────────────
+    /// Per-Calls-edge dispatch metadata. Sparse, sorted by `edge_idx`.
+    /// Empty when no indirect-dispatch capture has run yet (Tasks #11/#12).
+    pub call_metas: Vec<CallMeta>,
+    /// Per-Function/Method/Constructor metadata. Sparse, sorted by `node_idx`.
+    /// Empty when no per-language flag extraction has run yet (Task #11).
+    pub function_metas: Vec<FunctionMeta>,
+}
+
+impl ZeroCopyGraph {
+    pub fn call_meta(&self, edge_idx: u32) -> Option<&CallMeta> {
+        self.call_metas
+            .binary_search_by_key(&edge_idx, |m| m.edge_idx)
+            .ok()
+            .map(|i| &self.call_metas[i])
+    }
+
+    pub fn function_meta(&self, node_idx: u32) -> Option<&FunctionMeta> {
+        self.function_metas
+            .binary_search_by_key(&node_idx, |m| m.node_idx)
+            .ok()
+            .map(|i| &self.function_metas[i])
+    }
 }
 
 #[cfg(test)]
@@ -337,13 +489,8 @@ mod tests {
     use crate::pool::StringPool;
     use rkyv::rancor::Error;
 
-    #[test]
-    fn test_serialize_deserialize_graph() {
-        let mut pool = StringPool::new();
-        let name_ref = pool.add("main");
-        let uid_ref = pool.add("Function:src/main.ts:main");
-
-        let graph = ZeroCopyGraph {
+    fn make_base_graph(pool: StringPool, name_ref: StrRef, uid_ref: StrRef) -> ZeroCopyGraph {
+        ZeroCopyGraph {
             magic: GRAPH_MAGIC,
             version: GRAPH_FORMAT_VERSION,
             fingerprint: [0; 32],
@@ -362,7 +509,13 @@ mod tests {
                 span: (1, 0, 5, 0),
                 community_id: 0,
             }],
-            edges: vec![],
+            edges: vec![Edge {
+                source: 0,
+                target: 0,
+                rel_type: RelType::Calls,
+                confidence: 1.0,
+                reason: name_ref,
+            }],
             out_offsets: vec![0, 0],
             in_offsets: vec![0, 0],
             in_edge_idx: vec![],
@@ -372,7 +525,18 @@ mod tests {
             traces_data: vec![],
             blind_spots: vec![],
             route_shapes: vec![],
-        };
+            call_metas: vec![],
+            function_metas: vec![],
+        }
+    }
+
+    #[test]
+    fn test_serialize_deserialize_graph() {
+        let mut pool = StringPool::new();
+        let name_ref = pool.add("main");
+        let uid_ref = pool.add("Function:src/main.ts:main");
+
+        let graph = make_base_graph(pool, name_ref, uid_ref);
 
         // Serialize
         let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
@@ -388,5 +552,91 @@ mod tests {
         let archived_node = &archived.nodes[0];
         let name_str = archived_node.name.resolve(&archived.string_pool);
         assert_eq!(name_str, "main");
+    }
+
+    #[test]
+    fn test_side_table_roundtrip() {
+        let mut pool = StringPool::new();
+        let name_ref = pool.add("main");
+        let uid_ref = pool.add("Function:src/main.ts:main");
+        let dispatch_ref = pool.add("Box<dyn Trait>");
+
+        let mut graph = make_base_graph(pool, name_ref, uid_ref);
+        graph.call_metas = vec![CallMeta {
+            edge_idx: 0,
+            flags: CallMeta::FLAG_DYNAMIC_DISPATCH,
+            dispatch_type: dispatch_ref,
+        }];
+        graph.function_metas = vec![FunctionMeta {
+            node_idx: 0,
+            flags: FunctionMeta::FLAG_ASYNC | FunctionMeta::FLAG_TEST,
+            params: vec![name_ref],
+            return_type: name_ref,
+            decorators: vec![name_ref],
+        }];
+
+        let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
+
+        assert_eq!(archived.call_metas.len(), 1);
+        let cm = &archived.call_metas[0];
+        assert_eq!(cm.edge_idx.to_native(), 0);
+        assert_eq!(cm.flags, CallMeta::FLAG_DYNAMIC_DISPATCH);
+        let dt = cm.dispatch_type.resolve(&archived.string_pool);
+        assert_eq!(dt, "Box<dyn Trait>");
+
+        assert_eq!(archived.function_metas.len(), 1);
+        let fm = &archived.function_metas[0];
+        assert_eq!(fm.node_idx.to_native(), 0);
+        assert!(fm.flags.to_native() & FunctionMeta::FLAG_ASYNC != 0);
+        assert!(fm.flags.to_native() & FunctionMeta::FLAG_TEST != 0);
+        assert_eq!(fm.params.len(), 1);
+        assert_eq!(fm.decorators.len(), 1);
+    }
+
+    #[test]
+    fn test_call_meta_binary_search() {
+        let mut pool = StringPool::new();
+        let name_ref = pool.add("f");
+        let uid_ref = pool.add("Function:src/f.rs:f");
+        let empty_ref = pool.add("");
+
+        let mut graph = make_base_graph(pool, name_ref, uid_ref);
+        // 10 entries at even edge_idx values: 0, 2, 4, ..., 18
+        graph.call_metas = (0u32..10)
+            .map(|i| CallMeta {
+                edge_idx: i * 2,
+                flags: CallMeta::FLAG_DIRECT,
+                dispatch_type: empty_ref,
+            })
+            .collect();
+
+        assert!(graph.call_meta(4).is_some(), "edge_idx=4 must be found");
+        assert!(graph.call_meta(5).is_none(), "edge_idx=5 must not be found");
+        assert!(graph.call_meta(0).is_some(), "edge_idx=0 must be found");
+        assert!(graph.call_meta(18).is_some(), "edge_idx=18 must be found");
+        assert!(
+            graph.call_meta(19).is_none(),
+            "edge_idx=19 must not be found"
+        );
+    }
+
+    #[test]
+    fn test_struct_sizes() {
+        // Sanity-check layout assumptions documented in the PR body.
+        // CallMeta: edge_idx(4) + flags(1) + padding(3) + dispatch_type(8) = 16
+        // FunctionMeta: node_idx(4) + flags(2) + padding(2) + params(24) + return_type(8) + decorators(24) = 64
+        let call_meta_size = std::mem::size_of::<CallMeta>();
+        let fn_meta_size = std::mem::size_of::<FunctionMeta>();
+        println!("CallMeta size: {call_meta_size}");
+        println!("FunctionMeta size: {fn_meta_size}");
+        assert!(
+            call_meta_size <= 24,
+            "CallMeta unexpectedly large: {call_meta_size}"
+        );
+        assert!(
+            fn_meta_size <= 72,
+            "FunctionMeta unexpectedly large: {fn_meta_size}"
+        );
     }
 }

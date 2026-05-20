@@ -44,6 +44,8 @@ fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
     rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
 }

@@ -36,6 +36,8 @@ fn build_empty_graph() -> Vec<u8> {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
     rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
 }
@@ -94,6 +96,8 @@ fn build_graph_with_calls_edge() -> Vec<u8> {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
     rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
 }

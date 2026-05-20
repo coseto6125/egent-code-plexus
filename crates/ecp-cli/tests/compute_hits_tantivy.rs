@@ -117,6 +117,8 @@ fn make_config_graph() -> ZeroCopyGraph {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     }
 }
 

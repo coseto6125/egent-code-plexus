@@ -70,6 +70,8 @@ fn write_valid_empty_graph(path: &Path) {
         traces_data: Vec::new(),
         blind_spots: Vec::new(),
         route_shapes: Vec::new(),
+        call_metas: vec![],
+        function_metas: vec![],
     };
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
     fs::write(path, &*bytes).unwrap();

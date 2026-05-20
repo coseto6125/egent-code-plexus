@@ -1230,6 +1230,8 @@ impl GraphBuilder {
             files,
             blind_spots: all_blind_spots,
             route_shapes: route_shapes_out,
+            call_metas: vec![],
+            function_metas: vec![],
         }
     }
 }

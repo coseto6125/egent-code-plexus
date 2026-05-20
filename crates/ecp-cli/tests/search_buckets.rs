@@ -123,6 +123,8 @@ fn make_bucket_graph() -> ZeroCopyGraph {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     }
 }
 
@@ -312,6 +314,8 @@ fn empty_buckets_emit_empty_array_in_json() {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
     let tmp = TempDir::new().unwrap();
     let graph_path = tmp.path().join("graph.bin");
@@ -404,6 +408,8 @@ fn text_format_empty_bucket_shows_none() {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
     let tmp = TempDir::new().unwrap();
     let graph_path = tmp.path().join("graph.bin");
@@ -474,6 +480,8 @@ fn each_bucket_independently_capped_at_top_k() {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
     let tmp = TempDir::new().unwrap();
     let graph_path = tmp.path().join("graph.bin");

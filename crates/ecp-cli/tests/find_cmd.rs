@@ -128,6 +128,8 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
 
     let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();

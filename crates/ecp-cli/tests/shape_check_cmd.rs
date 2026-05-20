@@ -146,6 +146,8 @@ fn build_graph(
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes,
+        call_metas: vec![],
+        function_metas: vec![],
     };
 
     rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
