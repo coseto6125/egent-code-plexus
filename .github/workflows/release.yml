@@ -12,9 +12,7 @@ on:
         default: 'false'
 
 permissions:
-  contents: write       # GitHub Release 上傳
-  id-token: write       # SLSA OIDC token
-  attestations: write   # actions/attest-build-provenance
+  contents: read
 
 # 同一 tag/手動觸發避免重複跑，但不取消已 publish 中的（保證 release atomicity）
 concurrency:
@@ -33,6 +31,10 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write       # SLSA OIDC token
+      attestations: write   # actions/attest-build-provenance
     strategy:
       fail-fast: false
       matrix:
@@ -130,6 +132,9 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    permissions:
+      contents: write       # GitHub Release 上傳
+      id-token: write       # cosign keyless signing
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -153,6 +158,23 @@ jobs:
           sed "s/\$version = if (\$env:CGN_VERSION) { \$env:CGN_VERSION } else { 'latest' }/\$version = if (\$env:CGN_VERSION) { \$env:CGN_VERSION } else { '$version' }/" install.ps1 > dist/install.ps1
           ls -la dist/
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign release assets
+        shell: bash
+        run: |
+          find dist -maxdepth 1 -type f \
+            ! -name '*.sig' \
+            ! -name '*.pem' \
+            -print0 |
+            while IFS= read -r -d '' asset; do
+              cosign sign-blob --yes \
+                --output-signature "${asset}.sig" \
+                --output-certificate "${asset}.pem" \
+                "${asset}"
+            done
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
@@ -160,6 +182,8 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
+            dist/*.sig
+            dist/*.pem
             dist/install.sh
             dist/install.ps1
           draft: false
@@ -191,7 +215,8 @@ jobs:
 
             ### Manual download
             Pick a `.tar.gz` / `.zip` matching your platform from Assets below.
-            Each has a `.sha256` for integrity. Verify build provenance with:
+            Each has a `.sha256` for integrity and `.sig` / `.pem` files for
+            keyless signature verification. Verify build provenance with:
             ```
             gh attestation verify ./cgn --owner coseto6125
             ```
@@ -205,6 +230,8 @@ jobs:
     needs: [github-release]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    permissions:
+      contents: read
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
@@ -293,6 +320,8 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     if: vars.PUBLISH_CRATES == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    permissions:
+      contents: read
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
