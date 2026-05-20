@@ -18,9 +18,39 @@ pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+pub(crate) fn with_windows_retry<T, F: FnMut() -> io::Result<T>>(mut f: F) -> io::Result<T> {
+    use std::time::Duration;
+    let mut last_err = None;
+    for attempt in 0..100 {
+        match f() {
+            Ok(val) => return Ok(val),
+            Err(err) => {
+                let raw = err.raw_os_error();
+                if raw != Some(5) && raw != Some(32) {
+                    return Err(err);
+                }
+                last_err = Some(err);
+                // Backoff: 5ms, 6ms, 7ms ... up to 104ms
+                std::thread::sleep(Duration::from_millis(5 + attempt as u64));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(io::Error::last_os_error))
+}
+
+#[cfg(not(windows))]
+#[inline(always)]
+pub(crate) fn with_windows_retry<T, F: FnMut() -> io::Result<T>>(mut f: F) -> io::Result<T> {
+    f()
+}
+
+pub fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+    with_windows_retry(|| fs::rename(from, to))
+}
+
+#[cfg(windows)]
 fn replace_file_windows(from: &Path, to: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use std::time::Duration;
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
@@ -33,8 +63,7 @@ fn replace_file_windows(from: &Path, to: &Path) -> io::Result<()> {
     let from_wide: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
     let to_wide: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
 
-    let mut last_err = None;
-    for attempt in 0..50 {
+    with_windows_retry(|| {
         let ok = unsafe {
             MoveFileExW(
                 from_wide.as_ptr(),
@@ -43,19 +72,11 @@ fn replace_file_windows(from: &Path, to: &Path) -> io::Result<()> {
             )
         };
         if ok != 0 {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
-
-        let err = io::Error::last_os_error();
-        let raw = err.raw_os_error();
-        if raw != Some(5) && raw != Some(32) {
-            return Err(err);
-        }
-        last_err = Some(err);
-        std::thread::sleep(Duration::from_millis(1 + attempt / 10));
-    }
-
-    Err(last_err.unwrap_or_else(io::Error::last_os_error))
+    })
 }
 
 pub fn retire_dir(path: &Path) -> io::Result<Option<PathBuf>> {
@@ -72,7 +93,7 @@ pub fn retire_dir(path: &Path) -> io::Result<Option<PathBuf>> {
     }
 
     let retired = retired_dir_path(path);
-    fs::rename(path, &retired)?;
+    rename_with_retry(path, &retired)?;
     Ok(Some(retired))
 }
 

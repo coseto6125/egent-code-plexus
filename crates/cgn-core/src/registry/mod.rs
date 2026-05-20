@@ -14,7 +14,7 @@ mod store;
 pub use audit::{AuditEvent, AuditLog};
 pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord, BUILDER_FINGERPRINT};
 pub use dirname::{CommitDirName, ParseError as DirNameParseError, SourceType};
-pub use fs_safe::{replace_file, retire_dir, retire_dir_async};
+pub use fs_safe::{rename_with_retry, replace_file, retire_dir, retire_dir_async};
 pub use io::{atomic_write_bytes, atomic_write_bytes_no_fsync, atomic_write_json};
 /// Internal implementation detail. Not part of public API.
 /// Use only within cgn-core or in tests.

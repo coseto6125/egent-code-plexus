@@ -61,7 +61,7 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
             }
             SessionState::AugmentedReference { base_sha, .. } if base_sha == target_sha => {
                 let stale_path = sessions_dir.join(format!("{name}.stale-{sha8}"));
-                fs::rename(&path, &stale_path)?;
+                cgn_core::registry::rename_with_retry(&path, &stale_path)?;
                 spawn_delayed_rm_rf(stale_path, Duration::from_secs(2));
                 report.invalidated += 1;
             }

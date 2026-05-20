@@ -147,7 +147,7 @@ pub(crate) fn build_inside_locked(
         // publication event, so the lock is no longer needed after this point.
         drop(lock_guard.take());
         let publish_dir = publish_dir_for(commit_dir);
-        rename_dir_with_retry(building, &publish_dir)?;
+        cgn_core::registry::rename_with_retry(building, &publish_dir)?;
         let _ = cgn_core::registry::retire_dir_async(&publish_dir.join("_src"));
 
         update_repo_meta(repo_root, worktree, sha_hex)?;
@@ -378,31 +378,6 @@ fn sync_file(path: &Path) -> io::Result<()> {
     }
     #[cfg(not(windows))]
     File::open(path)?.sync_all()
-}
-
-fn rename_dir_with_retry(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::time::Duration;
-
-        let mut last_err = None;
-        for attempt in 0..50 {
-            match fs::rename(from, to) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    let raw = err.raw_os_error();
-                    if raw != Some(5) && raw != Some(32) {
-                        return Err(err);
-                    }
-                    last_err = Some(err);
-                    std::thread::sleep(Duration::from_millis(1 + attempt / 10));
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(io::Error::last_os_error))
-    }
-    #[cfg(not(windows))]
-    fs::rename(from, to)
 }
 
 pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> io::Result<()> {

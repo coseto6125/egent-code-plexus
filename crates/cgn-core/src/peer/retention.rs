@@ -34,10 +34,10 @@ pub fn rotate_if_needed(log: &Path, threshold_bytes: u64, keep: usize) -> io::Re
     for n in (1..keep).rev() {
         let from = path_n(n);
         if from.exists() {
-            fs::rename(&from, path_n(n + 1))?;
+            crate::registry::rename_with_retry(&from, &path_n(n + 1))?;
         }
     }
-    fs::rename(log, path_n(1))?;
+    crate::registry::rename_with_retry(log, &path_n(1))?;
     fs::write(log, b"")?;
     Ok(true)
 }

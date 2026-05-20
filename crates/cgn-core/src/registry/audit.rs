@@ -114,11 +114,11 @@ impl AuditLog {
                 if n == KEEP_ROTATED {
                     let _ = fs::remove_file(&from);
                 } else {
-                    fs::rename(&from, &to)?;
+                    crate::registry::rename_with_retry(&from, &to)?;
                 }
             }
         }
-        fs::rename(&self.path, rotated_path(&self.path, 1))?;
+        crate::registry::rename_with_retry(&self.path, &rotated_path(&self.path, 1))?;
         Ok(())
     }
 }

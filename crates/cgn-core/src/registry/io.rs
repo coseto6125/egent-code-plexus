@@ -27,16 +27,18 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
+            super::fs_safe::with_windows_retry(|| fs::create_dir_all(parent))?;
         }
     }
     let tmp = unique_tmp_sibling(path);
     {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp)?;
+        let mut f = super::fs_safe::with_windows_retry(|| {
+            fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)
+        })?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
@@ -64,16 +66,18 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()>
 pub fn atomic_write_bytes_no_fsync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
+            super::fs_safe::with_windows_retry(|| fs::create_dir_all(parent))?;
         }
     }
     let tmp = unique_tmp_sibling(path);
     {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp)?;
+        let mut f = super::fs_safe::with_windows_retry(|| {
+            fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)
+        })?;
         f.write_all(bytes)?;
         // Intentional: no sync_all. See doc comment.
     }
