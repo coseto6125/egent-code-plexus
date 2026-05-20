@@ -125,7 +125,7 @@ fn user_prompt_submit_coalesces_rebuild_marker_and_peer_drain() {
     std::fs::create_dir_all(&state_dir).unwrap();
     std::fs::write(state_dir.join(".rebuild-complete"), b"").unwrap();
 
-    let envelope = format!(r#"{{"cwd":"{}"}}"#, cwd.path().display());
+    let envelope = serde_json::json!({ "cwd": cwd.path() }).to_string();
     let out = fire("user-prompt-submit", &envelope, sid, tmp.path());
     let json = assert_single_json(&out, "UserPromptSubmit(dual)");
     let ctx = json["hookSpecificOutput"]["additionalContext"]
@@ -148,8 +148,7 @@ fn session_start_drains_peer_inbox() {
     // cwd must be non-empty (else session_start returns immediately).
     // Use a tempdir; it won't match the registry, so the rules-template
     // path is a no-op and only peer drain produces output.
-    let cwd = tmp.path().display();
-    let envelope = format!(r#"{{"cwd":"{cwd}"}}"#);
+    let envelope = serde_json::json!({ "cwd": tmp.path() }).to_string();
     let out = fire("session-start", &envelope, sid, tmp.path());
     let json = assert_single_json(&out, "SessionStart");
     let ctx = json["hookSpecificOutput"]["additionalContext"]

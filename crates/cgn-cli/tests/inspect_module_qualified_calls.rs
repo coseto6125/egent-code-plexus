@@ -284,6 +284,7 @@ edition = "2021"
             .unwrap_or_default();
         for entry in &callers {
             let name = entry["name"].as_str().unwrap_or("").to_string();
+            let symbol_file = symbol_file.replace('\\', "/");
             if symbol_file.contains("crates/a/") {
                 crate_a_callers.push(name);
             } else if symbol_file.contains("crates/b/") {

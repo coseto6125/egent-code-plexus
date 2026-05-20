@@ -159,6 +159,9 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         .truncate(false)
         .open(&lock_path)?;
     let lock_guard = if lock.try_lock_exclusive().is_err() {
+        // Windows/WSL: Must drop the open file handle before waiting, otherwise the winning
+        // builder will get Access Denied (os error 5) when trying to rename the building dir.
+        drop(lock);
         wait_for_completion(&building, &commit_dir)?;
 
         // 1a. Fingerprint short-circuit. If the winning builder just published

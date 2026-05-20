@@ -63,6 +63,9 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
         .truncate(false)
         .open(&lock_path)?;
     if lock.try_lock_exclusive().is_err() {
+        // Windows/WSL: Must drop the open file handle before waiting, otherwise the winning
+        // builder will get Access Denied (os error 5) when trying to rename the building dir.
+        drop(lock);
         // Another builder owns this dir — wait for completion + return
         return wait_for_completion(&building, &commit_dir);
     }
@@ -93,72 +96,85 @@ pub(crate) fn build_inside_locked(
     commit_dir: &Path,
     lock_guard: File,
 ) -> io::Result<BuildResult> {
-    let src_root = if worktree_clean_and_head_matches(worktree, sha_hex)? {
-        worktree.to_path_buf()
-    } else {
-        let src = building.join("_src");
-        fs::create_dir_all(&src)?;
-        git_archive_to(worktree, sha_hex, &src)?;
-        src
-    };
+    let mut lock_guard = Some(lock_guard);
+    let result = (|| {
+        let src_root = if worktree_clean_and_head_matches(worktree, sha_hex)? {
+            worktree.to_path_buf()
+        } else {
+            let src = building.join("_src");
+            fs::create_dir_all(&src)?;
+            git_archive_to(worktree, sha_hex, &src)?;
+            src
+        };
 
-    // Analyzer pipeline. `repo_root` doubles as the persistent parse_cache
-    // root — cache entries live in `<repo_root>/parse_cache/<fp>/` and
-    // survive across L2 commit_dirs as long as the file content (and binary
-    // build) is unchanged.
-    let node_count = crate::commands::admin::index::run_analyzer_for_paths(
-        &src_root,
-        building,
-        Some(repo_root),
-    )?;
+        // Analyzer pipeline. `repo_root` doubles as the persistent parse_cache
+        // root — cache entries live in `<repo_root>/parse_cache/<fp>/` and
+        // survive across L2 commit_dirs as long as the file content (and binary
+        // build) is unchanged.
+        let node_count = crate::commands::admin::index::run_analyzer_for_paths(
+            &src_root,
+            building,
+            Some(repo_root),
+        )?;
 
-    let refs_at_build = collect_refs(worktree, sha_hex)?;
-    let source_type = source_type_from_refs(&refs_at_build);
-    let source_id = source_id_from_refs(&refs_at_build);
-    let parent = parent_sha(worktree, sha_hex).ok();
+        let refs_at_build = collect_refs(worktree, sha_hex)?;
+        let source_type = source_type_from_refs(&refs_at_build);
+        let source_id = source_id_from_refs(&refs_at_build);
+        let parent = parent_sha(worktree, sha_hex).ok();
 
-    let meta = CommitBuildMeta {
-        version: 1,
-        sha: sha_hex.to_string(),
-        source_type,
-        source_id,
-        built_from_worktree: worktree.to_string_lossy().into(),
-        built_at: chrono::Utc::now().to_rfc3339(),
-        parent_sha: parent,
-        node_count: node_count as u32,
-        embedding_status: EmbeddingStatus::None,
-        refs_at_build,
-        refs_seen_since: vec![],
-        builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
-    };
-    CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
+        let meta = CommitBuildMeta {
+            version: 1,
+            sha: sha_hex.to_string(),
+            source_type,
+            source_id,
+            built_from_worktree: worktree.to_string_lossy().into(),
+            built_at: chrono::Utc::now().to_rfc3339(),
+            parent_sha: parent,
+            node_count: node_count as u32,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build,
+            refs_seen_since: vec![],
+            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+        };
+        CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
 
-    // fsync + atomic publish. If an L2 for the same SHA already exists,
-    // publish to a generation dir instead of touching the old reader-visible
-    // directory. CommitIndex resolves same-SHA generations to the newest one.
-    sync_all_files(building)?;
-    // Windows refuses to rename a directory that contains any open file
-    // handles (os error 5). Drop the lock fd now — the rename is the
-    // publication event, so the lock is no longer needed after this point.
-    drop(lock_guard);
-    let publish_dir = publish_dir_for(commit_dir);
-    rename_dir_with_retry(building, &publish_dir)?;
-    let _ = cgn_core::registry::retire_dir_async(&publish_dir.join("_src"));
+        // fsync + atomic publish. If an L2 for the same SHA already exists,
+        // publish to a generation dir instead of touching the old reader-visible
+        // directory. CommitIndex resolves same-SHA generations to the newest one.
+        sync_all_files(building)?;
+        // Windows refuses to rename a directory that contains any open file
+        // handles (os error 5). Drop the lock fd now — the rename is the
+        // publication event, so the lock is no longer needed after this point.
+        drop(lock_guard.take());
+        let publish_dir = publish_dir_for(commit_dir);
+        rename_dir_with_retry(building, &publish_dir)?;
+        let _ = cgn_core::registry::retire_dir_async(&publish_dir.join("_src"));
 
-    update_repo_meta(repo_root, worktree, sha_hex)?;
+        update_repo_meta(repo_root, worktree, sha_hex)?;
 
-    // Write the HEAD-SHA fingerprint next to the freshly published graph.bin
-    // so subsequent read commands can short-circuit `auto_ensure::ensure_index`
-    // without walking the working tree. Last step on the build path, detached
-    // to a background thread so the build's wall-clock isn't bumped by the
-    // tiny 41-byte write.
-    crate::auto_ensure::write_head_sha_sidecar_with_sha(&publish_dir.join("graph.bin"), sha_hex);
+        // Write the HEAD-SHA fingerprint next to the freshly published graph.bin
+        // so subsequent read commands can short-circuit `auto_ensure::ensure_index`
+        // without walking the working tree. Last step on the build path, detached
+        // to a background thread so the build's wall-clock isn't bumped by the
+        // tiny 41-byte write.
+        crate::auto_ensure::write_head_sha_sidecar_with_sha(
+            &publish_dir.join("graph.bin"),
+            sha_hex,
+        );
 
-    Ok(BuildResult {
-        commit_dir: publish_dir,
-        sha_hex: sha_hex.to_string(),
-        source_type,
-    })
+        Ok(BuildResult {
+            commit_dir: publish_dir,
+            sha_hex: sha_hex.to_string(),
+            source_type,
+        })
+    })();
+
+    if result.is_err() {
+        drop(lock_guard.take());
+        let _ = cgn_core::registry::retire_dir_async(building);
+    }
+
+    result
 }
 
 pub(crate) fn attach_latest_if_fingerprint_matches(
@@ -481,7 +497,7 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
 pub(crate) fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Result<BuildResult> {
     let start = std::time::Instant::now();
     while building.exists() {
-        if start.elapsed() > std::time::Duration::from_secs(600) {
+        if start.elapsed() > std::time::Duration::from_secs(5) {
             return Err(io::Error::other("build attach timeout"));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
