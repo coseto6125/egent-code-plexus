@@ -30,7 +30,7 @@ phf = { version = "0.11", features = ["macros"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["process", "signal"] }
+nix = { version = "0.31", features = ["process", "signal"] }
 
 [build-dependencies]
 cc = "1.0.94"
