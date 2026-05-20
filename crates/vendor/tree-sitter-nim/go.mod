@@ -4,6 +4,4 @@
 
 module github.com/alaviss/tree-sitter-nim
 
-go 1.22
-
-require github.com/tree-sitter/go-tree-sitter v0.24.0
+go 1.23
