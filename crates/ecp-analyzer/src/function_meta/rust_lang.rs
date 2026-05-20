@@ -8,6 +8,9 @@ use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta, NodeKind};
 use tree_sitter::Node;
 
+/// Span-keyed index entry: `(span, &RawNode)`.
+type FnSpan<'a> = ((u32, u32, u32, u32), &'a RawNode);
+
 pub fn extract(
     root: Node<'_>,
     source: &[u8],
@@ -47,7 +50,7 @@ fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
 fn collect_fn_nodes<'a>(
     node: Node<'a>,
     source: &[u8],
-    fn_spans: &[((u32, u32, u32, u32), &RawNode)],
+    fn_spans: &[FnSpan<'a>],
     file_category: FileCategory,
     out: &mut Vec<RawFunctionMeta>,
 ) {
@@ -102,7 +105,7 @@ fn extract_one(
                         }
                     } else if sib.id() == fn_node.id() {
                         // Found our function — all accumulated attrs belong to it.
-                        decs.extend(pending_attrs.drain(..));
+                        decs.append(&mut pending_attrs);
                         break;
                     } else {
                         // Non-attribute, non-fn sibling — reset accumulator.

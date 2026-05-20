@@ -25,13 +25,13 @@ fn find_fn(g: &ZeroCopyGraph, name: &str) -> u32 {
                 NodeKind::Function | NodeKind::Method | NodeKind::Constructor
             ) && n.name.resolve(pool) == name
         })
-        .expect(&format!("node {name} not found")) as u32
+        .unwrap_or_else(|| panic!("node {name} not found")) as u32
 }
 
 fn meta<'a>(g: &'a ZeroCopyGraph, name: &str) -> &'a FunctionMeta {
     let idx = find_fn(g, name);
     g.function_meta(idx)
-        .expect(&format!("FunctionMeta missing for {name}"))
+        .unwrap_or_else(|| panic!("FunctionMeta missing for {name}"))
 }
 
 // ── async ─────────────────────────────────────────────────────────────────────

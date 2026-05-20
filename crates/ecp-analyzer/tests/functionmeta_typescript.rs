@@ -35,13 +35,13 @@ fn find_fn(g: &ZeroCopyGraph, name: &str) -> u32 {
                 NodeKind::Function | NodeKind::Method | NodeKind::Constructor
             ) && n.name.resolve(pool) == name
         })
-        .expect(&format!("node {name} not found")) as u32
+        .unwrap_or_else(|| panic!("node {name} not found")) as u32
 }
 
 fn meta<'a>(g: &'a ZeroCopyGraph, name: &str) -> &'a FunctionMeta {
     let idx = find_fn(g, name);
     g.function_meta(idx)
-        .expect(&format!("FunctionMeta missing for {name}"))
+        .unwrap_or_else(|| panic!("FunctionMeta missing for {name}"))
 }
 
 // ── async ─────────────────────────────────────────────────────────────────────
@@ -188,12 +188,9 @@ fn ts_decorator_captured() {
     let g = analyze(src);
     let m = meta(&g, "getAll");
     let pool = g.string_pool.as_slice();
-    let dec_names: Vec<_> = m.decorators.iter().map(|d| d.resolve(pool)).collect();
-    // The decorator text may include the path argument; check for the name.
-    assert!(
-        !dec_names.is_empty() || true, // decorators capture is best-effort; just verify no panic.
-        "decorator presence checked without panic"
-    );
+    // The decorator text may include the path argument. Capture is best-effort; just
+    // verify no panic and that the pool lookup doesn't error.
+    let _ = m.decorators.iter().map(|d| d.resolve(pool)).count();
 }
 
 // ── sorted by node_idx invariant ─────────────────────────────────────────────

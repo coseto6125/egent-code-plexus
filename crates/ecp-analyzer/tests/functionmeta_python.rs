@@ -29,7 +29,7 @@ fn analyze_test_file(src: &str) -> ZeroCopyGraph {
     builder.build()
 }
 
-fn find_fn<'a>(g: &'a ZeroCopyGraph, name: &str) -> u32 {
+fn find_fn(g: &ZeroCopyGraph, name: &str) -> u32 {
     let pool = g.string_pool.as_slice();
     g.nodes
         .iter()
@@ -39,13 +39,13 @@ fn find_fn<'a>(g: &'a ZeroCopyGraph, name: &str) -> u32 {
                 NodeKind::Function | NodeKind::Method | NodeKind::Constructor
             ) && n.name.resolve(pool) == name
         })
-        .expect(&format!("node {name} not found")) as u32
+        .unwrap_or_else(|| panic!("node {name} not found")) as u32
 }
 
 fn meta<'a>(g: &'a ZeroCopyGraph, name: &str) -> &'a FunctionMeta {
     let idx = find_fn(g, name);
     g.function_meta(idx)
-        .expect(&format!("FunctionMeta missing for {name}"))
+        .unwrap_or_else(|| panic!("FunctionMeta missing for {name}"))
 }
 
 // ── async ─────────────────────────────────────────────────────────────────────
@@ -198,11 +198,11 @@ fn python_multi_decorator_captured() {
     let pool = g.string_pool.as_slice();
     let dec_names: Vec<_> = m.decorators.iter().map(|d| d.resolve(pool)).collect();
     assert!(
-        dec_names.iter().any(|d| *d == "staticmethod"),
+        dec_names.contains(&"staticmethod"),
         "staticmethod decorator expected, got: {dec_names:?}"
     );
     assert!(
-        dec_names.iter().any(|d| *d == "some_other"),
+        dec_names.contains(&"some_other"),
         "some_other decorator expected"
     );
 }

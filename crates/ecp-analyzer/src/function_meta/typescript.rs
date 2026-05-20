@@ -8,6 +8,9 @@ use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta, NodeKind};
 use tree_sitter::Node;
 
+/// Span-keyed index entry: `(span, &RawNode)`.
+type FnSpan<'a> = ((u32, u32, u32, u32), &'a RawNode);
+
 pub fn extract(
     root: Node<'_>,
     source: &[u8],
@@ -62,7 +65,7 @@ const TS_FN_KINDS: &[&str] = &[
 fn collect_fn_nodes<'a>(
     node: Node<'a>,
     source: &[u8],
-    fn_spans: &[((u32, u32, u32, u32), &RawNode)],
+    fn_spans: &[FnSpan<'a>],
     file_category: FileCategory,
     out: &mut Vec<RawFunctionMeta>,
 ) {
