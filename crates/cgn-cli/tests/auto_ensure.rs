@@ -38,7 +38,11 @@ fn git_init_with_commit(p: &Path) -> String {
 fn wait_for_sidecar(path: &Path) {
     for _ in 0..50 {
         if path.exists() {
-            return;
+            if let Ok(content) = fs::read_to_string(path) {
+                if !content.trim().is_empty() {
+                    return;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(2));
     }
