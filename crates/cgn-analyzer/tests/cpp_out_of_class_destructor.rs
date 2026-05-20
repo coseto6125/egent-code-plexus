@@ -43,10 +43,21 @@ fn out_of_class_destructor_with_body_emits_method() {
 #[test]
 fn out_of_class_destructor_eq_default_emits_method() {
     // Common real-corpus pattern from nlohmann/json regression suites and
-    // Fuzzer: `Foo::~Foo() = default;`. The `= default` clause is part of
-    // the function_definition shape (special-member default), not a body.
+    // Fuzzer: `Foo::~Foo() = default;`. tree-sitter-cpp ABI 15 (post-2025-09
+    // regen) reparses this as `expression_statement > assignment_expression`
+    // instead of `function_definition + default_method_clause`; the second
+    // pattern in queries.scm's Method section handles the new shape.
     let g = parse("ParserImpl::~ParserImpl() = default;\n");
     assert!(methods(&g).contains(&"~ParserImpl"));
+}
+
+#[test]
+fn out_of_class_destructor_eq_delete_emits_method() {
+    // ABI 15 still parses `= delete;` as function_definition (only `= default;`
+    // regressed to assignment_expression). Guard so any future grammar drift
+    // surfaces here.
+    let g = parse("Foo::~Foo() = delete;\n");
+    assert!(methods(&g).contains(&"~Foo"), "nodes: {:#?}", g.nodes);
 }
 
 #[test]

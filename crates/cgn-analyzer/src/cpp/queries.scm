@@ -199,6 +199,23 @@
   ]
 ) @method
 
+;; Out-of-class `Foo::~Foo() = default;` / `Foo::Foo() = default;` —
+;; tree-sitter-cpp ABI 15 (post-2025-09 regen) reparses these as
+;; `expression_statement > assignment_expression > call_expression` instead
+;; of `function_definition + default_method_clause`. The `= delete;` variants
+;; are unaffected. `default` is a reserved word so the RHS identifier can
+;; only carry that literal text — `#eq?` keeps the match scoped.
+(expression_statement
+  (assignment_expression
+    left: (call_expression
+      function: (qualified_identifier
+        name: [
+          (destructor_name) @name.method
+          (identifier) @name.method
+        ]))
+    right: (identifier) @_default
+    (#eq? @_default "default"))) @method
+
 
 ;; Preprocessor Includes
 (preproc_include
