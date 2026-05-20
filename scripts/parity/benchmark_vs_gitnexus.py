@@ -30,7 +30,7 @@ CMD_TIMEOUT_S = 1800  # cold-analyze can take 10+ min for gitnexus on 22k-file c
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_ECP = WORKSPACE_ROOT / "target" / "release" / "ecp"
 DEFAULT_GITNEXUS = Path.home() / ".npm-global" / "bin" / "gitnexus"
-DEFAULT_REPO = Path("/home/enor/egent-code-plexus/.sample_repo")
+DEFAULT_REPO = Path("/home/enor/code-graph-nexus/.sample_repo")
 
 
 @dataclass

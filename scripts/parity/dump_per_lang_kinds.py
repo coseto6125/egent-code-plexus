@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 
-REPO = "/home/enor/egent-code-plexus/.sample_repo"
+REPO = "/home/enor/code-graph-nexus/.sample_repo"
 LANGS = [
     "TypeScript",
     "JavaScript",
