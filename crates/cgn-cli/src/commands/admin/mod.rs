@@ -4,6 +4,7 @@
 use clap::Subcommand;
 
 pub mod claude_code;
+pub mod codex;
 pub mod config;
 pub mod drop;
 pub mod group;
@@ -37,6 +38,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: sessions::SessionsCommand,
     },
+    /// Scriptable Codex host integration commands
+    Codex {
+        #[command(subcommand)]
+        command: codex::CodexCommands,
+    },
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
     /// Diff resolver dump against language oracle (cgn-dev QA)
@@ -56,6 +62,7 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), cgn_core::
         AdminCommands::Sessions { command } => {
             sessions::run(command).map_err(cgn_core::CgnError::Output)
         }
+        AdminCommands::Codex { command } => codex::run(command),
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),
         AdminCommands::VerifyResolver(args) => crate::commands::verify_resolver::run(args),
     }

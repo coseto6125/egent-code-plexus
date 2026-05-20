@@ -2,8 +2,8 @@
 //!
 //! Opens a `dialoguer`-based menu tree.  Index, agent integration,
 //! config, group, and diagnostic workflows are reachable from here.
-//! No top-level `cgn install` / `cgn integrate` command is exposed — this
-//! is the sole entry point per the UX constraint in the host-integration spec.
+//! Scriptable host-integration operations live under `cgn admin <subcmd>`;
+//! this TUI remains the progressive human-operated path.
 //!
 //! # Menu tree
 //! ```text

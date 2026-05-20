@@ -167,6 +167,8 @@ Admin 命名空間 (`cgn admin <cmd>` — 隱藏於頂層說明)：
 | `config` | `.cgn/config.toml` 互動式精靈。 |
 | `mcp serve` / `mcp tools` | 給 LLM host 用的 MCP server (stdio)。 |
 
+不帶子命令執行 `cgn admin` 會開啟互動式 admin TUI，用於索引維護、host 整合、設定、群組與診斷。
+
 ---
 
 ## MCP 伺服器
@@ -176,6 +178,85 @@ Admin 命名空間 (`cgn admin <cmd>` — 隱藏於頂層說明)：
 ```bash
 cgn admin mcp tools          # 檢視暴露的工具表面
 cgn admin mcp serve          # 啟動伺服器 (預設：spawn 模式，每次調用啟動新進程)
+```
+
+給人操作的漸進式路徑：
+
+```text
+cgn admin
+→ Agent Integrations
+→ MCP
+→ <host>
+→ install
+```
+
+## Codex CLI native 整合
+
+Codex native 路徑與 MCP 分離。它會為 `openai/codex` fork 準備 patch，不會直接修改正在執行的 Codex 安裝：
+
+給人操作的漸進式路徑：
+
+```text
+cgn admin
+→ Agent Integrations
+→ Codex CLI
+→ install
+→ native-tools
+```
+
+內建 skills 使用相同的漸進式路徑：
+
+```text
+cgn admin
+→ Agent Integrations
+→ Codex CLI
+→ install
+→ skills
+→ all | cgn | simplify
+```
+
+給 AI agent 與自動化流程使用的指令化路徑：
+
+```bash
+cgn admin codex install native-tools
+cgn admin codex install skills all
+cgn admin codex install skills cgn
+cgn admin codex install skills simplify
+```
+
+內建 skills 用來教 agent 判斷 help 本身無法推導的使用場景：
+
+| Skill | 適用場景 |
+|---|---|
+| `cgn` | agent 需要判斷何時用圖譜感知的 symbol、impact、route、contract、rename 流程，而不是 grep / 讀檔。 |
+| `simplify` | agent 在 review changed code 時，應先看 cgn impact、盲區、egress、shape drift、resolver delta，再讀 raw diff。 |
+
+`native-tools` 元件會寫出：
+
+```text
+~/.config/cgn/host-integration/codex-cli.patch
+```
+
+在 Codex CLI fork 內套用 patch，接著把產生的 module 接進 Codex 的 tool registry：
+
+```bash
+cd /path/to/openai-codex-fork
+git apply ~/.config/cgn/host-integration/codex-cli.patch
+```
+
+若要檢查已套用 native marker 的 fork，先設定 `CGN_CODEX_CLI_CHECKOUT`，再於 TUI 內查看狀態：
+
+```bash
+CGN_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork cgn admin
+# Agent Integrations → Codex CLI → status
+```
+
+等價的指令化檢查：
+
+```bash
+CGN_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork cgn admin codex status
+cgn admin codex uninstall native-tools
+cgn admin codex uninstall skills all
 ```
 
 ---

@@ -60,7 +60,15 @@ fn top_level_hides_admin() {
 fn admin_help_lists_expected_entries() {
     // rename-branch removed in v2 (branch not in storage)
     let help = cgn_admin_help();
-    for cmd in ["install-hook", "drop", "prune", "config", "group", "index"] {
+    for cmd in [
+        "install-hook",
+        "drop",
+        "prune",
+        "config",
+        "group",
+        "index",
+        "codex",
+    ] {
         assert!(help.contains(cmd), "missing {cmd} in admin --help:\n{help}");
     }
 }

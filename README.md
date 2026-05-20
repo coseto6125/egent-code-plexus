@@ -167,7 +167,8 @@ Admin namespace (`cgn admin <cmd>` — hidden from top-level help):
 | `config` | Interactive TOML wizard for `.cgn/config.toml`. |
 | `mcp serve` / `mcp tools` | MCP server (stdio) for LLM hosts; `tools` lists the exposed tool surface. |
 
-All commands resolve `.cgn/graph.bin` from CWD unless `--graph <path>` is given. The CLI is non-interactive by design — every flag surfaces via `--help`, every output stream is parseable.
+All commands resolve `.cgn/graph.bin` from CWD unless `--graph <path>` is given. Agent-facing commands are non-interactive by design — every flag surfaces via `--help`, every output stream is parseable.
+Run `cgn admin` with no subcommand to open the interactive admin TUI for index maintenance, host integrations, config, groups, and diagnostics.
 
 ---
 
@@ -190,7 +191,84 @@ Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.j
 }
 ```
 
-A `cgn admin` TUI for one-command installation across multiple hosts ships in a follow-up release.
+Progressive path for human operators:
+
+```text
+cgn admin
+→ Agent Integrations
+→ MCP
+→ <host>
+→ install
+```
+
+## Codex CLI native integration
+
+The Codex native path is separate from MCP. It prepares a patch for an `openai/codex` fork instead of editing the running Codex installation directly:
+
+Progressive path for human operators:
+
+```text
+cgn admin
+→ Agent Integrations
+→ Codex CLI
+→ install
+→ native-tools
+```
+
+Bundled skills use the same progressive path:
+
+```text
+cgn admin
+→ Agent Integrations
+→ Codex CLI
+→ install
+→ skills
+→ all | cgn | simplify
+```
+
+Scripted path for AI agents and automation:
+
+```bash
+cgn admin codex install native-tools
+cgn admin codex install skills all
+cgn admin codex install skills cgn
+cgn admin codex install skills simplify
+```
+
+The bundled skills teach workflow selection that command help cannot infer by itself:
+
+| Skill | Use when |
+|---|---|
+| `cgn` | The agent needs to decide whether graph-aware symbol, impact, route, contract, or rename workflows are better than grep / file reads. |
+| `simplify` | The agent is reviewing changed code and should start from cgn impact, blind spots, egress, shape drift, and resolver deltas before reading raw diffs. |
+
+The `native-tools` component writes:
+
+```text
+~/.config/cgn/host-integration/codex-cli.patch
+```
+
+Apply the patch in your Codex CLI fork, then wire the generated module into Codex's tool registry:
+
+```bash
+cd /path/to/openai-codex-fork
+git apply ~/.config/cgn/host-integration/codex-cli.patch
+```
+
+To verify a fork that already has the native marker, set `CGN_CODEX_CLI_CHECKOUT` before checking status in the TUI:
+
+```bash
+CGN_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork cgn admin
+# Agent Integrations → Codex CLI → status
+```
+
+The equivalent scripted checks are:
+
+```bash
+CGN_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork cgn admin codex status
+cgn admin codex uninstall native-tools
+cgn admin codex uninstall skills all
+```
 
 ---
 

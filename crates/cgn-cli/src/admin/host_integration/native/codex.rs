@@ -43,7 +43,7 @@ pub fn status() -> HostStatus {
     }
 }
 
-fn run_install() -> Result<PathBuf, CgnError> {
+pub(crate) fn run_install() -> Result<PathBuf, CgnError> {
     let path = patch_path();
     let cgn_root =
         std::env::current_dir().map_err(|e| CgnError::Output(format!("current_dir: {e}")))?;
@@ -51,7 +51,7 @@ fn run_install() -> Result<PathBuf, CgnError> {
     Ok(path)
 }
 
-fn run_uninstall() -> Result<PathBuf, CgnError> {
+pub(crate) fn run_uninstall() -> Result<PathBuf, CgnError> {
     let path = patch_path();
     remove_patch(&path)?;
     Ok(path)

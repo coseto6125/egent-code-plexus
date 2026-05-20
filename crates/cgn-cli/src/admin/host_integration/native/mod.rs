@@ -1,4 +1,4 @@
-//! Native sub-menu — pick Codex CLI or Gemini CLI for zero-IPC / fork integration.
+//! Native sub-menu — pick non-Codex hosts for zero-IPC / fork integration.
 
 pub mod codex;
 pub mod gemini;
@@ -9,7 +9,6 @@ use cgn_core::CgnError;
 use dialoguer::theme::ColorfulTheme;
 
 const HOSTS: &[menu::Item<'_>] = &[
-    ("Codex CLI", "register cgn as a native tool in Codex CLI"),
     ("Gemini CLI", "register cgn as a native tool in Gemini CLI"),
     ("← Back", ""),
 ];
@@ -28,19 +27,12 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
         match choice {
             Some(0) => host_menu(
                 theme,
-                "Codex CLI",
-                codex::install,
-                codex::uninstall,
-                codex::status,
-            )?,
-            Some(1) => host_menu(
-                theme,
                 "Gemini CLI",
                 gemini::install,
                 gemini::uninstall,
                 gemini::status,
             )?,
-            Some(2) | None => return Ok(()),
+            Some(1) | None => return Ok(()),
             _ => unreachable!(),
         }
     }

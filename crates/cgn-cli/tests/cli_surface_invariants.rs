@@ -96,6 +96,7 @@ const ADMIN_SUBCMDS: &[&str] = &[
     "group",
     "index",
     "sessions",
+    "codex",
     "mcp",
     "verify-resolver",
 ];
@@ -105,6 +106,18 @@ const ADMIN_GROUP_SUBCMDS: &[&str] = &["add", "remove"];
 
 /// `cgn admin mcp <subcmd>` — MCP server entry points.
 const ADMIN_MCP_SUBCMDS: &[&str] = &["serve", "tools"];
+
+/// `cgn admin codex <action>` — Codex host integration actions.
+const ADMIN_CODEX_SUBCMDS: &[&str] = &["install", "uninstall", "status"];
+
+/// `cgn admin codex install <component>` — installable Codex components.
+const ADMIN_CODEX_INSTALL_SUBCMDS: &[&str] = &["native-tools", "skills"];
+
+/// `cgn admin codex uninstall <component>` — removable Codex components.
+const ADMIN_CODEX_UNINSTALL_SUBCMDS: &[&str] = &["native-tools", "skills"];
+
+/// `cgn admin codex install skills <target>` — installable Codex skill targets.
+const ADMIN_CODEX_SKILL_TARGETS: &[&str] = &["all", "cgn", "simplify"];
 
 /// `cgn admin sessions <subcmd>` — L1 session inspection.
 const ADMIN_SESSIONS_SUBCMDS: &[&str] = &["list"];
@@ -148,6 +161,41 @@ fn every_admin_group_subcommand_has_help() {
 fn every_admin_mcp_subcommand_has_help() {
     for sub in ADMIN_MCP_SUBCMDS {
         assert_help_ok(&["admin", "mcp", sub]);
+    }
+}
+
+#[test]
+fn every_admin_codex_subcommand_has_help() {
+    for sub in ADMIN_CODEX_SUBCMDS {
+        assert_help_ok(&["admin", "codex", sub]);
+    }
+}
+
+#[test]
+fn every_admin_codex_install_subcommand_has_help() {
+    for sub in ADMIN_CODEX_INSTALL_SUBCMDS {
+        assert_help_ok(&["admin", "codex", "install", sub]);
+    }
+}
+
+#[test]
+fn every_admin_codex_uninstall_subcommand_has_help() {
+    for sub in ADMIN_CODEX_UNINSTALL_SUBCMDS {
+        assert_help_ok(&["admin", "codex", "uninstall", sub]);
+    }
+}
+
+#[test]
+fn every_admin_codex_install_skills_target_has_help() {
+    for sub in ADMIN_CODEX_SKILL_TARGETS {
+        assert_help_ok(&["admin", "codex", "install", "skills", sub]);
+    }
+}
+
+#[test]
+fn every_admin_codex_uninstall_skills_target_has_help() {
+    for sub in ADMIN_CODEX_SKILL_TARGETS {
+        assert_help_ok(&["admin", "codex", "uninstall", "skills", sub]);
     }
 }
 
