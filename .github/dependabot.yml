@@ -1,0 +1,71 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: cargo
+    directory: /crates/vendor/tree-sitter-move
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /crates/vendor/tree-sitter-move/bindings/go
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /crates/vendor/tree-sitter-move
+    schedule:
+      interval: daily
+
+  - package-ecosystem: cargo
+    directory: /crates/vendor/tree-sitter-nim
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /crates/vendor/tree-sitter-nim/bindings/go
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /crates/vendor/tree-sitter-nim
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /crates/vendor/tree-sitter-nim
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /crates/vendor/tree-sitter-swift
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /crates/vendor/tree-sitter-swift
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /crates/vendor/tree-sitter-swift/test-npm-package
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /crates/vendor/tree-sitter-vyper
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /crates/vendor/tree-sitter-vyper
+    schedule:
+      interval: daily
