@@ -8,6 +8,7 @@
 /// crate context, not the dep's).
 pub const PARSER_FINGERPRINT: &str = env!("ECP_PARSER_FINGERPRINT");
 
+pub mod astro;
 pub mod bash;
 pub mod c;
 pub mod c_sharp;

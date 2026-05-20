@@ -1,0 +1,29 @@
+# 宣告獨立 workspace 邊界，避免被外圍 workspace 吸收。
+[workspace]
+
+[package]
+name = "tree-sitter-astro"
+description = "Astro grammar for the tree-sitter parsing library (virchau13/tree-sitter-astro SHA 213f6e6)"
+version = "0.0.1"
+keywords = ["incremental", "parsing", "astro"]
+categories = ["parsing", "text-editors"]
+repository = "https://github.com/virchau13/tree-sitter-astro"
+edition = "2021"
+license = "MIT"
+build = "bindings/rust/build.rs"
+include = [
+  "bindings/rust/*",
+  "src/*",
+]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1.0"
+
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+tree-sitter = "0.26"

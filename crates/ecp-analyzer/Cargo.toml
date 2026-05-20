@@ -57,6 +57,9 @@ tree-sitter-zig = "1.1.2"
 # tree-sitter-vue v0.2.1 (ikatyang/tree-sitter-vue) — no crates.io release;
 # vendored because it requires a C++ external scanner (scanner.cc).
 tree-sitter-vue = { path = "../vendor/tree-sitter-vue" }
+# tree-sitter-astro — no crates.io release; vendored virchau13/tree-sitter-astro
+# SHA 213f6e6973d9b456c6e50e86f19f66877e7ef0ee (no tags). ABI 14, within [13,15].
+tree-sitter-astro = { path = "../vendor/tree-sitter-astro" }
 rustc-hash = "2"
 
 [dev-dependencies]

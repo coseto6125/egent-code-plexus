@@ -8,12 +8,13 @@
 
 use crate::git::{safe_exec, DiffScope};
 use ecp_analyzer::{
-    c::parser::CProvider, c_sharp::parser::CSharpProvider, cpp::parser::CppProvider,
-    dart::parser::DartProvider, go::parser::GoProvider, java::parser::JavaProvider,
-    javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
-    markdown::parser::MarkdownProvider, php::parser::PhpProvider, python::parser::PythonProvider,
-    ruby::parser::RubyProvider, rust::parser::RustProvider, swift::parser::SwiftProvider,
-    typescript::parser::TypeScriptProvider, vue::parser::VueProvider, yaml::parser::YamlProvider,
+    astro::parser::AstroProvider, c::parser::CProvider, c_sharp::parser::CSharpProvider,
+    cpp::parser::CppProvider, dart::parser::DartProvider, go::parser::GoProvider,
+    java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
+    kotlin::parser::KotlinProvider, markdown::parser::MarkdownProvider, php::parser::PhpProvider,
+    python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
+    swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider, vue::parser::VueProvider,
+    yaml::parser::YamlProvider,
 };
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::types::LocalGraph;
@@ -41,6 +42,7 @@ pub fn make_pipeline() -> AnalyzerPipeline {
     pipeline.register_provider(Box::new(MarkdownProvider::new().unwrap()));
     pipeline.register_provider(Box::new(YamlProvider::new().unwrap()));
     pipeline.register_provider(Box::new(VueProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(AstroProvider::new().unwrap()));
     pipeline
 }
 
