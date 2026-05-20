@@ -467,8 +467,20 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
 /// Paths with no `/src/` or `/tests/` segment return `""` — single-crate
 /// repos at the repo root all share the empty prefix, so the Tier-4
 /// module-file fallback still fires for them.
+#[cfg(not(windows))]
 fn crate_root_prefix(path: &str) -> &str {
     path.rsplit_once("/src/")
+        .or_else(|| path.rsplit_once("/tests/"))
+        .map(|(root, _)| root)
+        .unwrap_or("")
+}
+
+#[cfg(windows)]
+fn crate_root_prefix(path: &str) -> &str {
+    // Windows paths use backslashes natively.
+    path.rsplit_once("\\src\\")
+        .or_else(|| path.rsplit_once("\\tests\\"))
+        .or_else(|| path.rsplit_once("/src/")) // Fallback for mixed/normalized paths
         .or_else(|| path.rsplit_once("/tests/"))
         .map(|(root, _)| root)
         .unwrap_or("")
