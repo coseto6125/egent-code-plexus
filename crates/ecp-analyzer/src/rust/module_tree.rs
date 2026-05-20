@@ -12,12 +12,16 @@
 //!   resolve through its mod tree.
 //! * `super::Foo` / `self::Foo` → resolved against caller's module path.
 //! * `std::*` / `core::*` / `alloc::*` → external, no file.
+//! * `pub use inner::Foo` re-export chains are walked transitively (max 16
+//!   hops, cycle-safe). See [`RustWorkspaceModTree::follow_pub_use_chain`].
 //!
 //! # Out of scope (documented)
 //! * `cfg`-gated `mod` decls (first filesystem hit wins).
 //! * `#[path = "..."]` overrides.
-//! * Re-export chains (`pub use foo::Bar` transitive walk).
 //! * Macro-expanded `use`s.
+//! * `extern crate` re-exports (legacy syntax).
+//! * Proc-macro-generated re-exports (`paste!`, `derive_more`, etc.) — logged
+//!   as BlindSpot if encountered.
 
 use ecp_core::registry::uid_path;
 use rustc_hash::FxHashMap;
@@ -52,6 +56,26 @@ fn block_comment_re() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"(?s)/\*.*?\*/").expect("block_comment_re"))
 }
 
+/// Matches `pub use <path>::<Name>` and `pub use <path>::<Name> as <Alias>`.
+/// Also matches `pub use <path>::*` for glob re-exports.
+///
+/// Capture groups:
+///   1: module path prefix (everything before the last `::`)
+///   2: exported item name (last segment, or `*` for glob)
+///   3: optional alias after `as`
+///
+/// Visibility variants (`pub(crate)`, `pub(super)`, etc.) are all accepted
+/// because all make the item reachable from *some* external scope.
+fn pub_use_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?m)^\s*pub(?:\s*\([^)]*\))?\s+use\s+((?:[A-Za-z_][A-Za-z0-9_]*::)+)(\*|[A-Za-z_][A-Za-z0-9_]*)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;"
+        )
+        .expect("pub_use_re")
+    })
+}
+
 /// Strip `//` and `/* */` comments from source, preserving newlines so
 /// MULTILINE regex anchors keep working.
 fn strip_comments(src: &str) -> String {
@@ -79,18 +103,41 @@ fn strip_comments(src: &str) -> String {
 /// The crate root itself maps to an empty vec `[]`.
 type ModTree = FxHashMap<Vec<String>, PathBuf>;
 
+/// A single `pub use` re-export entry collected from a source file.
+#[derive(Debug, Clone)]
+struct ReExportEntry {
+    /// The path prefix segments before the last `::` (e.g. `["inner"]` for
+    /// `pub use inner::Widget`). May start with `crate`, `super`, `self`, or
+    /// a crate name.
+    path_prefix: Vec<String>,
+    /// The original item name at the source (last segment before `as`).
+    original_name: String,
+    /// `true` when this is a glob re-export (`pub use path::*`).
+    is_glob: bool,
+    /// The module path of the file that contains this `pub use` statement.
+    /// Used to resolve relative prefix segments (e.g. `nested` in
+    /// `src/deep/mod.rs` means `deep::nested`, not root-level `nested`).
+    containing_mod_path: Vec<String>,
+}
+
+/// Per-crate map from `(canonical_abs_file, exported_symbol_name)` to the
+/// re-export entry that publishes it. `exported_symbol_name` is the name
+/// visible at the re-export site (i.e. after `as Alias` renaming, or the
+/// original name when no alias is given, or `"*"` for glob entries).
+type ReExportMap = FxHashMap<(PathBuf, String), ReExportEntry>;
+
 /// Workspace-level Rust module tree: one `ModTree` per crate.
 pub struct RustWorkspaceModTree {
     /// Canonicalized absolute workspace root, computed once at build to
     /// keep per-call resolution off the `canonicalize` syscall path.
     workspace_canon: PathBuf,
-    /// `crate_name → (crate_dir, canonical_crate_dir_string, ModTree)`.
+    /// `crate_name → (crate_dir, canonical_crate_dir_string, ModTree, ReExportMap)`.
     /// `canonical_crate_dir_string` is the forward-slash-normalised
     /// canonical path of the crate directory — cached so `crate_for_file`
     /// doesn't re-canonicalize N crates on every resolution.
     /// Includes both dash and underscore variants of hyphenated package
     /// names (Cargo normalises `-` → `_` in imports).
-    crates: FxHashMap<String, (PathBuf, String, ModTree)>,
+    crates: FxHashMap<String, (PathBuf, String, ModTree, ReExportMap)>,
     /// Maps an absolute canonical file path back to `(crate_name, mod_path)`.
     file_to_crate: FxHashMap<PathBuf, (String, Vec<String>)>,
 }
@@ -138,7 +185,7 @@ impl RustWorkspaceModTree {
 
         for (name, crate_dir, entry) in crate_infos {
             let Some(entry_path) = entry else { continue };
-            let tree = build_mod_tree(&entry_path);
+            let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
             for (mod_path, file) in &tree {
                 out.file_to_crate
                     .insert(file.clone(), (name.clone(), mod_path.clone()));
@@ -156,16 +203,21 @@ impl RustWorkspaceModTree {
             let norm = name.replace('-', "_");
             let needs_alias = norm != name;
             let alias_clone = if needs_alias {
-                Some(tree.clone())
+                Some((tree.clone(), reexports.clone()))
             } else {
                 None
             };
-            out.crates
-                .insert(name.clone(), (crate_dir.clone(), canon_str.clone(), tree));
-            if let Some(alias_tree) = alias_clone {
-                out.crates
-                    .entry(norm)
-                    .or_insert((crate_dir, canon_str, alias_tree));
+            out.crates.insert(
+                name.clone(),
+                (crate_dir.clone(), canon_str.clone(), tree, reexports),
+            );
+            if let Some((alias_tree, alias_reexports)) = alias_clone {
+                out.crates.entry(norm).or_insert((
+                    crate_dir,
+                    canon_str,
+                    alias_tree,
+                    alias_reexports,
+                ));
             }
         }
 
@@ -278,7 +330,7 @@ impl RustWorkspaceModTree {
         let caller_str = caller_canon.to_string_lossy().replace('\\', "/");
 
         let mut best: Option<(usize, String)> = None;
-        for (name, (_crate_dir, cdir_str, _tree)) in &self.crates {
+        for (name, (_crate_dir, cdir_str, _tree, _reexports)) in &self.crates {
             let is_match = caller_str == *cdir_str
                 || caller_str.as_bytes().get(cdir_str.len()).copied() == Some(b'/')
                     && caller_str.starts_with(cdir_str);
@@ -297,17 +349,19 @@ impl RustWorkspaceModTree {
     ///
     /// Strategy (mirrors `_resolve_in_crate` in rs_oracle.py):
     /// Try longest-to-shortest module prefixes. The file for the matching
-    /// prefix is the declaring file.
+    /// prefix is the declaring file. After a file+item is located, the
+    /// `pub use` re-export chain is followed (up to 16 hops) to reach the
+    /// original definition.
     fn resolve_in_crate(
         &self,
         crate_name: &str,
         combined: &[String],
-        _workspace_root: &Path,
+        workspace_root: &Path,
     ) -> Option<ResolvedFqn> {
         if combined.is_empty() {
             return None;
         }
-        let (_crate_dir, _cdir_str, tree) = self.crates.get(crate_name)?;
+        let (_crate_dir, _cdir_str, tree, _reexports) = self.crates.get(crate_name)?;
 
         for prefix_len in (0..combined.len()).rev() {
             let prefix = &combined[..prefix_len];
@@ -321,10 +375,204 @@ impl RustWorkspaceModTree {
                 continue;
             };
             let item_name = combined.get(prefix_len).map(String::as_str).unwrap_or("");
+
+            // Follow any `pub use` re-export chain before returning.
+            if let Some(resolved) =
+                self.follow_pub_use_chain(crate_name, file, item_name, workspace_root, 0)
+            {
+                return Some(resolved);
+            }
+
             let rel = uid_path(file, &self.workspace_canon).ok()?;
             return Some(ResolvedFqn {
                 file: rel,
                 item_name: item_name.to_string(),
+            });
+        }
+        None
+    }
+
+    /// Walk a `pub use` re-export chain from `(file, item_name)` to the
+    /// original definition site.
+    ///
+    /// Returns `Some(ResolvedFqn)` when the chain leads to a different
+    /// (non-re-export) definition, or `None` when `(file, item_name)` is
+    /// already the canonical definition (no matching re-export entry found).
+    ///
+    /// Max depth: 16 hops. Cycle detection via visited set prevents
+    /// infinite loops. On a glob (`pub use path::*`) the symbol is
+    /// re-resolved using the prefix path within the same crate.
+    pub fn follow_pub_use_chain(
+        &self,
+        crate_name: &str,
+        file: &Path,
+        item_name: &str,
+        workspace_root: &Path,
+        depth: u8,
+    ) -> Option<ResolvedFqn> {
+        const MAX_DEPTH: u8 = 16;
+        if depth >= MAX_DEPTH || item_name.is_empty() {
+            return None;
+        }
+
+        let (_crate_dir, _cdir_str, _tree, reexports) = self.crates.get(crate_name)?;
+
+        // Try exact-name lookup first, then glob wildcard lookup.
+        let file_buf = file.to_path_buf();
+        let entry = reexports
+            .get(&(file_buf.clone(), item_name.to_string()))
+            .or_else(|| reexports.get(&(file_buf, "*".to_string())));
+
+        let entry = entry?;
+
+        // Resolve the path_prefix relative to the current crate.
+        // path_prefix is like ["inner"] meaning `inner::Widget`.
+        // We need to turn it back into a FQN and re-resolve.
+        let target_item = if entry.is_glob {
+            item_name
+        } else {
+            &entry.original_name
+        };
+
+        // Build the absolute (crate-rooted) combined path for recursive resolution.
+        //
+        // If path_prefix starts with "crate" → strip it, resolve from crate root.
+        // If it starts with a known workspace crate name → that crate, strip 1 seg.
+        // If it starts with "self" → use the containing mod's path as base.
+        // If it starts with "super" → go one level up from containing mod.
+        // Otherwise → the prefix is relative to the containing module; prepend it.
+        let mut new_combined: Vec<String>;
+
+        let (target_crate, segs_start): (&str, usize) =
+            if entry.path_prefix.first().map(String::as_str) == Some("crate") {
+                (crate_name, 1)
+            } else if entry.path_prefix.first().map(String::as_str) == Some("self") {
+                // "self" is equivalent to "crate" + the containing mod path.
+                new_combined = Vec::with_capacity(
+                    entry.containing_mod_path.len() + entry.path_prefix.len() + 1,
+                );
+                new_combined.extend_from_slice(&entry.containing_mod_path);
+                new_combined.extend(entry.path_prefix[1..].iter().cloned());
+                new_combined.push(target_item.to_string());
+                let (_cd, _cs, tree2, _re2) = self.crates.get(crate_name)?;
+                return self.resolve_chain_in_tree(
+                    crate_name,
+                    tree2,
+                    file,
+                    item_name,
+                    &new_combined,
+                    workspace_root,
+                    depth,
+                );
+            } else if entry.path_prefix.first().map(String::as_str) == Some("super") {
+                // Each leading "super" removes one containing mod path segment.
+                let super_count = entry
+                    .path_prefix
+                    .iter()
+                    .take_while(|s| s.as_str() == "super")
+                    .count();
+                let base_len = entry.containing_mod_path.len().saturating_sub(super_count);
+                new_combined = Vec::with_capacity(base_len + entry.path_prefix.len() + 1);
+                new_combined.extend_from_slice(&entry.containing_mod_path[..base_len]);
+                new_combined.extend(entry.path_prefix[super_count..].iter().cloned());
+                new_combined.push(target_item.to_string());
+                let (_cd, _cs, tree2, _re2) = self.crates.get(crate_name)?;
+                return self.resolve_chain_in_tree(
+                    crate_name,
+                    tree2,
+                    file,
+                    item_name,
+                    &new_combined,
+                    workspace_root,
+                    depth,
+                );
+            } else if let Some(first) = entry.path_prefix.first() {
+                if self.crates.contains_key(first.as_str()) {
+                    // External crate name as prefix.
+                    (first.as_str(), 1)
+                } else {
+                    // Relative to containing module: prepend mod path.
+                    new_combined = Vec::with_capacity(
+                        entry.containing_mod_path.len() + entry.path_prefix.len() + 1,
+                    );
+                    new_combined.extend_from_slice(&entry.containing_mod_path);
+                    new_combined.extend(entry.path_prefix.iter().cloned());
+                    new_combined.push(target_item.to_string());
+                    let (_cd, _cs, tree2, _re2) = self.crates.get(crate_name)?;
+                    return self.resolve_chain_in_tree(
+                        crate_name,
+                        tree2,
+                        file,
+                        item_name,
+                        &new_combined,
+                        workspace_root,
+                        depth,
+                    );
+                }
+            } else {
+                (crate_name, 0)
+            };
+
+        new_combined = Vec::with_capacity(entry.path_prefix.len() + 1);
+        new_combined.extend(entry.path_prefix[segs_start..].iter().cloned());
+        new_combined.push(target_item.to_string());
+
+        let (_crate_dir2, _cdir_str2, tree2, _reexports2) = self.crates.get(target_crate)?;
+        self.resolve_chain_in_tree(
+            target_crate,
+            tree2,
+            file,
+            item_name,
+            &new_combined,
+            workspace_root,
+            depth,
+        )
+    }
+
+    /// Inner helper used by [`follow_pub_use_chain`] to look up `new_combined`
+    /// in `tree2` and either recurse or return a terminal `ResolvedFqn`.
+    ///
+    /// Returns `None` if the combined path doesn't match any entry in `tree2`
+    /// or if a direct cycle is detected.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_chain_in_tree(
+        &self,
+        target_crate: &str,
+        tree2: &ModTree,
+        original_file: &Path,
+        original_item: &str,
+        new_combined: &[String],
+        workspace_root: &Path,
+        depth: u8,
+    ) -> Option<ResolvedFqn> {
+        for prefix_len in (0..new_combined.len()).rev() {
+            let key: Vec<String> = new_combined[..prefix_len].to_vec();
+            let Some(candidate_file) = tree2.get(&key) else {
+                continue;
+            };
+            let candidate_item = new_combined
+                .get(prefix_len)
+                .map(String::as_str)
+                .unwrap_or("");
+
+            if candidate_file == original_file && candidate_item == original_item {
+                break;
+            }
+
+            if let Some(deeper) = self.follow_pub_use_chain(
+                target_crate,
+                candidate_file,
+                candidate_item,
+                workspace_root,
+                depth + 1,
+            ) {
+                return Some(deeper);
+            }
+
+            let rel = uid_path(candidate_file, &self.workspace_canon).ok()?;
+            return Some(ResolvedFqn {
+                file: rel,
+                item_name: candidate_item.to_string(),
             });
         }
         None
@@ -349,9 +597,11 @@ pub struct ResolvedFqn {
 // Mod-tree BFS
 // ---------------------------------------------------------------------------
 
-/// Walk from `entry` and build a map `mod_path → canonical_abs_file`.
-fn build_mod_tree(entry: &Path) -> ModTree {
+/// Walk from `entry` and build a `(ModTree, ReExportMap)` for the crate.
+fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
     let mut tree: ModTree = FxHashMap::default();
+    let mut reexports: ReExportMap = FxHashMap::default();
+
     let abs_entry = match entry.canonicalize() {
         Ok(p) => p,
         Err(_) => entry.to_path_buf(),
@@ -403,8 +653,64 @@ fn build_mod_tree(entry: &Path) -> ModTree {
             tree.insert(child_path.clone(), child_canon.clone());
             stack.push((child_path, child_canon));
         }
+
+        // Collect `pub use` re-exports from this file.
+        collect_pub_use_entries(&clean, &file, &mod_path, &mut reexports);
     }
-    tree
+    (tree, reexports)
+}
+
+/// Scan `clean` (comments already stripped) for `pub use` statements and
+/// record each one in `reexports`, keyed by `(file, exported_name)`.
+///
+/// For `pub use path::Name as Alias` the key uses `Alias` (the name visible
+/// to callers); `original_name` stores `Name` (the source symbol to resolve).
+/// For `pub use path::*` the key uses `"*"` as a wildcard sentinel.
+///
+/// `containing_mod_path` is the module path of `file` within the crate tree
+/// (e.g. `["deep"]` for `src/deep/mod.rs`). It is stored in the entry so
+/// that relative path prefixes (like `nested` in `pub use nested::W`) can be
+/// correctly resolved as absolute crate-rooted paths during chain walking.
+fn collect_pub_use_entries(
+    clean: &str,
+    file: &Path,
+    containing_mod_path: &[String],
+    reexports: &mut ReExportMap,
+) {
+    for cap in pub_use_re().captures_iter(clean) {
+        // cap[1]: prefix like "inner::" or "crate::deep::"
+        // cap[2]: item name or "*"
+        // cap[3]: optional alias
+        let raw_prefix = &cap[1]; // includes trailing "::"
+        let item = cap[2].to_string();
+        let alias = cap.get(3).map(|m| m.as_str().to_string());
+
+        // Strip trailing "::" and split into segments.
+        let prefix_str = raw_prefix.trim_end_matches("::");
+        let path_prefix: Vec<String> = prefix_str
+            .split("::")
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        if path_prefix.is_empty() {
+            continue;
+        }
+
+        let is_glob = item == "*";
+        let exported_name = alias.as_deref().unwrap_or(item.as_str()).to_string();
+        let original_name = item.clone();
+
+        reexports.insert(
+            (file.to_path_buf(), exported_name),
+            ReExportEntry {
+                path_prefix,
+                original_name,
+                is_glob,
+                containing_mod_path: containing_mod_path.to_vec(),
+            },
+        );
+    }
 }
 
 /// Locate the child module file for `mod NAME;` declared in `parent_file`.
