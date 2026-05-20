@@ -118,6 +118,7 @@ impl LanguageProvider for CSharpProvider {
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_decorator = self.query.capture_index_for_name("decorator");
+        let idx_override_marker = self.query.capture_index_for_name("override_marker");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
@@ -194,6 +195,8 @@ impl LanguageProvider for CSharpProvider {
                     {
                         decorators.push(text.to_string());
                     }
+                } else if Some(cap_idx) == idx_override_marker {
+                    decorators.push("__override__".to_string());
                 } else if (Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method

@@ -170,6 +170,7 @@ impl LanguageProvider for KotlinProvider {
         let idx_alias = self.query.capture_index_for_name("alias");
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_decorator = self.query.capture_index_for_name("decorator");
+        let idx_override_marker = self.query.capture_index_for_name("override_marker");
 
         // Root-span anchors (the @class / @function / @property / @variable
         // captures, not the .name variants). Their NodeKind is set via
@@ -258,6 +259,8 @@ impl LanguageProvider for KotlinProvider {
                     {
                         decorators.push(d.to_string());
                     }
+                } else if Some(cap_idx) == idx_override_marker {
+                    decorators.push("__override__".to_string());
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_alias {

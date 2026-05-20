@@ -47,6 +47,14 @@
   name: (identifier) @name.method
 ) @method
 
+;; Override marker on methods — `override void Foo()`. C# requires the
+;; `override` modifier to be explicit; absence means no override.
+(method_declaration
+  (modifier) @override_marker
+  (#eq? @override_marker "override")
+  name: (identifier) @name.method
+) @method
+
 ;; Constructors — distinct NodeKind::Constructor
 (constructor_declaration
   (attribute_list)* @decorator

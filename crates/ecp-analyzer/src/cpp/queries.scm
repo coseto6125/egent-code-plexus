@@ -1,11 +1,14 @@
 ;; Classes
+;; Heritage: `class B : public A` — tree-sitter-cpp puts `(type_identifier "A")`
+;; as a direct child of `base_class_clause` (not wrapped in an intermediate node),
+;; so we match it directly. `(_ ...)` was incorrect for access-specifier forms.
 (class_specifier
   name: [
     (type_identifier)
     (template_type)
   ] @name.class
   (base_class_clause
-    (_ (type_identifier) @heritage))?
+    (type_identifier) @heritage)?
 ) @class
 
 ;; Structs — emitted as NodeKind::Struct (distinct from Class)
@@ -15,7 +18,7 @@
     (template_type)
   ] @name.struct
   (base_class_clause
-    (_ (type_identifier) @heritage))?
+    (type_identifier) @heritage)?
 ) @struct
 
 ;; Unions — emitted as NodeKind::Struct (no dedicated `Union` kind in
@@ -304,3 +307,28 @@
 (type_definition
   declarator: (type_identifier) @name.typedef
 ) @typedef_node
+
+;; Override specifier — `void foo() override {}` or `void foo() override = 0;`.
+;; The `virtual_specifier` "override" appears as a direct child of
+;; `function_declarator`. Captured here with an `#eq?` guard so the "final"
+;; virtual_specifier on class declarations doesn't fire. The post-process
+;; override resolver uses this sentinel to identify candidates without
+;; re-reading source text.
+;;
+;; Three forms to cover: inline method, pointer return, reference return.
+(function_definition
+  declarator: (function_declarator
+    (virtual_specifier) @override_marker)
+  (#eq? @override_marker "override")) @method
+
+(function_definition
+  declarator: (pointer_declarator
+    (function_declarator
+      (virtual_specifier) @override_marker))
+  (#eq? @override_marker "override")) @method
+
+(function_definition
+  declarator: (reference_declarator
+    (function_declarator
+      (virtual_specifier) @override_marker))
+  (#eq? @override_marker "override")) @method
