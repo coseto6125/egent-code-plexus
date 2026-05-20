@@ -53,6 +53,12 @@ jobs:
         uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
         with:
           languages: ${{ matrix.language }}
+          # Vendored upstream tree-sitter grammars are generated parser code we
+          # don't author; any findings there (e.g. js/redos in
+          # tree-sitter-swift/grammar.js) belong to those upstream projects.
+          config: |
+            paths-ignore:
+              - crates/vendor/**
           # If you wish to specify custom queries, you can do so here or in a config file.
           # By default, queries listed here will override any specified in a config file.
           # Prefix the list here with "+" to use these queries and those in the config file.
