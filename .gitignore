@@ -1,7 +1,7 @@
 # --- Git / Version Control ---
 .git/
-.gitnexus/
-.worktrees/
+/.gitnexus/
+/.worktrees/
 
 # --- Rust Build & IDE ---
 target/
@@ -23,9 +23,9 @@ CLAUDE.md
 .fastembed_cache/
 
 # --- Project Specific (CGN) ---
-.cgn/
-.codegraph/
-.sample_repo/
+/.cgn/
+/.codegraph/
+/.sample_repo/
 
 # --- Parity Test Artifacts ---
 # Transient analysis artefacts, regenerated on demand
