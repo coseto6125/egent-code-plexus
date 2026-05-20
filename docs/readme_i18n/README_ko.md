@@ -1,14 +1,5 @@
 # EgentCodePlexus
 
-```
-  ╔══════════════════════════════════════════════════╗
-  ║  ecp                                             ║
-  ║                                                  ║
-  ║  structural code knowledge for AI agents         ║
-  ║  one-shot cli  ·  zero-copy mmap  ·  ~140 ms     ║
-  ╚══════════════════════════════════════════════════╝
-```
-
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coseto6125/egent-code-plexus/badge)](https://scorecard.dev/viewer/?uri=github.com/coseto6125/egent-code-plexus)
 
 [![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/coseto6125/egent-code-plexus/releases)
@@ -18,18 +9,13 @@
 [![Codex CLI](https://img.shields.io/badge/Codex_CLI-412991?style=for-the-badge&logo=openai&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/skill_sample/codex/ecp/SKILL.md)
 [![Cursor](https://img.shields.io/badge/Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/docs/skills/ecp-onboard/guides/04-mcp.md)
 
-```
-  cold index   ──  2.60 s   (60× upstream gitnexus)
-  query p50    ──  142 ms   ( 6× upstream gitnexus)
-  languages    ──  31       (14 deep + 17 structural)
-  edge policy  ──  honest unknown, never hallucinated
-```
+`cold index 2.60 s · query p50 142 ms · 31 languages · BlindSpot edges (no hallucinated dispatch) · 60× upstream gitnexus`
 
 [English](../../README.md) · [繁體中文](./README_zh-TW.md) · [简体中文](./README_zh-CN.md) · [Español](./README_es.md) · [Русский](./README_ru.md) · [हिन्दी](./README_hi.md) · [日本語](./README_ja.md) · **한국어** · [Português (BR)](./README_pt-BR.md)
 
 ---
 
-## ── 동기 ──
+## 동기
 
 코드 에이전트는 하나의 태스크당 20–50회의 조회를 수행합니다. `grep`은 문자열만 돌려주지만, 자율 에이전트가 정말 필요한 것은 심볼·호출자·간선, 그리고 정적 그래프가 답할 수 없을 때 솔직하게 "모른다"고 말하는 신호입니다.
 
@@ -44,9 +30,7 @@
 
 🎙️ **[에이전트 인터뷰](../../interviews/README.md)** — Gemini CLI와 Codex가 자율 워크플로에서 `ecp`를 평가합니다.
 
----
-
-## ── 측정 결과 ──
+## 측정 결과
 
 upstream GitNexus와의 정면 비교. [gitnexus](https://github.com/abhigyanpatwari/GitNexus) 코드베이스(TypeScript) 위에서 `scripts/parity/benchmark_vs_gitnexus.py`를 사용해 측정:
 
@@ -89,9 +73,7 @@ upstream GitNexus와의 정면 비교. [gitnexus](https://github.com/abhigyanpat
 
 </details>
 
----
-
-## ── vs. upstream gitnexus ──
+## vs. upstream gitnexus
 
 개념 모델은 같지만 대상이 다릅니다. `ecp`는 drop-in 대체재가 **아닙니다** — 누가 그래프를 읽는지에 따라 고르세요.
 
@@ -107,33 +89,30 @@ upstream GitNexus와의 정면 비교. [gitnexus](https://github.com/abhigyanpat
 
 8개 차원 전체 분석 + 의사결정 매트릭스 → [docs/vs-gitnexus.md](../vs-gitnexus.md).
 
----
-
-## ── 30초 데모 ──
+## 30초 데모
 
 ```bash
-$ ecp impact validateUser --direction upstream --format toon
+$ ecp impact parse_with_budget --direction upstream --format toon
 ```
 
 ```text
-target          validateUser
-  kind          Method
-  file          src/auth/validate.py:42
+target          parse_with_budget
+  kind          Function
+  file          crates/ecp-analyzer/src/parse_budget.rs:28
 risk_level      HIGH
-direct_callers  3
-  routes/api/login.py:18    POST /api/login   → loginUser
-  routes/api/oauth.py:24    POST /api/oauth   → oauthLogin
-  jobs/sync.py:91           sync_users (cron)
-transitive      12 symbols across 4 files
-blind_spots     1
-  jobs/sync.py:103          dynamic dispatch via getattr (unresolved)
+direct_callers  22 across 22 files
+  crates/ecp-analyzer/src/python/parser.rs:48      Method parse_file
+  crates/ecp-analyzer/src/rust/parser.rs:142       Method parse_file
+  crates/ecp-analyzer/src/typescript/parser.rs:73  Method parse_file
+  crates/ecp-analyzer/src/go/parser.rs:69          Method parse_file
+  ... (18 more language parsers)
+transitive      231 symbols across language detection + pipeline
+blind_spots     0
 ```
 
 이게 라운드트립 전부입니다 — 프로세스 한 번, mmap 한 번, ~140 ms. 읽기 계열 명령은 `--format text|json|toon`을 받습니다. 기본값은 명령마다 토큰이 가장 저렴한 인코딩입니다.
 
----
-
-## ── 설치 ──
+## 설치
 
 사전 빌드된 바이너리는 매 GitHub Release마다 배포됩니다. 설치 스크립트는 매칭되는 release 자산이 없을 때만 cargo source build로 폴백합니다.
 
@@ -158,9 +137,7 @@ RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" egent-code-plexus -
 
 </details>
 
----
-
-## ── 빠른 시작 ──
+## 빠른 시작
 
 ```bash
 # 1. 현재 저장소 인덱싱(점진적; 첫 쿼리도 자동 인덱싱)
@@ -181,9 +158,7 @@ ecp routes
 ecp routes /api/users --method POST     # route → handler → caller 체인
 ```
 
----
-
-## ── cli surface ──
+## cli surface
 
 두 계층 — 최상위 레벨의 **agent commands**(query / refactor / verify)와 `ecp admin` 아래의 **admin commands**(registry / hooks / 파괴적). 전체 플래그 매트릭스는 `ecp --help`와 `ecp admin --help`로 확인하세요.
 
@@ -220,9 +195,7 @@ ecp routes /api/users --method POST     # route → handler → caller 체인
 
 모든 명령은 `--graph <path>`가 주어지지 않으면 CWD에서 `.ecp/graph.bin`을 해석합니다. 에이전트용 명령은 설계상 비대화형 — 모든 플래그가 `--help`에서 노출되고, 모든 출력 스트림이 파싱 가능합니다. `ecp admin`을 서브커맨드 없이 실행하면 대화형 admin TUI가 열립니다.
 
----
-
-## ── MCP server ──
+## MCP server
 
 `ecp`는 코어 명령을 MCP tool로 노출하는 MCP server를 함께 제공합니다. MCP를 말할 줄 아는 호스트(Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI)는 `ecp`를 등록하고 자율적으로 tool을 호출할 수 있습니다.
 
@@ -310,9 +283,7 @@ ecp admin codex uninstall skills all
 
 </details>
 
----
-
-## ── 아키텍처 ──
+## 아키텍처
 
 ```
 crates/
@@ -324,26 +295,20 @@ crates/
 
 Parse → resolve → serialize는 MPSC 채널을 통해 단일 builder 스레드로 흘러 들어가, 그래프를 조립하고 제로카피 `.ecp/graph.bin`을 씁니다. 읽기 경로(`inspect`, `cypher`, `impact`, …)는 이 파일을 직접 mmap합니다. xxh3_64 콘텐츠 캐시 덕분에 22k 파일 저장소도 점진적 리빌드가 서브초 단위로 유지됩니다.
 
----
-
-## ── 언어 커버리지 ──
+## 언어 커버리지
 
 31개 언어를 구조 수준(함수 / 클래스 / 메서드 / import / call)으로 파싱합니다. 그중 14개 — 원본 GitNexus 세트 — 는 import, named binding, export, heritage, type, 생성자, config, 프레임워크, entry point, call, rename에 걸쳐 풀-뎁스 커버리지를 가집니다. 나머지 17개는 구조 전용입니다(Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig).
 
 📊 [언어별 케이퍼빌리티 전체 매트릭스](../language-matrix.md) — 언어별 상태와 근거.
 
----
-
-## ── 튜닝 ──
+## 튜닝
 
 | 환경 변수 | 기본값 | 효과 |
 |---|---|---|
 | `ECP_MAX_FILE_BYTES` | `16777216`(16 MiB) | 인제스트 중 이보다 큰 소스 파일을 건너뜀. 워커당 워스트케이스 RAM을 `num_threads × MAX`로 제한. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 탐색용 디렉터리 재귀 깊이. 깊게 중첩된 .NET 모노레포에서 상향 조정. |
 
----
-
-## ── 라이선스 ──
+## 라이선스
 
 [PolyForm Noncommercial 1.0.0](../../LICENSE.md)으로 라이선스됩니다. 개인 사용, 연구, 취미 프로젝트, 비영리 조직은 명시적으로 허용됩니다. **본 라이선스는 상업적 사용을 부여하지 않습니다** — 상업 라이선스는 upstream GitNexus 저자 [Abhigyan Patwari](https://github.com/abhigyanpatwari)에게 문의하세요. 필요한 귀속 고지: [NOTICES.md](../../LICENSES/NOTICES.md).
 
@@ -364,9 +329,7 @@ AI 에이전트용 온보딩(URL 부트스트랩, Claude Code skill, plugin inst
 
 </details>
 
----
-
-## ── 릴리스 상태 ──
+## 릴리스 상태
 
 현재 검증된 설치 경로는 `cargo install --git ...`로, `ecp`를 소스에서 빌드합니다. 릴리스 인스톨러에는 이미 checksum과 provenance 검증 흐름이 포함되어 있지만, 바이너리 다운로드 경로를 엔드투엔드로 검증하려면 게시된 태그와 릴리스 자산이 필요합니다. 에이전트용 온보딩 skill은 [docs/skills/ecp-onboard/ONBOARDING.md](../skills/ecp-onboard/ONBOARDING.md)에 문서화되어 있으며, 설치·첫 인덱스·선택적 그룹·MCP wiring·다음 단계를 안내합니다 — 보조 셋업 흐름은 계속 다듬어지고 있습니다.
 

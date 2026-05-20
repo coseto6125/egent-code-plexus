@@ -1,14 +1,5 @@
 # EgentCodePlexus
 
-```
-  ╔══════════════════════════════════════════════════╗
-  ║  ecp                                             ║
-  ║                                                  ║
-  ║  structural code knowledge for AI agents         ║
-  ║  one-shot cli  ·  zero-copy mmap  ·  ~140 ms     ║
-  ╚══════════════════════════════════════════════════╝
-```
-
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coseto6125/egent-code-plexus/badge)](https://scorecard.dev/viewer/?uri=github.com/coseto6125/egent-code-plexus)
 
 [![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/coseto6125/egent-code-plexus/releases)
@@ -18,18 +9,13 @@
 [![Codex CLI](https://img.shields.io/badge/Codex_CLI-412991?style=for-the-badge&logo=openai&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/skill_sample/codex/ecp/SKILL.md)
 [![Cursor](https://img.shields.io/badge/Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/docs/skills/ecp-onboard/guides/04-mcp.md)
 
-```
-  cold index   ──  2.60 s   (60× upstream gitnexus)
-  query p50    ──  142 ms   ( 6× upstream gitnexus)
-  languages    ──  31       (14 deep + 17 structural)
-  edge policy  ──  honest unknown, never hallucinated
-```
+`cold index 2.60 s · query p50 142 ms · 31 languages · BlindSpot edges (no hallucinated dispatch) · 60× upstream gitnexus`
 
 [English](../../README.md) · [繁體中文](./README_zh-TW.md) · [简体中文](./README_zh-CN.md) · **Español** · [Русский](./README_ru.md) · [हिन्दी](./README_hi.md) · [日本語](./README_ja.md) · [한국어](./README_ko.md) · [Português (BR)](./README_pt-BR.md)
 
 ---
 
-## ── el caso ──
+## el caso
 
 Los agentes de código realizan entre 20 y 50 búsquedas por tarea. `grep` devuelve cadenas; un agente autónomo necesita símbolos, llamadores, aristas y una señal honesta cuando el grafo estático se agota.
 
@@ -44,9 +30,7 @@ Construido sobre [GitNexus](https://github.com/abhigyanpatwari/GitNexus) de [Abh
 
 🎙️ **[Entrevistas con agentes](../../interviews/README.md)** — Gemini CLI y Codex evalúan `ecp` en flujos autónomos.
 
----
-
-## ── recibos ──
+## recibos
 
 Cabeza a cabeza contra el upstream GitNexus, medido sobre la codebase de [gitnexus](https://github.com/abhigyanpatwari/GitNexus) (TypeScript) con `scripts/parity/benchmark_vs_gitnexus.py`:
 
@@ -89,9 +73,7 @@ Reproducir: `python scripts/benchmark/benchmark_ecp.py`.
 
 </details>
 
----
-
-## ── vs. upstream gitnexus ──
+## vs. upstream gitnexus
 
 Mismo modelo conceptual, audiencia distinta. `ecp` **no** es un reemplazo drop-in — elige según quién lee el grafo.
 
@@ -107,33 +89,30 @@ Mismo modelo conceptual, audiencia distinta. `ecp` **no** es un reemplazo drop-i
 
 Desglose completo de las 8 dimensiones + matriz de decisión → [docs/vs-gitnexus.md](../vs-gitnexus.md).
 
----
-
-## ── demo de 30 segundos ──
+## demo de 30 segundos
 
 ```bash
-$ ecp impact validateUser --direction upstream --format toon
+$ ecp impact parse_with_budget --direction upstream --format toon
 ```
 
 ```text
-target          validateUser
-  kind          Method
-  file          src/auth/validate.py:42
+target          parse_with_budget
+  kind          Function
+  file          crates/ecp-analyzer/src/parse_budget.rs:28
 risk_level      HIGH
-direct_callers  3
-  routes/api/login.py:18    POST /api/login   → loginUser
-  routes/api/oauth.py:24    POST /api/oauth   → oauthLogin
-  jobs/sync.py:91           sync_users (cron)
-transitive      12 symbols across 4 files
-blind_spots     1
-  jobs/sync.py:103          dynamic dispatch via getattr (unresolved)
+direct_callers  22 across 22 files
+  crates/ecp-analyzer/src/python/parser.rs:48      Method parse_file
+  crates/ecp-analyzer/src/rust/parser.rs:142       Method parse_file
+  crates/ecp-analyzer/src/typescript/parser.rs:73  Method parse_file
+  crates/ecp-analyzer/src/go/parser.rs:69          Method parse_file
+  ... (18 more language parsers)
+transitive      231 symbols across language detection + pipeline
+blind_spots     0
 ```
 
 Eso es todo el round-trip — un proceso, un mmap, ~140 ms. Los comandos de lectura aceptan `--format text|json|toon`; el default por comando es la codificación más barata en tokens.
 
----
-
-## ── instalación ──
+## instalación
 
 Los binarios precompilados se publican con cada GitHub Release. Los scripts del instalador caen a una compilación cargo desde fuente solo si no hay un asset de release disponible.
 
@@ -158,9 +137,7 @@ RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" egent-code-plexus -
 
 </details>
 
----
-
-## ── inicio rápido ──
+## inicio rápido
 
 ```bash
 # 1. Indexa el repo actual (incremental; la primera query también auto-indexa)
@@ -181,9 +158,7 @@ ecp routes
 ecp routes /api/users --method POST     # ruta → handler → cadena de callers
 ```
 
----
-
-## ── cli surface ──
+## cli surface
 
 Dos niveles — **comandos de agente** en el top level (query / refactor / verify) y **comandos admin** bajo `ecp admin` (registry / hooks / destructivos). Corre `ecp --help` y `ecp admin --help` para las matrices completas de flags.
 
@@ -220,9 +195,7 @@ Dos niveles — **comandos de agente** en el top level (query / refactor / verif
 
 Todos los comandos resuelven `.ecp/graph.bin` desde el CWD a menos que se pase `--graph <path>`. Los comandos agent-facing son no-interactivos por diseño — cada flag sale en `--help`, cada stream de salida es parseable. Ejecuta `ecp admin` sin subcomando para abrir el TUI admin interactivo.
 
----
-
-## ── MCP server ──
+## MCP server
 
 `ecp` incluye un MCP server que expone los comandos core como tools MCP. Los hosts que hablan MCP (Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI) pueden registrar `ecp` y llamar los tools de forma autónoma.
 
@@ -310,9 +283,7 @@ ecp admin codex uninstall skills all
 
 </details>
 
----
-
-## ── arquitectura ──
+## arquitectura
 
 ```
 crates/
@@ -324,26 +295,20 @@ crates/
 
 Parse → resolve → serialize corre a través de un canal MPSC hacia un único builder thread que ensambla el grafo y escribe un `.ecp/graph.bin` zero-copy. Las rutas de lectura (`inspect`, `cypher`, `impact`, …) hacen mmap directo de este archivo. La caché de contenido xxh3_64 mantiene los rebuilds incrementales en sub-segundo sobre un repo de 22k archivos.
 
----
-
-## ── cobertura de lenguajes ──
+## cobertura de lenguajes
 
 31 lenguajes parseados a nivel estructural (funciones / clases / métodos / imports / calls). 14 de ellos — el conjunto original de GitNexus — obtienen cobertura full-depth en imports, named bindings, exports, herencia, types, constructores, config, frameworks, entry points, calls y rename. Los 17 restantes son structural-only (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig).
 
 📊 [Matriz completa de capacidades por lenguaje](../language-matrix.md) — status y rationale por lenguaje.
 
----
-
-## ── tuning ──
+## tuning
 
 | Variable de entorno | Default | Efecto |
 |---|---|---|
 | `ECP_MAX_FILE_BYTES` | `16777216` (16 MiB) | Salta archivos source mayores a esto durante la ingesta. Limita el peor caso de RAM por worker a `num_threads × MAX`. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | Profundidad de recursión de directorios para descubrir `*.csproj`. Súbelo para monorepos .NET muy anidados. |
 
----
-
-## ── licencia ──
+## licencia
 
 Licenciado bajo [PolyForm Noncommercial 1.0.0](../../LICENSE.md). Uso personal, investigación, proyectos hobby y organizaciones sin fines de lucro están explícitamente permitidos. **El uso comercial no está concedido por esta licencia** — contacta al autor upstream de GitNexus [Abhigyan Patwari](https://github.com/abhigyanpatwari) para derechos comerciales. Atribución requerida: [NOTICES.md](../../LICENSES/NOTICES.md).
 
@@ -364,9 +329,7 @@ El onboarding para agentes IA (bootstrap por URL, skill de Claude Code, instalac
 
 </details>
 
----
-
-## ── estado de release ──
+## estado de release
 
 La ruta de instalación verificada actualmente es `cargo install --git ...`, que compila `ecp` desde fuente. Los release installers ya contienen el flujo de verificación de checksum y procedencia, pero requieren un tag publicado y release assets antes de que la ruta de descarga del binario pueda ser end-to-end verificada. El skill de onboarding orientado a agentes en [docs/skills/ecp-onboard/ONBOARDING.md](../skills/ecp-onboard/ONBOARDING.md) guía a los usuarios por install, first-index, groups opcionales, wiring de MCP y siguientes pasos — el flujo de setup asistido sigue refinándose.
 
