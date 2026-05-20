@@ -91,7 +91,7 @@ jobs:
           name="${BIN_NAME}-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release-dist/${BIN_NAME}" "dist/${name}/"
-          cp README.md LICENSE NOTICES.md "dist/${name}/" 2>/dev/null || true
+          cp README.md LICENSE.md LICENSES/NOTICES.md "dist/${name}/" 2>/dev/null || true
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
 
@@ -104,7 +104,7 @@ jobs:
           if (-not $env:GITHUB_REF_NAME) { $name = "${env:BIN_NAME}-dev-${{ matrix.target }}" }
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release-dist/${env:BIN_NAME}.exe" "dist/$name/"
-          foreach ($f in @('README.md','LICENSE','NOTICES.md')) {
+          foreach ($f in @('README.md','LICENSE.md','LICENSES/NOTICES.md')) {
             if (Test-Path $f) { Copy-Item $f "dist/$name/" }
           }
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
@@ -161,17 +161,20 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
+      # cosign v3 made --bundle required and deprecated --output-signature /
+      # --output-certificate. We write a single Sigstore bundle per asset
+      # using the `.sigstore.json` suffix that OpenSSF Scorecard's
+      # releasesAreSigned probe recognises (.asc/.minisig/.sig/.sign/
+      # .sigstore/.sigstore.json).
       - name: Sign release assets
         shell: bash
         run: |
           find dist -maxdepth 1 -type f \
-            ! -name '*.sig' \
-            ! -name '*.pem' \
+            ! -name '*.sigstore.json' \
             -print0 |
             while IFS= read -r -d '' asset; do
               cosign sign-blob --yes \
-                --output-signature "${asset}.sig" \
-                --output-certificate "${asset}.pem" \
+                --bundle "${asset}.sigstore.json" \
                 "${asset}"
             done
 
@@ -182,8 +185,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
-            dist/*.sig
-            dist/*.pem
+            dist/*.sigstore.json
             dist/install.sh
             dist/install.ps1
           draft: false
@@ -215,8 +217,16 @@ jobs:
 
             ### Manual download
             Pick a `.tar.gz` / `.zip` matching your platform from Assets below.
-            Each has a `.sha256` for integrity and `.sig` / `.pem` files for
-            keyless signature verification. Verify build provenance with:
+            Each has a `.sha256` for integrity and a `.sigstore.json`
+            Sigstore bundle for keyless signature verification:
+            ```
+            cosign verify-blob \
+              --bundle <asset>.sigstore.json \
+              --certificate-identity-regexp 'https://github.com/coseto6125/egent-code-plexus/' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              <asset>
+            ```
+            Verify build provenance with:
             ```
             gh attestation verify ./ecp --owner coseto6125
             ```
@@ -370,7 +380,7 @@ jobs:
             -e "s/@VERSION@/${version}/g" \
             -e "s/@SHA256_ARM64_DARWIN@/${arm_sha}/g" \
             -e "s/@SHA256_X86_64_DARWIN@/${x86_sha}/g" \
-            packaging/homebrew/egent-code-plexus.rb.template \
+            packaging/egent-code-plexus.rb.template \
             > generated/Formula/egent-code-plexus.rb
 
       - name: Push formula to tap

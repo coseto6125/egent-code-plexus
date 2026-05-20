@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(dirname "$0")/test-helpers.sh"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-LINT="$ROOT/tools/lint-skill.sh"
+LINT="$ROOT/scripts/skill/lint-skill.sh"
 tmp=$(mktemp_test_dir)
 
 mkdir -p "$tmp/docs/skills/ecp-onboard/guides"
