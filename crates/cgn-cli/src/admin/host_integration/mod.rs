@@ -1,5 +1,6 @@
 //! Agent integration menu — host-first installers plus MCP / native / hooks.
 
+pub(crate) mod gemini_cli;
 pub mod mcp;
 pub mod native;
 
@@ -15,10 +16,6 @@ const MECHANISMS: &[menu::Item<'_>] = &[
     ("Gemini CLI", "install native skill and MCP server"),
     ("MCP", "shared side-car for any MCP-capable host"),
     (
-        "Native",
-        "no side-car; integrates into host's own tool registry",
-    ),
-    (
         "Hooks",
         "shell hooks (Claude Code) for auto-reindex on edits",
     ),
@@ -33,9 +30,8 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), CgnError> {
             Some(0) => codex_menu(theme)?,
             Some(1) => gemini_menu(theme)?,
             Some(2) => mcp::run(theme)?,
-            Some(3) => native::run(theme)?,
-            Some(4) => hooks_menu(theme)?,
-            Some(5) | None => return Ok(()),
+            Some(3) => hooks_menu(theme)?,
+            Some(4) | None => return Ok(()),
             _ => unreachable!(),
         }
     }
@@ -246,14 +242,7 @@ mod tests {
         let labels: Vec<&str> = MECHANISMS.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
-            vec![
-                "Codex CLI",
-                "Gemini CLI",
-                "MCP",
-                "Native",
-                "Hooks",
-                "← Back"
-            ]
+            vec!["Codex CLI", "Gemini CLI", "MCP", "Hooks", "← Back"]
         );
     }
 }

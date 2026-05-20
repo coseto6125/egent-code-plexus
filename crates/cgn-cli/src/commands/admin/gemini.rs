@@ -36,33 +36,21 @@ pub fn run(command: GeminiCommands) -> Result<(), cgn_core::CgnError> {
     }
 }
 
-pub fn install(component: GeminiComponent) -> Result<(), cgn_core::CgnError> {
-    let theme = dialoguer::theme::ColorfulTheme::default();
+pub(crate) fn install(component: GeminiComponent) -> Result<(), cgn_core::CgnError> {
     match component {
-        GeminiComponent::NativeSkill => {
-            native_gemini::install(&theme);
-        }
-        GeminiComponent::McpServer => {
-            mcp_gemini::install(&theme);
-        }
+        GeminiComponent::NativeSkill => native_gemini::install_scripted(),
+        GeminiComponent::McpServer => mcp_gemini::install_scripted(),
     }
-    Ok(())
 }
 
-pub fn uninstall(component: GeminiComponent) -> Result<(), cgn_core::CgnError> {
-    let theme = dialoguer::theme::ColorfulTheme::default();
+pub(crate) fn uninstall(component: GeminiComponent) -> Result<(), cgn_core::CgnError> {
     match component {
-        GeminiComponent::NativeSkill => {
-            native_gemini::uninstall(&theme);
-        }
-        GeminiComponent::McpServer => {
-            mcp_gemini::uninstall(&theme);
-        }
+        GeminiComponent::NativeSkill => native_gemini::uninstall_scripted(),
+        GeminiComponent::McpServer => mcp_gemini::uninstall_scripted(),
     }
-    Ok(())
 }
 
-pub fn print_status() -> Result<(), cgn_core::CgnError> {
+pub(crate) fn print_status() -> Result<(), cgn_core::CgnError> {
     native_gemini::status().print("Gemini CLI native-skill");
     mcp_gemini::status().print("Gemini CLI mcp-server");
     Ok(())
