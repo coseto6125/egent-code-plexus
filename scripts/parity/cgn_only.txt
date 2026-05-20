@@ -1,0 +1,381 @@
+__tests__/extraction.test.ts	git
+__tests__/installer-targets.test.ts	restore
+__tests__/mcp-initialize.test.ts	tick
+__tests__/resolution.test.ts	baseContext
+__tests__/security.test.ts	makeConfig
+__tests__/sync.test.ts	git
+__tests__/watcher.test.ts	check
+debug_python_ast.js	walk
+debug_python_ast2.js	walk
+publish.js	main@main
+scripts/extract-release-notes.mjs	arg
+scripts/extract-release-notes.mjs	block
+scripts/extract-release-notes.mjs	buf
+scripts/extract-release-notes.mjs	fenceRe
+scripts/extract-release-notes.mjs	flushBuf
+scripts/extract-release-notes.mjs	inFence
+scripts/extract-release-notes.mjs	leadingSpaces
+scripts/extract-release-notes.mjs	listItemRe
+scripts/extract-release-notes.mjs	out
+scripts/extract-release-notes.mjs	stack
+scripts/local-install.sh	BRANCH
+scripts/local-install.sh	LINKED
+scripts/local-install.sh	PKG
+scripts/local-install.sh	VERSION
+scripts/release.sh	NOTES
+scripts/release.sh	REPO
+scripts/release.sh	TAG
+scripts/release.sh	VERSION
+src/bin/codegraph.ts	IndexResult
+src/bin/codegraph.ts	Main → DetectAll
+src/bin/codegraph.ts	Main → FormatNumber
+src/bin/codegraph.ts	Main → GetTarget
+src/bin/codegraph.ts	Main → GetVersion
+src/bin/codegraph.ts	Main → ListTargetIds
+src/bin/codegraph.ts	Main → SupportsUnicode
+src/bin/codegraph.ts	Main → Tildify
+src/bin/codegraph.ts	PrintIndexResult → SupportsUnicode
+src/bin/codegraph.ts	TreeNode
+src/bin/codegraph.ts	createVerboseProgress
+src/bin/codegraph.ts	error
+src/bin/codegraph.ts	formatDuration
+src/bin/codegraph.ts	formatNumber
+src/bin/codegraph.ts	globToRegex
+src/bin/codegraph.ts	importESM
+src/bin/codegraph.ts	info
+src/bin/codegraph.ts	isTestFile
+src/bin/codegraph.ts	loadCodeGraph
+src/bin/codegraph.ts	main
+src/bin/codegraph.ts	main@main
+src/bin/codegraph.ts	nodeMajor
+src/bin/codegraph.ts	nodeVersion
+src/bin/codegraph.ts	printFileTree
+src/bin/codegraph.ts	printIndexResult
+src/bin/codegraph.ts	renderNode
+src/bin/codegraph.ts	resolveProjectPath
+src/bin/codegraph.ts	success
+src/bin/codegraph.ts	warn
+src/bin/codegraph.ts	writeErrorLog
+src/bin/node-version-check.ts	buildNode25BlockBanner
+src/config.ts	matchesPattern
+src/context/index.ts	BuildContext → GetRelatedFiles
+src/context/index.ts	FindRelevantContext → CacheNode
+src/context/index.ts	FindRelevantContext → LogDebug
+src/context/index.ts	FindRelevantContext → SafeJsonParse
+src/db/queries.ts	SearchNodes → GetStemVariants
+src/db/queries.ts	SearchNodes → MatchesNonProductionDir
+src/db/queries.ts	SearchNodes → SafeJsonParse
+src/db/schema.sql	applied_at
+src/db/schema.sql	candidates
+src/db/schema.sql	col
+src/db/schema.sql	content_hash
+src/db/schema.sql	decorators
+src/db/schema.sql	description
+src/db/schema.sql	docstring
+src/db/schema.sql	edges
+src/db/schema.sql	end_column
+src/db/schema.sql	end_line
+src/db/schema.sql	errors
+src/db/schema.sql	file_path
+src/db/schema.sql	files
+src/db/schema.sql	from_node_id
+src/db/schema.sql	id
+src/db/schema.sql	indexed_at
+src/db/schema.sql	is_abstract
+src/db/schema.sql	is_async
+src/db/schema.sql	is_exported
+src/db/schema.sql	is_static
+src/db/schema.sql	key
+src/db/schema.sql	kind
+src/db/schema.sql	language
+src/db/schema.sql	line
+src/db/schema.sql	metadata
+src/db/schema.sql	modified_at
+src/db/schema.sql	name
+src/db/schema.sql	node_count
+src/db/schema.sql	nodes
+src/db/schema.sql	nodes_fts
+src/db/schema.sql	path
+src/db/schema.sql	project_metadata
+src/db/schema.sql	provenance
+src/db/schema.sql	qualified_name
+src/db/schema.sql	reference_kind
+src/db/schema.sql	reference_name
+src/db/schema.sql	schema_versions
+src/db/schema.sql	signature
+src/db/schema.sql	size
+src/db/schema.sql	source
+src/db/schema.sql	start_column
+src/db/schema.sql	start_line
+src/db/schema.sql	target
+src/db/schema.sql	type_parameters
+src/db/schema.sql	unresolved_refs
+src/db/schema.sql	updated_at
+src/db/schema.sql	value
+src/db/schema.sql	version
+src/db/schema.sql	visibility
+src/db/sqlite-adapter.ts	all
+src/db/sqlite-adapter.ts	get
+src/db/sqlite-adapter.ts	run
+src/directory.ts	walkDir
+src/errors.ts	debug
+src/errors.ts	error
+src/errors.ts	warn
+src/extraction/index.ts	GetChangedFiles → NormalizePath
+src/extraction/index.ts	GetChangedFiles → OnProgress
+src/extraction/index.ts	GetChangedFiles → SafeJsonParse
+src/extraction/index.ts	IndexAll → GetAllFrameworkResolvers
+src/extraction/index.ts	IndexAll → GetApplicableFrameworks
+src/extraction/index.ts	IndexAll → InsertEdge
+src/extraction/index.ts	IndexAll → InsertNode
+src/extraction/index.ts	IndexAll → InsertUnresolvedRef
+src/extraction/index.ts	IndexAll → LogWarn
+src/extraction/index.ts	IndexAll → LooksLikeCpp
+src/extraction/index.ts	IndexAll → RecycleWorker
+src/extraction/index.ts	IndexAll → RejectAllPending
+src/extraction/index.ts	IndexAll → UpsertFile
+src/extraction/index.ts	Sync → DetectFrameworks
+src/extraction/index.ts	Sync → GetAllFrameworkResolvers
+src/extraction/index.ts	Sync → GetApplicableFrameworks
+src/extraction/index.ts	Sync → Init
+src/extraction/index.ts	Sync → InsertEdge
+src/extraction/index.ts	Sync → InsertNode
+src/extraction/index.ts	Sync → InsertUnresolvedRef
+src/extraction/index.ts	Sync → IsLanguageSupported
+src/extraction/index.ts	Sync → LooksLikeCpp
+src/extraction/index.ts	Sync → UpsertFile
+src/extraction/index.ts	Sync → ValidatePathWithinRoot
+src/extraction/index.ts	attachWorkerHandlers
+src/extraction/index.ts	ensureWorker
+src/extraction/index.ts	recycleWorker
+src/extraction/index.ts	rejectAllPending
+src/extraction/index.ts	requestParse
+src/extraction/index.ts	walk
+src/extraction/languages/rust.ts	getRootModule
+src/extraction/tree-sitter-types.ts	addUnresolvedReference
+src/extraction/tree-sitter-types.ts	createNode
+src/extraction/tree-sitter-types.ts	popScope
+src/extraction/tree-sitter-types.ts	pushScope
+src/extraction/tree-sitter-types.ts	visitFunctionBody
+src/extraction/tree-sitter-types.ts	visitNode
+src/extraction/tree-sitter.ts	ExtractField → GetChildByField
+src/extraction/tree-sitter.ts	ExtractField → GetNodeText
+src/extraction/tree-sitter.ts	ExtractImport → BuildQualifiedName
+src/extraction/tree-sitter.ts	ExtractImport → GenerateNodeId
+src/extraction/tree-sitter.ts	ExtractPascalDeclType → BuildQualifiedName
+src/extraction/tree-sitter.ts	ExtractPascalDeclType → GenerateNodeId
+src/extraction/tree-sitter.ts	ExtractTypeAlias → GenerateNodeId
+src/extraction/tree-sitter.ts	ExtractTypeAlias → GetNodeText
+src/extraction/tree-sitter.ts	ExtractVariable → GenerateNodeId
+src/extraction/tree-sitter.ts	VisitPascalNode → FindNodeByName
+src/extraction/tree-sitter.ts	VisitPascalNode → GetNodeText
+src/extraction/tree-sitter.ts	VisitPascalNode → VisitPascalBlock
+src/extraction/tree-sitter.ts	consider
+src/extraction/tree-sitter.ts	extractFromSpec
+src/extraction/tree-sitter.ts	visitForCallsAndStructure
+src/graph/queries.ts	dfs
+src/graph/traversal.ts	priority
+src/index.ts	InitSync → BuildWasmFallbackBanner
+src/index.ts	InitSync → GetConfigPath
+src/index.ts	InitSync → Prepare
+src/installer/clack.d.ts	error
+src/installer/clack.d.ts	info
+src/installer/clack.d.ts	message
+src/installer/clack.d.ts	start
+src/installer/clack.d.ts	step
+src/installer/clack.d.ts	stop
+src/installer/clack.d.ts	success
+src/installer/clack.d.ts	warn
+src/installer/targets/claude.ts	Uninstall → AtomicWriteFileSync
+src/installer/targets/claude.ts	Uninstall → ConfigDir
+src/installer/targets/opencode.ts	Uninstall → AtomicWriteFileSync
+src/installer/targets/opencode.ts	Uninstall → GlobalConfigDir
+src/installer/targets/types.ts	describePaths
+src/installer/targets/types.ts	detect
+src/installer/targets/types.ts	install
+src/installer/targets/types.ts	printConfig
+src/installer/targets/types.ts	supportsLocation
+src/installer/targets/types.ts	uninstall
+src/installer/targets/types.ts	wireProjectSurfaces
+src/mcp/tools.ts	Execute → FormatFilesGrouped
+src/mcp/tools.ts	Execute → GetCodeGraphDir
+src/mcp/tools.ts	Execute → GetConfigPath
+src/mcp/tools.ts	Execute → GetDatabasePath
+src/mcp/tools.ts	Execute → MergeConfig
+src/mcp/tools.ts	Execute → RenderNode
+src/mcp/tools.ts	Execute → Transaction
+src/mcp/tools.ts	Execute → TruncateOutput
+src/mcp/tools.ts	buildSection
+src/mcp/tools.ts	cg
+src/mcp/tools.ts	hasQueryRelevance
+src/mcp/tools.ts	isLowValue
+src/mcp/tools.ts	renderNode
+src/resolution/frameworks/cargo-workspace.ts	walk
+src/resolution/frameworks/csharp.ts	detect
+src/resolution/frameworks/csharp.ts	extract
+src/resolution/frameworks/csharp.ts	resolve
+src/resolution/frameworks/express.ts	detect
+src/resolution/frameworks/express.ts	extract
+src/resolution/frameworks/express.ts	resolve
+src/resolution/frameworks/go.ts	detect
+src/resolution/frameworks/go.ts	extract
+src/resolution/frameworks/go.ts	resolve
+src/resolution/frameworks/java.ts	detect
+src/resolution/frameworks/java.ts	extract
+src/resolution/frameworks/java.ts	resolve
+src/resolution/frameworks/laravel.ts	detect
+src/resolution/frameworks/laravel.ts	extract
+src/resolution/frameworks/laravel.ts	resolve
+src/resolution/frameworks/python.ts	detect
+src/resolution/frameworks/python.ts	extract
+src/resolution/frameworks/python.ts	resolve
+src/resolution/frameworks/react.ts	detect
+src/resolution/frameworks/react.ts	extract
+src/resolution/frameworks/react.ts	resolve
+src/resolution/frameworks/ruby.ts	detect
+src/resolution/frameworks/ruby.ts	extract
+src/resolution/frameworks/ruby.ts	resolve
+src/resolution/frameworks/rust.ts	detect
+src/resolution/frameworks/rust.ts	extract
+src/resolution/frameworks/rust.ts	resolve
+src/resolution/frameworks/svelte.ts	detect
+src/resolution/frameworks/svelte.ts	extract
+src/resolution/frameworks/svelte.ts	resolve
+src/resolution/frameworks/swift.ts	detect
+src/resolution/frameworks/swift.ts	extract
+src/resolution/frameworks/swift.ts	resolve
+src/resolution/frameworks/vue.ts	Resolve → GetAllFiles
+src/resolution/frameworks/vue.ts	Resolve → GetNodesInFile
+src/resolution/frameworks/vue.ts	detect
+src/resolution/frameworks/vue.ts	extract
+src/resolution/frameworks/vue.ts	resolve
+src/resolution/import-resolver.ts	tryWithExt
+src/resolution/index.ts	CreateContext → ExtractGoImports
+src/resolution/index.ts	CreateContext → ExtractJSImports
+src/resolution/index.ts	CreateContext → LogDebug
+src/resolution/index.ts	CreateContext → SplitWildcard
+src/resolution/index.ts	CreateContext → StripJsComments
+src/resolution/index.ts	CreateContext → StripJsonc
+src/resolution/types.ts	detect
+src/resolution/types.ts	extract
+src/resolution/types.ts	fileExists
+src/resolution/types.ts	getAllFiles
+src/resolution/types.ts	getImportMappings
+src/resolution/types.ts	getNodesByKind
+src/resolution/types.ts	getNodesByLowerName
+src/resolution/types.ts	getNodesByName
+src/resolution/types.ts	getNodesByQualifiedName
+src/resolution/types.ts	getNodesInFile
+src/resolution/types.ts	getProjectAliases
+src/resolution/types.ts	getProjectRoot
+src/resolution/types.ts	getReExports
+src/resolution/types.ts	listDirectories
+src/resolution/types.ts	readFile
+src/resolution/types.ts	resolve
+src/sync/watcher.ts	Start → LogWarn
+src/ui/shimmer-progress.ts	onProgress
+src/ui/shimmer-progress.ts	stop
+src/utils.ts	sizeOf
+src/web-tree-sitter.d.ts	abiVersion
+src/web-tree-sitter.d.ts	child
+src/web-tree-sitter.d.ts	childCount
+src/web-tree-sitter.d.ts	childForFieldId
+src/web-tree-sitter.d.ts	childForFieldName
+src/web-tree-sitter.d.ts	childWithDescendant
+src/web-tree-sitter.d.ts	children
+src/web-tree-sitter.d.ts	childrenForFieldId
+src/web-tree-sitter.d.ts	childrenForFieldName
+src/web-tree-sitter.d.ts	constructor
+src/web-tree-sitter.d.ts	copy
+src/web-tree-sitter.d.ts	currentDepth
+src/web-tree-sitter.d.ts	currentDescendantIndex
+src/web-tree-sitter.d.ts	currentFieldId
+src/web-tree-sitter.d.ts	currentFieldName
+src/web-tree-sitter.d.ts	currentNode
+src/web-tree-sitter.d.ts	delete
+src/web-tree-sitter.d.ts	descendantCount
+src/web-tree-sitter.d.ts	descendantForIndex
+src/web-tree-sitter.d.ts	descendantForPosition
+src/web-tree-sitter.d.ts	descendantsOfType
+src/web-tree-sitter.d.ts	edit
+src/web-tree-sitter.d.ts	endIndex
+src/web-tree-sitter.d.ts	endPosition
+src/web-tree-sitter.d.ts	equals
+src/web-tree-sitter.d.ts	fieldCount
+src/web-tree-sitter.d.ts	fieldIdForName
+src/web-tree-sitter.d.ts	fieldNameForChild
+src/web-tree-sitter.d.ts	fieldNameForId
+src/web-tree-sitter.d.ts	fieldNameForNamedChild
+src/web-tree-sitter.d.ts	firstChild
+src/web-tree-sitter.d.ts	firstChildForIndex
+src/web-tree-sitter.d.ts	firstNamedChild
+src/web-tree-sitter.d.ts	firstNamedChildForIndex
+src/web-tree-sitter.d.ts	getChangedRanges
+src/web-tree-sitter.d.ts	getIncludedRanges
+src/web-tree-sitter.d.ts	getLogger
+src/web-tree-sitter.d.ts	getTimeoutMicros
+src/web-tree-sitter.d.ts	gotoDescendant
+src/web-tree-sitter.d.ts	gotoFirstChild
+src/web-tree-sitter.d.ts	gotoFirstChildForIndex
+src/web-tree-sitter.d.ts	gotoFirstChildForPosition
+src/web-tree-sitter.d.ts	gotoLastChild
+src/web-tree-sitter.d.ts	gotoNextSibling
+src/web-tree-sitter.d.ts	gotoParent
+src/web-tree-sitter.d.ts	gotoPreviousSibling
+src/web-tree-sitter.d.ts	grammarId
+src/web-tree-sitter.d.ts	grammarType
+src/web-tree-sitter.d.ts	hasChanges
+src/web-tree-sitter.d.ts	hasError
+src/web-tree-sitter.d.ts	idForNodeType
+src/web-tree-sitter.d.ts	init
+src/web-tree-sitter.d.ts	isError
+src/web-tree-sitter.d.ts	isExtra
+src/web-tree-sitter.d.ts	isMissing
+src/web-tree-sitter.d.ts	isNamed
+src/web-tree-sitter.d.ts	lastChild
+src/web-tree-sitter.d.ts	lastNamedChild
+src/web-tree-sitter.d.ts	load
+src/web-tree-sitter.d.ts	lookaheadIterator
+src/web-tree-sitter.d.ts	name
+src/web-tree-sitter.d.ts	namedChild
+src/web-tree-sitter.d.ts	namedChildCount
+src/web-tree-sitter.d.ts	namedChildren
+src/web-tree-sitter.d.ts	namedDescendantForIndex
+src/web-tree-sitter.d.ts	namedDescendantForPosition
+src/web-tree-sitter.d.ts	nextNamedSibling
+src/web-tree-sitter.d.ts	nextParseState
+src/web-tree-sitter.d.ts	nextSibling
+src/web-tree-sitter.d.ts	nextState
+src/web-tree-sitter.d.ts	nodeId
+src/web-tree-sitter.d.ts	nodeIsMissing
+src/web-tree-sitter.d.ts	nodeIsNamed
+src/web-tree-sitter.d.ts	nodeStateId
+src/web-tree-sitter.d.ts	nodeText
+src/web-tree-sitter.d.ts	nodeType
+src/web-tree-sitter.d.ts	nodeTypeCount
+src/web-tree-sitter.d.ts	nodeTypeForId
+src/web-tree-sitter.d.ts	nodeTypeId
+src/web-tree-sitter.d.ts	nodeTypeIsNamed
+src/web-tree-sitter.d.ts	nodeTypeIsVisible
+src/web-tree-sitter.d.ts	parent
+src/web-tree-sitter.d.ts	parse
+src/web-tree-sitter.d.ts	parseState
+src/web-tree-sitter.d.ts	previousNamedSibling
+src/web-tree-sitter.d.ts	previousSibling
+src/web-tree-sitter.d.ts	query
+src/web-tree-sitter.d.ts	reset
+src/web-tree-sitter.d.ts	resetTo
+src/web-tree-sitter.d.ts	rootNode
+src/web-tree-sitter.d.ts	rootNodeWithOffset
+src/web-tree-sitter.d.ts	setLanguage
+src/web-tree-sitter.d.ts	setLogger
+src/web-tree-sitter.d.ts	setTimeoutMicros
+src/web-tree-sitter.d.ts	stateCount
+src/web-tree-sitter.d.ts	subtypes
+src/web-tree-sitter.d.ts	supertypes
+src/web-tree-sitter.d.ts	text
+src/web-tree-sitter.d.ts	toString
+src/web-tree-sitter.d.ts	type
+src/web-tree-sitter.d.ts	typeId
+src/web-tree-sitter.d.ts	version
+src/web-tree-sitter.d.ts	walk

@@ -98,6 +98,24 @@ fn run_stdout(repo: &Path, args: &[&str]) -> String {
 // ── Existing filter tests (updated: `context` → `inspect`, UID refs removed) ──
 
 #[test]
+fn inspect_accepts_name_positional() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "src/main.rs", "fn my_target() {}\n");
+    init_and_analyze(repo);
+
+    // Positional should work identically to named.
+    let positional = run_json(repo, &["inspect", "my_target", "--format", "json"]);
+    assert_eq!(positional["symbol"]["name"], "my_target");
+
+    let named = run_json(
+        repo,
+        &["inspect", "--name", "my_target", "--format", "json"],
+    );
+    assert_eq!(named["symbol"]["name"], "my_target");
+}
+
+#[test]
 fn inspect_ambiguous_name_disambiguated_by_file_path() {
     // Two functions named `handler` in different files — `--name handler` is
     // ambiguous; `--file_path src/auth/` must narrow it to the auth handler.

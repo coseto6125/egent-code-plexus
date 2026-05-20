@@ -33,13 +33,29 @@ use std::path::{Path, PathBuf};
 /// via tree-sitter and rewrites them atomically, with optional dry-run preview.
 #[derive(Args, Debug, Clone, Serialize)]
 pub struct RenameArgs {
-    /// The symbol name to rename (e.g. `old_name`).
-    #[arg(long, alias = "symbol_name")]
-    pub symbol: String,
+    /// The symbol name to rename (equivalent to `--symbol` flag).
+    pub symbol: Option<String>,
 
-    /// The new name to apply.
-    #[arg(long = "new-name", alias = "new_name")]
-    pub new_name: String,
+    /// Named alias for the positional SYMBOL argument.
+    #[arg(
+        long = "symbol",
+        alias = "symbol_name",
+        value_name = "SYMBOL",
+        conflicts_with = "symbol"
+    )]
+    pub symbol_flag: Option<String>,
+
+    /// The new name to apply (equivalent to `--new-name` flag).
+    pub new_name: Option<String>,
+
+    /// Named alias for the positional NEW_NAME argument.
+    #[arg(
+        long = "new-name",
+        alias = "new_name",
+        value_name = "NEW_NAME",
+        conflicts_with = "new_name"
+    )]
+    pub new_name_flag: Option<String>,
 
     /// Repository root. Defaults to current dir.
     #[arg(long)]
@@ -210,12 +226,30 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
+    let target_symbol = match args.symbol.as_deref().or(args.symbol_flag.as_deref()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return Err(CgnError::InvalidArgument(
+                "Target symbol name is required".to_string(),
+            ))
+        }
+    };
+
+    let target_new_name = match args.new_name.as_deref().or(args.new_name_flag.as_deref()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return Err(CgnError::InvalidArgument(
+                "New name is required".to_string(),
+            ))
+        }
+    };
+
     // --- Pre-flight collision detection ---
-    let collisions = detect_collisions(&args.new_name, graph);
+    let collisions = detect_collisions(&target_new_name, graph);
     if !collisions.is_empty() {
         eprintln!(
             "{}",
-            crate::hint::collision_warning(&args.new_name, &collisions)
+            crate::hint::collision_warning(&target_new_name, &collisions)
         );
     }
 
@@ -227,7 +261,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
         .nodes
         .iter()
         .enumerate()
-        .filter(|(_, n)| n.name.resolve(&graph.string_pool) == args.symbol)
+        .filter(|(_, n)| n.name.resolve(&graph.string_pool) == target_symbol)
         .map(|(i, _)| i)
         .collect();
 
@@ -256,7 +290,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
             let Ok(bytes) = std::fs::read(&abs_path) else {
                 continue;
             };
-            let occurrences = find_identifier_occurrences(rel_path, &bytes, &args.symbol);
+            let occurrences = find_identifier_occurrences(rel_path, &bytes, &target_symbol);
             if !occurrences.is_empty() {
                 hits.push((abs_path, occurrences));
             }
@@ -267,14 +301,14 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
 
     // Zero-occurrence case: explicit message + suggestions.
     if target_indices.is_empty() || total_ast_hits == 0 {
-        println!("No occurrences of \"{}\" found.", args.symbol);
+        println!("No occurrences of \"{}\" found.", target_symbol);
 
         // Check if the name exists in doc files even though not in graph.
         let doc_hits = if args.markdown {
-            apply_markdown_rename(&repo_root, &args.symbol, &args.new_name, true)
+            apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, true)
         } else {
             // Still scan to provide hints.
-            apply_markdown_rename(&repo_root, &args.symbol, &args.new_name, true)
+            apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, true)
         };
         if !doc_hits.is_empty() {
             let total_doc: usize = doc_hits.iter().map(|(_, c)| c).sum();
@@ -284,7 +318,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
             );
             println!(
                 "→ For markdown: cgn rename --symbol {} --new-name {} --markdown",
-                args.symbol, args.new_name
+                target_symbol, target_new_name
             );
         }
         return Ok(());
@@ -299,8 +333,8 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
             collect_diff(
                 &bytes,
                 ranges,
-                &args.symbol,
-                &args.new_name,
+                &target_symbol,
+                &target_new_name,
                 path,
                 &mut lines,
             );
@@ -308,7 +342,8 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
 
         // Markdown pass preview.
         if args.markdown {
-            let md_changed = apply_markdown_rename(&repo_root, &args.symbol, &args.new_name, true);
+            let md_changed =
+                apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, true);
             if !md_changed.is_empty() {
                 println!("[markdown] would update {} doc file(s):", md_changed.len());
                 for (p, c) in &md_changed {
@@ -319,8 +354,8 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
 
         emit_verification_payload(
             &repo_root,
-            &args.symbol,
-            &args.new_name,
+            &target_symbol,
+            &target_new_name,
             total_ast_hits,
             true,
         );
@@ -330,18 +365,18 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), CgnEr
     // --- Stage 3b: execute — atomic per-file replace by descending offset. ---
     for (path, ranges) in hits {
         lines.push(format!("renamed: {}", path.display()));
-        apply_rename(&path, &ranges, args.new_name.as_bytes()).map_err(CgnError::Io)?;
+        apply_rename(&path, &ranges, target_new_name.as_bytes()).map_err(CgnError::Io)?;
     }
 
     // Markdown pass.
     if args.markdown {
-        apply_markdown_rename(&repo_root, &args.symbol, &args.new_name, false);
+        apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, false);
     }
 
     emit_verification_payload(
         &repo_root,
-        &args.symbol,
-        &args.new_name,
+        &target_symbol,
+        &target_new_name,
         total_ast_hits,
         false,
     );

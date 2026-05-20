@@ -84,26 +84,41 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
             Some(method_name.to_string())
         }
         Some(receiver) => {
-            match receiver.kind() {
-                "self" => {
-                    // `self.method` → enclosing class
-                    if let Some(class_name) = ctx.enclosing_name(line) {
-                        return Some(format!("{class_name}.{method_name}"));
-                    }
-                    Some(method_name.to_string())
-                }
-                "constant" => {
-                    // `Foo.method` — singleton call on a constant-named receiver
-                    if let Ok(const_name) = receiver.utf8_text(source) {
-                        return Some(format!("{const_name}.{method_name}"));
-                    }
-                    Some(method_name.to_string())
-                }
-                _ => {
-                    // Other receiver forms (variable, expression) — bare name fallback.
-                    Some(method_name.to_string())
-                }
+            if let Some(inferred_type) = infer_receiver_type(receiver, source, ctx, line) {
+                Some(format!("{inferred_type}.{method_name}"))
+            } else {
+                // Bare name fallback.
+                Some(method_name.to_string())
             }
         }
+    }
+}
+
+fn infer_receiver_type(
+    node: Node<'_>,
+    source: &[u8],
+    ctx: &ClassContext,
+    line: u32,
+) -> Option<String> {
+    match node.kind() {
+        "self" => ctx.enclosing_name(line).map(|s| s.to_string()),
+        "constant" => node.utf8_text(source).ok().map(|s| s.to_string()),
+        "call" => {
+            let method_node = node.child_by_field_name("method")?;
+            let method_name = method_node.utf8_text(source).ok()?;
+
+            match method_name {
+                "new" | "create" | "create!" | "find" | "find_by" | "find_by!" | "where"
+                | "includes" | "joins" | "first" | "last" | "order" | "limit" | "offset" => {
+                    if let Some(inner) = node.child_by_field_name("receiver") {
+                        infer_receiver_type(inner, source, ctx, line)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }

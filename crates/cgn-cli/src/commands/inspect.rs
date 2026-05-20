@@ -10,9 +10,12 @@ use std::path::Path;
 
 #[derive(Args, Debug)]
 pub struct InspectArgs {
-    /// Name of the symbol to inspect.
-    #[arg(long)]
+    /// Target symbol name (equivalent to `--name` flag).
     pub name: Option<String>,
+
+    /// Named alias for the positional NAME argument — kept for parity with old MCP / wrapper habits.
+    #[arg(long = "name", value_name = "NAME", conflicts_with = "name")]
+    pub name_flag: Option<String>,
 
     /// Repository path
     #[arg(long)]
@@ -305,10 +308,16 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     let graph = engine.graph().map_err(|e| CgnError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
 
-    let name_query = args.name.as_deref().filter(|s| !s.is_empty());
+    let name_query = args
+        .name
+        .as_deref()
+        .or(args.name_flag.as_deref())
+        .filter(|s| !s.is_empty());
 
     if name_query.is_none() {
-        return Err(CgnError::InvalidArgument("--name is required".to_string()));
+        return Err(CgnError::InvalidArgument(
+            "Target symbol name is required".to_string(),
+        ));
     }
 
     let name = name_query.unwrap();

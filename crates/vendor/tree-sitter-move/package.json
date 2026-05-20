@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "node-addon-api": "^7.1.0",
+    "node-addon-api": "^8.7.0",
     "node-gyp-build": "^4.8.0"
   },
   "peerDependencies": {
@@ -24,7 +24,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "tree-sitter-cli": "^0.20.8",
+    "tree-sitter-cli": "^0.26.9",
     "prebuildify": "^6.0.0"
   },
   "tree-sitter": [

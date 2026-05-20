@@ -1,0 +1,7 @@
+scripts/patch-tree-sitter-dart.js	buildPath
+scripts/patch-tree-sitter-dart.js	existing
+src/extraction/parse-worker.ts	realWrite
+src/utils.ts	buffer
+src/utils.ts	bytesRead
+src/utils.ts	fd
+src/utils.ts	fs
