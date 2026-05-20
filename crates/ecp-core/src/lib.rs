@@ -10,6 +10,7 @@ pub mod peer;
 pub mod pool;
 pub mod registry;
 pub mod session;
+pub mod uid;
 
 pub use error::{EcpError, EcpResult};
 
