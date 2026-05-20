@@ -11,8 +11,8 @@ use ecp_analyzer::{
     nim::parser::NimProvider, php::parser::PhpProvider, python::parser::PythonProvider,
     ruby::parser::RubyProvider, rust::parser::RustProvider, solidity::parser::SolidityProvider,
     sql::parser::SqlProvider, swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
-    verilog::parser::VerilogProvider, vyper::parser::VyperProvider, yaml::parser::YamlProvider,
-    zig::parser::ZigProvider,
+    verilog::parser::VerilogProvider, vue::parser::VueProvider, vyper::parser::VyperProvider,
+    yaml::parser::YamlProvider, zig::parser::ZigProvider,
 };
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -186,6 +186,7 @@ pub fn run_analyzer_for_paths(
     add!(needed.verilog, VerilogProvider::new());
     add!(needed.cairo, CairoProvider::new());
     add!(needed.zig, ZigProvider::new());
+    add!(needed.vue, VueProvider::new());
     add!(needed.docker_compose, DockerComposeProvider::new());
 
     use rayon::prelude::*;
@@ -477,6 +478,7 @@ struct NeededProviders {
     cairo: bool,
     zig: bool,
     docker_compose: bool,
+    vue: bool,
 }
 
 /// Walk the scanned file list, set the flag for each language whose files we
@@ -532,6 +534,7 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
             "v" | "sv" | "vh" | "svh" => n.verilog = true,
             "cairo" => n.cairo = true,
             "zig" => n.zig = true,
+            "vue" => n.vue = true,
             "yml" | "yaml" => n.yaml = true,
             _ => {}
         }
@@ -604,6 +607,7 @@ fn should_analyze_path(path: &std::path::Path) -> bool {
                 | "vh"
                 | "svh"
                 | "zig"
+                | "vue"
         )
     )
 }

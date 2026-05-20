@@ -232,6 +232,11 @@ impl AnalyzerPipeline {
                 .iter()
                 .find(|p| p.name() == "zig")
                 .map(|p| p.as_ref()),
+            "vue" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "vue")
+                .map(|p| p.as_ref()),
             _ => None,
         }
     }
