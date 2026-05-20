@@ -151,12 +151,19 @@ impl NodeKind {
 
     /// True when the node can appear as the leading segment of a qualified
     /// callee (`outer::member()` / `outer.member()`). Superset of `is_type`
-    /// plus `Namespace`, so C++ `namespace outer { fn x() }` calls bind
-    /// through Tier 2.5 instead of falling to the bare-name global tier.
-    /// Same path serves C# / Kotlin / Move where namespaces / packages /
-    /// modules are first-class qualifier sources.
+    /// plus `Namespace` (C++ / C# / PHP) and `Module` (Rust inline
+    /// `mod foo { ... }`). Without these, every qualified call where the
+    /// leading segment isn't a class / struct / enum / typedef / trait /
+    /// interface drops at Tier 2.5 and falls through to the bare-name
+    /// global tier — which then rejects ultra-common member names like
+    /// `new` / `default` / `bar`.
+    ///
+    /// Rust note: file-backed `mod foo;` still resolves via the
+    /// language-specific Tier 3.5 (module-tree FQN) / Tier 4 (module-file
+    /// fallback) paths. Inline modules have no backing file, so they
+    /// previously had no path at all — `Module` here closes that gap.
     pub const fn is_qualifier(self) -> bool {
-        self.is_type() || matches!(self, Self::Namespace)
+        self.is_type() || matches!(self, Self::Namespace | Self::Module)
     }
 
     /// Static variant name. Used by Pass 1 UID construction (`"<Kind>:<path>:<name>"`)

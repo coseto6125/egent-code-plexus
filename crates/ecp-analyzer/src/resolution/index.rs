@@ -8,11 +8,12 @@ pub type NodeId = u32;
 /// to share the name.
 ///
 /// `Qualifier` is the leading-segment lookup used by `resolve_qualifier_file`
-/// — it accepts both Type (Class/Struct/Enum/Typedef/Trait/Interface) AND
-/// Namespace, because C++ / C# / Kotlin let a namespace name appear as the
-/// qualifier in `outer::member` / `outer.member` calls. Without it, every
-/// `namespace_name::func()` call drops at Tier 2.5 since `outer` is a
-/// Namespace node, not a Type.
+/// — it accepts Type (Class/Struct/Enum/Typedef/Trait/Interface) plus
+/// Namespace (C++ / C# / PHP) and Module (Rust inline `mod`). Without
+/// these, every qualified call whose leading segment isn't a class /
+/// struct / enum / typedef / trait / interface drops at Tier 2.5 since
+/// the qualifier kind doesn't pass `is_type` — falling to the bare-name
+/// Tier 3 which rejects ultra-common member names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveTarget {
     Callable,

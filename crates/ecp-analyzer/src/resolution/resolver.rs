@@ -282,7 +282,14 @@ impl<'a> Resolver<'a> {
         // safe to fall back) from `std::...` (external, refuse).
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
             let hit = self
-                .resolve_qualifier_file(source_file, qualifier, raw_imports, Some(symbol_name))
+                .resolve_qualifier_file(
+                    source_file,
+                    qualifier,
+                    member,
+                    target,
+                    raw_imports,
+                    Some(symbol_name),
+                )
                 .and_then(|qf| {
                     self.symbol_table
                         .lookup_in_file_with_kind(&qf, member, target)
@@ -353,8 +360,14 @@ impl<'a> Resolver<'a> {
         // recorded by the parser, mirroring MRO precedence).
         if !caller_heritage.is_empty() {
             for base in caller_heritage {
-                if let Some(qf) = self.resolve_qualifier_file(source_file, base, raw_imports, None)
-                {
+                if let Some(qf) = self.resolve_qualifier_file(
+                    source_file,
+                    base,
+                    symbol_name,
+                    target,
+                    raw_imports,
+                    None,
+                ) {
                     if let Some(node_id) =
                         self.symbol_table
                             .lookup_in_file_with_kind(&qf, symbol_name, target)
@@ -501,15 +514,19 @@ fn crate_root_prefix(path: &str) -> &str {
 }
 
 fn split_qualifier(name: &str) -> Option<(&str, &str)> {
-    let colon_idx = name.rfind("::");
-    let dot_idx = name.rfind('.');
-    let (sep_len, split_idx) = match (colon_idx, dot_idx) {
-        (Some(c), Some(d)) if c >= d => (2usize, c),
-        (Some(_), Some(d)) => (1, d),
-        (Some(c), None) => (2, c),
-        (None, Some(d)) => (1, d),
-        (None, None) => return None,
-    };
+    // Pick the rightmost separator. PHP's `\` is included alongside `::`
+    // and `.` so `\App\helper` resolves with `App` as qualifier. `::` is
+    // 2-char (preferred on tie since the position points at the first `:`,
+    // not the `.`/`\` that might appear at the same column).
+    let candidates = [
+        (name.rfind("::"), 2usize),
+        (name.rfind('.'), 1),
+        (name.rfind('\\'), 1),
+    ];
+    let (split_idx, sep_len) = candidates
+        .iter()
+        .filter_map(|&(idx, len)| idx.map(|i| (i, len)))
+        .max_by_key(|&(i, _)| i)?;
     let (before, after) = name.split_at(split_idx);
     let member = &after[sep_len..];
     if before.is_empty() || member.is_empty() {
@@ -518,6 +535,7 @@ fn split_qualifier(name: &str) -> Option<(&str, &str)> {
     let qualifier = before
         .rsplit_once("::")
         .or_else(|| before.rsplit_once('.'))
+        .or_else(|| before.rsplit_once('\\'))
         .map(|(_, q)| q)
         .unwrap_or(before);
     if qualifier.is_empty() {
@@ -688,6 +706,8 @@ impl<'a> Resolver<'a> {
         &self,
         source_file: &Path,
         qualifier: &str,
+        member: &str,
+        target: ResolveTarget,
         raw_imports: &[RawImport],
         full_callee: Option<&str>,
     ) -> Option<String> {
@@ -698,21 +718,41 @@ impl<'a> Resolver<'a> {
             std::borrow::Cow::Owned(source_file.to_string_lossy().replace('\\', "/"));
 
         // Tier 1: same-file qualifier definition. Qualifiers are class /
-        // interface / namespace names, so filter to Qualifier here —
-        // avoids a property named `Logger` winning over `class Logger`
-        // in the same file, while still letting `namespace outer { ... }`
-        // serve as the leading segment of `outer::member()` calls.
+        // interface / namespace / module names, so filter to Qualifier
+        // here — avoids a property named `Logger` winning over `class
+        // Logger` in the same file, while still letting `namespace outer
+        // { ... }` and inline `mod foo { ... }` serve as the leading
+        // segment of `outer::member()` / `foo::member()` calls.
+        //
+        // Member-presence gate: file-backed `mod auto_ensure;` declares
+        // the Module node in the parent file, but the actual members
+        // live in `auto_ensure.rs`. Returning the parent file here would
+        // short-circuit the downstream member lookup AND block Tier 4's
+        // module-file fallback. Only claim Tier 1 when the full chain
+        // (qualifier → file → member) resolves in the same file —
+        // matches the inline-mod / inline-namespace case and declines
+        // for the file-backed stub case, letting later tiers handle it.
         if let Some(id) = self.symbol_table.lookup_in_file_with_kind(
             &source_file_str,
             qualifier,
             ResolveTarget::Qualifier,
         ) {
-            return self.symbol_table.file_of(id).map(str::to_string);
+            if let Some(qf) = self.symbol_table.file_of(id) {
+                if self
+                    .symbol_table
+                    .lookup_in_file_with_kind(qf, member, target)
+                    .is_some()
+                {
+                    return Some(qf.to_string());
+                }
+            }
         }
 
         // Tier 2: imported qualifier (matches alias or imported_name; expands
         // specifier via the same L0 candidate enumeration used by the bare-
-        // name resolver).
+        // name resolver). Same member-presence gate as Tier 1: the import
+        // tells us which file the qualifier lives in, but that file must
+        // also contain the member to claim this tier.
         for import in raw_imports {
             let matches_qualifier = match &import.alias {
                 Some(alias) => alias == qualifier,
@@ -728,11 +768,15 @@ impl<'a> Resolver<'a> {
                 &import.source,
                 &self.path_aliases,
                 |candidate| {
-                    if self
+                    let qualifier_present = self
                         .symbol_table
                         .lookup_in_file_with_kind(candidate, exported, ResolveTarget::Qualifier)
-                        .is_some()
-                    {
+                        .is_some();
+                    let member_present = self
+                        .symbol_table
+                        .lookup_in_file_with_kind(candidate, member, target)
+                        .is_some();
+                    if qualifier_present && member_present {
                         hit = Some(candidate.to_string());
                         false
                     } else {
@@ -747,12 +791,24 @@ impl<'a> Resolver<'a> {
 
         // Tier 3: kind-filtered unique global. Language + vendor barriers
         // applied via FileMeta — the same defences as bare-name Tier 3.
+        // Member-presence gate identical to Tier 1's: blocks Module's
+        // declaration-file from outranking the file-stem fallback when
+        // members live elsewhere (`mod foo;` declaration in lib.rs vs.
+        // `fn bar()` body in foo.rs).
         let caller_meta = FileMeta::from_path(&source_file_str);
         if let Some(id) =
             self.symbol_table
                 .lookup_unique_global(qualifier, ResolveTarget::Qualifier, caller_meta)
         {
-            return self.symbol_table.file_of(id).map(str::to_string);
+            if let Some(qf) = self.symbol_table.file_of(id) {
+                if self
+                    .symbol_table
+                    .lookup_in_file_with_kind(qf, member, target)
+                    .is_some()
+                {
+                    return Some(qf.to_string());
+                }
+            }
         }
 
         // Tier 4: module-file fallback. The qualifier didn't match any Type
