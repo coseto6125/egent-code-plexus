@@ -42,6 +42,11 @@ impl std::str::FromStr for NodeKind {
             "annotation" => Ok(NodeKind::Annotation),
             "trait" | "protocol" => Ok(NodeKind::Trait),
             "impl" => Ok(NodeKind::Impl),
+            "schemafield" | "schema_field" | "schema field" => Ok(NodeKind::SchemaField),
+            "eventtopic" | "event_topic" | "event topic" => Ok(NodeKind::EventTopic),
+            "transactionscope" | "transaction_scope" | "transaction scope" => {
+                Ok(NodeKind::TransactionScope)
+            }
             _ => Err(()),
         }
     }
@@ -64,8 +69,19 @@ impl std::str::FromStr for RelType {
             "REFERENCES" => Ok(RelType::References),
             "DEFINES" => Ok(RelType::Defines),
             "FETCHES" => Ok(RelType::Fetches),
+            "MIRRORSFIELD" | "MIRRORS_FIELD" => Ok(RelType::MirrorsField),
+            "PUBLISHES" => Ok(RelType::Publishes),
+            "SUBSCRIBES" => Ok(RelType::Subscribes),
+            "EVENTTOPICMIRROR" | "EVENT_TOPIC_MIRROR" => Ok(RelType::EventTopicMirror),
+            "OPENSTXSCOPE" | "OPENS_TX_SCOPE" => Ok(RelType::OpensTxScope),
             _ => Err(()),
         }
+    }
+}
+
+impl RelType {
+    pub const fn is_heuristic(self) -> bool {
+        matches!(self, Self::MirrorsField | Self::EventTopicMirror)
     }
 }
 
@@ -130,6 +146,27 @@ pub enum NodeKind {
     /// a symbol callers reach for directly, but `ecp inspect` needs it
     /// to enumerate associated functions per type.
     Impl,
+    // ── Schema / event / transaction expansion (T0-1) ───────────────────
+    // Appended at the END to keep rkyv discriminants stable. Variants
+    // address data-layer and event-driven patterns that previously collapsed
+    // into `Property` / `Variable` / `Function` and obscured cross-service
+    // contracts for LLM queries.
+    /// Named column / field in a database schema or ORM model: Django
+    /// `models.Field`, SQLAlchemy `Column`, Prisma `@field`, Rust
+    /// `sqlx::FromRow` member. Distinct from `Property` so LLM queries
+    /// about schema drift and migration safety resolve without false hits
+    /// on in-memory object fields.
+    SchemaField,
+    /// Named pub/sub topic or event type: Kafka topic, SNS topic, EventBridge
+    /// rule, RabbitMQ queue. Distinct from `Const` because it carries routing
+    /// semantics — `Publishes` / `Subscribes` edges make producer/consumer
+    /// graphs queryable without parsing string literals.
+    EventTopic,
+    /// Database transaction boundary: `@Transactional`, `BEGIN…COMMIT` block,
+    /// SQLAlchemy `Session.begin()`. Distinct from `Function` so LLM queries
+    /// about atomicity scope and rollback paths resolve at the right
+    /// granularity without scanning all function bodies.
+    TransactionScope,
 }
 
 impl NodeKind {
@@ -196,6 +233,9 @@ impl NodeKind {
             Self::Annotation => "Annotation",
             Self::Trait => "Trait",
             Self::Impl => "Impl",
+            Self::SchemaField => "SchemaField",
+            Self::EventTopic => "EventTopic",
+            Self::TransactionScope => "TransactionScope",
         }
     }
 }
@@ -221,6 +261,23 @@ pub enum RelType {
     /// count as `fetch-url-match[|keys:a,b][|fetches:N]`, parsed by
     /// `ecp_analyzer::fetch_shape`.
     Fetches,
+    // ── Schema / event / transaction expansion (T0-1) ───────────────────
+    // Appended at the END to keep rkyv discriminants stable.
+    /// Heuristic: in-memory struct field → `SchemaField` when the struct
+    /// derives an ORM trait. Low-confidence — verified by `is_heuristic()`.
+    MirrorsField,
+    /// Producer → `EventTopic`: the source node emits events to this topic
+    /// (e.g. `kafka.send(TOPIC, ...)`, SNS `publish`).
+    Publishes,
+    /// Consumer → `EventTopic`: the source node consumes events from this
+    /// topic (e.g. `@KafkaListener(topics=TOPIC)`).
+    Subscribes,
+    /// Heuristic: `EventTopic` → `SchemaField` mirroring the event payload
+    /// schema. Low-confidence — verified by `is_heuristic()`.
+    EventTopicMirror,
+    /// `TransactionScope` → the function / method node that opens or
+    /// manages the transaction boundary.
+    OpensTxScope,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]

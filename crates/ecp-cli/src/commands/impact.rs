@@ -828,6 +828,9 @@ fn node_kind_to_str(kind: &NodeKind) -> &'static str {
         NodeKind::Annotation => "Annotation",
         NodeKind::Trait => "Trait",
         NodeKind::Impl => "Impl",
+        NodeKind::SchemaField => "SchemaField",
+        NodeKind::EventTopic => "EventTopic",
+        NodeKind::TransactionScope => "TransactionScope",
     }
 }
 

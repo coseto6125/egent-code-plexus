@@ -29,6 +29,9 @@ pub fn kind_to_str(kind: &ArchivedNodeKind) -> &'static str {
         ArchivedNodeKind::Annotation => "Annotation",
         ArchivedNodeKind::Trait => "Trait",
         ArchivedNodeKind::Impl => "Impl",
+        ArchivedNodeKind::SchemaField => "SchemaField",
+        ArchivedNodeKind::EventTopic => "EventTopic",
+        ArchivedNodeKind::TransactionScope => "TransactionScope",
     }
 }
 
@@ -46,5 +49,10 @@ pub fn rel_to_str(rel: &ArchivedRelType) -> &'static str {
         ArchivedRelType::StepInProcess => "step_in_process",
         ArchivedRelType::References => "references",
         ArchivedRelType::Fetches => "fetches",
+        ArchivedRelType::MirrorsField => "mirrors_field",
+        ArchivedRelType::Publishes => "publishes",
+        ArchivedRelType::Subscribes => "subscribes",
+        ArchivedRelType::EventTopicMirror => "event_topic_mirror",
+        ArchivedRelType::OpensTxScope => "opens_tx_scope",
     }
 }
