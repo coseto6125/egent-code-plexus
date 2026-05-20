@@ -465,6 +465,7 @@ impl LanguageProvider for SwiftProvider {
             framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         })
     }
 }

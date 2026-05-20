@@ -22,6 +22,7 @@ pub mod entry_points;
 pub mod fetch_shape;
 pub mod framework_confidence;
 pub mod framework_helpers;
+pub mod function_meta;
 pub mod github_actions;
 pub mod go;
 pub mod hcl;

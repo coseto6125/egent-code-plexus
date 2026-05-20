@@ -169,6 +169,7 @@ impl LanguageProvider for HclProvider {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         })
     }
 }

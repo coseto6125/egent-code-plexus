@@ -507,6 +507,14 @@ impl LanguageProvider for JavaScriptProvider {
             }));
         }
 
+        let file_category = crate::resolution::builder::determine_category(&path.to_string_lossy());
+        let raw_function_metas = crate::function_meta::javascript::extract(
+            tree.root_node(),
+            source,
+            &nodes,
+            file_category,
+        );
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -517,6 +525,7 @@ impl LanguageProvider for JavaScriptProvider {
             framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas,
         })
     }
 }

@@ -5,7 +5,8 @@ use crate::resolution::resolver::Resolver;
 use aho_corasick::{AhoCorasick, MatchKind};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::{
-    BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
+    BlindSpotRecord, Edge, File, FileCategory, FunctionMeta, Node, NodeKind, RelType, RouteShape,
+    ZeroCopyGraph,
 };
 use ecp_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
@@ -735,6 +736,61 @@ impl GraphBuilder {
                 _t_pass17.elapsed().as_secs_f32()
             );
         }
+        let _t_pass18 = std::time::Instant::now();
+        // Pass 1.8: FunctionMeta collection.
+        //
+        // For each LocalGraph that has populated `raw_function_metas`, pair each
+        // entry with the corresponding graph node by span, then intern the strings
+        // into the pool and produce a `FunctionMeta`. The result is sorted by
+        // `node_idx` so `ZeroCopyGraph::function_meta()` binary-search works.
+        let mut function_metas: Vec<FunctionMeta> = Vec::new();
+        {
+            let mut node_offset: u32 = 0;
+            for local_graph in &self.local_graphs {
+                if !local_graph.raw_function_metas.is_empty() {
+                    let base = node_offset;
+                    for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
+                        if !matches!(
+                            raw_node.kind,
+                            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                        ) {
+                            continue;
+                        }
+                        let node_idx = base + raw_idx as u32;
+                        // Find the matching RawFunctionMeta by span.
+                        let Some(rfm) = local_graph
+                            .raw_function_metas
+                            .iter()
+                            .find(|m| m.span == raw_node.span)
+                        else {
+                            continue;
+                        };
+                        let params: Vec<StrRef> =
+                            rfm.params.iter().map(|s| string_pool.add(s)).collect();
+                        let return_type = string_pool.add(&rfm.return_type);
+                        let decorators: Vec<StrRef> =
+                            rfm.decorators.iter().map(|s| string_pool.add(s)).collect();
+                        function_metas.push(FunctionMeta {
+                            node_idx,
+                            flags: rfm.flags,
+                            params,
+                            return_type,
+                            decorators,
+                        });
+                    }
+                }
+                node_offset += local_graph.nodes.len() as u32;
+            }
+        }
+        // Sort by node_idx so binary search in function_meta() is valid.
+        function_metas.sort_unstable_by_key(|m| m.node_idx);
+        if prof {
+            eprintln!(
+                "prof build.pass18_function_meta: {:.3}s  count={}",
+                _t_pass18.elapsed().as_secs_f32(),
+                function_metas.len()
+            );
+        }
         let _t_pass2 = std::time::Instant::now();
         // Pass 2: Resolve imports and build edges
         //
@@ -1231,7 +1287,7 @@ impl GraphBuilder {
             blind_spots: all_blind_spots,
             route_shapes: route_shapes_out,
             call_metas: vec![],
-            function_metas: vec![],
+            function_metas,
         }
     }
 }
@@ -1619,6 +1675,7 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -1639,6 +1696,7 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1788,6 +1846,7 @@ mod tests {
                 span: (0, 0, 0, 0),
             }],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1870,6 +1929,7 @@ mod tests {
                 span: (0, 0, 0, 0),
             }],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -1930,6 +1990,7 @@ mod tests {
                 span: (0, 0, 0, 0),
             }],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1971,6 +2032,7 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         }
     }
 
@@ -2067,6 +2129,7 @@ mod tests {
                     hint: "importlib.import_module(...) — dynamic loading".into(),
                 },
             ],
+            raw_function_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -2160,6 +2223,7 @@ mod tests {
                         span: (2, 0, 2, 5),
                     }],
                     blind_spots: vec![],
+                    raw_function_metas: vec![],
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
@@ -2207,6 +2271,7 @@ mod tests {
                     framework_refs: vec![],
                     fanout_refs: vec![],
                     blind_spots: vec![],
+                    raw_function_metas: vec![],
                 },
             ]
         }
@@ -2328,6 +2393,7 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         }
     }
 
@@ -2351,6 +2417,7 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         }
     }
 

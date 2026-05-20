@@ -4,10 +4,20 @@
   return_type: (type_annotation (type_identifier) @type)?
 ) @function
 
+(generator_function_declaration
+  name: (identifier) @function.name
+) @function
+
 (export_statement
   (function_declaration
     name: (identifier) @function.name
     return_type: (type_annotation (type_identifier) @type)?
+  ) @function
+) @export
+
+(export_statement
+  (generator_function_declaration
+    name: (identifier) @function.name
   ) @function
 ) @export
 

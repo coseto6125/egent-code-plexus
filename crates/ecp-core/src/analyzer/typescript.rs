@@ -24,6 +24,7 @@ impl LanguageProvider for TypeScriptProvider {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         })
     }
 }

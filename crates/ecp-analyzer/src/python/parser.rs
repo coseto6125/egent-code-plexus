@@ -12,7 +12,7 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode, RawRoute,
 };
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{FileCategory, NodeKind};
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
@@ -1022,6 +1022,24 @@ impl LanguageProvider for PythonProvider {
         });
         routes.dedup_by(|a, b| a.method == b.method && a.path == b.path && a.span == b.span);
 
+        // Python pytest convention: files named `test_*.py` or `*_test.py` are test files.
+        // `is_test_path` requires a `/test` dir prefix; supplement for bare filenames.
+        let basename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let is_py_test_file = file_is_test
+            || basename.starts_with("test_")
+            || basename.ends_with("_test.py")
+            || basename == "conftest.py";
+        let file_category = if is_py_test_file {
+            FileCategory::Test
+        } else {
+            FileCategory::Source
+        };
+        let raw_function_metas =
+            crate::function_meta::python::extract(tree.root_node(), source, &nodes, file_category);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -1032,6 +1050,7 @@ impl LanguageProvider for PythonProvider {
             framework_refs,
             fanout_refs,
             blind_spots,
+            raw_function_metas,
         })
     }
 }

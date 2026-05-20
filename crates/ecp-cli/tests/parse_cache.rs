@@ -20,6 +20,7 @@ fn graph(file: &str, hash: [u8; 8]) -> LocalGraph {
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],
+        raw_function_metas: vec![],
     }
 }
 

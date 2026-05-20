@@ -187,6 +187,7 @@ impl LanguageProvider for DockerComposeProvider {
                         framework_refs: vec![],
                         fanout_refs: vec![],
                         blind_spots: vec![],
+                        raw_function_metas: vec![],
                     });
                 }
             }
@@ -320,6 +321,7 @@ impl LanguageProvider for DockerComposeProvider {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas: vec![],
         })
     }
 }

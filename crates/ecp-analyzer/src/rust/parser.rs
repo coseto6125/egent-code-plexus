@@ -394,6 +394,14 @@ impl LanguageProvider for RustProvider {
             }
         }
 
+        let file_category = ecp_core::graph::FileCategory::Source;
+        let raw_function_metas = crate::function_meta::rust_lang::extract(
+            tree.root_node(),
+            source,
+            &nodes,
+            file_category,
+        );
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -404,6 +412,7 @@ impl LanguageProvider for RustProvider {
             framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
+            raw_function_metas,
         })
     }
 }

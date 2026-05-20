@@ -292,6 +292,7 @@ mod tests {
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: Vec::new(),
+            raw_function_metas: vec![],
         }
     }
 

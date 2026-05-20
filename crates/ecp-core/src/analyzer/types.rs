@@ -2,6 +2,31 @@ use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Language-agnostic function metadata captured during parsing, before the
+/// string pool is available. Stored in `LocalGraph` and converted to
+/// `FunctionMeta` (with interned `StrRef`s) by `GraphBuilder::build`.
+///
+/// Keyed by `span` — must match the `RawNode.span` of the function/method/
+/// constructor it describes. The builder pairs them via span lookup.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawFunctionMeta {
+    /// Span of the corresponding `RawNode` (used as the pairing key).
+    pub span: (u32, u32, u32, u32),
+    /// Bit-packed flags using the same layout as `FunctionMeta::flags`.
+    /// Callers use `FunctionMeta::FLAG_*` constants and the 3-bit visibility
+    /// shift (bits 6-8) to build this value.
+    pub flags: u16,
+    /// Flat alternating `[name1, type1, name2, type2, ...]` — empty String
+    /// for absent type annotations (dynamic-typed languages).
+    pub params: Vec<String>,
+    /// Return type as written in source. Empty string when absent/void.
+    pub return_type: String,
+    /// Decorator/attribute names in source order (e.g. `"staticmethod"`,
+    /// `"#[test]"`, `"@Injectable"`).
+    pub decorators: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct IdentifierRange {
     pub start_byte: usize,
@@ -123,4 +148,8 @@ pub struct LocalGraph {
     pub framework_refs: Vec<RawFrameworkRef>,
     pub fanout_refs: Vec<RawFanoutRef>,
     pub blind_spots: Vec<BlindSpot>,
+    /// Per-function metadata captured during parsing. Paired with `nodes` by
+    /// span at build time; only populated for `Function`/`Method`/`Constructor`
+    /// nodes. Empty for languages not yet covered by Phase 1/2.
+    pub raw_function_metas: Vec<RawFunctionMeta>,
 }
