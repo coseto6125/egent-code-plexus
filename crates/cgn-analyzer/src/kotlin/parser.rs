@@ -78,12 +78,12 @@ fn is_enum_class(class_decl: tree_sitter::Node) -> bool {
 /// `annotation class Foo`. Distinct from plain `class Foo`.
 fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
     for i in 0..class_decl.child_count() {
-        let Some(c) = class_decl.child(i) else {
+        let Some(c) = class_decl.child(i as u32) else {
             continue;
         };
         if c.kind() == "modifiers" {
             for j in 0..c.child_count() {
-                let Some(m) = c.child(j) else { continue };
+                let Some(m) = c.child(j as u32) else { continue };
                 if m.kind() == "class_modifier" || m.kind() == "modifier" {
                     if let Ok(t) = std::str::from_utf8(&source[m.start_byte()..m.end_byte()]) {
                         if t == "annotation" {

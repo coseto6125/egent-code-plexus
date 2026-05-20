@@ -309,7 +309,7 @@ impl LanguageProvider for JavaScriptProvider {
                         // Check if value is an arrow_function — those are already
                         // emitted as Function nodes by the @name.function capture.
                         for i in 0..child.child_count() {
-                            if let Some(gc) = child.child(i) {
+                            if let Some(gc) = child.child(i as u32) {
                                 if gc.kind() == "arrow_function" {
                                     is_arrow = true;
                                     break;

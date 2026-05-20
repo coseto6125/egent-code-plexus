@@ -191,7 +191,7 @@ fn actix_handler_name<'a>(
                     if s.kind() == "function_item" {
                         // function_item > name: (identifier)
                         for i in 0..s.named_child_count() {
-                            if let Some(child) = s.named_child(i) {
+                            if let Some(child) = s.named_child(i as u32) {
                                 if child.kind() == "identifier" {
                                     return std::str::from_utf8(&source[child.byte_range()])
                                         .unwrap_or("<unknown>")

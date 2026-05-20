@@ -13,7 +13,7 @@ fn main() {
     // Print children
     let class_decl = root.child(0).unwrap();
     for i in 0..class_decl.child_count() {
-        let child = class_decl.child(i).unwrap();
+        let child = class_decl.child(i as u32).unwrap();
         let text = &code[child.start_byte()..child.end_byte()];
         println!("Child {}: {} -> {}", i, child.kind(), text);
     }

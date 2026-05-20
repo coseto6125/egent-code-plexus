@@ -76,7 +76,7 @@ pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
                     target
                         .child_by_field_name("name")
                         .or_else(|| {
-                            target.named_child(target.named_child_count().saturating_sub(1))
+                            target.named_child(target.named_child_count().saturating_sub(1) as u32)
                         })
                         .and_then(|p| p.utf8_text(source).ok().map(|s| s.to_string()))
                 })

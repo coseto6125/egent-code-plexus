@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 rkyv = "0.8.16"
-tree-sitter = "0.25"
+tree-sitter = "0.26"
 rayon = "1.10.0"
 crossbeam-channel = "0.5.12"
 ignore = "0.4.22"

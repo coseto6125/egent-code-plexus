@@ -12,7 +12,7 @@ fn main() {
 
     let root = tree.root_node();
     for i in 0..root.child_count() {
-        let child = root.child(i).unwrap();
+        let child = root.child(i as u32).unwrap();
         let text =
             &source[child.start_byte()..std::cmp::min(child.end_byte(), child.start_byte() + 50)];
         println!(

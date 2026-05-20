@@ -56,7 +56,7 @@ fs2 = "0.4"
 notify = "8"
 walkdir = "2"
 uuid = { version = "1", features = ["v7"] }
-tree-sitter = "0.25"
+tree-sitter = "0.26"
 tree-sitter-go = "*"
 tree-sitter-python = "*"
 tree-sitter-typescript = "*"

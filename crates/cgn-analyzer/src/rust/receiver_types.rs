@@ -376,7 +376,7 @@ fn bare_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
         // *T or *mut T
         "raw_pointer_type" => {
             // raw_pointer_type: `*` (`const`|`mut`) type
-            let inner = ty_node.named_child(ty_node.named_child_count().saturating_sub(1))?;
+            let inner = ty_node.named_child(ty_node.named_child_count().saturating_sub(1) as u32)?;
             bare_type_name(inner, source)
         }
         _ => None,

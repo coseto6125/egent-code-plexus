@@ -473,7 +473,7 @@ impl LanguageProvider for SwiftProvider {
 /// child is the literal keyword token.
 fn swift_decl_keyword(class_decl: tree_sitter::Node<'_>) -> &'static str {
     for i in 0..class_decl.child_count() {
-        if let Some(c) = class_decl.child(i) {
+        if let Some(c) = class_decl.child(i as u32) {
             match c.kind() {
                 "class" => return "class",
                 "struct" => return "struct",
