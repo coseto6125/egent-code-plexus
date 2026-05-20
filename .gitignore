@@ -59,3 +59,4 @@ crates/vendor/**/package-lock.json
 
 # Cache and node artifacts
 .codegraph
+.gnx/
