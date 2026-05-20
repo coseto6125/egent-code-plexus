@@ -43,7 +43,7 @@ You can re-run the scalability suite on your own hardware:
 ls -d .sample_repo
 
 # 2. Run the benchmark script
-python3 scripts/benchmark_ecp.py
+python3 scripts/benchmark/benchmark_ecp.py
 ```
 
 To compare directly with the original Node.js implementation:

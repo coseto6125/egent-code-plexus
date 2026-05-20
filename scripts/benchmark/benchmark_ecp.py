@@ -3,9 +3,9 @@
 against a sample repo and reports wall-clock latency.
 
 Typical use:
-    python scripts/benchmark_ecp.py                              # full sweep
-    python scripts/benchmark_ecp.py --runs 5 --json out.json     # CI mode
-    python scripts/benchmark_ecp.py --skip-cold                  # don't wipe index
+    python scripts/benchmark/benchmark_ecp.py                              # full sweep
+    python scripts/benchmark/benchmark_ecp.py --runs 5 --json out.json     # CI mode
+    python scripts/benchmark/benchmark_ecp.py --skip-cold                  # don't wipe index
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from pathlib import Path
 from statistics import median
 
 CMD_TIMEOUT_S = 600
-# Resolve workspace dynamically: scripts/benchmark_ecp.py → parent → workspace root.
+# Resolve workspace dynamically: scripts/benchmark/benchmark_ecp.py → parent.parent → workspace root.
 # Hard-coding `/home/enor/egent-code-plexus` would cargo-build main even when this
 # script runs from a worktree, defeating the auto-rebuild check entirely.
-WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BINARY = WORKSPACE_ROOT / "target" / "release" / "ecp"
 # Bench fixtures live in the canonical repo, not per-worktree — worktrees never
 # copy `.sample_repo` (multi-GB of polyglot test sources). Keep absolute so a

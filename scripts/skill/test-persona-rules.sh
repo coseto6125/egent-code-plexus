@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# tools/test-persona-rules.sh
+# scripts/skill/test-persona-rules.sh
 # T4 — assert persona rule table and fixtures stay consistent.
 #
 # Usage:
-#   tools/test-persona-rules.sh <rules.md> <fixtures.yaml>
+#   scripts/skill/test-persona-rules.sh <rules.md> <fixtures.yaml>
 #
 # Both inputs are expected to follow the formats shown in spec § 5 / T4:
 #   rules.md     : markdown table with columns | Signal | Persona dimension | Default |

@@ -11,17 +11,15 @@ Security fixes are provided for the latest released version.
 Preferred channel — GitHub private vulnerability reporting:
 <https://github.com/coseto6125/egent-code-plexus/security/advisories/new>
 
-Backup channel — email the maintainer: <enor@j-tcg.com>
 
-If neither is available, open a minimal public issue that states a security
+If GitHub private vulnerability reporting is unavailable, open a minimal public issue stating a security
 contact is needed, without including exploit details.
 
 優先管道：請使用 GitHub private vulnerability reporting
 <https://github.com/coseto6125/egent-code-plexus/security/advisories/new>
 
-備用管道：寄信至維護者 <enor@j-tcg.com>
 
-兩者皆不可用時，請開一個最小公開 issue 說明需要安全聯絡管道，不要放入漏洞利用細節。
+若 GitHub private vulnerability reporting 不可用，請開一個最小公開 issue 說明需要安全聯絡管道，不要放入漏洞利用細節。
 
 Reports should include:
 

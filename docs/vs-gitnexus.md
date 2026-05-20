@@ -114,4 +114,4 @@ The two are not mutually exclusive. Several teams run GitNexus as the human-faci
 
 ## Attribution
 
-`ecp` is a derivative work of GitNexus. The original design, CLI surface, and conceptual model are the work of [Abhigyan Patwari](https://github.com/abhigyanpatwari). `ecp` is not affiliated with or endorsed by the upstream GitNexus project. See [NOTICES.md](../NOTICES.md) for the full third-party attribution list.
+`ecp` is a derivative work of GitNexus. The original design, CLI surface, and conceptual model are the work of [Abhigyan Patwari](https://github.com/abhigyanpatwari). `ecp` is not affiliated with or endorsed by the upstream GitNexus project. See [NOTICES.md](../LICENSES/NOTICES.md) for the full third-party attribution list.

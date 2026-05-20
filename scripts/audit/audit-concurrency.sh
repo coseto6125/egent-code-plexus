@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/audit-concurrency.sh
+# scripts/audit/audit-concurrency.sh
 # Re-run the concurrency audit suite. Required before each ecp release tag
 # and before each parity sub-project merge.
 #
@@ -35,9 +35,7 @@ if rustup toolchain list 2>/dev/null | grep -q nightly \
    && [ "$(uname -s)" = "Linux" ] \
    && rustup component list --toolchain nightly --installed 2>/dev/null | grep -q rust-src; then
   echo "==> TSan run (nightly)"
-  SUPPRESSIONS="$REPO_ROOT/tsan-suppressions.txt"
   for crate in ecp-core ecp-analyzer; do
-    TSAN_OPTIONS="suppressions=$SUPPRESSIONS" \
     RUSTFLAGS="-Z sanitizer=thread" \
     RUSTDOCFLAGS="-Z sanitizer=thread" \
     cargo +nightly test -Z build-std --target x86_64-unknown-linux-gnu \

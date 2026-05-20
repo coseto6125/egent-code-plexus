@@ -38,4 +38,4 @@ context window.
 
 When adding a row, you must also add at least one matching fixture to
 `tests/skill/persona-fixtures.yaml` and re-run
-`tools/test-persona-rules.sh` to confirm consistency.
+`scripts/skill/test-persona-rules.sh` to confirm consistency.
