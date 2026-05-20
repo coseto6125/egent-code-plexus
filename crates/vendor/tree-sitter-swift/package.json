@@ -63,6 +63,6 @@
   "devDependencies": {
     "node-gyp": "^10.0.1",
     "prebuildify": "^6.0.0",
-    "prettier": "2.3.2"
+    "prettier": "3.8.3"
   }
 }
