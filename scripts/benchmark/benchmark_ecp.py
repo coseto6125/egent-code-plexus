@@ -23,15 +23,15 @@ from statistics import median
 
 CMD_TIMEOUT_S = 600
 # Resolve workspace dynamically: scripts/benchmark/benchmark_ecp.py → parent.parent → workspace root.
-# Hard-coding `/home/enor/egent-code-plexus` would cargo-build main even when this
+# Hard-coding `/home/enor/code-graph-nexus` would cargo-build main even when this
 # script runs from a worktree, defeating the auto-rebuild check entirely.
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BINARY = WORKSPACE_ROOT / "target" / "release" / "ecp"
 # Bench fixtures live in the canonical repo, not per-worktree — worktrees never
 # copy `.sample_repo` (multi-GB of polyglot test sources). Keep absolute so a
 # bench run from a worktree still targets the canonical fixture.
-DEFAULT_REPO = Path("/home/enor/egent-code-plexus/.sample_repo")
-DEFAULT_GIT_REPO = Path("/home/enor/egent-code-plexus")
+DEFAULT_REPO = Path("/home/enor/code-graph-nexus/.sample_repo")
+DEFAULT_GIT_REPO = Path("/home/enor/code-graph-nexus")
 
 
 def _ensure_binary_fresh(binary: Path, *, skip: bool) -> None:
