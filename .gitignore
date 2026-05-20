@@ -1,44 +1,49 @@
+# --- Git / Version Control ---
+.git/
 .gitnexus/
-.sample_repo/
-.codegraph/
-.gitnexus/
-.ruff_cache
 .worktrees/
-.sample_repo/
 
-# Parity test fixtures (dev-local, generated per language)
-tests/parity/fixtures/*/sample_project/
+# --- Rust Build & IDE ---
+target/
+.rustfmt.toml
 
-# Parity per-symbol diff output (transient analysis artefacts, regenerated on demand)
-scripts/parity/symbol_diffs/
-scripts/parity/review/
-
-# Python bytecode caches anywhere in repo (scripts/parity/, tools/, etc.)
+# --- Python ---
 __pycache__/
 *.pyc
 *.pyo
+.ruff_cache/
+.venv/
+env/
+venv/
 
-# Rust build
-target/
-
-# AI tool config / caches (per-user)
+# --- AI Tools & Editor (Per-user) ---
 .claude/
 .gemini/
-.fastembed_cache/
 CLAUDE.md
+.fastembed_cache/
 
-# Local index
+# --- Project Specific (CGN) ---
 .cgn/
+.codegraph/
+.sample_repo/
 
-# Vendored 3rd-party grammar repos: keep src/queries/bindings, drop bloat
+# --- Parity Test Artifacts ---
+# Transient analysis artefacts, regenerated on demand
+scripts/parity/symbol_diffs/
+scripts/parity/review/
+# Dev-local fixtures (generated per language)
+tests/parity/fixtures/*/sample_project/
+# Legacy/Specific test artifacts
+tests/parity/fixtures/basic/.gitnexus-rs/
+
+# --- Vendored 3rd-party Grammars ---
+# Keep src/queries/bindings, drop build bloat
 crates/vendor/*/node_modules/
 crates/vendor/*/.git/
 crates/vendor/*/build/
 
-# Local backup snapshots (per-user, date-stamped)
+# --- Local Backups & Temporary Files ---
 .local-backups-*/
-
-# Scratch / one-off migration scripts (repo root)
 /test*.py
 /test*.rs
 /test*.js
@@ -50,4 +55,3 @@ crates/vendor/*/build/
 /refactor_*.py
 /optimize_*.py
 /update_*.py
-tests/parity/fixtures/basic/.gitnexus-rs/graph.bin
