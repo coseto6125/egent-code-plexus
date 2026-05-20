@@ -221,6 +221,98 @@ jobs:
             gh attestation verify ./ecp --owner coseto6125
             ```
 
+  # ==================== Post-Release Install Smoke ====================
+  # 對剛 publish 的 release assets 跑 user-facing 安裝路徑：
+  #   1. install.sh on Linux / macOS
+  #   2. install.ps1 on Windows
+  # 用 `${{ github.repository }}` + `${{ github.ref_name }}` 直打剛建好的 tag,
+  # 避開 `releases/latest` 的 redirect race。安裝完 assert `ecp --version` 含 tag。
+  post-release-install-smoke:
+    name: Install smoke (${{ matrix.os }})
+    needs: [github-release]
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shell: bash
+          - os: macos-latest
+            shell: bash
+          - os: windows-latest
+            shell: pwsh
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: install.sh smoke (Linux / macOS)
+        if: matrix.shell == 'bash'
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh"
+          curl -sSfL "$url" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          want="${GITHUB_REF_NAME#v}"
+          ecp --version | tee /dev/stderr | grep -qF "$want" \
+            || { echo "::error::ecp --version did not contain $want"; exit 1; }
+
+      - name: install.ps1 smoke (Windows)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.ps1"
+          iwr $url -UseBasicParsing | iex
+          $env:Path = "$env:LOCALAPPDATA\Programs\ecp;$env:Path"
+          $want = $env:GITHUB_REF_NAME.TrimStart('v')
+          $out  = & ecp --version
+          Write-Host $out
+          if ($out -notmatch [regex]::Escape($want)) {
+            Write-Error "ecp --version did not contain $want"
+            exit 1
+          }
+
+  # ==================== Cargo install --git smoke ====================
+  # 驗證 README / migration guide 上的「explicit cargo path」一行指令：
+  #   cargo install --git <repo> egent-code-plexus --tag <tag> --bin ecp --locked
+  # 抓 workspace 套件名 / bin 名 / Cargo.lock 漂移問題。
+  post-release-cargo-smoke:
+    name: cargo install --git smoke
+    needs: [github-release]
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: cargo install --git --tag --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install \
+            --git "https://github.com/${{ github.repository }}" egent-code-plexus \
+            --tag "${{ github.ref_name }}" \
+            --bin ecp \
+            --locked
+          want="${GITHUB_REF_NAME#v}"
+          ecp --version | tee /dev/stderr | grep -qF "$want" \
+            || { echo "::error::ecp --version did not contain $want"; exit 1; }
+
   # ==================== Homebrew Tap ====================
   # Requires:
   #   1. GitHub repo: coseto6125/homebrew-tap
