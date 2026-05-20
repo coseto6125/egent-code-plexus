@@ -2,6 +2,7 @@ use super::receiver_types::{collect_bindings, extract_cpp_calls};
 use super::spec::CppSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -510,6 +511,13 @@ impl LanguageProvider for CppProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         extract_cpp_calls(tree.root_node(), source, &mut nodes, &bindings);
 
+        // Merge bindings-derived types with declaration-level fn-pointer vars.
+        let mut fn_ptr_vars = bindings.flat_bindings();
+        let decl_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);
+        fn_ptr_vars.extend(decl_vars);
+        let call_metas =
+            detect_c_cpp_indirect(tree.root_node(), source, &nodes, &fn_ptr_vars, true);
+
         let framework_refs = detect_ast_framework_patterns(source, CPP_FRAMEWORKS);
 
         // `#define NAME` regex fallback — tree-sitter-cpp (0.23.x) ERROR-
@@ -533,6 +541,7 @@ impl LanguageProvider for CppProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas,
         })
     }
 }

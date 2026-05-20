@@ -199,6 +199,7 @@ impl LanguageProvider for GitHubActionsProvider {
                     schema_fields: None,
                     event_topics: None,
                     tx_scopes: None,
+                    call_metas: vec![],
                 });
             }
         };
@@ -228,6 +229,7 @@ impl LanguageProvider for GitHubActionsProvider {
                 schema_fields: None,
                 event_topics: None,
                 tx_scopes: None,
+                call_metas: vec![],
             });
         };
 
@@ -390,6 +392,7 @@ impl LanguageProvider for GitHubActionsProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         })
     }
 }

@@ -1,5 +1,6 @@
 use super::receiver_types::{collect_receiver_methods, extract_c_calls};
 use super::spec::CSpec;
+use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -686,6 +687,10 @@ impl LanguageProvider for CProvider {
         let methods = collect_receiver_methods(tree.root_node(), source);
         extract_c_calls(tree.root_node(), source, &mut nodes, &methods);
 
+        let fn_ptr_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);
+        let call_metas =
+            detect_c_cpp_indirect(tree.root_node(), source, &nodes, &fn_ptr_vars, false);
+
         // Named bindings: `typedef`, `#define`, `extern` declarations.
         // Emitted as `RawImport` with `alias = Some(short_name)` mirroring
         // Java's static-import convention so downstream resolvers can
@@ -714,6 +719,7 @@ impl LanguageProvider for CProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas,
         })
     }
 }

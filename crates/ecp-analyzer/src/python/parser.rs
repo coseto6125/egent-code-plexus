@@ -5,6 +5,7 @@ use crate::framework_helpers::{
     enclosing_class, enclosing_function_name, enumerate_class_methods, has_import_from, node_span,
     Span, MODULE_LEVEL_SOURCE,
 };
+use crate::indirect_dispatch::{collect_python_param_names, detect_python_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
@@ -957,6 +958,9 @@ impl LanguageProvider for PythonProvider {
         let local_types = collect_local_types(tree.root_node(), source);
         extract_python_calls(tree.root_node(), source, &mut nodes, &local_types);
 
+        let param_names = collect_python_param_names(tree.root_node(), source);
+        let call_metas = detect_python_indirect(tree.root_node(), source, &nodes, &param_names);
+
         // Resolve FastAPI Depends() refs: find the innermost enclosing
         // Function/Method node whose span contains the capture span. The site
         // capture itself was gated by `has_fastapi` in the main loop, so no
@@ -1035,6 +1039,7 @@ impl LanguageProvider for PythonProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas,
         })
     }
 }

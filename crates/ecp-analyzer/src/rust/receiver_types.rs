@@ -86,14 +86,14 @@ fn collect_impl_methods(
 // ── local type scope ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
-struct Scope {
+pub struct Scope {
     start_row: u32,
     end_row: u32,
     /// var_name → bare type name (references/pointers stripped).
-    bindings: HashMap<String, String>,
+    pub bindings: HashMap<String, String>,
     /// The impl-type in scope when this fn is inside an `impl_item`
     /// (used to resolve `self`).
-    self_type: Option<String>,
+    pub self_type: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +102,11 @@ pub struct LocalTypes {
 }
 
 impl LocalTypes {
+    /// Iterate all scopes for flat export (used by indirect-dispatch detection).
+    pub fn scopes(&self) -> &[Scope] {
+        &self.scopes
+    }
+
     /// Look up `var`'s type at `line`, preferring the innermost scope.
     /// Special case: `var == "self"` falls back to `self_type` of the scope.
     pub fn lookup(&self, line: u32, var: &str) -> Option<&str> {

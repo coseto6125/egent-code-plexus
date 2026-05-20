@@ -26,6 +26,19 @@ pub struct CppBindings {
 }
 
 impl CppBindings {
+    /// Flatten all local-variable bindings across all scopes into one map.
+    /// Used by indirect-call detection to check if a callee identifier is a
+    /// locally-typed pointer or function-pointer variable.
+    pub fn flat_bindings(&self) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        for (_, map) in &self.fn_scopes {
+            for (k, v) in map {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    }
+
     fn lookup_local(&self, line: u32, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
         let mut best_width = u32::MAX;
