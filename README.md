@@ -25,7 +25,7 @@
   edge policy  ──  honest unknown, never hallucinated
 ```
 
-[繁體中文 (Traditional Chinese)](./docs/readme_i18n/README_zh-TW.md)
+**English** · [繁體中文](./docs/readme_i18n/README_zh-TW.md) · [简体中文](./docs/readme_i18n/README_zh-CN.md) · [Español](./docs/readme_i18n/README_es.md) · [Русский](./docs/readme_i18n/README_ru.md) · [हिन्दी](./docs/readme_i18n/README_hi.md) · [日本語](./docs/readme_i18n/README_ja.md) · [한국어](./docs/readme_i18n/README_ko.md) · [Português (BR)](./docs/readme_i18n/README_pt-BR.md)
 
 ---
 

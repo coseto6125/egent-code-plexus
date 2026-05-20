@@ -25,7 +25,7 @@
   edge policy  ──  honest unknown, never hallucinated
 ```
 
-[English README](../../README.md)
+[English](../../README.md) · **繁體中文** · [简体中文](./README_zh-CN.md) · [Español](./README_es.md) · [Русский](./README_ru.md) · [हिन्दी](./README_hi.md) · [日本語](./README_ja.md) · [한국어](./README_ko.md) · [Português (BR)](./README_pt-BR.md)
 
 ---
 
