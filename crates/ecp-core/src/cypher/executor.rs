@@ -951,15 +951,30 @@ fn eval_expr(
                 return Ok(v.clone());
             }
             if let Some(&idx) = b.node_vars.get(var) {
-                Ok(Value::Str(
+                return Ok(Value::Str(
                     graph.nodes[idx as usize]
                         .name
                         .resolve(&graph.string_pool)
                         .to_string(),
-                ))
-            } else {
-                Ok(Value::Null)
+                ));
             }
+            // Edge variables must resolve to non-Null so aggregates like
+            // `count(r)` and `count(DISTINCT r)` see a value per binding.
+            // Returns EdgeRef (same shape as the rich projection path uses)
+            // so `value_key` partitions on edge identity for DISTINCT.
+            if let Some(&eidx) = b.edge_vars.get(var) {
+                let e = &graph.edges[eidx as usize];
+                let rt: RelType =
+                    rkyv::deserialize::<RelType, rkyv::rancor::Error>(&e.rel_type).unwrap();
+                return Ok(Value::EdgeRef {
+                    src: e.source.to_native(),
+                    tgt: e.target.to_native(),
+                    rel_type: rt,
+                    confidence: e.confidence.to_native(),
+                    reason: e.reason.resolve(&graph.string_pool).to_string(),
+                });
+            }
+            Ok(Value::Null)
         }
         Prop(var, prop) => Ok(prop_value(var, prop, b, graph, cache)),
         BinOp(op, lhs, rhs) => {
@@ -1900,6 +1915,43 @@ mod tests {
             let q =
                 parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN COUNT(DISTINCT b.name)")
                     .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Int(2));
+        });
+    }
+
+    #[test]
+    fn exec_count_edge_var_returns_actual_count() {
+        // Pre-fix bug: `COUNT(r)` where `r` is an edge variable evaluated
+        // every binding's `r` to Null (the `Var` arm of `eval_expr` only
+        // looked at `computed` + `node_vars`, falling through on edge
+        // vars). Aggregate's null-skip then yielded 0 even when the
+        // pattern produced matching bindings.
+        //
+        // Fan graph: fan->leaf_a, fan->leaf_b → 2 Calls edges. Expected
+        // COUNT(r) = 2, matching COUNT(*) on the same pattern.
+        with_fan(|g| {
+            let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN COUNT(r)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(
+                r.rows[0][0],
+                Value::Int(2),
+                "COUNT(r) on edge var must count matched edges, got {:?}",
+                r.rows[0][0]
+            );
+        });
+    }
+
+    #[test]
+    fn exec_count_distinct_edge_var() {
+        // DISTINCT on edge var: each matched edge is structurally
+        // distinct (different src/tgt/reason), so two edges still
+        // count as two.
+        with_fan(|g| {
+            let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN COUNT(DISTINCT r)")
+                .unwrap();
             let r = execute(&q, g, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Int(2));

@@ -6,10 +6,19 @@ pub type NodeId = u32;
 /// Edge kinds the resolver resolves towards. Constrains Tier-3 fallback so a
 /// bare callee like `format` never resolves to a Variable/Const that happens
 /// to share the name.
+///
+/// `Qualifier` is the leading-segment lookup used by `resolve_qualifier_file`
+/// — it accepts Type (Class/Struct/Enum/Typedef/Trait/Interface) plus
+/// Namespace (C++ / C# / PHP) and Module (Rust inline `mod`). Without
+/// these, every qualified call whose leading segment isn't a class /
+/// struct / enum / typedef / trait / interface drops at Tier 2.5 since
+/// the qualifier kind doesn't pass `is_type` — falling to the bare-name
+/// Tier 3 which rejects ultra-common member names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveTarget {
     Callable,
     Type,
+    Qualifier,
 }
 
 /// Per-parser-provider language tag. One variant per registered analyzer
@@ -432,6 +441,7 @@ impl SymbolTable {
         let predicate: fn(NodeKind) -> bool = match target {
             ResolveTarget::Callable => NodeKind::is_callable,
             ResolveTarget::Type => NodeKind::is_type,
+            ResolveTarget::Qualifier => NodeKind::is_qualifier,
         };
         ids.iter()
             .copied()
@@ -461,6 +471,7 @@ impl SymbolTable {
         let predicate: fn(NodeKind) -> bool = match target {
             ResolveTarget::Callable => NodeKind::is_callable,
             ResolveTarget::Type => NodeKind::is_type,
+            ResolveTarget::Qualifier => NodeKind::is_qualifier,
         };
         let mut found = None;
         for &id in raw {
@@ -508,6 +519,7 @@ impl SymbolTable {
         let predicate: fn(NodeKind) -> bool = match target {
             ResolveTarget::Callable => NodeKind::is_callable,
             ResolveTarget::Type => NodeKind::is_type,
+            ResolveTarget::Qualifier => NodeKind::is_qualifier,
         };
         let mut count = 0u32;
         for &id in raw {
