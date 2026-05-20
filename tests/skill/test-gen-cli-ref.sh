@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(dirname "$0")/test-helpers.sh"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-GEN="$ROOT/tools/gen-cli-ref.sh"
+GEN="$ROOT/scripts/skill/gen-cli-ref.sh"
 tmp=$(mktemp_test_dir)
 
 # Mock cgn: prints version and stub --help output for a fixed set of subcommands.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/lint-skill.sh
+# scripts/skill/lint-skill.sh
 # T1 structural lint for the cgn-onboard SKILL pack.
 # Usage: lint-skill.sh [path-to-skill-root]   # default: docs/skills/cgn-onboard
 

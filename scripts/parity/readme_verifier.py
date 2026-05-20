@@ -340,7 +340,7 @@ def main() -> int:
         type=Path,
         default=DEFAULT_README,
         help="README to verify (default: <repo>/README.md; "
-        "use README_zh-TW.md to check the zh-TW variant)",
+        "use docs/README_zh-TW.md to check the zh-TW variant)",
     )
     args = ap.parse_args()
 

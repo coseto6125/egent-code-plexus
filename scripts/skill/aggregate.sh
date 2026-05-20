@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/aggregate.sh
+# scripts/skill/aggregate.sh
 # Concatenate SKILL.md (frontmatter stripped) + guides/*.md (in lexical order)
 # → stdout. Used to build docs/skills/cgn-onboard/ONBOARDING.md for ShareOnboardingGuide.
 

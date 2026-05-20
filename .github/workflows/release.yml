@@ -91,7 +91,7 @@ jobs:
           name="${BIN_NAME}-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release-dist/${BIN_NAME}" "dist/${name}/"
-          cp README.md LICENSE NOTICES.md "dist/${name}/" 2>/dev/null || true
+          cp README.md LICENSE LICENSES/NOTICES.md "dist/${name}/" 2>/dev/null || true
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
 
@@ -104,7 +104,7 @@ jobs:
           if (-not $env:GITHUB_REF_NAME) { $name = "${env:BIN_NAME}-dev-${{ matrix.target }}" }
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release-dist/${env:BIN_NAME}.exe" "dist/$name/"
-          foreach ($f in @('README.md','LICENSE','NOTICES.md')) {
+          foreach ($f in @('README.md','LICENSE','LICENSES/NOTICES.md')) {
             if (Test-Path $f) { Copy-Item $f "dist/$name/" }
           }
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
@@ -278,7 +278,7 @@ jobs:
             -e "s/@VERSION@/${version}/g" \
             -e "s/@SHA256_ARM64_DARWIN@/${arm_sha}/g" \
             -e "s/@SHA256_X86_64_DARWIN@/${x86_sha}/g" \
-            packaging/homebrew/code-graph-nexus.rb.template \
+            packaging/code-graph-nexus.rb.template \
             > generated/Formula/code-graph-nexus.rb
 
       - name: Push formula to tap

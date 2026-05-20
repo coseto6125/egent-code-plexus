@@ -5,7 +5,7 @@
 
 給 **LLM 與 AI 程式碼代理（AI code agents）** 用的代碼智能圖譜 — 單次 CLI 調用、mmap 零拷貝、每次查詢亞秒級。
 
-[English README](./README.md)
+[English README](../../README.md)
 
 ---
 
@@ -18,9 +18,9 @@
 - **老實的回答勝於可讀的圖表。** 當呼叫點無法靜態解析（動態派發、未解析的導入、反射）時，`cgn` 會記錄 `BlindSpot`，而不是隨便連一條邊。一個基於幻覺依賴行動的代理，其成本遠高於一個獲得「我不知道」並能繞道而行的代理。
 - **廣泛的語言覆蓋。** 在結構層級解析 31 種語言，讓現代多語言專案（服務代碼 + Dockerfile + GitHub Actions + Terraform + SQL + 智能合約）在離開主語言後不再是黑洞。
 
-🎙️ **[Agent 訪談紀錄](./interviews/README_zh-TW.md)** — 查看真實 AI Agent (Gemini CLI, Codex) 在自主工作流中如何使用與評價 `cgn`。
+🎙️ **[Agent 訪談紀錄](../../interviews/README_zh-TW.md)** — 查看真實 AI Agent (Gemini CLI, Codex) 在自主工作流中如何使用與評價 `cgn`。
 
-致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)）— 同樣的核心想法（repo 的結構化知識圖譜），用 Rust 重寫成面向**另一群受眾**的版本。基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權；完整第三方歸屬清單請見 [NOTICES.md](./NOTICES.md)。
+致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)）— 同樣的核心想法（repo 的結構化知識圖譜），用 Rust 重寫成面向**另一群受眾**的版本。基於 [PolyForm Noncommercial 1.0.0](../../LICENSE) 授權；完整第三方歸屬清單請見 [NOTICES.md](../../LICENSES/NOTICES.md)。
 
 ---
 
@@ -66,7 +66,7 @@
 | `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **174.2 ms** | 較廣泛模式，匹配較多結果 |
 | `impact --baseline HEAD~1` (變更爆炸半徑) | **359.0 ms** | git diff + 平行單檔解析 + BFS |
 
-重現方式：`python scripts/benchmark_cgn.py`。
+重現方式：`python scripts/benchmark/benchmark_cgn.py`。
 
 ---
 
@@ -84,7 +84,7 @@
 | **支援語言** | 31 (14 種深度 + 17 種結構層級) | 14 (深度 9 維度覆蓋) |
 | **儲存層** | Rust + `rkyv` 零拷貝 mmap | Node.js + LadybugDB |
 
-**8 個維度的完整細節、哲學與決策矩陣 → [docs/vs-gitnexus.md](./docs/vs-gitnexus.md)**
+**8 個維度的完整細節、哲學與決策矩陣 → [docs/vs-gitnexus.md](../vs-gitnexus.md)**
 
 ---
 
@@ -277,13 +277,13 @@ crates/
 
 在結構層級解析 31 種語言。其中 14 種（原 GitNexus 集合）獲得完整的 9 維度覆蓋。其餘 17 種為結構層級解析。
 
-📊 **[完整語言能力矩陣](./docs/language-matrix.md)** — 各語言實作狀態與設計考量的詳細說明。
+📊 **[完整語言能力矩陣](../language-matrix.md)** — 各語言實作狀態與設計考量的詳細說明。
 
 ---
 
 ## 📄 授權與致謝
 
-基於 [PolyForm Noncommercial 1.0.0](./LICENSE) 授權。
+基於 [PolyForm Noncommercial 1.0.0](../../LICENSE) 授權。
 
 技術底層：
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — 原始設計、CLI 介面與概念模型
@@ -298,4 +298,4 @@ crates/
 
 ## 發佈狀態
 
-目前已驗證的安裝路徑是 `cargo install --git ...`，也就是從原始碼建置 `cgn`。release installer 已包含 checksum 與 provenance verification 流程，但必須等 tag 與 release assets 發佈後，binary 下載路徑才能做端到端驗證。Agent 安裝引導文件位於 [docs/skills/cgn-onboard/ONBOARDING.md](./docs/skills/cgn-onboard/ONBOARDING.md)；它用來引導使用者完成安裝、首次索引、可選群組、MCP wiring 與後續建議。輔助式配置與設定流程仍在完善中。
+目前已驗證的安裝路徑是 `cargo install --git ...`，也就是從原始碼建置 `cgn`。release installer 已包含 checksum 與 provenance verification 流程，但必須等 tag 與 release assets 發佈後，binary 下載路徑才能做端到端驗證。Agent 安裝引導文件位於 [docs/skills/cgn-onboard/ONBOARDING.md](../skills/cgn-onboard/ONBOARDING.md)；它用來引導使用者完成安裝、首次索引、可選群組、MCP wiring 與後續建議。輔助式配置與設定流程仍在完善中。

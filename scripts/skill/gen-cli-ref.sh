@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/gen-cli-ref.sh
+# scripts/skill/gen-cli-ref.sh
 # Generate per-version CLI reference cards from `cgn --help`.
 #
 # Usage:

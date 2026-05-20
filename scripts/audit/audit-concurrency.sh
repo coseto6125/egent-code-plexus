@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/audit-concurrency.sh
+# scripts/audit/audit-concurrency.sh
 # Re-run the concurrency audit suite. Required before each cgn release tag
 # and before each parity sub-project merge.
 #
@@ -35,7 +35,7 @@ if rustup toolchain list 2>/dev/null | grep -q nightly \
    && [ "$(uname -s)" = "Linux" ] \
    && rustup component list --toolchain nightly --installed 2>/dev/null | grep -q rust-src; then
   echo "==> TSan run (nightly)"
-  SUPPRESSIONS="$REPO_ROOT/tsan-suppressions.txt"
+  SUPPRESSIONS="$REPO_ROOT/scripts/audit/tsan-suppressions.txt"
   for crate in cgn-core cgn-analyzer; do
     TSAN_OPTIONS="suppressions=$SUPPRESSIONS" \
     RUSTFLAGS="-Z sanitizer=thread" \

@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(dirname "$0")/test-helpers.sh"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-AGG="$ROOT/tools/aggregate.sh"
+AGG="$ROOT/scripts/skill/aggregate.sh"
 tmp=$(mktemp_test_dir)
 
 mkdir -p "$tmp/docs/skills/cgn-onboard/guides"

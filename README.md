@@ -5,7 +5,7 @@
 
 A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero-copy mmap, sub-second per query.
 
-[繁體中文 (Traditional Chinese)](./README_zh-TW.md)
+[繁體中文 (Traditional Chinese)](./docs/readme_i18n/README_zh-TW.md)
 
 ---
 
@@ -20,7 +20,7 @@ A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero
 
 🎙️ **[Agent Interviews](./interviews/README.md)** — See how real AI agents (Gemini CLI, Codex) use and evaluate `cgn` in autonomous workflows.
 
-Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model (a structural knowledge graph of a repo), rewritten in Rust for a different audience. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE); see [NOTICES.md](./NOTICES.md) for required attribution.
+Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model (a structural knowledge graph of a repo), rewritten in Rust for a different audience. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE); see [NOTICES.md](./LICENSES/NOTICES.md) for required attribution.
 
 ---
 
@@ -66,7 +66,7 @@ Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase
 | `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **174.2 ms** | broader pattern, more matches |
 | `impact --baseline HEAD~1` (change-set blast radius) | **359.0 ms** | git diff + parallel per-file parse + BFS |
 
-Reproduce: `python scripts/benchmark_cgn.py`.
+Reproduce: `python scripts/benchmark/benchmark_cgn.py`.
 
 ---
 
@@ -318,7 +318,7 @@ Built on:
 - [memmap2](https://github.com/RazrFalcon/memmap2-rs) — zero-copy memory mapping for sub-millisecond graph access
 - [msgspec](https://github.com/jcrist/msgspec) — high-performance JSON serialization for inter-process communication
 
-Onboarding for AI agents (URL bootstrap, Claude Code skill, plugin install) lives at `docs/skills/cgn-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit-concurrency.sh`.
+Onboarding for AI agents (URL bootstrap, Claude Code skill, plugin install) lives at `docs/skills/cgn-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit/audit-concurrency.sh`.
 
 ## Release status
 

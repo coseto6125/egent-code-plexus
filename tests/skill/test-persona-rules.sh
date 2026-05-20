@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(dirname "$0")/test-helpers.sh"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-TOOL="$ROOT/tools/test-persona-rules.sh"
+TOOL="$ROOT/scripts/skill/test-persona-rules.sh"
 tmp=$(mktemp_test_dir)
 
 mkdir -p "$tmp/refs"
