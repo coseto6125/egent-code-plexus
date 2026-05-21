@@ -133,6 +133,8 @@ fn build_graph_bytes(spec: &GraphSpec) -> Vec<u8> {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
 
     rkyv::to_bytes::<Error>(&graph)
