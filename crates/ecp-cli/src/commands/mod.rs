@@ -4,6 +4,7 @@ pub mod coverage;
 pub mod cypher;
 pub mod diff;
 pub mod find;
+pub mod find_schema_bindings;
 pub mod find_tx_patterns;
 pub mod format;
 pub mod group;
