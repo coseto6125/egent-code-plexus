@@ -54,15 +54,17 @@ fn tiny_byte_budget_aborts_large_source() {
 
 #[test]
 fn generous_budget_completes_large_source() {
-    // With mimalloc as the test allocator (above), Windows comfortably stays
-    // under the 1 s DEFAULT at 50_000 lines — same as Linux / macOS. The
-    // +10 % Windows budget below remains as defense-in-depth against future
-    // GHA scheduler slowdowns (observed 1.05 s before mimalloc landed).
+    // mimalloc (above) closes most of the Windows / prod allocator gap,
+    // but GHA Windows runners are still meaningfully slower than measured
+    // prod hardware (observed 1.15 s for 50 000 lines / 650 KB even with
+    // mimalloc, vs 1.05 s pre-mimalloc). Use a +50 % Windows budget —
+    // generous enough to absorb scheduler jitter while still failing if a
+    // real perf regression pushes parsing past 1.5 s.
     let mut p = rust_parser();
     let src = "fn main() {}\n".repeat(50_000);
     #[cfg(target_os = "windows")]
     let budget = ParseBudget {
-        max_duration: ParseBudget::DEFAULT.max_duration + ParseBudget::DEFAULT.max_duration / 10,
+        max_duration: ParseBudget::DEFAULT.max_duration + ParseBudget::DEFAULT.max_duration / 2,
         max_bytes: ParseBudget::DEFAULT.max_bytes,
     };
     #[cfg(not(target_os = "windows"))]
