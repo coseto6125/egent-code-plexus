@@ -10,11 +10,10 @@ use ecp_analyzer::{
     kotlin::parser::KotlinProvider, lua::parser::LuaProvider, markdown::parser::MarkdownProvider,
     move_lang::parser::MoveProvider, nim::parser::NimProvider, php::parser::PhpProvider,
     python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
-    solidity::parser::SolidityProvider, sql::parser::SqlProvider,
-    svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
-    typescript::parser::TypeScriptProvider, verilog::parser::VerilogProvider,
-    vue::parser::VueProvider, vyper::parser::VyperProvider, yaml::parser::YamlProvider,
-    zig::parser::ZigProvider,
+    solidity::parser::SolidityProvider, sql::parser::SqlProvider, svelte::parser::SvelteProvider,
+    swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
+    verilog::parser::VerilogProvider, vue::parser::VueProvider, vyper::parser::VyperProvider,
+    yaml::parser::YamlProvider, zig::parser::ZigProvider,
 };
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
