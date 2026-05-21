@@ -28,6 +28,7 @@ pub mod github_actions;
 pub mod go;
 pub mod hcl;
 pub mod identifier_finder;
+pub mod incremental;
 pub mod indirect_dispatch;
 pub mod java;
 pub mod javascript;
