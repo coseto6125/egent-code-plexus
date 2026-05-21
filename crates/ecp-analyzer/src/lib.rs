@@ -47,6 +47,7 @@ pub mod sql;
 pub mod swift;
 pub mod typescript;
 pub mod verilog;
+pub mod vue;
 pub mod vyper;
 pub mod yaml;
 pub mod zig;

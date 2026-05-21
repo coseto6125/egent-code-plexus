@@ -54,6 +54,9 @@ tree-sitter-verilog = "1.0.3"
 tree-sitter-vyper = { path = "../vendor/tree-sitter-vyper" }
 tree-sitter-sequel = "0.3.11"
 tree-sitter-zig = "1.1.2"
+# tree-sitter-vue v0.2.1 (ikatyang/tree-sitter-vue) — no crates.io release;
+# vendored because it requires a C++ external scanner (scanner.cc).
+tree-sitter-vue = { path = "../vendor/tree-sitter-vue" }
 rustc-hash = "2"
 
 [dev-dependencies]

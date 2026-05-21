@@ -13,6 +13,7 @@ exclude = [
     "crates/vendor/tree-sitter-move",
     "crates/vendor/tree-sitter-nim",
     "crates/vendor/tree-sitter-swift",
+    "crates/vendor/tree-sitter-vue",
     "crates/vendor/tree-sitter-vyper",
 ]
 resolver = "2"
