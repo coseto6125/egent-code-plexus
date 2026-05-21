@@ -4,8 +4,9 @@
 //! is the actionable wrapper:
 //!
 //! - Missing → full L2 build via `build_l2` (sync, cold path).
-//! - Stale → per-file L1 overlay update; only dirty files are re-parsed
-//!   and written as fragments under `<repo>/sessions/<sid>/`.
+//! - Stale, header-incompatible → full L2 rebuild (corrupt overlay = corruption risk).
+//! - Stale, header-compatible → incremental: `reanalyze_files` for dirty set,
+//!   then L1 overlay fragment write under `<repo>/sessions/<sid>/`.
 //! - Ready → noop.
 
 use ecp_core::session::SessionMeta;
@@ -14,6 +15,37 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+/// Call-count trackers for branch-dispatch assertions.
+///
+/// The module is unconditionally compiled so integration tests can import
+/// `ecp_cli::auto_ensure::test_counters` without a feature flag. The counter
+/// `fetch_add` sites are always active so integration tests that call
+/// `ensure_fresh` directly see the increments. The statics cost two
+/// zero-initialised `usize` words in the BSS segment — negligible — and the
+/// linker dead-strips them in release builds when nothing reads them.
+/// Both counters use `Ordering::Relaxed`; tests assert after a single
+/// synchronous `ensure_fresh` call with no concurrent writers.
+#[allow(dead_code)]
+pub mod test_counters {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub static REANALYZE_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static BUILD_L2_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn reset() {
+        REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
+        BUILD_L2_CALL_COUNT.store(0, Ordering::Relaxed);
+    }
+
+    pub fn reanalyze_calls() -> usize {
+        REANALYZE_CALL_COUNT.load(Ordering::Relaxed)
+    }
+
+    pub fn build_l2_calls() -> usize {
+        BUILD_L2_CALL_COUNT.load(Ordering::Relaxed)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureResult {
@@ -138,7 +170,11 @@ fn git_fingerprint_shortcut(
 /// Ensure the graph exists and is fresher than the working tree.
 ///
 /// - Missing → `build_l2` (sync, L2 cold path).
-/// - Stale → per-file L1 overlay refresh under `<repo>/sessions/<sid>/`.
+/// - Stale, header-incompatible → `build_l2` (full rebuild; applying an L1
+///   overlay against an incompatible base schema produces a corrupt graph).
+/// - Stale, header-compatible → incremental: `reanalyze_files` for the dirty
+///   file set (T7-4), followed by L1 overlay fragment write (T7-5 will replace
+///   the overlay write with a zero-copy in-place merge).
 /// - Ready → noop.
 pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), String> {
     let state =
@@ -155,13 +191,53 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
             Ok(())
         }
         EnsureResult::Stale { .. } => {
-            apply_l1_overlay_updates(graph_path, worktree_root)
-                .map_err(|e| format!("L1 overlay refresh: {e}"))?;
-            // L1 overlay only touches dirty fragments under
-            // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
-            // working tree is now consistent with the indexed state of the
-            // current HEAD — refresh the fingerprint as the very last step.
-            write_head_sha_sidecar(graph_path, worktree_root);
+            if !crate::engine::header_compatible(graph_path) {
+                // Version-incompatible base: applying an overlay would silently
+                // corrupt graph.bin. Fully rebuild instead.
+                // Invariant (T1-7 + OQ-5): this branch must NEVER call the overlay path.
+                let start = std::time::Instant::now();
+                crate::build::orchestrator::build_l2(worktree_root, None)
+                    .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
+                eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
+                test_counters::BUILD_L2_CALL_COUNT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                // Header-compatible + dirty files: incremental refresh path (T7-4).
+                //
+                // Step 1 — reanalyze the dirty file set.
+                // `reanalyze_files` returns fresh `LocalGraph` views for each
+                // changed file. T7-5 will consume these to do a zero-copy
+                // in-place merge; for now the results are intentionally unused
+                // here — the wiring into auto_ensure is the T7-4 deliverable.
+                let graph_mtime = fs::metadata(graph_path)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                let dirty_abs =
+                    collect_dirty_files(graph_path, worktree_root, graph_mtime).unwrap_or_default();
+                let rel_paths: Vec<String> = dirty_abs
+                    .iter()
+                    .filter_map(|p| p.strip_prefix(worktree_root).ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                let _fresh_graphs = crate::reanalyze::reanalyze_files(
+                    worktree_root,
+                    &crate::git::DiffScope::Unstaged,
+                    &rel_paths,
+                );
+                test_counters::REANALYZE_CALL_COUNT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                // Step 2 — write L1 overlay fragments for the dirty set.
+                // T7-5 will replace this with a zero-copy merge of `_fresh_graphs`
+                // directly into graph.bin, eliminating the overlay write entirely.
+                apply_l1_overlay_updates(graph_path, worktree_root)
+                    .map_err(|e| format!("L1 overlay refresh: {e}"))?;
+                // L1 overlay only touches dirty fragments under
+                // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
+                // working tree is now consistent with the indexed state of the
+                // current HEAD — refresh the fingerprint as the very last step.
+                write_head_sha_sidecar(graph_path, worktree_root);
+            }
             Ok(())
         }
     }
