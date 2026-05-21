@@ -9,11 +9,12 @@ use ecp_analyzer::{
     hcl::parser::HclProvider, java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
     kotlin::parser::KotlinProvider, lua::parser::LuaProvider, markdown::parser::MarkdownProvider,
     move_lang::parser::MoveProvider, nim::parser::NimProvider, php::parser::PhpProvider,
-    python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
-    solidity::parser::SolidityProvider, sql::parser::SqlProvider, svelte::parser::SvelteProvider,
-    swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
-    verilog::parser::VerilogProvider, vue::parser::VueProvider, vyper::parser::VyperProvider,
-    yaml::parser::YamlProvider, zig::parser::ZigProvider,
+    protobuf::parser::ProtobufProvider, python::parser::PythonProvider, ruby::parser::RubyProvider,
+    rust::parser::RustProvider, solidity::parser::SolidityProvider, sql::parser::SqlProvider,
+    svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
+    typescript::parser::TypeScriptProvider, verilog::parser::VerilogProvider,
+    vue::parser::VueProvider, vyper::parser::VyperProvider, yaml::parser::YamlProvider,
+    zig::parser::ZigProvider,
 };
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -191,6 +192,7 @@ pub fn run_analyzer_for_paths(
     add!(needed.astro, AstroProvider::new());
     add!(needed.svelte, SvelteProvider::new());
     add!(needed.docker_compose, DockerComposeProvider::new());
+    add!(needed.protobuf, ProtobufProvider::new());
 
     use rayon::prelude::*;
     let providers: Vec<Box<dyn ecp_core::analyzer::provider::LanguageProvider>> = factories
@@ -484,6 +486,7 @@ struct NeededProviders {
     vue: bool,
     astro: bool,
     svelte: bool,
+    protobuf: bool,
 }
 
 /// Walk the scanned file list, set the flag for each language whose files we
@@ -542,6 +545,7 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
             "vue" => n.vue = true,
             "astro" => n.astro = true,
             "svelte" => n.svelte = true,
+            "proto" => n.protobuf = true,
             "yml" | "yaml" => n.yaml = true,
             _ => {}
         }
@@ -617,6 +621,7 @@ fn should_analyze_path(path: &std::path::Path) -> bool {
                 | "vue"
                 | "astro"
                 | "svelte"
+                | "proto"
         )
     )
 }

@@ -42,6 +42,7 @@ pub mod parse_budget;
 pub mod php;
 pub mod post_process;
 pub mod preproc_fallback;
+pub mod protobuf;
 pub mod python;
 pub mod resolution;
 pub mod route_detector;
