@@ -280,6 +280,13 @@ pub enum RelType {
     OpensTxScope,
 }
 
+impl ArchivedRelType {
+    /// Mirror of `RelType::is_heuristic` for zero-copy graph traversal.
+    pub const fn is_heuristic(&self) -> bool {
+        matches!(self, Self::MirrorsField | Self::EventTopicMirror)
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct Node {
