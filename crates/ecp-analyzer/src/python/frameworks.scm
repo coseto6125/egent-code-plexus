@@ -239,6 +239,93 @@
         arguments: (argument_list
           . (string) @kafka.topic)))))
 
+;; ---- Celery task invocation (T5-20) ----
+;; Covers synchronous (`delay`, `apply_async`) and broker-direct (`send_task`) forms.
+;; Import gate (`celery`) is enforced by CELERY_PYTHON.import_gate —
+;; these queries fire on syntax alone; the extractor filters by import at runtime.
+;;
+;; Topic literal semantics (documented in celery_python.rs):
+;;   delay / apply_async → receiver identifier (e.g. `add` from `add.delay(...)`).
+;;   send_task           → first positional string literal (task path, e.g. "tasks.add").
+;;   Variable task name on send_task → no capture (no fabrication).
+;;
+;; Chained attribute (`module.task.delay(...)`): the `@celery.topic` capture binds
+;; to the attribute-access receiver of `delay`/`apply_async`, which tree-sitter
+;; resolves to the last identifier before `.delay` (i.e. `task`, not `module`).
+;; This matches Celery's registered task-name convention — task names are
+;; the unqualified symbol, not the full module path.
+;;
+;; Anchored to `function_definition` to co-capture enclosing function name.
+;; Module-level calls are omitted — same rationale as Kafka (T5-2).
+
+;; Celery (sync): `add.delay(...)` inside a function.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          object: (identifier) @celery.topic
+          attribute: (identifier) @_method (#eq? @_method "delay"))))))
+
+;; Celery (sync): `add.apply_async(...)` inside a function.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          object: (identifier) @celery.topic
+          attribute: (identifier) @_method (#eq? @_method "apply_async"))))))
+
+;; Celery (sync): `app.send_task("tasks.add", ...)` inside a function.
+;; First positional string literal is the task name/path.
+;; Variable task name (identifier as first arg) → no string capture → no emit.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          attribute: (identifier) @_send (#eq? @_send "send_task"))
+        arguments: (argument_list
+          . (string) @celery.topic)))))
+
+;; Celery (async wrapper): `await add.delay(...)` inside an async function.
+;; Some async-celery libraries allow awaiting the delay result.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (await
+        (call
+          function: (attribute
+            object: (identifier) @celery.topic
+            attribute: (identifier) @_method (#eq? @_method "delay")))))))
+
+;; Celery (async wrapper): `await add.apply_async(...)` inside an async function.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (await
+        (call
+          function: (attribute
+            object: (identifier) @celery.topic
+            attribute: (identifier) @_method (#eq? @_method "apply_async")))))))
+
+;; Celery (async wrapper): `await app.send_task("tasks.add", ...)` inside an async function.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (await
+        (call
+          function: (attribute
+            attribute: (identifier) @_send (#eq? @_send "send_task"))
+          arguments: (argument_list
+            . (string) @celery.topic))))))
+
 ;; ---- SQLAlchemy declarative ORM (T4-3) ----
 ;; Idiom A — classic Column() declarative (1.x and 2.x compatible).
 ;; Captures: owner class name, field identifier, first positional arg of Column()

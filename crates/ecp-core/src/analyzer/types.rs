@@ -167,6 +167,12 @@ pub enum FrameworkId {
     PonyDbSession,
     // ── Schema field origins (T4-5) ──
     Protobuf,
+    // ── Event topic transports (T5 family — continued) ──
+    /// Celery distributed task queue — task enqueue model (T5-20).
+    /// Distinguished from Kafka (durable log) and Redis pub/sub
+    /// (fire-and-forget) so LLMs know task invocations are durable
+    /// (broker-backed queue with retry semantics).
+    Celery,
     // ── Fallback for frameworks not yet listed; promote to its own variant
     //    when adding emit support, do not extend silently. ──
     Unknown,
@@ -189,6 +195,7 @@ pub const FRAMEWORK_NAMES: &[&str] = &[
     "django-atomic",
     "pony-db-session",
     "protobuf",
+    "celery",
     "unknown",
 ];
 
@@ -229,6 +236,7 @@ impl FrameworkId {
             13 => Self::DjangoAtomic,
             14 => Self::PonyDbSession,
             15 => Self::Protobuf,
+            16 => Self::Celery,
             _ => Self::Unknown,
         }
     }
