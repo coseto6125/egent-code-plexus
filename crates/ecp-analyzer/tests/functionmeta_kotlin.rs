@@ -228,3 +228,15 @@ fn kotlin_function_metas_sorted_by_node_idx() {
         assert!(g.function_meta(m.node_idx).is_some());
     }
 }
+
+#[test]
+fn kotlin_nested_function_has_function_meta() {
+    let src = "fun outer(): Int { fun inner(value: Int): Int = value; return inner(1) }\n";
+    let g = analyze(src);
+
+    let outer = meta(&g, "outer");
+    let inner = meta(&g, "inner");
+
+    assert!(outer.is_static());
+    assert_eq!(inner.params.len(), 2);
+}

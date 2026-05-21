@@ -229,3 +229,18 @@ fn dart_function_metas_sorted_by_node_idx() {
         assert!(g.function_meta(m.node_idx).is_some());
     }
 }
+
+#[test]
+fn dart_nested_function_has_function_meta() {
+    let src = "int outer() { int inner(int value) { return value; } return inner(1); }\n";
+    let g = analyze(src);
+
+    let outer = meta(&g, "outer");
+    let inner = meta(&g, "inner");
+
+    assert!(!outer
+        .return_type
+        .resolve(g.string_pool.as_slice())
+        .is_empty());
+    assert!(!inner.params.is_empty());
+}

@@ -83,7 +83,6 @@ fn collect_fn_nodes<'a>(
             if let Some(meta) = extract_one(&node, source, raw, file_category) {
                 out.push(meta);
             }
-            return;
         }
     }
 

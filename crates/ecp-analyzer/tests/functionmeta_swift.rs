@@ -213,3 +213,19 @@ fn swift_function_metas_sorted_by_node_idx() {
         assert!(g.function_meta(m.node_idx).is_some());
     }
 }
+
+#[test]
+fn swift_nested_function_has_function_meta() {
+    let src =
+        "func outer() -> Int { func inner(value: Int) -> Int { return value }; return inner(value: 1) }\n";
+    let g = analyze(src);
+
+    let outer = meta(&g, "outer");
+    let inner = meta(&g, "inner");
+
+    assert!(outer
+        .return_type
+        .resolve(g.string_pool.as_slice())
+        .contains("Int"));
+    assert!(!inner.params.is_empty());
+}
