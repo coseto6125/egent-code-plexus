@@ -11,7 +11,7 @@
 
 use ecp_analyzer::python::schema_extractors::SQLALCHEMY_CONFIG;
 use ecp_analyzer::schema_field::extract_schema_fields;
-use ecp_core::analyzer::types::{FrameworkId, RawImport, SchemaType};
+use ecp_core::analyzer::types::{FrameworkId, RawImport, RawSchemaField, SchemaType};
 use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
@@ -19,18 +19,10 @@ use tree_sitter::{Parser, Query};
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn python_tree(src: &str) -> (tree_sitter::Tree, tree_sitter::Language) {
-    let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
-    let mut parser = Parser::new();
-    parser.set_language(&lang).expect("set_language");
-    (parser.parse(src.as_bytes(), None).expect("parse"), lang)
-}
-
-fn sqlalchemy_query(lang: &tree_sitter::Language) -> Query {
-    // Compile only the SQLAlchemy fragment for unit tests.
-    Query::new(
-        lang,
-        r#"
+/// Inline-compiled SQLAlchemy fragment from `frameworks.scm`. Tests use this
+/// fragment directly instead of the production-merged query so they don't
+/// depend on `PythonProvider::new()` query-build behaviour.
+const SQLA_QUERY: &str = r#"
 (class_definition
   name: (identifier) @sqlalchemy.owner
   body: (block
@@ -55,27 +47,36 @@ fn sqlalchemy_query(lang: &tree_sitter::Language) -> Query {
               (type (identifier) @sqlalchemy.type))))
         right: (call
           function: (identifier) @_mc (#eq? @_mc "mapped_column"))))))
-"#,
-    )
-    .expect("query compile")
-}
+"#;
 
-fn sqlalchemy_import() -> RawImport {
-    RawImport {
-        source: "sqlalchemy".to_string(),
-        imported_name: "Column".to_string(),
-        alias: None,
-        binding_kind: None,
-    }
-}
-
-fn sqlalchemy_orm_import() -> RawImport {
-    RawImport {
-        source: "sqlalchemy.orm".to_string(),
-        imported_name: "Mapped".to_string(),
-        alias: None,
-        binding_kind: None,
-    }
+/// Parse `src`, fabricate `RawImport`s from `import_sources` (only the
+/// `source` field is checked by `has_import_from`), then run the dispatcher.
+/// Returns the extracted fields plus the pool that owns the interned strings.
+fn run(src: &str, import_sources: &[&str]) -> (Vec<RawSchemaField>, StringPool) {
+    let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+    let mut parser = Parser::new();
+    parser.set_language(&lang).expect("set_language");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse");
+    let query = Query::new(&lang, SQLA_QUERY).expect("query compile");
+    let imports: Vec<RawImport> = import_sources
+        .iter()
+        .map(|s| RawImport {
+            source: (*s).to_string(),
+            imported_name: "*".to_string(),
+            alias: None,
+            binding_kind: None,
+        })
+        .collect();
+    let mut pool = StringPool::new();
+    let fields = extract_schema_fields(
+        &tree,
+        src.as_bytes(),
+        &query,
+        &[SQLALCHEMY_CONFIG],
+        &imports,
+        &mut pool,
+    );
+    (fields, pool)
 }
 
 // ---------------------------------------------------------------------------
@@ -87,19 +88,7 @@ fn sqlalchemy_orm_import() -> RawImport {
 fn test_column_string_type() {
     let src =
         "from sqlalchemy import Column, String\n\nclass User(Base):\n    name = Column(String)\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, &["sqlalchemy"]);
 
     assert_eq!(fields.len(), 1);
     let pool_bytes = pool.bytes.as_slice();
@@ -114,24 +103,11 @@ fn test_column_string_type() {
 fn test_column_integer_type() {
     let src =
         "from sqlalchemy import Column, Integer\n\nclass User(Base):\n    id = Column(Integer, primary_key=True)\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, &["sqlalchemy"]);
 
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].type_class, SchemaType::Int);
-    let pool_bytes = pool.bytes.as_slice();
-    assert_eq!(fields[0].name.resolve(pool_bytes), "id");
+    assert_eq!(fields[0].name.resolve(pool.bytes.as_slice()), "id");
 }
 
 /// `Column(String(50))` — the first arg is a *call* not an identifier.
@@ -141,22 +117,8 @@ fn test_column_integer_type() {
 #[test]
 fn test_column_with_size_arg_not_captured() {
     let src = "from sqlalchemy import Column, String\n\nclass Post(Base):\n    title = Column(String(50))\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_import()];
-    let mut pool = StringPool::new();
+    let (fields, _pool) = run(src, &["sqlalchemy"]);
 
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
-
-    // String(50) is a call, not an identifier — the `. (identifier)` anchor
-    // rejects it.  Documented as BlindSpot (see ignored test below).
     assert!(
         fields.is_empty(),
         "Column(String(50)) first arg is a call, not a bare identifier — not captured"
@@ -167,19 +129,7 @@ fn test_column_with_size_arg_not_captured() {
 #[test]
 fn test_mapped_column_typed_int() {
     let src = "from sqlalchemy.orm import Mapped, mapped_column\n\nclass User(Base):\n    id: Mapped[int] = mapped_column(primary_key=True)\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_orm_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, &["sqlalchemy.orm"]);
 
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].type_class, SchemaType::Int);
@@ -193,42 +143,18 @@ fn test_mapped_column_typed_int() {
 #[test]
 fn test_mapped_column_str() {
     let src = "from sqlalchemy.orm import Mapped, mapped_column\n\nclass User(Base):\n    name: Mapped[str] = mapped_column()\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_orm_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, &["sqlalchemy.orm"]);
 
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].type_class, SchemaType::String);
-    let pool_bytes = pool.bytes.as_slice();
-    assert_eq!(fields[0].name.resolve(pool_bytes), "name");
+    assert_eq!(fields[0].name.resolve(pool.bytes.as_slice()), "name");
 }
 
 /// No sqlalchemy import → import gate blocks all emission.
 #[test]
 fn test_no_sqlalchemy_import_no_emit() {
     let src = "class User(Base):\n    name = Column(String)\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &[],
-        &mut pool,
-    );
+    let (fields, _pool) = run(src, &[]);
 
     assert!(
         fields.is_empty(),
@@ -240,19 +166,7 @@ fn test_no_sqlalchemy_import_no_emit() {
 #[test]
 fn test_multiple_classes() {
     let src = "from sqlalchemy import Column, Integer, String\n\nclass User(Base):\n    id = Column(Integer)\n    name = Column(String)\n\nclass Post(Base):\n    id = Column(Integer)\n    title = Column(String)\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, &["sqlalchemy"]);
 
     assert_eq!(fields.len(), 4, "User(2) + Post(2) = 4 fields");
     let pool_bytes = pool.bytes.as_slice();
@@ -260,12 +174,8 @@ fn test_multiple_classes() {
         .iter()
         .map(|f| f.owner_class.resolve(pool_bytes))
         .collect();
-    assert!(owners.contains(&"User"), "User fields must be present");
-    assert!(owners.contains(&"Post"), "Post fields must be present");
-    let user_count = owners.iter().filter(|&&o| o == "User").count();
-    let post_count = owners.iter().filter(|&&o| o == "Post").count();
-    assert_eq!(user_count, 2);
-    assert_eq!(post_count, 2);
+    assert_eq!(owners.iter().filter(|&&o| o == "User").count(), 2);
+    assert_eq!(owners.iter().filter(|&&o| o == "Post").count(), 2);
 }
 
 /// `relationship("Post")` must NOT emit a schema field.
@@ -273,28 +183,14 @@ fn test_multiple_classes() {
 #[test]
 fn test_ignores_relationship() {
     let src = "from sqlalchemy import Column, Integer\nfrom sqlalchemy.orm import relationship\n\nclass User(Base):\n    id = Column(Integer)\n    posts = relationship(\"Post\")\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_import()];
-    let mut pool = StringPool::new();
+    let (fields, pool) = run(src, &["sqlalchemy"]);
 
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
-
-    // Only `id = Column(Integer)` matches; `posts = relationship(...)` must not.
     assert_eq!(
         fields.len(),
         1,
         "relationship() must not emit a schema field"
     );
-    let pool_bytes = pool.bytes.as_slice();
-    assert_eq!(fields[0].name.resolve(pool_bytes), "id");
+    assert_eq!(fields[0].name.resolve(pool.bytes.as_slice()), "id");
 }
 
 /// `parse_file` integration smoke test: PythonProvider populates
@@ -350,22 +246,8 @@ fn test_parse_file_no_import_schema_fields_none() {
 #[ignore = "BlindSpot: Column(String(50)) and Column(Namespace.Type) — first arg is a call/attribute, not a bare identifier; requires smarter type unwrapping"]
 fn test_column_parameterised_type_blind_spot() {
     let src = "from sqlalchemy import Column, String\n\nclass Post(Base):\n    title = Column(String(50))\n    body = Column(String(255))\n";
-    let (tree, lang) = python_tree(src);
-    let query = sqlalchemy_query(&lang);
-    let imports = vec![sqlalchemy_import()];
-    let mut pool = StringPool::new();
+    let (fields, _pool) = run(src, &["sqlalchemy"]);
 
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQLALCHEMY_CONFIG],
-        &imports,
-        &mut pool,
-    );
-
-    // Ideal: both fields captured as SchemaType::String.
-    // Actual: both missed because String(50) is a call node.
     assert_eq!(
         fields.len(),
         2,
