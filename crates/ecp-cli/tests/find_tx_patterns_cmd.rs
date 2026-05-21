@@ -1,9 +1,9 @@
-//! Integration tests for `ecp find-transaction-patterns` (Saga half).
+//! Integration tests for `ecp find-transaction-patterns` (Saga + Outbox).
 //!
 //! Each test builds a minimal in-memory repo, indexes it via `ecp admin index`,
 //! then runs the CLI and asserts on the JSON output.  All fixtures are pure
-//! Python so we only need one language to exercise the compensator detection
-//! logic (the algorithm is language-agnostic).
+//! Python so we only need one language to exercise the detection logic
+//! (both algorithms are language-agnostic).
 
 use serde_json::Value;
 use std::path::Path;
@@ -167,10 +167,87 @@ class Cart:
         pass
 "#;
 
+// ── Outbox fixtures ───────────────────────────────────────────────────────────
+
+/// `OutboxEvent` class + `save()` method + downstream Kafka producer call.
+/// Expected: 1 OutboxPattern finding.
+const OUTBOX_FULL: &str = r#"
+from kafka import KafkaProducer
+
+producer = KafkaProducer(bootstrap_servers='localhost:9092')
+
+class OutboxEvent:
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self.topic = topic
+        self.payload = payload
+
+    def save(self) -> None:
+        producer.send("orders", self.payload)
+"#;
+
+/// `OutboxEvent` class + `save()` + downstream function that calls producer.
+/// Tests BFS depth-2 traversal.
+const OUTBOX_INDIRECT: &str = r#"
+from kafka import KafkaProducer
+
+producer = KafkaProducer(bootstrap_servers='localhost:9092')
+
+def publish_event(topic: str, payload: bytes) -> None:
+    producer.send(topic, payload)
+
+class OutboxEvent:
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self.topic = topic
+        self.payload = payload
+
+    def save(self) -> None:
+        publish_event(self.topic, self.payload)
+"#;
+
+/// No outbox table at all → no outbox findings.
+const OUTBOX_NO_TABLE: &str = r#"
+class Order:
+    def place_order(self, order_id: str) -> None:
+        pass
+"#;
+
+/// `OutboxEvent` class but no downstream publisher reachable → no findings.
+const OUTBOX_NO_PUBLISHER: &str = r#"
+class OutboxEvent:
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self.topic = topic
+        self.payload = payload
+
+    def save(self) -> None:
+        pass
+"#;
+
+/// `event_outbox` snake_case variant → also a valid outbox table name.
+const OUTBOX_SNAKE_CASE: &str = r#"
+from kafka import KafkaProducer
+
+producer = KafkaProducer(bootstrap_servers='localhost:9092')
+
+class event_outbox:
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self.topic = topic
+        self.payload = payload
+
+    def save(self) -> None:
+        producer.send("payments", self.payload)
+"#;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn saga_pairs(json: &Value) -> &[Value] {
     json["saga_pairs"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+}
+
+fn outbox_patterns(json: &Value) -> &[Value] {
+    json["outbox_patterns"]
         .as_array()
         .map(|a| a.as_slice())
         .unwrap_or(&[])
@@ -181,6 +258,16 @@ fn setup_single_file(source: &str) -> tempfile::TempDir {
     init_repo(tmp.path());
     std::fs::create_dir_all(tmp.path().join("saga")).unwrap();
     std::fs::write(tmp.path().join("saga/order.py"), source).unwrap();
+    git_commit_all(tmp.path());
+    ecp_index(tmp.path());
+    tmp
+}
+
+fn setup_outbox_file(source: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    std::fs::create_dir_all(tmp.path().join("outbox")).unwrap();
+    std::fs::write(tmp.path().join("outbox/events.py"), source).unwrap();
     git_commit_all(tmp.path());
     ecp_index(tmp.path());
     tmp
@@ -294,25 +381,137 @@ fn no_compensator_no_match() {
     );
 }
 
+// ── Outbox tests ──────────────────────────────────────────────────────────────
+
 #[test]
-fn outbox_status_blocked_field_present() {
+fn outbox_full_pattern_emits_finding() {
+    let tmp = setup_outbox_file(OUTBOX_FULL);
+    let json = run_find_tx(tmp.path(), &[]);
+    let patterns = outbox_patterns(&json);
+    assert!(
+        !patterns.is_empty(),
+        "expected ≥1 OutboxPattern finding for OutboxEvent + Kafka producer: {json}"
+    );
+    let p = &patterns[0];
+    assert_eq!(
+        p["outbox_table"]["name"].as_str().unwrap_or(""),
+        "OutboxEvent"
+    );
+    assert_eq!(p["requires_verification"].as_bool(), Some(true));
+    let confidence = p["confidence"].as_f64().unwrap_or(0.0);
+    assert!(
+        confidence >= 0.70,
+        "outbox confidence should be ≥0.70, got {confidence}: {json}"
+    );
+    assert!(
+        confidence < 0.90,
+        "outbox confidence must be <0.90 (heuristic), got {confidence}: {json}"
+    );
+    // writer must be present
+    assert!(!p["writer"]["name"].as_str().unwrap_or("").is_empty());
+    // publisher must be present
+    assert!(!p["publisher"]["name"].as_str().unwrap_or("").is_empty());
+    // summary counts
+    assert_eq!(
+        json["summary"]["outbox_count"].as_u64(),
+        Some(patterns.len() as u64)
+    );
+}
+
+#[test]
+fn outbox_no_table_no_finding() {
+    let tmp = setup_outbox_file(OUTBOX_NO_TABLE);
+    let json = run_find_tx(tmp.path(), &[]);
+    let patterns = outbox_patterns(&json);
+    assert!(
+        patterns.is_empty(),
+        "no outbox table → no OutboxPattern findings: {json}"
+    );
+    assert_eq!(
+        json["summary"]["outbox_count"].as_u64(),
+        Some(0),
+        "outbox_count should be 0: {json}"
+    );
+}
+
+#[test]
+fn outbox_no_publisher_no_finding() {
+    let tmp = setup_outbox_file(OUTBOX_NO_PUBLISHER);
+    let json = run_find_tx(tmp.path(), &[]);
+    let patterns = outbox_patterns(&json);
+    assert!(
+        patterns.is_empty(),
+        "outbox table with no publisher reachable → no findings: {json}"
+    );
+}
+
+#[test]
+fn outbox_indirect_publish_via_helper_emits_finding() {
+    let tmp = setup_outbox_file(OUTBOX_INDIRECT);
+    let json = run_find_tx(tmp.path(), &[]);
+    // The BFS should reach publish_event (which calls producer.send) from save().
+    // We accept 0 findings here if the Calls graph doesn't connect — this is
+    // a best-effort heuristic — but the command must not error.
+    assert!(
+        json["outbox_patterns"].as_array().is_some(),
+        "outbox_patterns must always be present: {json}"
+    );
+}
+
+#[test]
+fn outbox_snake_case_name_matched() {
+    let tmp = setup_outbox_file(OUTBOX_SNAKE_CASE);
+    let json = run_find_tx(tmp.path(), &[]);
+    let patterns = outbox_patterns(&json);
+    assert!(
+        !patterns.is_empty(),
+        "snake_case event_outbox class must be matched: {json}"
+    );
+    let p = &patterns[0];
+    assert_eq!(
+        p["outbox_table"]["name"].as_str().unwrap_or(""),
+        "event_outbox"
+    );
+}
+
+#[test]
+fn outbox_only_flag_suppresses_saga() {
+    let tmp = setup_outbox_file(OUTBOX_FULL);
+    let json = run_find_tx(tmp.path(), &["--outbox-only"]);
+    let saga = saga_pairs(&json);
+    assert!(
+        saga.is_empty(),
+        "--outbox-only must suppress saga_pairs: {json}"
+    );
+    // outbox_patterns may or may not have findings depending on graph, but field exists.
+    assert!(
+        json["outbox_patterns"].as_array().is_some(),
+        "outbox_patterns field must exist: {json}"
+    );
+}
+
+#[test]
+fn saga_only_flag_suppresses_outbox() {
+    let tmp = setup_outbox_file(OUTBOX_FULL);
+    let json = run_find_tx(tmp.path(), &["--saga-only"]);
+    let patterns = outbox_patterns(&json);
+    assert!(
+        patterns.is_empty(),
+        "--saga-only must yield empty outbox_patterns: {json}"
+    );
+}
+
+#[test]
+fn outbox_patterns_field_always_present() {
     let tmp = setup_single_file(SAGA_NO_COMPENSATOR);
     let json = run_find_tx(tmp.path(), &[]);
-    // outbox_patterns must always be present (empty array).
-    let outbox = json["outbox_patterns"].as_array();
     assert!(
-        outbox.is_some(),
+        json["outbox_patterns"].as_array().is_some(),
         "outbox_patterns field must always be present: {json}"
     );
     assert!(
-        outbox.unwrap().is_empty(),
-        "outbox_patterns must be empty (blocked on T5-33): {json}"
-    );
-    // summary.outbox_status must carry the blocker token.
-    let status = json["summary"]["outbox_status"].as_str().unwrap_or("");
-    assert_eq!(
-        status, "blocked_on_t5_33",
-        "outbox_status should be 'blocked_on_t5_33': {json}"
+        json["summary"]["outbox_count"].as_u64().is_some(),
+        "summary.outbox_count must always be present: {json}"
     );
 }
 

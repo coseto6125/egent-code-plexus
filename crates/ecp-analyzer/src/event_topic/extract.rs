@@ -5,14 +5,11 @@ use ecp_core::analyzer::types::{PubSub, RawEventTopic, RawImport};
 use rustc_hash::FxHashMap;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor, Tree};
+// Note: StringPool import removed — RawEventTopic now uses owned Box<str>
 
 /// Walk all captures produced by `query` against `tree`/`source`, dispatch
 /// each match to the first `EventTopicConfig` whose import-gate is satisfied,
 /// and emit a `RawEventTopic` for every accepted match.
-///
-/// `pool` is used to intern `topic_literal` and `enclosing_fn` strings.
-/// Callers typically pass the same pool used for the rest of the file's
-/// `LocalGraph` to maximise dedup across nodes.
 ///
 /// The caller is responsible for supplying a query whose capture names align
 /// with the `topic_capture`, `producer_capture`, and `direction_capture`
@@ -29,8 +26,8 @@ use tree_sitter::{Query, QueryCursor, Tree};
 /// `RawEventTopic` has no `kind` field to distinguish queue-vs-exchange
 /// semantics (as AMQP does).  The `direction_classifier` therefore returns
 /// `PubSub` (Publish/Subscribe direction), not a queue-topology kind.
-/// A `kind: Option<StrRef>` field should be added to `RawEventTopic` in a
-/// future append-only schema migration when T5-3 (RabbitMQ) lands.
+/// A `kind` field should be added to `RawEventTopic` in a future
+/// append-only schema migration when T5-3 (RabbitMQ) lands.
 pub fn extract_event_topics(
     tree: &Tree,
     source: &[u8],
