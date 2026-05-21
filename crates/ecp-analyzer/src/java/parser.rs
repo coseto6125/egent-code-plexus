@@ -436,6 +436,20 @@ impl LanguageProvider for JavaProvider {
         };
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+
+        let event_topics = {
+            let mut pool = StringPool::new();
+            let topics = crate::event_topic::extract_event_topics(
+                &tree,
+                source,
+                &self.query,
+                &[crate::event_topic::KAFKA_JAVA],
+                &imports,
+                &mut pool,
+            );
+            (!topics.is_empty()).then(|| topics.into_boxed_slice())
+        };
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],

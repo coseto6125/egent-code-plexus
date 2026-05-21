@@ -14,6 +14,60 @@
           (#eq? @_autowired_kw "Autowired")))
       type: (type_identifier) @spring.autowired.target)))
 
+;; ---- Kafka Java (T5-5) ----
+;; Covers org.apache.kafka (KafkaProducer.send / KafkaConsumer.subscribe) and
+;; org.springframework.kafka (KafkaTemplate.send).
+;; Import gate (org.apache.kafka, org.springframework.kafka) is enforced by
+;; KAFKA_JAVA.import_gate — these queries fire on syntax alone; the extractor
+;; filters by import at runtime.
+;;
+;; Anchored to `method_declaration` to co-capture the enclosing method name.
+;; Variable topic args produce no capture (no fabrication).
+
+;; Apache Kafka producer: producer.send(new ProducerRecord<>("topic", ...))
+;; Captures the first string_literal argument to the ProducerRecord constructor.
+(method_declaration
+  name: (identifier) @kafka.java.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @kafka.java.direction
+        (#eq? @kafka.java.direction "send")
+        arguments: (argument_list
+          (object_creation_expression
+            type: (_) @_rec_type
+            (#match? @_rec_type "^ProducerRecord")
+            arguments: (argument_list
+              . (string_literal) @kafka.topic)))))))
+
+;; Spring Kafka producer: kafkaTemplate.send("topic", ...)
+;; Captures the first string_literal argument to `send`.
+(method_declaration
+  name: (identifier) @kafka.java.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @kafka.java.direction
+        (#eq? @kafka.java.direction "send")
+        arguments: (argument_list
+          . (string_literal) @kafka.topic)))))
+
+;; Apache Kafka consumer subscribe: consumer.subscribe(Arrays.asList("topic",...))
+;; Captures the first string_literal in the asList argument list.
+(method_declaration
+  name: (identifier) @kafka.java.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @kafka.java.direction
+        (#eq? @kafka.java.direction "subscribe")
+        arguments: (argument_list
+          (method_invocation
+            name: (identifier) @_aslist
+            (#eq? @_aslist "asList")
+            arguments: (argument_list
+              . (string_literal) @kafka.topic)))))))
+
 ;; Spring @RestController / @Controller class with @GetMapping / @PostMapping /
 ;; @PutMapping / @DeleteMapping / @PatchMapping / @RequestMapping methods.
 ;;
