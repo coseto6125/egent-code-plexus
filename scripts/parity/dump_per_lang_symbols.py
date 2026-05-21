@@ -136,7 +136,8 @@ def dump_rs(lang: str) -> set[tuple[str, str, str]]:
     out = run(["ecp", "cypher", "--repo", str(REPO), q, "--format", "json"])
     try:
         obj = json.loads(out)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(f"!! dump_rs({lang}): {e}", file=sys.stderr)
         return set()
     prefix = f"{lang}/"
     sink: set[tuple[str, str, str]] = set()
@@ -257,33 +258,38 @@ def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
     return rows if rows else None
 
 
-def dump_rs_schema_nodes(lang: str, node_kind: str) -> set[tuple[str, str, str]]:
-    """Dump ecp-only node kinds (no oracle counterpart for these labels).
+SCHEMA_NODE_KINDS: tuple[str, ...] = ("SchemaField", "EventTopic", "TransactionScope")
 
-    Returns an empty set for languages with no registered extensions in
-    LANG_EXTS — caller distinguishes "unknown lang" from "zero matches" via
-    the missing baseline file (we never write empty files for unknown langs).
+
+def dump_rs_schema_nodes(lang: str) -> dict[str, set[tuple[str, str, str]]]:
+    """Dump ecp-only node kinds in one query via `MATCH (n:A|B|C)` pipe syntax.
+
+    Returns a dict keyed by `n.kind` (NodeKind variant name); empty dict when
+    lang has no registered extensions in LANG_EXTS — caller distinguishes
+    "unknown lang" from "zero matches" via the missing baseline file.
     """
     exts = LANG_EXTS.get(lang, [])
     if not exts:
-        return set()
+        return {}
     where = _ext_clause(exts, "n")
-    q = f"MATCH (n:{node_kind}) WHERE {where} RETURN n.kind, n.filePath, n.name"
+    labels = "|".join(SCHEMA_NODE_KINDS)
+    q = f"MATCH (n:{labels}) WHERE {where} RETURN n.kind, n.filePath, n.name"
     out = run(["ecp", "cypher", "--repo", str(REPO), q, "--format", "json"])
     try:
         obj = json.loads(out)
-    except json.JSONDecodeError:
-        return set()
+    except json.JSONDecodeError as e:
+        print(f"!! dump_rs_schema_nodes({lang}): {e}", file=sys.stderr)
+        return {}
     prefix = f"{lang}/"
-    sink: set[tuple[str, str, str]] = set()
+    buckets: dict[str, set[tuple[str, str, str]]] = {k: set() for k in SCHEMA_NODE_KINDS}
     for row in obj.get("rows", []):
         kind, fp, name = row[0], row[1], row[2]
-        if is_anon(name):
+        if is_anon(name) or kind not in buckets:
             continue
         if fp.startswith(prefix):
             fp = fp[len(prefix) :]
-        sink.add((kind, fp, name))
-    return sink
+        buckets[kind].add((kind, fp, name))
+    return buckets
 
 
 def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
@@ -314,10 +320,10 @@ def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
 
 def dump_schema_nodes_lang(lang: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for node_kind in ("SchemaField", "EventTopic", "TransactionScope"):
-        rows = dump_rs_schema_nodes(lang, node_kind)
-        file_key = node_kind.lower()
-        (OUT_DIR / f"{lang}_rs_{file_key}.txt").write_text(
+    buckets = dump_rs_schema_nodes(lang)
+    for node_kind in SCHEMA_NODE_KINDS:
+        rows = buckets.get(node_kind, set())
+        (OUT_DIR / f"{lang}_rs_{node_kind.lower()}.txt").write_text(
             "\n".join(f"{k}\t{f}\t{n}" for k, f, n in sorted(rows)) + "\n"
         )
 
