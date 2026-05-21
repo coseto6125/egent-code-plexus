@@ -218,6 +218,7 @@ impl LanguageProvider for SvelteProvider {
             };
 
             let script_start_row = body_node.start_position().row as u32;
+            let script_start_col = body_node.start_position().column as u32;
             let body_start = body_node.start_byte();
             let body_end = body_node.end_byte();
             let script_source = &source[body_start..body_end];
@@ -229,6 +230,7 @@ impl LanguageProvider for SvelteProvider {
                     &self.ts_capture_by_idx,
                     || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                     script_start_row,
+                    script_start_col,
                 )
             } else {
                 parse_script_content(
@@ -237,6 +239,7 @@ impl LanguageProvider for SvelteProvider {
                     &self.js_capture_by_idx,
                     || tree_sitter_javascript::LANGUAGE.into(),
                     script_start_row,
+                    script_start_col,
                 )
             };
 
@@ -345,6 +348,7 @@ fn parse_script_content(
     capture_kind_by_idx: &[Option<NodeKind>],
     make_language: impl Fn() -> tree_sitter::Language,
     row_offset: u32,
+    col_offset: u32,
 ) -> (Vec<RawNode>, Vec<RawImport>) {
     let language = make_language();
     let mut parser = Parser::new();
@@ -429,7 +433,7 @@ fn parse_script_content(
             if let Ok(name_str) = std::str::from_utf8(&script_source[n.start_byte()..n.end_byte()])
             {
                 let raw_span = node_span(&root);
-                let span = offset_span(raw_span, row_offset);
+                let span = offset_span(raw_span, row_offset, col_offset);
                 let mut existing = false;
                 for node in &mut nodes {
                     if node.span == span && node.name == name_str {
@@ -504,11 +508,21 @@ fn parse_script_content(
 /// Add `row_offset` to the start and end rows of a span, leaving columns intact.
 /// This remaps script-local line numbers to .svelte file line numbers.
 #[inline]
-fn offset_span(span: Span, row_offset: u32) -> Span {
+fn offset_span(span: Span, row_offset: u32, col_offset: u32) -> Span {
+    let start_col = if span.0 == 0 {
+        span.1.saturating_add(col_offset)
+    } else {
+        span.1
+    };
+    let end_col = if span.2 == 0 {
+        span.3.saturating_add(col_offset)
+    } else {
+        span.3
+    };
     (
         span.0.saturating_add(row_offset),
-        span.1,
+        start_col,
         span.2.saturating_add(row_offset),
-        span.3,
+        end_col,
     )
 }
