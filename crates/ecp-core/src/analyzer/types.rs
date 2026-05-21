@@ -160,6 +160,11 @@ pub enum FrameworkId {
     PonyDbSession,
     // ── Schema field origins (T4-5) ──
     Protobuf,
+    // ── Event topic transports (T5-26/T5-27/T5-28) ──
+    /// Redis pub/sub (node-redis v4, ioredis) — lets LLMs distinguish
+    /// fire-and-forget `publish` from durable `subscribe` call sites without
+    /// conflating them with queue-backed brokers (Kafka, RabbitMQ).
+    Redis,
     // ── Fallback for frameworks not yet listed; promote to its own variant
     //    when adding emit support, do not extend silently. ──
     Unknown,
@@ -182,6 +187,7 @@ pub const FRAMEWORK_NAMES: &[&str] = &[
     "django-atomic",
     "pony-db-session",
     "protobuf",
+    "redis",
     "unknown",
 ];
 
@@ -222,6 +228,7 @@ impl FrameworkId {
             13 => Self::DjangoAtomic,
             14 => Self::PonyDbSession,
             15 => Self::Protobuf,
+            16 => Self::Redis,
             _ => Self::Unknown,
         }
     }
