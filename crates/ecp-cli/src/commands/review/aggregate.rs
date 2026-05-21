@@ -97,6 +97,7 @@ fn run_impact(
         include_tests: false,
         relation_types: None,
         repo: Some(repo_dir.to_string_lossy().into_owned()),
+        test_coverage: false,
         format: None,
     };
     let v = match impact::build_payload(&args, engine) {

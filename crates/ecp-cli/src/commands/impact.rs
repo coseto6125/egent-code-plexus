@@ -85,9 +85,235 @@ pub struct ImpactArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
+    /// Coverage gap analysis: for each touched symbol, classify by test-caller
+    /// presence (uncovered / partial / covered). Uses FunctionMeta.is_test
+    /// flag from per-language extraction. Outputs uncovered symbols first to
+    /// support LLM PR review ("X 改了沒測試"). Implies --include-tests during
+    /// traversal so test callers are reachable from the walker.
+    #[arg(long, aliases = ["test_coverage", "testCoverage"], default_value_t = false)]
+    pub test_coverage: bool,
+
     /// Output format (mostly internal — agent doesn't set this).
     #[arg(long)]
     pub format: Option<String>,
+}
+
+// ── Test-coverage gap analysis ────────────────────────────────────────────────
+
+/// Classification of a symbol's test coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoverageClass {
+    /// Callers exist in prod but zero test callers.
+    Uncovered,
+    /// test_caller_count >= 1, but prod callers outnumber tests by > 3:1.
+    Partial,
+    /// test_caller_count >= 1 and prod:test ratio <= 3:1.
+    Covered,
+    /// No callers at all (entry-point / dead code path).
+    Orphan,
+}
+
+/// Data collected for a single symbol during coverage analysis.
+struct SymbolCoverage {
+    uid: String,
+    name: String,
+    file: String,
+    line: u32,
+    kind: String,
+    test_callers: Vec<String>,
+    test_caller_count: usize,
+    prod_caller_count: usize,
+    class: CoverageClass,
+}
+
+/// Check whether a caller node is a test using FunctionMeta.is_test().
+///
+/// The archived `function_metas` vec is sorted by `node_idx`, so we use
+/// binary search. On the archived type, `flags` is `ArchivedU16` and requires
+/// `.to_native()` before bitwise ops.
+fn archived_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, node_idx: usize) -> bool {
+    use ecp_core::graph::FunctionMeta;
+    let target = node_idx as u32;
+    match graph
+        .function_metas
+        .binary_search_by_key(&target, |m| m.node_idx.to_native())
+    {
+        Ok(i) => graph.function_metas[i].flags.to_native() & FunctionMeta::FLAG_TEST != 0,
+        Err(_) => false,
+    }
+}
+
+/// Classify a single symbol given its upstream callers (BFS result).
+///
+/// `bfs_results` is the slice returned by `run_bfs`; depth-0 entry is the
+/// symbol itself. Only depth > 0 entries (actual callers) are examined.
+fn classify_symbol(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    symbol_idx: usize,
+    bfs_results: &[Value],
+) -> SymbolCoverage {
+    let node = &graph.nodes[symbol_idx];
+    let file_idx = node.file_idx.to_native() as usize;
+    let uid = node.uid.resolve(&graph.string_pool).to_string();
+    let name = node.name.resolve(&graph.string_pool).to_string();
+    let file = graph.files[file_idx]
+        .path
+        .resolve(&graph.string_pool)
+        .to_string();
+    let line = node.span.0.to_native();
+    let kind = kind_to_str(&node.kind).to_string();
+
+    let mut test_callers: Vec<String> = Vec::new();
+    let mut prod_caller_count: usize = 0;
+
+    for entry in bfs_results
+        .iter()
+        .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
+    {
+        // Recover the node index from the UID by matching back into the graph.
+        // We need the actual node_idx to call archived_is_test; scan nodes once
+        // per caller (caller count is small, depth-limited BFS).
+        let caller_uid = entry["uid"].as_str().unwrap_or("");
+        let caller_idx = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.uid.resolve(&graph.string_pool) == caller_uid)
+            .map(|(i, _)| i);
+
+        let is_test = caller_idx
+            .map(|idx| archived_is_test(graph, idx))
+            .unwrap_or(false);
+
+        if is_test {
+            let caller_name = entry["name"].as_str().unwrap_or(caller_uid).to_string();
+            test_callers.push(caller_name);
+        } else {
+            prod_caller_count += 1;
+        }
+    }
+
+    let test_caller_count = test_callers.len();
+    let class = match (test_caller_count, prod_caller_count) {
+        (0, 0) => CoverageClass::Orphan,
+        (0, _) => CoverageClass::Uncovered,
+        (t, p) if p > t * 3 => CoverageClass::Partial,
+        _ => CoverageClass::Covered,
+    };
+
+    SymbolCoverage {
+        uid,
+        name,
+        file,
+        line,
+        kind,
+        test_callers,
+        test_caller_count,
+        prod_caller_count,
+        class,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coverage_bfs_for_symbol(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    symbol_idx: usize,
+    requested_direction: &Direction,
+    existing_bfs: &[Value],
+    depth: usize,
+    min_conf: f32,
+    include_tests: bool,
+    rel_filter: &Option<Vec<String>>,
+) -> Vec<Value> {
+    if *requested_direction == Direction::Up {
+        return existing_bfs.to_vec();
+    }
+    let (bfs_result, _) = run_bfs(
+        graph,
+        symbol_idx,
+        &Direction::Up,
+        depth,
+        min_conf,
+        include_tests,
+        rel_filter,
+    );
+    bfs_result
+}
+
+fn coverage_analyses(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    bfs_by_symbol: &[(usize, Vec<Value>)],
+    requested_direction: &Direction,
+    depth: usize,
+    min_conf: f32,
+    include_tests: bool,
+    rel_filter: &Option<Vec<String>>,
+) -> Vec<SymbolCoverage> {
+    bfs_by_symbol
+        .iter()
+        .map(|(idx, bfs)| {
+            let coverage_bfs = coverage_bfs_for_symbol(
+                graph,
+                *idx,
+                requested_direction,
+                bfs,
+                depth,
+                min_conf,
+                include_tests,
+                rel_filter,
+            );
+            classify_symbol(graph, *idx, &coverage_bfs)
+        })
+        .collect()
+}
+
+/// Build the `coverage` JSON section from a list of per-symbol analyses.
+fn build_coverage_json(analyses: Vec<SymbolCoverage>) -> Value {
+    let mut uncovered: Vec<Value> = Vec::new();
+    let mut partial: Vec<Value> = Vec::new();
+    let mut covered: Vec<Value> = Vec::new();
+    let mut orphans: Vec<Value> = Vec::new();
+
+    for s in analyses {
+        let base = json!({
+            "uid": s.uid,
+            "name": s.name,
+            "file": s.file,
+            "line": s.line,
+            "kind": s.kind,
+            "test_caller_count": s.test_caller_count,
+            "prod_caller_count": s.prod_caller_count,
+        });
+        match s.class {
+            CoverageClass::Uncovered => uncovered.push(base),
+            CoverageClass::Partial => {
+                let mut v = base;
+                v["tests"] = json!(s.test_callers);
+                partial.push(v);
+            }
+            CoverageClass::Covered => {
+                let mut v = base;
+                v["tests"] = json!(s.test_callers);
+                covered.push(v);
+            }
+            CoverageClass::Orphan => orphans.push(base),
+        }
+    }
+
+    let total_analyzed = uncovered.len() + partial.len() + covered.len() + orphans.len();
+    json!({
+        "summary": {
+            "uncovered": uncovered.len(),
+            "partial": partial.len(),
+            "covered": covered.len(),
+            "orphan": orphans.len(),
+            "total_analyzed": total_analyzed,
+        },
+        "uncovered_symbols": uncovered,
+        "partial_symbols": partial,
+        "covered_symbols": covered,
+        "orphan_symbols": orphans,
+    })
 }
 
 /// Split a comma-separated flag value into a normalized lowercase Vec.
@@ -208,6 +434,7 @@ pub fn run_for_symbol(
         include_tests,
         relation_types: None,
         repo: Some(member_repo.to_string()),
+        test_coverage: false,
         format: None,
     };
     let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
@@ -312,9 +539,12 @@ fn impact_by_name(
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
+    // --test-coverage implies --include-tests so test callers are reachable.
+    let effective_include_tests = args.include_tests || args.test_coverage;
 
     let mut all_results: Vec<Value> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
+    let mut per_match_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for start_idx in &matches {
         let (bfs_result, hidden) = run_bfs(
             graph,
@@ -322,11 +552,12 @@ fn impact_by_name(
             &args.direction,
             args.depth,
             min_conf,
-            args.include_tests,
+            effective_include_tests,
             &rel_filter,
         );
-        all_results.extend(bfs_result);
+        all_results.extend(bfs_result.iter().cloned());
         hidden_edges_total += hidden;
+        per_match_bfs.push((*start_idx, bfs_result));
     }
 
     // Empty callers hint for upstream direction.
@@ -380,6 +611,19 @@ fn impact_by_name(
             "by_kind": by_kind,
             "note": "traversal may be incomplete — see `ecp doctor` blind spots catalog",
         });
+    }
+
+    if args.test_coverage {
+        let analyses = coverage_analyses(
+            graph,
+            &per_match_bfs,
+            &args.direction,
+            args.depth,
+            min_conf,
+            effective_include_tests,
+            &rel_filter,
+        );
+        result_obj["coverage"] = build_coverage_json(analyses);
     }
 
     Ok((
@@ -512,6 +756,11 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
                 "line": start_row,
                 "change_type": "added",
             }));
+            if let Some(&idx) = old_graph_idx.get(key) {
+                if !changed_node_indices.contains(&idx) {
+                    changed_node_indices.push(idx);
+                }
+            }
         }
     }
 
@@ -552,10 +801,13 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
+    // --test-coverage implies --include-tests so test callers are reachable.
+    let effective_include_tests = args.include_tests || args.test_coverage;
 
     // Run BFS from each changed symbol.
     let mut impact_by_symbol: Vec<Value> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
+    let mut per_symbol_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for &start_idx in &changed_node_indices {
         let node = &graph.nodes[start_idx];
         let sym_name = node.name.resolve(&graph.string_pool).to_string();
@@ -569,15 +821,16 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
             &args.direction,
             args.depth,
             min_conf,
-            args.include_tests,
+            effective_include_tests,
             &rel_filter,
         );
         impact_by_symbol.push(json!({
             "symbol": sym_name,
             "filePath": sym_file,
-            "impact": bfs_result,
+            "impact": bfs_result.clone(),
         }));
         hidden_edges_total += hidden;
+        per_symbol_bfs.push((start_idx, bfs_result));
     }
 
     let mut result = json!({
@@ -587,6 +840,20 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
         "impact_by_symbol": impact_by_symbol,
     });
     attach_hidden_edges(&mut result, hidden_edges_total);
+
+    if args.test_coverage {
+        let analyses = coverage_analyses(
+            graph,
+            &per_symbol_bfs,
+            &args.direction,
+            args.depth,
+            min_conf,
+            effective_include_tests,
+            &rel_filter,
+        );
+        result["coverage"] = build_coverage_json(analyses);
+    }
+
     Ok(result)
 }
 
