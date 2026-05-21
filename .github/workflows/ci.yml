@@ -1,33 +1,21 @@
 name: CI
 
-# Skip CI only when no source-relevant files change. Docs / license / config
-# (.gitignore, .editorconfig) edits don't need a full build+test cycle.
-# Anything outside paths-ignore — crates/, src/, tests/, Cargo.{toml,lock},
-# build scripts, .github/workflows/* — runs CI. This catches "chore(...)"
-# PRs that incidentally touch parser queries / source code (see #226).
+# CI runs on every push + PR — no path-filter skip.
+#
+# Earlier versions used `paths-ignore` to skip CI on docs-only / license /
+# config edits. That collided with branch protection: the required-status-
+# check list (Code Quality, Test on {ubuntu,macos,windows}-latest, Supply-
+# chain, Lint GitHub Actions workflows) names the jobs in THIS workflow,
+# so skipping the workflow meant those required checks never reported
+# success and docs-only PRs got stuck `BLOCKED` with no merge path except
+# admin override (see #236, #278). Removing `paths-ignore` is the simpler
+# fix; CI cost on docs-only PRs is bounded by the cargo build cache —
+# only the first PR after a Cargo.lock change pays the full price.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'interviews/**'
-      - 'LICENSE'
-      - 'LICENSES/**'
-      - '.gitignore'
-      - '.editorconfig'
-      - '.gitattributes'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'interviews/**'
-      - 'LICENSE'
-      - 'LICENSES/**'
-      - '.gitignore'
-      - '.editorconfig'
-      - '.gitattributes'
 
 permissions:
   contents: read
