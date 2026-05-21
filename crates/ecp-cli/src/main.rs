@@ -113,6 +113,10 @@ enum Commands {
     /// Heuristic Saga compensate/undo/rollback name-pair detector.
     /// All findings carry `requires_verification: true`; never enters the graph.
     FindTransactionPatterns(commands::find_tx_patterns::FindTxPatternsArgs),
+    /// Surface MirrorsField heuristic edges for a SchemaField and list
+    /// blind-spot candidates (cross-owner-class fields that share the name
+    /// but have no mirror edge). Accepts `Class.field` or bare `field`.
+    FindSchemaBindings(commands::find_schema_bindings::FindSchemaBindingsArgs),
 }
 
 fn main() {
@@ -187,6 +191,7 @@ fn main() {
         Commands::ToolMap(args) => args.repo.as_deref(),
         Commands::Review(args) => args.repo.as_deref(),
         Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
+        Commands::FindSchemaBindings(_) => None,
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -229,6 +234,7 @@ fn main() {
         Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
         Commands::Review(args) => commands::review::run(args, &engine),
         Commands::FindTransactionPatterns(args) => commands::find_tx_patterns::run(args, &engine),
+        Commands::FindSchemaBindings(args) => commands::find_schema_bindings::run(args, &engine),
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -272,6 +278,7 @@ fn check_group_atom(cli: &Cli) {
         Commands::Review(a) => (a.repo.as_deref(), None),
         Commands::Diff(a) => (a.repo.as_deref(), None),
         Commands::FindTransactionPatterns(a) => (a.repo.as_deref(), None),
+        Commands::FindSchemaBindings(_) => return,
         _ => return,
     };
     // The vast majority of invocations don't pass `--repo` at all, so the

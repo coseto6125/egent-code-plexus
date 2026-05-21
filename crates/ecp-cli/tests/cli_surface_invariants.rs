@@ -70,6 +70,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "peers",
     "review",
     "find-transaction-patterns",
+    "find-schema-bindings",
     // Hidden
     "admin",
     "group",
