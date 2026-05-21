@@ -818,6 +818,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tree-sitter",
+ "tree-sitter-astro",
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
@@ -3440,6 +3441,14 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-astro"
+version = "0.0.1"
+dependencies = [
+ "cc",
  "tree-sitter-language",
 ]
 

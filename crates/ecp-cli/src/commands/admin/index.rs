@@ -1,18 +1,19 @@
 use clap::Args;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::{
-    bash::parser::BashProvider, c::parser::CProvider, c_sharp::parser::CSharpProvider,
-    cairo::parser::CairoProvider, cpp::parser::CppProvider, crystal::parser::CrystalProvider,
-    dart::parser::DartProvider, docker_compose::parser::DockerComposeProvider,
-    dockerfile::parser::DockerfileProvider, github_actions::parser::GitHubActionsProvider,
-    go::parser::GoProvider, hcl::parser::HclProvider, java::parser::JavaProvider,
-    javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
-    lua::parser::LuaProvider, markdown::parser::MarkdownProvider, move_lang::parser::MoveProvider,
-    nim::parser::NimProvider, php::parser::PhpProvider, python::parser::PythonProvider,
-    ruby::parser::RubyProvider, rust::parser::RustProvider, solidity::parser::SolidityProvider,
-    sql::parser::SqlProvider, swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider,
-    verilog::parser::VerilogProvider, vue::parser::VueProvider, vyper::parser::VyperProvider,
-    yaml::parser::YamlProvider, zig::parser::ZigProvider,
+    astro::parser::AstroProvider, bash::parser::BashProvider, c::parser::CProvider,
+    c_sharp::parser::CSharpProvider, cairo::parser::CairoProvider, cpp::parser::CppProvider,
+    crystal::parser::CrystalProvider, dart::parser::DartProvider,
+    docker_compose::parser::DockerComposeProvider, dockerfile::parser::DockerfileProvider,
+    github_actions::parser::GitHubActionsProvider, go::parser::GoProvider,
+    hcl::parser::HclProvider, java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
+    kotlin::parser::KotlinProvider, lua::parser::LuaProvider, markdown::parser::MarkdownProvider,
+    move_lang::parser::MoveProvider, nim::parser::NimProvider, php::parser::PhpProvider,
+    python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
+    solidity::parser::SolidityProvider, sql::parser::SqlProvider, swift::parser::SwiftProvider,
+    typescript::parser::TypeScriptProvider, verilog::parser::VerilogProvider,
+    vue::parser::VueProvider, vyper::parser::VyperProvider, yaml::parser::YamlProvider,
+    zig::parser::ZigProvider,
 };
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
@@ -187,6 +188,7 @@ pub fn run_analyzer_for_paths(
     add!(needed.cairo, CairoProvider::new());
     add!(needed.zig, ZigProvider::new());
     add!(needed.vue, VueProvider::new());
+    add!(needed.astro, AstroProvider::new());
     add!(needed.docker_compose, DockerComposeProvider::new());
 
     use rayon::prelude::*;
@@ -479,6 +481,7 @@ struct NeededProviders {
     zig: bool,
     docker_compose: bool,
     vue: bool,
+    astro: bool,
 }
 
 /// Walk the scanned file list, set the flag for each language whose files we
@@ -535,6 +538,7 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
             "cairo" => n.cairo = true,
             "zig" => n.zig = true,
             "vue" => n.vue = true,
+            "astro" => n.astro = true,
             "yml" | "yaml" => n.yaml = true,
             _ => {}
         }
@@ -608,6 +612,7 @@ fn should_analyze_path(path: &std::path::Path) -> bool {
                 | "svh"
                 | "zig"
                 | "vue"
+                | "astro"
         )
     )
 }
