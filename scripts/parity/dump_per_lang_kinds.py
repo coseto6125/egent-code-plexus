@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 REPO = "/home/enor/code-graph-nexus/.sample_repo"
+REPO_REF = "/home/enor/gitnexus-rs/.sample_repo"  # gitnexus-indexed path (same corpus)
 LANGS = [
     "TypeScript",
     "JavaScript",
@@ -132,7 +133,7 @@ def cypher_ref_per_lang(lang: str) -> dict[str, int]:
         f"{_ext_filter_clause(lang)} "
         "RETURN labels(n) AS l, count(*) AS c ORDER BY c DESC LIMIT 50"
     )
-    return parse_ref(run(["gitnexus", "cypher", "--repo", REPO, q]))
+    return parse_ref(run(["gitnexus", "cypher", "--repo", REPO_REF, q]))
 
 
 def print_lang_table(lang: str, rs: dict[str, int], ref: dict[str, int]) -> None:

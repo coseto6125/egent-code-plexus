@@ -384,14 +384,6 @@ impl GraphBuilder {
             });
 
             for raw_node in &local_graph.nodes {
-                symbol_table.register_node_with_meta(
-                    &path_str,
-                    file_meta,
-                    &raw_node.name,
-                    current_node_idx,
-                    raw_node.kind,
-                );
-
                 // T1-5: canonical xxh3-64 UID — zero heap alloc, no string-pool entry.
                 // Canonical stream: kind_as_str \0 path \0 owner_class_or_empty \0 name
                 let uid_u64 = ecp_core::uid::compute(
@@ -403,6 +395,24 @@ impl GraphBuilder {
 
                 // D1 collision recovery: if two distinct symbol definitions hash to the
                 // same u64, drop the second and record a BlindSpot for manual review.
+                //
+                // Collision nodes must NOT be registered in the SymbolTable — they
+                // have no valid graph node backing them (we don't push them into
+                // `nodes`). The SymbolTable maps name→node_id, and a phantom node_id
+                // >= nodes.len() at CSR time causes an OOB panic in the out_offsets
+                // loop (builder.rs:1549).
+                //
+                // However, `nodes` MUST still receive a placeholder entry to preserve
+                // position alignment: Pass 2's `start_indices` prefix-sums over
+                // `lg.nodes.len()` (all raw nodes, including collision ones). If we
+                // skip the `nodes.push` without also adjusting `start_indices`, every
+                // subsequent file's node IDs in `start_indices` are off by the collision
+                // count, producing wrong `current_node_idx` values and broken edges.
+                //
+                // Solution: push a tombstone Node (kind=File is reused as the most
+                // benign placeholder; it doesn't enter SymbolTable so it's unreachable
+                // from any query) to occupy the position, keeping nodes.len() ≡
+                // current_node_idx throughout Pass 1.
                 if let Some((prev_kind, prev_path, prev_owner, prev_name)) = uid_seen.get(&uid_u64)
                 {
                     let hint = format!(
@@ -425,6 +435,22 @@ impl GraphBuilder {
                         end_col: raw_node.span.3,
                         hint: string_pool.add(&hint),
                     });
+                    // Push a tombstone Node + tombstone SymbolTable entry to keep
+                    // both `nodes.len()` and `node_kinds.len()` ≡ current_node_idx.
+                    // The tombstone is NOT registered in file_scoped / global_scoped,
+                    // so it is invisible to all name-based lookups and cannot produce
+                    // OOB edges via class_membership or overrides post-processes.
+                    symbol_table.register_tombstone(raw_node.kind, file_meta);
+                    nodes.push(Node {
+                        uid: uid_u64,
+                        name: string_pool.add(&raw_node.name),
+                        file_idx,
+                        kind: raw_node.kind,
+                        span: raw_node.span,
+                        community_id: 0,
+                        owner_class: StrRef::default(),
+                        content_hash: 0,
+                    });
                     current_node_idx += 1;
                     continue;
                 }
@@ -436,6 +462,14 @@ impl GraphBuilder {
                         raw_node.owner_class.clone(),
                         raw_node.name.clone(),
                     ),
+                );
+
+                symbol_table.register_node_with_meta(
+                    &path_str,
+                    file_meta,
+                    &raw_node.name,
+                    current_node_idx,
+                    raw_node.kind,
                 );
 
                 let name_ref = string_pool.add(&raw_node.name);

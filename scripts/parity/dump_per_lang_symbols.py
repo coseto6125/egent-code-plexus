@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(os.environ.get("PARITY_REPO", "/home/enor/code-graph-nexus/.sample_repo"))
+REPO_REF = Path(os.environ.get("PARITY_REPO_REF", "/home/enor/gitnexus-rs/.sample_repo"))
 OUT_DIR = Path(__file__).parent / "symbol_diffs"
 REFRESH_REF = os.environ.get("PARITY_REFRESH_REF", "").strip().lower() in {"1", "true", "yes"}
 LANGS = [
@@ -220,7 +221,7 @@ def dump_ref(lang: str) -> set[tuple[str, str, str]]:
             f"ORDER BY n.filePath, n.name, n.startLine "
             f"SKIP {skip} LIMIT {REF_PAGE}"
         )
-        out = run(["gitnexus", "cypher", "--repo", str(REPO), q])
+        out = run(["gitnexus", "cypher", "--repo", str(REPO_REF), q])
         md = ""
         try:
             obj = json.loads(out)

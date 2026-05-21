@@ -411,6 +411,21 @@ impl SymbolTable {
         self.node_file_meta.push(file_meta);
     }
 
+    /// Register a tombstone node: advances `node_kinds` / `node_file_meta`
+    /// alignment (keeping the monotonic-dense invariant intact) WITHOUT adding
+    /// the node to `file_scoped`, `global_scoped`, or `id_to_file`. Tombstones
+    /// occupy a node-ID slot so that subsequent registrations get the correct
+    /// ID, but they are invisible to all name-based lookups — no edge emitter
+    /// can obtain a tombstone node_id via `lookup_in_file` / `lookup_unique_global`.
+    ///
+    /// Used for UID-collision-dropped nodes (D1 recovery): the colliding raw node
+    /// still needs to occupy a position in `nodes` (to keep `start_indices`
+    /// prefix-sums correct in Pass 2), but must not be reachable by name.
+    pub fn register_tombstone(&mut self, kind: NodeKind, file_meta: FileMeta) {
+        self.node_kinds.push(kind);
+        self.node_file_meta.push(file_meta);
+    }
+
     /// Looks up a node ID by its file path and node name.
     ///
     /// Returns the **first** matching node_id (insertion order = source-line
