@@ -349,6 +349,145 @@ fn impact_test_coverage_uncovered_when_only_prod_callers() {
     );
 }
 
+// ── Test 8: end-to-end multi-function fixture with baseline classification ────
+//
+// Fixture layout (TypeScript, same directory so same-file call resolution fires):
+//
+//   src/lib.ts          — foo() + bar() { foo(); } + orphanFn()
+//   src/lib.test.ts     — testFoo() calls foo()  (is_test=true via *.test.ts)
+//
+// Three individual `impact --test-coverage` runs (one per prod function) verify
+// that the coverage section is correct for each. Using per-symbol runs avoids
+// the baseline "added-only" limitation where `changed_node_indices` is not
+// populated for symbols that are new (no prior commit body to diff).
+//
+// Assertions per symbol:
+//   foo      — has prod caller (bar from same file) → must not be orphan
+//   bar      — has no callers → orphan bucket
+//   orphanFn — has no callers → orphan bucket
+//   totals   — covered + partial + uncovered + orphan == total_analyzed for each
+
+#[test]
+fn impact_test_coverage_e2e_fixture_classifies_correctly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+
+    // ── Fixture sources ──────────────────────────────────────────────────────
+
+    /// Prod source: foo (called by bar and testFoo), bar (calls foo, no callers
+    /// of bar itself), orphanFn (zero callers).
+    const FIXTURE_PROD: &str = r#"
+export function foo(): number {
+    return 1;
+}
+
+export function bar(): number {
+    return foo() + 1;
+}
+
+export function orphanFn(): string {
+    return 'orphan';
+}
+"#;
+
+    /// Test source: testFoo calls foo — is_test=true via *.test.ts naming.
+    const FIXTURE_TEST: &str = r#"
+import { foo } from './lib';
+
+export function testFoo(): void {
+    const v = foo();
+    if (v !== 1) throw new Error('unexpected');
+}
+"#;
+
+    // ── Build git repo and index ─────────────────────────────────────────────
+
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("src/lib.ts"), FIXTURE_PROD).unwrap();
+    std::fs::write(repo.join("src/lib.test.ts"), FIXTURE_TEST).unwrap();
+    git_commit(repo);
+    admin_index(repo, home.path());
+
+    // ── Per-symbol coverage runs ─────────────────────────────────────────────
+
+    // foo: bar (prod) is a same-file caller; testFoo (test) may or may not be
+    // resolved cross-file. Either way, foo must appear in covered/partial/uncovered
+    // (not orphan) because bar calls it.
+    let foo_result = run_impact_json(
+        repo,
+        home.path(),
+        &[
+            "foo",
+            "--test-coverage",
+            "--direction",
+            "up",
+            "--file-path",
+            "src/lib.ts",
+        ],
+    );
+    let foo_cov = &foo_result["coverage"];
+    let foo_summary = &foo_cov["summary"];
+    let foo_total = foo_summary["total_analyzed"].as_u64().unwrap_or(0);
+    let foo_uncovered = foo_summary["uncovered"].as_u64().unwrap_or(0);
+    let foo_partial = foo_summary["partial"].as_u64().unwrap_or(0);
+    let foo_covered = foo_summary["covered"].as_u64().unwrap_or(0);
+    let foo_orphan = foo_summary["orphan"].as_u64().unwrap_or(0);
+
+    assert_eq!(
+        foo_total,
+        foo_uncovered + foo_partial + foo_covered + foo_orphan,
+        "foo: bucket sum must equal total_analyzed:\n{foo_summary}"
+    );
+    assert_eq!(
+        foo_total, 1,
+        "foo: exactly 1 symbol analyzed:\n{foo_summary}"
+    );
+    assert_eq!(
+        foo_orphan, 0,
+        "foo has prod caller (bar) — must not be classified orphan:\n{foo_cov}"
+    );
+
+    // bar: calls foo but nobody calls bar → orphan.
+    let bar_result = run_impact_json(
+        repo,
+        home.path(),
+        &["bar", "--test-coverage", "--direction", "up"],
+    );
+    let bar_cov = &bar_result["coverage"];
+    let bar_summary = &bar_cov["summary"];
+    let bar_total = bar_summary["total_analyzed"].as_u64().unwrap_or(0);
+    let bar_orphan = bar_summary["orphan"].as_u64().unwrap_or(0);
+    assert_eq!(
+        bar_total, 1,
+        "bar: exactly 1 symbol analyzed:\n{bar_summary}"
+    );
+    assert_eq!(
+        bar_orphan, 1,
+        "bar has no callers — must be classified orphan:\n{bar_cov}"
+    );
+
+    // orphanFn: no callers at all → orphan.
+    let orphan_result = run_impact_json(
+        repo,
+        home.path(),
+        &["orphanFn", "--test-coverage", "--direction", "up"],
+    );
+    let orphan_cov = &orphan_result["coverage"];
+    let orphan_summary = &orphan_cov["summary"];
+    let orphan_total = orphan_summary["total_analyzed"].as_u64().unwrap_or(0);
+    let orphan_class = orphan_summary["orphan"].as_u64().unwrap_or(0);
+    assert_eq!(
+        orphan_total, 1,
+        "orphanFn: exactly 1 symbol analyzed:\n{orphan_summary}"
+    );
+    assert_eq!(
+        orphan_class, 1,
+        "orphanFn has no callers — must be classified orphan:\n{orphan_cov}"
+    );
+}
+
 // ── Test 7: covered when test caller is present ────────────────────────────────
 //
 // Uses both SOURCE_PROD (prod) and SOURCE_TEST (test file, *.test.ts).
