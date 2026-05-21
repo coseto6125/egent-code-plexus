@@ -1617,6 +1617,9 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -1637,6 +1640,9 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1786,6 +1792,9 @@ mod tests {
                 span: (0, 0, 0, 0),
             }],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1868,6 +1877,9 @@ mod tests {
                 span: (0, 0, 0, 0),
             }],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -1928,6 +1940,9 @@ mod tests {
                 span: (0, 0, 0, 0),
             }],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1969,6 +1984,9 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         }
     }
 
@@ -2065,6 +2083,9 @@ mod tests {
                     hint: "importlib.import_module(...) — dynamic loading".into(),
                 },
             ],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -2158,6 +2179,9 @@ mod tests {
                         span: (2, 0, 2, 5),
                     }],
                     blind_spots: vec![],
+                    schema_fields: vec![],
+                    event_topics: vec![],
+                    tx_scopes: vec![],
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
@@ -2205,6 +2229,9 @@ mod tests {
                     framework_refs: vec![],
                     fanout_refs: vec![],
                     blind_spots: vec![],
+                    schema_fields: vec![],
+                    event_topics: vec![],
+                    tx_scopes: vec![],
                 },
             ]
         }
@@ -2326,6 +2353,9 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         }
     }
 
@@ -2349,6 +2379,9 @@ mod tests {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         }
     }
 

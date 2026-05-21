@@ -580,6 +580,9 @@ impl LanguageProvider for PhpProvider {
             framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
         })
     }
 }
