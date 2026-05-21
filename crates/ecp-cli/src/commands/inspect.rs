@@ -2,9 +2,11 @@ use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::commands::symbol_id::{resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
+use crate::session::overlay_reader::load_overlay;
 use clap::Args;
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::graph::ArchivedZeroCopyGraph;
+use ecp_core::session::merge_archived;
 use ecp_core::EcpError;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -348,6 +350,65 @@ where
     results
 }
 
+/// Find all base-graph indices whose node name and optional owner match.
+///
+/// When `overlay_bytes` is `Some`, `merge_archived` is called so overlay-
+/// overridden nodes are visible in the search.  The returned positions are
+/// always into `graph.nodes`; overlay-only nodes (no base counterpart) are
+/// excluded because edge traversal in `build_inspect_block` requires a graph
+/// index.  Edge traversal for overlay-only nodes is a T7-7 concern.
+fn search_nodes<'a>(
+    graph: &'a ArchivedZeroCopyGraph,
+    overlay_bytes: Option<&[u8]>,
+    bare_name: &str,
+    owner_filter: Option<&str>,
+) -> Vec<(usize, &'a ecp_core::graph::ArchivedNode)> {
+    // uid → base index, built once regardless of overlay presence.
+    let uid_to_base: rustc_hash::FxHashMap<u64, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.uid.to_native(), i))
+        .collect();
+
+    let name_owner_matches = |node: &ecp_core::graph::ArchivedNode, base_idx: usize| -> bool {
+        if node.name.resolve(&graph.string_pool) != bare_name {
+            return false;
+        }
+        if let Some(owner) = owner_filter {
+            return resolve_owner_class(graph, base_idx)
+                .map(|oc| oc == owner)
+                .unwrap_or(false);
+        }
+        true
+    };
+
+    if let Some(ov_bytes) = overlay_bytes {
+        if let Ok(archived_overlay) =
+            rkyv::access::<ecp_core::session::ArchivedOverlay, rkyv::rancor::Error>(ov_bytes)
+        {
+            return merge_archived(graph, archived_overlay)
+                .filter_map(|node| {
+                    let base_idx = uid_to_base.get(&node.uid.to_native()).copied()?;
+                    if name_owner_matches(node, base_idx) {
+                        Some((base_idx, &graph.nodes[base_idx]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+
+    // No overlay or corrupt overlay bytes — fall through to base graph only.
+    graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(idx, node)| name_owner_matches(node, *idx))
+        .collect()
+}
+
 pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
@@ -369,24 +430,17 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     // Split `Owner.Method` form for precise targeting.
     let (owner_filter, bare_name) = split_fqn_target(name);
 
-    let matching_nodes: Vec<(usize, _)> = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(idx, node)| {
-            if node.name.resolve(&graph.string_pool) != bare_name {
-                return false;
-            }
-            if let Some(owner) = owner_filter {
-                // FQN form: additionally require the owning class to match.
-                resolve_owner_class(graph, *idx)
-                    .map(|oc| oc == owner)
-                    .unwrap_or(false)
-            } else {
-                true
-            }
-        })
-        .collect();
+    // Load the session overlay (if present) and archive it so we can pass an
+    // `&ArchivedOverlay` to `merge_archived`. The overlay bytes live for the
+    // rest of this function — the `Option<Vec<u8>>` is the backing store.
+    let overlay_bytes: Option<Vec<u8>> = engine
+        .overlay_dir()
+        .and_then(|dir| load_overlay(dir).ok().flatten())
+        .and_then(|ov| rkyv::to_bytes::<rkyv::rancor::Error>(&ov).ok())
+        .map(|b| b.into_vec());
+
+    let matching_nodes: Vec<(usize, _)> =
+        search_nodes(graph, overlay_bytes.as_deref(), bare_name, owner_filter);
 
     if matching_nodes.is_empty() {
         let result = serde_json::json!({

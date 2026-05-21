@@ -12,7 +12,9 @@
 //! `docs/superpowers/specs/2026-05-17-multi-agent-peer-sync-design.md:152`
 //! and `docs/superpowers/plans/2026-05-17-multi-agent-peer-sync.md` Task 2.
 //! They are intentionally pre-wired ahead of the watcher integration that
-//! will drive them — `#![allow(dead_code)]` documents that intent.
+//! will drive them — `#![allow(dead_code)]` is retained here for the
+//! watcher-integration items; the merge-consumer items (`Fragment`,
+//! `ArchivedFragment`) are now used by `overlay_reader.rs`.
 
 #![allow(dead_code)]
 

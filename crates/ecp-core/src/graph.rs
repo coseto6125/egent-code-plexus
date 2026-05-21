@@ -249,6 +249,22 @@ impl NodeKind {
     }
 }
 
+impl From<&ArchivedNodeKind> for NodeKind {
+    /// Zero-copy conversion: both types are `#[repr(u8)]` with identical
+    /// discriminant layout. Reading via raw pointer avoids a 27-arm match
+    /// expression that previously triggered a rustc `check_unsafety` SIGSEGV
+    /// on stable when compiled in the same crate as `ZeroCopyGraph`.
+    ///
+    /// SAFETY: `ArchivedNodeKind` is rkyv's archive of a `#[repr(u8)]` enum
+    /// with the same discriminants as `NodeKind`. A bad discriminant byte only
+    /// arises from a malformed `graph.bin` that already failed the magic +
+    /// version guard in `validate_header()`.
+    fn from(a: &ArchivedNodeKind) -> Self {
+        // SAFETY: see doc-comment above.
+        unsafe { std::ptr::read(a as *const ArchivedNodeKind as *const NodeKind) }
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
