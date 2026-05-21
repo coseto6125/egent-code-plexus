@@ -20,9 +20,8 @@ fn make_graph(names: &[&str]) -> ZeroCopyGraph {
         .enumerate()
         .map(|(i, name)| {
             let name_ref = pool.add(name);
-            let uid_ref = pool.add(&format!("Function:src/lib.rs:{name}"));
             Node {
-                uid: uid_ref,
+                uid: ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, name),
                 name: name_ref,
                 file_idx: 0,
                 kind: NodeKind::Function,

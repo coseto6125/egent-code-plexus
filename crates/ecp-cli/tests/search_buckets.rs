@@ -31,7 +31,7 @@ fn make_bucket_graph() -> ZeroCopyGraph {
 
     let nodes = vec![
         Node {
-            uid: pool.add("Function:src/widget.rs:widget_source"),
+            uid: ecp_core::uid::compute(NodeKind::Function, "src/widget.rs", None, "widget_source"),
             name: src_node_name,
             file_idx: 0,
             kind: NodeKind::Function,
@@ -40,7 +40,12 @@ fn make_bucket_graph() -> ZeroCopyGraph {
             owner_class: StrRef::default(),
         },
         Node {
-            uid: pool.add("Function:tests/widget_test.rs:widget_test_fn"),
+            uid: ecp_core::uid::compute(
+                NodeKind::Function,
+                "tests/widget_test.rs",
+                None,
+                "widget_test_fn",
+            ),
             name: test_node_name,
             file_idx: 1,
             kind: NodeKind::Function,
@@ -49,7 +54,12 @@ fn make_bucket_graph() -> ZeroCopyGraph {
             owner_class: StrRef::default(),
         },
         Node {
-            uid: pool.add("Function:vendor/tree-sitter/src/widget_grammar.c:widget_ref"),
+            uid: ecp_core::uid::compute(
+                NodeKind::Function,
+                "vendor/tree-sitter/src/widget_grammar.c",
+                None,
+                "widget_ref",
+            ),
             name: ref_node_name,
             file_idx: 2,
             kind: NodeKind::Function,
@@ -58,7 +68,7 @@ fn make_bucket_graph() -> ZeroCopyGraph {
             owner_class: StrRef::default(),
         },
         Node {
-            uid: pool.add("Document:docs/widget.md:widget_doc"),
+            uid: ecp_core::uid::compute(NodeKind::Document, "docs/widget.md", None, "widget_doc"),
             name: doc_node_name,
             file_idx: 3,
             kind: NodeKind::Document,
@@ -67,7 +77,12 @@ fn make_bucket_graph() -> ZeroCopyGraph {
             owner_class: StrRef::default(),
         },
         Node {
-            uid: pool.add("Function:config/widget.toml:widget_cfg"),
+            uid: ecp_core::uid::compute(
+                NodeKind::Function,
+                "config/widget.toml",
+                None,
+                "widget_cfg",
+            ),
             name: cfg_node_name,
             file_idx: 4,
             kind: NodeKind::Function,
@@ -287,7 +302,12 @@ fn language_field_populated_from_extension() {
 fn empty_buckets_emit_empty_array_in_json() {
     let mut pool = StringPool::new();
     let src_path = pool.add("src/only_source.rs");
-    let uid_ref = pool.add("Function:src/only_source.rs:only_source_fn");
+    let uid_ref = ecp_core::uid::compute(
+        NodeKind::Function,
+        "src/only_source.rs",
+        None,
+        "only_source_fn",
+    );
     let src_name = pool.add("only_source_fn");
     let n = 1u32;
     let graph = ZeroCopyGraph {
@@ -382,7 +402,12 @@ fn text_format_empty_bucket_shows_none() {
     // Only source file — tests/reference/document/config buckets should show (none).
     let mut pool = StringPool::new();
     let src_path = pool.add("src/widget_only.rs");
-    let uid_ref = pool.add("Function:src/widget_only.rs:widget_only");
+    let uid_ref = ecp_core::uid::compute(
+        NodeKind::Function,
+        "src/widget_only.rs",
+        None,
+        "widget_only",
+    );
     let src_name = pool.add("widget_only");
     let n = 1u32;
     let graph = ZeroCopyGraph {
@@ -444,19 +469,19 @@ fn each_bucket_independently_capped_at_top_k() {
     // Build a graph with 25 source functions all named "overflow_src_N".
     let mut pool = StringPool::new();
     let src_path = pool.add("src/big.rs");
-    // Pre-allocate all StrRefs before building nodes vec.
-    let node_data: Vec<(ecp_core::pool::StrRef, ecp_core::pool::StrRef)> = (0..25usize)
+    // Pre-allocate all name StrRefs before building nodes vec.
+    let node_data: Vec<(u64, ecp_core::pool::StrRef)> = (0..25usize)
         .map(|i| {
             let name = format!("overflow_src_{i}");
-            let uid = format!("Function:src/big.rs:{name}");
-            (pool.add(&uid), pool.add(&name))
+            let uid = ecp_core::uid::compute(NodeKind::Function, "src/big.rs", None, &name);
+            (uid, pool.add(&name))
         })
         .collect();
     let nodes: Vec<Node> = node_data
         .iter()
         .enumerate()
-        .map(|(i, (uid_ref, name_ref))| Node {
-            uid: *uid_ref,
+        .map(|(i, (uid_val, name_ref))| Node {
+            uid: *uid_val,
             name: *name_ref,
             file_idx: 0,
             kind: NodeKind::Function,

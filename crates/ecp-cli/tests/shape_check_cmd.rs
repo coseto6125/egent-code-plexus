@@ -34,10 +34,20 @@ fn build_graph(
     let mut pool = StringPool::new();
     let file_ref = pool.add("src/consumer.ts");
     let route_file_ref = pool.add("src/api.ts");
-    let consumer_uid = pool.add("Function:src/consumer.ts:fetchUser");
     let consumer_name = pool.add("fetchUser");
-    let route_uid = pool.add("Route:src/api.ts:GET /users/:id");
+    let consumer_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/consumer.ts",
+        None,
+        "fetchUser",
+    );
     let route_name = pool.add("GET /users/:id");
+    let route_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Route,
+        "src/api.ts",
+        None,
+        "GET /users/:id",
+    );
 
     // Pre-intern edge reasons so each Edge.reason can resolve out of
     // the same pool. We collect (offset,len) for the actual Edge build

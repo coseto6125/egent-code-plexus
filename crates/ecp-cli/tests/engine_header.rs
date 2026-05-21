@@ -14,7 +14,6 @@ use tempfile::tempdir;
 fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
     let mut pool = StringPool::new();
     let name_ref = pool.add("entry");
-    let uid_ref = pool.add("Function:src/main.ts:entry");
     let g = ZeroCopyGraph {
         magic,
         version,
@@ -27,7 +26,7 @@ fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
             category: ecp_core::graph::FileCategory::Source,
         }],
         nodes: vec![Node {
-            uid: uid_ref,
+            uid: ecp_core::uid::compute(NodeKind::Function, "src/main.ts", None, "entry"),
             name: name_ref,
             file_idx: 0,
             kind: NodeKind::Function,

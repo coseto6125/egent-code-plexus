@@ -96,8 +96,18 @@ fn two_class_validate_graph(foo_file: &str, bar_file: &str) -> Vec<u8> {
     let owner_foo_ref = pool.add("Foo");
     let owner_bar_ref = pool.add("Bar");
 
-    let uid_foo = pool.add(&format!("Method:{foo_file}:Foo:validate"));
-    let uid_bar = pool.add(&format!("Method:{bar_file}:Bar:validate"));
+    let uid_foo = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Method,
+        foo_file,
+        Some("Foo"),
+        "validate",
+    );
+    let uid_bar = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Method,
+        bar_file,
+        Some("Bar"),
+        "validate",
+    );
 
     let files = vec![
         File {
@@ -309,7 +319,12 @@ fn test_rename_bare_name_hits_top_level_function() {
         let mut pool = StringPool::new();
         let path_ref = pool.add("util.py");
         let name_ref = pool.add("validate");
-        let uid_ref = pool.add("Function:util.py:validate");
+        let uid_ref = ecp_core::uid::compute(
+            ecp_core::graph::NodeKind::Function,
+            "util.py",
+            None,
+            "validate",
+        );
 
         serialize_graph(&ZeroCopyGraph {
             magic: GRAPH_MAGIC,

@@ -300,7 +300,7 @@ mod tests {
     fn n(pool: &mut StringPool, name: &str, kind: NodeKind, file_idx: u32) -> Node {
         let r = pool.add(name);
         Node {
-            uid: r,
+            uid: crate::uid::compute(kind, "", None, name),
             name: r,
             file_idx,
             kind,

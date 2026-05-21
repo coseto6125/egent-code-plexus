@@ -16,7 +16,7 @@ fn test_mmap_graph_access() {
     // 1. Create and Serialize Graph
     let mut pool = StringPool::new();
     let name_ref = pool.add("mmap_func");
-    let uid_ref = pool.add("Function:test.ts:mmap_func");
+    let uid_val = ecp_core::uid::compute(NodeKind::Function, "test.ts", None, "mmap_func");
 
     let graph = ZeroCopyGraph {
         magic: GRAPH_MAGIC,
@@ -25,7 +25,7 @@ fn test_mmap_graph_access() {
         string_pool: pool.bytes,
         files: vec![],
         nodes: vec![Node {
-            uid: uid_ref,
+            uid: uid_val,
             name: name_ref,
             file_idx: 0,
             kind: NodeKind::Function,

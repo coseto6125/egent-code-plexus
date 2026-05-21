@@ -38,8 +38,18 @@ fn build_graph_bytes(spec: &GraphSpec) -> Vec<u8> {
 
     let file_a = pool.add("src/a.ts");
     let file_b = pool.add("src/b.ts");
-    let uid_alpha = pool.add("Function:src/a.ts:alpha");
-    let uid_beta = pool.add("Function:src/b.ts:beta");
+    let uid_alpha = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/a.ts",
+        None,
+        "alpha",
+    );
+    let uid_beta = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/b.ts",
+        None,
+        "beta",
+    );
     let name_alpha = pool.add("alpha");
     let name_beta = pool.add("beta");
 

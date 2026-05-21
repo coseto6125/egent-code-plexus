@@ -24,9 +24,13 @@ fn make_graph_with_names(names: &[&str]) -> ZeroCopyGraph {
         .enumerate()
         .map(|(i, name)| {
             let name_ref = pool.add(name);
-            let uid_ref = pool.add(&format!("Function:src/main.rs:{name}"));
             Node {
-                uid: uid_ref,
+                uid: ecp_core::uid::compute(
+                    ecp_core::graph::NodeKind::Function,
+                    "src/main.rs",
+                    None,
+                    name,
+                ),
                 name: name_ref,
                 file_idx: 0,
                 kind: NodeKind::Function,
@@ -81,9 +85,12 @@ fn build_index_happy_path_returns_ok_and_is_queryable() {
 
     let hits =
         TantivyEngine::search(index_dir, "resolve_symbol", 100).expect("index must be queryable");
+    let expected_uid =
+        ecp_core::uid::compute(NodeKind::Function, "src/main.rs", None, "resolve_symbol")
+            .to_string();
     assert!(
-        hits.iter().any(|(_, uid)| uid.contains("resolve_symbol")),
-        "expected resolve_symbol in BM25 hits, got: {hits:?}"
+        hits.iter().any(|(_, uid)| uid == &expected_uid),
+        "expected uid {expected_uid} for resolve_symbol in BM25 hits, got: {hits:?}"
     );
 }
 
@@ -106,9 +113,11 @@ fn build_index_wipes_stale_directory_left_by_prior_abort() {
 
     let hits = TantivyEngine::search(index_dir_root, "fresh_symbol", 100)
         .expect("index must be queryable");
+    let expected_uid =
+        ecp_core::uid::compute(NodeKind::Function, "src/main.rs", None, "fresh_symbol").to_string();
     assert!(
-        hits.iter().any(|(_, uid)| uid.contains("fresh_symbol")),
-        "rebuilt index must be queryable: {hits:?}"
+        hits.iter().any(|(_, uid)| uid == &expected_uid),
+        "rebuilt index must be queryable, expected uid {expected_uid}, got: {hits:?}"
     );
     // The garbage files must have been removed by the wipe step.
     assert!(

@@ -66,7 +66,7 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
         .map(|ns| {
             let file_idx = seen_files.iter().position(|&p| p == ns.file).unwrap() as u32;
             Node {
-                uid: pool.add(&format!("{}:{}:{}", kind_str(ns.kind), ns.file, ns.name)),
+                uid: ecp_core::uid::compute(ns.kind, ns.file, None, ns.name),
                 name: pool.add(ns.name),
                 file_idx,
                 kind: ns.kind,
@@ -137,15 +137,6 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
     let graph_path = dir.path().join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
     (dir, graph_path)
-}
-
-fn kind_str(k: NodeKind) -> &'static str {
-    match k {
-        NodeKind::Function => "Function",
-        NodeKind::Method => "Method",
-        NodeKind::Class => "Class",
-        _ => "Unknown",
-    }
 }
 
 fn run_find(graph: &Path, args: &[&str]) -> std::process::Output {

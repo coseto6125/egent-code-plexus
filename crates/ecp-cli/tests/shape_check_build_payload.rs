@@ -45,9 +45,7 @@ fn build_empty_graph() -> Vec<u8> {
 fn build_graph_with_calls_edge() -> Vec<u8> {
     let mut pool = StringPool::new();
     let file_ref = pool.add("src/a.ts");
-    let uid_a = pool.add("Function:src/a.ts:foo");
     let name_a = pool.add("foo");
-    let uid_b = pool.add("Function:src/a.ts:bar");
     let name_b = pool.add("bar");
     let reason = pool.add("ast-call");
 
@@ -64,7 +62,7 @@ fn build_graph_with_calls_edge() -> Vec<u8> {
         }],
         nodes: vec![
             Node {
-                uid: uid_a,
+                uid: ecp_core::uid::compute(NodeKind::Function, "src/a.ts", None, "foo"),
                 name: name_a,
                 file_idx: 0,
                 kind: NodeKind::Function,
@@ -73,7 +71,7 @@ fn build_graph_with_calls_edge() -> Vec<u8> {
                 owner_class: StrRef::default(),
             },
             Node {
-                uid: uid_b,
+                uid: ecp_core::uid::compute(NodeKind::Function, "src/a.ts", None, "bar"),
                 name: name_b,
                 file_idx: 0,
                 kind: NodeKind::Function,

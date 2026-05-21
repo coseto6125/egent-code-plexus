@@ -112,8 +112,18 @@ fn mirrors_field_graph(
     let mirror_path_ref = pool.add(mirror_file);
     let model_name_ref = pool.add(model_symbol);
     let mirror_name_ref = pool.add(mirror_symbol);
-    let model_uid = pool.add(&format!("Function:{model_file}:{model_symbol}"));
-    let mirror_uid = pool.add(&format!("Function:{mirror_file}:{mirror_symbol}"));
+    let model_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        model_file,
+        None,
+        model_symbol,
+    );
+    let mirror_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        mirror_file,
+        None,
+        mirror_symbol,
+    );
     let reason_ref = pool.add("schema-mirror-heuristic");
 
     let files = vec![
@@ -196,7 +206,7 @@ fn zero_mirrors_graph(symbol: &str, file: &str) -> Vec<u8> {
     let mut pool = StringPool::new();
     let path_ref = pool.add(file);
     let name_ref = pool.add(symbol);
-    let uid_ref = pool.add(&format!("Function:{file}:{symbol}"));
+    let uid_ref = ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, file, None, symbol);
 
     let files = vec![File {
         path: path_ref,

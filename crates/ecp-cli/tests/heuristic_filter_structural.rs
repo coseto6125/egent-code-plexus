@@ -97,8 +97,18 @@ fn synthetic_graph_with_mirrors_field() -> Vec<u8> {
     let mut pool = StringPool::new();
 
     let file_ref = pool.add("src/a.ts");
-    let producer_uid = pool.add("Function:src/a.ts:producer");
-    let consumer_uid = pool.add("Function:src/b.ts:consumer");
+    let producer_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/a.ts",
+        None,
+        "producer",
+    );
+    let consumer_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/b.ts",
+        None,
+        "consumer",
+    );
     let producer_name = pool.add("producer");
     let consumer_name = pool.add("consumer");
     let file_b_ref = pool.add("src/b.ts");

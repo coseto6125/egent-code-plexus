@@ -32,7 +32,7 @@ fn setup_fixture() -> BatchFixture {
         .iter()
         .enumerate()
         .map(|(i, name)| Node {
-            uid: pool.add(&format!("Function:src.rs:{name}")),
+            uid: ecp_core::uid::compute(NodeKind::Function, "src.rs", None, name),
             name: pool.add(name),
             file_idx: 0,
             kind: NodeKind::Function,

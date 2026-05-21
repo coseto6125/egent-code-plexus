@@ -96,8 +96,18 @@ fn synthetic_graph_two_nodes(rel_type: RelType, reason_str: &str) -> Vec<u8> {
     let mut pool = StringPool::new();
     let file_a = pool.add("src/a.ts");
     let file_b = pool.add("src/b.ts");
-    let src_uid = pool.add("Function:src/a.ts:source");
-    let tgt_uid = pool.add("Function:src/b.ts:target");
+    let src_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/a.ts",
+        None,
+        "source",
+    );
+    let tgt_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/b.ts",
+        None,
+        "target",
+    );
     let src_name = pool.add("source");
     let tgt_name = pool.add("target");
     let reason_ref = pool.add(reason_str);

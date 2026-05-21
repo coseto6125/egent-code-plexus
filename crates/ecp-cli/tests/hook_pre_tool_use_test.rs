@@ -92,13 +92,13 @@ fn make_graph() -> ZeroCopyGraph {
     let mut pool = StringPool::new();
     let file_path = pool.add("src/lib.rs");
     let reason = pool.add("call");
-    let load_uid = pool.add("Function:src/lib.rs:loadConfig");
     let load_name = pool.add("loadConfig");
-    let parse_uid = pool.add("Function:src/lib.rs:parseConfig");
     let parse_name = pool.add("parseConfig");
-    let tok_uid = pool.add("Function:src/lib.rs:tokenize");
     let tok_name = pool.add("tokenize");
-    let mk = |uid, name, line: u32| Node {
+    let load_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "loadConfig");
+    let parse_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "parseConfig");
+    let tok_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "tokenize");
+    let mk = |uid: u64, name, line: u32| Node {
         uid,
         name,
         file_idx: 0,

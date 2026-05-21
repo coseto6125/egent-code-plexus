@@ -33,7 +33,7 @@ fn seed_repo(home_ecp: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]
     let nodes: Vec<Node> = node_names
         .iter()
         .map(|n| Node {
-            uid: pool.add(&format!("Function:{dir_name}.rs:{n}")),
+            uid: ecp_core::uid::compute(NodeKind::Function, &format!("{dir_name}.rs"), None, n),
             name: pool.add(n),
             file_idx: 0,
             kind: NodeKind::Function,

@@ -1143,7 +1143,7 @@ fn node_prop_value(
 ) -> Value {
     match prop {
         "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
-        "uid" => Value::Str(n.uid.resolve(&graph.string_pool).to_string()),
+        "uid" => Value::Str(n.uid.to_native().to_string()),
         "ownerClass" => {
             let oc = n.owner_class.resolve(&graph.string_pool);
             if oc.is_empty() {
@@ -1292,8 +1292,6 @@ mod tests {
         let callee_name = pool.add("callee");
         let file_path = pool.add("src/x.ts");
         let reason = pool.add("ast-call");
-        let uid_a = pool.add("0:caller");
-        let uid_b = pool.add("0:callee");
 
         let g = ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -1308,7 +1306,7 @@ mod tests {
             }],
             nodes: vec![
                 Node {
-                    uid: uid_a,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "caller"),
                     name: caller_name,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -1317,7 +1315,7 @@ mod tests {
                     owner_class: StrRef::default(),
                 },
                 Node {
-                    uid: uid_b,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "callee"),
                     name: callee_name,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -1365,9 +1363,6 @@ mod tests {
         let fp = pool.add("src/x.ts");
         let r1 = pool.add("r1");
         let r2 = pool.add("r2");
-        let ua = pool.add("0:a");
-        let ub = pool.add("0:b");
-        let uc = pool.add("0:c");
 
         let g = ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -1382,7 +1377,7 @@ mod tests {
             }],
             nodes: vec![
                 Node {
-                    uid: ua,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "a"),
                     name: na,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -1391,7 +1386,7 @@ mod tests {
                     owner_class: StrRef::default(),
                 },
                 Node {
-                    uid: ub,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "b"),
                     name: nb,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -1400,7 +1395,7 @@ mod tests {
                     owner_class: StrRef::default(),
                 },
                 Node {
-                    uid: uc,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "c"),
                     name: nc,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -1455,7 +1450,6 @@ mod tests {
         let nrefs: Vec<_> = names.iter().map(|n| pool.add(n)).collect();
         let fp = pool.add("src/x.ts");
         let reasons: Vec<_> = (0..3).map(|i| pool.add(&format!("r{i}"))).collect();
-        let urefs: Vec<_> = names.iter().map(|n| pool.add(&format!("0:{n}"))).collect();
 
         let g = ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -1468,13 +1462,16 @@ mod tests {
                 content_hash: [0u8; 8],
                 category: FileCategory::Source,
             }],
-            nodes: (0..4u32)
-                .map(|i| Node {
-                    uid: urefs[i as usize],
-                    name: nrefs[i as usize],
+            nodes: names
+                .iter()
+                .zip(nrefs.iter())
+                .enumerate()
+                .map(|(i, (name, &nref))| Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, name),
+                    name: nref,
                     file_idx: 0,
                     kind: NodeKind::Function,
-                    span: (i * 2, 0, i * 2 + 1, 0),
+                    span: (i as u32 * 2, 0, i as u32 * 2 + 1, 0),
                     community_id: 0,
                     owner_class: StrRef::default(),
                 })
@@ -1744,7 +1741,6 @@ mod tests {
         let mut pool = StringPool::new();
         let nm = pool.add("lone");
         let fp = pool.add("src/x.ts");
-        let uid = pool.add("0:lone");
 
         let g = ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -1758,7 +1754,7 @@ mod tests {
                 category: FileCategory::Source,
             }],
             nodes: vec![Node {
-                uid,
+                uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "lone"),
                 name: nm,
                 file_idx: 0,
                 kind: NodeKind::Function,
@@ -1821,9 +1817,6 @@ mod tests {
         let fp = pool.add("src/x.ts");
         let r1 = pool.add("r1");
         let r2 = pool.add("r2");
-        let u_fan = pool.add("0:fan");
-        let u_la = pool.add("0:leaf_a");
-        let u_lb = pool.add("0:leaf_b");
 
         let g = ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -1838,7 +1831,7 @@ mod tests {
             }],
             nodes: vec![
                 Node {
-                    uid: u_fan,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "fan"),
                     name: n_fan,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -1847,7 +1840,7 @@ mod tests {
                     owner_class: StrRef::default(),
                 },
                 Node {
-                    uid: u_la,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "leaf_a"),
                     name: n_leaf_a,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -1856,7 +1849,7 @@ mod tests {
                     owner_class: StrRef::default(),
                 },
                 Node {
-                    uid: u_lb,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "leaf_b"),
                     name: n_leaf_b,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -2204,8 +2197,6 @@ mod tests {
         let n_func = pool.add("my_func");
         let n_meth = pool.add("my_method");
         let fp = pool.add("src/x.ts");
-        let u1 = pool.add("0:my_func");
-        let u2 = pool.add("0:my_method");
 
         let g = ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -2220,7 +2211,7 @@ mod tests {
             }],
             nodes: vec![
                 Node {
-                    uid: u1,
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "my_func"),
                     name: n_func,
                     file_idx: 0,
                     kind: NodeKind::Function,
@@ -2229,7 +2220,7 @@ mod tests {
                     owner_class: StrRef::default(),
                 },
                 Node {
-                    uid: u2,
+                    uid: crate::uid::compute(NodeKind::Method, "src/x.ts", None, "my_method"),
                     name: n_meth,
                     file_idx: 0,
                     kind: NodeKind::Method,
@@ -2339,7 +2330,6 @@ mod tests {
         let mut pool = StringPool::new();
         let n_name = pool.add("hello");
         let fp = pool.add(rel_path);
-        let uid = pool.add("0:hello");
 
         let g = ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -2353,7 +2343,7 @@ mod tests {
                 category: FileCategory::Source,
             }],
             nodes: vec![Node {
-                uid,
+                uid: crate::uid::compute(NodeKind::Function, "hello.ts", None, "hello"),
                 name: n_name,
                 file_idx: 0,
                 kind: NodeKind::Function,

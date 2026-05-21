@@ -309,7 +309,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 kind: kind_to_str(&node.kind).to_string(),
                 category: category_to_str(&file.category).to_string(),
                 caller_count,
-                signature: node.uid.resolve(&graph.string_pool).to_string(),
+                signature: node.uid.to_native().to_string(),
             }
         })
         .collect();
@@ -650,16 +650,19 @@ fn tantivy_hits(
         return Vec::new();
     }
 
-    // uid → node_idx lookup over the whole graph (capacity matches the
-    // number of insertions, not the smaller `scored` set).
-    let mut uid_to_idx: HashMap<&str, usize> = HashMap::with_capacity(graph.nodes.len());
+    // uid → node_idx lookup over the whole graph. Tantivy stores uid as the
+    // decimal string of the u64 hash; parse back for O(1) lookup.
+    let mut uid_to_idx: HashMap<u64, usize> = HashMap::with_capacity(graph.nodes.len());
     for (idx, node) in graph.nodes.iter().enumerate() {
-        uid_to_idx.insert(node.uid.resolve(&graph.string_pool), idx);
+        uid_to_idx.insert(node.uid.to_native(), idx);
     }
 
     let mut hits = Vec::with_capacity(scored.len());
     for (score, uid) in scored {
-        let Some(&idx) = uid_to_idx.get(uid.as_str()) else {
+        let Ok(uid_u64) = uid.parse::<u64>() else {
+            continue;
+        };
+        let Some(&idx) = uid_to_idx.get(&uid_u64) else {
             continue;
         };
         if let Some(hit) = build_hit(graph, idx, score, ScoreSource::Bm25, kind_set, repo_label) {
