@@ -73,14 +73,11 @@ fn execute_inner(
     // Apply WHERE filter.
     if let Some(w) = &query.where_ {
         // Collect retain mask separately to avoid simultaneous &mut borrows.
+        // Propagate eval errors (e.g. uid string-literal misuse) to the caller.
         let mask: Vec<bool> = bindings
             .iter()
-            .map(|b| {
-                eval_expr(w, b, graph, cache)
-                    .map(|v| value_truthy(&v))
-                    .unwrap_or(false)
-            })
-            .collect();
+            .map(|b| eval_expr(w, b, graph, cache).map(|v| value_truthy(&v)))
+            .collect::<Result<_, _>>()?;
         let mut mask_iter = mask.into_iter();
         bindings.retain(|_| mask_iter.next().unwrap_or(false));
     }
@@ -546,12 +543,8 @@ fn exec_with(
     if let Some(w) = &wc.where_ {
         let mask: Vec<bool> = out
             .iter()
-            .map(|b| {
-                eval_expr(w, b, graph, cache)
-                    .map(|v| value_truthy(&v))
-                    .unwrap_or(false)
-            })
-            .collect();
+            .map(|b| eval_expr(w, b, graph, cache).map(|v| value_truthy(&v)))
+            .collect::<Result<_, _>>()?;
         let mut mask_iter = mask.into_iter();
         out.retain(|_| mask_iter.next().unwrap_or(false));
     }
@@ -893,6 +886,15 @@ fn node_matches(
                     return false;
                 }
             }
+            "uid" => {
+                if let Literal::Int(v) = lit {
+                    if node.uid.to_native() as i64 != *v {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
             _ => return false,
         }
     }
@@ -978,6 +980,15 @@ fn eval_expr(
         }
         Prop(var, prop) => Ok(prop_value(var, prop, b, graph, cache)),
         BinOp(op, lhs, rhs) => {
+            // Catch `n.uid = "string"` before evaluation to give a clear error.
+            let uid_str_side = |e: &Expr| matches!(e, Prop(_, p) if p == "uid");
+            let str_lit_side = |e: &Expr| matches!(e, Lit(Literal::Str(_)));
+            if (uid_str_side(lhs) && str_lit_side(rhs)) || (str_lit_side(lhs) && uid_str_side(rhs))
+            {
+                return Err(CypherError::Exec {
+                    msg: "n.uid is u64; pass a numeric literal, not a string".into(),
+                });
+            }
             let lv = eval_expr(lhs, b, graph, cache)?;
             let rv = eval_expr(rhs, b, graph, cache)?;
             Ok(Value::Bool(eval_binop(*op, &lv, &rv)))
@@ -1143,7 +1154,8 @@ fn node_prop_value(
 ) -> Value {
     match prop {
         "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
-        "uid" => Value::Str(n.uid.to_native().to_string()),
+        // u64 uid stored as i64 bits — no allocation per row.
+        "uid" => Value::Int(n.uid.to_native() as i64),
         "ownerClass" => {
             let oc = n.owner_class.resolve(&graph.string_pool);
             if oc.is_empty() {
