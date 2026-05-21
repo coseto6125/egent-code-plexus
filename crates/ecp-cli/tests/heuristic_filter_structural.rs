@@ -1,7 +1,4 @@
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
+use ecp_core::graph::{Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::pool::StringPool;
 use rkyv::rancor::Error;
 use std::path::Path;
@@ -159,9 +156,6 @@ fn synthetic_graph_with_mirrors_field() -> Vec<u8> {
     let name_index: Vec<u32> = (0..n as u32).collect();
 
     let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
         string_pool: pool.bytes,
         files,
         nodes,
@@ -171,12 +165,7 @@ fn synthetic_graph_with_mirrors_field() -> Vec<u8> {
         in_edge_idx,
         name_index,
         process_start: n as u32,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
+        ..Default::default()
     };
 
     rkyv::to_bytes::<Error>(&graph)

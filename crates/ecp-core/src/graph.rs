@@ -591,6 +591,36 @@ impl ZeroCopyGraph {
     }
 }
 
+/// Empty-but-header-valid graph for synthetic fixtures. New schema fields
+/// added to `ZeroCopyGraph` get a zero/empty default here — test fixtures
+/// using `..Default::default()` absorb the addition with no churn (the
+/// failure pattern that broke `heuristic_filter_structural` after the
+/// schema v5 merge).
+impl Default for ZeroCopyGraph {
+    fn default() -> Self {
+        Self {
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
+            fingerprint: [0; 32],
+            string_pool: Vec::new(),
+            files: Vec::new(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            out_offsets: Vec::new(),
+            in_offsets: Vec::new(),
+            in_edge_idx: Vec::new(),
+            name_index: Vec::new(),
+            process_start: 0,
+            traces_offsets: vec![0],
+            traces_data: Vec::new(),
+            blind_spots: Vec::new(),
+            route_shapes: Vec::new(),
+            call_metas: Vec::new(),
+            function_metas: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
