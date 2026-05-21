@@ -98,6 +98,9 @@ fn run_impact(
         relation_types: None,
         repo: Some(repo_dir.to_string_lossy().into_owned()),
         test_coverage: false,
+        include_heuristic: false,
+        confidence_threshold: crate::commands::impact::DEFAULT_CONFIDENCE_THRESHOLD,
+        explain_confidence: false,
         format: None,
     };
     let v = match impact::build_payload(&args, engine) {

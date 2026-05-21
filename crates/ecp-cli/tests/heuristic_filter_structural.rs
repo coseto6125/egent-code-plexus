@@ -69,21 +69,29 @@ fn init_repo_and_index(repo: &Path) {
     );
 }
 
-/// Locate the graph.bin written under `.ecp/<sha>/graph.bin` (one sha-dir deep).
+/// Locate the graph.bin written under `.ecp/` (recursive search, up to 4
+/// levels deep, to accommodate the `<repo__hash>/commits/<branch__sha>/`
+/// directory structure produced by `admin index`).
 fn find_graph_bin(repo: &Path) -> std::path::PathBuf {
-    std::fs::read_dir(repo.join(".ecp"))
-        .expect(".ecp dir missing after index")
-        .filter_map(|e| e.ok())
-        .flat_map(|entry| {
-            std::fs::read_dir(entry.path())
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .collect::<Vec<_>>()
-        })
-        .find(|p| p.file_name().map(|n| n == "graph.bin").unwrap_or(false))
-        .expect("graph.bin not found after admin index")
+    fn walk(dir: &Path, depth: usize) -> Option<std::path::PathBuf> {
+        if depth == 0 {
+            return None;
+        }
+        let rd = std::fs::read_dir(dir).ok()?;
+        for entry in rd.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.file_name().map(|n| n == "graph.bin").unwrap_or(false) {
+                return Some(p);
+            }
+            if p.is_dir() {
+                if let Some(found) = walk(&p, depth - 1) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    walk(&repo.join(".ecp"), 5).expect("graph.bin not found after admin index")
 }
 
 /// Build a small synthetic `ZeroCopyGraph` with two `Function` nodes linked by
@@ -183,7 +191,6 @@ fn synthetic_graph_with_mirrors_field() -> Vec<u8> {
 /// T-H1. This test is the structural CI gate: the graph serializes and the
 /// test body is fully specified; T-H1 only removes the `#[ignore]` attribute.
 #[test]
-#[ignore = "structural CI gate — un-ignored in T-H1 when impact filter wires is_heuristic()"]
 fn test_impact_default_hides_mirrors_field() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_index(tmp.path());
