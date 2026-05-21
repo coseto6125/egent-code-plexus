@@ -15,6 +15,7 @@ use ecp_core::analyzer::types::{
     RawRoute, RawTxScope,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
+use ecp_core::pool::StringPool;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};

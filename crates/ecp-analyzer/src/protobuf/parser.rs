@@ -8,7 +8,6 @@ use super::schema_extractors::{
 };
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawSchemaField};
-use ecp_core::pool::StringPool;
 use std::path::Path;
 
 pub struct ProtobufProvider;
@@ -28,8 +27,7 @@ impl LanguageProvider for ProtobufProvider {
         let text = std::str::from_utf8(source)
             .map_err(|e| anyhow::anyhow!("protobuf: UTF-8 decode error in {:?}: {}", path, e))?;
 
-        let mut pool = StringPool::new();
-        let fields = extract_proto_fields(text, &mut pool);
+        let fields = extract_proto_fields(text);
         let schema_fields = (!fields.is_empty()).then(|| fields.into_boxed_slice());
 
         Ok(LocalGraph {
@@ -48,7 +46,7 @@ impl LanguageProvider for ProtobufProvider {
 /// - `depth`: brace nesting depth.  A top-level `message` bumps depth to 1;
 ///   any nested `{` (including nested messages, oneofs, options) bumps it
 ///   further.  Fields are only emitted when `depth == 1`.
-fn extract_proto_fields(text: &str, pool: &mut StringPool) -> Vec<RawSchemaField> {
+fn extract_proto_fields(text: &str) -> Vec<RawSchemaField> {
     let mut out: Vec<RawSchemaField> = Vec::new();
     let mut current_message: Option<String> = None;
     let mut depth: u32 = 0;
@@ -102,9 +100,9 @@ fn extract_proto_fields(text: &str, pool: &mut StringPool) -> Vec<RawSchemaField
             let type_class = classify_protobuf_type(type_token);
             let span = (row, 0u32, row, line.len() as u32);
             out.push(RawSchemaField {
-                name: pool.add(&field_name),
+                name: field_name.into_boxed_str(),
                 type_class,
-                owner_class: pool.add(owner),
+                owner_class: Box::from(owner.as_str()),
                 framework: PROTOBUF_FRAMEWORK,
                 span,
             });

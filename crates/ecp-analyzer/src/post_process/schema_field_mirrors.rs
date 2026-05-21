@@ -40,6 +40,7 @@ use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::types::{LocalGraph, SchemaType};
 use ecp_core::graph::{Edge, Node, NodeKind, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::uid;
 use rustc_hash::FxHashMap;
 
 /// Promote `RawSchemaField`s to `SchemaField` Nodes + emit `HasProperty`
@@ -96,23 +97,28 @@ pub fn emit_edges(
                 continue;
             };
 
-            // UID format: stable across reindex; includes framework so
-            // cross-framework mirrors with same (owner, name) get distinct
-            // UIDs. Format mirrors File-node UID convention.
-            let uid_str = format!(
-                "SchemaField:{:?}:{}.{}:{}",
-                raw_sf.framework, owner_name, field_name, path_str
+            // UID: T1-5 canonical xxh3-64 over (kind, path, owner, name).
+            // owner_class is included so cross-framework mirrors with the same
+            // (owner, name) but different SchemaField nodes get distinct UIDs
+            // via path / owner disambiguation upstream.
+            let node_uid = uid::compute(
+                NodeKind::SchemaField,
+                &path_str,
+                Some(owner_name),
+                field_name,
             );
-            let uid_ref = string_pool.add(&uid_str);
             let name_ref = string_pool.add(field_name);
+            let owner_ref = string_pool.add(owner_name);
             let sf_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: uid_ref,
+                uid: node_uid,
                 name: name_ref,
                 file_idx,
                 kind: NodeKind::SchemaField,
                 span: raw_sf.span,
                 community_id: 0,
+                owner_class: owner_ref,
+                content_hash: 0,
             });
 
             // HasProperty: <Class> -> <SchemaField>. Non-heuristic
