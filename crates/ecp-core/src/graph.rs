@@ -316,6 +316,7 @@ impl ArchivedRelType {
     pub const fn is_heuristic(&self) -> bool {
         matches!(self, Self::MirrorsField | Self::EventTopicMirror)
     }
+}
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
