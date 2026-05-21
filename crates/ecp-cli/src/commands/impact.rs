@@ -174,7 +174,7 @@ fn classify_symbol(
 ) -> SymbolCoverage {
     let node = &graph.nodes[symbol_idx];
     let file_idx = node.file_idx.to_native() as usize;
-    let uid = node.uid.resolve(&graph.string_pool).to_string();
+    let uid = node.uid.to_native().to_string();
     let name = node.name.resolve(&graph.string_pool).to_string();
     let file = graph.files[file_idx]
         .path
@@ -198,7 +198,7 @@ fn classify_symbol(
             .nodes
             .iter()
             .enumerate()
-            .find(|(_, n)| n.uid.resolve(&graph.string_pool) == caller_uid)
+            .find(|(_, n)| n.uid.to_native().to_string() == caller_uid)
             .map(|(i, _)| i);
 
         let is_test = caller_idx
@@ -1079,7 +1079,7 @@ fn run_bfs(
 
         let owner_class = resolve_owner_class(graph, curr_idx);
         let entry = json!({
-            "uid": curr_node.uid.resolve(&graph.string_pool),
+            "uid": curr_node.uid.to_native().to_string(),
             "name": curr_node.name.resolve(&graph.string_pool),
             "ownerClass": owner_class,
             "kind": kind_to_str(&curr_node.kind),

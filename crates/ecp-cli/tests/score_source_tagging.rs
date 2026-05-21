@@ -7,7 +7,7 @@ use ecp_cli::search::TantivyEngine;
 use ecp_core::graph::{
     File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use std::fs;
 use tempfile::tempdir;
@@ -20,14 +20,14 @@ fn make_graph(names: &[&str]) -> ZeroCopyGraph {
         .enumerate()
         .map(|(i, name)| {
             let name_ref = pool.add(name);
-            let uid_ref = pool.add(&format!("Function:src/lib.rs:{name}"));
             Node {
-                uid: uid_ref,
+                uid: ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, name),
                 name: name_ref,
                 file_idx: 0,
                 kind: NodeKind::Function,
                 span: (i as u32, 0, i as u32 + 1, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             }
         })
         .collect();

@@ -146,14 +146,16 @@ fn build_payload_with_hints(
 
         let source_idx = edge.source.to_native() as usize;
         let consumer_node = &graph.nodes[source_idx];
-        let consumer_uid = consumer_node.uid.resolve(&graph.string_pool);
+        let consumer_uid_str = consumer_node.uid.to_native().to_string();
+        let consumer_uid = consumer_uid_str.as_str();
         let consumer_name = consumer_node.name.resolve(&graph.string_pool);
         let consumer_file = graph.files[consumer_node.file_idx.to_native() as usize]
             .path
             .resolve(&graph.string_pool);
 
         let route_node = &graph.nodes[target_idx as usize];
-        let route_uid = route_node.uid.resolve(&graph.string_pool);
+        let route_uid_str = route_node.uid.to_native().to_string();
+        let route_uid = route_uid_str.as_str();
         let route_name = route_node.name.resolve(&graph.string_pool);
 
         let drift_owned: Vec<String> = drift.iter().map(|&s| s.clone()).collect();

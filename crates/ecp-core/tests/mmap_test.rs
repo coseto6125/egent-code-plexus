@@ -1,7 +1,7 @@
 use ecp_core::graph::{
     ArchivedZeroCopyGraph, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::File;
@@ -16,7 +16,7 @@ fn test_mmap_graph_access() {
     // 1. Create and Serialize Graph
     let mut pool = StringPool::new();
     let name_ref = pool.add("mmap_func");
-    let uid_ref = pool.add("Function:test.ts:mmap_func");
+    let uid_val = ecp_core::uid::compute(NodeKind::Function, "test.ts", None, "mmap_func");
 
     let graph = ZeroCopyGraph {
         magic: GRAPH_MAGIC,
@@ -25,12 +25,13 @@ fn test_mmap_graph_access() {
         string_pool: pool.bytes,
         files: vec![],
         nodes: vec![Node {
-            uid: uid_ref,
+            uid: uid_val,
             name: name_ref,
             file_idx: 0,
             kind: NodeKind::Function,
             span: (1, 0, 10, 0),
             community_id: 0,
+            owner_class: StrRef::default(),
         }],
         edges: vec![],
         out_offsets: vec![0, 0],
@@ -66,4 +67,10 @@ fn test_mmap_graph_access() {
 
     let resolved_name = first_node.name.resolve(&archived.string_pool);
     assert_eq!(resolved_name, "mmap_func");
+
+    // `StrRef::default()` (offset=0, len=0) must survive the rkyv round-trip
+    // and resolve to the empty string — the sentinel for "top-level symbol,
+    // no owner class". A regression here would silently break
+    // `commands::rename::run`'s bare-name filter (which compares len == 0).
+    assert_eq!(first_node.owner_class.resolve(&archived.string_pool), "");
 }

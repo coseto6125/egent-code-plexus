@@ -321,11 +321,15 @@ impl GraphBuilder {
 
         // Pass 1: Register all nodes into SymbolTable and StringPool
         let mut current_node_idx = 0;
-        // Reusable UID buffer — avoids one allocation per `Node` (~297k
-        // nodes on .sample_repo). `push_str` chain over `write!` skips
-        // the fmt dispatch (see `NodeKind::as_str` doc) while reusing
-        // the underlying capacity across clears.
-        let mut uid_buf = String::with_capacity(128);
+        // D1 collision set: uid_u64 → (kind_str, path, owner_class, name) of the first node
+        // with that hash. On collision, skip the duplicate and emit a BlindSpotRecord.
+        // FxHashMap: O(1) lookup per node on the hot path.
+        let mut uid_seen: FxHashMap<u64, (String, String, Option<String>, String)> =
+            FxHashMap::default();
+        // Collision BlindSpots are accumulated here and merged into all_blind_spots
+        // after the main blind-spot pass (below). Using a separate vec avoids
+        // borrowing string_pool twice in the node loop.
+        let mut collision_blind_spots: Vec<BlindSpotRecord> = Vec::new();
 
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
@@ -363,26 +367,69 @@ impl GraphBuilder {
                     raw_node.kind,
                 );
 
-                uid_buf.clear();
-                // push_str chain over `write!("{:?}:{}:{}")`: avoids fmt
-                // dispatch (~300k calls × 3 segments). NodeKind::as_str()
-                // returns the same byte-stable variant identifier that
-                // Debug would, so existing UID strings stay binary-compat.
-                uid_buf.push_str(raw_node.kind.as_str());
-                uid_buf.push(':');
-                uid_buf.push_str(&path_str);
-                uid_buf.push(':');
-                uid_buf.push_str(&raw_node.name);
-                let uid_ref = string_pool.add(&uid_buf);
+                // T1-5: canonical xxh3-64 UID — zero heap alloc, no string-pool entry.
+                // Canonical stream: kind_as_str \0 path \0 owner_class_or_empty \0 name
+                let uid_u64 = ecp_core::uid::compute(
+                    raw_node.kind,
+                    &path_str,
+                    raw_node.owner_class.as_deref(),
+                    &raw_node.name,
+                );
+
+                // D1 collision recovery: if two distinct symbol definitions hash to the
+                // same u64, drop the second and record a BlindSpot for manual review.
+                if let Some((prev_kind, prev_path, prev_owner, prev_name)) = uid_seen.get(&uid_u64)
+                {
+                    let hint = format!(
+                        "uid-collision: first={}:{}:{}:{} second={}:{}:{}:{}",
+                        prev_kind,
+                        prev_path,
+                        prev_owner.as_deref().unwrap_or(""),
+                        prev_name,
+                        raw_node.kind.as_str(),
+                        path_str,
+                        raw_node.owner_class.as_deref().unwrap_or(""),
+                        raw_node.name,
+                    );
+                    collision_blind_spots.push(BlindSpotRecord {
+                        kind: string_pool.add("uid-collision"),
+                        file_path: string_pool.add(&path_str),
+                        start_row: raw_node.span.0,
+                        start_col: raw_node.span.1,
+                        end_row: raw_node.span.2,
+                        end_col: raw_node.span.3,
+                        hint: string_pool.add(&hint),
+                    });
+                    current_node_idx += 1;
+                    continue;
+                }
+                uid_seen.insert(
+                    uid_u64,
+                    (
+                        raw_node.kind.as_str().to_string(),
+                        path_str.to_string(),
+                        raw_node.owner_class.clone(),
+                        raw_node.name.clone(),
+                    ),
+                );
+
                 let name_ref = string_pool.add(&raw_node.name);
+                // Skip hash-lookup when there is no owner: `StrRef::default()`
+                // (offset=0, len=0) resolves to "" against any pool. Avoids
+                // ~N hash-table lookups for top-level symbols at build time.
+                let owner_class_ref = match raw_node.owner_class.as_deref() {
+                    Some(s) => string_pool.add(s),
+                    None => StrRef::default(),
+                };
 
                 nodes.push(Node {
-                    uid: uid_ref,
+                    uid: uid_u64,
                     name: name_ref,
                     file_idx,
                     kind: raw_node.kind,
                     span: raw_node.span,
                     community_id: 0,
+                    owner_class: owner_class_ref,
                 });
 
                 current_node_idx += 1;
@@ -443,16 +490,21 @@ impl GraphBuilder {
                 for dec in &raw_node.decorators {
                     if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
                         let route_name = format!("{} {}", detected.method, detected.path);
-                        let uid_str = format!("Route:{}:{}", path_str, route_name);
 
                         let route_idx = nodes.len() as u32;
                         nodes.push(Node {
-                            uid: string_pool.add(&uid_str),
+                            uid: ecp_core::uid::compute(
+                                NodeKind::Route,
+                                &path_str,
+                                None,
+                                &route_name,
+                            ),
                             name: string_pool.add(&route_name),
                             file_idx,
                             kind: ecp_core::graph::NodeKind::Route,
                             span: raw_node.span,
                             community_id: 0,
+                            owner_class: StrRef::default(),
                         });
 
                         route_edges.push(Edge {
@@ -472,16 +524,16 @@ impl GraphBuilder {
             for raw_route in &local_graph.routes {
                 if let Some(detected) = crate::route_detector::detect_from_call(raw_route) {
                     let route_name = format!("{} {}", detected.method, detected.path);
-                    let uid_str = format!("Route:{}:{}", path_str, route_name);
 
                     let route_idx = nodes.len() as u32;
                     nodes.push(Node {
-                        uid: string_pool.add(&uid_str),
+                        uid: ecp_core::uid::compute(NodeKind::Route, &path_str, None, &route_name),
                         name: string_pool.add(&route_name),
                         file_idx,
                         kind: ecp_core::graph::NodeKind::Route,
                         span: raw_route.span,
                         community_id: 0,
+                        owner_class: StrRef::default(),
                     });
 
                     // Resolve the imperative-route handler, if the parser captured
@@ -724,16 +776,24 @@ impl GraphBuilder {
                     // a target would be a dangling marker.
                     continue;
                 };
-                let entry_uid = format!("EntryPoint:{}:{}:{}", path_str, ep.kind.tag(), ep.uid);
                 let entry_name = format!("{}@{}", ep.kind.tag(), ep.uid);
+                // EntryPoint UID encodes kind-tag + handler-uid in the name segment
+                // so two entry points for the same handler (route + main) don't collide.
+                let entry_uid_name = format!("{}:{}", ep.kind.tag(), ep.uid);
                 let entry_idx = nodes.len() as u32;
                 nodes.push(Node {
-                    uid: string_pool.add(&entry_uid),
+                    uid: ecp_core::uid::compute(
+                        NodeKind::EntryPoint,
+                        &path_str,
+                        None,
+                        &entry_uid_name,
+                    ),
                     name: string_pool.add(&entry_name),
                     file_idx,
                     kind: NodeKind::EntryPoint,
                     span: (0, 0, 0, 0),
                     community_id: 0,
+                    owner_class: StrRef::default(),
                 });
 
                 // Encode score in the edge reason: "{tag}:{score}:{reason}".
@@ -1059,6 +1119,10 @@ impl GraphBuilder {
                 });
             }
         }
+        // Merge D1 collision blind spots from Pass 1 (recorded before string_pool
+        // was moved into ZeroCopyGraph). BlindSpotRecord StrRefs are already valid
+        // because `string_pool` was borrowed mutably in Pass 1 when they were pushed.
+        all_blind_spots.extend(collision_blind_spots);
 
         // Optional: flush the resolver decision dump now that pass 2 is done.
         // Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
@@ -1160,7 +1224,7 @@ impl GraphBuilder {
                 capitalize(&entry_name),
                 capitalize(&terminal_name)
             );
-            let uid_str = format!(
+            let proc_uid_name = format!(
                 "proc_{}_{}_{}",
                 k,
                 sanitize_id(&entry_name),
@@ -1172,9 +1236,30 @@ impl GraphBuilder {
                 .get(entry_idx as usize)
                 .map(|n| n.community_id)
                 .unwrap_or(0);
+            let process_file_path = nodes
+                .get(entry_idx as usize)
+                .map(|n| {
+                    let fi = n.file_idx as usize;
+                    if fi < files.len() {
+                        let f = &files[fi];
+                        let s = f.path.offset as usize;
+                        let e = s + f.path.len as usize;
+                        std::str::from_utf8(&string_pool.bytes[s..e])
+                            .unwrap_or("")
+                            .to_string()
+                    } else {
+                        String::new()
+                    }
+                })
+                .unwrap_or_default();
 
             nodes.push(Node {
-                uid: string_pool.add(&uid_str),
+                uid: ecp_core::uid::compute(
+                    NodeKind::Process,
+                    &process_file_path,
+                    None,
+                    &proc_uid_name,
+                ),
                 name: string_pool.add(&label),
                 file_idx: nodes
                     .get(entry_idx as usize)
@@ -1186,6 +1271,7 @@ impl GraphBuilder {
                     .map(|n| n.span)
                     .unwrap_or((0, 0, 0, 0)),
                 community_id: process_node_community,
+                owner_class: StrRef::default(),
             });
 
             for (step_idx, &member_idx) in tr.trace.iter().enumerate() {
@@ -1246,8 +1332,6 @@ impl GraphBuilder {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path_str.clone());
-            let file_uid = format!("File:{}", path_str);
-            let uid_ref = string_pool.add(&file_uid);
             let name_ref = string_pool.add(&basename);
             // `Node.file_idx` points into `files: Vec<File>`. Pass 1 pushed
             // `files` in the same `self.local_graphs` enumeration order, so
@@ -1267,12 +1351,13 @@ impl GraphBuilder {
             // EntryPoint / Process nodes instead of File.
             let file_node_id = nodes.len() as u32;
             nodes.push(Node {
-                uid: uid_ref,
+                uid: ecp_core::uid::compute(NodeKind::File, &path_str, None, &path_str),
                 name: name_ref,
                 file_idx: node_file_idx,
                 kind: NodeKind::File,
                 span: (0, 0, 0, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             });
             file_node_idx.insert(path_str, file_node_id);
         }

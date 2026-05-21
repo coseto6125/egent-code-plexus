@@ -11,7 +11,7 @@ use ecp_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::Path;
@@ -38,8 +38,18 @@ fn build_graph_bytes(spec: &GraphSpec) -> Vec<u8> {
 
     let file_a = pool.add("src/a.ts");
     let file_b = pool.add("src/b.ts");
-    let uid_alpha = pool.add("Function:src/a.ts:alpha");
-    let uid_beta = pool.add("Function:src/b.ts:beta");
+    let uid_alpha = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/a.ts",
+        None,
+        "alpha",
+    );
+    let uid_beta = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/b.ts",
+        None,
+        "beta",
+    );
     let name_alpha = pool.add("alpha");
     let name_beta = pool.add("beta");
 
@@ -65,6 +75,7 @@ fn build_graph_bytes(spec: &GraphSpec) -> Vec<u8> {
             kind: NodeKind::Function,
             span: (1, 0, 3, 0),
             community_id: 0,
+            owner_class: StrRef::default(),
         },
         Node {
             uid: uid_beta,
@@ -73,6 +84,7 @@ fn build_graph_bytes(spec: &GraphSpec) -> Vec<u8> {
             kind: NodeKind::Function,
             span: (1, 0, 3, 0),
             community_id: 0,
+            owner_class: StrRef::default(),
         },
     ];
 

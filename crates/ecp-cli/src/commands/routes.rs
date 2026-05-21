@@ -98,7 +98,7 @@ fn list_routes(
         // route-emission skip filter which gates on `Test | Reference`.
         let is_test = matches!(file_node.category, ArchivedFileCategory::Test);
         let row = serde_json::json!({
-            "uid": node.uid.resolve(&graph.string_pool),
+            "uid": node.uid.to_native().to_string(),
             "method": method,
             "path": path,
             "kind": "Route",
@@ -215,7 +215,7 @@ fn enclosing_scope_json(
         Some(idx) => {
             let n = &graph.nodes[idx];
             serde_json::json!({
-                "uid": n.uid.resolve(&graph.string_pool),
+                "uid": n.uid.to_native().to_string(),
                 "name": n.name.resolve(&graph.string_pool),
                 "kind": kind_to_str(&n.kind),
                 "line": n.span.0.to_native(),
@@ -285,7 +285,7 @@ fn inspect_route(
                 serde_json::json!({
                     "method": method,
                     "path": path,
-                    "uid": node.uid.resolve(&graph.string_pool),
+                    "uid": node.uid.to_native().to_string(),
                     "filePath": file_node.path.resolve(&graph.string_pool),
                 })
             })
@@ -324,7 +324,7 @@ fn inspect_route(
         routes_out.push(serde_json::json!({
             "method": route_method,
             "path": route_path,
-            "uid": route_node.uid.resolve(&graph.string_pool),
+            "uid": route_node.uid.to_native().to_string(),
             "filePath": route_file_path,
             "line": route_line,
             "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
@@ -364,7 +364,7 @@ fn inspect_route(
                     graph,
                     scope_idx,
                     depth,
-                    route_node.uid.resolve(&graph.string_pool),
+                    &route_node.uid.to_native().to_string(),
                     &mut callers_out,
                 );
             }
@@ -379,7 +379,7 @@ fn inspect_route(
             let handler_file = &graph.files[handler_node.file_idx.to_native() as usize];
 
             handlers_out.push(serde_json::json!({
-                "uid": handler_node.uid.resolve(&graph.string_pool),
+                "uid": handler_node.uid.to_native().to_string(),
                 "name": handler_node.name.resolve(&graph.string_pool),
                 "kind": kind_to_str(&handler_node.kind),
                 "handlerKind": "named",
@@ -393,7 +393,7 @@ fn inspect_route(
                 graph,
                 handler_idx,
                 depth,
-                handler_node.uid.resolve(&graph.string_pool),
+                &handler_node.uid.to_native().to_string(),
                 &mut callers_out,
             );
         }
@@ -438,7 +438,7 @@ fn bfs_upstream(
                 .map(|(r, c)| (r.as_str(), *c))
                 .unwrap_or(("", 1.0));
             out.push(serde_json::json!({
-                "uid": curr_node.uid.resolve(&graph.string_pool),
+                "uid": curr_node.uid.to_native().to_string(),
                 "name": curr_node.name.resolve(&graph.string_pool),
                 "kind": kind_to_str(&curr_node.kind),
                 "filePath": file_node.path.resolve(&graph.string_pool),

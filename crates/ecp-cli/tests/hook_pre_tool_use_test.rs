@@ -11,7 +11,7 @@ use ecp_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use std::fs;
 use tempfile::tempdir;
@@ -92,19 +92,20 @@ fn make_graph() -> ZeroCopyGraph {
     let mut pool = StringPool::new();
     let file_path = pool.add("src/lib.rs");
     let reason = pool.add("call");
-    let load_uid = pool.add("Function:src/lib.rs:loadConfig");
     let load_name = pool.add("loadConfig");
-    let parse_uid = pool.add("Function:src/lib.rs:parseConfig");
     let parse_name = pool.add("parseConfig");
-    let tok_uid = pool.add("Function:src/lib.rs:tokenize");
     let tok_name = pool.add("tokenize");
-    let mk = |uid, name, line: u32| Node {
+    let load_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "loadConfig");
+    let parse_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "parseConfig");
+    let tok_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "tokenize");
+    let mk = |uid: u64, name, line: u32| Node {
         uid,
         name,
         file_idx: 0,
         kind: NodeKind::Function,
         span: (line, 0, line + 1, 0),
         community_id: 0,
+        owner_class: StrRef::default(),
     };
     // node 0 = parseConfig, 1 = loadConfig, 2 = tokenize.
     // edges: parseConfig→tokenize (e0), loadConfig→parseConfig (e1).

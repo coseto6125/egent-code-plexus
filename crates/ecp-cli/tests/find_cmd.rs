@@ -9,7 +9,7 @@ use ecp_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -66,12 +66,13 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
         .map(|ns| {
             let file_idx = seen_files.iter().position(|&p| p == ns.file).unwrap() as u32;
             Node {
-                uid: pool.add(&format!("{}:{}:{}", kind_str(ns.kind), ns.file, ns.name)),
+                uid: ecp_core::uid::compute(ns.kind, ns.file, None, ns.name),
                 name: pool.add(ns.name),
                 file_idx,
                 kind: ns.kind,
                 span: (ns.line, 0, ns.line + 10, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             }
         })
         .collect();
@@ -136,15 +137,6 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
     let graph_path = dir.path().join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
     (dir, graph_path)
-}
-
-fn kind_str(k: NodeKind) -> &'static str {
-    match k {
-        NodeKind::Function => "Function",
-        NodeKind::Method => "Method",
-        NodeKind::Class => "Class",
-        _ => "Unknown",
-    }
 }
 
 fn run_find(graph: &Path, args: &[&str]) -> std::process::Output {

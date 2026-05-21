@@ -11,7 +11,7 @@
 use ecp_core::graph::{
     File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use ecp_core::registry::{GroupEntry, RegistryFile, RepoAlias};
 use rkyv::rancor::Error;
 use serde_json::Value;
@@ -33,12 +33,13 @@ fn seed_repo(home_ecp: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]
     let nodes: Vec<Node> = node_names
         .iter()
         .map(|n| Node {
-            uid: pool.add(&format!("Function:{dir_name}.rs:{n}")),
+            uid: ecp_core::uid::compute(NodeKind::Function, &format!("{dir_name}.rs"), None, n),
             name: pool.add(n),
             file_idx: 0,
             kind: NodeKind::Function,
             span: (0, 0, 0, 10),
             community_id: 0,
+            owner_class: StrRef::default(),
         })
         .collect();
     let files = vec![File {
