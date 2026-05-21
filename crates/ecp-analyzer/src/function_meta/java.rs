@@ -13,11 +13,10 @@
 //! - `return_type`:  return type before method name
 //! - `decorators`:   annotation names with `@` stripped, args `(...)` dropped
 
+use super::{extract_with, node_text, ts_span};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
-use ecp_core::graph::{FileCategory, FunctionMeta, NodeKind};
+use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
-
-type FnSpan<'a> = ((u32, u32, u32, u32), &'a RawNode);
 
 /// Java test annotation names (without `@`).
 const TEST_ANNOTATIONS: &[&str] = &[
@@ -30,42 +29,6 @@ const TEST_ANNOTATIONS: &[&str] = &[
     "AfterAll",
 ];
 
-pub fn extract(
-    root: Node<'_>,
-    source: &[u8],
-    nodes: &[RawNode],
-    file_category: FileCategory,
-) -> Vec<RawFunctionMeta> {
-    let fn_spans: Vec<_> = nodes
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            )
-        })
-        .map(|n| (n.span, n))
-        .collect();
-
-    if fn_spans.is_empty() {
-        return vec![];
-    }
-
-    let mut out: Vec<RawFunctionMeta> = Vec::with_capacity(fn_spans.len());
-    collect_fn_nodes(root, source, &fn_spans, file_category, &mut out);
-    out
-}
-
-fn ts_span(n: &Node<'_>) -> (u32, u32, u32, u32) {
-    let s = n.start_position();
-    let e = n.end_position();
-    (s.row as u32, s.column as u32, e.row as u32, e.column as u32)
-}
-
-fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
-    std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("")
-}
-
 /// Java function-like node kinds.
 const JAVA_FN_KINDS: &[&str] = &[
     "method_declaration",
@@ -75,32 +38,20 @@ const JAVA_FN_KINDS: &[&str] = &[
     "interface_method_declaration", // may not exist in all grammar versions
 ];
 
-fn collect_fn_nodes<'a>(
-    node: Node<'a>,
+pub fn extract(
+    root: Node<'_>,
     source: &[u8],
-    fn_spans: &[FnSpan<'a>],
+    nodes: &[RawNode],
     file_category: FileCategory,
-    out: &mut Vec<RawFunctionMeta>,
-) {
-    let k = node.kind();
-    if JAVA_FN_KINDS.contains(&k) {
-        let span = ts_span(&node);
-        if let Some((_, raw)) = fn_spans.iter().find(|(s, _)| *s == span) {
-            if let Some(meta) = extract_one(&node, source, raw, file_category) {
-                out.push(meta);
-            }
-        }
-    }
-
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            collect_fn_nodes(cursor.node(), source, fn_spans, file_category, out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
+) -> Vec<RawFunctionMeta> {
+    extract_with(
+        root,
+        source,
+        nodes,
+        file_category,
+        JAVA_FN_KINDS,
+        extract_one,
+    )
 }
 
 fn extract_one(

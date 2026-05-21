@@ -47,6 +47,26 @@ pub(super) fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("")
 }
 
+/// Find the first direct child of `node` matching `kind`. Used by
+/// kotlin/dart/swift extractors to pick out specific child grammar nodes
+/// without re-implementing the cursor walk per language.
+pub(super) fn find_child_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut c = node.walk();
+    if !c.goto_first_child() {
+        return None;
+    }
+    loop {
+        let child = c.node();
+        if child.kind() == kind {
+            return Some(child);
+        }
+        if !c.goto_next_sibling() {
+            break;
+        }
+    }
+    None
+}
+
 /// Sorted span index over Function/Method/Constructor nodes — enables
 /// `binary_search_by_key` lookups in `walk_fn_nodes` instead of O(N) `find`.
 pub(super) fn build_span_index(nodes: &[RawNode]) -> Vec<FnSpan<'_>> {
