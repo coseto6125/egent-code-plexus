@@ -224,15 +224,10 @@ impl LanguageProvider for VueProvider {
         }
 
         Ok(LocalGraph {
-            content_hash: [0; 8],
             file_path: path.to_path_buf(),
             nodes: all_nodes,
             imports: all_imports,
-            routes: vec![],
-            documents: vec![],
-            framework_refs: vec![],
-            fanout_refs: vec![],
-            blind_spots: vec![],
+            ..Default::default()
         })
     }
 }

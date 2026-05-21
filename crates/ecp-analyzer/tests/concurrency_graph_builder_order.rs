@@ -126,6 +126,9 @@ fn make_fixture_files() -> Vec<LocalGraph> {
                 span: (2, 0, 2, 5),
             }],
             blind_spots: vec![],
+            schema_fields: None,
+            event_topics: None,
+            tx_scopes: None,
         })
         .collect()
 }

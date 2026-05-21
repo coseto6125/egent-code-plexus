@@ -1032,6 +1032,9 @@ impl LanguageProvider for PythonProvider {
             framework_refs,
             fanout_refs,
             blind_spots,
+            schema_fields: None,
+            event_topics: None,
+            tx_scopes: None,
         })
     }
 }

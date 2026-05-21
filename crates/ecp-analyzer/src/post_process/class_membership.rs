@@ -292,6 +292,9 @@ mod tests {
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: Vec::new(),
+            schema_fields: None,
+            event_topics: None,
+            tx_scopes: None,
         }
     }
 

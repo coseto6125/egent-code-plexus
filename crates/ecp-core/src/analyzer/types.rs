@@ -1,4 +1,5 @@
 use crate::graph::NodeKind;
+use crate::pool::StrRef;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -77,6 +78,119 @@ pub struct RawFrameworkRef {
     pub span: (u32, u32, u32, u32),
 }
 
+/// Primitive type of a schema column or model field.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum SchemaType {
+    String,
+    Int,
+    Float,
+    Bool,
+    Datetime,
+    Json,
+    Other,
+}
+
+/// Message-bus direction for a call site.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum PubSub {
+    Publish,
+    Subscribe,
+}
+
+/// Origin framework that triggered detection of a `SchemaField` /
+/// `EventTopic` / `TxScope`. Closed set, stored as u8 so per-instance cost
+/// is 1 byte versus ~24 bytes + heap copy for a `String`. Variants are
+/// archive-stable as long as new ones are appended (never reordered);
+/// `as_str()` round-trips via `FRAMEWORK_NAMES`.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(compare(PartialEq))]
+#[rkyv(derive(Debug))]
+#[repr(u8)]
+pub enum FrameworkId {
+    // ── Schema field origins (T4 family) ──
+    Pydantic,
+    SqlAlchemy,
+    Django,
+    Prisma,
+    Sqlx,
+    TypeScriptInterface,
+    // ── Event topic transports (T5 family) ──
+    Kafka,
+    Sns,
+    Sqs,
+    RabbitMq,
+    EventBridge,
+    // ── Transaction scopes (T10 family — values observed in PR #272) ──
+    SpringTransactional,
+    JpaTransactional,
+    DjangoAtomic,
+    PonyDbSession,
+    // ── Fallback for frameworks not yet listed; promote to its own variant
+    //    when adding emit support, do not extend silently. ──
+    Unknown,
+}
+
+pub const FRAMEWORK_NAMES: &[&str] = &[
+    "pydantic",
+    "sqlalchemy",
+    "django",
+    "prisma",
+    "sqlx",
+    "typescript-interface",
+    "kafka",
+    "sns",
+    "sqs",
+    "rabbitmq",
+    "eventbridge",
+    "spring-transactional",
+    "jpa-transactional",
+    "django-atomic",
+    "pony-db-session",
+    "unknown",
+];
+
+impl FrameworkId {
+    /// Layout-locked with the enum discriminant. Asserted at startup by
+    /// `debug_assert_eq!` in tests so a future variant reorder is caught.
+    pub const fn as_str(self) -> &'static str {
+        FRAMEWORK_NAMES[self as usize]
+    }
+}
+
+/// ORM / schema model field detected at static-analysis time.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawSchemaField {
+    pub name: StrRef,
+    pub type_class: SchemaType,
+    pub owner_class: StrRef,
+    pub framework: FrameworkId,
+    pub span: (u32, u32, u32, u32),
+}
+
+/// Message-bus publish/subscribe call site.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawEventTopic {
+    /// None = dynamic topic, upstream emits BlindSpot
+    pub topic_literal: Option<StrRef>,
+    pub direction: PubSub,
+    pub lib: FrameworkId,
+    pub enclosing_fn: StrRef,
+    pub span: (u32, u32, u32, u32),
+}
+
+/// Transactional scope boundary (e.g. `@Transactional`, `atomic()`).
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawTxScope {
+    pub enclosing_fn: StrRef,
+    pub source_pattern: FrameworkId,
+    pub span: (u32, u32, u32, u32),
+}
+
 /// Reflection-style fan-out reference: a single call site whose target cannot
 /// be uniquely picked at static-analysis time, but where the analyzer can
 /// enumerate the candidate set. The builder emits one `References` edge per
@@ -123,4 +237,30 @@ pub struct LocalGraph {
     pub framework_refs: Vec<RawFrameworkRef>,
     pub fanout_refs: Vec<RawFanoutRef>,
     pub blind_spots: Vec<BlindSpot>,
+    /// Side tables for T-phase detectors. `None` until the corresponding
+    /// detector populates them — saves 16 bytes/field versus an always-empty
+    /// `Vec` and skips an archived length marker in `graph.bin` for files
+    /// with no schema / event / transaction surface (i.e. the majority).
+    pub schema_fields: Option<Box<[RawSchemaField]>>,
+    pub event_topics: Option<Box<[RawEventTopic]>>,
+    pub tx_scopes: Option<Box<[RawTxScope]>>,
+}
+
+impl Default for LocalGraph {
+    fn default() -> Self {
+        Self {
+            file_path: PathBuf::new(),
+            content_hash: [0; 8],
+            nodes: Vec::new(),
+            documents: Vec::new(),
+            imports: Vec::new(),
+            routes: Vec::new(),
+            framework_refs: Vec::new(),
+            fanout_refs: Vec::new(),
+            blind_spots: Vec::new(),
+            schema_fields: None,
+            event_topics: None,
+            tx_scopes: None,
+        }
+    }
 }

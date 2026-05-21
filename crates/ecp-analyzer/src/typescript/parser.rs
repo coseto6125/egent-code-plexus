@@ -519,6 +519,9 @@ impl LanguageProvider for TypeScriptProvider {
             framework_refs,
             fanout_refs: vec![],
             blind_spots: vec![],
+            schema_fields: None,
+            event_topics: None,
+            tx_scopes: None,
         })
     }
 }
