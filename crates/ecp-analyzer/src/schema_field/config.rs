@@ -1,4 +1,4 @@
-use ecp_core::analyzer::types::SchemaType;
+use ecp_core::analyzer::types::{FrameworkId, SchemaType};
 
 /// Table-driven configuration for a single ORM / schema framework.
 ///
@@ -9,14 +9,10 @@ use ecp_core::analyzer::types::SchemaType;
 ///
 /// `&'static str` fields are intentional — configs are `const` items, so all
 /// strings live in the binary's read-only segment (zero heap alloc). These
-/// structs are **never** archived by rkyv (only `RawSchemaField` is, and it
-/// stores `framework` as `String` to satisfy rkyv's `Archive` bound). The
-/// extractor converts `config.framework` to `String::from(...)` once per
-/// emitted `RawSchemaField`.
+/// structs are **never** archived by rkyv (only `RawSchemaField` is).
 pub struct SchemaFieldConfig {
-    /// Human-readable label written into `RawSchemaField::framework`.
-    /// Example: `"pydantic"`, `"sqlalchemy"`, `"typescript-interface"`.
-    pub framework: &'static str,
+    /// Framework identity written into `RawSchemaField::framework`.
+    pub framework: FrameworkId,
     /// Tree-sitter capture name identifying the owner class / struct.
     /// Example: `"owner"`, `"class_name"`.
     pub owner_capture: &'static str,

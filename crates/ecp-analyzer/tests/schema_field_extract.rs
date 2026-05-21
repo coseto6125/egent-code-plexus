@@ -4,7 +4,7 @@
 //! Those belong to T4-2..T4-6.
 
 use ecp_analyzer::schema_field::{extract_schema_fields, SchemaFieldConfig};
-use ecp_core::analyzer::types::{RawImport, SchemaType};
+use ecp_core::analyzer::types::{FrameworkId, RawImport, SchemaType};
 use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
@@ -69,7 +69,7 @@ fn classify_str_int(raw: &str) -> SchemaType {
 // ---------------------------------------------------------------------------
 
 const CONFIG_A: SchemaFieldConfig = SchemaFieldConfig {
-    framework: "test-frameworkA",
+    framework: FrameworkId::Pydantic,
     owner_capture: "owner",
     name_capture: "field",
     type_capture: "type",
@@ -78,7 +78,7 @@ const CONFIG_A: SchemaFieldConfig = SchemaFieldConfig {
 };
 
 const CONFIG_B: SchemaFieldConfig = SchemaFieldConfig {
-    framework: "test-frameworkB",
+    framework: FrameworkId::SqlAlchemy,
     owner_capture: "owner",
     name_capture: "field",
     type_capture: "type",
@@ -111,7 +111,7 @@ fn test_config_driven_dispatch_picks_right_framework_label() {
     );
 
     assert_eq!(fields.len(), 1, "expected exactly one field");
-    assert_eq!(fields[0].framework, "test-frameworkA");
+    assert_eq!(fields[0].framework, FrameworkId::Pydantic);
 
     // Flip: only lib-beta import → CONFIG_B fires.
     let imports_b = vec![fake_import("lib-beta")];
@@ -126,7 +126,7 @@ fn test_config_driven_dispatch_picks_right_framework_label() {
     );
 
     assert_eq!(fields_b.len(), 1);
-    assert_eq!(fields_b[0].framework, "test-frameworkB");
+    assert_eq!(fields_b[0].framework, FrameworkId::SqlAlchemy);
 }
 
 /// No required import present → zero fields emitted (gate blocks dispatch).

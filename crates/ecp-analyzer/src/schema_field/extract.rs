@@ -2,6 +2,7 @@ use super::config::SchemaFieldConfig;
 use crate::framework_helpers::has_import_from;
 use ecp_core::analyzer::types::{RawImport, RawSchemaField, SchemaType};
 use ecp_core::pool::StringPool;
+use rustc_hash::FxHashMap;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor, Tree};
 
@@ -41,34 +42,66 @@ pub fn extract_schema_fields(
         return Vec::new();
     }
 
+    // Pre-build capture-name → [(active_idx, role)] map once per call.
+    // Multiple active configs may share the same capture name (e.g. both
+    // Pydantic and SQLAlchemy name their owner capture "owner"), so the value
+    // is a Vec. Done once here; amortises across all (match × capture) pairs
+    // in the file, keeping the per-capture cost O(1) instead of O(K).
+    let mut cap_map: FxHashMap<&str, Vec<(usize, CaptureRole)>> =
+        FxHashMap::with_capacity_and_hasher(active.len() * 3, Default::default());
+    for (idx, cfg) in active.iter().enumerate() {
+        cap_map
+            .entry(cfg.owner_capture)
+            .or_default()
+            .push((idx, CaptureRole::Owner));
+        cap_map
+            .entry(cfg.name_capture)
+            .or_default()
+            .push((idx, CaptureRole::Name));
+        // type_capture may be empty string when the query omits a type node;
+        // skip to avoid a catch-all "" entry that matches every capture.
+        if !cfg.type_capture.is_empty() {
+            cap_map
+                .entry(cfg.type_capture)
+                .or_default()
+                .push((idx, CaptureRole::Type));
+        }
+    }
+
+    let n_active = active.len();
     let mut out = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
 
-    while let Some(m) = matches.next() {
-        // Try each active config in declaration order; first match wins.
-        'configs: for config in &active {
-            let mut owner_text: Option<&str> = None;
-            let mut name_text: Option<&str> = None;
-            let mut type_text: Option<&str> = None;
+    // Reusable per-match slot table: [owner, name, type] text per active config.
+    // Allocated once, cleared before each match.
+    let mut slots: Vec<[Option<&str>; 3]> = vec![[None; 3]; n_active];
 
-            for cap in m.captures {
-                let cap_name = &query.capture_names()[cap.index as usize];
+    while let Some(m) = matches.next() {
+        // Reset slots for this match.
+        for s in slots.iter_mut() {
+            *s = [None; 3];
+        }
+
+        // Single O(M) pass over captures; O(1) lookup per capture.
+        for cap in m.captures {
+            let cap_name = &query.capture_names()[cap.index as usize];
+            if let Some(entries) = cap_map.get(&**cap_name) {
                 let node_text = cap.node.utf8_text(source).unwrap_or("");
-                if *cap_name == config.owner_capture {
-                    owner_text = Some(node_text);
-                } else if *cap_name == config.name_capture {
-                    name_text = Some(node_text);
-                } else if *cap_name == config.type_capture {
-                    type_text = Some(node_text);
+                for &(idx, role) in entries {
+                    slots[idx][role as usize] = Some(node_text);
                 }
             }
+        }
 
-            let (Some(owner), Some(name)) = (owner_text, name_text) else {
-                continue 'configs;
+        // Scan active configs in declaration order; first fully-populated wins.
+        for (idx, config) in active.iter().enumerate() {
+            let [owner_opt, name_opt, type_opt] = slots[idx];
+            let (Some(owner), Some(name)) = (owner_opt, name_opt) else {
+                continue;
             };
 
-            let type_class = (config.type_classifier)(type_text.unwrap_or(""));
+            let type_class = (config.type_classifier)(type_opt.unwrap_or(""));
 
             let start = m.captures[0].node.start_position();
             let end = m.captures[0].node.end_position();
@@ -83,14 +116,23 @@ pub fn extract_schema_fields(
                 name: pool.add(name),
                 type_class,
                 owner_class: pool.add(owner),
-                framework: String::from(config.framework),
+                framework: config.framework,
                 span,
             });
-            break 'configs;
+            break;
         }
     }
 
     out
+}
+
+/// Capture role for the dispatch map — maps a slot index to its semantic
+/// meaning within `SchemaFieldConfig`.
+#[derive(Clone, Copy)]
+enum CaptureRole {
+    Owner = 0,
+    Name = 1,
+    Type = 2,
 }
 
 /// Canonical type classifier for Python / SQLAlchemy naming conventions.
