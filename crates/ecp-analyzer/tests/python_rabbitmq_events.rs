@@ -5,15 +5,11 @@
 
 use ecp_analyzer::event_topic::{extract_event_topics, KAFKA_PYTHON, RABBITMQ_PYTHON};
 use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/python/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<ecp_core::analyzer::types::RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -28,16 +24,14 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
     let result = extract_event_topics(
         &tree,
         src.as_bytes(),
         &query,
         &[KAFKA_PYTHON, RABBITMQ_PYTHON],
         &imports,
-        &mut pool,
     );
-    (result, pool)
+    result
 }
 
 /// pika basic_publish with literal routing_key → Publish direction, topic="orders".
@@ -49,7 +43,7 @@ import pika
 def publish_order(data):
     channel.basic_publish(exchange='', routing_key='orders', body=data.encode())
 "#;
-    let (result, pool) = run(src, &["pika"]);
+    let result = run(src, &["pika"]);
     assert_eq!(
         result.len(),
         1,
@@ -58,8 +52,11 @@ def publish_order(data):
     );
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// pika basic_consume with literal queue → Subscribe direction, topic="orders".
@@ -71,7 +68,7 @@ import pika
 def consume_orders():
     channel.basic_consume(queue='orders', on_message_callback=callback, auto_ack=True)
 "#;
-    let (result, pool) = run(src, &["pika"]);
+    let result = run(src, &["pika"]);
     assert_eq!(
         result.len(),
         1,
@@ -80,8 +77,11 @@ def consume_orders():
     );
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// aio_pika async exchange.publish with literal routing_key → Publish direction.
@@ -96,7 +96,7 @@ async def send_payment(payload):
         routing_key='payments',
     )
 "#;
-    let (result, pool) = run(src, &["aio_pika"]);
+    let result = run(src, &["aio_pika"]);
     assert_eq!(
         result.len(),
         1,
@@ -105,8 +105,11 @@ async def send_payment(payload):
     );
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "payments");
 }
 
 /// kombu producer.publish with literal routing_key → Publish direction.
@@ -118,7 +121,7 @@ from kombu import Producer
 def emit_event(producer, body):
     producer.publish(body, routing_key='events', exchange='my_exchange')
 "#;
-    let (result, pool) = run(src, &["kombu"]);
+    let result = run(src, &["kombu"]);
     assert_eq!(
         result.len(),
         1,
@@ -127,8 +130,11 @@ def emit_event(producer, body):
     );
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "events");
 }
 
 /// Variable routing_key → no capture (no fabrication).
@@ -140,7 +146,7 @@ import pika
 def publish_dynamic(data, routing_key):
     channel.basic_publish(exchange='', routing_key=routing_key, body=data)
 "#;
-    let (result, _pool) = run(src, &["pika"]);
+    let result = run(src, &["pika"]);
     assert!(
         result.is_empty(),
         "variable routing_key must produce no RawEventTopic; got {:?}",
@@ -157,7 +163,7 @@ import json
 def publish():
     result = json.dumps({"routing_key": "orders"})
 "#;
-    let (result, _pool) = run(src, &["json"]);
+    let result = run(src, &["json"]);
     assert!(
         result.is_empty(),
         "non-rabbitmq import must produce nothing; got {:?}",
@@ -177,7 +183,7 @@ def publish_order(data):
 def consume_orders():
     channel.basic_consume(queue='orders', on_message_callback=callback)
 "#;
-    let (result, pool) = run(src, &["pika"]);
+    let result = run(src, &["pika"]);
     assert_eq!(
         result.len(),
         2,
@@ -194,13 +200,15 @@ def consume_orders():
     let pub_lit = publish
         .unwrap()
         .topic_literal
+        .as_deref()
         .expect("publish topic must be Some");
     let sub_lit = subscribe
         .unwrap()
         .topic_literal
+        .as_deref()
         .expect("subscribe topic must be Some");
-    assert_eq!(pool.resolve(&pub_lit), "orders");
-    assert_eq!(pool.resolve(&sub_lit), "orders");
+    assert_eq!(pub_lit, "orders");
+    assert_eq!(sub_lit, "orders");
 }
 
 /// Kafka import with KAFKA_PYTHON in the same config slice must not fire RabbitMQ patterns,
@@ -214,7 +222,7 @@ def publish(data):
     channel.basic_publish(exchange='', routing_key='orders', body=data)
 "#;
     // Only kafka import → RABBITMQ_PYTHON gate must stay closed.
-    let (result, pool) = run(src, &["kafka"]);
+    let result = run(src, &["kafka"]);
     // KAFKA_PYTHON will not match basic_publish (no "send" call), so result is empty.
     assert!(
         result.is_empty() || result.iter().all(|r| r.lib == FrameworkId::Kafka),
@@ -224,7 +232,7 @@ def publish(data):
             .map(|r| (
                 r.lib,
                 r.direction,
-                r.topic_literal.map(|t| pool.resolve(&t).to_string())
+                r.topic_literal.as_ref().map(|t| t.to_string())
             ))
             .collect::<Vec<_>>()
     );

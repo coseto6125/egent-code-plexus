@@ -5,16 +5,12 @@
 
 use ecp_analyzer::event_topic::{extract_event_topics, RABBITMQ_JAVA};
 use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/java/frameworks.scm");
 const QUERIES_SCM: &str = include_str!("../src/java/queries.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<ecp_core::analyzer::types::RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -33,16 +29,8 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[RABBITMQ_JAVA],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    let result = extract_event_topics(&tree, src.as_bytes(), &query, &[RABBITMQ_JAVA], &imports);
+    result
 }
 
 /// Spring: rabbitTemplate.convertAndSend(exchange, routingKey, payload) → Publish.
@@ -57,12 +45,15 @@ public class OrderService {
     }
 }
 "#;
-    let (result, pool) = run(src, &["org.springframework.amqp"]);
+    let result = run(src, &["org.springframework.amqp"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// Spring: @RabbitListener(queues = "orders") → Subscribe.
@@ -76,12 +67,15 @@ public class OrderConsumer {
     void handleOrder(Object msg) {}
 }
 "#;
-    let (result, pool) = run(src, &["org.springframework.amqp"]);
+    let result = run(src, &["org.springframework.amqp"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// Java AMQP client: channel.basicPublish(exchange, routingKey, ...) → Publish.
@@ -96,12 +90,15 @@ public class Publisher {
     }
 }
 "#;
-    let (result, pool) = run(src, &["com.rabbitmq.client"]);
+    let result = run(src, &["com.rabbitmq.client"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "payments");
 }
 
 /// Java AMQP client: channel.basicConsume(queue, ...) → Subscribe.
@@ -116,12 +113,15 @@ public class Consumer {
     }
 }
 "#;
-    let (result, pool) = run(src, &["com.rabbitmq.client"]);
+    let result = run(src, &["com.rabbitmq.client"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "notifications");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "notifications");
 }
 
 /// Variable routing key → no capture (no fabrication).
@@ -136,7 +136,7 @@ public class DynamicPublisher {
     }
 }
 "#;
-    let (result, _pool) = run(src, &["org.springframework.amqp"]);
+    let result = run(src, &["org.springframework.amqp"]);
     assert!(
         result.is_empty(),
         "variable routing_key must produce no RawEventTopic; got {:?}",
@@ -156,7 +156,7 @@ public class LogService {
     }
 }
 "#;
-    let (result, _pool) = run(src, &["java.util.logging"]);
+    let result = run(src, &["java.util.logging"]);
     assert!(
         result.is_empty(),
         "non-rabbitmq import must produce nothing; got {:?}",
@@ -179,7 +179,7 @@ public class Broker {
     }
 }
 "#;
-    let (result, pool) = run(src, &["com.rabbitmq.client"]);
+    let result = run(src, &["com.rabbitmq.client"]);
     assert_eq!(result.len(), 2, "expected 2 topics; got {:?}", result);
     let publish = result.iter().find(|r| r.direction == PubSub::Publish);
     let subscribe = result.iter().find(|r| r.direction == PubSub::Subscribe);
@@ -188,11 +188,13 @@ public class Broker {
     let pub_lit = publish
         .unwrap()
         .topic_literal
+        .as_deref()
         .expect("publish topic must be Some");
     let sub_lit = subscribe
         .unwrap()
         .topic_literal
+        .as_deref()
         .expect("subscribe topic must be Some");
-    assert_eq!(pool.resolve(&pub_lit), "events");
-    assert_eq!(pool.resolve(&sub_lit), "events");
+    assert_eq!(pub_lit, "events");
+    assert_eq!(sub_lit, "events");
 }

@@ -5,15 +5,11 @@
 
 use ecp_analyzer::event_topic::{extract_event_topics, RABBITMQ_GO};
 use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/go/queries.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<ecp_core::analyzer::types::RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -28,16 +24,8 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[RABBITMQ_GO],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    let result = extract_event_topics(&tree, src.as_bytes(), &query, &[RABBITMQ_GO], &imports);
+    result
 }
 
 /// streadway/amqp: channel.Publish(exchange, routingKey, ...) → Publish.
@@ -54,12 +42,15 @@ func publishOrder(ch *amqp.Channel, body []byte) error {
     })
 }
 "#;
-    let (result, pool) = run(src, &["streadway/amqp"]);
+    let result = run(src, &["streadway/amqp"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// streadway/amqp: channel.Consume(queue, ...) → Subscribe.
@@ -74,12 +65,15 @@ func consumeOrders(ch *amqp.Channel) (<-chan amqp.Delivery, error) {
     return ch.Consume("orders", "", true, false, false, false, nil)
 }
 "#;
-    let (result, pool) = run(src, &["streadway/amqp"]);
+    let result = run(src, &["streadway/amqp"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// rabbitmq/amqp091-go: channel.Publish with same API surface.
@@ -96,12 +90,15 @@ func sendNotification(ch *amqp.Channel, body []byte) error {
     })
 }
 "#;
-    let (result, pool) = run(src, &["rabbitmq/amqp091-go"]);
+    let result = run(src, &["rabbitmq/amqp091-go"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "email");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "email");
 }
 
 /// channel.Get(queue, ...) → Subscribe direction.
@@ -116,12 +113,15 @@ func pollQueue(ch *amqp.Channel) (amqp.Delivery, bool, error) {
     return ch.Get("task_queue", true)
 }
 "#;
-    let (result, pool) = run(src, &["streadway/amqp"]);
+    let result = run(src, &["streadway/amqp"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "task/queue");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "task/queue");
 }
 
 /// Variable routing key → no capture (no fabrication).
@@ -136,7 +136,7 @@ func publishDynamic(ch *amqp.Channel, routingKey string, body []byte) error {
     return ch.Publish("exchange", routingKey, false, false, amqp.Publishing{Body: body})
 }
 "#;
-    let (result, _pool) = run(src, &["streadway/amqp"]);
+    let result = run(src, &["streadway/amqp"]);
     assert!(
         result.is_empty(),
         "variable routing_key must produce no RawEventTopic; got {:?}",
@@ -157,7 +157,7 @@ func publishOrder() {
     fmt.Println("done")
 }
 "#;
-    let (result, _pool) = run(src, &["fmt"]);
+    let result = run(src, &["fmt"]);
     assert!(
         result.is_empty(),
         "non-rabbitmq import must produce nothing; got {:?}",
@@ -181,7 +181,7 @@ func receiveEvent(ch *amqp.Channel) (<-chan amqp.Delivery, error) {
     return ch.Consume("payments", "", true, false, false, false, nil)
 }
 "#;
-    let (result, pool) = run(src, &["streadway/amqp"]);
+    let result = run(src, &["streadway/amqp"]);
     assert_eq!(result.len(), 2, "expected 2 topics; got {:?}", result);
     let publish = result.iter().find(|r| r.direction == PubSub::Publish);
     let subscribe = result.iter().find(|r| r.direction == PubSub::Subscribe);
@@ -190,11 +190,13 @@ func receiveEvent(ch *amqp.Channel) (<-chan amqp.Delivery, error) {
     let pub_lit = publish
         .unwrap()
         .topic_literal
+        .as_deref()
         .expect("publish topic must be Some");
     let sub_lit = subscribe
         .unwrap()
         .topic_literal
+        .as_deref()
         .expect("subscribe topic must be Some");
-    assert_eq!(pool.resolve(&pub_lit), "payments");
-    assert_eq!(pool.resolve(&sub_lit), "payments");
+    assert_eq!(pub_lit, "payments");
+    assert_eq!(sub_lit, "payments");
 }

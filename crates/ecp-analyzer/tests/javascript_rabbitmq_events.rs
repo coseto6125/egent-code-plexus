@@ -5,16 +5,12 @@
 
 use ecp_analyzer::event_topic::{extract_event_topics, RABBITMQ_JS};
 use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/javascript/frameworks.scm");
 const QUERIES_SCM: &str = include_str!("../src/javascript/queries.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<ecp_core::analyzer::types::RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -33,16 +29,8 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[RABBITMQ_JS],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    let result = extract_event_topics(&tree, src.as_bytes(), &query, &[RABBITMQ_JS], &imports);
+    result
 }
 
 /// amqplib: channel.publish(exchange, routingKey, content) → Publish.
@@ -55,12 +43,15 @@ async function publishOrder(data) {
     await channel.publish('exchange', 'orders', Buffer.from(data));
 }
 "#;
-    let (result, pool) = run(src, &["amqplib"]);
+    let result = run(src, &["amqplib"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// amqplib: channel.consume('orders', handler) → Subscribe.
@@ -73,12 +64,15 @@ async function consumeOrders() {
     await channel.consume('orders', function(msg) { process(msg); });
 }
 "#;
-    let (result, pool) = run(src, &["amqplib"]);
+    let result = run(src, &["amqplib"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "orders");
 }
 
 /// amqplib: channel.assertQueue('payments') → Subscribe.
@@ -91,12 +85,15 @@ async function setupQueue() {
     await channel.assertQueue('payments', { durable: false });
 }
 "#;
-    let (result, pool) = run(src, &["amqplib"]);
+    let result = run(src, &["amqplib"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "payments");
 }
 
 /// amqp-connection-manager publish.
@@ -109,12 +106,15 @@ function sendNotification() {
     channel.publish('notifications', 'email', Buffer.from('hello'));
 }
 "#;
-    let (result, pool) = run(src, &["amqp-connection-manager"]);
+    let result = run(src, &["amqp-connection-manager"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "email");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "email");
 }
 
 /// Variable routing_key → no capture (no fabrication).
@@ -127,7 +127,7 @@ async function publishDynamic(key, data) {
     await channel.publish('exchange', key, Buffer.from(data));
 }
 "#;
-    let (result, _pool) = run(src, &["amqplib"]);
+    let result = run(src, &["amqplib"]);
     assert!(
         result.is_empty(),
         "variable routing_key must produce no RawEventTopic; got {:?}",
@@ -145,7 +145,7 @@ async function publishOrder(data) {
     await channel.publish('exchange', 'orders', Buffer.from(data));
 }
 "#;
-    let (result, _pool) = run(src, &["ioredis"]);
+    let result = run(src, &["ioredis"]);
     assert!(
         result.is_empty(),
         "non-rabbitmq import must produce nothing; got {:?}",
@@ -163,9 +163,12 @@ function directSend() {
     channel.sendToQueue('task_queue', Buffer.from('work'));
 }
 "#;
-    let (result, pool) = run(src, &["amqplib"]);
+    let result = run(src, &["amqplib"]);
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "task/queue");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
+    assert_eq!(lit, "task/queue");
 }
