@@ -21,6 +21,9 @@ pub mod redis_python;
 pub mod redis_rust;
 pub mod redis_ts;
 pub mod sqs;
+pub mod sqs_js;
+pub mod sqs_python;
+pub mod sqs_ts;
 
 pub use celery_python::CELERY_PYTHON;
 pub use config::EventTopicConfig;
@@ -44,3 +47,6 @@ pub use redis_python::REDIS_PYTHON;
 pub use redis_rust::REDIS_RUST;
 pub use redis_ts::REDIS_TS;
 pub use sqs::{SQS_GO, SQS_JAVA, SQS_RUST};
+pub use sqs_js::SQS_JS;
+pub use sqs_python::SQS_PYTHON;
+pub use sqs_ts::SQS_TS;

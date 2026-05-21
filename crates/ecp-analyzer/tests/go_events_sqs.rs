@@ -28,7 +28,7 @@ fn run(
         .iter()
         .map(|s| RawImport {
             source: (*s).to_string(),
-            imported_name: s.split('/').last().unwrap_or(s).to_string(),
+            imported_name: s.rsplit('/').next().unwrap_or(s).to_string(),
             alias: None,
             binding_kind: None,
         })

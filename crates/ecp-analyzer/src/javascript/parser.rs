@@ -541,6 +541,7 @@ impl LanguageProvider for JavaScriptProvider {
                     crate::event_topic::REDIS_JS,
                     crate::event_topic::KAFKA_NODE,
                     crate::event_topic::RABBITMQ_JS,
+                    crate::event_topic::SQS_JS,
                 ],
                 &imports,
             );
