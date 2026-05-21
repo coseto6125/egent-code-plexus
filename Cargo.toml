@@ -58,3 +58,15 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Test profile — light optimization (opt-level=1) instead of the default
+# debug build. tree-sitter parse + rkyv archive walks are alloc / branch
+# heavy; unoptimized code on slow Windows CI runners pushed
+# `generous_budget_completes_large_source` past its 1.5s Windows budget
+# (observed 1.759s). opt-level=1 keeps debug info and codegen-units at
+# default, but enables basic codegen optimisations — a one-time +20-30%
+# test-binary build cost in exchange for noticeably faster test runtime
+# (single-test wins compound across the 2 500+ test suite, with Windows
+# benefiting most because its baseline is already alloc-bound).
+[profile.test]
+opt-level = 1
