@@ -625,7 +625,7 @@ impl LanguageProvider for GoProvider {
                 &tree,
                 source,
                 &self.query,
-                &[crate::event_topic::REDIS_GO],
+                &[crate::event_topic::REDIS_GO, crate::event_topic::KAFKA_GO],
                 &imports,
                 &mut pool,
             );
