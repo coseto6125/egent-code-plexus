@@ -547,7 +547,11 @@ impl LanguageProvider for TypeScriptProvider {
                 &tree,
                 source,
                 &self.query,
-                &[crate::event_topic::REDIS_TS, crate::event_topic::KAFKA_NODE],
+                &[
+                    crate::event_topic::REDIS_TS,
+                    crate::event_topic::KAFKA_NODE,
+                    crate::event_topic::RABBITMQ_TS,
+                ],
                 &imports,
                 &mut pool,
             );
