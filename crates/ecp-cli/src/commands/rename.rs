@@ -253,14 +253,18 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     // `ast_target_name` / `ast_new_name` are the bare identifiers used for
     // tree-sitter search and byte-level rewrite.
     // "Foo.validate" → ast_target_name="validate"; "Foo.check" → ast_new_name="check"
+    // "pkg.Foo.validate" → ast_target_name="validate" (split on LAST `.` so the
+    // bare name on the right matches `Node.name`, which is always bare).
     // Bare names pass through unchanged.
+    // TODO(#284 follow-up): migrate to shared `symbol_id::split_fqn_target`
+    // once that PR lands so rename + inspect + impact share one FQN parser.
     let ast_target_name: &str = target_symbol
-        .find('.')
-        .map(|dot| &target_symbol[dot + 1..])
+        .rsplit_once('.')
+        .map(|(_, name)| name)
         .unwrap_or(&target_symbol);
     let ast_new_name: &str = target_new_name
-        .find('.')
-        .map(|dot| &target_new_name[dot + 1..])
+        .rsplit_once('.')
+        .map(|(_, name)| name)
         .unwrap_or(&target_new_name);
 
     // --- Pre-flight collision detection ---
@@ -281,17 +285,16 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
     // Stage 1: locate target node + collect affected files.
     //
-    // Parse `target_symbol` for owner-class qualification:
-    //   "Foo.validate" → match nodes where owner_class=="Foo" AND name=="validate"
-    //   "validate"     → match nodes where owner_class is empty (top-level only)
+    // Parse `target_symbol` for owner-class qualification (split on LAST `.`):
+    //   "Foo.validate"     → owner="Foo",     name="validate"
+    //   "pkg.Foo.validate" → owner="pkg.Foo", name="validate"
+    //   "validate"         → bare name → match top-level only (owner_class empty)
     //
     // This isolates Foo.validate from Bar.validate (T1-11 accuracy fix).
     // Bare names no longer match class methods — they resolve to module-level
     // symbols only.  Callers wanting a class method must use "ClassName.method".
 
-    let target_indices: Vec<usize> = if let Some(dot) = target_symbol.find('.') {
-        let owner = &target_symbol[..dot];
-        let name = &target_symbol[dot + 1..];
+    let target_indices: Vec<usize> = if let Some((owner, name)) = target_symbol.rsplit_once('.') {
         let owner_len = owner.len() as u32;
         graph
             .nodes
