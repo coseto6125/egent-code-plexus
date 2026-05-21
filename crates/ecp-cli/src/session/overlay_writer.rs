@@ -17,16 +17,58 @@
 #![allow(dead_code)]
 
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+use ecp_core::analyzer::types::{LocalGraph, RawEventTopic, RawSchemaField, RawTxScope};
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file};
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
 use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use rayon::prelude::*;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+
+/// A single symbol span produced by `parse_to_fragment`.
+///
+/// Mirrors the shape emitted by full-reindex: `span` is `(start_row, start_col,
+/// end_row, end_col)` — identical to `RawNode.span` so the T7-7 parity gate
+/// can do a direct comparison between incremental and full-index paths.
+///
+/// `schema_fields`, `event_topics`, `tx_scopes` carry the T0-2 side-data vectors
+/// so the struct shape aligns with full-reindex output from day one; the Phase 3
+/// detectors fill them — they are empty here.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct Fragment {
+    pub name: String,
+    pub kind: NodeKind,
+    /// `(start_row, start_col, end_row, end_col)` — 0-based, matches `RawNode.span`.
+    pub span: (u32, u32, u32, u32),
+    pub schema_fields: Vec<RawSchemaField>,
+    pub event_topics: Vec<RawEventTopic>,
+    pub tx_scopes: Vec<RawTxScope>,
+}
+
+/// Convert the nodes in a `LocalGraph` into `Fragment` slices.
+///
+/// Exposed for tests: callers that need to inspect fragment shape without
+/// going through rkyv serialisation/deserialisation call this directly.
+pub fn fragments_from_local_graph(graph: &LocalGraph) -> Vec<Fragment> {
+    graph
+        .nodes
+        .iter()
+        .map(|n| Fragment {
+            name: n.name.clone(),
+            kind: n.kind,
+            span: n.span,
+            schema_fields: vec![],
+            event_topics: vec![],
+            tx_scopes: vec![],
+        })
+        .collect()
+}
 
 pub struct FragmentInput {
     pub rel_path: String,
@@ -161,8 +203,14 @@ fn write_fragment_file(
 }
 
 fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
-    let _ = (rel_path, content);
-    Ok(vec![])
+    let path = std::path::Path::new(rel_path);
+    let graph = pipeline()
+        .parse_file_raw(path, content)
+        .map_err(io::Error::other)?;
+    let fragments = fragments_from_local_graph(&graph);
+    rkyv::to_bytes::<rkyv::rancor::Error>(&fragments)
+        .map(|v| v.into_vec())
+        .map_err(io::Error::other)
 }
 
 fn content_hash_hex(bytes: &[u8]) -> String {
