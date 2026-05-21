@@ -17,11 +17,13 @@
 //! - return_type: always empty (Ruby has no explicit return type annotation).
 //! - decorators: always empty Vec (no decorator syntax in stock Ruby).
 
+use super::{extract_with, node_text, subtree_contains_kind, ts_span};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
-use ecp_core::graph::{FileCategory, FunctionMeta, NodeKind};
+use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
 
-type FnSpan<'a> = ((u32, u32, u32, u32), &'a RawNode);
+/// Both `method` (instance) and `singleton_method` (`def self.foo`) map to Method nodes.
+const RUBY_FN_KINDS: &[&str] = &["method", "singleton_method"];
 
 pub fn extract(
     root: Node<'_>,
@@ -29,63 +31,14 @@ pub fn extract(
     nodes: &[RawNode],
     file_category: FileCategory,
 ) -> Vec<RawFunctionMeta> {
-    let fn_spans: Vec<_> = nodes
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            )
-        })
-        .map(|n| (n.span, n))
-        .collect();
-
-    if fn_spans.is_empty() {
-        return vec![];
-    }
-
-    let mut out: Vec<RawFunctionMeta> = Vec::with_capacity(fn_spans.len());
-    collect_fn_nodes(root, source, &fn_spans, file_category, &mut out);
-    out
-}
-
-fn ts_span(n: &Node<'_>) -> (u32, u32, u32, u32) {
-    let s = n.start_position();
-    let e = n.end_position();
-    (s.row as u32, s.column as u32, e.row as u32, e.column as u32)
-}
-
-fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
-    std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("")
-}
-
-fn collect_fn_nodes<'a>(
-    node: Node<'a>,
-    source: &[u8],
-    fn_spans: &[FnSpan<'a>],
-    file_category: FileCategory,
-    out: &mut Vec<RawFunctionMeta>,
-) {
-    let k = node.kind();
-    // Both `method` (instance) and `singleton_method` (`def self.foo`) map to Method nodes.
-    if k == "method" || k == "singleton_method" {
-        let span = ts_span(&node);
-        if let Some((_, raw)) = fn_spans.iter().find(|(s, _)| *s == span) {
-            if let Some(meta) = extract_one(&node, source, raw, file_category) {
-                out.push(meta);
-            }
-        }
-    }
-
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            collect_fn_nodes(cursor.node(), source, fn_spans, file_category, out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
+    extract_with(
+        root,
+        source,
+        nodes,
+        file_category,
+        RUBY_FN_KINDS,
+        extract_one,
+    )
 }
 
 fn extract_one(
@@ -224,25 +177,6 @@ fn infer_visibility(fn_node: &Node<'_>, source: &[u8]) -> u16 {
         }
     }
     last_vis
-}
-
-/// Recursively check whether a subtree contains a node of the given kind.
-fn subtree_contains_kind(node: Node<'_>, kind: &str) -> bool {
-    if node.kind() == kind {
-        return true;
-    }
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            if subtree_contains_kind(cursor.node(), kind) {
-                return true;
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    false
 }
 
 /// Extract flat `[name1, "", name2, "", ...]` (no type annotations in stock Ruby).
