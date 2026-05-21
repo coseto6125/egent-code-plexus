@@ -167,6 +167,8 @@ fn synthetic_graph_with_mirrors_field() -> Vec<u8> {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     };
 
     rkyv::to_bytes::<Error>(&graph)
