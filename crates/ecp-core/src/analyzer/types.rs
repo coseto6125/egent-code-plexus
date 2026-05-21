@@ -237,6 +237,9 @@ pub struct BlindSpot {
 pub struct RawCallMeta {
     /// Name of the enclosing `RawNode` (caller) that owns the call.
     pub caller_name: String,
+    /// Span of the enclosing caller node. Combined with `call_index` to
+    /// uniquely identify same-name functions/methods in one file.
+    pub caller_span: (u32, u32, u32, u32),
     /// Zero-based index into `RawNode.calls` for that caller.
     pub call_index: u32,
     /// Packed flags — same bit layout as `graph::CallMeta::flags`.

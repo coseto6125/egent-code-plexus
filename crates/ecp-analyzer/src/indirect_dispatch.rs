@@ -56,6 +56,7 @@ fn record_indirect(
     *count += 1;
     out.push(RawCallMeta {
         caller_name: nodes[caller_idx].name.clone(),
+        caller_span: nodes[caller_idx].span,
         call_index,
         flags,
         dispatch_type: dispatch_type.to_string(),

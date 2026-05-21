@@ -175,6 +175,21 @@ use std::collections::HashMap;
 /// `pending_call_metas` entries are `(pre_sort_edge_idx, flags, dispatch_type)`.
 type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CallMetaKey {
+    caller_span: (u32, u32, u32, u32),
+    call_index: u32,
+}
+
+impl CallMetaKey {
+    const fn new(caller_span: (u32, u32, u32, u32), call_index: u32) -> Self {
+        Self {
+            caller_span,
+            call_index,
+        }
+    }
+}
+
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -833,16 +848,16 @@ impl GraphBuilder {
         let symbol_table_ref = &symbol_table;
         let reason_cache_ref = &reason_cache;
 
-        // Pre-build per-graph indirect-call lookup: maps "caller_name:call_index" → (flags, dispatch_type).
-        // String key avoids lifetime complexity when sharing across rayon workers.
-        let indirect_lookups: Vec<FxHashMap<String, (u8, String)>> = local_graphs
+        // Pre-build per-graph indirect-call lookup keyed by caller span and
+        // call index so same-name functions/methods in one file do not collide.
+        let indirect_lookups: Vec<FxHashMap<CallMetaKey, (u8, String)>> = local_graphs
             .iter()
             .map(|lg| {
                 lg.call_metas
                     .iter()
                     .map(|m| {
                         (
-                            format!("{}:{}", m.caller_name, m.call_index),
+                            CallMetaKey::new(m.caller_span, m.call_index),
                             (m.flags, m.dispatch_type.clone()),
                         )
                     })
@@ -1392,11 +1407,12 @@ fn enclosing_class_heritage<'a>(
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
 ///
-/// `indirect_lookup` maps `(caller_name, call_index)` → `(flags, dispatch_type_string)`
-/// for calls that are non-direct. When a Calls edge is emitted from such a
-/// call site, a corresponding entry is pushed to `pending_call_metas` using the
-/// pre-sort edge index. The caller is responsible for converting pre-sort indices
-/// to final sorted indices before placing entries in `ZeroCopyGraph.call_metas`.
+/// `indirect_lookup` maps `(caller_span, call_index)` to
+/// `(flags, dispatch_type_string)` for calls that are non-direct. When a Calls
+/// edge is emitted from such a call site, a corresponding entry is pushed to
+/// `pending_call_metas` using the pre-sort edge index. The caller is responsible
+/// for converting pre-sort indices to final sorted indices before placing
+/// entries in `ZeroCopyGraph.call_metas`.
 #[allow(clippy::too_many_arguments)]
 fn pass2_emit_node_edges(
     resolver: &Resolver<'_>,
@@ -1407,7 +1423,7 @@ fn pass2_emit_node_edges(
     reason_type: StrRef,
     reason_call: StrRef,
     edges: &mut Vec<Edge>,
-    indirect_lookup: &FxHashMap<String, (u8, String)>,
+    indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
 ) {
     for base in &raw_node.heritage {
@@ -1430,7 +1446,7 @@ fn pass2_emit_node_edges(
 
     let call_heritage = enclosing_class_heritage(raw_node, local_graph);
     for (call_idx, callee) in raw_node.calls.iter().enumerate() {
-        let lookup_key = format!("{}:{}", raw_node.name, call_idx);
+        let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
         let targets = resolver.resolve_symbol_with_heritage(
             &local_graph.file_path,
