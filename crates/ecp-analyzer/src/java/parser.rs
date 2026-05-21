@@ -433,6 +433,7 @@ impl LanguageProvider for JavaProvider {
                 &[
                     crate::event_topic::REDIS_JAVA,
                     crate::event_topic::KAFKA_JAVA,
+                    crate::event_topic::RABBITMQ_JAVA,
                 ],
                 &imports,
                 &mut pool,

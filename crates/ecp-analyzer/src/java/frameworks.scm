@@ -1,4 +1,70 @@
-;; Framework-aware queries for Java (Tier 2: Spring subset + Redis pub/sub).
+;; Framework-aware queries for Java (Tier 2: Spring subset + Redis pub/sub + RabbitMQ).
+
+;; ---- RabbitMQ Java (T5-11) ----
+;; Covers Spring AMQP (rabbitTemplate.convertAndSend / @RabbitListener)
+;; and the plain Java AMQP client (channel.basicPublish / channel.basicConsume).
+;; Import gate (`org.springframework.amqp`, `com.rabbitmq.client`) is enforced
+;; by RABBITMQ_JAVA.import_gate — these queries fire on syntax alone.
+;;
+;; `amqp.direction` captures the method/annotation name so
+;; `classify_amqp_direction` can resolve Publish vs Subscribe.
+;;
+;; Topic literal semantics:
+;;   convertAndSend(exchange, routingKey, payload) → routingKey = 2nd positional.
+;;   basicPublish(exchange, routingKey, props, body) → routingKey = 2nd positional.
+;;   basicConsume(queue, ...) → queue = 1st positional.
+;;   @RabbitListener(queues = "orders") → annotation attribute string literal.
+
+;; Spring: rabbitTemplate.convertAndSend(exchange, routingKey, payload)
+;; Captures the routingKey (2nd positional string_literal arg) as topic.
+(method_declaration
+  name: (identifier) @amqp.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @amqp.direction
+        (#eq? @amqp.direction "convertAndSend")
+        arguments: (argument_list
+          . (_)
+          . (string_literal) @amqp.topic)))))
+
+;; Spring: @RabbitListener(queues = "orders") on a method.
+;; Captures the queue string literal from the annotation attribute.
+(method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @amqp.direction
+      (#eq? @amqp.direction "RabbitListener")
+      arguments: (annotation_argument_list
+        (element_value_pair
+          key: (identifier) @_k (#eq? @_k "queues")
+          value: (string_literal) @amqp.topic))))
+  name: (identifier) @amqp.fn)
+
+;; Java AMQP client: channel.basicPublish(exchange, routingKey, props, body)
+;; Captures the routingKey (2nd positional string_literal arg) as topic.
+(method_declaration
+  name: (identifier) @amqp.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @amqp.direction
+        (#eq? @amqp.direction "basicPublish")
+        arguments: (argument_list
+          . (_)
+          . (string_literal) @amqp.topic)))))
+
+;; Java AMQP client: channel.basicConsume(queue, autoAck, consumer)
+;; Captures the queue (1st positional string_literal arg) as topic.
+(method_declaration
+  name: (identifier) @amqp.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @amqp.direction
+        (#eq? @amqp.direction "basicConsume")
+        arguments: (argument_list
+          . (string_literal) @amqp.topic)))))
 
 ;; Spring @Autowired field injection — capture enclosing class name and
 ;; the injected field's type. Confidence 0.8, reason "spring-autowired".

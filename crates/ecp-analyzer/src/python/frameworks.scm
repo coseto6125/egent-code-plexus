@@ -401,6 +401,88 @@
           arguments: (argument_list
             . (string) @redis.topic))))))
 
+;; ---- RabbitMQ Python (T5-8) ----
+;; Covers pika (sync AMQP), aio_pika (async AMQP), and kombu.
+;; Import gate (`pika`, `aio_pika`, `kombu`) is enforced by
+;; RABBITMQ_PYTHON.import_gate — these queries fire on syntax alone.
+;;
+;; `amqp.direction` binds the method identifier so `classify_amqp_direction`
+;; can resolve Publish vs Subscribe direction.
+;;
+;; Topic literal semantics (documented in rabbitmq_python.rs):
+;;   Publish → `routing_key` kwarg value (AMQP routing unit).
+;;   Subscribe → `queue` kwarg / positional value (subscriber binding point).
+;; The queue/exchange topology distinction cannot be expressed in the current
+;; `RawEventTopic` schema; deferred to schema-migration PR.
+;;
+;; Anchored to `function_definition` to co-capture enclosing function name.
+;; Module-level calls are omitted — same rationale as Kafka (T5-2).
+
+;; pika (sync): channel.basic_publish(exchange=..., routing_key='orders', body=...)
+;; Captures routing_key kwarg string literal as topic.
+(function_definition
+  name: (identifier) @amqp.fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          attribute: (identifier) @amqp.direction (#eq? @amqp.direction "basic_publish"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @_rk (#eq? @_rk "routing_key")
+            value: (string) @amqp.topic))))))
+
+;; pika (sync): channel.basic_consume(queue='orders', on_message_callback=cb)
+;; Captures queue kwarg string literal as topic.
+(function_definition
+  name: (identifier) @amqp.fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          attribute: (identifier) @amqp.direction (#eq? @amqp.direction "basic_consume"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @_q (#eq? @_q "queue")
+            value: (string) @amqp.topic))))))
+
+;; aio_pika (async): await exchange.publish(message, routing_key='orders')
+;; Captures routing_key kwarg string literal as topic.
+(function_definition
+  name: (identifier) @amqp.fn
+  body: (block
+    (_
+      (await
+        (call
+          function: (attribute
+            attribute: (identifier) @amqp.direction (#eq? @amqp.direction "publish"))
+          arguments: (argument_list
+            (keyword_argument
+              name: (identifier) @_rk2 (#eq? @_rk2 "routing_key")
+              value: (string) @amqp.topic)))))))
+
+;; aio_pika (async): await queue.consume(callback)
+;; Positional first arg is the callback — topic is the queue object itself.
+;; We cannot capture a string literal from the queue variable, so we anchor
+;; on the method name only; topic string must come from queue binding context.
+;; Pattern omitted: queue.consume() takes no string literal argument — topic
+;; resolution requires queue-name lookup which is out-of-scope for literal-only capture.
+;; Documented as T5-8-followup: needs `kind` field + queue-name resolver.
+
+;; kombu: producer.publish(body, routing_key='orders', exchange='x')
+;; Captures routing_key kwarg string literal as topic.
+(function_definition
+  name: (identifier) @amqp.fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          attribute: (identifier) @amqp.direction (#eq? @amqp.direction "publish"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @_rk3 (#eq? @_rk3 "routing_key")
+            value: (string) @amqp.topic))))))
+
 ;; ---- SQLAlchemy declarative ORM (T4-3) ----
 ;; Idiom A — classic Column() declarative (1.x and 2.x compatible).
 ;; Captures: owner class name, field identifier, first positional arg of Column()

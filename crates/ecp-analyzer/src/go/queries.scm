@@ -141,3 +141,38 @@
     (identifier)? @route.handler
   )
 ) @route.call
+
+;; ---- RabbitMQ Go (T5-12) ----
+;; Covers streadway/amqp and rabbitmq/amqp091-go (identical API surface).
+;; Import gate (`streadway/amqp`, `rabbitmq/amqp091-go`) enforced by
+;; RABBITMQ_GO.import_gate.
+;;
+;; `amqp.direction` captures the method name:
+;;   channel.Publish(exchange, routingKey, ...) → routingKey = 2nd positional.
+;;   channel.Consume(queue, ...) / channel.Get(queue, ...) → queue = 1st positional.
+;;
+;; Flat call_expression patterns (no function_declaration anchor) — Go's block
+;; wraps statements in a statement_list node, so anchoring to function_declaration
+;; body children would require matching statement_list indirection.
+;; Import gate provides isolation; function name is not captured.
+;; Variable args → no capture (interpreted_string_literal required).
+
+;; channel.Publish(exchange, routingKey, mandatory, immediate, msg)
+;; Captures routingKey (2nd interpreted_string_literal) as topic.
+(call_expression
+  function: (selector_expression
+    field: (field_identifier) @amqp.direction
+    (#eq? @amqp.direction "Publish"))
+  arguments: (argument_list
+    . (_)
+    . (interpreted_string_literal) @amqp.topic))
+
+;; channel.Consume(queue, consumer, autoAck, exclusive, noLocal, noWait, args)
+;; channel.Get(queue, noWait)
+;; Captures queue (1st interpreted_string_literal) as topic.
+(call_expression
+  function: (selector_expression
+    field: (field_identifier) @amqp.direction
+    (#match? @amqp.direction "^(Consume|Get)$"))
+  arguments: (argument_list
+    . (interpreted_string_literal) @amqp.topic))

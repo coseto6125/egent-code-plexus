@@ -1,4 +1,37 @@
-;; Framework-aware queries for Rust (Tier 1: Axum/Actix routes + Redis pub/sub).
+;; Framework-aware queries for Rust (Tier 1: Axum/Actix routes + Redis pub/sub + RabbitMQ).
+
+;; ---- RabbitMQ Rust (T5-13) ----
+;; Covers lapin (async) and amiquip (sync-friendly).
+;; Import gate (`lapin`, `amiquip`) enforced by RABBITMQ_RUST.import_gate.
+;;
+;; `amqp.direction` captures the method name:
+;;   channel.basic_publish(exchange, routing_key, ...) → routing_key = 2nd positional.
+;;   channel.basic_consume(queue, ...) / channel.basic_get(queue, ...) → queue = 1st positional.
+;;
+;; Flat call_expression patterns (no function_item anchor) — lapin calls are
+;; typically chained as `.basic_publish(...).await.unwrap()`, placing the
+;; basic_publish call_expression inside an await_expression > field_expression
+;; chain rather than as a direct block child. Import gate provides isolation.
+;; Variable args → no capture (string_literal required).
+
+;; basic_publish(exchange, routing_key, options, payload, properties)
+;; Captures routing_key (2nd positional string_literal) as topic.
+(call_expression
+  function: (field_expression
+    field: (field_identifier) @amqp.direction
+    (#eq? @amqp.direction "basic_publish"))
+  arguments: (arguments
+    . (_)
+    . (string_literal) @amqp.topic))
+
+;; basic_consume(queue, consumer_tag, options, fields) / basic_get(queue, no_ack)
+;; Captures queue (1st positional string_literal) as topic.
+(call_expression
+  function: (field_expression
+    field: (field_identifier) @amqp.direction
+    (#match? @amqp.direction "^(basic_consume|basic_get)$"))
+  arguments: (arguments
+    . (string_literal) @amqp.topic))
 
 ;; ---- Kafka Rust (T5-7) ----
 ;; Covers rdkafka: FutureRecord::to("topic") producer and
