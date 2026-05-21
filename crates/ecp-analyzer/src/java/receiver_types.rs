@@ -196,7 +196,16 @@ fn java_callee(
             "super" => enclosing_superclass(nodes, line),
             "identifier" => {
                 let var = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
-                locals.lookup(line, var).map(|t| t.to_string())
+                // When the local-type map has the variable, resolve to declared type.
+                // When it misses (e.g. static class name like `Util`), keep the
+                // identifier as-is so Tier 2.5 qualifier-scoped lookup can match
+                // `Util.helper` against the definition node.
+                Some(
+                    locals
+                        .lookup(line, var)
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| var.to_string()),
+                )
             }
             _ => None,
         }
