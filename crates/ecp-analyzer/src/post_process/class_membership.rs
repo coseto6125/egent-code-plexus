@@ -5,11 +5,9 @@
 //! - **Pass 1** — span containment, covers 30 languages whose class body
 //!   syntactically encloses its methods/properties (TS / Ruby / Java / PHP /
 //!   Dart / Swift / C++ / C# / Python / etc.).
-//! - **Pass 2** — Rust `impl` bridge. Rust splits the struct/enum declaration
-//!   and its `impl` blocks, so methods don't sit inside the Class span. The
-//!   Rust parser stamps each impl method's owning type into `RawNode.heritage`
-//!   as `__impl_target__:Foo`; this pass reads that sentinel and emits the
-//!   matching `HasMethod` edge.
+//! - **Pass 2** — parser-direct `owner_class` bridge. All parsers (since T1-1)
+//!   stamp each method's owning type directly into `RawNode.owner_class`. This
+//!   pass reads that field and emits the matching `HasMethod` edge.
 //!
 //! Emission convention is **B.1** (5-agent design review): a single edge
 //! type `HasMethod` regardless of target kind (`Method` or `Function`). This
@@ -23,12 +21,6 @@ use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::{Edge, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
-
-/// Sentinel prefix the Rust parser writes into `RawNode.heritage` for
-/// methods defined inside an `impl` block. Carries the impl target's type
-/// name (e.g. `__impl_target__:Resolver`). Post-process strips the prefix
-/// and uses the suffix as the Class name to bridge struct ↔ impl.
-pub const IMPL_TARGET_PREFIX: &str = "__impl_target__:";
 
 /// Emit `HasMethod` / `HasProperty` edges by walking the raw per-file
 /// `LocalGraph`s and resolving names back to node indices via `SymbolTable`.
@@ -156,18 +148,13 @@ fn emit_pass1_span(
     emitted
 }
 
-/// Pass 2 — parser-direct owner_class bridge (and legacy `__impl_target__:` fallback).
+/// Pass 2 — parser-direct owner_class bridge.
 ///
-/// Primary: reads `RawNode.owner_class` set directly by each language parser
+/// Reads `RawNode.owner_class` set directly by each language parser
 /// (Rust uses impl_map; Go uses recv_map; all others use span containment
 /// within parse_file). Emits `HasMethod` / `HasProperty` for members whose
 /// owning type's span does NOT contain the member's span — i.e., cases where
 /// Pass 1 span containment would miss (Rust impl blocks, Go receiver methods).
-///
-/// Legacy fallback: also accepts the `__impl_target__:Foo` heritage sentinel
-/// written by older cache entries that predate the owner_class field, so a
-/// `~/.ecp/graph.bin` from before this version still produces correct edges
-/// without a forced reindex.
 ///
 /// Skip emission when Pass 1 already covered the link — checked by
 /// span containment: if the member's span lies inside any Class span in
@@ -190,57 +177,43 @@ fn emit_pass2_rust_impl(
             continue;
         }
 
-        // Collect candidate class names from both sources. Dedup is not
-        // necessary — emit_single_edge guards against duplicates via span check.
-        let mut class_name_candidates: Vec<&str> = Vec::new();
+        let Some(ref class_name) = member.owner_class else {
+            continue;
+        };
 
-        // Primary: owner_class field set by the parser.
-        if let Some(ref oc) = member.owner_class {
-            class_name_candidates.push(oc.as_str());
+        // Skip if Pass 1 already emitted via span containment.
+        let already_via_span = classes_by_name
+            .get(class_name.as_str())
+            .map(|spans| spans.iter().any(|s| span_contains(*s, member.span)))
+            .unwrap_or(false);
+        if already_via_span {
+            continue;
         }
 
-        // Legacy: __impl_target__: heritage sentinel from pre-T1-1 cache entries.
-        for tag in &member.heritage {
-            if let Some(name) = tag.strip_prefix(IMPL_TARGET_PREFIX) {
-                class_name_candidates.push(name);
-            }
+        let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
+            continue;
+        };
+        let Some(member_idx) = symbol_table.lookup_in_file(path_str, &member.name) else {
+            continue;
+        };
+        if class_idx == member_idx {
+            continue;
         }
 
-        for class_name in class_name_candidates {
-            // Skip if Pass 1 already emitted via span containment.
-            let already_via_span = classes_by_name
-                .get(class_name)
-                .map(|spans| spans.iter().any(|s| span_contains(*s, member.span)))
-                .unwrap_or(false);
-            if already_via_span {
-                continue;
-            }
+        let rel_type = if matches!(member.kind, NodeKind::Property) {
+            RelType::HasProperty
+        } else {
+            RelType::HasMethod
+        };
 
-            let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
-                continue;
-            };
-            let Some(member_idx) = symbol_table.lookup_in_file(path_str, &member.name) else {
-                continue;
-            };
-            if class_idx == member_idx {
-                continue;
-            }
-
-            let rel_type = if matches!(member.kind, NodeKind::Property) {
-                RelType::HasProperty
-            } else {
-                RelType::HasMethod
-            };
-
-            edges_out.push(Edge {
-                source: class_idx,
-                target: member_idx,
-                rel_type,
-                confidence: 1.0,
-                reason,
-            });
-            emitted += 1;
-        }
+        edges_out.push(Edge {
+            source: class_idx,
+            target: member_idx,
+            rel_type,
+            confidence: 1.0,
+            reason,
+        });
+        emitted += 1;
     }
 
     emitted
@@ -267,22 +240,22 @@ mod tests {
         }
     }
 
-    fn raw_with_heritage(
+    fn raw_with_owner_class(
         name: &str,
         kind: NodeKind,
         span: (u32, u32, u32, u32),
-        heritage: Vec<String>,
+        owner_class: &str,
     ) -> RawNode {
         RawNode {
             name: name.to_string(),
             kind,
             span,
             is_exported: false,
-            heritage,
+            heritage: Vec::new(),
             type_annotation: None,
             decorators: Vec::new(),
             calls: Vec::new(),
-            owner_class: None,
+            owner_class: Some(owner_class.to_string()),
             content_hash: 0,
         }
     }
@@ -417,17 +390,12 @@ mod tests {
     }
 
     #[test]
-    fn rust_inherent_impl_via_impl_map() {
+    fn rust_inherent_impl_via_owner_class() {
         // struct Foo (1..1) — single line decl
-        // fn new (5..7) heritage=__impl_target__:Foo, kind=Function
+        // fn new (5..7) owner_class="Foo", kind=Function
         let nodes = vec![
             raw("Foo", NodeKind::Class, (1, 0, 1, 12)),
-            raw_with_heritage(
-                "new",
-                NodeKind::Function,
-                (5, 4, 7, 4),
-                vec!["__impl_target__:Foo".into()],
-            ),
+            raw_with_owner_class("new", NodeKind::Function, (5, 4, 7, 4), "Foo"),
         ];
         let edges = run(vec![lg("foo.rs", nodes)]);
         assert_eq!(edges.len(), 1);
@@ -437,15 +405,10 @@ mod tests {
     }
 
     #[test]
-    fn rust_trait_impl_via_impl_map() {
+    fn rust_trait_impl_via_owner_class() {
         let nodes = vec![
             raw("Foo", NodeKind::Class, (1, 0, 1, 12)),
-            raw_with_heritage(
-                "fmt",
-                NodeKind::Method,
-                (5, 4, 7, 4),
-                vec!["__impl_target__:Foo".into()],
-            ),
+            raw_with_owner_class("fmt", NodeKind::Method, (5, 4, 7, 4), "Foo"),
         ];
         let edges = run(vec![lg("foo.rs", nodes)]);
         assert_eq!(edges.len(), 1);
@@ -490,16 +453,11 @@ mod tests {
 
     #[test]
     fn rust_pass2_skips_when_pass1_covered() {
-        // If a Class's span DOES contain the method's span AND heritage has
-        // __impl_target__, Pass 1 emits and Pass 2 must skip (no duplicate).
+        // If a Class's span DOES contain the method's span AND owner_class is set,
+        // Pass 1 emits and Pass 2 must skip (no duplicate).
         let nodes = vec![
             raw("Foo", NodeKind::Class, (1, 0, 10, 0)),
-            raw_with_heritage(
-                "bar",
-                NodeKind::Method,
-                (3, 4, 5, 4),
-                vec!["__impl_target__:Foo".into()],
-            ),
+            raw_with_owner_class("bar", NodeKind::Method, (3, 4, 5, 4), "Foo"),
         ];
         let edges = run(vec![lg("foo.rs", nodes)]);
         assert_eq!(edges.len(), 1, "must not double-emit");

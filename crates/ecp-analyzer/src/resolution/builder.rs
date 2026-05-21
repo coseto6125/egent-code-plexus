@@ -1296,9 +1296,8 @@ impl GraphBuilder {
         // Cross-language class membership post-process. Emits HasMethod /
         // HasProperty edges (Class → Function|Method|Property) for every
         // language. Pass 1 uses span containment; Pass 2 uses RawNode.owner_class
-        // (set directly by each parser) as primary and the legacy __impl_target__:
-        // heritage sentinel as a cache-compat fallback. Must run BEFORE the CSR
-        // construction below so new edges land in `out_offsets` / `in_offsets`.
+        // set directly by each parser. Must run BEFORE the CSR construction below
+        // so new edges land in `out_offsets` / `in_offsets`.
         if prof {
             eprintln!(
                 "prof build.pass4_processes: {:.3}s",
