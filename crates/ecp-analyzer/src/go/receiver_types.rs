@@ -48,6 +48,24 @@ pub fn build_receiver_map(root: Node<'_>, source: &[u8]) -> ReceiverMap {
     ReceiverMap { entries }
 }
 
+/// Extract the receiver type from a `method_declaration` node.
+///
+/// Used at emit time (rather than a post-loop map lookup) so that two
+/// methods with the same name on different receiver types are correctly
+/// distinguished: `func (f *Foo) Run()` and `func (b *Bar) Run()` both
+/// emit `Run`, each with the correct `owner_class`.
+pub fn receiver_type_from_method_decl(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() != "method_declaration" {
+        return None;
+    }
+    let receiver_list = node.child_by_field_name("receiver")?;
+    let param = receiver_list
+        .children(&mut receiver_list.walk())
+        .find(|c| c.kind() == "parameter_declaration")?;
+    let ty_node = param.child_by_field_name("type")?;
+    bare_type_name(ty_node, source)
+}
+
 /// Extract `(method_name, receiver_type)` from a single `method_declaration`.
 /// Returns `None` when source bytes can't be decoded as UTF-8.
 fn extract_method_receiver(node: &Node<'_>, source: &[u8]) -> Option<(String, String)> {

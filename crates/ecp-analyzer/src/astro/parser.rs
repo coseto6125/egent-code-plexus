@@ -119,6 +119,7 @@ impl LanguageProvider for AstroProvider {
                         type_annotation: None,
                         decorators: vec![],
                         calls: vec![],
+                        owner_class: None,
                     });
                 } else if ci == idx_script {
                     section_nodes.push(RawNode {
@@ -130,6 +131,7 @@ impl LanguageProvider for AstroProvider {
                         type_annotation: None,
                         decorators: vec![],
                         calls: vec![],
+                        owner_class: None,
                     });
                 }
             }
@@ -146,6 +148,7 @@ impl LanguageProvider for AstroProvider {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec![],
+                owner_class: None,
             });
         }
 
@@ -172,6 +175,7 @@ impl LanguageProvider for AstroProvider {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec![],
+                owner_class: None,
             });
         }
 

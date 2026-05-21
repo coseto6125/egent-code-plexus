@@ -208,6 +208,7 @@ pub fn parse_embedded_script(
                         type_annotation: None,
                         decorators: vec![],
                         calls: vec![],
+                        owner_class: None,
                     });
                 }
             }

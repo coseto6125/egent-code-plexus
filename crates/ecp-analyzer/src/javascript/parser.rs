@@ -282,6 +282,7 @@ impl LanguageProvider for JavaScriptProvider {
                             kind: k,
                             span: node_span,
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }
@@ -375,6 +376,7 @@ impl LanguageProvider for JavaScriptProvider {
                                     kind: var_kind,
                                     span: var_span,
                                     calls: Vec::new(),
+                                    owner_class: None,
                                 });
                             }
                         }
@@ -518,6 +520,7 @@ impl LanguageProvider for JavaScriptProvider {
             file_category,
         );
 
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,

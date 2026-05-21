@@ -237,6 +237,7 @@ impl LanguageProvider for DartProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -283,6 +284,7 @@ impl LanguageProvider for DartProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -332,6 +334,7 @@ impl LanguageProvider for DartProvider {
         let raw_function_metas =
             crate::function_meta::dart::extract(tree.root_node(), source, &nodes, file_category);
 
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -380,5 +383,6 @@ fn synth_typedef_from_misparse(
             end.column as u32,
         ),
         calls: Vec::new(),
+        owner_class: None,
     })
 }

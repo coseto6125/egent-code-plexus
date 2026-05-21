@@ -92,6 +92,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 },
                 RawNode {
                     name: format!("fn_{i}"),
@@ -106,6 +107,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
                     } else {
                         vec![]
                     },
+                    owner_class: None,
                 },
             ],
             documents: vec![],

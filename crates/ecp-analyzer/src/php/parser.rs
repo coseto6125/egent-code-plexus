@@ -460,6 +460,7 @@ impl LanguageProvider for PhpProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                         i
                     });
@@ -570,6 +571,7 @@ impl LanguageProvider for PhpProvider {
             routes.clear();
         }
 
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,

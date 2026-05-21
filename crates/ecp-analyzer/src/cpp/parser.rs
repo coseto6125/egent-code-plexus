@@ -378,6 +378,7 @@ impl LanguageProvider for CppProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -403,6 +404,7 @@ impl LanguageProvider for CppProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -435,6 +437,7 @@ impl LanguageProvider for CppProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }
@@ -528,6 +531,10 @@ impl LanguageProvider for CppProvider {
         // fallback restores full recall.
         emit_macro_fallback(source, &mut nodes);
 
+        // Populate owner_class for methods/properties via span containment.
+        // Scans the already-collected class nodes in the same file — zero
+        // cross-file dependency.
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -569,6 +576,7 @@ fn emit_macro_fallback(source: &[u8], nodes: &mut Vec<RawNode>) {
             kind: NodeKind::Macro,
             span: (hit.line, hit.col_start, hit.line, hit.col_end),
             calls: Vec::new(),
+            owner_class: None,
         });
     }
 }

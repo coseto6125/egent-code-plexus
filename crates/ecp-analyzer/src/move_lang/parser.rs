@@ -139,6 +139,7 @@ impl LanguageProvider for MoveProvider {
                         type_annotation: None,
                         decorators: Vec::new(),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }

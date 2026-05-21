@@ -155,6 +155,7 @@ impl LanguageProvider for VyperProvider {
                             kind: k,
                             span,
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }
@@ -199,6 +200,7 @@ impl LanguageProvider for VyperProvider {
                         kind: NodeKind::Typedef,
                         span: (row as u32, 0, row as u32, line.len() as u32),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -215,6 +217,7 @@ impl LanguageProvider for VyperProvider {
                             kind: NodeKind::Typedef,
                             span: (row as u32, 0, row as u32, line.len() as u32),
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }

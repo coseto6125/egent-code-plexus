@@ -156,17 +156,22 @@ fn emit_pass1_span(
     emitted
 }
 
-/// Pass 2 — Rust `impl` bridge.
+/// Pass 2 — parser-direct owner_class bridge (and legacy `__impl_target__:` fallback).
 ///
-/// The Rust parser stamps each impl method's owning type name into the
-/// method's `heritage` field as `__impl_target__:Foo`. We scan for that
-/// sentinel and emit a `HasMethod` edge from the named Class to the method,
-/// even though the method's span is OUTSIDE the Class span (Rust splits
-/// `struct Foo {}` from `impl Foo { fn bar() {} }`).
+/// Primary: reads `RawNode.owner_class` set directly by each language parser
+/// (Rust uses impl_map; Go uses recv_map; all others use span containment
+/// within parse_file). Emits `HasMethod` / `HasProperty` for members whose
+/// owning type's span does NOT contain the member's span — i.e., cases where
+/// Pass 1 span containment would miss (Rust impl blocks, Go receiver methods).
+///
+/// Legacy fallback: also accepts the `__impl_target__:Foo` heritage sentinel
+/// written by older cache entries that predate the owner_class field, so a
+/// `~/.ecp/graph.bin` from before this version still produces correct edges
+/// without a forced reindex.
 ///
 /// Skip emission when Pass 1 already covered the link — checked by
-/// span containment: if the method's span lies inside any Class span in
-/// the same file with `class_name`, Pass 1 already emitted.
+/// span containment: if the member's span lies inside any Class span in
+/// the same file, Pass 1 already emitted.
 fn emit_pass2_rust_impl(
     raws: &[RawNode],
     classes_by_name: &FxHashMap<&str, Vec<Span>>,
@@ -180,18 +185,29 @@ fn emit_pass2_rust_impl(
     for member in raws {
         if !matches!(
             member.kind,
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            NodeKind::Function | NodeKind::Method | NodeKind::Constructor | NodeKind::Property
         ) {
             continue;
         }
-        for tag in &member.heritage {
-            let Some(class_name) = tag.strip_prefix(IMPL_TARGET_PREFIX) else {
-                continue;
-            };
 
-            // Skip if Pass 1 already emitted via span containment. Hash
-            // lookup by name (typical bucket size 1) replaces the prior
-            // O(N) full-raws scan.
+        // Collect candidate class names from both sources. Dedup is not
+        // necessary — emit_single_edge guards against duplicates via span check.
+        let mut class_name_candidates: Vec<&str> = Vec::new();
+
+        // Primary: owner_class field set by the parser.
+        if let Some(ref oc) = member.owner_class {
+            class_name_candidates.push(oc.as_str());
+        }
+
+        // Legacy: __impl_target__: heritage sentinel from pre-T1-1 cache entries.
+        for tag in &member.heritage {
+            if let Some(name) = tag.strip_prefix(IMPL_TARGET_PREFIX) {
+                class_name_candidates.push(name);
+            }
+        }
+
+        for class_name in class_name_candidates {
+            // Skip if Pass 1 already emitted via span containment.
             let already_via_span = classes_by_name
                 .get(class_name)
                 .map(|spans| spans.iter().any(|s| span_contains(*s, member.span)))
@@ -210,10 +226,16 @@ fn emit_pass2_rust_impl(
                 continue;
             }
 
+            let rel_type = if matches!(member.kind, NodeKind::Property) {
+                RelType::HasProperty
+            } else {
+                RelType::HasMethod
+            };
+
             edges_out.push(Edge {
                 source: class_idx,
                 target: member_idx,
-                rel_type: RelType::HasMethod,
+                rel_type,
                 confidence: 1.0,
                 reason,
             });
@@ -240,6 +262,7 @@ mod tests {
             type_annotation: None,
             decorators: Vec::new(),
             calls: Vec::new(),
+            owner_class: None,
         }
     }
 
@@ -258,6 +281,7 @@ mod tests {
             type_annotation: None,
             decorators: Vec::new(),
             calls: Vec::new(),
+            owner_class: None,
         }
     }
 

@@ -289,6 +289,7 @@ impl LanguageProvider for DockerComposeProvider {
                                         env_end.column as u32,
                                     ),
                                     calls: vec![],
+                                    owner_class: None,
                                 });
                             }
                         }
@@ -311,6 +312,7 @@ impl LanguageProvider for DockerComposeProvider {
                         svc_end.column as u32,
                     ),
                     calls,
+                    owner_class: None,
                 });
             }
         }

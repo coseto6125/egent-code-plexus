@@ -83,6 +83,25 @@ fn collect_impl_methods(
     }
 }
 
+/// Walk `node`'s parent chain to find the innermost enclosing `impl_item`
+/// and return the self-type name.  Returns `None` when the node is not inside
+/// any impl block (free function, module-level item, etc.).
+///
+/// This is the at-emit-time approach: each function_item node has grammar
+/// ancestry `declaration_list → impl_item`, so the parent walk is O(depth)
+/// rather than a hash lookup.  Correctly handles two structs with the same
+/// method name — each function_item's ancestry leads to a distinct impl_item.
+pub fn enclosing_impl_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        if n.kind() == "impl_item" {
+            return impl_self_type(&n, source);
+        }
+        current = n.parent();
+    }
+    None
+}
+
 // ── local type scope ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]

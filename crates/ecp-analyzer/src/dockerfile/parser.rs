@@ -129,6 +129,7 @@ impl LanguageProvider for DockerfileProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -158,6 +159,7 @@ impl LanguageProvider for DockerfileProvider {
                         end.column as u32,
                     ),
                     calls: Vec::new(),
+                    owner_class: None,
                 });
             }
 
@@ -186,6 +188,7 @@ impl LanguageProvider for DockerfileProvider {
                         end.column as u32,
                     ),
                     calls: Vec::new(),
+                    owner_class: None,
                 });
             }
 
@@ -210,6 +213,7 @@ impl LanguageProvider for DockerfileProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -235,6 +239,7 @@ impl LanguageProvider for DockerfileProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }

@@ -141,6 +141,7 @@ impl LanguageProvider for NimProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }

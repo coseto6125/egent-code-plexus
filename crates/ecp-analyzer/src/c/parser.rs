@@ -593,6 +593,7 @@ impl LanguageProvider for CProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -618,6 +619,7 @@ impl LanguageProvider for CProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -660,6 +662,7 @@ impl LanguageProvider for CProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }
@@ -706,6 +709,21 @@ impl LanguageProvider for CProvider {
         // macros in `tsd.h` to full recall after this pass.
         emit_macro_fallback(source, &mut nodes);
 
+        // Stamp owner_class from the receiver-convention map (self/this
+        // first-param pattern). C has no class syntax; the receiver
+        // convention is the closest proxy for struct membership.
+        for node in nodes.iter_mut() {
+            if matches!(node.kind, NodeKind::Function | NodeKind::Method) {
+                if let Some(recv_ty) = methods.get(&node.name) {
+                    node.owner_class = Some(recv_ty.to_string());
+                }
+            }
+        }
+
+        // Populate owner_class for methods/properties via span containment.
+        // Scans the already-collected class nodes in the same file — zero
+        // cross-file dependency.
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -747,6 +765,7 @@ fn emit_macro_fallback(source: &[u8], nodes: &mut Vec<RawNode>) {
             kind: NodeKind::Macro,
             span: (hit.line, hit.col_start, hit.line, hit.col_end),
             calls: Vec::new(),
+            owner_class: None,
         });
     }
 }

@@ -143,6 +143,7 @@ impl LanguageProvider for VueProvider {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 });
             }
 
@@ -156,6 +157,7 @@ impl LanguageProvider for VueProvider {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 });
             }
         }
@@ -183,6 +185,7 @@ impl LanguageProvider for VueProvider {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec![],
+                owner_class: None,
             });
 
             let body_node = match raw_text_node {

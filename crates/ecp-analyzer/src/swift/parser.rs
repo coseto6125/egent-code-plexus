@@ -242,6 +242,7 @@ impl LanguageProvider for SwiftProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                     imports.push(RawImport {
                         alias: Some(lhs.clone()),
@@ -280,6 +281,7 @@ impl LanguageProvider for SwiftProvider {
                             kind: NodeKind::Property,
                             span,
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }
@@ -304,6 +306,7 @@ impl LanguageProvider for SwiftProvider {
                         end.column as u32,
                     ),
                     calls: Vec::new(),
+                    owner_class: None,
                 });
             }
 
@@ -377,6 +380,7 @@ impl LanguageProvider for SwiftProvider {
                         kind: node_kind,
                         span,
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -427,6 +431,7 @@ impl LanguageProvider for SwiftProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -460,6 +465,7 @@ impl LanguageProvider for SwiftProvider {
         let raw_function_metas =
             crate::function_meta::swift::extract(tree.root_node(), source, &nodes, file_category);
 
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],

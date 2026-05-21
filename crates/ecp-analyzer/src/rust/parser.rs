@@ -1,4 +1,6 @@
-use super::receiver_types::{build_impl_map, collect_local_types, extract_rust_calls};
+use super::receiver_types::{
+    build_impl_map, collect_local_types, enclosing_impl_type, extract_rust_calls,
+};
 use super::spec::RustSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span, MODULE_LEVEL_SOURCE};
@@ -272,6 +274,20 @@ impl LanguageProvider for RustProvider {
                         NodeKind::Function => 1,
                         _ => 0,
                     };
+
+                    // At-emit-time parent-chain walk to find the enclosing
+                    // impl_item. Correctly handles two structs with the same
+                    // method name — each function_item's ancestry leads to a
+                    // distinct impl_item, so no HashMap collision.
+                    let owner = if matches!(
+                        k,
+                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                    ) {
+                        enclosing_impl_type(root, source)
+                    } else {
+                        None
+                    };
+
                     let mut merged = false;
                     if new_priority > 0 {
                         for existing in nodes.iter_mut() {
@@ -286,6 +302,10 @@ impl LanguageProvider for RustProvider {
                                     existing.kind = k;
                                 }
                                 if existing_priority > 0 {
+                                    // Preserve owner_class if not already set.
+                                    if existing.owner_class.is_none() {
+                                        existing.owner_class = owner.clone();
+                                    }
                                     merged = true;
                                 }
                                 break;
@@ -302,6 +322,7 @@ impl LanguageProvider for RustProvider {
                             kind: k,
                             span,
                             calls: Vec::new(),
+                            owner_class: owner,
                         });
                     }
                 }
@@ -355,18 +376,11 @@ impl LanguageProvider for RustProvider {
         }
         let call_metas = detect_rust_indirect(tree.root_node(), source, &nodes, &param_types);
 
-        // Stamp impl-target sentinel onto each impl method's heritage so the
-        // class-membership post-process can bridge `struct Foo` ↔ `impl Foo
-        // { fn bar() {} }` — the method's span lies OUTSIDE the struct span,
-        // so pure span containment misses.
-        let prefix = crate::post_process::class_membership::IMPL_TARGET_PREFIX;
-        for raw in nodes.iter_mut() {
-            if matches!(raw.kind, NodeKind::Function | NodeKind::Method) {
-                if let Some(impl_ty) = impl_map.entries.get(&raw.name) {
-                    raw.heritage.push(format!("{}{}", prefix, impl_ty));
-                }
-            }
-        }
+        // owner_class is now set at emit time via enclosing_impl_type() parent
+        // walk (see emit block above). The legacy `__impl_target__:Type`
+        // heritage sentinel push has been removed — `class_membership` Pass 2
+        // reads `RawNode.owner_class` directly and falls back to the sentinel
+        // only for pre-T1-1 cached graphs.
 
         // Framework-presence gates: only claim Axum/Actix refs when the file
         // actually `use`s the matching crate. Saves us from false positives in

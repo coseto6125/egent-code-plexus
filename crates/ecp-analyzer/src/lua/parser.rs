@@ -222,6 +222,7 @@ impl LanguageProvider for LuaProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }

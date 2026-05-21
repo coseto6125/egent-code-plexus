@@ -321,6 +321,7 @@ impl LanguageProvider for TypeScriptProvider {
                             heritage: heritage.clone(),
                             type_annotation: type_annotation.clone(),
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }
@@ -520,6 +521,7 @@ impl LanguageProvider for TypeScriptProvider {
             file_category,
         );
 
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,

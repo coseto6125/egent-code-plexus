@@ -311,6 +311,7 @@ impl LanguageProvider for RubyProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -387,6 +388,7 @@ impl LanguageProvider for RubyProvider {
                         type_annotation: None,
                         decorators: Vec::new(),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -601,6 +603,7 @@ impl LanguageProvider for RubyProvider {
                 kind: NodeKind::Method,
                 span: (line, 0, line, 0),
                 calls: vec![],
+                owner_class: None,
             });
         }
 
@@ -621,6 +624,8 @@ impl LanguageProvider for RubyProvider {
             }
             None => false,
         });
+
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
         Ok(LocalGraph {
             content_hash: [0; 8],

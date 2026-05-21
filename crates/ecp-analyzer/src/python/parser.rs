@@ -815,6 +815,7 @@ impl LanguageProvider for PythonProvider {
                             kind: final_kind,
                             span,
                             calls: Vec::new(),
+                            owner_class: None,
                         });
                     }
                 }
@@ -1044,6 +1045,7 @@ impl LanguageProvider for PythonProvider {
         let raw_function_metas =
             crate::function_meta::python::extract(tree.root_node(), source, &nodes, file_category);
 
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,

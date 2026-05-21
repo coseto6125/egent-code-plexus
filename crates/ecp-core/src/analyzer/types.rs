@@ -50,6 +50,12 @@ pub struct RawNode {
     /// Each entry is the callee's *short* name (e.g. `method` for `obj.method()`).
     /// Resolved against imports + same-file symbols in Pass 2 → `RelType::Calls`.
     pub calls: Vec<String>,
+    /// Owning class/struct/trait for methods and properties.
+    /// Set by each language parser at parse time; `None` for module-level
+    /// functions. Eliminates the need for post-process span containment to
+    /// establish class membership — parsers have grammar-level access to the
+    /// enclosing type that the post-pass must re-derive from spans.
+    pub owner_class: Option<String>,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]

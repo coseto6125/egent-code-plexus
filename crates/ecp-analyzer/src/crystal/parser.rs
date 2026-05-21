@@ -125,6 +125,7 @@ impl LanguageProvider for CrystalProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }

@@ -315,6 +315,7 @@ mod tests {
             type_annotation: None,
             decorators: vec![],
             calls: vec![],
+            owner_class: None,
         }
     }
 

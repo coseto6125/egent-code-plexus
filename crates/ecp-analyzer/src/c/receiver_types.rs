@@ -33,7 +33,7 @@ pub struct CReceiverMap {
 }
 
 impl CReceiverMap {
-    fn get(&self, fn_name: &str) -> Option<&str> {
+    pub fn get(&self, fn_name: &str) -> Option<&str> {
         self.map.get(fn_name).map(String::as_str)
     }
 }

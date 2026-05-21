@@ -1204,9 +1204,9 @@ impl GraphBuilder {
 
         // Cross-language class membership post-process. Emits HasMethod /
         // HasProperty edges (Class → Function|Method|Property) for every
-        // language whose class body encloses its members by span, plus a
-        // Rust impl bridge that uses the `__impl_target__:` sentinel the
-        // Rust parser stamped into heritage. Must run BEFORE the CSR
+        // language. Pass 1 uses span containment; Pass 2 uses RawNode.owner_class
+        // (set directly by each parser) as primary and the legacy __impl_target__:
+        // heritage sentinel as a cache-compat fallback. Must run BEFORE the CSR
         // construction below so new edges land in `out_offsets` / `in_offsets`.
         if prof {
             eprintln!(
@@ -1793,6 +1793,7 @@ mod tests {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec!["thing".into()],
+                owner_class: None,
             }],
             documents: vec![],
             imports: vec![RawImport {
@@ -1823,6 +1824,7 @@ mod tests {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec![],
+                owner_class: None,
             }],
             documents: vec![],
             imports: vec![],
@@ -1940,6 +1942,7 @@ mod tests {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 },
                 RawNode {
                     name: "handle_a".into(),
@@ -1950,6 +1953,7 @@ mod tests {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 },
                 RawNode {
                     name: "handle_b".into(),
@@ -1960,6 +1964,7 @@ mod tests {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 },
                 RawNode {
                     name: "handle_c".into(),
@@ -1970,6 +1975,7 @@ mod tests {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 },
             ],
             documents: vec![],
@@ -2039,6 +2045,7 @@ mod tests {
             type_annotation: None,
             decorators: vec![],
             calls: vec![],
+            owner_class: None,
         }];
         let mut candidates = vec![];
         for i in 0..60u32 {
@@ -2053,6 +2060,7 @@ mod tests {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec![],
+                owner_class: None,
             });
         }
         let g = LocalGraph {
@@ -2112,6 +2120,7 @@ mod tests {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 },
                 RawNode {
                     name: "get_db".into(),
@@ -2122,6 +2131,7 @@ mod tests {
                     type_annotation: None,
                     decorators: vec![],
                     calls: vec![],
+                    owner_class: None,
                 },
             ],
             documents: vec![],
@@ -2175,6 +2185,7 @@ mod tests {
                 type_annotation: None,
                 decorators: vec![],
                 calls,
+                owner_class: None,
             }],
             documents: vec![],
             imports: vec![],
@@ -2362,6 +2373,7 @@ mod tests {
                         type_annotation: Some("Other".into()),
                         decorators: vec![],
                         calls: vec!["other_fn".into()],
+                        owner_class: None,
                     }],
                     documents: vec![],
                     imports: vec![],
@@ -2400,6 +2412,7 @@ mod tests {
                             type_annotation: None,
                             decorators: vec![],
                             calls: vec![],
+                            owner_class: None,
                         },
                         RawNode {
                             name: "Other".into(),
@@ -2410,6 +2423,7 @@ mod tests {
                             type_annotation: None,
                             decorators: vec![],
                             calls: vec![],
+                            owner_class: None,
                         },
                         RawNode {
                             name: "other_fn".into(),
@@ -2420,6 +2434,7 @@ mod tests {
                             type_annotation: None,
                             decorators: vec![],
                             calls: vec![],
+                            owner_class: None,
                         },
                     ],
                     documents: vec![],
@@ -2547,6 +2562,7 @@ mod tests {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec![],
+                owner_class: None,
             }],
             documents: vec![],
             imports: vec![],
@@ -2580,6 +2596,7 @@ mod tests {
                 type_annotation: None,
                 decorators: vec![],
                 calls: vec![],
+                owner_class: None,
             }],
             documents: vec![],
             imports: vec![],

@@ -124,6 +124,7 @@ impl LanguageProvider for SqlProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }

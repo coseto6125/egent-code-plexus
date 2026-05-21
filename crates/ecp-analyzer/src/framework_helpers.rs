@@ -126,6 +126,47 @@ pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, S
         .map(|n| (n.name.clone(), n.span))
 }
 
+/// Span-containment owner_class stamping for 12 languages whose parser captures
+/// class members at emit time without a parent-walk (Java / Kotlin / C# / Swift /
+/// Dart / JavaScript / TypeScript / Python / PHP / Ruby / C / C++). Snapshots
+/// class spans once, then matches each `Method`/`Function`/`Constructor`/
+/// `Property` against the snapshot — O(N+K·C) where N=nodes, K=members,
+/// C=classes, vs O(N²) when each parser called `enclosing_class` in a map.
+/// Rust uses `enclosing_impl_type` instead (impl blocks split struct/fn spans);
+/// Go uses recv_map (explicit receiver types).
+pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
+    let class_spans: Vec<(String, Span)> = nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
+            )
+        })
+        .map(|n| (n.name.clone(), n.span))
+        .collect();
+    if class_spans.is_empty() {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        if !matches!(
+            node.kind,
+            NodeKind::Method | NodeKind::Function | NodeKind::Constructor | NodeKind::Property
+        ) {
+            continue;
+        }
+        let span = node.span;
+        let owner = class_spans
+            .iter()
+            .filter(|(_, s)| span_contains(*s, span))
+            .min_by_key(|(_, s)| span_area(*s))
+            .map(|(name, _)| name.clone());
+        if owner.is_some() {
+            node.owner_class = owner;
+        }
+    }
+}
+
 /// Enumerate `Function`/`Method` `RawNode` whose span lies inside `class_span`,
 /// skipping dunder methods (`__init__`, `__repr__`, ...) and `exclude_name`
 /// (the caller — prevents self-fan-out).

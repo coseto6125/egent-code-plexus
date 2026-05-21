@@ -1,4 +1,6 @@
-use super::receiver_types::{build_receiver_map, collect_local_types, extract_go_calls};
+use super::receiver_types::{
+    build_receiver_map, collect_local_types, extract_go_calls, receiver_type_from_method_decl,
+};
 use super::spec::GoSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -292,6 +294,7 @@ impl LanguageProvider for GoProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: None,
                     });
                 }
             }
@@ -325,6 +328,7 @@ impl LanguageProvider for GoProvider {
                                     end.column as u32,
                                 ),
                                 calls: Vec::new(),
+                                owner_class: None,
                             });
                         }
                     }
@@ -362,6 +366,7 @@ impl LanguageProvider for GoProvider {
                                     end.column as u32,
                                 ),
                                 calls: Vec::new(),
+                                owner_class: None,
                             });
                         }
                     }
@@ -397,6 +402,7 @@ impl LanguageProvider for GoProvider {
                                     end.column as u32,
                                 ),
                                 calls: Vec::new(),
+                                owner_class: None,
                             });
                         }
                     }
@@ -409,6 +415,16 @@ impl LanguageProvider for GoProvider {
                     let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
                     let start = root.start_position();
                     let end = root.end_position();
+
+                    // At emit time: extract receiver type from method_declaration.
+                    // Each match carries the full declaration node, so two methods
+                    // with the same name on different receiver types are correctly
+                    // distinguished without a HashMap collision.
+                    let owner = if k == NodeKind::Method {
+                        receiver_type_from_method_decl(root, source)
+                    } else {
+                        None
+                    };
 
                     nodes.push(RawNode {
                         decorators: vec![],
@@ -424,6 +440,7 @@ impl LanguageProvider for GoProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        owner_class: owner,
                     });
                 }
             }
@@ -535,6 +552,9 @@ impl LanguageProvider for GoProvider {
         let recv_map = build_receiver_map(tree.root_node(), source);
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
         extract_go_calls(tree.root_node(), source, &mut nodes, &local_types);
+
+        // owner_class is set at emit time via receiver_type_from_method_decl().
+        // No post-loop needed; recv_map is still used for call-site resolution.
 
         // Gate-and-emit pending gin / echo framework refs. Both lists hold
         // the same handlers (we couldn't tell them apart at capture time);
