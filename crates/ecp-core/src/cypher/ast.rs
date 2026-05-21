@@ -86,6 +86,11 @@ pub enum Expr {
     StartsWith(Box<Expr>, String),
     EndsWith(Box<Expr>, String),
     Contains(Box<Expr>, String),
+    /// OpenCypher label-test predicate: `n:Label` or `n:A|B|C`.
+    /// Labels are kept as raw strings (not `NodeKind`) so unknown labels
+    /// fall through to `false` instead of erroring at parse time — matches
+    /// how MATCH pattern handles unknown kinds.
+    HasLabel(String, Vec<String>),
     FunCall {
         name: String,
         distinct: bool,

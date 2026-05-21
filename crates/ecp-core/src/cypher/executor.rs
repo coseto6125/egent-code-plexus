@@ -1023,6 +1023,18 @@ fn eval_expr(
                 matches!(v, Value::Str(ref s) if s.contains(p.as_str())),
             ))
         }
+        HasLabel(var, labels) => {
+            // Resolve `var` to a node binding; non-node bindings (edge vars,
+            // WITH-computed scalars) never satisfy a label test → false.
+            let Some(&idx) = b.node_vars.get(var) else {
+                return Ok(Value::Bool(false));
+            };
+            let kind: NodeKind =
+                rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&graph.nodes[idx as usize].kind)
+                    .unwrap();
+            let kind_str = format!("{kind:?}");
+            Ok(Value::Bool(labels.contains(&kind_str)))
+        }
         FunCall { .. } => Err(CypherError::Exec {
             msg: "function calls in WHERE not yet supported".into(),
         }),
