@@ -531,9 +531,22 @@ impl LanguageProvider for CppProvider {
         // fallback restores full recall.
         emit_macro_fallback(source, &mut nodes);
 
-        // Populate owner_class for methods/properties via span containment.
-        // Scans the already-collected class nodes in the same file — zero
-        // cross-file dependency.
+        // C++ test files: placed in tests/ or test/ directories (Google Test / Catch2 / doctest).
+        let file_category = {
+            let path_str = path.to_str().unwrap_or("");
+            if path_str.contains("/tests/")
+                || path_str.contains("/test/")
+                || path_str.starts_with("tests/")
+                || path_str.starts_with("test/")
+            {
+                ecp_core::graph::FileCategory::Test
+            } else {
+                ecp_core::graph::FileCategory::Source
+            }
+        };
+        let raw_function_metas =
+            crate::function_meta::cpp::extract(tree.root_node(), source, &nodes, file_category);
+
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
@@ -549,7 +562,7 @@ impl LanguageProvider for CppProvider {
             event_topics: None,
             tx_scopes: None,
             call_metas,
-            raw_function_metas: vec![],
+            raw_function_metas,
         })
     }
 }
