@@ -108,8 +108,10 @@ fn build_inspect_block(
 
     let mut incoming: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     let mut outgoing: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut heuristic_incoming: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut heuristic_outgoing: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
-    // Outgoing edges
+    // Outgoing edges — split deterministic vs heuristic.
     let out_start = graph.out_offsets[node_idx].to_native() as usize;
     let out_end = graph.out_offsets[node_idx + 1].to_native() as usize;
     for i in out_start..out_end {
@@ -130,11 +132,17 @@ fn build_inspect_block(
             "filePath": target_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
             "confidence": edge.confidence.to_native(),
+            // T4-7 replaces this placeholder with real tier + checks data.
+            "checks": "[UNKNOWN_TIER] checks: <none recorded yet>",
         });
-        outgoing.entry(rel_str).or_default().push(entry);
+        if edge.rel_type.is_heuristic() {
+            heuristic_outgoing.entry(rel_str).or_default().push(entry);
+        } else {
+            outgoing.entry(rel_str).or_default().push(entry);
+        }
     }
 
-    // Incoming edges
+    // Incoming edges — split deterministic vs heuristic.
     let in_start = graph.in_offsets[node_idx].to_native() as usize;
     let in_end = graph.in_offsets[node_idx + 1].to_native() as usize;
     for i in in_start..in_end {
@@ -158,8 +166,14 @@ fn build_inspect_block(
             "filePath": source_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
             "confidence": edge.confidence.to_native(),
+            // T4-7 replaces this placeholder with real tier + checks data.
+            "checks": "[UNKNOWN_TIER] checks: <none recorded yet>",
         });
-        incoming.entry(rel_str).or_default().push(entry);
+        if edge.rel_type.is_heuristic() {
+            heuristic_incoming.entry(rel_str).or_default().push(entry);
+        } else {
+            incoming.entry(rel_str).or_default().push(entry);
+        }
     }
 
     // Blind spots: only from the same file.
@@ -199,7 +213,9 @@ fn build_inspect_block(
         (Vec::new(), Vec::new())
     };
 
-    serde_json::json!({
+    let has_heuristic = !heuristic_outgoing.is_empty() || !heuristic_incoming.is_empty();
+
+    let mut block = serde_json::json!({
         "symbol": {
             "name": node.name.resolve(&graph.string_pool),
             "kind": kind_to_str(&node.kind),
@@ -213,7 +229,26 @@ fn build_inspect_block(
         "impact_upstream_1hop": upstream_1hop,
         "contained_methods": contained_methods,
         "contained_properties": contained_properties,
-    })
+    });
+
+    if has_heuristic {
+        let obj = block.as_object_mut().unwrap();
+        obj.insert(
+            "heuristic_outgoing".to_string(),
+            serde_json::json!(heuristic_outgoing),
+        );
+        obj.insert(
+            "heuristic_incoming".to_string(),
+            serde_json::json!(heuristic_incoming),
+        );
+        // Signals LLM consumers that heuristic edges need manual verification.
+        obj.insert(
+            "heuristic_note".to_string(),
+            serde_json::json!("verify before acting — candidate edges, may have false positives"),
+        );
+    }
+
+    block
 }
 
 /// Walk outgoing HasMethod / HasProperty edges and produce flat member lists
@@ -374,7 +409,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             file_substr,
             args.include_tests,
         );
-        let result = serde_json::json!({
+        let mut result = serde_json::json!({
             "status": "found",
             "symbol": block["symbol"],
             "incoming": block["incoming"],
@@ -385,6 +420,21 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             "contained_methods": block["contained_methods"],
             "contained_properties": block["contained_properties"],
         });
+        if block.get("heuristic_note").is_some() {
+            let obj = result.as_object_mut().unwrap();
+            obj.insert(
+                "heuristic_outgoing".to_string(),
+                block["heuristic_outgoing"].clone(),
+            );
+            obj.insert(
+                "heuristic_incoming".to_string(),
+                block["heuristic_incoming"].clone(),
+            );
+            obj.insert(
+                "heuristic_note".to_string(),
+                block["heuristic_note"].clone(),
+            );
+        }
         return emit(&result, format);
     }
 
