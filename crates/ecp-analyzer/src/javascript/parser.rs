@@ -10,6 +10,7 @@ use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use ecp_core::graph::NodeKind;
+use ecp_core::pool::StringPool;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
@@ -40,8 +41,12 @@ pub struct JavaScriptProvider {
 impl JavaScriptProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_javascript::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        let query = Query::new(&language, &query_source)?;
 
         // Pre-resolve capture-name → NodeKind from the spec table so the
         // hot loop stays an integer-index lookup (no per-capture string compare).
@@ -527,6 +532,23 @@ impl LanguageProvider for JavaScriptProvider {
         );
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+
+        // `RawEventTopic.topic_literal` is a `StrRef` into this local pool; the
+        // pool drops at end of scope and the builder must re-intern the literal
+        // before resolution.
+        let event_topics = {
+            let mut pool = StringPool::new();
+            let topics = crate::event_topic::extract_event_topics(
+                &tree,
+                source,
+                &self.query,
+                &[crate::event_topic::REDIS_JS],
+                &imports,
+                &mut pool,
+            );
+            (!topics.is_empty()).then(|| topics.into_boxed_slice())
+        };
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -538,7 +560,7 @@ impl LanguageProvider for JavaScriptProvider {
             fanout_refs: vec![],
             blind_spots: vec![],
             schema_fields: None,
-            event_topics: None,
+            event_topics,
             tx_scopes: None,
             call_metas,
             raw_function_metas,

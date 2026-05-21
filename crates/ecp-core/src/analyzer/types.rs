@@ -173,7 +173,7 @@ pub enum FrameworkId {
     /// (fire-and-forget) so LLMs know task invocations are durable
     /// (broker-backed queue with retry semantics).
     Celery,
-    /// Redis pub/sub — fire-and-forget channel model (T5-26).
+    /// Redis pub/sub — fire-and-forget channel model (T5-26/T5-27/T5-28).
     /// Distinguished from Kafka (durable log) and RabbitMQ (queued AMQP)
     /// so LLMs know subscribers MUST be online when publish fires.
     Redis,
