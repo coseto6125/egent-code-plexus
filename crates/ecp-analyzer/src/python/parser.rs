@@ -15,6 +15,7 @@ use ecp_core::analyzer::types::{
     RawRoute, RawTxScope,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
+use ecp_core::pool::StringPool;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
@@ -1068,6 +1069,26 @@ impl LanguageProvider for PythonProvider {
         let tx_scopes = resolve_tx_scopes(&nodes, &pending_tx_scopes);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+
+        // The local pool is dropped after this block. `StrRef` fields inside
+        // `RawSchemaField` carry byte offsets relative to this pool — they
+        // remain valid Copy values, but string resolution requires the builder
+        // to re-intern them (see TODO: builder pass for T4-schema integration).
+        // Since the builder currently ignores `schema_fields`, no caller
+        // dereferences these StrRefs today.
+        let schema_fields = {
+            let mut pool = StringPool::new();
+            let fields = crate::schema_field::extract_schema_fields(
+                &tree,
+                source,
+                &self.query,
+                &[crate::python::schema_extractors::PYDANTIC_CONFIG],
+                &imports,
+                &mut pool,
+            );
+            (!fields.is_empty()).then(|| fields.into_boxed_slice())
+        };
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -1078,7 +1099,7 @@ impl LanguageProvider for PythonProvider {
             framework_refs,
             fanout_refs,
             blind_spots,
-            schema_fields: None,
+            schema_fields,
             event_topics: None,
             tx_scopes,
             call_metas,

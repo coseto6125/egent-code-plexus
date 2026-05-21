@@ -170,3 +170,20 @@
   arguments: (argument_list)
   (#eq? @_g "getattr")
   (#not-eq? @_obj "self")) @blind.cross_getattr
+
+;; ── Pydantic SchemaField ──
+;; Captures typed class attributes on `class X(BaseModel)` bodies.
+;; Each typed assignment becomes one RawSchemaField via the T4-1 dispatcher.
+;;
+;; The `(#eq? @_super "BaseModel")` predicate prevents false positives on
+;; plain classes with type annotations (they look identical syntactically).
+;; Captures: owner class name, field identifier, field type annotation text.
+(class_definition
+  name: (identifier) @pydantic.owner
+  superclasses: (argument_list (identifier) @_super)
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @pydantic.field
+        type: (type) @pydantic.type))))
+(#eq? @_super "BaseModel")
