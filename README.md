@@ -145,6 +145,8 @@ Two tiers — **agent commands** at top level (query/refactor/verify) and **admi
 |---|---|
 | `inspect <name>` | One symbol → metadata, decorators, signature, callers, callees, 1-hop impact |
 | `find <pattern>` | Locate symbols — exact (default) · `--mode fuzzy` substring · `--mode bm25` lexical ranking; bm25 partitions output into source / tests / reference / document / config buckets |
+| `find-schema-bindings <field>` | Surface MirrorsField heuristic edges + blind-spot candidates (schema field mirrors across classes / services). Format: toon (default) or json. |
+| `find-transaction-patterns [--class <Name>]` | Detect Saga compensate/undo/rollback name-pairs on same class. Confidence ≥0.75 tier:POSSIBLY_RELATED, <0.75 tier:BLIND_SPOT. Outbox half deferred (T5-33). |
 | `impact <name> --direction <up\|down>` | Blast-radius traversal with confidence filtering. `--since <ref>` for change-set impact. |
 | `rename --symbol <old> --new-name <new>` | AST-aware multi-file rename across 14 languages. Always `--dry-run` first. |
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body. |

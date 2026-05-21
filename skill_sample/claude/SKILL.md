@@ -15,6 +15,8 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | ONE symbol → blast radius | `ecp impact X --direction upstream --repo .` (positional; `--target X` alias works too. `--direction` accepts `up`/`down`/`both` or `upstream`/`downstream`. Filters: `--kind --file_path --relation_types --depth --min-confidence --include-tests`) |
 | PR blast radius — symbol view (who breaks) | `ecp impact --baseline origin/main --repo .` |
 | Find symbol by name / concept | `ecp find "term" --repo .` (auto-picks bm25 / hybrid / vector; force via `--mode`) |
+| Schema mirrors (cross-service / multi-model field alignment) | `ecp find-schema-bindings User.email --repo .` or `ecp find-schema-bindings email --repo .` (bare = all classes). Toon format; `--format json` for parsing. |
+| Saga compensate/undo/rollback pairs (transaction pattern audit) | `ecp find-transaction-patterns --repo .` or `ecp find-transaction-patterns --class OrderService --repo .` (bare = all classes). JSON format; `POSSIBLY_RELATED` (≥0.75 confidence) or `BLIND_SPOT` (<0.75). Outbox half deferred (depends on T5-33). |
 | Arbitrary graph query / source body via Cypher | `ecp cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query "..."` alias works. Single-repo only. Minimal grammar — see Cypher subset below) |
 | AST-aware multi-file rename | `ecp rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `ecp routes <path?> --repo .` (no path = list all) |
