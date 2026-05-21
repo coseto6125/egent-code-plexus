@@ -167,10 +167,16 @@ fn archived_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, node_idx: us
 ///
 /// `bfs_results` is the slice returned by `run_bfs`; depth-0 entry is the
 /// symbol itself. Only depth > 0 entries (actual callers) are examined.
+///
+/// `uid_idx` is the pre-built `uid → node_idx` table from
+/// [`ecp_core::graph_query::build_uid_index`]. Building it once per
+/// coverage analysis and passing it here avoids an O(N) linear scan over
+/// all graph nodes for every BFS caller entry (T1-6 fast-path).
 fn classify_symbol(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     symbol_idx: usize,
     bfs_results: &[Value],
+    uid_idx: &rustc_hash::FxHashMap<u64, u32>,
 ) -> SymbolCoverage {
     let node = &graph.nodes[symbol_idx];
     let file_idx = node.file_idx.to_native() as usize;
@@ -190,16 +196,13 @@ fn classify_symbol(
         .iter()
         .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
     {
-        // Recover the node index from the UID by matching back into the graph.
-        // We need the actual node_idx to call archived_is_test; scan nodes once
-        // per caller (caller count is small, depth-limited BFS).
+        // O(1) uid → node_idx via pre-built FxHashMap (T1-6 fast-path).
+        // BFS JSON stores uid as a decimal string; parse back to u64 for lookup.
         let caller_uid = entry["uid"].as_str().unwrap_or("");
-        let caller_idx = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .find(|(_, n)| n.uid.to_native().to_string() == caller_uid)
-            .map(|(i, _)| i);
+        let caller_idx = caller_uid
+            .parse::<u64>()
+            .ok()
+            .and_then(|u| uid_idx.get(&u).map(|&i| i as usize));
 
         let is_test = caller_idx
             .map(|idx| archived_is_test(graph, idx))
@@ -272,6 +275,11 @@ fn coverage_analyses(
     include_tests: bool,
     rel_filter: &Option<Vec<String>>,
 ) -> Vec<SymbolCoverage> {
+    // Build uid → node_idx once for the whole analysis. classify_symbol
+    // needs to reverse-look-up caller uids (from BFS JSON) back to node
+    // indices to call archived_is_test; without this table each caller
+    // entry would do an O(N) linear scan. (T1-6 fast-path)
+    let uid_idx = ecp_core::graph_query::build_uid_index(graph);
     bfs_by_symbol
         .iter()
         .map(|(idx, bfs)| {
@@ -285,7 +293,7 @@ fn coverage_analyses(
                 include_tests,
                 rel_filter,
             );
-            classify_symbol(graph, *idx, &coverage_bfs)
+            classify_symbol(graph, *idx, &coverage_bfs, &uid_idx)
         })
         .collect()
 }

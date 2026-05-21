@@ -7,6 +7,7 @@
 
 use crate::graph::{ArchivedNode, ArchivedZeroCopyGraph};
 use fixedbitset::FixedBitSet;
+use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 
 /// Find the file_idx whose stored path ends with `relative_path`.
@@ -180,6 +181,25 @@ fn bfs(
         }
     }
     out
+}
+
+/// Build a `uid → node_idx` lookup table from an archived graph in a single
+/// O(N) pass.
+///
+/// `Node.uid` is the xxh3-64 hash computed at build time; it is unique by
+/// construction (collisions are rejected during `GraphBuilder::build` with a
+/// `uid-collision` BlindSpot). This table enables O(1) reverse lookup from a
+/// uid string (as emitted in BFS JSON output) back to the dense node index
+/// without scanning `graph.nodes` on every lookup.
+///
+/// Build the table once per query at the call site that owns the graph
+/// reference, then pass it down to helpers that need uid→idx resolution.
+pub fn build_uid_index(graph: &ArchivedZeroCopyGraph) -> FxHashMap<u64, u32> {
+    let mut m = FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        m.insert(node.uid.to_native(), idx as u32);
+    }
+    m
 }
 
 /// Given a `node_idx`, return the indices of Process nodes whose trace

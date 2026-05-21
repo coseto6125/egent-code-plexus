@@ -1,3 +1,42 @@
+//! Symbol resolver — maps call-site names to global node ids.
+//!
+//! ## T1-6: FxHashMap uid lookup — decision record
+//!
+//! The roadmap item T1-6 asked whether a `FxHashMap<u64, NodeId>` field on
+//! `SymbolTable` would yield a meaningful win.
+//!
+//! **`SymbolTable` does not hold `u64` uids at all.** The `uid: u64` hash
+//! (xxh3-64 of kind + path + owner_class + name) lives in
+//! `ZeroCopyGraph::Node.uid`, which is the serialised on-disk graph consulted
+//! at *query time*. `SymbolTable` operates at *build time* with dense
+//! sequential `NodeId (u32)` indices and is already O(1) for all its lookups
+//! via `FxHashMap<String, …>`. Adding a `u64` uid field to `SymbolTable` would
+//! require wiring uid computation into the builder before `current_node_idx`
+//! is assigned, with no caller benefit — the resolver tiers never look up by
+//! uid, only by (file_path, name) or (name) pairs.
+//!
+//! **The real O(N) gap** was in the query layer:
+//! `impact::classify_symbol` (ecp-cli) did a linear scan over all graph nodes
+//! per BFS caller entry to reverse-look-up `uid_string → node_idx`:
+//!
+//! ```text
+//! graph.nodes.iter().enumerate()
+//!     .find(|(_, n)| n.uid.to_native().to_string() == caller_uid)
+//! ```
+//!
+//! This is O(N) per caller × O(symbols) per coverage analysis, which on a
+//! 3k-node graph with 5 callers/symbol costs ~2 ms per call vs ~0.6 µs with
+//! the FxHashMap path (>3000× speedup).
+//!
+//! **Fix**: `ecp_core::graph_query::build_uid_index` builds
+//! `FxHashMap<u64, u32>` once per coverage-analysis call; callers are looked
+//! up in O(1). `coverage_analyses` (impact.rs) now builds the table once and
+//! passes it to `classify_symbol`.
+//!
+//! See `crates/ecp-analyzer/tests/resolver_fxhash_uid.rs` for the correctness
+//! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
+//! the before/after bench numbers.
+
 use ecp_core::analyzer::types::RawImport;
 use serde::Serialize;
 use std::borrow::Cow;

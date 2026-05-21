@@ -74,5 +74,12 @@ blake3 = "1.5"
 # workloads like tree-sitter parsing.
 mimalloc = { version = "0.1", default-features = false }
 
+[dev-dependencies.rkyv]
+version = "0.8.16"
+
+[[bench]]
+name = "resolver_lookup"
+harness = false
+
 [lints]
 workspace = true
