@@ -22,6 +22,11 @@ pub enum Direction {
     Both,
 }
 
+/// Default heuristic-edge confidence gate; mirrored by all three
+/// `confidence_threshold: 0.85` sites (ImpactArgs default, build_payload's
+/// inner construction, review/aggregate.rs).
+pub const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.85;
+
 /// Symbol-level blast radius. From `<name>` traverses call-graph for upstream
 /// callers / downstream callees with risk_level. From `--baseline <ref>`
 /// detects symbols changed vs the baseline and runs the same traversal per
@@ -92,6 +97,20 @@ pub struct ImpactArgs {
     /// traversal so test callers are reachable from the walker.
     #[arg(long, aliases = ["test_coverage", "testCoverage"], default_value_t = false)]
     pub test_coverage: bool,
+
+    /// Include heuristic edges (MirrorsField, EventTopicMirror) in BFS.
+    /// Default off keeps blast-radius results noise-free.
+    #[arg(long, default_value_t = false)]
+    pub include_heuristic: bool,
+
+    /// Informational confidence gate — promotes heuristic edges when T4-7/T5-33
+    /// emit per-edge tiers. Currently controls the --explain-confidence report.
+    #[arg(long, default_value_t = DEFAULT_CONFIDENCE_THRESHOLD)]
+    pub confidence_threshold: f32,
+
+    /// Emit explain_confidence block with threshold + per-tier filtered counts.
+    #[arg(long, default_value_t = false)]
+    pub explain_confidence: bool,
 
     /// Output format (mostly internal — agent doesn't set this).
     #[arg(long)]
@@ -228,7 +247,9 @@ fn coverage_bfs_for_symbol(
     if *requested_direction == Direction::Up {
         return existing_bfs.to_vec();
     }
-    let (bfs_result, _) = run_bfs(
+    // Coverage analysis only consumes deterministic upstream callers — discard
+    // the heuristic / hidden-count fields from #264's expanded run_bfs return.
+    let (det_results, _heur, _hidden_conf, _hidden_heur) = run_bfs(
         graph,
         symbol_idx,
         &Direction::Up,
@@ -236,8 +257,9 @@ fn coverage_bfs_for_symbol(
         min_conf,
         include_tests,
         rel_filter,
+        false, // include_heuristic
     );
-    bfs_result
+    det_results
 }
 
 fn coverage_analyses(
@@ -334,6 +356,8 @@ struct ImpactStderrHints {
     empty_hint_name: Option<String>,
     /// If > 0, emit the hidden-edges footer.
     hidden_edges: u64,
+    /// Heuristic edges hidden by the is_heuristic() filter (T-H1).
+    hidden_heuristic_edges: u64,
 }
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
@@ -345,6 +369,12 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         );
     }
     emit_hidden_edges_footer(hints.hidden_edges);
+    if hints.hidden_heuristic_edges > 0 {
+        eprintln!(
+            "note: {} heuristic edges hidden (pass --include-heuristic to see them)",
+            hints.hidden_heuristic_edges
+        );
+    }
     emit(&payload, format)
 }
 
@@ -436,6 +466,9 @@ pub fn run_for_symbol(
         repo: Some(member_repo.to_string()),
         test_coverage: false,
         format: None,
+        include_heuristic: false,
+        confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
+        explain_confidence: false,
     };
     let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
     let (payload, _hints) = build_payload_with_hints(&args, engine)?;
@@ -543,10 +576,12 @@ fn impact_by_name(
     let effective_include_tests = args.include_tests || args.test_coverage;
 
     let mut all_results: Vec<Value> = Vec::new();
+    let mut all_heuristic_results: Vec<Value> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
+    let mut hidden_heuristic_total: u64 = 0;
     let mut per_match_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for start_idx in &matches {
-        let (bfs_result, hidden) = run_bfs(
+        let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
             graph,
             *start_idx,
             &args.direction,
@@ -554,10 +589,13 @@ fn impact_by_name(
             min_conf,
             effective_include_tests,
             &rel_filter,
+            args.include_heuristic,
         );
-        all_results.extend(bfs_result.iter().cloned());
-        hidden_edges_total += hidden;
-        per_match_bfs.push((*start_idx, bfs_result));
+        all_results.extend(det_results.iter().cloned());
+        per_match_bfs.push((*start_idx, det_results));
+        all_heuristic_results.extend(heur_results);
+        hidden_edges_total += hidden_conf;
+        hidden_heuristic_total += hidden_heur;
     }
 
     // Empty callers hint for upstream direction.
@@ -594,6 +632,14 @@ fn impact_by_name(
         "impact": all_results,
     });
     attach_hidden_edges(&mut result_obj, hidden_edges_total);
+    attach_heuristic_fields(
+        &mut result_obj,
+        hidden_heuristic_total,
+        all_heuristic_results,
+        args.include_heuristic,
+        args.explain_confidence,
+        args.confidence_threshold,
+    );
 
     if !all_blind_spot_kinds.is_empty() {
         let mut by_kind = std::collections::BTreeMap::<String, u32>::new();
@@ -631,6 +677,7 @@ fn impact_by_name(
         ImpactStderrHints {
             empty_hint_name: emit_empty_hint.then(|| name.to_string()),
             hidden_edges: hidden_edges_total,
+            hidden_heuristic_edges: hidden_heuristic_total,
         },
     ))
 }
@@ -807,6 +854,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     // Run BFS from each changed symbol.
     let mut impact_by_symbol: Vec<Value> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
+    let mut hidden_heuristic_total: u64 = 0;
     let mut per_symbol_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for &start_idx in &changed_node_indices {
         let node = &graph.nodes[start_idx];
@@ -815,7 +863,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
             .path
             .resolve(&graph.string_pool)
             .to_string();
-        let (bfs_result, hidden) = run_bfs(
+        let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
             graph,
             start_idx,
             &args.direction,
@@ -823,14 +871,20 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
             min_conf,
             effective_include_tests,
             &rel_filter,
+            args.include_heuristic,
         );
-        impact_by_symbol.push(json!({
+        let mut sym_entry = json!({
             "symbol": sym_name,
             "filePath": sym_file,
-            "impact": bfs_result.clone(),
-        }));
-        hidden_edges_total += hidden;
-        per_symbol_bfs.push((start_idx, bfs_result));
+            "impact": det_results.clone(),
+        });
+        if args.include_heuristic && !heur_results.is_empty() {
+            sym_entry["heuristic_edges"] = json!(heur_results);
+        }
+        impact_by_symbol.push(sym_entry);
+        hidden_edges_total += hidden_conf;
+        hidden_heuristic_total += hidden_heur;
+        per_symbol_bfs.push((start_idx, det_results));
     }
 
     let mut result = json!({
@@ -840,6 +894,14 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
         "impact_by_symbol": impact_by_symbol,
     });
     attach_hidden_edges(&mut result, hidden_edges_total);
+    attach_heuristic_fields(
+        &mut result,
+        hidden_heuristic_total,
+        vec![],
+        args.include_heuristic,
+        args.explain_confidence,
+        args.confidence_threshold,
+    );
 
     if args.test_coverage {
         let analyses = coverage_analyses(
@@ -863,6 +925,35 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
 fn attach_hidden_edges(result: &mut Value, hidden_edges: u64) {
     if hidden_edges > 0 {
         result["hidden_edges"] = json!(hidden_edges);
+    }
+}
+
+/// Attach heuristic-filter fields to the JSON result object.
+///
+/// `hidden_heuristic_edges` is always written (0 is safe — callers can branch
+/// on the field existing). `heuristic_edges` section is appended only when
+/// `include_heuristic` is true and the vec is non-empty.
+/// `explain_confidence` block is appended when the flag is set.
+fn attach_heuristic_fields(
+    result: &mut Value,
+    hidden_heuristic_edges: u64,
+    heuristic_results: Vec<Value>,
+    include_heuristic: bool,
+    explain_confidence: bool,
+    confidence_threshold: f32,
+) {
+    result["hidden_heuristic_edges"] = json!(hidden_heuristic_edges);
+    let heuristic_reached = heuristic_results.len() as u64;
+    if include_heuristic && !heuristic_results.is_empty() {
+        result["heuristic_edges"] = json!(heuristic_results);
+    }
+    if explain_confidence {
+        result["explain_confidence"] = json!({
+            "threshold": confidence_threshold,
+            "edges_filtered_by_tier": {
+                "unknown_tier": heuristic_reached + hidden_heuristic_edges,
+            },
+        });
     }
 }
 
@@ -905,16 +996,21 @@ fn direction_str(dir: &Direction) -> &'static str {
 
 /// Core BFS over the graph from `start_idx`.
 ///
-/// Returns `(visited_nodes, hidden_edges)`. The start node appears at
-/// depth 0. `--include-tests` / `--relation-types` / `min_conf` are
-/// applied here; `--kind` / `--file` emission-only filtering is NOT
-/// applied here (callers can filter the returned Vec if needed).
+/// Returns `(det_results, heur_results, hidden_conf_edges, hidden_heuristic_edges)`.
+/// The start node appears at depth 0 in `det_results`.
 ///
-/// `hidden_edges` counts edges dropped *because their confidence fell
-/// below `min_conf`* — i.e. the surface area lost to the high-trust
-/// filter. Edges skipped for other reasons (`--include-tests`,
-/// `--relation-types`, already-visited target) are NOT counted, since
-/// those are explicit user-driven filters rather than the silent default.
+/// - `det_results`: nodes reached exclusively via deterministic edges.
+/// - `heur_results`: nodes reached via a heuristic edge (only populated when
+///   `include_heuristic` is true; kept in a separate vec so callers render them
+///   in a distinct output section per the T-H1 spec).
+/// - `hidden_conf_edges`: edges dropped because confidence < `min_conf`.
+/// - `hidden_heuristic_edges`: heuristic edges skipped when `include_heuristic`
+///   is false. These are the structural signal surfaced as
+///   `hidden_heuristic_edges: N` in the output payload.
+///
+/// `--include-tests` / `--relation-types` / `min_conf` are applied here;
+/// `--kind` / `--file` emission-only filtering is NOT applied here.
+#[allow(clippy::too_many_arguments)]
 fn run_bfs(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     start_idx: usize,
@@ -923,20 +1019,24 @@ fn run_bfs(
     min_conf: f32,
     include_tests: bool,
     rel_filter: &Option<Vec<String>>,
-) -> (Vec<Value>, u64) {
+    include_heuristic: bool,
+) -> (Vec<Value>, Vec<Value>, u64, u64) {
+    // (node_idx, depth, via_edge_info, reached_via_heuristic)
     type ViaEdge = Option<(String, f32)>;
-    type Step = (usize, usize, ViaEdge);
+    type Step = (usize, usize, ViaEdge, bool);
 
     let mut visited = HashSet::new();
     let mut queue: VecDeque<Step> = VecDeque::new();
-    let mut results = Vec::new();
+    let mut det_results: Vec<Value> = Vec::new();
+    let mut heur_results: Vec<Value> = Vec::new();
     let mut test_path_cache = HashMap::new();
-    let mut hidden_edges: u64 = 0;
+    let mut hidden_conf_edges: u64 = 0;
+    let mut hidden_heuristic_edges: u64 = 0;
 
-    queue.push_back((start_idx, 0, None));
+    queue.push_back((start_idx, 0, None, false));
     visited.insert(start_idx);
 
-    while let Some((curr_idx, curr_depth, via)) = queue.pop_front() {
+    while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
         let curr_node = &graph.nodes[curr_idx];
         let file_idx = curr_node.file_idx.to_native() as usize;
 
@@ -959,7 +1059,7 @@ fn run_bfs(
             .map(|(r, c)| (r.as_str(), *c))
             .unwrap_or(("", 1.0));
 
-        results.push(json!({
+        let entry = json!({
             "uid": curr_node.uid.resolve(&graph.string_pool),
             "name": curr_node.name.resolve(&graph.string_pool),
             "kind": kind_to_str(&curr_node.kind),
@@ -968,7 +1068,12 @@ fn run_bfs(
             "depth": curr_depth,
             "viaReason": via_reason,
             "viaConfidence": via_confidence,
-        }));
+        });
+        if via_heuristic {
+            heur_results.push(entry);
+        } else {
+            det_results.push(entry);
+        }
 
         if curr_depth >= max_depth {
             continue;
@@ -983,7 +1088,12 @@ fn run_bfs(
                     let edge = &graph.edges[edge_idx];
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
-                        hidden_edges += 1;
+                        hidden_conf_edges += 1;
+                        continue;
+                    }
+                    let is_heur = edge.rel_type.is_heuristic();
+                    if is_heur && !include_heuristic {
+                        hidden_heuristic_edges += 1;
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
@@ -996,7 +1106,12 @@ fn run_bfs(
                     if !visited.contains(&next_idx) {
                         visited.insert(next_idx);
                         let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
-                        queue.push_back((next_idx, curr_depth + 1, Some((edge_reason, edge_conf))));
+                        queue.push_back((
+                            next_idx,
+                            curr_depth + 1,
+                            Some((edge_reason, edge_conf)),
+                            is_heur,
+                        ));
                     }
                 }
                 if direction == &Direction::Up {
@@ -1009,7 +1124,12 @@ fn run_bfs(
                     let edge = &graph.edges[i];
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
-                        hidden_edges += 1;
+                        hidden_conf_edges += 1;
+                        continue;
+                    }
+                    let is_heur = edge.rel_type.is_heuristic();
+                    if is_heur && !include_heuristic {
+                        hidden_heuristic_edges += 1;
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
@@ -1022,7 +1142,12 @@ fn run_bfs(
                     if !visited.contains(&next_idx) {
                         visited.insert(next_idx);
                         let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
-                        queue.push_back((next_idx, curr_depth + 1, Some((edge_reason, edge_conf))));
+                        queue.push_back((
+                            next_idx,
+                            curr_depth + 1,
+                            Some((edge_reason, edge_conf)),
+                            is_heur,
+                        ));
                     }
                 }
             }
@@ -1033,7 +1158,12 @@ fn run_bfs(
                     let edge = &graph.edges[i];
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
-                        hidden_edges += 1;
+                        hidden_conf_edges += 1;
+                        continue;
+                    }
+                    let is_heur = edge.rel_type.is_heuristic();
+                    if is_heur && !include_heuristic {
+                        hidden_heuristic_edges += 1;
                         continue;
                     }
                     if let Some(rels) = rel_filter.as_ref() {
@@ -1046,14 +1176,24 @@ fn run_bfs(
                     if !visited.contains(&next_idx) {
                         visited.insert(next_idx);
                         let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
-                        queue.push_back((next_idx, curr_depth + 1, Some((edge_reason, edge_conf))));
+                        queue.push_back((
+                            next_idx,
+                            curr_depth + 1,
+                            Some((edge_reason, edge_conf)),
+                            is_heur,
+                        ));
                     }
                 }
             }
         }
     }
 
-    (results, hidden_edges)
+    (
+        det_results,
+        heur_results,
+        hidden_conf_edges,
+        hidden_heuristic_edges,
+    )
 }
 
 fn collect_blind_spots(
