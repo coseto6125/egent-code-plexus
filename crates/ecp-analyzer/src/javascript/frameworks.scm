@@ -176,3 +176,124 @@
           property: (property_identifier) @_mproduce (#eq? @_mproduce "produce"))
         arguments: (arguments
           . (string) @kafka.topic)))))
+
+;; ---- RabbitMQ JavaScript (T5-10) ----
+;; Covers amqplib and amqp-connection-manager.
+;; Import gate (`amqplib`, `amqp-connection-manager`) is enforced by
+;; RABBITMQ_JS.import_gate — these queries fire on syntax alone.
+;;
+;; `amqp.direction` captures the method name so `classify_amqp_direction`
+;; can distinguish Subscribe (consume/assertQueue) from Publish (publish/sendToQueue).
+;;
+;; Topic literal:
+;;   publish(exchange, routingKey, content) → routingKey = 2nd positional string.
+;;   consume(queue, handler)               → queue      = 1st positional string.
+;;   assertQueue(queue, opts)              → queue      = 1st positional string.
+;;   sendToQueue(queue, content)           → queue      = 1st positional string.
+;;
+;; Variable args → no capture. Anchored to function_declaration and
+;; method_definition; sync + await forms.
+
+;; publish(exchange, routingKey, ...) — sync, function_declaration.
+(function_declaration
+  name: (identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @amqp.direction
+          (#eq? @amqp.direction "publish"))
+        arguments: (arguments
+          . (_)
+          . (string) @amqp.topic)))))
+
+;; publish — await, function_declaration.
+(function_declaration
+  name: (identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @amqp.direction
+            (#eq? @amqp.direction "publish"))
+          arguments: (arguments
+            . (_)
+            . (string) @amqp.topic))))))
+
+;; consume / assertQueue / sendToQueue — sync, function_declaration.
+(function_declaration
+  name: (identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @amqp.direction
+          (#match? @amqp.direction "^(consume|assertQueue|sendToQueue)$"))
+        arguments: (arguments
+          . (string) @amqp.topic)))))
+
+;; consume / assertQueue / sendToQueue — await, function_declaration.
+(function_declaration
+  name: (identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @amqp.direction
+            (#match? @amqp.direction "^(consume|assertQueue|sendToQueue)$"))
+          arguments: (arguments
+            . (string) @amqp.topic))))))
+
+;; publish — sync, method_definition.
+(method_definition
+  name: (property_identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @amqp.direction
+          (#eq? @amqp.direction "publish"))
+        arguments: (arguments
+          . (_)
+          . (string) @amqp.topic)))))
+
+;; publish — await, method_definition.
+(method_definition
+  name: (property_identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @amqp.direction
+            (#eq? @amqp.direction "publish"))
+          arguments: (arguments
+            . (_)
+            . (string) @amqp.topic))))))
+
+;; consume / assertQueue / sendToQueue — sync, method_definition.
+(method_definition
+  name: (property_identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @amqp.direction
+          (#match? @amqp.direction "^(consume|assertQueue|sendToQueue)$"))
+        arguments: (arguments
+          . (string) @amqp.topic)))))
+
+;; consume / assertQueue / sendToQueue — await, method_definition.
+(method_definition
+  name: (property_identifier) @amqp.fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @amqp.direction
+            (#match? @amqp.direction "^(consume|assertQueue|sendToQueue)$"))
+          arguments: (arguments
+            . (string) @amqp.topic))))))
