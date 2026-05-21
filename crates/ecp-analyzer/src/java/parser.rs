@@ -7,6 +7,7 @@ use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
+use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -421,6 +422,19 @@ impl LanguageProvider for JavaProvider {
         let tx_scopes =
             collect_jvm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Constructor]);
 
+        let event_topics = {
+            let mut pool = StringPool::new();
+            let topics = crate::event_topic::extract_event_topics(
+                &tree,
+                source,
+                &self.query,
+                &[crate::event_topic::REDIS_JAVA],
+                &imports,
+                &mut pool,
+            );
+            (!topics.is_empty()).then(|| topics.into_boxed_slice())
+        };
+
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
@@ -433,7 +447,7 @@ impl LanguageProvider for JavaProvider {
             fanout_refs: vec![],
             blind_spots: vec![],
             schema_fields: None,
-            event_topics: None,
+            event_topics,
             tx_scopes,
             call_metas: vec![],
             raw_function_metas,

@@ -1,4 +1,4 @@
-;; Framework-aware queries for Java (Tier 2: Spring subset).
+;; Framework-aware queries for Java (Tier 2: Spring subset + Redis pub/sub).
 
 ;; Spring @Autowired field injection — capture enclosing class name and
 ;; the injected field's type. Confidence 0.8, reason "spring-autowired".
@@ -41,3 +41,68 @@
              [(string_literal) @spring.route.path (MISSING) @spring.route.path])?)]
         (#match? @_verb "^(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)$"))
       name: (identifier) @spring.route.handler)))
+
+;; ---- Redis Java pub/sub (T5-29) ----
+;; Covers spring-data-redis, Jedis, and Lettuce Core under one config slice.
+;; Import gate (org.springframework.data.redis / redis.clients.jedis /
+;; io.lettuce.core) is enforced by REDIS_JAVA.import_gate — these queries fire
+;; on syntax alone; the extractor filters by import at runtime.
+;;
+;; `redis.direction` captures the method name so `classify_redis_direction` can
+;; distinguish Subscribe from Publish.
+;;
+;; Topic literal: the first positional string literal arg to the call.
+;; Variable channel args produce no `redis.topic` capture → no RawEventTopic.
+;;
+;; Anchored to `method_declaration` to co-capture the enclosing method name.
+
+;; spring-data-redis: redisTemplate.convertAndSend("channel", message) — Publish.
+(method_declaration
+  name: (identifier) @redis.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @redis.direction (#eq? @redis.direction "convertAndSend")
+        arguments: (argument_list
+          . (string_literal) @redis.topic)))))
+
+;; Jedis / Lettuce: obj.publish("channel", msg) — Publish.
+(method_declaration
+  name: (identifier) @redis.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @redis.direction (#eq? @redis.direction "publish")
+        arguments: (argument_list
+          . (string_literal) @redis.topic)))))
+
+;; Lettuce: commands.subscribe("channel") — Subscribe.
+(method_declaration
+  name: (identifier) @redis.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @redis.direction (#eq? @redis.direction "subscribe")
+        arguments: (argument_list
+          . (string_literal) @redis.topic)))))
+
+;; Lettuce: commands.psubscribe("pattern.*") — Subscribe (glob pattern).
+;; Pattern strings are glob expressions; stored as-is in topic_literal.
+(method_declaration
+  name: (identifier) @redis.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @redis.direction (#eq? @redis.direction "psubscribe")
+        arguments: (argument_list
+          . (string_literal) @redis.topic)))))
+
+;; Lettuce reactive API: commands.pSubscribe("pattern.*") — Subscribe (camelCase).
+(method_declaration
+  name: (identifier) @redis.fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @redis.direction (#eq? @redis.direction "pSubscribe")
+        arguments: (argument_list
+          . (string_literal) @redis.topic)))))
