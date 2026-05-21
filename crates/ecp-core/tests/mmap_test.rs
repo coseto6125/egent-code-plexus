@@ -67,4 +67,10 @@ fn test_mmap_graph_access() {
 
     let resolved_name = first_node.name.resolve(&archived.string_pool);
     assert_eq!(resolved_name, "mmap_func");
+
+    // `StrRef::default()` (offset=0, len=0) must survive the rkyv round-trip
+    // and resolve to the empty string — the sentinel for "top-level symbol,
+    // no owner class". A regression here would silently break
+    // `commands::rename::run`'s bare-name filter (which compares len == 0).
+    assert_eq!(first_node.owner_class.resolve(&archived.string_pool), "");
 }

@@ -283,3 +283,87 @@ fn test_rename_bare_name_matches_only_top_level() {
         "bare-name rename against method-only graph must report no matches; stdout={stdout}",
     );
 }
+
+/// Positive case for tightened bare-name semantics: a module-level function
+/// (no owner_class) must still be reachable via bare-name rename.  Without
+/// this test, the negative test above could pass trivially even if the filter
+/// incorrectly rejected ALL nodes regardless of owner_class.
+#[test]
+fn test_rename_bare_name_hits_top_level_function() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let root = repo.path();
+
+    std::fs::write(root.join("util.py"), "def validate(x):\n    return True\n").unwrap();
+
+    run_git(root, &["init", "-q"]);
+    run_git(root, &["config", "user.email", "t@e"]);
+    run_git(root, &["config", "user.name", "t"]);
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-q", "-m", "init"]);
+    build_index(root);
+
+    // Inject a synthetic graph: one Function node named `validate` with
+    // owner_class = StrRef::default() (top-level / no class).
+    let graph_bin = find_graph_bin(root);
+    let synthetic = {
+        let mut pool = StringPool::new();
+        let path_ref = pool.add("util.py");
+        let name_ref = pool.add("validate");
+        let uid_ref = pool.add("Function:util.py:validate");
+
+        serialize_graph(&ZeroCopyGraph {
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
+            string_pool: pool.bytes,
+            files: vec![File {
+                path: path_ref,
+                mtime: 0,
+                content_hash: [0; 8],
+                category: FileCategory::Source,
+            }],
+            nodes: vec![Node {
+                uid: uid_ref,
+                name: name_ref,
+                file_idx: 0,
+                kind: NodeKind::Function,
+                span: (1, 0, 2, 0),
+                community_id: 0,
+                owner_class: ecp_core::pool::StrRef::default(),
+            }],
+            edges: vec![],
+            out_offsets: vec![0u32, 0],
+            in_offsets: vec![0u32, 0],
+            in_edge_idx: vec![],
+            name_index: vec![0],
+            process_start: 1,
+            ..ZeroCopyGraph::default()
+        })
+    };
+    std::fs::write(&graph_bin, synthetic).unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "rename",
+            "validate",
+            "check",
+            "--repo",
+            root.to_str().unwrap(),
+        ])
+        .env("HOME", root)
+        .current_dir(root)
+        .output()
+        .expect("ecp rename spawn failed");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    let util_content = std::fs::read_to_string(root.join("util.py")).unwrap_or_default();
+    assert!(
+        util_content.contains("check"),
+        "top-level `validate` must be renamed by bare-name target; util.py=\n{util_content}\nstdout={stdout}\nstderr={stderr}",
+    );
+    assert!(
+        !util_content.contains("def validate"),
+        "old name must no longer appear as the function definition; util.py=\n{util_content}",
+    );
+}

@@ -1144,6 +1144,14 @@ fn node_prop_value(
     match prop {
         "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
         "uid" => Value::Str(n.uid.resolve(&graph.string_pool).to_string()),
+        "ownerClass" => {
+            let oc = n.owner_class.resolve(&graph.string_pool);
+            if oc.is_empty() {
+                Value::Null
+            } else {
+                Value::Str(oc.to_string())
+            }
+        }
         "kind" => {
             let kind: NodeKind =
                 rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&n.kind).unwrap();

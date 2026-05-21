@@ -250,12 +250,29 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         }
     };
 
+    // `ast_target_name` / `ast_new_name` are the bare identifiers used for
+    // tree-sitter search and byte-level rewrite.
+    // "Foo.validate" → ast_target_name="validate"; "Foo.check" → ast_new_name="check"
+    // Bare names pass through unchanged.
+    let ast_target_name: &str = target_symbol
+        .find('.')
+        .map(|dot| &target_symbol[dot + 1..])
+        .unwrap_or(&target_symbol);
+    let ast_new_name: &str = target_new_name
+        .find('.')
+        .map(|dot| &target_new_name[dot + 1..])
+        .unwrap_or(&target_new_name);
+
     // --- Pre-flight collision detection ---
-    let collisions = detect_collisions(&target_new_name, graph);
+    // Pass the bare new-name: `Node.name` stores bare identifiers only, so
+    // matching against `target_new_name="Foo.check"` would compare against
+    // `node.name="check"` and silently never fire. Owner-class-aware
+    // collision detection is T1-12 follow-up.
+    let collisions = detect_collisions(ast_new_name, graph);
     if !collisions.is_empty() {
         eprintln!(
             "{}",
-            crate::hint::collision_warning(&target_new_name, &collisions)
+            crate::hint::collision_warning(ast_new_name, &collisions)
         );
     }
 
@@ -271,19 +288,6 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     // This isolates Foo.validate from Bar.validate (T1-11 accuracy fix).
     // Bare names no longer match class methods — they resolve to module-level
     // symbols only.  Callers wanting a class method must use "ClassName.method".
-    //
-    // `ast_target_name` / `ast_new_name` are the bare identifiers used for
-    // tree-sitter search and byte-level rewrite.
-    // "Foo.validate" → ast_target_name="validate"; "Foo.check" → ast_new_name="check"
-    // Bare names pass through unchanged.
-    let ast_target_name: &str = target_symbol
-        .find('.')
-        .map(|dot| &target_symbol[dot + 1..])
-        .unwrap_or(&target_symbol);
-    let ast_new_name: &str = target_new_name
-        .find('.')
-        .map(|dot| &target_new_name[dot + 1..])
-        .unwrap_or(&target_new_name);
 
     let target_indices: Vec<usize> = if let Some(dot) = target_symbol.find('.') {
         let owner = &target_symbol[..dot];
