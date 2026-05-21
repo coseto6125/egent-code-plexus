@@ -5,17 +5,30 @@
 //! Tests are placed in a dedicated file so their `test_counters::reset()` calls
 //! cannot interfere with counters in other test binaries running in parallel.
 //!
-//! Test infrastructure note: cargo integration tests each run in their own
-//! process; `test_counters` statics are process-local, so `reset()` before
-//! each test is sufficient isolation.
+//! Tests that assert on process-global `test_counters` statics acquire
+//! `COUNTER_LOCK` before resetting, so concurrent test threads cannot
+//! interleave their counter writes. `test_edit_file_then_impact_sees_new_symbol`
+//! spawns an `ecp` subprocess and inspects filesystem side-effects only — it
+//! does not touch the counters — so it does not need the lock.
 
 use ecp_cli::auto_ensure::test_counters;
 use ecp_core::graph::{ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use tempfile::TempDir;
+
+/// Serialise all tests that touch `test_counters` so their reset→call→assert
+/// sequences are not interleaved across threads.
+static COUNTER_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_counters() -> MutexGuard<'static, ()> {
+    // Poisoned mutex means a previous test panicked while holding the lock;
+    // recover so the remaining tests can still run and report their failures.
+    COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -179,6 +192,7 @@ fn test_edit_file_then_impact_sees_new_symbol_without_full_reindex() {
 /// compilation unit for `ecp-cli`).
 #[test]
 fn test_auto_ensure_dispatches_incremental_for_overlay_dirty() {
+    let _guard = lock_counters();
     test_counters::reset();
 
     let tmp = TempDir::new().unwrap();
@@ -267,5 +281,75 @@ fn test_pre_tool_use_hook_unchanged_path() {
     assert_eq!(
         push_count, 2,
         "pre_tool_use::handle should contain exactly 2 `sections.push` calls, found {push_count}"
+    );
+}
+
+// ── T7-4 test 4 (negative) ───────────────────────────────────────────────────
+
+/// When `graph.bin` has an incompatible format version, `ensure_fresh` must
+/// fall through to `build_l2` and must NOT call `reanalyze_files`.
+///
+/// The fixture writes a graph.bin with `version = 0` (never a valid ecp
+/// GRAPH_FORMAT_VERSION), which makes `header_compatible` return false. Even
+/// though `build_l2` itself will fail in a bare tempdir (no git history, no
+/// analyzable source tree), the counter is incremented BEFORE the call so we
+/// can assert branch dispatch independently of the build outcome.
+#[test]
+fn test_version_incompatible_falls_through_to_build_l2() {
+    let _guard = lock_counters();
+    test_counters::reset();
+
+    let tmp = TempDir::new().unwrap();
+    let worktree = tmp.path();
+
+    // Minimal git repo so ensure_index can decide Stale (needs at least a
+    // file newer than the graph to avoid Ready).
+    git_init_with_commit(worktree);
+
+    // Write an incompatible graph.bin: same magic but version = 0.
+    // GRAPH_FORMAT_VERSION is guaranteed > 0, so this is always incompatible.
+    let graph_path = worktree.join(".ecp").join("graph.bin");
+    fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+    let bad_graph = ZeroCopyGraph {
+        magic: GRAPH_MAGIC,
+        version: 0, // always incompatible — GRAPH_FORMAT_VERSION >= 1
+        fingerprint: [0; 32],
+        string_pool: Vec::new(),
+        files: Vec::new(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        out_offsets: vec![0],
+        in_offsets: vec![0],
+        in_edge_idx: Vec::new(),
+        name_index: Vec::new(),
+        process_start: 0,
+        traces_offsets: Vec::new(),
+        traces_data: Vec::new(),
+        blind_spots: Vec::new(),
+        route_shapes: Vec::new(),
+        call_metas: vec![],
+        function_metas: vec![],
+    };
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&bad_graph).unwrap();
+    fs::write(&graph_path, &*bytes).unwrap();
+
+    // Ensure the source file is newer than graph.bin so ensure_index returns Stale.
+    std::thread::sleep(Duration::from_millis(30));
+    fs::write(worktree.join("lib.rs"), "pub fn some_fn() {}\n").unwrap();
+
+    // Run ensure_fresh — it will enter the incompatible branch and attempt
+    // build_l2 (which will fail in the tempdir, but the counter fires first).
+    let _ = ecp_cli::auto_ensure::ensure_fresh(&graph_path, worktree);
+
+    // build_l2 branch must have fired; reanalyze_files must NOT have fired.
+    assert_eq!(
+        test_counters::build_l2_calls(),
+        1,
+        "ensure_fresh must call build_l2 when graph header is incompatible"
+    );
+    assert_eq!(
+        test_counters::reanalyze_calls(),
+        0,
+        "ensure_fresh must NOT call reanalyze_files when graph header is incompatible"
     );
 }

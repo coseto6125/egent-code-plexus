@@ -195,12 +195,14 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
                 // Version-incompatible base: applying an overlay would silently
                 // corrupt graph.bin. Fully rebuild instead.
                 // Invariant (T1-7 + OQ-5): this branch must NEVER call the overlay path.
+                // Counter is incremented before build_l2 so tests can assert branch
+                // dispatch even when build_l2 fails in a minimal tempdir fixture.
+                test_counters::BUILD_L2_CALL_COUNT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let start = std::time::Instant::now();
                 crate::build::orchestrator::build_l2(worktree_root, None)
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
-                test_counters::BUILD_L2_CALL_COUNT
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             } else {
                 // Header-compatible + dirty files: incremental refresh path (T7-4).
                 //
