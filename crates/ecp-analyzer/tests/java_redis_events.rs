@@ -4,16 +4,12 @@
 //! query string against spring-data-redis, Jedis, and Lettuce patterns.
 
 use ecp_analyzer::event_topic::{extract_event_topics, REDIS_JAVA};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/java/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -28,16 +24,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[REDIS_JAVA],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[REDIS_JAVA], &imports)
 }
 
 /// spring-data-redis: redisTemplate.convertAndSend("orders", msg) → Publish, topic="orders".
@@ -52,7 +39,7 @@ public class OrderPublisher {
     }
 }
 "#;
-    let (result, pool) = run(src, &["org.springframework.data.redis.core.RedisTemplate"]);
+    let result = run(src, &["org.springframework.data.redis.core.RedisTemplate"]);
     assert_eq!(
         result.len(),
         1,
@@ -61,8 +48,13 @@ public class OrderPublisher {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// Jedis: jedis.publish("payments", msg) → Publish, topic="payments".
@@ -77,7 +69,7 @@ public class PaymentPublisher {
     }
 }
 "#;
-    let (result, pool) = run(src, &["redis.clients.jedis.Jedis"]);
+    let result = run(src, &["redis.clients.jedis.Jedis"]);
     assert_eq!(
         result.len(),
         1,
@@ -86,8 +78,13 @@ public class PaymentPublisher {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// Lettuce: commands.subscribe("events") → Subscribe, topic="events".
@@ -102,7 +99,7 @@ public class EventSubscriber {
     }
 }
 "#;
-    let (result, pool) = run(
+    let result = run(
         src,
         &["io.lettuce.core.pubsub.StatefulRedisPubSubConnection"],
     );
@@ -114,8 +111,13 @@ public class EventSubscriber {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "events"
+    );
 }
 
 /// Lettuce: commands.psubscribe("orders.*") → Subscribe, pattern stored as topic.
@@ -130,7 +132,7 @@ public class PatternSubscriber {
     }
 }
 "#;
-    let (result, pool) = run(
+    let result = run(
         src,
         &["io.lettuce.core.pubsub.StatefulRedisPubSubConnection"],
     );
@@ -142,9 +144,14 @@ public class PatternSubscriber {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // canonicalize: true converts "orders.*" → "orders/*"
-    assert_eq!(pool.resolve(&lit), "orders/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders/*"
+    );
 }
 
 /// Lettuce reactive: commands.pSubscribe("events.*") → Subscribe (camelCase).
@@ -159,7 +166,7 @@ public class ReactiveSubscriber {
     }
 }
 "#;
-    let (result, pool) = run(
+    let result = run(
         src,
         &["io.lettuce.core.pubsub.api.reactive.RedisPubSubReactiveCommands"],
     );
@@ -171,8 +178,13 @@ public class ReactiveSubscriber {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "events/*"
+    );
 }
 
 /// Variable channel → no capture (no fabrication).
@@ -187,7 +199,7 @@ public class DynamicPublisher {
     }
 }
 "#;
-    let (result, _pool) = run(src, &["redis.clients.jedis.Jedis"]);
+    let result = run(src, &["redis.clients.jedis.Jedis"]);
     assert!(
         result.is_empty(),
         "variable channel must produce nothing; got {:?}",
@@ -207,7 +219,7 @@ public class Handler {
     }
 }
 "#;
-    let (result, _pool) = run(src, &["java.util.Map"]);
+    let result = run(src, &["java.util.Map"]);
     assert!(
         result.is_empty(),
         "non-redis import must produce nothing; got {:?}",

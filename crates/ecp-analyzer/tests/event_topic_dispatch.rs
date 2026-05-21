@@ -7,7 +7,6 @@ use ecp_analyzer::event_topic::{
     classify_amqp_direction, classify_kafka_direction, extract_event_topics, EventTopicConfig,
 };
 use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 // ---------------------------------------------------------------------------
@@ -31,13 +30,12 @@ fn strip_quotes(s: &str) -> &str {
 
 /// Parse `src`, build `query`, fabricate `RawImport`s from `import_sources`
 /// (modelling `from <source> import *`), then run `extract_event_topics`.
-/// Returns the extracted vec plus the pool that owns the interned strings.
 fn run(
     src: &str,
     query: &str,
     configs: &[EventTopicConfig],
     import_sources: &[&str],
-) -> (Vec<RawEventTopic>, StringPool) {
+) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -54,9 +52,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(&tree, src.as_bytes(), &query, configs, &imports, &mut pool);
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, configs, &imports)
 }
 
 // ---------------------------------------------------------------------------
@@ -80,14 +76,14 @@ const CONFIG_KAFKA: EventTopicConfig = EventTopicConfig {
 /// No configs → empty Vec, no panic.
 #[test]
 fn test_empty_configs_returns_empty() {
-    let (result, _pool) = run(r#"topic = "user.created""#, TOPIC_QUERY, &[], &[]);
+    let result = run(r#"topic = "user.created""#, TOPIC_QUERY, &[], &[]);
     assert!(result.is_empty(), "no configs must return empty");
 }
 
 /// Config requires `kafka` import; file has no such import → empty Vec.
 #[test]
 fn test_import_gate_blocks_when_absent() {
-    let (result, _pool) = run(
+    let result = run(
         r#"topic = "order.created""#,
         TOPIC_QUERY,
         &[CONFIG_KAFKA],
@@ -99,7 +95,7 @@ fn test_import_gate_blocks_when_absent() {
 /// Config requires `kafka` import; file imports `kafka.producer` → emits.
 #[test]
 fn test_import_gate_passes_when_present() {
-    let (result, _pool) = run(
+    let result = run(
         r#"topic = "order.created""#,
         TOPIC_QUERY,
         &[CONFIG_KAFKA],
@@ -121,11 +117,10 @@ fn test_canonicalize_applied_when_enabled() {
 
     let raw_topic = "User.Created";
     let src = format!(r#"topic = "{raw_topic}""#);
-    let (result, pool) = run(&src, TOPIC_QUERY, &[CONFIG_KAFKA], &["kafka"]);
+    let result = run(&src, TOPIC_QUERY, &[CONFIG_KAFKA], &["kafka"]);
 
     assert_eq!(result.len(), 1);
-    let str_ref = result[0].topic_literal.expect("topic_literal");
-    let emitted = pool.resolve(&str_ref).to_string();
+    let emitted = result[0].topic_literal.as_deref().expect("topic_literal");
     let expected = canonicalize(raw_topic);
     assert_eq!(
         emitted, expected,
@@ -149,13 +144,12 @@ fn test_canonicalize_skipped_when_disabled() {
 
     let raw_topic = "User.Created";
     let src = format!(r#"topic = "{raw_topic}""#);
-    let (result, pool) = run(&src, TOPIC_QUERY, &[CONFIG_RAW], &["kafka"]);
+    let result = run(&src, TOPIC_QUERY, &[CONFIG_RAW], &["kafka"]);
 
     assert_eq!(result.len(), 1);
-    let str_ref = result[0].topic_literal.expect("topic_literal");
-    let emitted = pool.resolve(&str_ref).to_string();
+    let emitted = result[0].topic_literal.as_deref().expect("topic_literal");
     assert_eq!(
-        strip_quotes(&emitted),
+        strip_quotes(emitted),
         raw_topic,
         "canonicalize=false must not transform the topic"
     );
@@ -184,7 +178,7 @@ fn test_multiple_configs_first_match_wins() {
         canonicalize: true,
     };
 
-    let (result, _pool) = run(
+    let result = run(
         r#"topic = "order.placed""#,
         TOPIC_QUERY,
         &[CONFIG_FIRST, CONFIG_SECOND],
@@ -228,7 +222,7 @@ fn test_direction_classifier_invoked() {
         canonicalize: false,
     };
 
-    let (result, pool) = run(
+    let result = run(
         r#"send("consume", "order.placed")"#,
         CALL_QUERY,
         &[CONFIG_AMQP],
@@ -241,9 +235,8 @@ fn test_direction_classifier_invoked() {
         PubSub::Subscribe,
         "classify_amqp_direction(\"consume\") must produce PubSub::Subscribe"
     );
-    let str_ref = result[0].topic_literal.expect("topic_literal");
     assert_eq!(
-        pool.resolve(&str_ref),
+        result[0].topic_literal.as_deref().expect("topic_literal"),
         "order.placed",
         "topic text must be emitted verbatim (canonicalize=false)"
     );

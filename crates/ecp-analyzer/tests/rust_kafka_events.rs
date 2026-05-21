@@ -6,17 +6,13 @@
 //! - `consumer.subscribe(&["topic", ...])` (consumer)
 
 use ecp_analyzer::event_topic::{extract_event_topics, KAFKA_RUST};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/rust/queries.scm");
 const FRAMEWORKS_SCM: &str = include_str!("../src/rust/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -35,16 +31,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[KAFKA_RUST],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[KAFKA_RUST], &imports)
 }
 
 /// rdkafka async producer: producer.send(FutureRecord::to("topic"), ...).await → Publish.
@@ -60,7 +47,7 @@ async fn publish_order(producer: &FutureProducer) {
     ).await;
 }
 "#;
-    let (result, pool) = run(src, &["rdkafka"]);
+    let result = run(src, &["rdkafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -69,8 +56,13 @@ async fn publish_order(producer: &FutureProducer) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// rdkafka consumer: consumer.subscribe(&["topic"]) → Subscribe direction.
@@ -83,7 +75,7 @@ fn subscribe_orders(consumer: &StreamConsumer) {
     consumer.subscribe(&["orders"]).expect("subscribe failed");
 }
 "#;
-    let (result, pool) = run(src, &["rdkafka"]);
+    let result = run(src, &["rdkafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -92,8 +84,13 @@ fn subscribe_orders(consumer: &StreamConsumer) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// Variable topic → no capture (no fabrication).
@@ -109,7 +106,7 @@ async fn publish_dynamic(producer: &FutureProducer, topic: &str) {
     ).await;
 }
 "#;
-    let (result, _pool) = run(src, &["rdkafka"]);
+    let result = run(src, &["rdkafka"]);
     assert!(
         result.is_empty(),
         "variable topic must produce no RawEventTopic; got {:?}",
@@ -128,7 +125,7 @@ async fn publish_order(producer: &SomeProducer) {
     ).await;
 }
 "#;
-    let (result, _pool) = run(src, &["some_other_crate"]);
+    let result = run(src, &["some_other_crate"]);
     assert!(
         result.is_empty(),
         "non-rdkafka import must produce nothing; got {:?}",
@@ -149,7 +146,7 @@ fn publish_payment(producer: &FutureProducer) {
     );
 }
 "#;
-    let (result, pool) = run(src, &["rdkafka"]);
+    let result = run(src, &["rdkafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -158,8 +155,13 @@ fn publish_payment(producer: &FutureProducer) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// Enclosing function name is captured correctly.
@@ -175,8 +177,7 @@ async fn publish_user_event(producer: &FutureProducer) {
     ).await;
 }
 "#;
-    let (result, pool) = run(src, &["rdkafka"]);
+    let result = run(src, &["rdkafka"]);
     assert_eq!(result.len(), 1);
-    let fn_name = pool.resolve(&result[0].enclosing_fn);
-    assert_eq!(fn_name, "publish_user_event");
+    assert_eq!(result[0].enclosing_fn.as_ref(), "publish_user_event");
 }

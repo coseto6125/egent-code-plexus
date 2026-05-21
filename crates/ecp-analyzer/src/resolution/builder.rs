@@ -1448,6 +1448,21 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        // T5-33: promote `RawEventTopic`s → `EventTopic` Nodes +
+        // `Publishes`/`Subscribes` edges (fn → EventTopic) + `EventTopicMirror`
+        // heuristic edges between matched Publish↔Subscribe pairs. Runs after
+        // schema_field_mirrors (sibling post-process) and before File-node loop
+        // for the same idx-contiguity reason. EventTopic nodes are NOT
+        // registered in SymbolTable — queries reach them via Publishes/Subscribes
+        // traversal from function nodes.
+        crate::post_process::event_topic_mirrors::emit_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut nodes,
+            &mut edges,
+        );
+
         // Append one `NodeKind::File` node per LocalGraph at the tail of
         // `nodes` (idx >= raw-node count). Doing it here — AFTER all passes
         // that index symbols by SymbolTable + use raw node idx ranges —

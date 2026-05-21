@@ -1,5 +1,4 @@
 use crate::graph::NodeKind;
-use crate::pool::StrRef;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -274,14 +273,24 @@ pub struct RawSchemaField {
 }
 
 /// Message-bus publish/subscribe call site.
+///
+/// `topic_literal` and `enclosing_fn` are owned `Box<str>` so the struct is
+/// self-contained after the per-file parse scope drops. Previous
+/// `StrRef`-based layout required callers to carry a dropped local pool,
+/// making post-process promotion (T5-33) impossible without leaking the
+/// pool into `LocalGraph`. `Box<str>` matches `RawSchemaField`'s pattern.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawEventTopic {
-    /// None = dynamic topic, upstream emits BlindSpot
-    pub topic_literal: Option<StrRef>,
+    /// `None` when the topic string is dynamic (variable arg); emitter
+    /// records a `BlindSpot` instead. Already canonicalised by the
+    /// per-language detector via `event_topic::normalize::canonicalize`.
+    pub topic_literal: Option<Box<str>>,
     pub direction: PubSub,
     pub lib: FrameworkId,
-    pub enclosing_fn: StrRef,
+    /// Name of the enclosing function/method at the call site.
+    /// Empty string when the detector's producer-capture is absent.
+    pub enclosing_fn: Box<str>,
     pub span: (u32, u32, u32, u32),
 }
 

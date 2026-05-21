@@ -4,16 +4,12 @@
 //! query string — a typo in either path breaks these tests immediately.
 
 use ecp_analyzer::event_topic::{extract_event_topics, KAFKA_NODE};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/javascript/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -28,16 +24,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[KAFKA_NODE],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[KAFKA_NODE], &imports)
 }
 
 #[test]
@@ -50,12 +37,17 @@ async function publishOrder(data) {
     await producer.send({ topic: 'orders', messages: [{ value: JSON.stringify(data) }] });
 }
 "#;
-    let (result, pool) = run(src, &["kafkajs"]);
+    let result = run(src, &["kafkajs"]);
     assert_eq!(result.len(), 1, "expected one RawEventTopic");
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 #[test]
@@ -67,7 +59,7 @@ function emitPayment(payload) {
     producer.produce('payments', null, Buffer.from(payload));
 }
 "#;
-    let (result, pool) = run(src, &["node-rdkafka"]);
+    let result = run(src, &["node-rdkafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -75,8 +67,13 @@ function emitPayment(payload) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// Non-literal topic variable — extractor refuses to fabricate.
@@ -90,7 +87,7 @@ function publish() {
     producer.send({ topic: topic, messages: [] });
 }
 "#;
-    let (result, _pool) = run(src, &["kafkajs"]);
+    let result = run(src, &["kafkajs"]);
     assert!(
         result.is_empty(),
         "variable topic must not produce a RawEventTopic"
@@ -106,7 +103,7 @@ function handleRequest(req, res) {
     res.send({ topic: 'orders', messages: [] });
 }
 "#;
-    let (result, _pool) = run(src, &["express"]);
+    let result = run(src, &["express"]);
     assert!(result.is_empty(), "non-kafka import must produce nothing");
 }
 
@@ -125,7 +122,7 @@ function sendViaRdkafka(payload) {
     rdProducer.produce('events', null, Buffer.from(payload));
 }
 "#;
-    let (result, pool) = run(src, &["kafkajs", "node-rdkafka"]);
+    let result = run(src, &["kafkajs", "node-rdkafka"]);
     assert_eq!(
         result.len(),
         2,
@@ -133,7 +130,7 @@ function sendViaRdkafka(payload) {
     );
     let topics: Vec<&str> = result
         .iter()
-        .map(|r| pool.resolve(r.topic_literal.as_ref().expect("topic_literal")))
+        .map(|r| r.topic_literal.as_deref().expect("topic_literal"))
         .collect();
     assert!(topics.contains(&"billing"), "missing 'billing' topic");
     assert!(topics.contains(&"events"), "missing 'events' topic");
@@ -155,8 +152,13 @@ class OrderService {
     }
 }
 "#;
-    let (result, pool) = run(src, &["kafkajs"]);
+    let result = run(src, &["kafkajs"]);
     assert_eq!(result.len(), 1, "expected one RawEventTopic from method");
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }

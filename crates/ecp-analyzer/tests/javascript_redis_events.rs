@@ -6,16 +6,12 @@
 //! Libraries under test: node-redis v4 (`redis` import), ioredis (`ioredis`).
 
 use ecp_analyzer::event_topic::{extract_event_topics, REDIS_JS};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/javascript/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -30,16 +26,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[REDIS_JS],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[REDIS_JS], &imports)
 }
 
 /// node-redis v4: `await client.publish('channel', msg)` → Publish
@@ -54,13 +41,18 @@ async function notifyOrder(msg) {
     await client.publish('orders.created', msg);
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(result.len(), 1, "expected one RawEventTopic");
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // canonicalize: '.' → '/' → "orders/created"
-    assert_eq!(pool.resolve(&lit), "orders/created");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders/created"
+    );
 }
 
 /// node-redis v4: `await client.subscribe('channel', handler)` → Subscribe
@@ -75,13 +67,18 @@ async function listenForOrders() {
     await subscriber.subscribe('orders.created', (msg) => console.log(msg));
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(result.len(), 1, "expected one RawEventTopic");
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // canonicalize: '.' → '/' → "orders/created"
-    assert_eq!(pool.resolve(&lit), "orders/created");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders/created"
+    );
 }
 
 /// node-redis v4: `await client.pSubscribe('pattern.*', handler)` → Subscribe (camelCase)
@@ -96,13 +93,18 @@ async function watchAll() {
     await subscriber.pSubscribe('orders.*', (msg) => process(msg));
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(result.len(), 1, "expected one RawEventTopic for pSubscribe");
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // canonicalize: '.' → '/' → "orders/*"
-    assert_eq!(pool.resolve(&lit), "orders/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders/*"
+    );
 }
 
 /// ioredis: `redis.publish('channel', msg)` → Publish (sync, no await)
@@ -115,7 +117,7 @@ function sendNotification(msg) {
     redis.publish('notifications', msg);
 }
 "#;
-    let (result, pool) = run(src, &["ioredis"]);
+    let result = run(src, &["ioredis"]);
     assert_eq!(
         result.len(),
         1,
@@ -123,8 +125,13 @@ function sendNotification(msg) {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "notifications");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "notifications"
+    );
 }
 
 /// ioredis: `redis.subscribe('channel')` → Subscribe (sync form)
@@ -137,7 +144,7 @@ function startListener() {
     subscriber.subscribe('payments');
 }
 "#;
-    let (result, pool) = run(src, &["ioredis"]);
+    let result = run(src, &["ioredis"]);
     assert_eq!(
         result.len(),
         1,
@@ -145,8 +152,13 @@ function startListener() {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// ioredis: `redis.psubscribe('pattern.*')` → Subscribe (lowercase)
@@ -161,7 +173,7 @@ function watchPayments() {
     subscriber.psubscribe('payments.*');
 }
 "#;
-    let (result, pool) = run(src, &["ioredis"]);
+    let result = run(src, &["ioredis"]);
     assert_eq!(
         result.len(),
         1,
@@ -169,9 +181,14 @@ function watchPayments() {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // canonicalize: '.' → '/' → "payments/*"
-    assert_eq!(pool.resolve(&lit), "payments/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments/*"
+    );
 }
 
 /// Variable channel → extractor refuses to fabricate.
@@ -184,7 +201,7 @@ async function broadcast(channel, msg) {
     await client.publish(channel, msg);
 }
 "#;
-    let (result, _pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert!(
         result.is_empty(),
         "variable channel must not produce a RawEventTopic"
@@ -201,7 +218,7 @@ async function handler(req, res) {
     await client.publish('orders', req.body);
 }
 "#;
-    let (result, _pool) = run(src, &["express"]);
+    let result = run(src, &["express"]);
     assert!(result.is_empty(), "non-redis import must produce nothing");
 }
 

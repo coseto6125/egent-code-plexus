@@ -5,17 +5,13 @@
 //! and `org.springframework.kafka` (template.send) Kotlin patterns.
 
 use ecp_analyzer::event_topic::{extract_event_topics, KAFKA_KOTLIN};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/kotlin/queries.scm");
 const FRAMEWORKS_SCM: &str = include_str!("../src/kotlin/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_kotlin::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -34,16 +30,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[KAFKA_KOTLIN],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[KAFKA_KOTLIN], &imports)
 }
 
 /// Apache Kafka: producer.send(ProducerRecord("topic", ...)) → Publish.
@@ -57,7 +44,7 @@ fun publishOrder(producer: KafkaProducer<String, String>, data: String) {
     producer.send(ProducerRecord("orders", data))
 }
 "#;
-    let (result, pool) = run(src, &["org.apache.kafka"]);
+    let result = run(src, &["org.apache.kafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -66,8 +53,13 @@ fun publishOrder(producer: KafkaProducer<String, String>, data: String) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// Spring Kafka: template.send("topic", msg) → Publish.
@@ -80,7 +72,7 @@ fun publishPayment(template: KafkaTemplate<String, String>, msg: String) {
     template.send("payments", msg)
 }
 "#;
-    let (result, pool) = run(src, &["org.springframework.kafka"]);
+    let result = run(src, &["org.springframework.kafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -89,8 +81,13 @@ fun publishPayment(template: KafkaTemplate<String, String>, msg: String) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// Variable topic argument → no capture (no fabrication).
@@ -104,7 +101,7 @@ fun publishDynamic(producer: KafkaProducer<String, String>, topicName: String, d
     producer.send(ProducerRecord(topicName, data))
 }
 "#;
-    let (result, _pool) = run(src, &["org.apache.kafka"]);
+    let result = run(src, &["org.apache.kafka"]);
     assert!(
         result.is_empty(),
         "variable topic must produce no RawEventTopic; got {:?}",
@@ -120,7 +117,7 @@ fun sendMessage(logger: Any, msg: String) {
     logger.send("events", msg)
 }
 "#;
-    let (result, _pool) = run(src, &["some.other.lib"]);
+    let result = run(src, &["some.other.lib"]);
     assert!(
         result.is_empty(),
         "non-kafka import must produce nothing; got {:?}",
@@ -144,10 +141,10 @@ fun sendSpring(template: KafkaTemplate<String, String>, msg: String) {
     template.send("billing", msg)
 }
 "#;
-    let (result, pool) = run(src, &["org.apache.kafka", "org.springframework.kafka"]);
+    let result = run(src, &["org.apache.kafka", "org.springframework.kafka"]);
     let topics: Vec<&str> = result
         .iter()
-        .map(|r| pool.resolve(r.topic_literal.as_ref().unwrap()))
+        .map(|r| r.topic_literal.as_deref().unwrap())
         .collect();
     assert!(topics.contains(&"events"), "apache kafka topic must appear");
     assert!(
@@ -166,8 +163,7 @@ fun publishUserEvent(template: KafkaTemplate<String, String>, msg: String) {
     template.send("users", msg)
 }
 "#;
-    let (result, pool) = run(src, &["org.springframework.kafka"]);
+    let result = run(src, &["org.springframework.kafka"]);
     assert_eq!(result.len(), 1);
-    let fn_name = pool.resolve(&result[0].enclosing_fn);
-    assert_eq!(fn_name, "publishUserEvent");
+    assert_eq!(result[0].enclosing_fn.as_ref(), "publishUserEvent");
 }

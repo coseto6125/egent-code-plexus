@@ -5,17 +5,13 @@
 //! Shopify/sarama (ProducerMessage struct literal) patterns.
 
 use ecp_analyzer::event_topic::{extract_event_topics, KAFKA_GO};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/go/queries.scm");
 const FRAMEWORKS_SCM: &str = include_str!("../src/go/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -34,16 +30,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[KAFKA_GO],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[KAFKA_GO], &imports)
 }
 
 /// segmentio/kafka-go: WriteMessages with literal Topic → Publish.
@@ -61,7 +48,7 @@ func publishOrder(writer *kafka.Writer, ctx interface{}) {
     })
 }
 "#;
-    let (result, pool) = run(src, &["github.com/segmentio/kafka-go"]);
+    let result = run(src, &["github.com/segmentio/kafka-go"]);
     assert_eq!(
         result.len(),
         1,
@@ -70,8 +57,13 @@ func publishOrder(writer *kafka.Writer, ctx interface{}) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// Shopify/sarama: ProducerMessage with literal Topic → Publish.
@@ -90,7 +82,7 @@ func sendSarama(producer sarama.SyncProducer) {
     producer.SendMessage(msg)
 }
 "#;
-    let (result, pool) = run(src, &["github.com/Shopify/sarama"]);
+    let result = run(src, &["github.com/Shopify/sarama"]);
     assert_eq!(
         result.len(),
         1,
@@ -99,8 +91,13 @@ func sendSarama(producer sarama.SyncProducer) {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// Variable Topic field → no capture (no fabrication).
@@ -118,7 +115,7 @@ func publishDynamic(writer *kafka.Writer, ctx interface{}, topicName string) {
     })
 }
 "#;
-    let (result, _pool) = run(src, &["github.com/segmentio/kafka-go"]);
+    let result = run(src, &["github.com/segmentio/kafka-go"]);
     assert!(
         result.is_empty(),
         "variable Topic must produce no RawEventTopic; got {:?}",
@@ -138,7 +135,7 @@ func sendMessage(w http.ResponseWriter, topic string) {
     w.WriteMessages(nil, struct{ Topic string }{"orders"})
 }
 "#;
-    let (result, _pool) = run(src, &["net/http"]);
+    let result = run(src, &["net/http"]);
     assert!(
         result.is_empty(),
         "non-kafka import must produce nothing; got {:?}",
@@ -165,7 +162,7 @@ func (s *EventService) publishEvent(ctx interface{}) {
     })
 }
 "#;
-    let (result, pool) = run(src, &["github.com/segmentio/kafka-go"]);
+    let result = run(src, &["github.com/segmentio/kafka-go"]);
     assert_eq!(
         result.len(),
         1,
@@ -173,8 +170,13 @@ func (s *EventService) publishEvent(ctx interface{}) {
         result
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "events"
+    );
 }
 
 /// Enclosing function name is captured correctly.
@@ -192,8 +194,7 @@ func publishUserEvent(writer *kafka.Writer, ctx interface{}) {
     })
 }
 "#;
-    let (result, pool) = run(src, &["github.com/segmentio/kafka-go"]);
+    let result = run(src, &["github.com/segmentio/kafka-go"]);
     assert_eq!(result.len(), 1);
-    let fn_name = pool.resolve(&result[0].enclosing_fn);
-    assert_eq!(fn_name, "publishUserEvent");
+    assert_eq!(result[0].enclosing_fn.as_ref(), "publishUserEvent");
 }

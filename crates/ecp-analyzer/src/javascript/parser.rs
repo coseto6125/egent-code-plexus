@@ -10,7 +10,6 @@ use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute};
 use ecp_core::graph::NodeKind;
-use ecp_core::pool::StringPool;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
@@ -533,11 +532,7 @@ impl LanguageProvider for JavaScriptProvider {
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
-        // `RawEventTopic.topic_literal` is a `StrRef` into this local pool; the
-        // pool drops at end of scope and the builder must re-intern the literal
-        // before resolution.
         let event_topics = {
-            let mut pool = StringPool::new();
             let topics = crate::event_topic::extract_event_topics(
                 &tree,
                 source,
@@ -548,7 +543,6 @@ impl LanguageProvider for JavaScriptProvider {
                     crate::event_topic::RABBITMQ_JS,
                 ],
                 &imports,
-                &mut pool,
             );
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };

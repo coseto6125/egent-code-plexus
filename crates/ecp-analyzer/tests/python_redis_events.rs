@@ -5,16 +5,12 @@
 //! Also re-verifies Kafka + RabbitMQ regression isolation.
 
 use ecp_analyzer::event_topic::{extract_event_topics, KAFKA_PYTHON, REDIS_PYTHON};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/python/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -29,16 +25,13 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
+    extract_event_topics(
         &tree,
         src.as_bytes(),
         &query,
         &[KAFKA_PYTHON, REDIS_PYTHON],
         &imports,
-        &mut pool,
-    );
-    (result, pool)
+    )
 }
 
 /// redis (sync) publish with literal channel → Publish direction, topic="orders".
@@ -50,7 +43,7 @@ import redis
 def publish_order(r, data):
     r.publish("orders", data)
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -59,8 +52,13 @@ def publish_order(r, data):
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// redis (sync) pubsub.subscribe with literal channel → Subscribe direction.
@@ -72,7 +70,7 @@ import redis
 def listen_orders(pubsub):
     pubsub.subscribe("orders")
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -81,8 +79,13 @@ def listen_orders(pubsub):
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// redis (sync) pubsub.psubscribe with literal pattern → Subscribe, pattern stored as topic.
@@ -94,7 +97,7 @@ import redis
 def listen_pattern(pubsub):
     pubsub.psubscribe("orders.*")
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -103,14 +106,19 @@ def listen_pattern(pubsub):
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // `canonicalize: true` converts `orders.*` → `orders/*` (dot → slash rule).
     // This is a known schema gap: without a `kind` field the canonicalizer
     // cannot distinguish a glob pattern from a plain channel name. T5-33 will
     // receive `"orders/*"` — it cannot reconstruct `"orders.*"` to match against
     // Redis channel names that contain dots. Deferred to schema-migration PR;
     // see redis_python.rs schema gap note.
-    assert_eq!(pool.resolve(&lit), "orders/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders/*"
+    );
 }
 
 /// aioredis (async) await publish → Publish direction.
@@ -122,7 +130,7 @@ import aioredis
 async def publish_payment(r, data):
     await r.publish("payments", data)
 "#;
-    let (result, pool) = run(src, &["aioredis"]);
+    let result = run(src, &["aioredis"]);
     assert_eq!(
         result.len(),
         1,
@@ -131,8 +139,13 @@ async def publish_payment(r, data):
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// aioredis (async) await pubsub.subscribe → Subscribe direction.
@@ -144,7 +157,7 @@ import aioredis
 async def listen_payments(pubsub):
     await pubsub.subscribe("payments")
 "#;
-    let (result, pool) = run(src, &["aioredis"]);
+    let result = run(src, &["aioredis"]);
     assert_eq!(
         result.len(),
         1,
@@ -153,8 +166,13 @@ async def listen_payments(pubsub):
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// Variable channel argument → no capture (no fabrication).
@@ -166,7 +184,7 @@ import redis
 def publish_dynamic(r, channel, data):
     r.publish(channel, data)
 "#;
-    let (result, _pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert!(
         result.is_empty(),
         "variable channel must produce no RawEventTopic; got {:?}",
@@ -183,7 +201,7 @@ import json
 def publish():
     result = json.dumps({"channel": "orders"})
 "#;
-    let (result, _pool) = run(src, &["json"]);
+    let result = run(src, &["json"]);
     assert!(
         result.is_empty(),
         "non-redis import must produce nothing; got {:?}",
@@ -205,7 +223,7 @@ import redis
 def listen_multi(pubsub):
     pubsub.subscribe("ch1", "ch2")
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     // Only the first literal is captured — documented limitation.
     assert_eq!(
         result.len(),
@@ -215,8 +233,13 @@ def listen_multi(pubsub):
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "ch1");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "ch1"
+    );
 }
 
 /// aioredis (async) await pubsub.psubscribe with literal pattern → Subscribe.
@@ -228,7 +251,7 @@ import aioredis
 async def listen_pattern(pubsub):
     await pubsub.psubscribe("events.*")
 "#;
-    let (result, pool) = run(src, &["aioredis"]);
+    let result = run(src, &["aioredis"]);
     assert_eq!(
         result.len(),
         1,
@@ -237,10 +260,15 @@ async def listen_pattern(pubsub):
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // `canonicalize: true` converts `events.*` → `events/*` — same schema gap
     // as psubscribe sync form; see redis_python.rs schema gap note.
-    assert_eq!(pool.resolve(&lit), "events/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "events/*"
+    );
 }
 
 // ── Regression: Kafka still fires correctly in the same config slice ──
@@ -255,7 +283,7 @@ from kafka import KafkaProducer
 def send_event(producer):
     producer.send("events", b"data")
 "#;
-    let (result, pool) = run(src, &["kafka"]);
+    let result = run(src, &["kafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -264,10 +292,13 @@ def send_event(producer):
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0]
-        .topic_literal
-        .expect("kafka topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("kafka topic_literal must be Some"),
+        "events"
+    );
 }
 
 // RabbitMQ regression dropped: RABBITMQ_PYTHON does not yet exist on `main`
@@ -283,7 +314,7 @@ def handler(r, pubsub):
     r.publish("orders", b"data")
     pubsub.subscribe("orders")
 "#;
-    let (result, _pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert!(
         result.iter().all(|r| r.lib == FrameworkId::Redis),
         "redis import must not fire RabbitMQ config; got libs: {:?}",

@@ -5,17 +5,13 @@
 //! and `org.springframework.kafka` (KafkaTemplate) patterns.
 
 use ecp_analyzer::event_topic::{extract_event_topics, KAFKA_JAVA};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/java/queries.scm");
 const FRAMEWORKS_SCM: &str = include_str!("../src/java/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -34,16 +30,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[KAFKA_JAVA],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[KAFKA_JAVA], &imports)
 }
 
 /// Apache Kafka: producer.send(new ProducerRecord<>("topic", ...)) → Publish.
@@ -59,7 +46,7 @@ public class OrderService {
     }
 }
 "#;
-    let (result, pool) = run(src, &["org.apache.kafka"]);
+    let result = run(src, &["org.apache.kafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -68,8 +55,13 @@ public class OrderService {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// Spring Kafka: kafkaTemplate.send("topic", msg) → Publish.
@@ -86,7 +78,7 @@ public class PaymentService {
     }
 }
 "#;
-    let (result, pool) = run(src, &["org.springframework.kafka"]);
+    let result = run(src, &["org.springframework.kafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -95,8 +87,13 @@ public class PaymentService {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// Apache Kafka consumer subscribe via Arrays.asList → Subscribe direction.
@@ -112,7 +109,7 @@ public class OrderListener {
     }
 }
 "#;
-    let (result, pool) = run(src, &["org.apache.kafka"]);
+    let result = run(src, &["org.apache.kafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -121,8 +118,13 @@ public class OrderListener {
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// Variable topic argument → no capture (no fabrication).
@@ -138,7 +140,7 @@ public class DynamicService {
     }
 }
 "#;
-    let (result, _pool) = run(src, &["org.apache.kafka"]);
+    let result = run(src, &["org.apache.kafka"]);
     assert!(
         result.is_empty(),
         "variable topic must produce no RawEventTopic; got {:?}",
@@ -158,7 +160,7 @@ public class LogService {
     }
 }
 "#;
-    let (result, _pool) = run(src, &["java.util.logging"]);
+    let result = run(src, &["java.util.logging"]);
     assert!(
         result.is_empty(),
         "non-kafka import must produce nothing; got {:?}",
@@ -184,10 +186,10 @@ public class MultiKafkaService {
     }
 }
 "#;
-    let (result, pool) = run(src, &["org.apache.kafka", "org.springframework.kafka"]);
+    let result = run(src, &["org.apache.kafka", "org.springframework.kafka"]);
     let topics: Vec<&str> = result
         .iter()
-        .map(|r| pool.resolve(r.topic_literal.as_ref().unwrap()))
+        .map(|r| r.topic_literal.as_deref().unwrap())
         .collect();
     assert!(topics.contains(&"events"), "apache kafka topic must appear");
     assert!(
@@ -209,8 +211,7 @@ public class UserService {
     }
 }
 "#;
-    let (result, pool) = run(src, &["org.apache.kafka"]);
+    let result = run(src, &["org.apache.kafka"]);
     assert_eq!(result.len(), 1);
-    let fn_name = pool.resolve(&result[0].enclosing_fn);
-    assert_eq!(fn_name, "publishUserEvent");
+    assert_eq!(result[0].enclosing_fn.as_ref(), "publishUserEvent");
 }

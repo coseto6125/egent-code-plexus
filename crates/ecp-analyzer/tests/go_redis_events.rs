@@ -4,17 +4,13 @@
 //! query string against go-redis (v8/v9) and gomodule/redigo patterns.
 
 use ecp_analyzer::event_topic::{extract_event_topics, REDIS_GO};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/go/queries.scm");
 const FRAMEWORKS_SCM: &str = include_str!("../src/go/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -33,16 +29,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[REDIS_GO],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[REDIS_GO], &imports)
 }
 
 /// go-redis: client.Publish(ctx, "orders", msg) → Publish, topic="orders".
@@ -56,7 +43,7 @@ func publishOrder(client *redis.Client, ctx context.Context, data string) {
     client.Publish(ctx, "orders", data)
 }
 "#;
-    let (result, pool) = run(src, &["github.com/redis/go-redis/v9"]);
+    let result = run(src, &["github.com/redis/go-redis/v9"]);
     assert_eq!(
         result.len(),
         1,
@@ -65,8 +52,13 @@ func publishOrder(client *redis.Client, ctx context.Context, data string) {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// go-redis: client.Subscribe(ctx, "payments") → Subscribe, topic="payments".
@@ -81,7 +73,7 @@ func listenPayments(client *redis.Client, ctx context.Context) {
     _ = pubsub
 }
 "#;
-    let (result, pool) = run(src, &["github.com/redis/go-redis/v9"]);
+    let result = run(src, &["github.com/redis/go-redis/v9"]);
     assert_eq!(
         result.len(),
         1,
@@ -90,8 +82,13 @@ func listenPayments(client *redis.Client, ctx context.Context) {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// go-redis: client.PSubscribe(ctx, "orders.*") → Subscribe, pattern stored.
@@ -106,7 +103,7 @@ func listenPattern(client *redis.Client, ctx context.Context) {
     _ = pubsub
 }
 "#;
-    let (result, pool) = run(src, &["github.com/redis/go-redis/v9"]);
+    let result = run(src, &["github.com/redis/go-redis/v9"]);
     assert_eq!(
         result.len(),
         1,
@@ -115,9 +112,14 @@ func listenPattern(client *redis.Client, ctx context.Context) {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // canonicalize: true converts "orders.*" → "orders/*"
-    assert_eq!(pool.resolve(&lit), "orders/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders/*"
+    );
 }
 
 /// redigo: psc.Subscribe("events") → Subscribe, topic="events".
@@ -131,7 +133,7 @@ func listenEvents(psc redis.PubSubConn) {
     psc.Subscribe("events")
 }
 "#;
-    let (result, pool) = run(src, &["github.com/gomodule/redigo/redis"]);
+    let result = run(src, &["github.com/gomodule/redigo/redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -140,8 +142,13 @@ func listenEvents(psc redis.PubSubConn) {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "events"
+    );
 }
 
 /// Variable channel → no capture (no fabrication).
@@ -155,7 +162,7 @@ func publishDynamic(client *redis.Client, ctx context.Context, channel string, d
     client.Publish(ctx, channel, data).Err()
 }
 "#;
-    let (result, _pool) = run(src, &["github.com/redis/go-redis/v9"]);
+    let result = run(src, &["github.com/redis/go-redis/v9"]);
     assert!(
         result.is_empty(),
         "variable channel must produce nothing; got {:?}",
@@ -174,7 +181,7 @@ func process(channel string) {
     fmt.Println(channel)
 }
 "#;
-    let (result, _pool) = run(src, &["fmt"]);
+    let result = run(src, &["fmt"]);
     assert!(
         result.is_empty(),
         "non-redis import must produce nothing; got {:?}",

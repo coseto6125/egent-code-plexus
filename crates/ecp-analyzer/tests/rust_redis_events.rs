@@ -4,17 +4,13 @@
 //! query string against the `redis` crate (sync and async variants).
 
 use ecp_analyzer::event_topic::{extract_event_topics, REDIS_RUST};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/rust/queries.scm");
 const FRAMEWORKS_SCM: &str = include_str!("../src/rust/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -33,16 +29,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[REDIS_RUST],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[REDIS_RUST], &imports)
 }
 
 /// redis crate: con.publish("orders", "msg") → Publish, topic="orders".
@@ -56,7 +43,7 @@ fn publish_order(con: &mut redis::Connection) -> redis::RedisResult<()> {
     Ok(())
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -65,8 +52,13 @@ fn publish_order(con: &mut redis::Connection) -> redis::RedisResult<()> {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "orders");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders"
+    );
 }
 
 /// redis crate: pubsub.subscribe("payments") → Subscribe, topic="payments".
@@ -81,7 +73,7 @@ fn listen_payments(con: &mut redis::Connection) -> redis::RedisResult<()> {
     Ok(())
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -90,8 +82,13 @@ fn listen_payments(con: &mut redis::Connection) -> redis::RedisResult<()> {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "payments");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "payments"
+    );
 }
 
 /// redis crate: pubsub.psubscribe("orders.*") → Subscribe, pattern stored.
@@ -106,7 +103,7 @@ fn listen_pattern(con: &mut redis::Connection) -> redis::RedisResult<()> {
     Ok(())
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -115,9 +112,14 @@ fn listen_pattern(con: &mut redis::Connection) -> redis::RedisResult<()> {
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
     // canonicalize: true converts "orders.*" → "orders/*"
-    assert_eq!(pool.resolve(&lit), "orders/*");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "orders/*"
+    );
 }
 
 /// Async redis: con.publish("events", "msg").await — Publish direction.
@@ -131,7 +133,7 @@ async fn publish_event(con: &mut redis::aio::Connection) -> redis::RedisResult<(
     Ok(())
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -140,8 +142,13 @@ async fn publish_event(con: &mut redis::aio::Connection) -> redis::RedisResult<(
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "events"
+    );
 }
 
 /// Variable channel → no capture (no fabrication).
@@ -155,7 +162,7 @@ fn publish_dynamic(con: &mut redis::Connection, channel: &str, msg: &str) -> red
     Ok(())
 }
 "#;
-    let (result, _pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert!(
         result.is_empty(),
         "variable channel must produce nothing; got {:?}",
@@ -171,7 +178,7 @@ fn process(channel: &str) {
     println!("channel: {}", channel);
 }
 "#;
-    let (result, _pool) = run(src, &["std"]);
+    let result = run(src, &["std"]);
     assert!(
         result.is_empty(),
         "non-redis import must produce nothing; got {:?}",
@@ -190,7 +197,7 @@ async fn listen_notifications(mut pubsub: redis::aio::PubSub) -> redis::RedisRes
     Ok(())
 }
 "#;
-    let (result, pool) = run(src, &["redis"]);
+    let result = run(src, &["redis"]);
     assert_eq!(
         result.len(),
         1,
@@ -199,6 +206,11 @@ async fn listen_notifications(mut pubsub: redis::aio::PubSub) -> redis::RedisRes
     );
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "notifications");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "notifications"
+    );
 }

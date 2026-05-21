@@ -15,7 +15,6 @@ use ecp_core::analyzer::types::{
     RawRoute, RawTxScope,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
-use ecp_core::pool::StringPool;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
@@ -1087,12 +1086,7 @@ impl LanguageProvider for PythonProvider {
         );
         let schema_fields = (!fields.is_empty()).then(|| fields.into_boxed_slice());
 
-        // Same pool-isolation contract as `schema_fields` above:
-        // `RawEventTopic.topic_literal` is a `StrRef` whose byte offset is
-        // relative to this local pool. The pool drops at end of scope; the
-        // builder must re-intern the literal before resolution.
         let event_topics = {
-            let mut pool = StringPool::new();
             let topics = crate::event_topic::extract_event_topics(
                 &tree,
                 source,
@@ -1104,7 +1098,6 @@ impl LanguageProvider for PythonProvider {
                     crate::event_topic::RABBITMQ_PYTHON,
                 ],
                 &imports,
-                &mut pool,
             );
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };

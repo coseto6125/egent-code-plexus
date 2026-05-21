@@ -5,16 +5,12 @@
 //! Also re-verifies Kafka regression isolation.
 
 use ecp_analyzer::event_topic::{extract_event_topics, CELERY_PYTHON, KAFKA_PYTHON};
-use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
+use ecp_core::analyzer::types::{FrameworkId, PubSub, RawEventTopic, RawImport};
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/python/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -29,16 +25,13 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
+    extract_event_topics(
         &tree,
         src.as_bytes(),
         &query,
         &[KAFKA_PYTHON, CELERY_PYTHON],
         &imports,
-        &mut pool,
-    );
-    (result, pool)
+    )
 }
 
 /// `add.delay(2, 3)` → topic="add", Publish direction.
@@ -50,7 +43,7 @@ from celery import shared_task
 def enqueue_add(x, y):
     add.delay(x, y)
 "#;
-    let (result, pool) = run(src, &["celery"]);
+    let result = run(src, &["celery"]);
     assert_eq!(
         result.len(),
         1,
@@ -59,8 +52,13 @@ def enqueue_add(x, y):
     );
     assert_eq!(result[0].lib, FrameworkId::Celery);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "add");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "add"
+    );
 }
 
 /// `add.apply_async(args=[2, 3])` → topic="add", Publish direction.
@@ -72,7 +70,7 @@ from celery import shared_task
 def enqueue_add(x, y):
     add.apply_async(args=[x, y])
 "#;
-    let (result, pool) = run(src, &["celery"]);
+    let result = run(src, &["celery"]);
     assert_eq!(
         result.len(),
         1,
@@ -81,8 +79,13 @@ def enqueue_add(x, y):
     );
     assert_eq!(result[0].lib, FrameworkId::Celery);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "add");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "add"
+    );
 }
 
 /// `app.send_task("tasks.add", ...)` → topic="tasks.add", Publish direction.
@@ -96,7 +99,7 @@ app = Celery("myapp")
 def enqueue_add(x, y):
     app.send_task("tasks.add", args=[x, y])
 "#;
-    let (result, pool) = run(src, &["celery"]);
+    let result = run(src, &["celery"]);
     assert_eq!(
         result.len(),
         1,
@@ -105,8 +108,13 @@ def enqueue_add(x, y):
     );
     assert_eq!(result[0].lib, FrameworkId::Celery);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "tasks/add");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "tasks/add"
+    );
 }
 
 /// `app.send_task(task_name_var, ...)` → no capture (variable, no fabrication).
@@ -120,7 +128,7 @@ app = Celery("myapp")
 def enqueue_dynamic(task_name, x):
     app.send_task(task_name, args=[x])
 "#;
-    let (result, _pool) = run(src, &["celery"]);
+    let result = run(src, &["celery"]);
     assert!(
         result.is_empty(),
         "variable task name must produce no RawEventTopic; got {:?}",
@@ -137,7 +145,7 @@ import json
 def enqueue():
     add.delay(1, 2)
 "#;
-    let (result, _pool) = run(src, &["json"]);
+    let result = run(src, &["json"]);
     assert!(
         result.is_empty(),
         "non-celery import must produce nothing; got {:?}",
@@ -154,7 +162,7 @@ from kafka import KafkaProducer
 def send_event(producer):
     producer.send("events", b"data")
 "#;
-    let (result, pool) = run(src, &["kafka"]);
+    let result = run(src, &["kafka"]);
     assert_eq!(
         result.len(),
         1,
@@ -163,10 +171,13 @@ def send_event(producer):
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0]
-        .topic_literal
-        .expect("kafka topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "events");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("kafka topic_literal must be Some"),
+        "events"
+    );
 }
 
 /// Celery import does not fire Kafka config.
@@ -178,7 +189,7 @@ from celery import shared_task
 def enqueue():
     add.delay(1, 2)
 "#;
-    let (result, _pool) = run(src, &["celery"]);
+    let result = run(src, &["celery"]);
     assert!(
         result.iter().all(|r| r.lib == FrameworkId::Celery),
         "celery import must not fire Kafka config; got libs: {:?}",
@@ -204,7 +215,7 @@ import celery
 def enqueue():
     module.task.delay(1, 2)
 "#;
-    let (result, _pool) = run(src, &["celery"]);
+    let result = run(src, &["celery"]);
     // Chained access `module.task.delay(...)` — `module.task` is an attribute
     // node (not a plain identifier), so the `object: (identifier)` capture in
     // the pattern does not match. Result is empty — documented limitation.
@@ -224,7 +235,7 @@ from celery import shared_task
 async def enqueue_add_async(x, y):
     await add.delay(x, y)
 "#;
-    let (result, pool) = run(src, &["celery"]);
+    let result = run(src, &["celery"]);
     assert_eq!(
         result.len(),
         1,
@@ -233,6 +244,11 @@ async def enqueue_add_async(x, y):
     );
     assert_eq!(result[0].lib, FrameworkId::Celery);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
-    assert_eq!(pool.resolve(&lit), "add");
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "add"
+    );
 }

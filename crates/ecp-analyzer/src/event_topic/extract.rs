@@ -2,7 +2,6 @@ use super::config::EventTopicConfig;
 use super::normalize::canonicalize;
 use crate::framework_helpers::has_import_from;
 use ecp_core::analyzer::types::{PubSub, RawEventTopic, RawImport};
-use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor, Tree};
@@ -38,7 +37,6 @@ pub fn extract_event_topics(
     query: &Query,
     configs: &[EventTopicConfig],
     imports: &[RawImport],
-    pool: &mut StringPool,
 ) -> Vec<RawEventTopic> {
     // Identify which configs are live for this file once, not per-match.
     let active: Vec<&EventTopicConfig> = configs
@@ -125,7 +123,7 @@ pub fn extract_event_topics(
             let direction_raw = strip_string_delimiters(direction_opt.unwrap_or(""));
             let direction = (config.direction_classifier)(direction_raw);
 
-            let enclosing_fn = pool.add(producer_opt.unwrap_or(""));
+            let enclosing_fn: Box<str> = producer_opt.unwrap_or("").into();
 
             let start = m.captures[0].node.start_position();
             let end = m.captures[0].node.end_position();
@@ -137,7 +135,7 @@ pub fn extract_event_topics(
             );
 
             out.push(RawEventTopic {
-                topic_literal: Some(pool.add(&topic_text)),
+                topic_literal: Some(topic_text.into_boxed_str()),
                 direction,
                 lib: config.framework,
                 enclosing_fn,

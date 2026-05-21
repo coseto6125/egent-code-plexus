@@ -7,7 +7,6 @@ use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
-use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -425,7 +424,6 @@ impl LanguageProvider for JavaProvider {
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
         let event_topics = {
-            let mut pool = StringPool::new();
             let topics = crate::event_topic::extract_event_topics(
                 &tree,
                 source,
@@ -436,7 +434,6 @@ impl LanguageProvider for JavaProvider {
                     crate::event_topic::RABBITMQ_JAVA,
                 ],
                 &imports,
-                &mut pool,
             );
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
