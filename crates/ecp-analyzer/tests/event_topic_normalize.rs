@@ -63,8 +63,8 @@ fn test_event_topic_normalize_comprehensive() {
         ("ProductAdded", "product/added", "camel case two words"),
         (
             "HTTPSConnectionEstablished",
-            "httpsconnection/established",
-            "acronym handling (no split on consecutive caps)",
+            "https/connection/established",
+            "acronym handling: consecutive caps split before Capitalized word",
         ),
         // Combinations: env prefix + version + separators + camel case
         (
