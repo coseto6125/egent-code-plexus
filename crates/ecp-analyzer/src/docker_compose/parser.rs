@@ -190,6 +190,7 @@ impl LanguageProvider for DockerComposeProvider {
                         schema_fields: None,
                         event_topics: None,
                         tx_scopes: None,
+                        call_metas: vec![],
                     });
                 }
             }
@@ -326,6 +327,7 @@ impl LanguageProvider for DockerComposeProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         })
     }
 }

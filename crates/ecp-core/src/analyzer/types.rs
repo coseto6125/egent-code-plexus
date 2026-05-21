@@ -224,6 +224,33 @@ pub struct BlindSpot {
     pub hint: String,
 }
 
+/// Per-call-site dispatch annotation produced by the per-language indirect-
+/// dispatch detector. Identifies which entry in `RawNode.calls` (by caller
+/// name + zero-based index) is non-direct so the builder can emit a
+/// `graph::CallMeta` entry keyed on the resulting `Edge` index.
+///
+/// Only non-direct calls get a `RawCallMeta` — direct calls are the default
+/// and are not annotated (saves space; sparse population contract matches
+/// `ZeroCopyGraph.call_metas`).
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawCallMeta {
+    /// Name of the enclosing `RawNode` (caller) that owns the call.
+    pub caller_name: String,
+    /// Span of the enclosing caller node. Combined with `call_index` to
+    /// uniquely identify same-name functions/methods in one file.
+    pub caller_span: (u32, u32, u32, u32),
+    /// Zero-based index into `RawNode.calls` for that caller.
+    pub call_index: u32,
+    /// Packed flags — same bit layout as `graph::CallMeta::flags`.
+    /// Populated by the per-language detector; `FLAG_DIRECT` is always clear
+    /// (this struct only exists for non-direct calls).
+    pub flags: u8,
+    /// Dispatch type string as it appears in source (e.g. `"dyn Handler"`,
+    /// `"void(*)(int)"`, `"Box<dyn Trait>"`). Empty string when not available.
+    pub dispatch_type: String,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct LocalGraph {
@@ -244,6 +271,11 @@ pub struct LocalGraph {
     pub schema_fields: Option<Box<[RawSchemaField]>>,
     pub event_topics: Option<Box<[RawEventTopic]>>,
     pub tx_scopes: Option<Box<[RawTxScope]>>,
+    /// Indirect-dispatch annotations for individual call sites. Sparse:
+    /// only non-direct calls (fn-pointer / vtable / callback / dyn-trait)
+    /// have entries. The builder promotes these to `ZeroCopyGraph.call_metas`
+    /// once `Edge` indices are known.
+    pub call_metas: Vec<RawCallMeta>,
 }
 
 impl Default for LocalGraph {
@@ -261,6 +293,7 @@ impl Default for LocalGraph {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: Vec::new(),
         }
     }
 }

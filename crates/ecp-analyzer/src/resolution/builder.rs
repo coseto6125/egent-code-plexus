@@ -5,7 +5,8 @@ use crate::resolution::resolver::Resolver;
 use aho_corasick::{AhoCorasick, MatchKind};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::{
-    BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
+    BlindSpotRecord, CallMeta, Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape,
+    ZeroCopyGraph,
 };
 use ecp_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
@@ -169,6 +170,25 @@ pub fn determine_category(path: &str) -> FileCategory {
 }
 
 use std::collections::HashMap;
+
+/// Per-graph output from Pass 2 parallel map: `(edges, pending_call_metas)`.
+/// `pending_call_metas` entries are `(pre_sort_edge_idx, flags, dispatch_type)`.
+type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CallMetaKey {
+    caller_span: (u32, u32, u32, u32),
+    call_index: u32,
+}
+
+impl CallMetaKey {
+    const fn new(caller_span: (u32, u32, u32, u32), call_index: u32) -> Self {
+        Self {
+            caller_span,
+            call_index,
+        }
+    }
+}
 
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -828,13 +848,36 @@ impl GraphBuilder {
         let symbol_table_ref = &symbol_table;
         let reason_cache_ref = &reason_cache;
 
+        // Pre-build per-graph indirect-call lookup keyed by caller span and
+        // call index so same-name functions/methods in one file do not collide.
+        let indirect_lookups: Vec<FxHashMap<CallMetaKey, (u8, String)>> = local_graphs
+            .iter()
+            .map(|lg| {
+                lg.call_metas
+                    .iter()
+                    .map(|m| {
+                        (
+                            CallMetaKey::new(m.caller_span, m.call_index),
+                            (m.flags, m.dispatch_type.clone()),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // `pending_call_metas`: pairs of (pre-sort edge index, RawCallMeta ref).
+        // Collected alongside edges and promoted to ZeroCopyGraph.call_metas after
+        // the final edge sort remaps pre-sort indices to sorted positions.
+        let mut pending_call_metas_global: Vec<(usize, u8, String)> = Vec::new();
+
         let edges: Vec<Edge> = if let Some(resolver) = resolver_for_dump.as_mut() {
             // Serial dump path — original loop, with reason lookups going
             // through `reason_cache` (filled above) instead of inline
             // `string_pool.add`.
             let mut edges = Vec::new();
             let mut current_node_idx = 0u32;
-            for local_graph in local_graphs {
+            for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
+                let lookup = &indirect_lookups[graph_idx];
                 for raw_node in &local_graph.nodes {
                     pass2_emit_node_edges(
                         resolver,
@@ -845,6 +888,8 @@ impl GraphBuilder {
                         reason_type,
                         reason_call,
                         &mut edges,
+                        lookup,
+                        &mut pending_call_metas_global,
                     );
                     current_node_idx += 1;
                 }
@@ -868,17 +913,20 @@ impl GraphBuilder {
             // `Sync`), so sharing it across rayon workers is safe.
             let mod_tree_ref = mod_tree_opt.as_ref();
             let workspace_root_ref = self.repo_root.as_ref();
-            local_graphs
+            // Collect (local_edges, local_pending) per graph, then stitch.
+            let per_graph: Vec<PerGraphPass2> = local_graphs
                 .par_iter()
                 .enumerate()
-                .flat_map_iter(|(graph_idx, local_graph)| {
+                .map(|(graph_idx, local_graph)| {
                     let mut resolver =
                         Resolver::new(symbol_table_ref).with_path_aliases(path_aliases.clone());
                     if let (Some(mt), Some(root)) = (mod_tree_ref, workspace_root_ref) {
                         resolver = resolver.with_mod_tree(mt, root.clone());
                     }
                     let start_idx = start_indices[graph_idx];
+                    let lookup = &indirect_lookups[graph_idx];
                     let mut local_edges: Vec<Edge> = Vec::new();
+                    let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
                     for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                         let current_node_idx = start_idx + node_offset as u32;
                         pass2_emit_node_edges(
@@ -890,6 +938,8 @@ impl GraphBuilder {
                             reason_type,
                             reason_call,
                             &mut local_edges,
+                            lookup,
+                            &mut local_pending,
                         );
                     }
                     pass2_emit_framework_and_fanout(
@@ -899,9 +949,21 @@ impl GraphBuilder {
                         reason_cache_ref,
                         &mut local_edges,
                     );
-                    local_edges
+                    (local_edges, local_pending)
                 })
-                .collect()
+                .collect();
+
+            // Stitch per-graph results: compute global edge offset for each graph's
+            // local_pending indices, then merge into the global pending vec.
+            let mut all_edges: Vec<Edge> = Vec::new();
+            for (local_edges, local_pending) in per_graph {
+                let edge_offset = all_edges.len();
+                for (local_idx, flags, dispatch_type) in local_pending {
+                    pending_call_metas_global.push((edge_offset + local_idx, flags, dispatch_type));
+                }
+                all_edges.extend(local_edges);
+            }
+            all_edges
         };
         let mut edges = edges;
         let resolver_dump_drain = resolver_for_dump.as_mut();
@@ -1185,7 +1247,23 @@ impl GraphBuilder {
         }
         let _t_csr = std::time::Instant::now();
         // Final pass: Construct CSR (out_offsets and in_offsets)
-        // Sort edges by source to build out_offsets easily
+        // Sort edges by source to build out_offsets easily.
+        // We need to track where pre-sort indices land after sorting so
+        // `pending_call_metas_global` pre-sort edge indices can be remapped
+        // to the final sorted positions for `ZeroCopyGraph.call_metas`.
+        let n_edges = edges.len();
+        let mut pre_sort_to_sorted: Vec<u32> = vec![0; n_edges];
+        {
+            // Build a permutation vector: sorted_positions[i] = pre-sort index that
+            // lands at sorted position i. Stable sort preserves relative order of
+            // equal keys, mirroring what `edges.sort_by_key` will do.
+            let mut perm: Vec<usize> = (0..n_edges).collect();
+            perm.sort_by_key(|&i| edges[i].source);
+            // Invert: pre_sort_to_sorted[pre_sort_idx] = sorted_idx.
+            for (sorted_idx, &pre_idx) in perm.iter().enumerate() {
+                pre_sort_to_sorted[pre_idx] = sorted_idx as u32;
+            }
+        }
         edges.sort_by_key(|e| e.source);
 
         let num_nodes = nodes.len();
@@ -1224,6 +1302,26 @@ impl GraphBuilder {
                 t_total.elapsed().as_secs_f32()
             );
         }
+
+        // Promote pending_call_metas_global to ZeroCopyGraph.call_metas.
+        // Remap pre-sort edge indices to sorted positions via `pre_sort_to_sorted`,
+        // intern dispatch_type strings, then sort by edge_idx for binary-search
+        // lookup in graph_query.rs hot paths (ZeroCopyGraph.call_meta() contract).
+        let mut call_metas: Vec<CallMeta> = pending_call_metas_global
+            .into_iter()
+            .filter_map(|(pre_idx, flags, dispatch_type)| {
+                pre_sort_to_sorted.get(pre_idx).map(|&sorted_idx| CallMeta {
+                    edge_idx: sorted_idx,
+                    flags,
+                    dispatch_type: string_pool.add(&dispatch_type),
+                })
+            })
+            .collect();
+        call_metas.sort_by_key(|m| m.edge_idx);
+        // Deduplicate: if two RawCallMeta entries map to the same edge (shouldn't
+        // happen in practice, but defensive), keep the first (most specific).
+        call_metas.dedup_by_key(|m| m.edge_idx);
+
         ZeroCopyGraph {
             magic: ecp_core::graph::GRAPH_MAGIC,
             version: ecp_core::graph::GRAPH_FORMAT_VERSION,
@@ -1241,7 +1339,7 @@ impl GraphBuilder {
             files,
             blind_spots: all_blind_spots,
             route_shapes: route_shapes_out,
-            call_metas: vec![],
+            call_metas,
             function_metas: vec![],
         }
     }
@@ -1308,6 +1406,13 @@ fn enclosing_class_heritage<'a>(
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
+///
+/// `indirect_lookup` maps `(caller_span, call_index)` to
+/// `(flags, dispatch_type_string)` for calls that are non-direct. When a Calls
+/// edge is emitted from such a call site, a corresponding entry is pushed to
+/// `pending_call_metas` using the pre-sort edge index. The caller is responsible
+/// for converting pre-sort indices to final sorted indices before placing
+/// entries in `ZeroCopyGraph.call_metas`.
 #[allow(clippy::too_many_arguments)]
 fn pass2_emit_node_edges(
     resolver: &Resolver<'_>,
@@ -1318,6 +1423,8 @@ fn pass2_emit_node_edges(
     reason_type: StrRef,
     reason_call: StrRef,
     edges: &mut Vec<Edge>,
+    indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
+    pending_call_metas: &mut Vec<(usize, u8, String)>,
 ) {
     for base in &raw_node.heritage {
         let targets = resolver.resolve_symbol(
@@ -1338,7 +1445,9 @@ fn pass2_emit_node_edges(
     }
 
     let call_heritage = enclosing_class_heritage(raw_node, local_graph);
-    for callee in &raw_node.calls {
+    for (call_idx, callee) in raw_node.calls.iter().enumerate() {
+        let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
+        let meta = indirect_lookup.get(&lookup_key);
         let targets = resolver.resolve_symbol_with_heritage(
             &local_graph.file_path,
             callee,
@@ -1350,6 +1459,7 @@ fn pass2_emit_node_edges(
             if target_id == current_node_idx {
                 continue; // self-recursion edges are Louvain / process noise
             }
+            let edge_pre_sort_idx = edges.len();
             edges.push(Edge {
                 source: current_node_idx,
                 target: target_id,
@@ -1357,6 +1467,9 @@ fn pass2_emit_node_edges(
                 confidence,
                 reason: reason_call,
             });
+            if let Some((flags, dispatch_type)) = meta {
+                pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
+            }
         }
     }
 
@@ -1633,6 +1746,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -1656,6 +1770,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1808,6 +1923,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1893,6 +2009,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -1956,6 +2073,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -2000,6 +2118,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         }
     }
 
@@ -2099,6 +2218,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -2195,6 +2315,7 @@ mod tests {
                     schema_fields: None,
                     event_topics: None,
                     tx_scopes: None,
+                    call_metas: vec![],
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
@@ -2245,6 +2366,7 @@ mod tests {
                     schema_fields: None,
                     event_topics: None,
                     tx_scopes: None,
+                    call_metas: vec![],
                 },
             ]
         }
@@ -2369,6 +2491,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         }
     }
 
@@ -2395,6 +2518,7 @@ mod tests {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas: vec![],
         }
     }
 

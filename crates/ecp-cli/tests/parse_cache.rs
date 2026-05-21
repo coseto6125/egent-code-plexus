@@ -23,6 +23,7 @@ fn graph(file: &str, hash: [u8; 8]) -> LocalGraph {
         schema_fields: None,
         event_topics: None,
         tx_scopes: None,
+        call_metas: vec![],
     }
 }
 

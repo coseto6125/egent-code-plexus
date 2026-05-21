@@ -16,16 +16,29 @@
 
 use crate::calls::attach_to_enclosing;
 use ecp_core::analyzer::types::RawNode;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 pub struct CppBindings {
-    fn_scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    fn_scopes: Vec<((u32, u32), FxHashMap<String, String>)>,
     class_scopes: Vec<((u32, u32), String)>,
 }
 
 impl CppBindings {
+    /// Flatten all local-variable bindings across all scopes into one map.
+    /// Used by indirect-call detection to check if a callee identifier is a
+    /// locally-typed pointer or function-pointer variable.
+    pub fn flat_bindings(&self) -> FxHashMap<String, String> {
+        let mut out = FxHashMap::default();
+        for (_, map) in &self.fn_scopes {
+            for (k, v) in map {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    }
+
     fn lookup_local(&self, line: u32, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
         let mut best_width = u32::MAX;
@@ -60,7 +73,7 @@ impl CppBindings {
 }
 
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
-    let mut fn_scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut fn_scopes: Vec<((u32, u32), FxHashMap<String, String>)> = Vec::new();
     let mut class_scopes: Vec<((u32, u32), String)> = Vec::new();
 
     let mut stack: Vec<Node<'_>> = vec![root];
@@ -80,7 +93,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
             }
             "function_definition" => {
                 let span = (n.start_position().row as u32, n.end_position().row as u32);
-                let mut map: HashMap<String, String> = HashMap::new();
+                let mut map: FxHashMap<String, String> = FxHashMap::default();
                 collect_typed_cpp_params(n, source, &mut map);
                 if let Some(body) = n.child_by_field_name("body") {
                     collect_typed_cpp_decls(body, source, &mut map);
@@ -106,7 +119,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
 /// Scan the function's declarator for `parameter_declaration` nodes.
 /// A simple type_identifier + identifier (possibly wrapped in
 /// reference_declarator / pointer_declarator) is recognized.
-fn collect_typed_cpp_params(fn_def: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+fn collect_typed_cpp_params(fn_def: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
     let Some(declarator) = fn_def.child_by_field_name("declarator") else {
         return;
     };
@@ -141,7 +154,7 @@ fn collect_typed_cpp_params(fn_def: Node<'_>, source: &[u8], out: &mut HashMap<S
 
 /// Walk the function body for `declaration` nodes with a single
 /// `type_identifier` type and an `init_declarator`/declarator name.
-fn collect_typed_cpp_decls(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+fn collect_typed_cpp_decls(body: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
     let mut stack: Vec<Node<'_>> = vec![body];
     while let Some(n) = stack.pop() {
         if n.kind() == "function_definition" {

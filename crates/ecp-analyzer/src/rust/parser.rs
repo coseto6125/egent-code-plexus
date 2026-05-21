@@ -2,6 +2,7 @@ use super::receiver_types::{build_impl_map, collect_local_types, extract_rust_ca
 use super::spec::RustSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span, MODULE_LEVEL_SOURCE};
+use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -337,6 +338,23 @@ impl LanguageProvider for RustProvider {
         let local_types = collect_local_types(tree.root_node(), source, &impl_map);
         extract_rust_calls(tree.root_node(), source, &mut nodes, &local_types);
 
+        // Build param type map for indirect-call detection.
+        // `collect_rust_indirect_param_types` captures fn(...)  and &dyn Trait
+        // types that `bare_type_name` (used by LocalTypes) discards.
+        let mut param_types = collect_rust_indirect_param_types(tree.root_node(), source);
+        // Merge LocalTypes bindings (for typed let bindings already collected).
+        for scope in local_types.scopes() {
+            for (var, ty) in &scope.bindings {
+                param_types.entry(var.clone()).or_insert_with(|| ty.clone());
+            }
+            if let Some(ref st) = scope.self_type {
+                param_types
+                    .entry("self".to_string())
+                    .or_insert_with(|| st.clone());
+            }
+        }
+        let call_metas = detect_rust_indirect(tree.root_node(), source, &nodes, &param_types);
+
         // Stamp impl-target sentinel onto each impl method's heritage so the
         // class-membership post-process can bridge `struct Foo` ↔ `impl Foo
         // { fn bar() {} }` — the method's span lies OUTSIDE the struct span,
@@ -407,6 +425,7 @@ impl LanguageProvider for RustProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas,
         })
     }
 }

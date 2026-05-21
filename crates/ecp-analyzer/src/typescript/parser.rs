@@ -4,6 +4,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
+use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -509,6 +510,9 @@ impl LanguageProvider for TypeScriptProvider {
             }
         }
 
+        let param_names = collect_js_param_names(tree.root_node(), source);
+        let call_metas = detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -522,6 +526,7 @@ impl LanguageProvider for TypeScriptProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
+            call_metas,
         })
     }
 }
