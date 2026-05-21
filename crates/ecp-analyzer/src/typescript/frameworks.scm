@@ -49,6 +49,23 @@
       (method_definition
         name: (property_identifier) @nestjs.method.name))))
 
+;; ---- TypeScript interface SchemaField (T4-4) ----
+;; Captures typed property signatures on `interface X { ... }` bodies.
+;; Each property_signature with a predefined_type annotation becomes one
+;; RawSchemaField via the T4-1 dispatcher (TS_INTERFACE_CONFIG).
+;; `predefined_type` covers: string, number, boolean, any, void, never, object,
+;; symbol, bigint, undefined, null.  Union (`string | null`) and array
+;; (`string[]`) are `union_type` / `array_type` — they don't match this
+;; pattern and fall through to SchemaType::Other via classify_ts_type("").
+;; No import gate needed: `interface` is a TS language built-in.
+(interface_declaration
+  name: (type_identifier) @ts.owner
+  body: (interface_body
+    (property_signature
+      name: (property_identifier) @ts.field
+      type: (type_annotation
+        (predefined_type) @ts.type))))
+
 ;; NestJS / generic decorator-route: `@Get('users')` / `@Post('users/:id')` /
 ;; `@Put('audio/transcode')`. Captures the decorator verb AND the bare path
 ;; argument. Independent of `@Controller` context — gated in parser.rs by

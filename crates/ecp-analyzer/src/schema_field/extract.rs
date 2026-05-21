@@ -33,9 +33,11 @@ pub fn extract_schema_fields(
     pool: &mut StringPool,
 ) -> Vec<RawSchemaField> {
     // Identify which configs are live for this file once, not per-match.
+    // Empty import_gate is vacuously satisfied — language built-ins (e.g.
+    // TypeScript `interface`) require no import to carry schema semantics.
     let active: Vec<&SchemaFieldConfig> = configs
         .iter()
-        .filter(|c| has_import_from(imports, c.import_gate))
+        .filter(|c| c.import_gate.is_empty() || has_import_from(imports, c.import_gate))
         .collect();
 
     if active.is_empty() {
