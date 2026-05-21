@@ -1621,6 +1621,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -1645,6 +1646,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1801,6 +1803,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1888,6 +1891,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -1953,6 +1957,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -1998,6 +2003,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         }
     }
 
@@ -2097,6 +2103,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         };
 
         let mut builder = GraphBuilder::new();
@@ -2194,6 +2201,7 @@ mod tests {
                     schema_fields: vec![],
                     event_topics: vec![],
                     tx_scopes: vec![],
+                    pool_bytes: vec![],
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
@@ -2247,6 +2255,7 @@ mod tests {
                     schema_fields: vec![],
                     event_topics: vec![],
                     tx_scopes: vec![],
+                    pool_bytes: vec![],
                 },
             ]
         }
@@ -2372,6 +2381,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         }
     }
 
@@ -2399,6 +2409,7 @@ mod tests {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         }
     }
 

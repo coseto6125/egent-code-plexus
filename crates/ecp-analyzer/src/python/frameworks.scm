@@ -84,6 +84,23 @@
   definition: (function_definition
     name: (identifier) @celery.task.handler))
 
+;; ---- T10-1: Transaction boundary decorators ----
+;; Django / generic: `@transaction.atomic` on a function or method.
+(decorated_definition
+  (decorator
+    (attribute
+      object: (identifier) @_tx_obj (#eq? @_tx_obj "transaction")
+      attribute: (identifier) @_tx_attr (#eq? @_tx_attr "atomic")))
+  definition: (function_definition
+    name: (identifier) @tx.atomic.handler))
+
+;; PonyORM: `@db_session` bare marker decorator on a function or method.
+(decorated_definition
+  (decorator
+    (identifier) @_db_sess (#eq? @_db_sess "db_session"))
+  definition: (function_definition
+    name: (identifier) @tx.db_session.handler))
+
 ;; ---- Reflection fan-out (Phase 2) ----
 ;; `getattr(self, name_var)(...)` — dynamic dispatch on `self`. The second
 ;; positional argument must be an `(identifier)` (not a `(string)`), so static

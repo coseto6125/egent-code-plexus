@@ -5,8 +5,9 @@ use crate::framework_helpers::{enclosing_class, has_import_from, node_span};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode, RawTxScope};
 use ecp_core::graph::NodeKind;
+use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -434,6 +435,27 @@ impl LanguageProvider for JavaProvider {
                 node.owner_class = owner;
             }
         }
+        // T10-1: @Transactional on a method/constructor → RawTxScope.
+        // Decorator text from tree-sitter includes the leading `@`, so we
+        // match on the prefix to cover both `@Transactional` (marker) and
+        // `@Transactional(...)` (annotation with arguments).
+        let mut pool = StringPool::new();
+        let tx_scopes: Vec<RawTxScope> = nodes
+            .iter()
+            .filter(|n| {
+                matches!(n.kind, NodeKind::Method | NodeKind::Constructor)
+                    && n.decorators
+                        .iter()
+                        .any(|d| d == "@Transactional" || d.starts_with("@Transactional("))
+            })
+            .map(|n| RawTxScope {
+                enclosing_fn: pool.add(&n.name),
+                source_pattern: "java-transactional".to_string(),
+                span: n.span,
+            })
+            .collect();
+        let pool_bytes = pool.bytes;
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -446,7 +468,8 @@ impl LanguageProvider for JavaProvider {
             blind_spots: vec![],
             schema_fields: vec![],
             event_topics: vec![],
-            tx_scopes: vec![],
+            tx_scopes,
+            pool_bytes,
         })
     }
 }

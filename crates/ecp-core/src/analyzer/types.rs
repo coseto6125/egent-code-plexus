@@ -195,4 +195,10 @@ pub struct LocalGraph {
     pub schema_fields: Vec<RawSchemaField>,
     pub event_topics: Vec<RawEventTopic>,
     pub tx_scopes: Vec<RawTxScope>,
+    /// Interned string pool for identifier-bearing fields in `schema_fields`,
+    /// `event_topics`, and `tx_scopes`. Parsers that emit those vectors create
+    /// a `StringPool`, intern names, then move `pool.bytes` here. Consumers
+    /// resolve `StrRef` values via `StrRef::resolve(&graph.pool_bytes)`.
+    /// Empty for parsers that emit none of the above.
+    pub pool_bytes: Vec<u8>,
 }

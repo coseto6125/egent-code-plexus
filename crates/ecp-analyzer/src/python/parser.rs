@@ -10,9 +10,10 @@ use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    BlindSpot, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode, RawRoute,
+    BlindSpot, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode, RawRoute, RawTxScope,
 };
 use ecp_core::graph::NodeKind;
+use ecp_core::pool::StringPool;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
@@ -353,6 +354,9 @@ struct PythonCaptureIndices {
     django_signal_connect_name: Option<u32>,
     django_signal_connect_handler: Option<u32>,
     celery_task_handler: Option<u32>,
+    // T10-1: transaction boundary decorator captures.
+    tx_atomic_handler: Option<u32>,
+    tx_db_session_handler: Option<u32>,
     reflection_getattr_site: Option<u32>,
     blind_eval: Option<u32>,
     blind_exec: Option<u32>,
@@ -422,6 +426,8 @@ impl PythonProvider {
             django_signal_connect_handler: query
                 .capture_index_for_name("django.signal.connect_handler"),
             celery_task_handler: query.capture_index_for_name("celery.task.handler"),
+            tx_atomic_handler: query.capture_index_for_name("tx.atomic.handler"),
+            tx_db_session_handler: query.capture_index_for_name("tx.db_session.handler"),
             reflection_getattr_site: query.capture_index_for_name("reflection.getattr.site"),
             blind_eval: query.capture_index_for_name("blind.eval"),
             blind_exec: query.capture_index_for_name("blind.exec"),
@@ -529,6 +535,12 @@ impl LanguageProvider for PythonProvider {
         // Reflection fan-out sites: outer `getattr(self, name)()` call spans.
         // Resolved after `nodes` is populated (need enclosing class + sibling methods).
         let mut pending_getattr_sites: Vec<Span> = Vec::new();
+
+        // T10-1: tx-scope pool + vec. Pool must outlive the tx_scopes vec
+        // (StrRef offsets are into pool.bytes). Built incrementally in the
+        // match loop and moved into LocalGraph at return.
+        let mut tx_pool = StringPool::new();
+        let mut tx_scopes: Vec<RawTxScope> = Vec::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -672,6 +684,26 @@ impl LanguageProvider for PythonProvider {
                             target_name: target_name.to_string(),
                             confidence: framework_confidence::CELERY_TASK,
                             reason: "celery-task".to_string(),
+                            span: node_span(&cap.node),
+                        });
+                    }
+                } else if cap_idx == idx.tx_atomic_handler {
+                    if let Ok(fn_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        tx_scopes.push(RawTxScope {
+                            enclosing_fn: tx_pool.add(fn_name),
+                            source_pattern: "django-atomic".to_string(),
+                            span: node_span(&cap.node),
+                        });
+                    }
+                } else if cap_idx == idx.tx_db_session_handler {
+                    if let Ok(fn_name) =
+                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
+                    {
+                        tx_scopes.push(RawTxScope {
+                            enclosing_fn: tx_pool.add(fn_name),
+                            source_pattern: "pony-db-session".to_string(),
                             span: node_span(&cap.node),
                         });
                     }
@@ -1046,6 +1078,8 @@ impl LanguageProvider for PythonProvider {
                 node.owner_class = owner;
             }
         }
+        let pool_bytes = tx_pool.bytes;
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -1058,7 +1092,8 @@ impl LanguageProvider for PythonProvider {
             blind_spots,
             schema_fields: vec![],
             event_topics: vec![],
-            tx_scopes: vec![],
+            tx_scopes,
+            pool_bytes,
         })
     }
 }

@@ -45,6 +45,7 @@ fn local_graph(path: &str, fn_name: &str, content_byte: u8) -> LocalGraph {
         schema_fields: vec![],
         event_topics: vec![],
         tx_scopes: vec![],
+        pool_bytes: vec![],
     }
 }
 

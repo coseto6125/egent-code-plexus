@@ -418,6 +418,7 @@ impl LanguageProvider for RustProvider {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         })
     }
 }

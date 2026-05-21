@@ -107,6 +107,7 @@
     (annotation) @decorator
     (marker_annotation) @decorator
   ])
+  name: (identifier) @method.name
 ) @method
 
 (constructor_declaration
@@ -114,4 +115,5 @@
     (annotation) @decorator
     (marker_annotation) @decorator
   ])
+  name: (identifier) @constructor.name
 ) @constructor

@@ -131,6 +131,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
             schema_fields: vec![],
             event_topics: vec![],
             tx_scopes: vec![],
+            pool_bytes: vec![],
         })
         .collect()
 }

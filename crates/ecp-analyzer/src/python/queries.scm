@@ -74,3 +74,4 @@
   function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|route|add_route|add_url_rule|add_api_route|GET|POST|PUT|DELETE|PATCH|ROUTE)$"))
   arguments: (argument_list [(string) @route.path (MISSING) @route.path])
 ) @route.call
+
