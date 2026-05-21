@@ -77,6 +77,12 @@ pub fn extract_schema_fields(
     // Allocated once, cleared before each match.
     let mut slots: Vec<[Option<&str>; 3]> = vec![[None; 3]; n_active];
 
+    // Hoist `capture_names()` out of the match × capture nested loop —
+    // tree_sitter's `capture_names()` re-walks the query's name table on
+    // each call, and the inner loop touches O(matches × captures_per_match)
+    // captures across 25k+ files in cold-index path.
+    let cap_names = query.capture_names();
+
     while let Some(m) = matches.next() {
         // Reset slots for this match.
         for s in slots.iter_mut() {
@@ -85,8 +91,8 @@ pub fn extract_schema_fields(
 
         // Single O(M) pass over captures; O(1) lookup per capture.
         for cap in m.captures {
-            let cap_name = &query.capture_names()[cap.index as usize];
-            if let Some(entries) = cap_map.get(&**cap_name) {
+            let cap_name = cap_names[cap.index as usize];
+            if let Some(entries) = cap_map.get(cap_name) {
                 let node_text = cap.node.utf8_text(source).unwrap_or("");
                 for &(idx, role) in entries {
                     slots[idx][role as usize] = Some(node_text);
