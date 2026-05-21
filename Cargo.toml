@@ -58,3 +58,12 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Optimize *dependencies* (incl. tree-sitter C grammars, mimalloc) at -O3
+# even under cargo test / dev. Own crates stay at opt-level=0 so test
+# rebuilds remain fast. Measured impact: tree-sitter Rust parse of 650 KB
+# trivial source drops 308 ms → 62 ms (4.8×), matching release perf.
+# Without this, debug-profile parse_budget tests overrun their 1.5 s
+# Windows-CI budget under scheduler jitter.
+[profile.dev.package."*"]
+opt-level = 3
