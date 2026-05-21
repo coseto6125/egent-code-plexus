@@ -49,14 +49,11 @@ pub fn rel_to_str(rel: &ArchivedRelType) -> &'static str {
         ArchivedRelType::StepInProcess => "step_in_process",
         ArchivedRelType::References => "references",
         ArchivedRelType::Fetches => "fetches",
-<<<<<<< HEAD
         ArchivedRelType::MirrorsField => "mirrors_field",
         ArchivedRelType::Publishes => "publishes",
         ArchivedRelType::Subscribes => "subscribes",
         ArchivedRelType::EventTopicMirror => "event_topic_mirror",
         ArchivedRelType::OpensTxScope => "opens_tx_scope",
-=======
         ArchivedRelType::Overrides => "overrides",
->>>>>>> 6acf3cc (fix(cli): add ArchivedRelType::Overrides arm to rel_to_str in format.rs)
     }
 }
