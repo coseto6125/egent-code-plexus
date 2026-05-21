@@ -81,3 +81,111 @@
     (#match? @nestjs.decorator.verb "^(Get|Post|Put|Delete|Patch|Options|Head|All)$")
     arguments: (arguments
       [(string (string_fragment) @nestjs.decorator.path) (MISSING) @nestjs.decorator.path])))
+
+;; ---- Kafka TypeScript (T5-3) ----
+;; Covers kafkajs (`producer.send({ topic: '...', messages: [...] })`) and
+;; node-rdkafka (`producer.produce('topic-name', ...)`).
+;; Import gate (`kafkajs`, `node-rdkafka`) is enforced by KAFKA_TS.import_gate —
+;; these queries fire on syntax alone; the extractor filters by import at runtime.
+;;
+;; Anchored to `function_declaration` and `method_definition` to co-capture the
+;; enclosing function/method name alongside the topic literal in a single match.
+;; Module-level Kafka calls are omitted — <1% real-world signal with no LLM
+;; disambiguation value (empty enclosing_fn).
+;;
+;; `sendBatch` (topicMessages: [{ topic: '...', messages: [...] }]) is a nested
+;; array form — the triple-nesting makes a unique predicate-free pattern;
+;; deferred to T5-3-followup once tree-sitter quantifier support is confirmed.
+
+;; kafkajs: `producer.send({ topic: '<literal>', ... })` inside a function_declaration (sync).
+(function_declaration
+  name: (identifier) @kafka.producer_fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_send
+          (#eq? @_send "send"))
+        arguments: (arguments
+          (object
+            (pair
+              key: (property_identifier) @_topic_key
+              (#eq? @_topic_key "topic")
+              value: (string) @kafka.topic)))))))
+
+;; kafkajs: `await producer.send({ topic: '<literal>', ... })` inside an async function_declaration.
+;; The await_expression wraps the call — separate pattern from the sync form.
+(function_declaration
+  name: (identifier) @kafka.producer_fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @_asend
+            (#eq? @_asend "send"))
+          arguments: (arguments
+            (object
+              (pair
+                key: (property_identifier) @_atopic_key
+                (#eq? @_atopic_key "topic")
+                value: (string) @kafka.topic))))))))
+
+;; kafkajs: `producer.send({ topic: '<literal>', ... })` inside a method_definition (sync).
+(method_definition
+  name: (property_identifier) @kafka.producer_fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_msend
+          (#eq? @_msend "send"))
+        arguments: (arguments
+          (object
+            (pair
+              key: (property_identifier) @_mtopic_key
+              (#eq? @_mtopic_key "topic")
+              value: (string) @kafka.topic)))))))
+
+;; kafkajs: `await producer.send({ topic: '<literal>', ... })` inside an async method_definition.
+;; The await_expression wraps the call — needs a separate pattern from the sync form.
+(method_definition
+  name: (property_identifier) @kafka.producer_fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @_masend
+            (#eq? @_masend "send"))
+          arguments: (arguments
+            (object
+              (pair
+                key: (property_identifier) @_matopic_key
+                (#eq? @_matopic_key "topic")
+                value: (string) @kafka.topic))))))))
+
+;; node-rdkafka: `producer.produce('<topic>', partition, payload, ...)` inside a function_declaration.
+;; First positional arg must be a string literal.
+(function_declaration
+  name: (identifier) @kafka.producer_fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_produce
+          (#eq? @_produce "produce"))
+        arguments: (arguments
+          . (string) @kafka.topic)))))
+
+;; node-rdkafka: `producer.produce('<topic>', ...)` inside a method_definition.
+(method_definition
+  name: (property_identifier) @kafka.producer_fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_mproduce
+          (#eq? @_mproduce "produce"))
+        arguments: (arguments
+          . (string) @kafka.topic)))))
