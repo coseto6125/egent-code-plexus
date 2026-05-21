@@ -1,4 +1,5 @@
 use crate::commands::format::{kind_to_str, rel_to_str};
+use crate::commands::symbol_id::{format_fqn, resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::output::{emit, OutputFormat};
@@ -504,7 +505,11 @@ fn impact_by_name(
         .expect("build_payload_with_hints gates on name||target");
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
 
-    // Resolve name → matching node indices, with optional --file / --kind disambiguation.
+    // Split `Owner.Method` form for precise targeting.
+    let (owner_filter, bare_name) = split_fqn_target(name);
+
+    // Resolve name → matching node indices, with optional --file / --kind
+    // disambiguation. FQN `Owner.Method` form is an additional filter on top.
     let file_needle = args.file.as_deref();
     let kind_needle = args.kind.as_deref().map(|s| s.to_ascii_lowercase());
 
@@ -512,8 +517,8 @@ fn impact_by_name(
         .nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| {
-            if node.name.resolve(&graph.string_pool) != name {
+        .filter(|(idx, node)| {
+            if node.name.resolve(&graph.string_pool) != bare_name {
                 return false;
             }
             if let Some(ref kn) = kind_needle {
@@ -530,6 +535,14 @@ fn impact_by_name(
                     return false;
                 }
             }
+            if let Some(owner) = owner_filter {
+                if !resolve_owner_class(graph, *idx)
+                    .map(|oc| oc == owner)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+            }
             true
         })
         .map(|(i, _)| i)
@@ -538,7 +551,7 @@ fn impact_by_name(
     if matches.is_empty() {
         return Ok((
             json!({
-                "error": format!("No symbol named '{name}' found in graph"),
+                "error": format!("No symbol named '{}' found in graph", format_fqn(owner_filter, bare_name)),
                 "hint": "Try `ecp find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
             }),
             ImpactStderrHints::default(),
@@ -546,7 +559,10 @@ fn impact_by_name(
     }
 
     // Multiple matches without disambiguation → report candidates then fail.
+    // FQN targeting (owner_filter present) already narrows by owner, so only
+    // fall into the ambiguous branch when the remaining options still exceed 1.
     if matches.len() > 1 && file_needle.is_none() && kind_needle.is_none() {
+        let fqn_label = format_fqn(owner_filter, bare_name);
         let candidates: Vec<Value> = matches
             .iter()
             .map(|&i| {
@@ -563,7 +579,7 @@ fn impact_by_name(
             .collect();
         return Ok((
             json!({
-                "error": format!("'{name}' is ambiguous ({} candidates) — add --file or --kind to disambiguate", matches.len()),
+                "error": format!("'{fqn_label}' is ambiguous ({} candidates) — add --file or --kind to disambiguate", matches.len()),
                 "candidates": candidates,
             }),
             ImpactStderrHints::default(),
@@ -625,9 +641,11 @@ fn impact_by_name(
         all_blind_spot_kinds.extend(collect_blind_spots(graph, fp));
     }
 
+    // Use the original user-supplied name (which may be FQN) as the target
+    // label in output — more precise than bare_name when owner was specified.
     let mut result_obj = json!({
         "status": "success",
-        "target": name,
+        "target": format_fqn(owner_filter, bare_name),
         "direction": direction_str(&args.direction),
         "impact": all_results,
     });
@@ -675,7 +693,7 @@ fn impact_by_name(
     Ok((
         result_obj,
         ImpactStderrHints {
-            empty_hint_name: emit_empty_hint.then(|| name.to_string()),
+            empty_hint_name: emit_empty_hint.then(|| format_fqn(owner_filter, bare_name)),
             hidden_edges: hidden_edges_total,
             hidden_heuristic_edges: hidden_heuristic_total,
         },
@@ -1059,9 +1077,11 @@ fn run_bfs(
             .map(|(r, c)| (r.as_str(), *c))
             .unwrap_or(("", 1.0));
 
+        let owner_class = resolve_owner_class(graph, curr_idx);
         let entry = json!({
             "uid": curr_node.uid.resolve(&graph.string_pool),
             "name": curr_node.name.resolve(&graph.string_pool),
+            "ownerClass": owner_class,
             "kind": kind_to_str(&curr_node.kind),
             "filePath": file_path,
             "line": curr_node.span.0.to_native(),
