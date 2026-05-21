@@ -257,6 +257,37 @@ def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
     return rows if rows else None
 
 
+def dump_rs_schema_nodes(lang: str, node_kind: str) -> set[tuple[str, str, str]]:
+    """Query ecp for SchemaField/EventTopic/TransactionScope nodes per language.
+
+    These node types exist only in ecp (not in ref-gitnexus oracle), so this
+    function queries ecp exclusively to build a baseline for the new schema
+    dimensions.
+
+    Returns (kind, filePath, name) tuples with file-extension scoping.
+    """
+    exts = LANG_EXTS.get(lang, [])
+    if not exts:
+        return set()
+    where = _ext_clause(exts, "n")
+    q = f"MATCH (n:{node_kind}) WHERE {where} RETURN n.kind, n.filePath, n.name"
+    out = run(["ecp", "cypher", "--repo", str(REPO), q, "--format", "json"])
+    try:
+        obj = json.loads(out)
+    except json.JSONDecodeError:
+        return set()
+    prefix = f"{lang}/"
+    sink: set[tuple[str, str, str]] = set()
+    for row in obj.get("rows", []):
+        kind, fp, name = row[0], row[1], row[2]
+        if is_anon(name):
+            continue
+        if fp.startswith(prefix):
+            fp = fp[len(prefix) :]
+        sink.add((kind, fp, name))
+    return sink
+
+
 def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
     rs = dump_rs(lang)
     cached_ref = None if REFRESH_REF else _read_cached_ref(lang)
@@ -283,6 +314,21 @@ def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
     return len(rs), len(ref), len(rs_only), len(ref_only), common
 
 
+def dump_schema_nodes_lang(lang: str) -> None:
+    """Dump ecp-only schema nodes (SchemaField/EventTopic/TransactionScope).
+
+    Since these node types exist only in ecp (not in ref-gitnexus), we emit
+    ecp counts per node type as a baseline for post-T4-7 parity tracking.
+    """
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for node_kind in ("SchemaField", "EventTopic", "TransactionScope"):
+        rows = dump_rs_schema_nodes(lang, node_kind)
+        file_key = node_kind.lower()
+        (OUT_DIR / f"{lang}_rs_{file_key}.txt").write_text(
+            "\n".join(f"{k}\t{f}\t{n}" for k, f, n in sorted(rows)) + "\n"
+        )
+
+
 def main() -> int:
     target = sys.argv[1] if len(sys.argv) > 1 else None
     langs = [target] if target else LANGS
@@ -297,6 +343,8 @@ def main() -> int:
             f"{lang:<12} rs={rs_n:>6} ref={ref_n:>6}  "
             f"rs_only={rs_only:>6} ref_only={ref_only:>6} common={common:>6}"
         )
+        # Also dump the three new schema node types (ecp-only, no oracle baseline)
+        dump_schema_nodes_lang(lang)
     md = [
         "# Per-lang per-symbol parity diff",
         "",
