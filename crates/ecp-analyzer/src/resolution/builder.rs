@@ -1098,6 +1098,17 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        // Override resolution — emits `RelType::Overrides` edges (concrete
+        // method → overridden supertype method). Runs after class_membership
+        // so HasMethod edges are already in place; before CSR construction so
+        // the new edges land in out_offsets / in_offsets.
+        crate::post_process::overrides::emit_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut edges,
+        );
+
         // Append one `NodeKind::File` node per LocalGraph at the tail of
         // `nodes` (idx >= raw-node count). Doing it here — AFTER all passes
         // that index symbols by SymbolTable + use raw node idx ranges —

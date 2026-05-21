@@ -79,3 +79,13 @@
 (enum_class_body
   (enum_entry
     (simple_identifier) @enum_entry.name) @enum_entry)
+
+; Override marker — `override fun foo()`. Kotlin REQUIRES the `override`
+; keyword; its absence on a method that shadows a supertype member is a
+; compile error. Captured separately so the post-process override resolver
+; can identify candidate overriders without re-reading source text.
+(function_declaration
+  (modifiers
+    (member_modifier) @override_marker
+    (#eq? @override_marker "override"))
+  (simple_identifier) @function.name) @function

@@ -74,6 +74,7 @@ impl std::str::FromStr for RelType {
             "SUBSCRIBES" => Ok(RelType::Subscribes),
             "EVENTTOPICMIRROR" | "EVENT_TOPIC_MIRROR" => Ok(RelType::EventTopicMirror),
             "OPENSTXSCOPE" | "OPENS_TX_SCOPE" => Ok(RelType::OpensTxScope),
+            "OVERRIDES" => Ok(RelType::Overrides),
             _ => Err(()),
         }
     }
@@ -283,6 +284,27 @@ pub enum RelType {
     /// edge direction, so a single CSR slice from the scope answers
     /// "who opens this scope?" without a join.
     OpensTxScope,
+    /// Method-level override edge. Source is a concrete method
+    /// (`Function` / `Method` / `Constructor`) on a subtype; target is the
+    /// corresponding method on the *immediate* supertype or interface that the
+    /// source overrides. Distinct from class-level `Extends` / `Implements`
+    /// — those link `Class`/`Interface` nodes, while `Overrides` links method
+    /// nodes. LLM-utility (A) Graph completeness: refactoring a base method
+    /// must find every overriding implementation; without this edge the only
+    /// option is grep-and-pray. (C) Edge semantics: `Extends` carries a
+    /// different meaning (type hierarchy) and cannot substitute.
+    ///
+    /// Target is the **immediate** supertype's method, not a transitive
+    /// ancestor. For `C extends B extends A; A.foo; B.foo; C.foo` the edges
+    /// are `C.foo → B.foo` and `B.foo → A.foo`; querying the full chain
+    /// requires two hops, which is the correct semantic (C overrides B's
+    /// contract, not A's directly).
+    ///
+    /// Languages: Java (`@Override`), Kotlin (`override fun`), C# (`override`
+    /// modifier), C++ (`override` specifier or virtual-matched signature).
+    /// Appended at the END to preserve rkyv discriminants for existing
+    /// `graph.bin` files.
+    Overrides,
 }
 
 impl ArchivedRelType {

@@ -87,12 +87,14 @@
   name: (identifier) @method.name
 ) @method
 
-;; Decorators
+;; Decorators — each pattern repeats the name capture so `name_node` is
+;; populated in the same match, enabling the merge path in parser.rs.
 (class_declaration
   (modifiers [
     (annotation) @decorator
     (marker_annotation) @decorator
   ])
+  name: (identifier) @class.name
 ) @class
 
 (interface_declaration
@@ -100,6 +102,7 @@
     (annotation) @decorator
     (marker_annotation) @decorator
   ])
+  name: (identifier) @interface.name
 ) @interface
 
 (method_declaration
@@ -107,6 +110,7 @@
     (annotation) @decorator
     (marker_annotation) @decorator
   ])
+  name: (identifier) @method.name
 ) @method
 
 (constructor_declaration
@@ -114,4 +118,5 @@
     (annotation) @decorator
     (marker_annotation) @decorator
   ])
+  name: (identifier) @constructor.name
 ) @constructor

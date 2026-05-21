@@ -204,6 +204,35 @@ impl LanguageProvider for CppProvider {
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
+        // Pre-pass: collect function_definition node IDs that carry an
+        // `override` virtual_specifier. These are collected in a separate
+        // QueryCursor pass so we can cross-reference against the main parse
+        // loop (where the override pattern fires on a different match than
+        // the @name.method capture, making per-match `has_override` unreliable).
+        let mut override_func_ids: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
+        {
+            let idx_om = self.query.capture_index_for_name("override_marker");
+            if let Some(om_idx) = idx_om {
+                let mut pre_cursor = QueryCursor::new();
+                let mut pre_matches = pre_cursor.matches(&self.query, tree.root_node(), source);
+                while let Some(m) = pre_matches.next() {
+                    for cap in m.captures {
+                        if cap.index == om_idx {
+                            // Walk up to the enclosing function_definition.
+                            let mut p = cap.node.parent();
+                            while let Some(node) = p {
+                                if node.kind() == "function_definition" {
+                                    override_func_ids.insert(node.id());
+                                    break;
+                                }
+                                p = node.parent();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -231,6 +260,7 @@ impl LanguageProvider for CppProvider {
         let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_enum_node = self.query.capture_index_for_name("enum_node");
         let idx_typedef_node = self.query.capture_index_for_name("typedef_node");
+        let _idx_override_marker = self.query.capture_index_for_name("override_marker");
 
         let is_header = path
             .extension()
@@ -328,8 +358,13 @@ impl LanguageProvider for CppProvider {
                         })
                         .collect();
 
+                    let decorators = if override_func_ids.contains(&root.id()) {
+                        vec!["__override__".to_string()]
+                    } else {
+                        vec![]
+                    };
                     nodes.push(RawNode {
-                        decorators: vec![],
+                        decorators,
                         is_exported: is_header || is_exported_by_query,
                         heritage,
                         type_annotation,
