@@ -7,7 +7,7 @@
 
 use ecp_analyzer::python::schema_extractors::PYDANTIC_CONFIG;
 use ecp_analyzer::schema_field::extract_schema_fields;
-use ecp_core::analyzer::types::{FrameworkId, RawImport, SchemaType};
+use ecp_core::analyzer::types::{FrameworkId, RawImport, RawSchemaField, SchemaType};
 use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
@@ -15,18 +15,30 @@ use tree_sitter::{Parser, Query};
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn python_tree(src: &str) -> (tree_sitter::Tree, tree_sitter::Language) {
+fn pydantic_import() -> RawImport {
+    RawImport {
+        source: "pydantic".to_string(),
+        imported_name: "BaseModel".to_string(),
+        alias: None,
+        binding_kind: None,
+    }
+}
+
+/// Run the Pydantic dispatcher against `src`. Returns the extracted fields
+/// plus the pool that owns their string bytes — callers resolve `StrRef`s via
+/// `pool.bytes.as_slice()`.
+///
+/// `with_import` toggles the `pydantic` import-gate; tests use `false` to
+/// verify gating, `true` for happy paths. The query is the Pydantic fragment
+/// from `frameworks.scm`, compiled inline so unit tests don't depend on the
+/// production-query merge step in `PythonProvider::new()`.
+fn run(src: &str, with_import: bool) -> (Vec<RawSchemaField>, StringPool) {
     let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
-    (parser.parse(src.as_bytes(), None).expect("parse"), lang)
-}
-
-fn pydantic_query(lang: &tree_sitter::Language) -> Query {
-    // The production query is compiled from both queries.scm + frameworks.scm.
-    // For unit tests we compile only the Pydantic fragment inline.
-    Query::new(
-        lang,
+    let tree = parser.parse(src.as_bytes(), None).expect("parse");
+    let query = Query::new(
+        &lang,
         r#"
 (class_definition
   name: (identifier) @pydantic.owner
@@ -39,16 +51,22 @@ fn pydantic_query(lang: &tree_sitter::Language) -> Query {
 (#eq? @_super "BaseModel")
 "#,
     )
-    .expect("query compile")
-}
-
-fn pydantic_import() -> RawImport {
-    RawImport {
-        source: "pydantic".to_string(),
-        imported_name: "BaseModel".to_string(),
-        alias: None,
-        binding_kind: None,
-    }
+    .expect("query compile");
+    let imports = if with_import {
+        vec![pydantic_import()]
+    } else {
+        Vec::new()
+    };
+    let mut pool = StringPool::new();
+    let fields = extract_schema_fields(
+        &tree,
+        src.as_bytes(),
+        &query,
+        &[PYDANTIC_CONFIG],
+        &imports,
+        &mut pool,
+    );
+    (fields, pool)
 }
 
 // ---------------------------------------------------------------------------
@@ -61,19 +79,7 @@ fn pydantic_import() -> RawImport {
 fn test_happy_path_two_fields() {
     let src =
         "from pydantic import BaseModel\n\nclass User(BaseModel):\n    name: str\n    age: int\n";
-    let (tree, lang) = python_tree(src);
-    let query = pydantic_query(&lang);
-    let imports = vec![pydantic_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, true);
 
     assert_eq!(fields.len(), 2, "expected two fields for User");
 
@@ -100,19 +106,7 @@ fn test_happy_path_two_fields() {
 fn test_optional_union_type_emitted_as_other() {
     let src =
         "from pydantic import BaseModel\n\nclass User(BaseModel):\n    email: str | None = None\n";
-    let (tree, lang) = python_tree(src);
-    let query = pydantic_query(&lang);
-    let imports = vec![pydantic_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, true);
 
     assert_eq!(fields.len(), 1);
     assert_eq!(
@@ -120,8 +114,7 @@ fn test_optional_union_type_emitted_as_other() {
         SchemaType::Other,
         "union type resolves to Other"
     );
-    let pool_bytes = pool.bytes.as_slice();
-    assert_eq!(fields[0].name.resolve(pool_bytes), "email");
+    assert_eq!(fields[0].name.resolve(pool.bytes.as_slice()), "email");
 }
 
 /// Generic type `list[str]` — field emitted, type_class is `Other`.
@@ -129,19 +122,7 @@ fn test_optional_union_type_emitted_as_other() {
 fn test_generic_type_emitted_as_other() {
     let src =
         "from pydantic import BaseModel\n\nclass Tags(BaseModel):\n    items: list[str] = []\n";
-    let (tree, lang) = python_tree(src);
-    let query = pydantic_query(&lang);
-    let imports = vec![pydantic_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, _pool) = run(src, true);
 
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].type_class, SchemaType::Other);
@@ -151,18 +132,7 @@ fn test_generic_type_emitted_as_other() {
 #[test]
 fn test_no_pydantic_import_zero_fields() {
     let src = "class User(BaseModel):\n    name: str\n    age: int\n";
-    let (tree, lang) = python_tree(src);
-    let query = pydantic_query(&lang);
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &[],
-        &mut pool,
-    );
+    let (fields, _pool) = run(src, false);
 
     assert!(
         fields.is_empty(),
@@ -175,19 +145,7 @@ fn test_no_pydantic_import_zero_fields() {
 #[test]
 fn test_plain_class_no_fields_emitted() {
     let src = "from pydantic import BaseModel\n\nclass Plain:\n    x: int = 0\n    y: str\n";
-    let (tree, lang) = python_tree(src);
-    let query = pydantic_query(&lang);
-    let imports = vec![pydantic_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, _pool) = run(src, true);
 
     assert!(
         fields.is_empty(),
@@ -210,24 +168,8 @@ fn test_plain_class_no_fields_emitted() {
 #[ignore = "BlindSpot: inherited fields via intermediate class require cross-file symbol resolution beyond single-file tree-sitter scope"]
 fn test_inherited_model_own_fields_only() {
     let src = "from pydantic import BaseModel\n\nclass User(BaseModel):\n    name: str\n\nclass Admin(User):\n    role: str\n";
-    let (tree, lang) = python_tree(src);
-    let query = pydantic_query(&lang);
-    let imports = vec![pydantic_import()];
-    let mut pool = StringPool::new();
+    let (fields, pool) = run(src, true);
 
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &imports,
-        &mut pool,
-    );
-
-    // Only User.name should appear; Admin.role extends User, not BaseModel.
-    // The current query captures both classes independently — User matches
-    // (BaseModel) but Admin matches (User). This test documents expected
-    // single-file behaviour: only BaseModel-direct subclasses are captured.
     let pool_bytes = pool.bytes.as_slice();
     let owners: Vec<&str> = fields
         .iter()
@@ -247,19 +189,7 @@ fn test_inherited_model_own_fields_only() {
 #[test]
 fn test_multiple_models_in_file() {
     let src = "from pydantic import BaseModel\n\nclass Foo(BaseModel):\n    x: int\n\nclass Bar(BaseModel):\n    y: str\n    z: bool\n";
-    let (tree, lang) = python_tree(src);
-    let query = pydantic_query(&lang);
-    let imports = vec![pydantic_import()];
-    let mut pool = StringPool::new();
-
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &imports,
-        &mut pool,
-    );
+    let (fields, pool) = run(src, true);
 
     assert_eq!(fields.len(), 3, "Foo(1) + Bar(2) = 3 total fields");
     let pool_bytes = pool.bytes.as_slice();
