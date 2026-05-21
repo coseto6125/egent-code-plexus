@@ -117,6 +117,15 @@ jobs:
         with:
           tool: cargo-nextest
 
+      # Sample repos are 13 shallow clones (~1.8 GB) used as parity fixtures.
+      # Key tracks the bootstrap script; cache shared across OSes since content
+      # is pure git data. Hit lets the script's `.git`-presence check no-op.
+      - name: Cache sample repos
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .sample_repo
+          key: sample-repos-${{ hashFiles('scripts/parity/bootstrap_sample_repos.sh') }}
+
       - name: Bootstrap sample repos
         shell: bash
         run: bash scripts/parity/bootstrap_sample_repos.sh
@@ -158,7 +167,11 @@ jobs:
       - name: Cache cargo registry & advisory-db
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: audit-${{ hashFiles('Cargo.lock') }}
+          # Swatinem v2.9 already folds Cargo.lock hash into the final key
+          # suffix (-<lockfile-hash>); wrapping the shared-key in hashFiles()
+          # too forces a 100% miss on every lockfile change. Plain `audit`
+          # lets the built-in lockfile-derived suffix handle invalidation.
+          shared-key: audit
           # audit/deny 只讀 lockfile，不需快取 target/
           cache-targets: false
           cache-on-failure: true
