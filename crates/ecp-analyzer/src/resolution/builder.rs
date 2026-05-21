@@ -11,7 +11,7 @@ use ecp_core::graph::{
 };
 use ecp_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::OnceLock;
 
 #[derive(Copy, Clone)]
@@ -229,6 +229,16 @@ pub struct GraphBuilder {
     /// edges are emitted). Production callers (the `analyze` command)
     /// always pass this; in-process tests opt in via tempdirs.
     repo_root: Option<std::path::PathBuf>,
+    /// T7-6: per-file set of symbol UIDs whose body hash is UNCHANGED since
+    /// the last full build. Symbols in this set skip `pass2_emit_node_edges`
+    /// and the `class_membership` post-process. `None` = no diff data
+    /// available → resolve everything (default, full-build path).
+    ///
+    /// Key: forward-slash relative path (matches `LocalGraph.file_path`
+    /// normalisation used throughout the builder).
+    /// Value: UIDs to SKIP. An empty inner set means all symbols changed;
+    /// a full inner set means the file is entirely unchanged.
+    symbol_skip_set: Option<FxHashMap<String, FxHashSet<u64>>>,
 }
 
 impl Default for GraphBuilder {
@@ -245,6 +255,7 @@ impl GraphBuilder {
             resolver_dump_path: None,
             path_aliases: PathAliases::new(),
             repo_root: None,
+            symbol_skip_set: None,
         }
     }
 
@@ -263,6 +274,20 @@ impl GraphBuilder {
 
     pub fn with_cache(mut self, hashes: HashMap<String, [u8; 8]>) -> Self {
         self.old_file_hashes = hashes;
+        self
+    }
+
+    /// T7-6: supply per-symbol skip data from `symbol_hash_diff`. Symbols
+    /// whose UID appears in the inner set for their file skip Pass 2 resolver
+    /// work and the class_membership post-process entirely. Files absent from
+    /// the outer map fall through to full reanalyze.
+    ///
+    /// The skip set is built by `ecp_cli::incremental::symbol_hash_diff` after
+    /// all guards (import-set, shadow-candidate, SchemaField) have been
+    /// evaluated. Callers MUST only pass this when the guard conditions are
+    /// satisfied; the builder trusts the skip set unconditionally.
+    pub fn with_symbol_skip_set(mut self, skip: FxHashMap<String, FxHashSet<u64>>) -> Self {
+        self.symbol_skip_set = Some(skip);
         self
     }
 
@@ -973,6 +998,8 @@ impl GraphBuilder {
         let local_graphs = &self.local_graphs;
         let symbol_table_ref = &symbol_table;
         let reason_cache_ref = &reason_cache;
+        // T7-6: reference to skip-set (None = full reanalyze for all files).
+        let symbol_skip_ref = self.symbol_skip_set.as_ref();
 
         // Pre-build per-graph indirect-call lookup keyed by caller span and
         // call index so same-name functions/methods in one file do not collide.
@@ -1004,7 +1031,34 @@ impl GraphBuilder {
             let mut current_node_idx = 0u32;
             for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
                 let lookup = &indirect_lookups[graph_idx];
+                // T7-6: per-file skip set. `None` = no diff data → resolve all.
+                let file_skip = symbol_skip_ref.and_then(|m| {
+                    let raw = local_graph.file_path.to_string_lossy();
+                    let p: std::borrow::Cow<'_, str> = if raw.contains('\\') {
+                        std::borrow::Cow::Owned(raw.replace('\\', "/"))
+                    } else {
+                        raw
+                    };
+                    m.get(p.as_ref())
+                });
                 for raw_node in &local_graph.nodes {
+                    // T7-6: skip resolver work for symbols whose body hash is
+                    // unchanged. `file_skip` being `None` means either no diff
+                    // data or the file needs full reanalyze — always emit in
+                    // both cases. An empty inner set means all symbols changed.
+                    let skip = file_skip.is_some_and(|skip_uids| {
+                        let uid = ecp_core::uid::compute(
+                            raw_node.kind,
+                            &local_graph.file_path.to_string_lossy().replace('\\', "/"),
+                            raw_node.owner_class.as_deref(),
+                            &raw_node.name,
+                        );
+                        skip_uids.contains(&uid)
+                    });
+                    if skip {
+                        current_node_idx += 1;
+                        continue;
+                    }
                     pass2_emit_node_edges(
                         resolver,
                         local_graph,
@@ -1019,13 +1073,29 @@ impl GraphBuilder {
                     );
                     current_node_idx += 1;
                 }
-                pass2_emit_framework_and_fanout(
-                    resolver,
-                    symbol_table_ref,
-                    local_graph,
-                    reason_cache_ref,
-                    &mut edges,
-                );
+                // T7-6: skip framework/fanout edges when all symbols in this
+                // file are in the skip set (import set unchanged → no new
+                // resolution targets for framework refs either).
+                let all_skipped = file_skip.is_some_and(|skip_uids| {
+                    local_graph.nodes.iter().all(|n| {
+                        let uid = ecp_core::uid::compute(
+                            n.kind,
+                            &local_graph.file_path.to_string_lossy().replace('\\', "/"),
+                            n.owner_class.as_deref(),
+                            &n.name,
+                        );
+                        skip_uids.contains(&uid)
+                    })
+                });
+                if !all_skipped {
+                    pass2_emit_framework_and_fanout(
+                        resolver,
+                        symbol_table_ref,
+                        local_graph,
+                        reason_cache_ref,
+                        &mut edges,
+                    );
+                }
             }
             edges
         } else {
@@ -1053,8 +1123,32 @@ impl GraphBuilder {
                     let lookup = &indirect_lookups[graph_idx];
                     let mut local_edges: Vec<Edge> = Vec::new();
                     let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
+                    // T7-6: per-file skip set lookup (parallel path).
+                    let file_path_str = {
+                        let raw = local_graph.file_path.to_string_lossy();
+                        if raw.contains('\\') {
+                            raw.replace('\\', "/")
+                        } else {
+                            raw.into_owned()
+                        }
+                    };
+                    let file_skip: Option<&FxHashSet<u64>> =
+                        symbol_skip_ref.and_then(|m| m.get(&file_path_str));
                     for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                         let current_node_idx = start_idx + node_offset as u32;
+                        // T7-6: skip resolver work for unchanged-body symbols.
+                        let skip = file_skip.is_some_and(|skip_uids| {
+                            let uid = ecp_core::uid::compute(
+                                raw_node.kind,
+                                &file_path_str,
+                                raw_node.owner_class.as_deref(),
+                                &raw_node.name,
+                            );
+                            skip_uids.contains(&uid)
+                        });
+                        if skip {
+                            continue;
+                        }
                         pass2_emit_node_edges(
                             &resolver,
                             local_graph,
@@ -1068,13 +1162,28 @@ impl GraphBuilder {
                             &mut local_pending,
                         );
                     }
-                    pass2_emit_framework_and_fanout(
-                        &resolver,
-                        symbol_table_ref,
-                        local_graph,
-                        reason_cache_ref,
-                        &mut local_edges,
-                    );
+                    // T7-6: skip framework/fanout edges only when ALL symbols
+                    // in this file are unchanged.
+                    let all_skipped = file_skip.is_some_and(|skip_uids| {
+                        local_graph.nodes.iter().all(|n| {
+                            let uid = ecp_core::uid::compute(
+                                n.kind,
+                                &file_path_str,
+                                n.owner_class.as_deref(),
+                                &n.name,
+                            );
+                            skip_uids.contains(&uid)
+                        })
+                    });
+                    if !all_skipped {
+                        pass2_emit_framework_and_fanout(
+                            &resolver,
+                            symbol_table_ref,
+                            local_graph,
+                            reason_cache_ref,
+                            &mut local_edges,
+                        );
+                    }
                     (local_edges, local_pending)
                 })
                 .collect();
@@ -1311,6 +1420,7 @@ impl GraphBuilder {
             &symbol_table,
             &mut string_pool,
             &mut edges,
+            self.symbol_skip_set.as_ref(),
         );
 
         // Override resolution — emits `RelType::Overrides` edges (concrete
