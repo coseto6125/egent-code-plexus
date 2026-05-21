@@ -10,14 +10,16 @@ use crate::git::{safe_exec, DiffScope};
 use ecp_analyzer::{
     astro::parser::AstroProvider, c::parser::CProvider, c_sharp::parser::CSharpProvider,
     cpp::parser::CppProvider, dart::parser::DartProvider, go::parser::GoProvider,
-    java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
-    kotlin::parser::KotlinProvider, markdown::parser::MarkdownProvider, php::parser::PhpProvider,
-    python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
-    svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
-    typescript::parser::TypeScriptProvider, vue::parser::VueProvider, yaml::parser::YamlProvider,
+    incremental::shadow_candidates::detect_shadow_candidates, java::parser::JavaProvider,
+    javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
+    markdown::parser::MarkdownProvider, php::parser::PhpProvider, python::parser::PythonProvider,
+    ruby::parser::RubyProvider, rust::parser::RustProvider, svelte::parser::SvelteProvider,
+    swift::parser::SwiftProvider, typescript::parser::TypeScriptProvider, vue::parser::VueProvider,
+    yaml::parser::YamlProvider,
 };
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::types::LocalGraph;
+use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 
 /// Build the production analyzer pipeline with every registered language
@@ -72,6 +74,30 @@ pub fn reanalyze_files(repo: &Path, scope: &DiffScope, rel_paths: &[String]) -> 
     if rel_paths.is_empty() {
         return Vec::new();
     }
+
+    // Expand the path set with any pre-existing files whose import-resolution
+    // the changed files can steal (ref-gitnexus PR #1479 stale-Calls fix).
+    let expanded: Vec<String> = if let Some(all_tracked) = tracked_files(repo) {
+        let changed_pb: Vec<PathBuf> = rel_paths.iter().map(PathBuf::from).collect();
+        let shadows = detect_shadow_candidates(&changed_pb, &all_tracked);
+        if shadows.is_empty() {
+            rel_paths.to_vec()
+        } else {
+            // Use FxHashSet for O(1) dedup instead of Vec::contains O(N).
+            let mut seen: FxHashSet<String> = rel_paths.iter().map(|s| s.to_string()).collect();
+            let mut v = rel_paths.to_vec();
+            for s in shadows {
+                let as_str = s.to_string_lossy().into_owned();
+                if seen.insert(as_str.clone()) {
+                    v.push(as_str);
+                }
+            }
+            v
+        }
+    } else {
+        rel_paths.to_vec()
+    };
+    let rel_paths = expanded.as_slice();
 
     let pipeline = make_pipeline();
 
@@ -148,4 +174,25 @@ fn staged_blob(repo: &Path, rel_path: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(out.stdout)
+}
+
+/// List every file tracked by git in `repo` as relative `PathBuf`s.
+/// Used to supply the `all_files` filter to `detect_shadow_candidates`.
+/// Returns `None` if git is unavailable or the repo is bare.
+fn tracked_files(repo: &Path) -> Option<Vec<PathBuf>> {
+    let out = safe_exec::git()
+        .args(["ls-files", "-z"])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let paths = out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| PathBuf::from(String::from_utf8_lossy(s).as_ref()))
+        .collect();
+    Some(paths)
 }
