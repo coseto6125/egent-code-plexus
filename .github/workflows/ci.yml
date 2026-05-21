@@ -1,16 +1,22 @@
 name: CI
 
-# CI runs on every push + PR — no path-filter skip.
+# CI strategy: docs-only PRs short-circuit heavy jobs (cargo build / test /
+# audit) at the STEP level — the job itself still runs and reports SUCCESS,
+# satisfying branch protection's required-check list while not burning CI
+# minutes on .md edits.
 #
-# Earlier versions used `paths-ignore` to skip CI on docs-only / license /
-# config edits. That collided with branch protection: the required-status-
-# check list (Code Quality, Test on {ubuntu,macos,windows}-latest, Supply-
-# chain, Lint GitHub Actions workflows) names the jobs in THIS workflow,
-# so skipping the workflow meant those required checks never reported
-# success and docs-only PRs got stuck `BLOCKED` with no merge path except
-# admin override (see #236, #278). Removing `paths-ignore` is the simpler
-# fix; CI cost on docs-only PRs is bounded by the cargo build cache —
-# only the first PR after a Cargo.lock change pays the full price.
+# History: paths-ignore at the workflow level made required-check jobs
+# never report, deadlocking docs-only PRs (#236/#278). The current
+# `detect-changes` setup avoids that trap because:
+#   1. Every required-check job continues to RUN (no job-level `if: false`).
+#   2. The first step in each heavy job inspects `needs.detect-changes`
+#      output and either short-circuits with a SUCCESS message (docs-only)
+#      or proceeds with real work (code change).
+#   3. actionlint runs unconditionally — it lints workflow YAML which is
+#      always present, fast, and idempotent.
+#
+# Code-path detection lives in the `detect-changes` job (shell-based diff
+# against `github.base_ref`) — no third-party action, transparent regex.
 on:
   push:
     branches: [main]
@@ -35,12 +41,18 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
-  # ==================== Code Quality ====================
-  code-quality:
-    name: Code Quality (Linting & Formatting)
+  # ==================== Detect code changes ====================
+  # Outputs `code: true|false` based on whether any code-relevant path
+  # changed in this PR. Heavy downstream jobs gate their real work on this
+  # output but still RUN as jobs (SUCCESS on docs-only, full work on code).
+  #
+  # On push-to-main events `code` is unconditionally true (merge commits
+  # always get full validation regardless of detected paths).
+  detect-changes:
+    name: Detect code changes
     runs-on: ubuntu-latest
-    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
-
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
@@ -50,14 +62,72 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          # Need history to diff PR head against base ref.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: filter
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # Push to main: always treat as code change (final validation).
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "Event is '$EVENT_NAME' (not pull_request) — defaulting code=true"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD")
+          echo "Changed files:"
+          echo "$CHANGED" | sed 's/^/  /'
+
+          # Positive list — anything outside it is docs/config/license-only.
+          # Match anchors: ^ start, $ end for exact-filename matches.
+          if echo "$CHANGED" | grep -qE '^(crates/|Cargo\.toml$|Cargo\.lock$|\.github/|scripts/|rust-toolchain|deny\.toml$|clippy\.toml$|rustfmt\.toml$)'; then
+            echo "Code-relevant change detected — code=true"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No code-relevant change — code=false (docs-only)"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ==================== Code Quality ====================
+  code-quality:
+    name: Code Quality (Linting & Formatting)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+
+    steps:
+      - name: Short-circuit for docs-only PR
+        if: needs.detect-changes.outputs.code != 'true'
+        run: echo "✓ Docs-only PR — skipping rustfmt + clippy"
+
+      - name: Harden the runner (Audit all outbound calls)
+        if: needs.detect-changes.outputs.code == 'true'
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        if: needs.detect-changes.outputs.code == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
           persist-credentials: false
 
       - name: Install Rust toolchain
+        if: needs.detect-changes.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo
+        if: needs.detect-changes.outputs.code == 'true'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: linux-build   # 與 test-ubuntu 共用 target/，避免互相覆蓋
@@ -65,12 +135,14 @@ jobs:
           cache-workspace-crates: true
 
       - name: Run rustfmt check
+        if: needs.detect-changes.outputs.code == 'true'
         run: |
           echo "::group::Rustfmt"
           cargo fmt --all -- --check
           echo "::endgroup::"
 
       - name: Run clippy
+        if: needs.detect-changes.outputs.code == 'true'
         run: |
           echo "::group::Clippy"
           cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -80,6 +152,7 @@ jobs:
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    needs: detect-changes
     strategy:
       fail-fast: false
       matrix:
@@ -87,20 +160,28 @@ jobs:
     if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
 
     steps:
+      - name: Short-circuit for docs-only PR
+        if: needs.detect-changes.outputs.code != 'true'
+        run: echo "✓ Docs-only PR — skipping cargo nextest on ${{ matrix.os }}"
+
       - name: Harden the runner (Audit all outbound calls)
+        if: needs.detect-changes.outputs.code == 'true'
         uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
         with:
           egress-policy: audit
 
       - name: Checkout code
+        if: needs.detect-changes.outputs.code == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
+        if: needs.detect-changes.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Install cargo-nextest
+        if: needs.detect-changes.outputs.code == 'true'
         uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
         with:
           tool: cargo-nextest
@@ -109,16 +190,19 @@ jobs:
       # Key tracks the bootstrap script; cache shared across OSes since content
       # is pure git data. Hit lets the script's `.git`-presence check no-op.
       - name: Cache sample repos
+        if: needs.detect-changes.outputs.code == 'true'
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: .sample_repo
           key: sample-repos-${{ hashFiles('scripts/parity/bootstrap_sample_repos.sh') }}
 
       - name: Bootstrap sample repos
+        if: needs.detect-changes.outputs.code == 'true'
         shell: bash
         run: bash scripts/parity/bootstrap_sample_repos.sh
 
       - name: Cache cargo
+        if: needs.detect-changes.outputs.code == 'true'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # ubuntu 與 code-quality 共用 cache，macos/windows 獨立
@@ -127,6 +211,7 @@ jobs:
           cache-workspace-crates: true
 
       - name: Run tests (nextest)
+        if: needs.detect-changes.outputs.code == 'true'
         run: |
           echo "::group::cargo nextest"
           cargo nextest run --workspace --all-features --no-fail-fast
@@ -136,23 +221,32 @@ jobs:
   audit:
     name: Supply-chain (audit & deny)
     runs-on: ubuntu-latest
+    needs: detect-changes
     if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
 
     steps:
+      - name: Short-circuit for docs-only PR
+        if: needs.detect-changes.outputs.code != 'true'
+        run: echo "✓ Docs-only PR — skipping cargo-audit + cargo-deny (no Cargo.lock change)"
+
       - name: Harden the runner (Audit all outbound calls)
+        if: needs.detect-changes.outputs.code == 'true'
         uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
         with:
           egress-policy: audit
 
       - name: Checkout code
+        if: needs.detect-changes.outputs.code == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain (audit 需要 cargo metadata 來解 Cargo.lock)
+        if: needs.detect-changes.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo registry & advisory-db
+        if: needs.detect-changes.outputs.code == 'true'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # Swatinem v2.9 already folds Cargo.lock hash into the final key
@@ -165,23 +259,28 @@ jobs:
           cache-on-failure: true
 
       - name: Install cargo-audit & cargo-deny
+        if: needs.detect-changes.outputs.code == 'true'
         uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
         with:
           tool: cargo-audit,cargo-deny
 
       - name: Run cargo-audit
+        if: needs.detect-changes.outputs.code == 'true'
         run: |
           echo "::group::cargo audit"
           cargo audit
           echo "::endgroup::"
 
       - name: Run cargo-deny
+        if: needs.detect-changes.outputs.code == 'true'
         run: |
           echo "::group::cargo deny"
           cargo deny check
           echo "::endgroup::"
 
   # ==================== Workflow Lint ====================
+  # actionlint runs unconditionally — fast (~30s), idempotent, and lints
+  # the workflow YAML itself which is always present. No short-circuit.
   actionlint:
     name: Lint GitHub Actions workflows
     runs-on: ubuntu-latest
