@@ -412,7 +412,7 @@ impl LanguageProvider for RustProvider {
             }
         }
 
-        let file_category = ecp_core::graph::FileCategory::Source;
+        let file_category = crate::resolution::builder::determine_category(&path.to_string_lossy());
         let raw_function_metas = crate::function_meta::rust_lang::extract(
             tree.root_node(),
             source,

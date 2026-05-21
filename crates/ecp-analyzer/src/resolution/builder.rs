@@ -1,4 +1,5 @@
 use crate::fetch_shape::{consumer_keys, fetch_urls, format_reason, response_shapes};
+use crate::framework_helpers::Span;
 use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
@@ -772,6 +773,15 @@ impl GraphBuilder {
             for local_graph in &self.local_graphs {
                 if !local_graph.raw_function_metas.is_empty() {
                     let base = node_offset;
+                    // Sorted index → binary_search per node, so the inner loop
+                    // is O(N log F) instead of O(N*F).
+                    let mut meta_idx: Vec<(Span, usize)> = local_graph
+                        .raw_function_metas
+                        .iter()
+                        .enumerate()
+                        .map(|(i, m)| (m.span, i))
+                        .collect();
+                    meta_idx.sort_by_key(|(s, _)| *s);
                     for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
                         if !matches!(
                             raw_node.kind,
@@ -780,14 +790,11 @@ impl GraphBuilder {
                             continue;
                         }
                         let node_idx = base + raw_idx as u32;
-                        // Find the matching RawFunctionMeta by span.
-                        let Some(rfm) = local_graph
-                            .raw_function_metas
-                            .iter()
-                            .find(|m| m.span == raw_node.span)
+                        let Ok(slot) = meta_idx.binary_search_by_key(&raw_node.span, |(s, _)| *s)
                         else {
                             continue;
                         };
+                        let rfm = &local_graph.raw_function_metas[meta_idx[slot].1];
                         let params: Vec<StrRef> =
                             rfm.params.iter().map(|s| string_pool.add(s)).collect();
                         let return_type = string_pool.add(&rfm.return_type);
