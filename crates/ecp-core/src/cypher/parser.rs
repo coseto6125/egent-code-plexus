@@ -544,6 +544,26 @@ fn parse_primary(c: &mut Cursor) -> Result<Expr, CypherError> {
             };
             return Ok(Expr::Prop(name, prop));
         }
+        // OpenCypher label-test predicate `n:Label[|Label2]*`.  Mirrors the
+        // MATCH-pattern label syntax (parser.rs:191) but lives at expression
+        // level so WHERE clauses can disjoin labels (the `WHERE n:A OR n:B`
+        // form is illegal in OpenCypher; pipe is the correct disjunction).
+        if c.eat(&Token::Colon) {
+            let mut labels = Vec::new();
+            let first = match c.advance() {
+                Some(Token::Ident(s)) => s.clone(),
+                _ => return Err(c.err("label name after :")),
+            };
+            labels.push(first);
+            while c.eat(&Token::Pipe) {
+                let lab = match c.advance() {
+                    Some(Token::Ident(s)) => s.clone(),
+                    _ => return Err(c.err("label name after |")),
+                };
+                labels.push(lab);
+            }
+            return Ok(Expr::HasLabel(name, labels));
+        }
         if c.eat(&Token::LParen) {
             let distinct = c.eat(&Token::Distinct);
             if c.eat(&Token::Star) {
@@ -751,6 +771,61 @@ mod tests {
         let mut c = Cursor::new(&toks);
         let e = parse_where(&mut c).unwrap();
         assert!(matches!(e, Expr::BinOp(Op::Eq, ..)));
+    }
+
+    #[test]
+    fn where_label_test_single() {
+        let toks = tokenize("WHERE n:Function").unwrap();
+        let mut c = Cursor::new(&toks);
+        let e = parse_where(&mut c).unwrap();
+        match e {
+            Expr::HasLabel(v, labels) => {
+                assert_eq!(v, "n");
+                assert_eq!(labels, vec!["Function".to_string()]);
+            }
+            other => panic!("expected HasLabel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_label_test_pipe_disjunction() {
+        let toks = tokenize("WHERE n:Function|Class|Method").unwrap();
+        let mut c = Cursor::new(&toks);
+        let e = parse_where(&mut c).unwrap();
+        match e {
+            Expr::HasLabel(v, labels) => {
+                assert_eq!(v, "n");
+                assert_eq!(labels, vec!["Function", "Class", "Method"]);
+            }
+            other => panic!("expected HasLabel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_label_test_in_boolean_context() {
+        let toks = tokenize("WHERE n:Function AND n.name = 'main'").unwrap();
+        let mut c = Cursor::new(&toks);
+        let e = parse_where(&mut c).unwrap();
+        match e {
+            Expr::BinOp(Op::And, lhs, rhs) => {
+                assert!(matches!(*lhs, Expr::HasLabel(_, _)));
+                assert!(matches!(*rhs, Expr::BinOp(Op::Eq, ..)));
+            }
+            other => panic!("expected And(HasLabel, Eq), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_label_test_negated() {
+        let toks = tokenize("WHERE NOT n:Function").unwrap();
+        let mut c = Cursor::new(&toks);
+        let e = parse_where(&mut c).unwrap();
+        match e {
+            Expr::UnaryOp(UnaryOp::Not, inner) => {
+                assert!(matches!(*inner, Expr::HasLabel(_, _)));
+            }
+            other => panic!("expected Not(HasLabel), got {other:?}"),
+        }
     }
 
     fn q(s: &str) -> Query {

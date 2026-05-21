@@ -121,6 +121,19 @@ def run(cmd: list[str], cwd: Path | None = None) -> str:
     return r.stdout
 
 
+def _cypher_rows(label: str, query: str) -> list[list]:
+    """Run a cypher query and return its `rows`. Empty list on JSON failure;
+    callers distinguish "zero matches" from "decode failed" via the stderr
+    line emitted on the latter path.
+    """
+    out = run(["ecp", "cypher", "--repo", str(REPO), query, "--format", "json"])
+    try:
+        return json.loads(out).get("rows", [])
+    except json.JSONDecodeError as e:
+        print(f"!! {label}: {e}", file=sys.stderr)
+        return []
+
+
 def dump_rs(lang: str) -> set[tuple[str, str, str]]:
     """Cypher the root index with file-extension scoping for this lang.
 
@@ -133,14 +146,9 @@ def dump_rs(lang: str) -> set[tuple[str, str, str]]:
         return set()
     where = _ext_clause(exts, "n")
     q = f"MATCH (n) WHERE {where} RETURN n.kind, n.filePath, n.name"
-    out = run(["ecp", "cypher", "--repo", str(REPO), q, "--format", "json"])
-    try:
-        obj = json.loads(out)
-    except json.JSONDecodeError:
-        return set()
     prefix = f"{lang}/"
     sink: set[tuple[str, str, str]] = set()
-    for row in obj.get("rows", []):
+    for row in _cypher_rows(f"dump_rs({lang})", q):
         kind, fp, name = row[0], row[1], row[2]
         if kind in DROP_KINDS or is_anon(name):
             continue
@@ -257,6 +265,34 @@ def _read_cached_ref(lang: str) -> set[tuple[str, str, str]] | None:
     return rows if rows else None
 
 
+SCHEMA_NODE_KINDS: tuple[str, ...] = ("SchemaField", "EventTopic", "TransactionScope")
+
+
+def dump_rs_schema_nodes(lang: str) -> dict[str, set[tuple[str, str, str]]]:
+    """Dump ecp-only node kinds in one query via `MATCH (n:A|B|C)` pipe syntax.
+
+    Returns a dict keyed by `n.kind` (NodeKind variant name); empty dict when
+    lang has no registered extensions in LANG_EXTS — caller distinguishes
+    "unknown lang" from "zero matches" via the missing baseline file.
+    """
+    exts = LANG_EXTS.get(lang, [])
+    if not exts:
+        return {}
+    where = _ext_clause(exts, "n")
+    labels = "|".join(SCHEMA_NODE_KINDS)
+    q = f"MATCH (n:{labels}) WHERE {where} RETURN n.kind, n.filePath, n.name"
+    prefix = f"{lang}/"
+    buckets: dict[str, set[tuple[str, str, str]]] = {k: set() for k in SCHEMA_NODE_KINDS}
+    for row in _cypher_rows(f"dump_rs_schema_nodes({lang})", q):
+        kind, fp, name = row[0], row[1], row[2]
+        if is_anon(name):
+            continue
+        if fp.startswith(prefix):
+            fp = fp[len(prefix) :]
+        buckets[kind].add((kind, fp, name))
+    return buckets
+
+
 def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
     rs = dump_rs(lang)
     cached_ref = None if REFRESH_REF else _read_cached_ref(lang)
@@ -283,6 +319,18 @@ def diff_lang(lang: str) -> tuple[int, int, int, int, int]:
     return len(rs), len(ref), len(rs_only), len(ref_only), common
 
 
+def dump_schema_nodes_lang(lang: str) -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    buckets = dump_rs_schema_nodes(lang)
+    if not buckets:
+        return
+    for node_kind in SCHEMA_NODE_KINDS:
+        rows = buckets[node_kind]
+        (OUT_DIR / f"{lang}_rs_{node_kind.lower()}.txt").write_text(
+            "\n".join(f"{k}\t{f}\t{n}" for k, f, n in sorted(rows)) + "\n"
+        )
+
+
 def main() -> int:
     target = sys.argv[1] if len(sys.argv) > 1 else None
     langs = [target] if target else LANGS
@@ -297,6 +345,7 @@ def main() -> int:
             f"{lang:<12} rs={rs_n:>6} ref={ref_n:>6}  "
             f"rs_only={rs_only:>6} ref_only={ref_only:>6} common={common:>6}"
         )
+        dump_schema_nodes_lang(lang)
     md = [
         "# Per-lang per-symbol parity diff",
         "",

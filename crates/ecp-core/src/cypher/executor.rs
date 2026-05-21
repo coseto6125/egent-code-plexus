@@ -395,9 +395,6 @@ fn eval_return_item_rich(
             }
             if let Some(&idx) = b.node_vars.get(var) {
                 let n = &graph.nodes[idx as usize];
-                let kind: crate::graph::NodeKind =
-                    rkyv::deserialize::<crate::graph::NodeKind, rkyv::rancor::Error>(&n.kind)
-                        .unwrap();
                 let fi = n.file_idx.to_native() as usize;
                 let file_path = if fi < graph.files.len() {
                     graph.files[fi].path.resolve(&graph.string_pool).to_string()
@@ -407,7 +404,7 @@ fn eval_return_item_rich(
                 return Value::NodeRef {
                     idx,
                     name: n.name.resolve(&graph.string_pool).to_string(),
-                    kind: format!("{kind:?}"),
+                    kind: archived_kind_str(n).to_string(),
                     file_path,
                 };
             }
@@ -879,7 +876,7 @@ fn node_matches(
             }
             "kind" => {
                 if let Literal::Str(s) = lit {
-                    if format!("{kind:?}") != *s {
+                    if kind.as_str() != s {
                         return false;
                     }
                 } else {
@@ -1034,6 +1031,16 @@ fn eval_expr(
                 matches!(v, Value::Str(ref s) if s.contains(p.as_str())),
             ))
         }
+        HasLabel(var, labels) => {
+            // Unbound (edge var / WITH scalar) returns Null, mirroring the
+            // `Var` arm's unbound convention so WHERE serialization and
+            // value_truthy semantics stay consistent.
+            let Some(&idx) = b.node_vars.get(var) else {
+                return Ok(Value::Null);
+            };
+            let kind_str = archived_kind_str(&graph.nodes[idx as usize]);
+            Ok(Value::Bool(labels.iter().any(|l| l == kind_str)))
+        }
         FunCall { .. } => Err(CypherError::Exec {
             msg: "function calls in WHERE not yet supported".into(),
         }),
@@ -1144,6 +1151,15 @@ fn prop_value(
     Value::Null
 }
 
+/// Deserialize an archived node's kind once and resolve to its static
+/// variant name (`"Function"`, `"Class"`, …). Shared by the NodeRef
+/// projection, the `n.kind` property, and the WHERE label-test arm so a
+/// future Display tweak on `NodeKind` lands at one site instead of three.
+fn archived_kind_str(node: &crate::graph::ArchivedNode) -> &'static str {
+    let kind: NodeKind = rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&node.kind).unwrap();
+    kind.as_str()
+}
+
 /// Resolve a single property from an archived node.
 /// `cache` is used for the `content` property (C12).
 fn node_prop_value(
@@ -1164,11 +1180,7 @@ fn node_prop_value(
                 Value::Str(oc.to_string())
             }
         }
-        "kind" => {
-            let kind: NodeKind =
-                rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&n.kind).unwrap();
-            Value::Str(format!("{kind:?}"))
-        }
+        "kind" => Value::Str(archived_kind_str(n).to_string()),
         "filePath" => {
             let fi = n.file_idx.to_native() as usize;
             Value::Str(if fi < graph.files.len() {
