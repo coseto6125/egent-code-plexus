@@ -19,7 +19,7 @@
 
 ## Status snapshot
 
-Last refreshed 2026-05-21 by grep-verification against `origin/main`
+Last refreshed 2026-05-22 by grep-verification against `origin/main`
 (not just by trusting PR titles). Source-of-truth columns:
 
 - `grep evidence` cites the actual symbol / file the verification looked
@@ -33,14 +33,14 @@ Last refreshed 2026-05-21 by grep-verification against `origin/main`
 | 0 | T0-2 (LocalGraph raw vecs) | shipped #263 | `LocalGraph.schema_fields/event_topics/tx_scopes` in `types.rs` |
 | 1 | T1-1 (= T1-3 per D5) owner_class 14-lang | shipped #267 | `RawNode.owner_class` + `stamp_owner_class_by_span` in `framework_helpers.rs` |
 | 1 | T1-2 streaming xxh3_64 helper | shipped #262 | `crates/ecp-core/src/uid.rs` |
-| 1 | **T1-4** `Node.owner_class` (struct field) | **pending** | `Node` in `graph.rs:319-326` has only `uid/name/file_idx/kind/span/community_id` |
+| 1 | **T1-4** `Node.owner_class` (struct field) | **in-flight PR #285** (bundled w/ T1-11) | branch adds `Node.owner_class: StrRef` + `GRAPH_FORMAT_VERSION 5→6` + builder Pass-1 wiring + 14-lang parity test. Auto-merge enabled, awaiting CI |
 | 1 | **T1-5** `Node.uid: u64` | **pending** | `pub uid: StrRef` in `graph.rs:320` |
 | 1 | **T1-6** Resolver `FxHashMap<u64, NodeId>` | **respec needed** | Current resolver is `SymbolTable` (custom) — not the vanilla `HashMap` the roadmap assumed; T1-6 as written is moot |
-| 1 | T1-7 `GRAPH_FORMAT_VERSION` bump 4 → 5 | **bump done, rollback-safety partial** | `GRAPH_FORMAT_VERSION = 5` in `graph.rs:14` ✓; auto-reindex + `.v4.bak` rollback path needs re-audit |
-| 1 | **T1-8** FQN in `inspect` | **pending** | zero `fqn`/`owner_class` refs in `commands/inspect.rs` |
-| 1 | **T1-9** FQN in `impact` | **pending** | zero `fqn`/`owner_class` refs in `commands/impact.rs` |
+| 1 | T1-7 `GRAPH_FORMAT_VERSION` bump 4 → 5 | **bump done, rollback-safety partial** | `GRAPH_FORMAT_VERSION = 5` in `graph.rs:14` ✓; auto-reindex + `.v4.bak` rollback path needs re-audit. **Note**: PR #285 bumps to 6 (new field) — when it lands the rollback path needs the same audit at v6 |
+| 1 | **T1-8** FQN in `inspect` | **in-flight PR #284** (bundled w/ T1-9) | branch adds `commands/symbol_id.rs` (`resolve_owner_class` edge-walk + `split_fqn_target`) + `ownerClass` JSON output. Auto-merge enabled, awaiting CI |
+| 1 | **T1-9** FQN in `impact` | **in-flight PR #284** (bundled w/ T1-8) | branch adds owner_filter to `impact_by_name` + BFS results carry `ownerClass`. Auto-merge enabled, awaiting CI |
 | 1 | **T1-10** Cypher uid migration | pending (blocks-on T1-5) | `executor.rs:1146` still `uid.resolve(&graph.string_pool)` |
-| 1 | **T1-11** `ecp rename` owner_class isolation ⚠️ | **pending — LOAD-BEARING ACCURACY BUG** | `rename.rs:270` filters `n.name.resolve(...) == target_symbol` only — two classes with same method name collide today |
+| 1 | **T1-11** `ecp rename` owner_class isolation | **in-flight PR #285** (bundled w/ T1-4) — fixes LOAD-BEARING accuracy bug | branch parses `Foo.bar` (`rsplit_once`) + filters by both `n.name` AND `n.owner_class.len/resolve`; bare-name now strict top-level only; u32-len fast-reject in hot path. Auto-merge enabled, awaiting CI |
 | 1 | T1-12 sentinel/bool cleanup | pending | `__impl_target__` sentinel removed from rust parser already (T1-1 work) — verify class_membership fallback still safe to drop |
 | 4 (hybrid) | T-H1 impact filter | shipped #264 | `is_heuristic()` filter in BFS edge loop |
 | 4 (hybrid) | T-H2 rename hard-exclude + count surface | shipped #265 | `heuristic_mirror_count` in `rename.rs` |
@@ -50,16 +50,16 @@ Last refreshed 2026-05-21 by grep-verification against `origin/main`
 | 7 | T7-3 shadow-candidates | shipped #269 | `crates/ecp-analyzer/src/incremental/shadow_candidates.rs` |
 | 7 | **T7-4** wire `reanalyze_files` into `auto_ensure` | **pending** | `auto_ensure.rs:158` calls `apply_l1_overlay_updates`; `reanalyze_files` at `reanalyze.rs:73` has no `auto_ensure` caller |
 | 7 | T7-5/6/7 | pending | overlay zero-copy / skip-unchanged / parity gate — no commit evidence |
-| 4 (schema) | T4-1 SchemaFieldExtractor skeleton | **in-flight PR #270** | `crates/ecp-analyzer/src/schema_field/{config,extract,mod}.rs` present |
-| 4 (schema) | T4-2 Pydantic | pending | no `pydantic*` source file |
-| 4 (schema) | T4-3 SQLAlchemy | pending | no `sqlalchemy*` source file |
-| 4 (schema) | T4-4 TS interface | pending | not in `typescript/queries.scm` |
+| 4 (schema) | T4-1 SchemaFieldExtractor skeleton | shipped #270 | `crates/ecp-analyzer/src/schema_field/{config,extract,mod}.rs` |
+| 4 (schema) | T4-2 Pydantic | shipped #279 | `python/schema_extractors.rs::PYDANTIC_CONFIG` + `python_pydantic_schema.rs` tests |
+| 4 (schema) | T4-3 SQLAlchemy | shipped #281 | `python/schema_extractors.rs::SQLALCHEMY_CONFIG` (Idiom A `Column` + Idiom B `Mapped[T]`) + `python_sqlalchemy_schema.rs` tests |
+| 4 (schema) | T4-4 TS interface | shipped #283 | TS interface property extraction wired through `typescript/queries.scm` + dispatcher |
 | 4 (schema) | T4-5 protobuf | pending | no protobuf provider crate dir |
 | 4 (schema) | T4-6 OpenAPI | pending | no `openapi` source dir |
-| 4 (schema) | T4-7 SchemaFieldIndex + `MirrorsField` | pending | no `pass2_emit_schema_field_mirrors` in `builder.rs` |
+| 4 (schema) | T4-7 SchemaFieldIndex + `MirrorsField` | pending | no `pass2_emit_schema_field_mirrors` in `builder.rs` — RawSchemaField currently dropped at builder boundary, T4-2/3/4 emit dead data until T4-7 wires them in |
 | 4 (schema) | T4-8 `find-schema-bindings` CLI | pending | no `find_schema*` in `commands/` |
-| 5 (event) | T5-0 normalize | **in-flight PR #271** | `event_topic/normalize.rs` ships with `split_camel_case` consecutive-caps fix |
-| 5 (event) | T5-1 `RawEventTopic` collector | **pending** | `event_topic/mod.rs` is 19 bytes (essentially empty) |
+| 5 (event) | T5-0 normalize | shipped #271 | `event_topic/normalize.rs` with `split_camel_case` consecutive-caps fix |
+| 5 (event) | T5-1 `RawEventTopic` dispatcher skeleton | shipped #280 | `event_topic/mod.rs` 179B (dispatcher present) — note: PR shipped as "dispatcher skeleton", concrete collectors land in T5-2..31 |
 | 5 (event) | T5-2 … T5-31 (25 detectors, 5 Celery SKIP) | pending | no `kafka*/rabbitmq*/sqs*/celery*` files |
 | 5 (event) | T5-32 coverage matrix doc | pending | T5-2..31 not done |
 | 5 (event) | T5-33 `EventTopicMirror` heuristic | pending | depends on T5-2..31 subset gate (D7) |
@@ -71,12 +71,29 @@ Last refreshed 2026-05-21 by grep-verification against `origin/main`
 
 ### Things to highlight (vs. literal reading of body below)
 
-- **T1-11 is a real bug**, not just a missing nice-to-have. Today
-  `ecp rename Foo.validate xxx` will rewrite every `validate` in the
-  graph regardless of owner class. This is the load-bearing accuracy
-  claim of Feature #1; until T1-11 lands, the rename CLI's user-visible
-  contract is silently broken on any codebase with same-name methods
-  across classes.
+- **T1-4 + T1-11 are bundled in PR #285** because T1-11's rename-by-owner
+  filter needs `Node.owner_class` on the archived graph. PR ships sentinel
+  `StrRef` (default = len=0) rather than `Option<StrRef>` — 4-8 MB smaller
+  graph.bin at 1M nodes, no rkyv tag overhead, slightly cheaper hot-path
+  filter (u32 `len` compare before string resolve). PR includes the
+  14-lang `owner_class_node_parity.rs` test required by CLAUDE.md
+  multi-language coverage rule, builder-time skip-intern for `None` owners,
+  and rename filter's u32-len fast-reject.
+- **T1-8 + T1-9 are bundled in PR #284**. The PR currently derives owner
+  via incoming `HasMethod`/`HasProperty` edge walk (`commands/symbol_id.rs`)
+  because at branch-fork time `Node.owner_class` was not yet on main.
+  Follow-up after PR #285 lands: collapse `resolve_owner_class` to a single
+  field read (O(in_degree) → O(1)). PR #285 + PR #284 already align on
+  `rsplit_once('.')` for FQN parsing (last-dot semantics, namespace-safe).
+- **T1-11 was a real bug** (now in flight as PR #285).
+  `ecp rename Foo.validate xxx` historically rewrote every `validate` in
+  the graph regardless of owner class. PR #285's strict bare-name
+  semantics change the contract: bare names now match top-level symbols
+  only; class methods require explicit `ClassName.method` form.
+- **T4-2/T4-3/T4-4 shipped but emit dead data** until T4-7 wires builder
+  promotion of `RawSchemaField` into actual `SchemaField` nodes +
+  `MirrorsField` edges. T4-7 unblocks the entire schema-cross-binding
+  user-visible value chain.
 - **T1-6 is not a no-op rename**. The roadmap body assumes a flat
   `HashMap<String, NodeId>` resolver. Main has since shipped a custom
   `SymbolTable` with `stem_index`/`register_node_with_meta`/
@@ -86,7 +103,8 @@ Last refreshed 2026-05-21 by grep-verification against `origin/main`
 - **T1-7 is partly done**. The version bump itself (4 → 5) is on main.
   The auto-reindex + `.v4.bak` rollback path described in the body
   needs a separate audit of `engine.rs:122-170` + `auto_ensure.rs:37-42`
-  to confirm it matches the spec.
+  to confirm it matches the spec. When PR #285 bumps version 5 → 6, the
+  same audit applies for the v5→v6 path.
 - **T7-2 evidence weakened**. Earlier restore-note claimed a local
   branch `feat/t7-2-symbol-hashes` had a commit ready. The current
   refresh can't find that branch on remote nor any `symbol_hashes`
