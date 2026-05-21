@@ -70,6 +70,12 @@ pub struct RenameArgs {
     /// documentation files. Default OFF.
     #[arg(long, default_value_t = false)]
     pub markdown: bool,
+
+    /// Expand the heuristic mirror list in the output. When unset, only the
+    /// count is shown. Tier/check data is a T-H2 placeholder; T4-7 populates
+    /// real values.
+    #[arg(long, default_value_t = false)]
+    pub show_heuristic_mirrors: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -268,19 +274,55 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     // Stage 2: parse each file, find identifier occurrences.
     let mut hits: Vec<(PathBuf, Vec<IdentifierRange>)> = Vec::new();
 
+    // Heuristic mirror count + candidate names (T-H2).
+    // Count is informational only — never drives mutation.
+    let mut heuristic_mirror_count: usize = 0;
+    let mut heuristic_mirror_names: Vec<String> = Vec::new();
+
     if !target_indices.is_empty() {
         let mut affected_file_idx: HashSet<usize> = HashSet::new();
         for &target_idx in &target_indices {
             let target_node = &graph.nodes[target_idx];
             affected_file_idx.insert(target_node.file_idx.to_native() as usize);
 
+            // Inbound edges, single pass: deterministic edges contribute to
+            // `affected_file_idx`; heuristic ones bump the mirror counter.
+            // Rename mutation stays 100% deterministic because the file-set
+            // is only extended from non-heuristic sources.
             let in_start = graph.in_offsets[target_idx].to_native() as usize;
             let in_end = graph.in_offsets[target_idx + 1].to_native() as usize;
             for i in in_start..in_end {
                 let edge_idx = graph.in_edge_idx[i].to_native() as usize;
                 let edge = &graph.edges[edge_idx];
-                let src = &graph.nodes[edge.source.to_native() as usize];
-                affected_file_idx.insert(src.file_idx.to_native() as usize);
+                if edge.rel_type.is_heuristic() {
+                    heuristic_mirror_count += 1;
+                    if args.show_heuristic_mirrors {
+                        let src_name = graph.nodes[edge.source.to_native() as usize]
+                            .name
+                            .resolve(&graph.string_pool)
+                            .to_string();
+                        heuristic_mirror_names.push(src_name);
+                    }
+                } else {
+                    let src = &graph.nodes[edge.source.to_native() as usize];
+                    affected_file_idx.insert(src.file_idx.to_native() as usize);
+                }
+            }
+
+            // Single-hop heuristic mirror count: outbound heuristic edges.
+            let out_start = graph.out_offsets[target_idx].to_native() as usize;
+            let out_end = graph.out_offsets[target_idx + 1].to_native() as usize;
+            for edge in &graph.edges[out_start..out_end] {
+                if edge.rel_type.is_heuristic() {
+                    heuristic_mirror_count += 1;
+                    if args.show_heuristic_mirrors {
+                        let tgt_name = graph.nodes[edge.target.to_native() as usize]
+                            .name
+                            .resolve(&graph.string_pool)
+                            .to_string();
+                        heuristic_mirror_names.push(tgt_name);
+                    }
+                }
             }
         }
 
@@ -352,6 +394,12 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             }
         }
 
+        emit_mirror_summary(
+            &target_symbol,
+            heuristic_mirror_count,
+            &heuristic_mirror_names,
+            args.show_heuristic_mirrors,
+        );
         emit_verification_payload(
             &repo_root,
             &target_symbol,
@@ -363,7 +411,10 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     }
 
     // --- Stage 3b: execute — atomic per-file replace by descending offset. ---
+    println!("Renamed:");
     for (path, ranges) in hits {
+        let rel = path.strip_prefix(&repo_root).unwrap_or(&path);
+        println!("  - {}", rel.display());
         lines.push(format!("renamed: {}", path.display()));
         apply_rename(&path, &ranges, target_new_name.as_bytes()).map_err(EcpError::Io)?;
     }
@@ -373,6 +424,12 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, false);
     }
 
+    emit_mirror_summary(
+        &target_symbol,
+        heuristic_mirror_count,
+        &heuristic_mirror_names,
+        args.show_heuristic_mirrors,
+    );
     emit_verification_payload(
         &repo_root,
         &target_symbol,
@@ -408,6 +465,33 @@ fn emit_verification_payload(
 
     // Best-effort: emit as structured JSON after main output.
     let _ = crate::output::emit(&payload, crate::output::OutputFormat::Toon);
+}
+
+// ---------------------------------------------------------------------------
+// Heuristic mirror summary
+// ---------------------------------------------------------------------------
+
+/// Emit `heuristic_mirrors_not_touched: <N>` and, when count > 0, the hint
+/// line. When `show_mirrors` is set, embed the candidate list with the
+/// UNKNOWN_TIER placeholder shape (T4-7 will populate real tier/check values).
+fn emit_mirror_summary(symbol: &str, count: usize, mirror_names: &[String], show_mirrors: bool) {
+    println!("heuristic_mirrors_not_touched: {count}");
+    // Zero count: omit hint — it adds noise when no mirrors exist
+    // (per test_rename_zero_count_omits_hint_line).
+    if count > 0 {
+        println!(
+            "hint: \"ecp find-schema-bindings {symbol}\" or rerun with --show-heuristic-mirrors"
+        );
+    }
+    if show_mirrors && !mirror_names.is_empty() {
+        println!("heuristic_mirrors:");
+        for name in mirror_names {
+            // T-H2 stub: tier/check data lands in T4-7; placeholder shape
+            // exercises the format/wiring so T4-7 only needs to fill values.
+            println!("  - {name:<30} [UNKNOWN_TIER]   checks: <none recorded yet>");
+            println!("                                          requires_verification: true");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
