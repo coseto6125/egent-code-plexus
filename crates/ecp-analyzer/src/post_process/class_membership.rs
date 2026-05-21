@@ -20,7 +20,7 @@ use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::{Edge, NodeKind, RelType};
 use ecp_core::pool::StringPool;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Emit `HasMethod` / `HasProperty` edges by walking the raw per-file
 /// `LocalGraph`s and resolving names back to node indices via `SymbolTable`.
@@ -28,11 +28,16 @@ use rustc_hash::FxHashMap;
 ///
 /// Idempotent w.r.t. the input — re-running on the same `local_graphs` would
 /// emit the same edge set. Callers must ensure they don't double-invoke.
+///
+/// `symbol_skip_set` — T7-6 incremental skip data. When `Some`, files whose
+/// ALL symbols are in the skip set bypass both pass-1 span and pass-2 impl
+/// emission. `None` = full reanalyze for all files (default, full-build path).
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
+    symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
 ) -> usize {
     let reason = string_pool.add("post_process:class_membership");
     let reason_impl = string_pool.add("post_process:class_membership:rust_impl");
@@ -41,6 +46,30 @@ pub fn emit_edges(
 
     for local_graph in local_graphs {
         let raws = &local_graph.nodes;
+
+        // T7-6: skip class_membership for files whose every symbol is unchanged.
+        if let Some(skip_map) = symbol_skip_set {
+            let raw_path = local_graph.file_path.to_string_lossy();
+            let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
+                std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
+            } else {
+                raw_path
+            };
+            if let Some(skip_uids) = skip_map.get(path_str.as_ref()) {
+                let all_unchanged = raws.iter().all(|n| {
+                    let uid = ecp_core::uid::compute(
+                        n.kind,
+                        &path_str,
+                        n.owner_class.as_deref(),
+                        &n.name,
+                    );
+                    skip_uids.contains(&uid)
+                });
+                if all_unchanged {
+                    continue;
+                }
+            }
+        }
 
         // Pre-pass: collect Class-like nodes + group by name. Both passes hot-loop
         // over this O(N) once-per-file index instead of re-scanning `raws`
@@ -276,7 +305,13 @@ mod tests {
 
     fn run(local_graphs: Vec<LocalGraph>) -> Vec<Edge> {
         let (symbol_table, mut string_pool, mut edges) = build_setup(local_graphs.clone());
-        emit_edges(&local_graphs, &symbol_table, &mut string_pool, &mut edges);
+        emit_edges(
+            &local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut edges,
+            None,
+        );
         edges
     }
 

@@ -11,6 +11,7 @@ pub mod git;
 pub mod git_state;
 pub mod graph_path;
 pub mod hint;
+pub mod incremental;
 pub mod output;
 pub mod parse_cache;
 pub mod peer;
