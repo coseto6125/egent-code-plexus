@@ -85,12 +85,31 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+    env:
+      # 14 tree-sitter parsers × 30+ test binaries × debug-info defaulted to
+      # `true` produced ~30 GB in target/debug/deps/ and filled the ubuntu
+      # runner's 14 GB free space at link time (tantivy.rlib → os error 28).
+      # Tests run under nextest don't need debug-info; assertions stay on.
+      CARGO_PROFILE_TEST_DEBUG: "0"
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
         with:
           egress-policy: audit
+
+      # Reclaim ~30 GB on ubuntu runners before checkout / build. macOS &
+      # windows have 50+ GB free by default; only ubuntu needs this.
+      - name: Free disk space (ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
 
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
