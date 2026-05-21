@@ -2,14 +2,12 @@ use super::receiver_types::extract_kotlin_calls;
 use super::spec::KotlinSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    has_import_from, is_jvm_transactional, node_span, MODULE_LEVEL_SOURCE,
+    collect_jvm_transactional_scopes, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{
-    FrameworkId, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawTxScope,
-};
+use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -423,7 +421,10 @@ impl LanguageProvider for KotlinProvider {
             crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
         let raw_function_metas =
             crate::function_meta::kotlin::extract(tree.root_node(), source, &nodes, file_category);
-        let tx_scopes = collect_jvm_transactional_scopes(&nodes);
+        let tx_scopes = collect_jvm_transactional_scopes(
+            &nodes,
+            &[NodeKind::Method, NodeKind::Function, NodeKind::Constructor],
+        );
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
@@ -443,24 +444,4 @@ impl LanguageProvider for KotlinProvider {
             raw_function_metas,
         })
     }
-}
-
-/// Pick methods / top-level functions / constructors annotated with
-/// `@Transactional` (Spring on JVM-Kotlin) and pack them as `RawTxScope` with
-/// the node's index. Kotlin's `fun` at module level emits as
-/// `NodeKind::Function`, which Java does not have — that's the only filter
-/// shape difference from the Java parser's identical helper.
-fn collect_jvm_transactional_scopes(nodes: &[RawNode]) -> Option<Box<[RawTxScope]>> {
-    let scopes: Vec<RawTxScope> = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| {
-            matches!(
-                n.kind,
-                NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-            ) && n.decorators.iter().any(|d| is_jvm_transactional(d))
-        })
-        .map(|(idx, _)| RawTxScope::new(idx as u32, FrameworkId::SpringTransactional))
-        .collect();
-    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
 }

@@ -190,21 +190,35 @@ impl FrameworkId {
     }
 
     /// Decode a u8 (e.g. from a packed bitfield or corrupted archive) into a
-    /// FrameworkId. Out-of-range bytes fall back to `Unknown` rather than
-    /// invoking UB via `transmute` — preserves archive read safety when
-    /// `RawTxScope.packed` is consumed from a `graph.bin` written by a future
-    /// version with extra variants.
+    /// FrameworkId. Out-of-range bytes fall back to `Unknown` — preserves
+    /// archive read safety when `RawTxScope.packed` is consumed from a
+    /// `graph.bin` written by a future version with extra variants.
+    ///
+    /// Exhaustive `match` instead of bounds-checked `transmute`: adding a new
+    /// variant without updating this arm is a compile error, so the
+    /// "discriminant ↔ variant" link is enforced by the compiler rather than
+    /// by a documented invariant. Modern rustc lowers a 0..N integer match on
+    /// a `#[repr(u8)]` enum to a jump table — zero runtime cost vs the
+    /// transmute path.
     #[inline]
     pub const fn from_u8(value: u8) -> Self {
-        if (value as usize) < FRAMEWORK_NAMES.len() {
-            // SAFETY: `value` is bounded by `FRAMEWORK_NAMES` length, which is
-            // layout-locked to the enum's sequential `#[repr(u8)]`
-            // discriminants 0..N. The `as_str()` const fn relies on the same
-            // invariant; any future variant reorder breaks both at the same
-            // call site and is caught by the startup `debug_assert_eq!`.
-            unsafe { std::mem::transmute::<u8, FrameworkId>(value) }
-        } else {
-            FrameworkId::Unknown
+        match value {
+            0 => Self::Pydantic,
+            1 => Self::SqlAlchemy,
+            2 => Self::Django,
+            3 => Self::Prisma,
+            4 => Self::Sqlx,
+            5 => Self::TypeScriptInterface,
+            6 => Self::Kafka,
+            7 => Self::Sns,
+            8 => Self::Sqs,
+            9 => Self::RabbitMq,
+            10 => Self::EventBridge,
+            11 => Self::SpringTransactional,
+            12 => Self::JpaTransactional,
+            13 => Self::DjangoAtomic,
+            14 => Self::PonyDbSession,
+            _ => Self::Unknown,
         }
     }
 }
@@ -244,10 +258,11 @@ pub struct RawEventTopic {
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
 pub struct RawTxScope {
-    /// Bit-packed `(node_idx << 8) | framework_id_u8`. Always access via
-    /// the `node_idx()` / `framework()` methods — direct field reads will
-    /// break if the packing format changes.
-    pub packed: u32,
+    /// Bit-packed `(node_idx << 8) | framework_id_u8`. Visibility is
+    /// `pub(crate)` so out-of-crate consumers must go through the
+    /// `node_idx()` / `framework()` accessor methods — keeps the layout
+    /// free to change without breaking external callers.
+    pub(crate) packed: u32,
 }
 
 impl RawTxScope {

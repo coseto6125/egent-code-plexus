@@ -1,13 +1,11 @@
 use super::receiver_types::extract_java_calls;
 use super::spec::JavaSpec;
 use crate::framework_confidence;
-use crate::framework_helpers::{has_import_from, is_jvm_transactional, node_span};
+use crate::framework_helpers::{collect_jvm_transactional_scopes, has_import_from, node_span};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{
-    FrameworkId, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawTxScope,
-};
+use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -417,7 +415,8 @@ impl LanguageProvider for JavaProvider {
             crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
         let raw_function_metas =
             crate::function_meta::java::extract(tree.root_node(), source, &nodes, file_category);
-        let tx_scopes = collect_jvm_transactional_scopes(&nodes);
+        let tx_scopes =
+            collect_jvm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Constructor]);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
@@ -437,22 +436,6 @@ impl LanguageProvider for JavaProvider {
             raw_function_metas,
         })
     }
-}
-
-/// Pick methods / constructors annotated with `@Transactional` (Spring) and
-/// pack them as `RawTxScope` with the node's index. Iteration happens after
-/// `nodes` is finalized, so the index is stable for the LocalGraph.
-fn collect_jvm_transactional_scopes(nodes: &[RawNode]) -> Option<Box<[RawTxScope]>> {
-    let scopes: Vec<RawTxScope> = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| {
-            matches!(n.kind, NodeKind::Method | NodeKind::Constructor)
-                && n.decorators.iter().any(|d| is_jvm_transactional(d))
-        })
-        .map(|(idx, _)| RawTxScope::new(idx as u32, FrameworkId::SpringTransactional))
-        .collect();
-    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
 }
 
 /// Helper to look up a capture index by name from the compiled query.

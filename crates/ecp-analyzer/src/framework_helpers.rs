@@ -8,7 +8,7 @@
 //! This module consolidates those helpers so each parser stays focused on its own
 //! grammar quirks, not span arithmetic.
 
-use ecp_core::analyzer::types::{RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{FrameworkId, RawFrameworkRef, RawImport, RawNode, RawTxScope};
 use ecp_core::graph::NodeKind;
 
 pub type Span = (u32, u32, u32, u32);
@@ -275,6 +275,50 @@ pub fn detect_ast_framework_patterns(
 #[inline]
 pub fn is_jvm_transactional(decorator: &str) -> bool {
     decorator == "@Transactional" || decorator.starts_with("@Transactional(")
+}
+
+/// Collect `RawTxScope` entries for nodes whose `kind` is in `scopeable_kinds`
+/// **and** carry an `@Transactional` decorator (Spring family). Both Java and
+/// Kotlin parsers call this — they differ only in which `NodeKind`s are
+/// scopeable (Kotlin adds `Function` for module-level `fun`; Java has no such
+/// thing).
+///
+/// **Spring vs JPA**: currently emits `FrameworkId::SpringTransactional` for
+/// every match. `FrameworkId::JpaTransactional` is reserved for a future
+/// import-source dispatch (`javax.transaction.Transactional` /
+/// `jakarta.transaction.Transactional`) — not implemented here because the
+/// caller does not yet pass `RawImport` context. Adding that argument when
+/// the JPA emit path lands is the planned extension point.
+pub fn collect_jvm_transactional_scopes(
+    nodes: &[RawNode],
+    scopeable_kinds: &[NodeKind],
+) -> Option<Box<[RawTxScope]>> {
+    let scopes: Vec<RawTxScope> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            scopeable_kinds.contains(&n.kind)
+                && n.decorators.iter().any(|d| is_jvm_transactional(d))
+        })
+        .map(|(idx, _)| RawTxScope::new(idx as u32, FrameworkId::SpringTransactional))
+        .collect();
+    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
+}
+
+/// Inclusive containment test: `(row, col)` lies within `span`'s
+/// `(start_row, start_col, end_row, end_col)` range. Used to recover a
+/// `RawNode` index from a captured identifier's position when the capture
+/// fires inside the parser's match loop before `nodes` is finalized.
+///
+/// Distinct from [`span_contains`] which takes `(outer: Span, inner: Span)`
+/// — keep the names separate so the call site reads the semantics
+/// unambiguously.
+#[inline]
+pub fn point_in_span(span: Span, row: u32, col: u32) -> bool {
+    let (sr, sc, er, ec) = span;
+    let after_start = (row > sr) || (row == sr && col >= sc);
+    let before_end = (row < er) || (row == er && col <= ec);
+    after_start && before_end
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

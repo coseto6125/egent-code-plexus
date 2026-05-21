@@ -553,6 +553,12 @@ pub struct ZeroCopyGraph {
     /// For node_idx >= process_start, `process_k = node_idx - process_start`
     /// and its trace lives in `traces_data[traces_offsets[k]..traces_offsets[k+1]]`.
     pub process_start: u32,
+    /// CSR-style boundary offsets — `traces_offsets[k+1]` is read for every
+    /// process, so the vector must contain at least one element even when no
+    /// processes exist. The canonical zero-process value is `vec![0]` (a
+    /// single sentinel); `Default::default()` for `ZeroCopyGraph` initializes
+    /// it to that. Empty `vec![]` would make `offsets[k+1]` panic for the
+    /// first process append.
     pub traces_offsets: Vec<u32>,
     pub traces_data: Vec<u32>,
 

@@ -3,7 +3,7 @@ use super::spec::PythonSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_class, enclosing_function_name, enumerate_class_methods, has_import_from, node_span,
-    Span, MODULE_LEVEL_SOURCE,
+    point_in_span, Span, MODULE_LEVEL_SOURCE,
 };
 use crate::indirect_dispatch::{collect_python_param_names, detect_python_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -1113,20 +1113,10 @@ fn resolve_tx_scopes(
                     matches!(
                         n.kind,
                         NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    ) && span_contains(n.span, row, col)
+                    ) && point_in_span(n.span, row, col)
                 })
                 .map(|(idx, _)| RawTxScope::new(idx as u32, framework))
         })
         .collect();
     (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
-}
-
-/// Inclusive containment test: `(row, col)` lies within `span`'s range. Spans
-/// are `(start_row, start_col, end_row, end_col)` per `node_span` convention.
-#[inline]
-fn span_contains(span: (u32, u32, u32, u32), row: u32, col: u32) -> bool {
-    let (sr, sc, er, ec) = span;
-    let after_start = (row > sr) || (row == sr && col >= sc);
-    let before_end = (row < er) || (row == er && col <= ec);
-    after_start && before_end
 }
