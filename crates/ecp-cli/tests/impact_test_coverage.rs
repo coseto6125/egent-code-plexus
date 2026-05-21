@@ -547,3 +547,104 @@ fn impact_test_coverage_covered_when_test_caller_present() {
         "targetFn must appear in one of the coverage buckets:\n{coverage}"
     );
 }
+
+// ── Test 9: --baseline + --test-coverage includes added symbols ───────────────
+//
+// Regression for the bug where added symbols populated `changed_symbols` but
+// were never added to `changed_node_indices`, causing empty coverage buckets.
+//
+// Fixture:
+//   Commit 1 (baseline): src/lib.ts — only `existingFn`
+//   Commit 2 (HEAD):     src/lib.ts — adds `newFn` + test file calling `newFn`
+//
+// `newFn` is an ADDED symbol (not in baseline). With the bug it would appear
+// in `changed_symbols` but `coverage.summary.total_analyzed` would be 0.
+// After the fix, `newFn` must appear in one of the coverage buckets.
+
+#[test]
+fn impact_baseline_test_coverage_includes_added_symbols() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+
+    // Baseline commit: only existingFn.
+    std::fs::write(
+        repo.join("src/lib.ts"),
+        "export function existingFn(): number { return 1; }\n",
+    )
+    .unwrap();
+    git_commit(repo);
+
+    // Capture baseline SHA.
+    let baseline_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .expect("git rev-parse HEAD failed");
+    let baseline_sha = String::from_utf8_lossy(&baseline_out.stdout)
+        .trim()
+        .to_string();
+
+    // HEAD commit: add newFn to lib.ts + test file that calls newFn.
+    std::fs::write(
+        repo.join("src/lib.ts"),
+        "export function existingFn(): number { return 1; }\nexport function newFn(): string { return 'new'; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/lib.test.ts"),
+        "import { newFn } from './lib';\nexport function testNewFn(): void { newFn(); }\n",
+    )
+    .unwrap();
+    git_commit(repo);
+
+    admin_index(repo, home.path());
+
+    let result = run_impact_json(
+        repo,
+        home.path(),
+        &["--baseline", &baseline_sha, "--test-coverage"],
+    );
+
+    // newFn must appear in changed_symbols.
+    let changed = result["changed_symbols"].as_array().unwrap();
+    let new_fn_in_changed = changed
+        .iter()
+        .any(|s| s["name"].as_str() == Some("newFn") && s["change_type"].as_str() == Some("added"));
+    assert!(
+        new_fn_in_changed,
+        "newFn must appear in changed_symbols with change_type=added:\n{changed:?}"
+    );
+
+    // coverage section must be present with total_analyzed >= 1.
+    // Before the fix, total_analyzed was 0 because added symbols never reached
+    // changed_node_indices.
+    let coverage = result
+        .get("coverage")
+        .unwrap_or_else(|| panic!("--test-coverage must produce a `coverage` section:\n{result}"));
+    let total = coverage["summary"]["total_analyzed"].as_u64().unwrap_or(0);
+    assert!(
+        total >= 1,
+        "total_analyzed must be >= 1 (newFn must be analyzed): was 0, which means the added-symbol bug is present:\n{coverage}"
+    );
+
+    // newFn must appear in one of the coverage buckets.
+    let empty = vec![];
+    let all_bucket_names: Vec<&str> = [
+        "uncovered_symbols",
+        "partial_symbols",
+        "covered_symbols",
+        "orphan_symbols",
+    ]
+    .iter()
+    .flat_map(|key| coverage[key].as_array().unwrap_or(&empty).iter())
+    .filter_map(|s| s["name"].as_str())
+    .collect();
+    assert!(
+        all_bucket_names.contains(&"newFn"),
+        "newFn must appear in one of the coverage buckets (uncovered/partial/covered/orphan):\n{coverage}"
+    );
+}

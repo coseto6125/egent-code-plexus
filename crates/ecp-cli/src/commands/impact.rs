@@ -214,6 +214,58 @@ fn classify_symbol(
     }
 }
 
+fn coverage_bfs_for_symbol(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    symbol_idx: usize,
+    requested_direction: &Direction,
+    existing_bfs: &[Value],
+    depth: usize,
+    min_conf: f32,
+    include_tests: bool,
+    rel_filter: &Option<Vec<String>>,
+) -> Vec<Value> {
+    if *requested_direction == Direction::Up {
+        return existing_bfs.to_vec();
+    }
+    let (bfs_result, _) = run_bfs(
+        graph,
+        symbol_idx,
+        &Direction::Up,
+        depth,
+        min_conf,
+        include_tests,
+        rel_filter,
+    );
+    bfs_result
+}
+
+fn coverage_analyses(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    bfs_by_symbol: &[(usize, Vec<Value>)],
+    requested_direction: &Direction,
+    depth: usize,
+    min_conf: f32,
+    include_tests: bool,
+    rel_filter: &Option<Vec<String>>,
+) -> Vec<SymbolCoverage> {
+    bfs_by_symbol
+        .iter()
+        .map(|(idx, bfs)| {
+            let coverage_bfs = coverage_bfs_for_symbol(
+                graph,
+                *idx,
+                requested_direction,
+                bfs,
+                depth,
+                min_conf,
+                include_tests,
+                rel_filter,
+            );
+            classify_symbol(graph, *idx, &coverage_bfs)
+        })
+        .collect()
+}
+
 /// Build the `coverage` JSON section from a list of per-symbol analyses.
 fn build_coverage_json(analyses: Vec<SymbolCoverage>) -> Value {
     let mut uncovered: Vec<Value> = Vec::new();
@@ -561,10 +613,15 @@ fn impact_by_name(
     }
 
     if args.test_coverage {
-        let analyses: Vec<SymbolCoverage> = per_match_bfs
-            .iter()
-            .map(|(idx, bfs)| classify_symbol(graph, *idx, bfs))
-            .collect();
+        let analyses = coverage_analyses(
+            graph,
+            &per_match_bfs,
+            &args.direction,
+            args.depth,
+            min_conf,
+            effective_include_tests,
+            &rel_filter,
+        );
         result_obj["coverage"] = build_coverage_json(analyses);
     }
 
@@ -698,6 +755,11 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
                 "line": start_row,
                 "change_type": "added",
             }));
+            if let Some(&idx) = old_graph_idx.get(key) {
+                if !changed_node_indices.contains(&idx) {
+                    changed_node_indices.push(idx);
+                }
+            }
         }
     }
 
@@ -779,10 +841,15 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     attach_hidden_edges(&mut result, hidden_edges_total);
 
     if args.test_coverage {
-        let analyses: Vec<SymbolCoverage> = per_symbol_bfs
-            .iter()
-            .map(|(idx, bfs)| classify_symbol(graph, *idx, bfs))
-            .collect();
+        let analyses = coverage_analyses(
+            graph,
+            &per_symbol_bfs,
+            &args.direction,
+            args.depth,
+            min_conf,
+            effective_include_tests,
+            &rel_filter,
+        );
         result["coverage"] = build_coverage_json(analyses);
     }
 
