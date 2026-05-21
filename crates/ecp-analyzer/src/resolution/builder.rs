@@ -1319,6 +1319,21 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        // T4-7: promote `RawSchemaField` → `SchemaField` Nodes + `HasProperty`
+        // (Class → SchemaField) + `MirrorsField` heuristic edges across
+        // detected cross-framework mirrors. Runs after overrides because it
+        // appends new Nodes; before File-node loop so SchemaField nodes
+        // occupy idx range BEFORE files[] (keeps file_node_idx contiguous).
+        // SchemaField nodes are NOT registered in SymbolTable — nothing
+        // references them by name; reverse traversal goes via HasProperty.
+        crate::post_process::schema_field_mirrors::emit_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut nodes,
+            &mut edges,
+        );
+
         // Append one `NodeKind::File` node per LocalGraph at the tail of
         // `nodes` (idx >= raw-node count). Doing it here — AFTER all passes
         // that index symbols by SymbolTable + use raw node idx ranges —

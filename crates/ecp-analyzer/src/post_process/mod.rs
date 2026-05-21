@@ -9,3 +9,4 @@
 pub mod class_membership;
 pub mod imports_edges;
 pub mod overrides;
+pub mod schema_field_mirrors;

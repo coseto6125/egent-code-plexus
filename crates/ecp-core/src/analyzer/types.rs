@@ -110,7 +110,7 @@ pub struct RawFrameworkRef {
 }
 
 /// Primitive type of a schema column or model field.
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[rkyv(derive(Debug))]
 pub enum SchemaType {
     String,
@@ -228,12 +228,19 @@ impl FrameworkId {
 }
 
 /// ORM / schema model field detected at static-analysis time.
+///
+/// Field-name + owner-class are stored as owned `Box<str>` rather than
+/// `StrRef` because per-language parsers run in isolated scopes — the
+/// `StringPool` they intern into is dropped before the `LocalGraph` reaches
+/// the builder. Owned strings cost an extra 16 B per field but eliminate
+/// the dangling-StrRef pre-T4-7 bug entirely. Aligns with `RawNode.name`
+/// which is also `String` for the same reason.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawSchemaField {
-    pub name: StrRef,
+    pub name: Box<str>,
     pub type_class: SchemaType,
-    pub owner_class: StrRef,
+    pub owner_class: Box<str>,
     pub framework: FrameworkId,
     pub span: (u32, u32, u32, u32),
 }

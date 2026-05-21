@@ -1,14 +1,11 @@
 //! T4-2: Pydantic v1+v2 BaseModel field extraction tests.
 //!
-//! All tests call `extract_schema_fields` directly with a local `StringPool`
-//! so strings are resolved before the pool is dropped.  The `parse_file`
-//! wiring stores fields in `LocalGraph.schema_fields`; builder-side re-interning
-//! is a separate future pass (see TODO in parser.rs).
+//! Post-T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so
+//! `.name` / `.owner_class` are directly readable as `&str` — no pool plumbing.
 
 use ecp_analyzer::python::schema_extractors::PYDANTIC_CONFIG;
 use ecp_analyzer::schema_field::extract_schema_fields;
 use ecp_core::analyzer::types::{FrameworkId, RawImport, RawSchemaField, SchemaType};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 // ---------------------------------------------------------------------------
@@ -25,14 +22,13 @@ fn pydantic_import() -> RawImport {
 }
 
 /// Run the Pydantic dispatcher against `src`. Returns the extracted fields
-/// plus the pool that owns their string bytes — callers resolve `StrRef`s via
-/// `pool.bytes.as_slice()`.
+/// with owned strings (no pool teardown concerns).
 ///
 /// `with_import` toggles the `pydantic` import-gate; tests use `false` to
 /// verify gating, `true` for happy paths. The query is the Pydantic fragment
 /// from `frameworks.scm`, compiled inline so unit tests don't depend on the
 /// production-query merge step in `PythonProvider::new()`.
-fn run(src: &str, with_import: bool) -> (Vec<RawSchemaField>, StringPool) {
+fn run(src: &str, with_import: bool) -> Vec<RawSchemaField> {
     let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -57,16 +53,7 @@ fn run(src: &str, with_import: bool) -> (Vec<RawSchemaField>, StringPool) {
     } else {
         Vec::new()
     };
-    let mut pool = StringPool::new();
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[PYDANTIC_CONFIG],
-        &imports,
-        &mut pool,
-    );
-    (fields, pool)
+    extract_schema_fields(&tree, src.as_bytes(), &query, &[PYDANTIC_CONFIG], &imports)
 }
 
 // ---------------------------------------------------------------------------
@@ -79,24 +66,21 @@ fn run(src: &str, with_import: bool) -> (Vec<RawSchemaField>, StringPool) {
 fn test_happy_path_two_fields() {
     let src =
         "from pydantic import BaseModel\n\nclass User(BaseModel):\n    name: str\n    age: int\n";
-    let (fields, pool) = run(src, true);
+    let fields = run(src, true);
 
     assert_eq!(fields.len(), 2, "expected two fields for User");
 
-    let pool_bytes = pool.bytes.as_slice();
-    let by_name: std::collections::HashMap<&str, &_> = fields
-        .iter()
-        .map(|f| (f.name.resolve(pool_bytes), f))
-        .collect();
+    let by_name: std::collections::HashMap<&str, &_> =
+        fields.iter().map(|f| (&*f.name, f)).collect();
 
     let name_field = by_name["name"];
     assert_eq!(name_field.type_class, SchemaType::String);
-    assert_eq!(name_field.owner_class.resolve(pool_bytes), "User");
+    assert_eq!(&*name_field.owner_class, "User");
     assert_eq!(name_field.framework, FrameworkId::Pydantic);
 
     let age_field = by_name["age"];
     assert_eq!(age_field.type_class, SchemaType::Int);
-    assert_eq!(age_field.owner_class.resolve(pool_bytes), "User");
+    assert_eq!(&*age_field.owner_class, "User");
 }
 
 /// Optional / union type `str | None` — field is still emitted; type_class is
@@ -106,7 +90,7 @@ fn test_happy_path_two_fields() {
 fn test_optional_union_type_emitted_as_other() {
     let src =
         "from pydantic import BaseModel\n\nclass User(BaseModel):\n    email: str | None = None\n";
-    let (fields, pool) = run(src, true);
+    let fields = run(src, true);
 
     assert_eq!(fields.len(), 1);
     assert_eq!(
@@ -114,7 +98,7 @@ fn test_optional_union_type_emitted_as_other() {
         SchemaType::Other,
         "union type resolves to Other"
     );
-    assert_eq!(fields[0].name.resolve(pool.bytes.as_slice()), "email");
+    assert_eq!(&*fields[0].name, "email");
 }
 
 /// Generic type `list[str]` — field emitted, type_class is `Other`.
@@ -122,7 +106,7 @@ fn test_optional_union_type_emitted_as_other() {
 fn test_generic_type_emitted_as_other() {
     let src =
         "from pydantic import BaseModel\n\nclass Tags(BaseModel):\n    items: list[str] = []\n";
-    let (fields, _pool) = run(src, true);
+    let fields = run(src, true);
 
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].type_class, SchemaType::Other);
@@ -132,7 +116,7 @@ fn test_generic_type_emitted_as_other() {
 #[test]
 fn test_no_pydantic_import_zero_fields() {
     let src = "class User(BaseModel):\n    name: str\n    age: int\n";
-    let (fields, _pool) = run(src, false);
+    let fields = run(src, false);
 
     assert!(
         fields.is_empty(),
@@ -145,7 +129,7 @@ fn test_no_pydantic_import_zero_fields() {
 #[test]
 fn test_plain_class_no_fields_emitted() {
     let src = "from pydantic import BaseModel\n\nclass Plain:\n    x: int = 0\n    y: str\n";
-    let (fields, _pool) = run(src, true);
+    let fields = run(src, true);
 
     assert!(
         fields.is_empty(),
@@ -168,13 +152,9 @@ fn test_plain_class_no_fields_emitted() {
 #[ignore = "BlindSpot: inherited fields via intermediate class require cross-file symbol resolution beyond single-file tree-sitter scope"]
 fn test_inherited_model_own_fields_only() {
     let src = "from pydantic import BaseModel\n\nclass User(BaseModel):\n    name: str\n\nclass Admin(User):\n    role: str\n";
-    let (fields, pool) = run(src, true);
+    let fields = run(src, true);
 
-    let pool_bytes = pool.bytes.as_slice();
-    let owners: Vec<&str> = fields
-        .iter()
-        .map(|f| f.owner_class.resolve(pool_bytes))
-        .collect();
+    let owners: Vec<&str> = fields.iter().map(|f| &*f.owner_class).collect();
     assert!(
         !owners.contains(&"Admin"),
         "Admin is not a direct BaseModel subclass"
@@ -189,14 +169,10 @@ fn test_inherited_model_own_fields_only() {
 #[test]
 fn test_multiple_models_in_file() {
     let src = "from pydantic import BaseModel\n\nclass Foo(BaseModel):\n    x: int\n\nclass Bar(BaseModel):\n    y: str\n    z: bool\n";
-    let (fields, pool) = run(src, true);
+    let fields = run(src, true);
 
     assert_eq!(fields.len(), 3, "Foo(1) + Bar(2) = 3 total fields");
-    let pool_bytes = pool.bytes.as_slice();
-    let owners: Vec<&str> = fields
-        .iter()
-        .map(|f| f.owner_class.resolve(pool_bytes))
-        .collect();
+    let owners: Vec<&str> = fields.iter().map(|f| &*f.owner_class).collect();
     assert!(owners.contains(&"Foo"));
     assert!(owners.contains(&"Bar"));
 }
@@ -216,9 +192,12 @@ fn test_parse_file_populates_schema_fields() {
 
     let fields = local.schema_fields.expect("schema_fields must be Some");
     assert_eq!(fields.len(), 2, "Item has 2 fields");
-    // StrRefs are live only within the parse_file-local pool; assert
-    // count and framework only — string resolution requires builder re-intern.
+    // Post-T4-7: owned `Box<str>` is directly readable.
+    let names: Vec<&str> = fields.iter().map(|f| &*f.name).collect();
+    assert!(names.contains(&"name"));
+    assert!(names.contains(&"price"));
     assert!(fields.iter().all(|f| f.framework == FrameworkId::Pydantic));
+    assert!(fields.iter().all(|f| &*f.owner_class == "Item"));
 }
 
 /// No pydantic import → `LocalGraph.schema_fields` is `None`.

@@ -5,7 +5,6 @@
 
 use ecp_analyzer::schema_field::{extract_schema_fields, SchemaFieldConfig};
 use ecp_core::analyzer::types::{FrameworkId, RawImport, SchemaType};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 // ---------------------------------------------------------------------------
@@ -97,7 +96,6 @@ fn test_config_driven_dispatch_picks_right_framework_label() {
     let src = "class MyModel:\n    name: str = None\n";
     let (tree, lang) = python_tree(src);
     let query = Query::new(&lang, FIELD_QUERY).expect("query compile");
-    let mut pool = StringPool::new();
 
     // Only lib-alpha import → CONFIG_A should fire, CONFIG_B should not.
     let imports = vec![fake_import("lib-alpha")];
@@ -107,7 +105,6 @@ fn test_config_driven_dispatch_picks_right_framework_label() {
         &query,
         &[CONFIG_A, CONFIG_B],
         &imports,
-        &mut pool,
     );
 
     assert_eq!(fields.len(), 1, "expected exactly one field");
@@ -115,14 +112,12 @@ fn test_config_driven_dispatch_picks_right_framework_label() {
 
     // Flip: only lib-beta import → CONFIG_B fires.
     let imports_b = vec![fake_import("lib-beta")];
-    let mut pool2 = StringPool::new();
     let fields_b = extract_schema_fields(
         &tree,
         src.as_bytes(),
         &query,
         &[CONFIG_A, CONFIG_B],
         &imports_b,
-        &mut pool2,
     );
 
     assert_eq!(fields_b.len(), 1);
@@ -135,7 +130,6 @@ fn test_import_gate_negative_drops_capture() {
     let src = "class MyModel:\n    name: str = None\n";
     let (tree, lang) = python_tree(src);
     let query = Query::new(&lang, FIELD_QUERY).expect("query compile");
-    let mut pool = StringPool::new();
 
     // Imports for an unrelated library — neither gate satisfied.
     let imports = vec![fake_import("unrelated-lib")];
@@ -145,7 +139,6 @@ fn test_import_gate_negative_drops_capture() {
         &query,
         &[CONFIG_A, CONFIG_B],
         &imports,
-        &mut pool,
     );
 
     assert!(fields.is_empty(), "import gate must block all extraction");

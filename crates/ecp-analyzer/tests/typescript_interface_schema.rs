@@ -1,8 +1,7 @@
 //! T4-4: TypeScript `interface` property extraction tests.
 //!
-//! Most tests call `extract_schema_fields` directly with a local `StringPool`
-//! so strings are resolved before the pool is dropped.  The last two tests use
-//! `TypeScriptProvider::parse_file` as an integration smoke check.
+//! Post-T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so
+//! `.name` / `.owner_class` are directly readable as `&str` — no pool plumbing.
 //!
 //! Import gate is empty for TS interfaces (language built-in, no framework
 //! import required); `extract_schema_fields` treats `&[]` as vacuously satisfied.
@@ -10,7 +9,6 @@
 use ecp_analyzer::schema_field::extract_schema_fields;
 use ecp_analyzer::typescript::schema_extractors::TS_INTERFACE_CONFIG;
 use ecp_core::analyzer::types::{FrameworkId, RawSchemaField, SchemaType};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 // ---------------------------------------------------------------------------
@@ -34,24 +32,14 @@ const INTERFACE_QUERY: &str = r#"
 "#;
 
 /// Run the TS interface dispatcher against `src`.
-/// Returns extracted fields + the pool that owns their string bytes.
-fn run(src: &str) -> (Vec<RawSchemaField>, StringPool) {
+fn run(src: &str) -> Vec<RawSchemaField> {
     let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
     let tree = parser.parse(src.as_bytes(), None).expect("parse");
     let query = Query::new(&lang, INTERFACE_QUERY).expect("query compile");
     // No imports needed — empty gate is always active.
-    let mut pool = StringPool::new();
-    let fields = extract_schema_fields(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[TS_INTERFACE_CONFIG],
-        &[],
-        &mut pool,
-    );
-    (fields, pool)
+    extract_schema_fields(&tree, src.as_bytes(), &query, &[TS_INTERFACE_CONFIG], &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -61,39 +49,36 @@ fn run(src: &str) -> (Vec<RawSchemaField>, StringPool) {
 #[test]
 fn test_simple_string_field() {
     let src = "interface User { name: string; }";
-    let (fields, pool) = run(src);
+    let fields = run(src);
 
     assert_eq!(fields.len(), 1);
     let f = &fields[0];
-    let bytes = pool.bytes.as_slice();
-    assert_eq!(f.name.resolve(bytes), "name");
+    assert_eq!(&*f.name, "name");
     assert_eq!(f.type_class, SchemaType::String);
-    assert_eq!(f.owner_class.resolve(bytes), "User");
+    assert_eq!(&*f.owner_class, "User");
     assert_eq!(f.framework, FrameworkId::TypeScriptInterface);
 }
 
 #[test]
 fn test_number_field() {
     let src = "interface Item { age: number; }";
-    let (fields, pool) = run(src);
+    let fields = run(src);
 
     assert_eq!(fields.len(), 1);
     let f = &fields[0];
-    let bytes = pool.bytes.as_slice();
-    assert_eq!(f.name.resolve(bytes), "age");
+    assert_eq!(&*f.name, "age");
     // classify_ts_type maps `number` → SchemaType::Int
     assert_eq!(f.type_class, SchemaType::Int);
-    assert_eq!(f.owner_class.resolve(bytes), "Item");
+    assert_eq!(&*f.owner_class, "Item");
 }
 
 #[test]
 fn test_boolean_field() {
     let src = "interface Config { active: boolean; }";
-    let (fields, pool) = run(src);
+    let fields = run(src);
 
     assert_eq!(fields.len(), 1);
-    let bytes = pool.bytes.as_slice();
-    assert_eq!(fields[0].name.resolve(bytes), "active");
+    assert_eq!(&*fields[0].name, "active");
     assert_eq!(fields[0].type_class, SchemaType::Bool);
 }
 
@@ -106,7 +91,7 @@ fn test_date_field() {
     // The query intentionally restricts to `predefined_type` to avoid capturing
     // arbitrary type references.  Date support requires a separate query arm.
     let src = "interface Event { created: Date; }";
-    let (fields, _pool) = run(src);
+    let fields = run(src);
     // Date is a type_identifier, not a predefined_type — not captured by this query.
     assert!(
         fields.is_empty(),
@@ -119,7 +104,7 @@ fn test_union_type_other() {
     // `string | null` is a `union_type` node, not `predefined_type`.
     // The query only captures `predefined_type` → this field is not emitted.
     let src = "interface Contact { email: string | null; }";
-    let (fields, _pool) = run(src);
+    let fields = run(src);
     assert!(
         fields.is_empty(),
         "union_type does not match predefined_type capture — field not emitted"
@@ -130,7 +115,7 @@ fn test_union_type_other() {
 fn test_array_type_other() {
     // `string[]` is an `array_type` node, not `predefined_type`.
     let src = "interface Post { tags: string[]; }";
-    let (fields, _pool) = run(src);
+    let fields = run(src);
     assert!(
         fields.is_empty(),
         "array_type does not match predefined_type capture — field not emitted"
@@ -140,30 +125,26 @@ fn test_array_type_other() {
 #[test]
 fn test_multiple_interfaces() {
     let src = "interface Foo { x: number; label: string; } interface Bar { active: boolean; }";
-    let (fields, pool) = run(src);
+    let fields = run(src);
 
     assert_eq!(fields.len(), 3, "Foo(2) + Bar(1) = 3 total fields");
-    let bytes = pool.bytes.as_slice();
 
-    let owners: Vec<&str> = fields
-        .iter()
-        .map(|f| f.owner_class.resolve(bytes))
-        .collect();
+    let owners: Vec<&str> = fields.iter().map(|f| &*f.owner_class).collect();
     assert!(owners.contains(&"Foo"), "Foo fields must appear");
     assert!(owners.contains(&"Bar"), "Bar fields must appear");
 
     let foo_fields: Vec<&str> = fields
         .iter()
-        .filter(|f| f.owner_class.resolve(bytes) == "Foo")
-        .map(|f| f.name.resolve(bytes))
+        .filter(|f| &*f.owner_class == "Foo")
+        .map(|f| &*f.name)
         .collect();
     assert!(foo_fields.contains(&"x"));
     assert!(foo_fields.contains(&"label"));
 
     let bar_fields: Vec<&str> = fields
         .iter()
-        .filter(|f| f.owner_class.resolve(bytes) == "Bar")
-        .map(|f| f.name.resolve(bytes))
+        .filter(|f| &*f.owner_class == "Bar")
+        .map(|f| &*f.name)
         .collect();
     assert!(bar_fields.contains(&"active"));
 }
@@ -173,14 +154,13 @@ fn test_nested_interface_does_not_emit_extras() {
     // `user: User` — `User` is a `type_identifier`, not `predefined_type`.
     // Only the `predefined_type` arm fires; `user` field is not emitted.
     let src = "interface Wrapper { user: User; count: number; }";
-    let (fields, pool) = run(src);
+    let fields = run(src);
 
     // Only `count: number` (predefined_type) is captured; `user: User` is not.
     assert_eq!(fields.len(), 1, "only predefined_type fields are captured");
-    let bytes = pool.bytes.as_slice();
-    assert_eq!(fields[0].name.resolve(bytes), "count");
+    assert_eq!(&*fields[0].name, "count");
     assert_eq!(fields[0].type_class, SchemaType::Int);
-    assert_eq!(fields[0].owner_class.resolve(bytes), "Wrapper");
+    assert_eq!(&*fields[0].owner_class, "Wrapper");
 }
 
 /// BlindSpot: optional properties (`name?: string`) use `property_signature`
@@ -190,12 +170,11 @@ fn test_nested_interface_does_not_emit_extras() {
 #[test]
 fn test_optional_property_is_captured() {
     let src = "interface User { name?: string; }";
-    let (fields, pool) = run(src);
+    let fields = run(src);
     // Optional properties ARE captured — `?` is a modifier on the
     // property_signature, not on the name node, so the query fires.
     assert_eq!(fields.len(), 1);
-    let bytes = pool.bytes.as_slice();
-    assert_eq!(fields[0].name.resolve(bytes), "name");
+    assert_eq!(&*fields[0].name, "name");
     assert_eq!(fields[0].type_class, SchemaType::String);
 }
 
@@ -207,7 +186,7 @@ fn test_optional_property_is_captured() {
 #[ignore = "BlindSpot: type alias object literals require a separate query arm (T4-5)"]
 fn test_type_alias_not_captured() {
     let src = "type Point = { x: number; y: number; }";
-    let (fields, _pool) = run(src);
+    let fields = run(src);
     // Currently zero — type aliases use type_alias_declaration, not
     // interface_declaration.  T4-5 tracks this gap.
     assert!(
@@ -233,9 +212,13 @@ fn test_parse_file_populates_schema_fields() {
 
     let fields = local.schema_fields.expect("schema_fields must be Some");
     assert_eq!(fields.len(), 2, "Product has 2 predefined-type fields");
+    let names: Vec<&str> = fields.iter().map(|f| &*f.name).collect();
+    assert!(names.contains(&"name"));
+    assert!(names.contains(&"price"));
     assert!(fields
         .iter()
         .all(|f| f.framework == FrameworkId::TypeScriptInterface));
+    assert!(fields.iter().all(|f| &*f.owner_class == "Product"));
 }
 
 #[test]

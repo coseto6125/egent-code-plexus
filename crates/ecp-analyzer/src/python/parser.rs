@@ -15,7 +15,6 @@ use ecp_core::analyzer::types::{
     RawRoute, RawTxScope,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
-use ecp_core::pool::StringPool;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
@@ -1070,27 +1069,19 @@ impl LanguageProvider for PythonProvider {
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
-        // The local pool is dropped after this block. `StrRef` fields inside
-        // `RawSchemaField` carry byte offsets relative to this pool — they
-        // remain valid Copy values, but string resolution requires the builder
-        // to re-intern them (see TODO: builder pass for T4-schema integration).
-        // Since the builder currently ignores `schema_fields`, no caller
-        // dereferences these StrRefs today.
-        let schema_fields = {
-            let mut pool = StringPool::new();
-            let fields = crate::schema_field::extract_schema_fields(
-                &tree,
-                source,
-                &self.query,
-                &[
-                    crate::python::schema_extractors::PYDANTIC_CONFIG,
-                    crate::python::schema_extractors::SQLALCHEMY_CONFIG,
-                ],
-                &imports,
-                &mut pool,
-            );
-            (!fields.is_empty()).then(|| fields.into_boxed_slice())
-        };
+        // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
+        // per-file parser scope can drop cleanly without dangling-pool risk.
+        let fields = crate::schema_field::extract_schema_fields(
+            &tree,
+            source,
+            &self.query,
+            &[
+                crate::python::schema_extractors::PYDANTIC_CONFIG,
+                crate::python::schema_extractors::SQLALCHEMY_CONFIG,
+            ],
+            &imports,
+        );
+        let schema_fields = (!fields.is_empty()).then(|| fields.into_boxed_slice());
 
         // Same pool-isolation contract as `schema_fields` above:
         // `RawEventTopic.topic_literal` is a `StrRef` whose byte offset is

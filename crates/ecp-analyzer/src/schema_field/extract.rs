@@ -1,7 +1,6 @@
 use super::config::SchemaFieldConfig;
 use crate::framework_helpers::has_import_from;
 use ecp_core::analyzer::types::{RawImport, RawSchemaField, SchemaType};
-use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor, Tree};
@@ -9,10 +8,6 @@ use tree_sitter::{Query, QueryCursor, Tree};
 /// Walk all captures produced by `query` against `tree`/`source`, dispatch
 /// each match to the first `SchemaFieldConfig` whose import-gate is satisfied,
 /// and emit a `RawSchemaField` for every accepted match.
-///
-/// `pool` is used to intern `name` and `owner_class` strings.  The caller
-/// typically passes the same pool used for the rest of the file's `LocalGraph`
-/// to maximise dedup across nodes.
 ///
 /// The caller is responsible for supplying a query whose capture names align
 /// with the `owner_capture`, `name_capture`, and `type_capture` fields of at
@@ -24,13 +19,18 @@ use tree_sitter::{Query, QueryCursor, Tree};
 /// A config fires only when `has_import_from(imports, config.import_gate)`
 /// returns `true`.  When no config's gate is satisfied by the file's imports,
 /// this function returns an empty `Vec` — no false positives.
+///
+/// # Ownership
+/// `RawSchemaField` stores `name` / `owner_class` as owned `Box<str>` so the
+/// per-file parser scope can be dropped without dangling the strings — the
+/// pre-T4-7 design interned into a transient `StringPool` which was dropped
+/// at scope exit, leaving `RawSchemaField` carrying unreachable `StrRef`s.
 pub fn extract_schema_fields(
     tree: &Tree,
     source: &[u8],
     query: &Query,
     configs: &[SchemaFieldConfig],
     imports: &[RawImport],
-    pool: &mut StringPool,
 ) -> Vec<RawSchemaField> {
     // Identify which configs are live for this file once, not per-match.
     // Empty import_gate is vacuously satisfied — language built-ins (e.g.
@@ -121,9 +121,9 @@ pub fn extract_schema_fields(
             );
 
             out.push(RawSchemaField {
-                name: pool.add(name),
+                name: name.into(),
                 type_class,
-                owner_class: pool.add(owner),
+                owner_class: owner.into(),
                 framework: config.framework,
                 span,
             });
