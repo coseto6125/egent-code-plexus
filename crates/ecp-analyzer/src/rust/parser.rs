@@ -381,9 +381,8 @@ impl LanguageProvider for RustProvider {
 
         // owner_class is now set at emit time via enclosing_impl_type() parent
         // walk (see emit block above). The legacy `__impl_target__:Type`
-        // heritage sentinel push has been removed — `class_membership` Pass 2
-        // reads `RawNode.owner_class` directly and falls back to the sentinel
-        // only for pre-T1-1 cached graphs.
+        // heritage sentinel has been removed in T1-12; `class_membership` Pass 2
+        // reads `RawNode.owner_class` directly.
 
         // Framework-presence gates: only claim Axum/Actix refs when the file
         // actually `use`s the matching crate. Saves us from false positives in
