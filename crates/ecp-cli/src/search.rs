@@ -147,9 +147,8 @@ impl TantivyEngine {
             .map_err(|e| format!("acquire tantivy writer (lock held?): {e}"))?;
 
         for node in graph.nodes.iter() {
-            let uid_start = node.uid.offset as usize;
-            let uid_end = uid_start + node.uid.len as usize;
-            let uid = std::str::from_utf8(&graph.string_pool[uid_start..uid_end]).unwrap_or("");
+            let uid_str = node.uid.to_string();
+            let uid = uid_str.as_str();
 
             let name_start = node.name.offset as usize;
             let name_end = name_start + node.name.len as usize;

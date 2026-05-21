@@ -12,7 +12,7 @@ use ecp_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
     GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::Path;
@@ -34,10 +34,20 @@ fn build_graph(
     let mut pool = StringPool::new();
     let file_ref = pool.add("src/consumer.ts");
     let route_file_ref = pool.add("src/api.ts");
-    let consumer_uid = pool.add("Function:src/consumer.ts:fetchUser");
     let consumer_name = pool.add("fetchUser");
-    let route_uid = pool.add("Route:src/api.ts:GET /users/:id");
+    let consumer_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/consumer.ts",
+        None,
+        "fetchUser",
+    );
     let route_name = pool.add("GET /users/:id");
+    let route_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Route,
+        "src/api.ts",
+        None,
+        "GET /users/:id",
+    );
 
     // Pre-intern edge reasons so each Edge.reason can resolve out of
     // the same pool. We collect (offset,len) for the actual Edge build
@@ -126,6 +136,7 @@ fn build_graph(
                 kind: NodeKind::Function,
                 span: (1, 0, 5, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
             Node {
                 uid: route_uid,
@@ -134,6 +145,7 @@ fn build_graph(
                 kind: NodeKind::Route,
                 span: (1, 0, 5, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
         ],
         edges,

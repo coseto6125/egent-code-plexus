@@ -9,7 +9,7 @@ use ecp_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::process::Command;
@@ -45,9 +45,7 @@ fn build_empty_graph() -> Vec<u8> {
 fn build_graph_with_calls_edge() -> Vec<u8> {
     let mut pool = StringPool::new();
     let file_ref = pool.add("src/a.ts");
-    let uid_a = pool.add("Function:src/a.ts:foo");
     let name_a = pool.add("foo");
-    let uid_b = pool.add("Function:src/a.ts:bar");
     let name_b = pool.add("bar");
     let reason = pool.add("ast-call");
 
@@ -64,20 +62,22 @@ fn build_graph_with_calls_edge() -> Vec<u8> {
         }],
         nodes: vec![
             Node {
-                uid: uid_a,
+                uid: ecp_core::uid::compute(NodeKind::Function, "src/a.ts", None, "foo"),
                 name: name_a,
                 file_idx: 0,
                 kind: NodeKind::Function,
                 span: (0, 0, 1, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
             Node {
-                uid: uid_b,
+                uid: ecp_core::uid::compute(NodeKind::Function, "src/a.ts", None, "bar"),
                 name: name_b,
                 file_idx: 0,
                 kind: NodeKind::Function,
                 span: (2, 0, 3, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
         ],
         edges: vec![Edge {

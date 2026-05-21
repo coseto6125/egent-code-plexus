@@ -11,7 +11,12 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// the new reader (or vice-versa). The reader refuses any version it
 /// does not recognize, so a stale CLI does not segfault on a fresh
 /// `graph.bin` and a fresh CLI does not silently misinterpret old data.
-pub const GRAPH_FORMAT_VERSION: u32 = 5;
+///
+/// v6: `Node.owner_class: StrRef` added for method rename isolation (T1-11).
+/// v7: `Node.uid: StrRef` → `u64` (xxh3_64 streaming hash, T1-5).
+///     Canonical bytes: `kind_as_str \0 path \0 owner_class_or_empty \0 name`.
+///     1-cycle `FxHashMap` lookup; eliminates string-pool dereference on hot paths.
+pub const GRAPH_FORMAT_VERSION: u32 = 7;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -86,11 +91,12 @@ impl RelType {
     }
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
 #[repr(u8)]
 pub enum NodeKind {
+    #[default]
     File,
     Function,
     Class,
@@ -205,10 +211,9 @@ impl NodeKind {
         self.is_type() || matches!(self, Self::Namespace | Self::Module)
     }
 
-    /// Static variant name. Used by Pass 1 UID construction (`"<Kind>:<path>:<name>"`)
-    /// where `write!(.., "{:?}", kind)` would otherwise go through `fmt`
-    /// dispatch per node (~300k on `.sample_repo`). Matches the variant
-    /// identifier exactly, so existing UID strings stay byte-stable.
+    /// Static variant name. Used by `ecp_core::uid::compute` as the first
+    /// segment of the canonical byte stream fed to xxh3-64.
+    /// Must match the variant identifier exactly for byte-stable hashes.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::File => "File",
@@ -314,15 +319,24 @@ impl ArchivedRelType {
     }
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Default)]
 #[rkyv(derive(Debug))]
 pub struct Node {
-    pub uid: StrRef,
+    /// Deterministic xxh3-64 hash of the canonical byte stream:
+    /// `kind_as_str \0 path \0 owner_class_or_empty \0 name`.
+    /// Computed by `ecp_core::uid::compute`. Enables 1-cycle `FxHashMap`
+    /// lookup in the resolver; eliminates string-pool dereference.
+    pub uid: u64,
     pub name: StrRef,
     pub file_idx: u32,
     pub kind: NodeKind,
     pub span: (u32, u32, u32, u32), // start_line, start_col, end_line, end_col
     pub community_id: u16,          // 0 = unassigned
+    /// Owning class/struct for methods and properties; `StrRef::default()` (len=0)
+    /// means module-level symbol with no owner.  Appended at the END to preserve
+    /// rkyv binary layout for v5 fields; format version bumped to 6.
+    /// Used by `ecp rename` to isolate `Foo.validate` from `Bar.validate` (T1-11).
+    pub owner_class: StrRef,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -633,7 +647,7 @@ mod tests {
     use crate::pool::StringPool;
     use rkyv::rancor::Error;
 
-    fn make_base_graph(pool: StringPool, name_ref: StrRef, uid_ref: StrRef) -> ZeroCopyGraph {
+    fn make_base_graph(pool: StringPool, name_ref: StrRef, uid_val: u64) -> ZeroCopyGraph {
         ZeroCopyGraph {
             magic: GRAPH_MAGIC,
             version: GRAPH_FORMAT_VERSION,
@@ -646,12 +660,13 @@ mod tests {
                 category: FileCategory::Source,
             }],
             nodes: vec![Node {
-                uid: uid_ref,
+                uid: uid_val,
                 name: name_ref,
                 file_idx: 0,
                 kind: NodeKind::Function,
                 span: (1, 0, 5, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             }],
             edges: vec![Edge {
                 source: 0,
@@ -678,9 +693,9 @@ mod tests {
     fn test_serialize_deserialize_graph() {
         let mut pool = StringPool::new();
         let name_ref = pool.add("main");
-        let uid_ref = pool.add("Function:src/main.ts:main");
+        let uid_val = crate::uid::compute(NodeKind::Function, "src/main.ts", None, "main");
 
-        let graph = make_base_graph(pool, name_ref, uid_ref);
+        let graph = make_base_graph(pool, name_ref, uid_val);
 
         // Serialize
         let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
@@ -696,16 +711,17 @@ mod tests {
         let archived_node = &archived.nodes[0];
         let name_str = archived_node.name.resolve(&archived.string_pool);
         assert_eq!(name_str, "main");
+        assert_eq!(archived_node.uid.to_native(), uid_val);
     }
 
     #[test]
     fn test_side_table_roundtrip() {
         let mut pool = StringPool::new();
         let name_ref = pool.add("main");
-        let uid_ref = pool.add("Function:src/main.ts:main");
+        let uid_val = crate::uid::compute(NodeKind::Function, "src/main.ts", None, "main");
         let dispatch_ref = pool.add("Box<dyn Trait>");
 
-        let mut graph = make_base_graph(pool, name_ref, uid_ref);
+        let mut graph = make_base_graph(pool, name_ref, uid_val);
         graph.call_metas = vec![CallMeta {
             edge_idx: 0,
             flags: CallMeta::FLAG_DYNAMIC_DISPATCH,
@@ -742,10 +758,10 @@ mod tests {
     fn test_call_meta_binary_search() {
         let mut pool = StringPool::new();
         let name_ref = pool.add("f");
-        let uid_ref = pool.add("Function:src/f.rs:f");
+        let uid_val = crate::uid::compute(NodeKind::Function, "src/f.rs", None, "f");
         let empty_ref = pool.add("");
 
-        let mut graph = make_base_graph(pool, name_ref, uid_ref);
+        let mut graph = make_base_graph(pool, name_ref, uid_val);
         // 10 entries at even edge_idx values: 0, 2, 4, ..., 18
         graph.call_metas = (0u32..10)
             .map(|i| CallMeta {

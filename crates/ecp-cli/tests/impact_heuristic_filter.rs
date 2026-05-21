@@ -7,7 +7,7 @@ use ecp_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
     GRAPH_MAGIC,
 };
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use std::path::Path;
 use std::process::Command;
@@ -96,8 +96,18 @@ fn synthetic_graph_two_nodes(rel_type: RelType, reason_str: &str) -> Vec<u8> {
     let mut pool = StringPool::new();
     let file_a = pool.add("src/a.ts");
     let file_b = pool.add("src/b.ts");
-    let src_uid = pool.add("Function:src/a.ts:source");
-    let tgt_uid = pool.add("Function:src/b.ts:target");
+    let src_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/a.ts",
+        None,
+        "source",
+    );
+    let tgt_uid = ecp_core::uid::compute(
+        ecp_core::graph::NodeKind::Function,
+        "src/b.ts",
+        None,
+        "target",
+    );
     let src_name = pool.add("source");
     let tgt_name = pool.add("target");
     let reason_ref = pool.add(reason_str);
@@ -124,6 +134,7 @@ fn synthetic_graph_two_nodes(rel_type: RelType, reason_str: &str) -> Vec<u8> {
             kind: NodeKind::Function,
             span: (1, 0, 3, 0),
             community_id: 0,
+            owner_class: StrRef::default(),
         },
         Node {
             uid: tgt_uid,
@@ -132,6 +143,7 @@ fn synthetic_graph_two_nodes(rel_type: RelType, reason_str: &str) -> Vec<u8> {
             kind: NodeKind::Function,
             span: (2, 0, 4, 0),
             community_id: 0,
+            owner_class: StrRef::default(),
         },
     ];
     // source (0) → target (1)

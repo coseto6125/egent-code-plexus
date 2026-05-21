@@ -1,4 +1,5 @@
 use crate::commands::format::{kind_to_str, rel_to_str};
+use crate::commands::symbol_id::{resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
@@ -126,8 +127,11 @@ fn build_inspect_block(
             continue;
         }
 
+        let target_idx = edge.target.to_native() as usize;
+        let target_owner = resolve_owner_class(graph, target_idx);
         let entry = serde_json::json!({
             "name": target_node.name.resolve(&graph.string_pool),
+            "ownerClass": target_owner,
             "kind": target_kind,
             "filePath": target_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
@@ -160,8 +164,11 @@ fn build_inspect_block(
             continue;
         }
 
+        let source_idx = edge.source.to_native() as usize;
+        let source_owner = resolve_owner_class(graph, source_idx);
         let entry = serde_json::json!({
             "name": source_node.name.resolve(&graph.string_pool),
+            "ownerClass": source_owner,
             "kind": source_kind,
             "filePath": source_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
@@ -215,9 +222,11 @@ fn build_inspect_block(
 
     let has_heuristic = !heuristic_outgoing.is_empty() || !heuristic_incoming.is_empty();
 
+    let owner_class = resolve_owner_class(graph, node_idx);
     let mut block = serde_json::json!({
         "symbol": {
             "name": node.name.resolve(&graph.string_pool),
+            "ownerClass": owner_class,
             "kind": kind_to_str(&node.kind),
             "filePath": file_path_str,
             "startLine": node.span.0.to_native(),
@@ -356,11 +365,27 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     }
 
     let name = name_query.unwrap();
+
+    // Split `Owner.Method` form for precise targeting.
+    let (owner_filter, bare_name) = split_fqn_target(name);
+
     let matching_nodes: Vec<(usize, _)> = graph
         .nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| node.name.resolve(&graph.string_pool) == name)
+        .filter(|(idx, node)| {
+            if node.name.resolve(&graph.string_pool) != bare_name {
+                return false;
+            }
+            if let Some(owner) = owner_filter {
+                // FQN form: additionally require the owning class to match.
+                resolve_owner_class(graph, *idx)
+                    .map(|oc| oc == owner)
+                    .unwrap_or(false)
+            } else {
+                true
+            }
+        })
         .collect();
 
     if matching_nodes.is_empty() {

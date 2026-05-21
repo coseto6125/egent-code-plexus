@@ -387,7 +387,7 @@ mod tests {
         BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph,
         GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
     };
-    use ecp_core::pool::StringPool;
+    use ecp_core::pool::{StrRef, StringPool};
 
     /// rkyv-archive an in-memory `ZeroCopyGraph` and pass the borrowed
     /// `ArchivedZeroCopyGraph` into the test body.
@@ -552,8 +552,10 @@ mod tests {
         let name_a = pool.add("a");
         let name_b = pool.add("b");
         let path = pool.add("src/x.py");
-        let uid_a = pool.add("0:a");
-        let uid_b = pool.add("0:b");
+        let uid_a =
+            ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, "src/x.py", None, "a");
+        let uid_b =
+            ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, "src/x.py", None, "b");
         let r_fastapi_dep = pool.add("fastapi-depends");
         let r_fastapi_route = pool.add("fastapi-route-GET");
         let r_axum = pool.add("axum-route-handler");
@@ -574,6 +576,7 @@ mod tests {
                 kind: NodeKind::Function,
                 span: (0, 0, 1, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
             Node {
                 uid: uid_b,
@@ -582,6 +585,7 @@ mod tests {
                 kind: NodeKind::Function,
                 span: (1, 0, 2, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
         ];
         g.edges = vec![
@@ -648,9 +652,11 @@ mod tests {
         let name_c = pool.add("C");
         let name_v = pool.add("v");
         let path = pool.add("src/x.py");
-        let uid_f = pool.add("0:f");
-        let uid_c = pool.add("0:C");
-        let uid_v = pool.add("0:v");
+        let uid_f =
+            ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, "src/x.py", None, "f");
+        let uid_c = ecp_core::uid::compute(ecp_core::graph::NodeKind::Class, "src/x.py", None, "C");
+        let uid_v =
+            ecp_core::uid::compute(ecp_core::graph::NodeKind::Variable, "src/x.py", None, "v");
 
         let mut g = empty_graph(pool);
         g.files = vec![File {
@@ -669,6 +675,7 @@ mod tests {
                 kind: NodeKind::Function,
                 span: (0, 0, 1, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
             Node {
                 uid: uid_c,
@@ -677,6 +684,7 @@ mod tests {
                 kind: NodeKind::Class,
                 span: (2, 0, 3, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
             Node {
                 uid: uid_v,
@@ -685,6 +693,7 @@ mod tests {
                 kind: NodeKind::Variable,
                 span: (4, 0, 5, 0),
                 community_id: 0,
+                owner_class: StrRef::default(),
             },
         ];
         g.edges = vec![Edge {

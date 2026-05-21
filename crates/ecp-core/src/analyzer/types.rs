@@ -158,6 +158,8 @@ pub enum FrameworkId {
     JpaTransactional,
     DjangoAtomic,
     PonyDbSession,
+    // ── Schema field origins (T4-5) ──
+    Protobuf,
     // ── Fallback for frameworks not yet listed; promote to its own variant
     //    when adding emit support, do not extend silently. ──
     Unknown,
@@ -179,6 +181,7 @@ pub const FRAMEWORK_NAMES: &[&str] = &[
     "jpa-transactional",
     "django-atomic",
     "pony-db-session",
+    "protobuf",
     "unknown",
 ];
 
@@ -218,6 +221,7 @@ impl FrameworkId {
             12 => Self::JpaTransactional,
             13 => Self::DjangoAtomic,
             14 => Self::PonyDbSession,
+            15 => Self::Protobuf,
             _ => Self::Unknown,
         }
     }

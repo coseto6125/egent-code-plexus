@@ -17,13 +17,12 @@ fn canonical_hash(g: &ZeroCopyGraph) -> [u8; 32] {
     let pool = g.string_pool.as_slice();
     let mut h = Hasher::new();
 
-    // Nodes: sort by (uid_resolved, name, kind, span, file_idx, community_id)
+    // Nodes: sort by (uid, name, kind, span, file_idx, community_id)
     let mut nodes: Vec<_> = g.nodes.iter().collect();
     nodes.sort_by_cached_key(|n| {
-        let uid = n.uid.resolve(pool).to_string();
         let name = n.name.resolve(pool).to_string();
         (
-            uid,
+            n.uid,
             name,
             format!("{:?}", n.kind),
             n.span,
@@ -32,7 +31,7 @@ fn canonical_hash(g: &ZeroCopyGraph) -> [u8; 32] {
         )
     });
     for n in &nodes {
-        h.update(n.uid.resolve(pool).as_bytes());
+        h.update(&n.uid.to_le_bytes());
         h.update(n.name.resolve(pool).as_bytes());
         h.update(format!("{:?}", n.kind).as_bytes());
         h.update(&n.file_idx.to_le_bytes());

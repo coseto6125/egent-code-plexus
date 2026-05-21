@@ -1,7 +1,7 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use rustc_hash::FxHashMap;
 
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[rkyv(compare(PartialEq))]
 #[rkyv(derive(Debug))]
 pub struct StrRef {

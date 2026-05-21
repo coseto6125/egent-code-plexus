@@ -7,14 +7,13 @@
 
 use ecp_cli::engine::Engine;
 use ecp_core::graph::{File, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
-use ecp_core::pool::StringPool;
+use ecp_core::pool::{StrRef, StringPool};
 use rkyv::rancor::Error;
 use tempfile::tempdir;
 
 fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
     let mut pool = StringPool::new();
     let name_ref = pool.add("entry");
-    let uid_ref = pool.add("Function:src/main.ts:entry");
     let g = ZeroCopyGraph {
         magic,
         version,
@@ -27,12 +26,13 @@ fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
             category: ecp_core::graph::FileCategory::Source,
         }],
         nodes: vec![Node {
-            uid: uid_ref,
+            uid: ecp_core::uid::compute(NodeKind::Function, "src/main.ts", None, "entry"),
             name: name_ref,
             file_idx: 0,
             kind: NodeKind::Function,
             span: (1, 0, 5, 0),
             community_id: 0,
+            owner_class: StrRef::default(),
         }],
         edges: vec![],
         out_offsets: vec![0, 0],

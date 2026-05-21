@@ -188,6 +188,57 @@
         type: (type) @pydantic.type))))
 (#eq? @_super "BaseModel")
 
+;; ---- Kafka Python (T5-2) ----
+;; Covers kafka-python (`KafkaProducer.send`), confluent_kafka (`Producer.produce`),
+;; and aiokafka (`AIOKafkaProducer.send`).
+;; Import gate (`kafka`, `aiokafka`, `confluent_kafka`, `faust`) is enforced by
+;; KAFKA_PYTHON.import_gate — these queries fire on syntax alone; the extractor
+;; filters by import presence at runtime.
+;;
+;; Anchored to `function_definition` to capture the enclosing function name
+;; alongside the topic literal in a single match.  Module-level Kafka calls
+;; (scripts) are omitted — they represent <1% of production usage and would
+;; produce a topic with empty enclosing_fn, offering no LLM disambiguation value.
+;;
+;; Faust `app.send(topic, ...)` — skipped; Faust's send takes a `Topic` object,
+;; not a plain string literal, so literal capture would yield <1% precision.
+;; Tracked as T5-2-followup.
+
+;; kafka-python: `<producer>.send("<topic>", ...)` (sync) inside a function.
+(function_definition
+  name: (identifier) @kafka.producer_fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          attribute: (identifier) @_send (#eq? @_send "send"))
+        arguments: (argument_list
+          . (string) @kafka.topic)))))
+
+;; aiokafka: `await <producer>.send("<topic>", ...)` inside an async function.
+;; The `await` expression wraps the call — needs a separate pattern from the sync form.
+(function_definition
+  name: (identifier) @kafka.producer_fn
+  body: (block
+    (_
+      (await
+        (call
+          function: (attribute
+            attribute: (identifier) @_asend (#eq? @_asend "send"))
+          arguments: (argument_list
+            . (string) @kafka.topic))))))
+
+;; confluent_kafka: `<producer>.produce("<topic>", ...)` inside a function.
+(function_definition
+  name: (identifier) @kafka.producer_fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          attribute: (identifier) @_produce (#eq? @_produce "produce"))
+        arguments: (argument_list
+          . (string) @kafka.topic)))))
+
 ;; ---- SQLAlchemy declarative ORM (T4-3) ----
 ;; Idiom A — classic Column() declarative (1.x and 2.x compatible).
 ;; Captures: owner class name, field identifier, first positional arg of Column()

@@ -84,7 +84,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_REF"
           CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD")
           echo "Changed files:"
-          echo "$CHANGED" | sed 's/^/  /'
+          while IFS= read -r file; do echo "  $file"; done <<< "$CHANGED"
 
           # Positive list — anything outside it is docs/config/license-only.
           # Match anchors: ^ start, $ end for exact-filename matches.

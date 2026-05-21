@@ -18,6 +18,7 @@ pub mod rename;
 pub mod review;
 pub mod routes;
 pub mod shape_check;
+pub mod symbol_id;
 pub mod tool_map;
 pub mod verify_resolver;
 pub mod watch;

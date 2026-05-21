@@ -250,12 +250,33 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         }
     };
 
+    // `ast_target_name` / `ast_new_name` are the bare identifiers used for
+    // tree-sitter search and byte-level rewrite.
+    // "Foo.validate" → ast_target_name="validate"; "Foo.check" → ast_new_name="check"
+    // "pkg.Foo.validate" → ast_target_name="validate" (split on LAST `.` so the
+    // bare name on the right matches `Node.name`, which is always bare).
+    // Bare names pass through unchanged.
+    // TODO(#284 follow-up): migrate to shared `symbol_id::split_fqn_target`
+    // once that PR lands so rename + inspect + impact share one FQN parser.
+    let ast_target_name: &str = target_symbol
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&target_symbol);
+    let ast_new_name: &str = target_new_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&target_new_name);
+
     // --- Pre-flight collision detection ---
-    let collisions = detect_collisions(&target_new_name, graph);
+    // Pass the bare new-name: `Node.name` stores bare identifiers only, so
+    // matching against `target_new_name="Foo.check"` would compare against
+    // `node.name="check"` and silently never fire. Owner-class-aware
+    // collision detection is T1-12 follow-up.
+    let collisions = detect_collisions(ast_new_name, graph);
     if !collisions.is_empty() {
         eprintln!(
             "{}",
-            crate::hint::collision_warning(&target_new_name, &collisions)
+            crate::hint::collision_warning(ast_new_name, &collisions)
         );
     }
 
@@ -263,13 +284,44 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     let mut lines: Vec<String> = Vec::new();
 
     // Stage 1: locate target node + collect affected files.
-    let target_indices: Vec<usize> = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| n.name.resolve(&graph.string_pool) == target_symbol)
-        .map(|(i, _)| i)
-        .collect();
+    //
+    // Parse `target_symbol` for owner-class qualification (split on LAST `.`):
+    //   "Foo.validate"     → owner="Foo",     name="validate"
+    //   "pkg.Foo.validate" → owner="pkg.Foo", name="validate"
+    //   "validate"         → bare name → match top-level only (owner_class empty)
+    //
+    // This isolates Foo.validate from Bar.validate (T1-11 accuracy fix).
+    // Bare names no longer match class methods — they resolve to module-level
+    // symbols only.  Callers wanting a class method must use "ClassName.method".
+
+    let target_indices: Vec<usize> = if let Some((owner, name)) = target_symbol.rsplit_once('.') {
+        let owner_len = owner.len() as u32;
+        graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                // Fast-reject by u32 len before string resolve: cheaper than
+                // a pool dereference + strcmp when owner_class lengths differ.
+                n.owner_class.len.to_native() == owner_len
+                    && n.name.resolve(&graph.string_pool) == name
+                    && n.owner_class.resolve(&graph.string_pool) == owner
+            })
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        // Bare name: match only top-level symbols (owner_class is empty / len==0).
+        graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                n.name.resolve(&graph.string_pool) == target_symbol
+                    && n.owner_class.len.to_native() == 0
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
 
     // Stage 2: parse each file, find identifier occurrences.
     let mut hits: Vec<(PathBuf, Vec<IdentifierRange>)> = Vec::new();
@@ -332,7 +384,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             let Ok(bytes) = std::fs::read(&abs_path) else {
                 continue;
             };
-            let occurrences = find_identifier_occurrences(rel_path, &bytes, &target_symbol);
+            let occurrences = find_identifier_occurrences(rel_path, &bytes, ast_target_name);
             if !occurrences.is_empty() {
                 hits.push((abs_path, occurrences));
             }
@@ -375,8 +427,8 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             collect_diff(
                 &bytes,
                 ranges,
-                &target_symbol,
-                &target_new_name,
+                ast_target_name,
+                ast_new_name,
                 path,
                 &mut lines,
             );
@@ -416,7 +468,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         let rel = path.strip_prefix(&repo_root).unwrap_or(&path);
         println!("  - {}", rel.display());
         lines.push(format!("renamed: {}", path.display()));
-        apply_rename(&path, &ranges, target_new_name.as_bytes()).map_err(EcpError::Io)?;
+        apply_rename(&path, &ranges, ast_new_name.as_bytes()).map_err(EcpError::Io)?;
     }
 
     // Markdown pass.

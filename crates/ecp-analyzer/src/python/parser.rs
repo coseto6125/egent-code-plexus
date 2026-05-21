@@ -1092,6 +1092,23 @@ impl LanguageProvider for PythonProvider {
             (!fields.is_empty()).then(|| fields.into_boxed_slice())
         };
 
+        // Same pool-isolation contract as `schema_fields` above:
+        // `RawEventTopic.topic_literal` is a `StrRef` whose byte offset is
+        // relative to this local pool. The pool drops at end of scope; the
+        // builder must re-intern the literal before resolution.
+        let event_topics = {
+            let mut pool = StringPool::new();
+            let topics = crate::event_topic::extract_event_topics(
+                &tree,
+                source,
+                &self.query,
+                &[crate::event_topic::KAFKA_PYTHON],
+                &imports,
+                &mut pool,
+            );
+            (!topics.is_empty()).then(|| topics.into_boxed_slice())
+        };
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -1103,7 +1120,7 @@ impl LanguageProvider for PythonProvider {
             fanout_refs,
             blind_spots,
             schema_fields,
-            event_topics: None,
+            event_topics,
             tx_scopes,
             call_metas,
             raw_function_metas,

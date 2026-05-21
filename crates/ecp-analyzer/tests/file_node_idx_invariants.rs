@@ -1,8 +1,8 @@
 //! File-kind node invariants.
 //!
-//! For every `NodeKind::File` node, `files[node.file_idx].path` must equal the
-//! path encoded in the node's UID (`File:<path>`). Violating this invariant
-//! makes downstream consumers (`ecp inspect` impact_upstream_1hop,
+//! For every `NodeKind::File` node, the UID must match `uid::compute(File, path, None, path)`
+//! and `files[node.file_idx].path` must be the path used to compute the UID.
+//! Violating this invariant makes downstream consumers (`ecp inspect` impact_upstream_1hop,
 //! `routes.rs` category lookup) report the wrong file for a File node.
 //!
 //! The bug it pins: `let node_file_idx = file_node_idx.len() as u32;` in the
@@ -57,11 +57,20 @@ fn assert_file_nodes_self_reference(g: &ecp_core::graph::ZeroCopyGraph) {
         if !matches!(n.kind, NodeKind::File) {
             continue;
         }
-        let uid = n.uid.resolve(pool);
-        let expected = uid.strip_prefix("File:").unwrap_or(uid);
+        // With u64 UIDs we can't decode the path from the uid value directly.
+        // Verify instead that file_idx is in-bounds and the File at that index
+        // exists (the self-reference property is now checked via the builder test).
         let actual = g.files[n.file_idx as usize].path.resolve(pool);
-        if actual != expected {
-            mismatches.push((idx, n.file_idx, expected.to_string(), actual.to_string()));
+        // Re-compute expected UID from the file path to verify round-trip.
+        let expected_uid =
+            ecp_core::uid::compute(ecp_core::graph::NodeKind::File, actual, None, actual);
+        if n.uid != expected_uid {
+            mismatches.push((
+                idx,
+                n.file_idx,
+                format!("{expected_uid}"),
+                format!("{}", n.uid),
+            ));
         }
     }
     assert!(
