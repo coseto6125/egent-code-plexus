@@ -13,3 +13,12 @@ pub const PYDANTIC_CONFIG: SchemaFieldConfig = SchemaFieldConfig {
     import_gate: &["pydantic"],
     type_classifier: classify_python_type,
 };
+
+pub const SQLALCHEMY_CONFIG: SchemaFieldConfig = SchemaFieldConfig {
+    framework: FrameworkId::SqlAlchemy,
+    owner_capture: "sqlalchemy.owner",
+    name_capture: "sqlalchemy.field",
+    type_capture: "sqlalchemy.type",
+    import_gate: &["sqlalchemy"],
+    type_classifier: classify_python_type,
+};

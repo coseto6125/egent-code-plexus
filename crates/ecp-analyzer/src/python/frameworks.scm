@@ -187,3 +187,39 @@
         left: (identifier) @pydantic.field
         type: (type) @pydantic.type))))
 (#eq? @_super "BaseModel")
+
+;; ---- SQLAlchemy declarative ORM (T4-3) ----
+;; Idiom A — classic Column() declarative (1.x and 2.x compatible).
+;; Captures: owner class name, field identifier, first positional arg of Column()
+;; as the SQLAlchemy type name (e.g. Integer, String, Boolean).
+;; The `#eq? @_col "Column"` predicate prevents false positives on unrelated
+;; class-body assignments.  Import gate (`sqlalchemy`) provides the second
+;; filter layer — see SQLALCHEMY_CONFIG.import_gate.
+(class_definition
+  name: (identifier) @sqlalchemy.owner
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @sqlalchemy.field
+        right: (call
+          function: (identifier) @_col (#eq? @_col "Column")
+          arguments: (argument_list
+            . (identifier) @sqlalchemy.type))))))
+
+;; Idiom B — Mapped[T] typed declarative (SQLAlchemy 2.0 style).
+;; Captures the inner type identifier from `Mapped[<type>]` annotations.
+;; The `(#eq? @_mapped "Mapped")` predicate ensures only Mapped[] subscripts
+;; are captured, not arbitrary subscripted types like `list[str]`.
+(class_definition
+  name: (identifier) @sqlalchemy.owner
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @sqlalchemy.field
+        type: (type
+          (generic_type
+            (identifier) @_mapped (#eq? @_mapped "Mapped")
+            (type_parameter
+              (type (identifier) @sqlalchemy.type))))
+        right: (call
+          function: (identifier) @_mc (#eq? @_mc "mapped_column"))))))

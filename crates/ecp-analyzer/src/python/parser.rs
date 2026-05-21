@@ -1082,7 +1082,10 @@ impl LanguageProvider for PythonProvider {
                 &tree,
                 source,
                 &self.query,
-                &[crate::python::schema_extractors::PYDANTIC_CONFIG],
+                &[
+                    crate::python::schema_extractors::PYDANTIC_CONFIG,
+                    crate::python::schema_extractors::SQLALCHEMY_CONFIG,
+                ],
                 &imports,
                 &mut pool,
             );
