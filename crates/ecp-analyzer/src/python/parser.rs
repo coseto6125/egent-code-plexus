@@ -1102,7 +1102,10 @@ impl LanguageProvider for PythonProvider {
                 &tree,
                 source,
                 &self.query,
-                &[crate::event_topic::KAFKA_PYTHON],
+                &[
+                    crate::event_topic::KAFKA_PYTHON,
+                    crate::event_topic::RABBITMQ_PYTHON,
+                ],
                 &imports,
                 &mut pool,
             );
