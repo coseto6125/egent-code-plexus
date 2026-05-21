@@ -285,21 +285,12 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             let target_node = &graph.nodes[target_idx];
             affected_file_idx.insert(target_node.file_idx.to_native() as usize);
 
-            // Inbound edges: skip heuristic edges — rename mutation must be
-            // 100% deterministic; heuristic count is collected separately below.
+            // Inbound edges, single pass: deterministic edges contribute to
+            // `affected_file_idx`; heuristic ones bump the mirror counter.
+            // Rename mutation stays 100% deterministic because the file-set
+            // is only extended from non-heuristic sources.
             let in_start = graph.in_offsets[target_idx].to_native() as usize;
             let in_end = graph.in_offsets[target_idx + 1].to_native() as usize;
-            for i in in_start..in_end {
-                let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-                let edge = &graph.edges[edge_idx];
-                if edge.rel_type.is_heuristic() {
-                    continue;
-                }
-                let src = &graph.nodes[edge.source.to_native() as usize];
-                affected_file_idx.insert(src.file_idx.to_native() as usize);
-            }
-
-            // Single-hop heuristic mirror count: inbound heuristic edges.
             for i in in_start..in_end {
                 let edge_idx = graph.in_edge_idx[i].to_native() as usize;
                 let edge = &graph.edges[edge_idx];
@@ -312,6 +303,9 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
                             .to_string();
                         heuristic_mirror_names.push(src_name);
                     }
+                } else {
+                    let src = &graph.nodes[edge.source.to_native() as usize];
+                    affected_file_idx.insert(src.file_idx.to_native() as usize);
                 }
             }
 

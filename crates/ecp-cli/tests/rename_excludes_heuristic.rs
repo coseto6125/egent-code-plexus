@@ -184,6 +184,8 @@ fn mirrors_field_graph(
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     })
 }
 
@@ -226,6 +228,8 @@ fn zero_mirrors_graph(symbol: &str, file: &str) -> Vec<u8> {
         traces_data: vec![],
         blind_spots: vec![],
         route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
     })
 }
 
