@@ -1,4 +1,5 @@
 use crate::graph::NodeKind;
+use crate::pool::StrRef;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -77,6 +78,68 @@ pub struct RawFrameworkRef {
     pub span: (u32, u32, u32, u32),
 }
 
+/// Primitive type of a schema column or model field.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum SchemaType {
+    String,
+    Int,
+    Float,
+    Bool,
+    Datetime,
+    Json,
+    Other,
+}
+
+/// Message-bus direction for a call site.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum PubSub {
+    Publish,
+    Subscribe,
+}
+
+// D4: All identifier-bearing fields use StrRef (string-pool indirect, 4-byte
+// offset+len) from day-1 to avoid per-parse heap allocs on the hot path.
+// `framework` / `source_pattern` / `lib` are compile-time constants (callers
+// pass `&'static str` literals); however, because `LocalGraph` derives
+// `Archive`, rkyv requires every field to be archivable — `&'static str` has
+// no rkyv impl, so these fields are stored as `String`. The caller's
+// `&'static str` is moved in via `String::from(...)` with zero runtime
+// allocation overhead beyond the one-time pass at build time.
+
+/// ORM / schema model field detected at static-analysis time.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawSchemaField {
+    pub name: StrRef,
+    pub type_class: SchemaType,
+    pub owner_class: StrRef,
+    pub framework: String,
+    pub span: (u32, u32, u32, u32),
+}
+
+/// Message-bus publish/subscribe call site.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawEventTopic {
+    /// None = dynamic topic, upstream emits BlindSpot
+    pub topic_literal: Option<StrRef>,
+    pub direction: PubSub,
+    pub lib: String,
+    pub enclosing_fn: StrRef,
+    pub span: (u32, u32, u32, u32),
+}
+
+/// Transactional scope boundary (e.g. `@Transactional`, `atomic()`).
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawTxScope {
+    pub enclosing_fn: StrRef,
+    pub source_pattern: String,
+    pub span: (u32, u32, u32, u32),
+}
+
 /// Reflection-style fan-out reference: a single call site whose target cannot
 /// be uniquely picked at static-analysis time, but where the analyzer can
 /// enumerate the candidate set. The builder emits one `References` edge per
@@ -123,4 +186,7 @@ pub struct LocalGraph {
     pub framework_refs: Vec<RawFrameworkRef>,
     pub fanout_refs: Vec<RawFanoutRef>,
     pub blind_spots: Vec<BlindSpot>,
+    pub schema_fields: Vec<RawSchemaField>,
+    pub event_topics: Vec<RawEventTopic>,
+    pub tx_scopes: Vec<RawTxScope>,
 }
