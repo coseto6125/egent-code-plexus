@@ -252,6 +252,14 @@ impl AnalyzerPipeline {
                 .iter()
                 .find(|p| p.name() == "protobuf")
                 .map(|p| p.as_ref()),
+            // `.json` files are routed to the OpenAPI provider; the provider
+            // itself applies a cheap 200-byte prefix gate so non-OpenAPI JSON
+            // is returned as an empty `LocalGraph` at near-zero cost.
+            "json" => self
+                .providers
+                .iter()
+                .find(|p| p.name() == "openapi")
+                .map(|p| p.as_ref()),
             _ => None,
         }
     }

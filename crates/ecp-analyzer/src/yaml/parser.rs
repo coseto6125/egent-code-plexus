@@ -1,3 +1,4 @@
+use crate::openapi::schema_scan::{extract_fields as extract_openapi_fields, has_openapi_marker};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawDocumentBlock};
@@ -118,6 +119,19 @@ impl LanguageProvider for YamlProvider {
             }
         }
 
+        // ── OpenAPI schema fields (T4-6) ─────────────────────────────────────
+        // Only attempt when the 200-byte gate fires; zero cost for non-OpenAPI
+        // YAML (k8s, Helm, CI configs, etc.).
+        let probe = &source[..source.len().min(200)];
+        let schema_fields = if has_openapi_marker(probe) {
+            extract_openapi_fields(path, source)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| v.into_boxed_slice())
+        } else {
+            None
+        };
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -128,7 +142,7 @@ impl LanguageProvider for YamlProvider {
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
-            schema_fields: None,
+            schema_fields,
             event_topics: None,
             tx_scopes: None,
             call_metas: vec![],

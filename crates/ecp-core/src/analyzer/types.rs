@@ -177,6 +177,9 @@ pub enum FrameworkId {
     /// Distinguished from Kafka (durable log) and RabbitMQ (queued AMQP)
     /// so LLMs know subscribers MUST be online when publish fires.
     Redis,
+    // ── Schema field origins (T4-6) ──
+    OpenApi,
+    Swagger,
     // ── Fallback for frameworks not yet listed; promote to its own variant
     //    when adding emit support, do not extend silently. ──
     Unknown,
@@ -201,6 +204,8 @@ pub const FRAMEWORK_NAMES: &[&str] = &[
     "protobuf",
     "celery",
     "redis",
+    "openapi",
+    "swagger",
     "unknown",
 ];
 
@@ -243,6 +248,8 @@ impl FrameworkId {
             15 => Self::Protobuf,
             16 => Self::Celery,
             17 => Self::Redis,
+            18 => Self::OpenApi,
+            19 => Self::Swagger,
             _ => Self::Unknown,
         }
     }

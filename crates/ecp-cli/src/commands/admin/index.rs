@@ -8,7 +8,8 @@ use ecp_analyzer::{
     github_actions::parser::GitHubActionsProvider, go::parser::GoProvider,
     hcl::parser::HclProvider, java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
     kotlin::parser::KotlinProvider, lua::parser::LuaProvider, markdown::parser::MarkdownProvider,
-    move_lang::parser::MoveProvider, nim::parser::NimProvider, php::parser::PhpProvider,
+    move_lang::parser::MoveProvider, nim::parser::NimProvider,
+    openapi::schema_scan::OpenApiProvider, php::parser::PhpProvider,
     protobuf::parser::ProtobufProvider, python::parser::PythonProvider, ruby::parser::RubyProvider,
     rust::parser::RustProvider, solidity::parser::SolidityProvider, sql::parser::SqlProvider,
     svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
@@ -193,6 +194,7 @@ pub fn run_analyzer_for_paths(
     add!(needed.svelte, SvelteProvider::new());
     add!(needed.docker_compose, DockerComposeProvider::new());
     add!(needed.protobuf, ProtobufProvider::new());
+    add!(needed.openapi, OpenApiProvider::new());
 
     use rayon::prelude::*;
     let providers: Vec<Box<dyn ecp_core::analyzer::provider::LanguageProvider>> = factories
@@ -487,6 +489,7 @@ struct NeededProviders {
     astro: bool,
     svelte: bool,
     protobuf: bool,
+    openapi: bool,
 }
 
 /// Walk the scanned file list, set the flag for each language whose files we
@@ -547,6 +550,9 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
             "svelte" => n.svelte = true,
             "proto" => n.protobuf = true,
             "yml" | "yaml" => n.yaml = true,
+            // `.json` files are checked for OpenAPI 3.x / Swagger 2.0 markers
+            // by the provider itself; non-OpenAPI JSON is returned empty.
+            "json" => n.openapi = true,
             _ => {}
         }
     }
@@ -622,6 +628,7 @@ fn should_analyze_path(path: &std::path::Path) -> bool {
                 | "astro"
                 | "svelte"
                 | "proto"
+                | "json"
         )
     )
 }
