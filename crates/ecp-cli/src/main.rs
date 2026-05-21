@@ -110,6 +110,9 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::group::GroupCommands,
     },
+    /// Heuristic Saga compensate/undo/rollback name-pair detector.
+    /// All findings carry `requires_verification: true`; never enters the graph.
+    FindTransactionPatterns(commands::find_tx_patterns::FindTxPatternsArgs),
 }
 
 fn main() {
@@ -183,6 +186,7 @@ fn main() {
         Commands::ShapeCheck(args) => args.repo.as_deref(),
         Commands::ToolMap(args) => args.repo.as_deref(),
         Commands::Review(args) => args.repo.as_deref(),
+        Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -224,6 +228,7 @@ fn main() {
         Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
         Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
         Commands::Review(args) => commands::review::run(args, &engine),
+        Commands::FindTransactionPatterns(args) => commands::find_tx_patterns::run(args, &engine),
         Commands::Coverage(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -266,6 +271,7 @@ fn check_group_atom(cli: &Cli) {
         Commands::ToolMap(a) => (a.repo.as_deref(), None),
         Commands::Review(a) => (a.repo.as_deref(), None),
         Commands::Diff(a) => (a.repo.as_deref(), None),
+        Commands::FindTransactionPatterns(a) => (a.repo.as_deref(), None),
         _ => return,
     };
     // The vast majority of invocations don't pass `--repo` at all, so the
