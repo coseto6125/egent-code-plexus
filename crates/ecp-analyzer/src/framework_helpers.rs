@@ -134,6 +134,11 @@ pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, S
 /// C=classes, vs O(N²) when each parser called `enclosing_class` in a map.
 /// Rust uses `enclosing_impl_type` instead (impl blocks split struct/fn spans);
 /// Go uses recv_map (explicit receiver types).
+///
+/// Also stamps nested type declarations (`Class | Interface | Trait | Struct |
+/// Enum | Annotation`) so that inner classes with the same name across
+/// different outer classes resolve to distinct UIDs
+/// (uid = kind + path + owner_class + name).
 pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     let class_spans: Vec<(String, Span)> = nodes
         .iter()
@@ -149,18 +154,36 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
         return;
     }
     for node in nodes.iter_mut() {
-        if !matches!(
+        let span = node.span;
+        let owner = if matches!(
             node.kind,
             NodeKind::Method | NodeKind::Function | NodeKind::Constructor | NodeKind::Property
         ) {
+            // Members: find the tightest enclosing class span.
+            class_spans
+                .iter()
+                .filter(|(_, s)| span_contains(*s, span))
+                .min_by_key(|(_, s)| span_area(*s))
+                .map(|(name, _)| name.clone())
+        } else if matches!(
+            node.kind,
+            NodeKind::Class
+                | NodeKind::Interface
+                | NodeKind::Trait
+                | NodeKind::Struct
+                | NodeKind::Enum
+                | NodeKind::Annotation
+        ) {
+            // Nested type declarations: find the tightest enclosing class span
+            // that is strictly larger (exclude self-containment where spans are equal).
+            class_spans
+                .iter()
+                .filter(|(_, s)| *s != span && span_contains(*s, span))
+                .min_by_key(|(_, s)| span_area(*s))
+                .map(|(name, _)| name.clone())
+        } else {
             continue;
-        }
-        let span = node.span;
-        let owner = class_spans
-            .iter()
-            .filter(|(_, s)| span_contains(*s, span))
-            .min_by_key(|(_, s)| span_area(*s))
-            .map(|(name, _)| name.clone());
+        };
         if owner.is_some() {
             node.owner_class = owner;
         }
