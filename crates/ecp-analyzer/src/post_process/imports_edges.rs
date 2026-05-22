@@ -79,28 +79,26 @@ pub fn emit_edges(
     // per import. On `.sample_repo` (14k files) this shrinks Step 3 cost
     // from O(imports × files) ≈ 200M comparisons to O(imports × bucket)
     // where bucket size is typically < 10.
+    // Both indexes built in one pass through file_node_idx — saves one
+    // 14k-entry iteration vs the two-loop version.
     let mut basename_idx: FxHashMap<&str, Vec<(&str, u32)>> = FxHashMap::default();
+    let mut dir_component_idx: FxHashMap<&str, Vec<(&str, u32)>> = FxHashMap::default();
     for (path, &idx) in file_node_idx.iter() {
-        let basename = std::path::Path::new(path.as_str())
+        let path_str = path.as_str();
+        let basename = std::path::Path::new(path_str)
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or(path.as_str());
+            .unwrap_or(path_str);
         basename_idx
             .entry(basename)
             .or_default()
-            .push((path.as_str(), idx));
-    }
-    // Also index path components for Step 3f namespace/module-dir match.
-    // Key = directory component name (e.g. "X" from `src/X/Alpha.cs`).
-    // Value = Vec<(full_path, idx)>. Same O(1) lookup benefit.
-    let mut dir_component_idx: FxHashMap<&str, Vec<(&str, u32)>> = FxHashMap::default();
-    for (path, &idx) in file_node_idx.iter() {
-        for component in path.split('/') {
+            .push((path_str, idx));
+        for component in path_str.split('/') {
             if !component.is_empty() && !component.contains('.') {
                 dir_component_idx
                     .entry(component)
                     .or_default()
-                    .push((path.as_str(), idx));
+                    .push((path_str, idx));
             }
         }
     }
@@ -117,8 +115,17 @@ pub fn emit_edges(
             let mut local_emitted = 0usize;
             let mut local_edges: Vec<Edge> = Vec::new();
             let mut dedupe: FxHashSet<(u32, u32)> = FxHashSet::default();
-            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
-            let Some(&source_file_idx) = file_node_idx.get(&path_str) else {
+            // Forward-slash normalize without allocating on Linux/macOS
+            // (raw path is already `/`-only there). file_node_idx.get() takes
+            // &str so Cow → &str → HashMap lookup is alloc-free for the
+            // common branch.
+            let raw_path = local_graph.file_path.to_string_lossy();
+            let path_str: Cow<'_, str> = if raw_path.contains('\\') {
+                Cow::Owned(raw_path.replace('\\', "/"))
+            } else {
+                raw_path
+            };
+            let Some(&source_file_idx) = file_node_idx.get(path_str.as_ref()) else {
                 return (local_emitted, local_edges);
             };
             if local_graph.imports.is_empty() {
