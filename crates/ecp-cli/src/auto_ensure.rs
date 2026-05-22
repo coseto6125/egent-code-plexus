@@ -230,9 +230,11 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Step 2 — write L1 overlay fragments for the dirty set.
-                // T7-5 will replace this with a zero-copy merge of `_fresh_graphs`
-                // directly into graph.bin, eliminating the overlay write entirely.
-                apply_l1_overlay_updates(graph_path, worktree_root)
+                // Reuse the `dirty_abs` already collected above instead of
+                // re-walking the tree (~10k extra stat syscalls on a mid-size
+                // repo). T7-5 will replace the overlay write with a zero-copy
+                // merge of `_fresh_graphs` directly into graph.bin.
+                apply_l1_overlay_updates(worktree_root, dirty_abs)
                     .map_err(|e| format!("L1 overlay refresh: {e}"))?;
                 // L1 overlay only touches dirty fragments under
                 // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
@@ -245,7 +247,7 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
     }
 }
 
-fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Result<()> {
+fn apply_l1_overlay_updates(worktree_root: &Path, dirty_files: Vec<PathBuf>) -> io::Result<()> {
     use crate::session::{overlay_writer, promotion, resolver};
 
     let session_id = resolver::resolve_session_id(None);
@@ -276,8 +278,8 @@ fn apply_l1_overlay_updates(graph_path: &Path, worktree_root: &Path) -> io::Resu
     }
     // ─────────────────────────────────────────────────────────────────────
 
-    let graph_mtime = fs::metadata(graph_path)?.modified()?;
-    let dirty_files = collect_dirty_files(graph_path, worktree_root, graph_mtime)?;
+    // `dirty_files` was collected once by `ensure_fresh` and threaded through
+    // — see comment at the call site for the rationale.
 
     // Build inputs first so per-file read errors get individually surfaced
     // (matches the old per-file warning), then commit fragment writes +
