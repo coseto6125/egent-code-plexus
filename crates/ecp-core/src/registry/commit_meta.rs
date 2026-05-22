@@ -54,6 +54,17 @@ pub enum EmbeddingStatus {
     Computed,
 }
 
+impl CommitBuildMeta {
+    pub fn write_atomic(path: &Path, value: &Self) -> io::Result<()> {
+        crate::registry::io::atomic_write_json(path, value)
+    }
+
+    pub fn read(path: &Path) -> io::Result<Self> {
+        let bytes = fs::read(path)?;
+        serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,16 +117,5 @@ mod tests {
         }"#;
         let meta: CommitBuildMeta = serde_json::from_str(json).unwrap();
         assert_eq!(meta.binary_commit_sha, None);
-    }
-}
-
-impl CommitBuildMeta {
-    pub fn write_atomic(path: &Path, value: &Self) -> io::Result<()> {
-        crate::registry::io::atomic_write_json(path, value)
-    }
-
-    pub fn read(path: &Path) -> io::Result<Self> {
-        let bytes = fs::read(path)?;
-        serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
 }
