@@ -66,3 +66,50 @@ fn test_c_enum_emits_enum_node() {
         .unwrap_or_else(|| panic!("expected Enum node `E`, got {:#?}", graph.nodes));
     assert_eq!(node.kind, NodeKind::Enum);
 }
+
+// Regression: tightened struct/union/enum queries must emit ONLY at
+// definition sites (with body). Reference forms — forward decls,
+// pointer-to-struct in params, sizeof — must not emit duplicate nodes.
+//
+// Before tightening, every `struct hdr_histogram *h` parameter and every
+// `sizeof(struct X)` site over-matched `struct_specifier`, producing
+// duplicate Struct emissions that uid-collided with the real definition
+// (1,378 collisions on the .sample_repo corpus before this fix).
+
+#[test]
+fn test_c_struct_forward_decl_emits_no_struct() {
+    let graph = parse("struct OnlyForward;\n");
+    assert!(
+        !graph.nodes.iter().any(|n| n.name == "OnlyForward"),
+        "forward-decl struct (no body) must not emit a Struct node"
+    );
+}
+
+#[test]
+fn test_c_struct_reference_in_param_emits_no_struct() {
+    // `struct hdr_histogram *h` as a parameter type is a reference,
+    // not a definition. Only the function should be emitted; the
+    // `struct hdr_histogram` reference must not over-match.
+    let src = "void use(struct hdr_histogram *h) {}\n";
+    let graph = parse(src);
+    assert!(
+        !graph
+            .nodes
+            .iter()
+            .any(|n| n.name == "hdr_histogram" && n.kind == NodeKind::Struct),
+        "param-typed struct reference must not emit a Struct node — got {:#?}",
+        graph.nodes
+    );
+}
+
+#[test]
+fn test_c_enum_forward_decl_emits_no_enum() {
+    // C++/C2x-style scoped enum forward declaration (`enum X : int;`)
+    // and plain forward declarations have no body. The tightened query
+    // skips them.
+    let graph = parse("enum FwdOnly;\n");
+    assert!(
+        !graph.nodes.iter().any(|n| n.name == "FwdOnly"),
+        "forward-decl enum (no body) must not emit an Enum node"
+    );
+}

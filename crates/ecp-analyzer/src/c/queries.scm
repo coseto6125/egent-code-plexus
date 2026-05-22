@@ -21,17 +21,23 @@
           declarator: (identifier) @function.name))
     ]) @function)
 
-;; Structs
+;; Structs — definition sites only (must have body).
+;; Without `body:` anchor, the query matched every `struct hdr_histogram *p;`
+;; / `sizeof(struct hdr_histogram)` reference site, producing duplicate
+;; emissions that uid-collide with the real definition.
 (struct_specifier
-  name: (type_identifier) @struct.name) @struct
+  name: (type_identifier) @struct.name
+  body: (field_declaration_list)) @struct
 
-;; Unions (no separate NodeKind — emitted as Struct)
+;; Unions — definition sites only (no separate NodeKind — emitted as Struct)
 (union_specifier
-  name: (type_identifier) @union.name) @union
+  name: (type_identifier) @union.name
+  body: (field_declaration_list)) @union
 
-;; Enums
+;; Enums — definition sites only
 (enum_specifier
-  name: (type_identifier) @enum.name) @enum
+  name: (type_identifier) @enum.name
+  body: (enumerator_list)) @enum
 
 ;; Typedefs
 (type_definition

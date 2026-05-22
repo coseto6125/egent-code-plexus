@@ -40,6 +40,43 @@ pub struct GoProvider {
     capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
+/// Walk up the AST from `node` until a `function_declaration` or
+/// `method_declaration` is found. Returns the enclosing function name —
+/// receiver methods are qualified as `RecvType.MethodName` so two methods
+/// with the same name on different receivers (`(d *Dog) name()` and
+/// `(c *Cat) name()`) don't collide.
+///
+/// Used to scope short-var (`:=`) locals; without this, every `pairs := ...`
+/// across all funcs in a file uid-collides.
+fn enclosing_func_or_method_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = node.parent()?;
+    loop {
+        match current.kind() {
+            "function_declaration" => {
+                let name_node = current.child_by_field_name("name")?;
+                return std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                    .ok()
+                    .map(String::from);
+            }
+            "method_declaration" => {
+                let name_node = current.child_by_field_name("name")?;
+                let method_name =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                        .ok()?
+                        .to_string();
+                return Some(
+                    match super::receiver_types::receiver_type_from_method_decl(current, source) {
+                        Some(recv) => format!("{recv}.{method_name}"),
+                        None => method_name,
+                    },
+                );
+            }
+            _ => {}
+        }
+        current = current.parent()?;
+    }
+}
+
 impl GoProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_go::LANGUAGE.into();
@@ -388,8 +425,16 @@ impl LanguageProvider for GoProvider {
 
             // Short-var `x := expr` — emit one Variable per identifier on the left.
             // type_annotation is always None (no type field in the grammar).
+            //
+            // owner_class = enclosing function name: `:=` is statement-level so
+            // every short-var is inside a function or method. Without this, every
+            // `pairs := ...` across all funcs in a file uid-collides (1,798 hits
+            // on `Go/auth.go::pairs` on the .sample_repo corpus). Scoping to the
+            // enclosing function/method makes each uid distinct while preserving
+            // receiver-type call resolution (go_ctor.rs::test_go_short_var_*).
             if is_local {
                 if let Some(root) = local_root_node {
+                    let enclosing = enclosing_func_or_method_name(root, source);
                     for n in &local_name_nodes {
                         if let Ok(name_str) =
                             std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
@@ -415,7 +460,7 @@ impl LanguageProvider for GoProvider {
                                     end.column as u32,
                                 ),
                                 calls: Vec::new(),
-                                owner_class: None,
+                                owner_class: enclosing.clone(),
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[root.start_byte()..root.end_byte()],
                                 ),

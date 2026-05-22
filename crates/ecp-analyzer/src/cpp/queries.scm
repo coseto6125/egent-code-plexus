@@ -9,9 +9,12 @@
   ] @name.class
   (base_class_clause
     (type_identifier) @heritage)?
+  body: (field_declaration_list)
 ) @class
 
-;; Structs — emitted as NodeKind::Struct (distinct from Class)
+;; Structs — emitted as NodeKind::Struct (distinct from Class).
+;; `body:` anchor scopes to definition sites only; forward decls
+;; (`struct Foo;`) and type references (`struct Foo *p`) are skipped.
 (struct_specifier
   name: [
     (type_identifier)
@@ -19,6 +22,7 @@
   ] @name.struct
   (base_class_clause
     (type_identifier) @heritage)?
+  body: (field_declaration_list)
 ) @struct
 
 ;; Unions — emitted as NodeKind::Struct (no dedicated `Union` kind in
@@ -32,6 +36,7 @@
 ;; emap_batch_lookup_result_u, redis/cluster_legacy.h clusterMsgData).
 (union_specifier
   name: (type_identifier) @name.struct
+  body: (field_declaration_list)
 ) @struct
 
 ;; Functions
@@ -294,9 +299,12 @@
   ]
 ) @namespace
 
-;; Enum definitions — `enum class Color { ... }` and `enum OldEnum { ... }`
+;; Enum definitions — `enum class Color { ... }` and `enum OldEnum { ... }`.
+;; `body:` anchor skips scoped forward decls (`enum Color : int;`) and
+;; type references (`enum Color c;`).
 (enum_specifier
   name: (type_identifier) @name.enum
+  body: (enumerator_list)
 ) @enum_node
 
 ;; Type aliases — `using Foo = Bar;`  and  `typedef int MyInt;`

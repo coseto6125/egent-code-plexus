@@ -40,15 +40,23 @@ fn plain_named_union_emits_struct() {
 }
 
 #[test]
-fn typedef_union_same_name_emits_struct_and_typedef() {
-    // `typedef union GCObject GCObject;` — the inner union_specifier
-    // matches the new union query (Struct), and the outer type_definition
-    // matches the existing typedef query (Typedef). Both must surface so
-    // either-kind cypher lookups resolve the source declaration.
+fn typedef_union_forward_decl_emits_typedef_only() {
+    // `typedef union GCObject GCObject;` is a forward declaration —
+    // the inner `union_specifier` has no body. The tightened query
+    // (`body: (field_declaration_list)`) skips it, so only the outer
+    // type_definition emits a Typedef. The real `union GCObject { ... }`
+    // (with body) lives in another file (e.g. lua/lstate.h) and surfaces
+    // the Struct node there. This separation eliminates the uid-collision
+    // that arose when every reference site also emitted a Struct.
     let src = "typedef union GCObject GCObject;\n";
     let nodes = parse(src);
-    find(&nodes, "GCObject", NodeKind::Struct);
     find(&nodes, "GCObject", NodeKind::Typedef);
+    assert!(
+        !nodes
+            .iter()
+            .any(|n| n.name == "GCObject" && n.kind == NodeKind::Struct),
+        "forward-decl union must not emit Struct — definition site owns that emission"
+    );
 }
 
 #[test]

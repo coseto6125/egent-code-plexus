@@ -100,6 +100,55 @@ fn path_pattern_ac() -> &'static (AhoCorasick, Vec<PathPatternKind>) {
     })
 }
 
+/// Classify a uid-hash collision based on `(kind, path)`. Returns the
+/// BlindSpot `kind` string. See builder.rs near `uid_seen.get` for context.
+///
+///   `method-overload` — Method/Constructor collisions are almost always
+///       overload variants (same name, different parameter types) in Java,
+///       Swift, Kotlin, TypeScript, PHP, etc. The uid composition
+///       `(kind, path, owner_class, name)` lacks the parameter signature
+///       so overloads inherently collide.
+///
+///   `ifdef-redef`    — Macro/Function/Struct/Enum/Typedef/Variable/Const
+///       in C/C++ files. Headers commonly `#define X` or `static int foo()`
+///       under different `#ifdef` branches (32/64-bit, GCC/MSVC,
+///       portability shims). Tree-sitter parses both branches without
+///       preprocessor evaluation, so both emit nodes that collide.
+///
+///   `uid-collision`  — Everything else: a true ambiguity in the corpus
+///       worth investigating. After this reclassification, the count
+///       drops from ~25K to <1K on .sample_repo, making the residual
+///       set tractable.
+pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
+    if matches!(kind, NodeKind::Method | NodeKind::Constructor) {
+        return "method-overload";
+    }
+    let is_c_family = path.ends_with(".c")
+        || path.ends_with(".h")
+        || path.ends_with(".cc")
+        || path.ends_with(".cpp")
+        || path.ends_with(".cxx")
+        || path.ends_with(".hpp")
+        || path.ends_with(".hh")
+        || path.ends_with(".hxx");
+    if is_c_family
+        && matches!(
+            kind,
+            NodeKind::Macro
+                | NodeKind::Function
+                | NodeKind::Struct
+                | NodeKind::Enum
+                | NodeKind::Typedef
+                | NodeKind::Variable
+                | NodeKind::Const
+                | NodeKind::Property
+        )
+    {
+        return "ifdef-redef";
+    }
+    "uid-collision"
+}
+
 pub fn determine_category(path: &str) -> FileCategory {
     let normalized_path = path.replace('\\', "/");
     // Prefix with "/" so patterns like "/vendor/" match both embedded
@@ -415,8 +464,25 @@ impl GraphBuilder {
                 // current_node_idx throughout Pass 1.
                 if let Some((prev_kind, prev_path, prev_owner, prev_name)) = uid_seen.get(&uid_u64)
                 {
+                    // Reclassify the collision based on (kind, lang) — most
+                    // collisions are not parser bugs but legitimate semantic
+                    // ambiguities the indexer can't resolve without semantic
+                    // analysis. Triaging them up front lets `uid-collision`
+                    // mean "true parser ambiguity worth investigating".
+                    //
+                    //   - method-overload : Method/Constructor with same
+                    //     (kind, path, owner, name) but distinct param-types
+                    //     (Java/Swift/Kotlin/TS/PHP overloads, C++ `operator new`).
+                    //   - ifdef-redef     : C/C++ Macro/Function/Struct/Enum/
+                    //     Typedef/Variable redefined under `#ifdef` branches
+                    //     (`#define X` for 32/64-bit, `static int foo() { ... }`
+                    //     repeated under different platform guards).
+                    //   - uid-collision   : everything else (real parser bug
+                    //     or unhandled corpus pattern).
+                    let bs_kind = classify_collision(raw_node.kind, &path_str);
                     let hint = format!(
-                        "uid-collision: first={}:{}:{}:{} second={}:{}:{}:{}",
+                        "{}: first={}:{}:{}:{} second={}:{}:{}:{}",
+                        bs_kind,
                         prev_kind,
                         prev_path,
                         prev_owner.as_deref().unwrap_or(""),
@@ -427,7 +493,7 @@ impl GraphBuilder {
                         raw_node.name,
                     );
                     collision_blind_spots.push(BlindSpotRecord {
-                        kind: string_pool.add("uid-collision"),
+                        kind: string_pool.add(bs_kind),
                         file_path: string_pool.add(&path_str),
                         start_row: raw_node.span.0,
                         start_col: raw_node.span.1,
@@ -2093,6 +2159,76 @@ mod tests {
     use super::*;
     use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
     use ecp_core::graph::NodeKind;
+
+    // ---- classify_collision (uid-collision reclassification) ----
+
+    #[test]
+    fn classify_method_in_any_file_is_overload() {
+        assert_eq!(
+            classify_collision(NodeKind::Method, "Java/foo/Bar.java"),
+            "method-overload"
+        );
+        assert_eq!(
+            classify_collision(NodeKind::Constructor, "Swift/Source/Foo.swift"),
+            "method-overload"
+        );
+        assert_eq!(
+            classify_collision(NodeKind::Method, "C/deps/jemalloc/src/jemalloc_cpp.cpp"),
+            "method-overload"
+        );
+    }
+
+    #[test]
+    fn classify_c_macro_function_struct_is_ifdef_redef() {
+        for kind in [
+            NodeKind::Macro,
+            NodeKind::Function,
+            NodeKind::Struct,
+            NodeKind::Enum,
+            NodeKind::Typedef,
+            NodeKind::Variable,
+            NodeKind::Const,
+            NodeKind::Property,
+        ] {
+            for path in [
+                "C/deps/hiredis/hiredis.h",
+                "C/foo.c",
+                "Cpp/include/nlohmann/json.hpp",
+                "src/foo.cc",
+                "src/foo.cxx",
+                "src/foo.hh",
+                "src/foo.hxx",
+            ] {
+                assert_eq!(
+                    classify_collision(kind, path),
+                    "ifdef-redef",
+                    "kind={kind:?} path={path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classify_non_c_non_method_falls_through() {
+        // Go Variable, Rust Impl, Bash Const, etc. stay as `uid-collision`
+        // until per-lang fixes land (or until they get their own kind).
+        for (kind, path) in [
+            (NodeKind::Variable, "Go/auth.go"),
+            (NodeKind::Impl, "Rust/lib.rs"),
+            (NodeKind::Const, "bash/aliases.sh"),
+            (NodeKind::Class, "Swift/AppDelegate.swift"),
+            (NodeKind::Property, "Rust/benches/copy.rs"),
+            // C/C++ Class is not in the ifdef-redef list (class is C++-only
+            // and uses body anchoring after the cpp scm tighten).
+            (NodeKind::Class, "Cpp/foo.cpp"),
+        ] {
+            assert_eq!(
+                classify_collision(kind, path),
+                "uid-collision",
+                "kind={kind:?} path={path}"
+            );
+        }
+    }
 
     /// L0 end-to-end: caller imports `./b`, defining file lives at
     /// `src/b.ts`. Tier 2 ImportScoped must fire and emit a `Calls` edge
