@@ -601,7 +601,23 @@ fn parse_primary(c: &mut Cursor) -> Result<Expr, CypherError> {
 
 /// Convert `HasMethod` → `HAS_METHOD` so Cypher CamelCase rel-types map to
 /// the RelType::FromStr matcher which uses UPPER_SNAKE_CASE strings.
+///
+/// Inputs that are already UPPER_SNAKE (`FETCHES`, `HAS_METHOD`) or
+/// all-lowercase (`fetches`) pass through `to_uppercase()` only — without
+/// the early return, `FETCHES` would get one underscore inserted before
+/// every cap → `F_E_T_C_H_E_S`, which never matches RelType::FromStr.
+/// RelType / NodeKind are already case-insensitive at the FromStr layer;
+/// this helper just normalizes the surface form cypher accepts.
 fn camel_to_upper_snake(s: &str) -> String {
+    let already_snake = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    let all_lower = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if already_snake || all_lower {
+        return s.to_ascii_uppercase();
+    }
     let mut out = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {
         if ch.is_uppercase() && i > 0 {
@@ -697,6 +713,43 @@ mod tests {
     fn rel_type_alternation() {
         let r = rp("[:Calls|HasMethod]");
         assert_eq!(r.types, vec![RelType::Calls, RelType::HasMethod]);
+    }
+
+    #[test]
+    fn rel_type_accepts_upper_snake() {
+        // `[:FETCHES]` is what cypher convention recommends — must not get
+        // mangled to `F_E_T_C_H_E_S` by camel-to-snake conversion.
+        let r = rp("[:FETCHES]");
+        assert_eq!(r.types, vec![RelType::Fetches]);
+        let r2 = rp("[:HAS_METHOD]");
+        assert_eq!(r2.types, vec![RelType::HasMethod]);
+    }
+
+    #[test]
+    fn rel_type_accepts_all_lowercase() {
+        let r = rp("[:fetches]");
+        assert_eq!(r.types, vec![RelType::Fetches]);
+        let r2 = rp("[:has_method]");
+        assert_eq!(r2.types, vec![RelType::HasMethod]);
+    }
+
+    #[test]
+    fn rel_type_camel_case_still_works() {
+        // Regression guard: existing CamelCase path must keep working.
+        let r = rp("[:HasMethod]");
+        assert_eq!(r.types, vec![RelType::HasMethod]);
+        let r2 = rp("[:Calls]");
+        assert_eq!(r2.types, vec![RelType::Calls]);
+    }
+
+    #[test]
+    fn rel_type_alternation_mixed_case_forms() {
+        // All three cypher conventions in one alternation — must all resolve.
+        let r = rp("[:FETCHES|HasMethod|calls]");
+        assert_eq!(
+            r.types,
+            vec![RelType::Fetches, RelType::HasMethod, RelType::Calls]
+        );
     }
 
     fn pat(s: &str) -> Pattern {
