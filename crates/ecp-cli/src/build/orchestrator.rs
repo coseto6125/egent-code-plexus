@@ -578,13 +578,26 @@ fn git_remote_url(worktree: &Path) -> io::Result<String> {
 }
 
 fn dir_size(dir: &Path) -> io::Result<u64> {
+    // CI-M-followup: tolerant per-entry metadata fetch. The background
+    // tantivy writer (CI-B) actively churns `.tmpXXX` segment files inside
+    // `publish_dir/tantivy/` — walkdir enumerates them, then a fraction of
+    // a millisecond later tantivy renames/deletes the segment for compaction.
+    // `metadata()?` on the now-gone path bubbles up an `io::Error` whose
+    // walkdir Display format is `IO error for operation on PATH: kind`,
+    // which previously surfaced as a `build_l2 failed` subprocess error in
+    // Linux + macOS CI (Windows happened to win the race). `total_size_bytes`
+    // is an advisory stats field — undercounting by a few transient temp
+    // files is acceptable; treating those misses as a fatal build error is
+    // not.
     let mut total = 0;
     for e in walkdir::WalkDir::new(dir)
         .into_iter()
         .filter_map(Result::ok)
     {
         if e.file_type().is_file() {
-            total += e.metadata()?.len();
+            if let Ok(m) = e.metadata() {
+                total += m.len();
+            }
         }
     }
     Ok(total)
