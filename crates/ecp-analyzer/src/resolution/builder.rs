@@ -1,4 +1,6 @@
-use crate::fetch_shape::{consumer_keys, fetch_urls, format_reason, response_shapes};
+use crate::fetch_shape::{
+    consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
+};
 use crate::framework_helpers::Span;
 use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
@@ -604,8 +606,8 @@ impl GraphBuilder {
         // Pass 1.5: Extract Routes
         let mut route_edges = Vec::new();
         let mut current_handler_idx = 0;
-        // (route_node_idx, file_idx, route_path) — drives Pass 1.6 below.
-        let mut emitted_routes: Vec<(u32, u32, String)> = Vec::new();
+        // (route_node_idx, file_idx, route_method, route_path) — drives Pass 1.6 below.
+        let mut emitted_routes: Vec<(u32, u32, String, String)> = Vec::new();
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
             let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -662,7 +664,12 @@ impl GraphBuilder {
                             reason: string_pool.add("decorator"),
                         });
 
-                        emitted_routes.push((route_idx, file_idx, detected.path.clone()));
+                        emitted_routes.push((
+                            route_idx,
+                            file_idx,
+                            detected.method.clone(),
+                            detected.path.clone(),
+                        ));
                     }
                 }
                 current_handler_idx += 1;
@@ -702,7 +709,12 @@ impl GraphBuilder {
                         }
                     }
 
-                    emitted_routes.push((route_idx, file_idx, detected.path.clone()));
+                    emitted_routes.push((
+                        route_idx,
+                        file_idx,
+                        detected.method.clone(),
+                        detected.path.clone(),
+                    ));
                 }
             }
         }
@@ -758,7 +770,7 @@ impl GraphBuilder {
             };
 
             // 1.6a — RouteShape per Route.
-            for (route_idx, file_idx, _route_path) in &emitted_routes {
+            for (route_idx, file_idx, _route_method, _route_path) in &emitted_routes {
                 let lg = &self.local_graphs[*file_idx as usize];
                 let Some(lang) = lang_for_path(&lg.file_path.to_string_lossy()) else {
                     continue;
@@ -788,14 +800,18 @@ impl GraphBuilder {
                 });
             }
 
-            // 1.6b — Fetches edges. Build path→Vec<route_idx> first
-            // (multiple routes can share a path under different methods —
-            // we link to all of them; downstream tooling already filters
-            // by method when needed).
-            let mut route_by_path: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-            for (route_idx, _file_idx, route_path) in &emitted_routes {
-                route_by_path
-                    .entry(route_path.clone())
+            // 1.6b — Fetches edges.
+            //
+            // RouteIndex: (UPPERCASED_METHOD, normalized_path) → Vec<route_idx>.
+            // `normalize_route_path` coalesces `:param` / `{param}` / `<param>`
+            // to `:*` so `app.get('/api/users/:id')` and
+            // `fetch('/api/users/42')` both resolve to `("GET", "api/users/:*")`
+            // and produce a Fetches edge.
+            let mut route_index: FxHashMap<(String, String), Vec<u32>> = FxHashMap::default();
+            for (route_idx, _file_idx, route_method, route_path) in &emitted_routes {
+                let (norm_path, _) = normalize_route_path(route_path);
+                route_index
+                    .entry((route_method.to_uppercase(), norm_path))
                     .or_default()
                     .push(*route_idx);
             }
@@ -825,7 +841,7 @@ impl GraphBuilder {
             // consumers — skip them on the consumer pass to avoid
             // self-loops where a file `fetch()`es its own route.
             let handler_files: rustc_hash::FxHashSet<u32> =
-                emitted_routes.iter().map(|(_, fi, _)| *fi).collect();
+                emitted_routes.iter().map(|(_, fi, _, _)| *fi).collect();
 
             for (file_idx, lg) in self.local_graphs.iter().enumerate() {
                 let file_idx = file_idx as u32;
@@ -836,51 +852,55 @@ impl GraphBuilder {
                     continue;
                 };
                 let path_str = lg.file_path.to_string_lossy();
-                // URL extraction is JS/TS-only (upstream parity) — skip
-                // other extensions cheaply by not loading them.
-                if lang_for_path(&path_str)
-                    .map(|l| matches!(l, response_shapes::Lang::Php))
-                    .unwrap_or(true)
-                {
-                    // None or Php — neither yields a useful consumer scan.
+                // Allowlist: extensions where `fetch_urls::extract` produces
+                // useful hits. PHP is a route-server language, not a consumer
+                // here; all other unknown extensions are skipped cheaply.
+                if !is_consumer_extension(&path_str) {
                     continue;
                 }
                 let Some(content) = read_content(file_idx, &mut content_cache, &self.local_graphs)
                 else {
                     continue;
                 };
-                let urls = fetch_urls::extract(&content);
-                if urls.is_empty() {
+                let client_calls = fetch_urls::extract(&content);
+                if client_calls.is_empty() {
                     continue;
                 }
                 let keys = consumer_keys::extract(&content);
 
-                // fetch_count = how many distinct route paths this consumer
-                // matches (upstream definition). Compute by intersecting
-                // `urls` with `route_by_path` keys.
-                let matched_paths: Vec<&String> = urls
-                    .iter()
-                    .filter(|u| route_by_path.contains_key(*u))
-                    .collect();
-                if matched_paths.is_empty() {
+                // Resolve each (method, url) pair against the RouteIndex.
+                // Cross-repo misses (no matching Route node) are silently
+                // skipped — ecp contracts handles those separately.
+                let mut matched: Vec<(u32, bool)> = Vec::new(); // (route_idx, is_templated)
+                for (client_method, client_url) in &client_calls {
+                    let (norm_url, client_templated) = normalize_route_path(client_url);
+                    // Route side also normalized via `:*`; the index key carries
+                    // `:*` segments whenever the route had a param placeholder.
+                    let route_templated = norm_url.contains(":*");
+                    if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
+                        for &route_idx in targets {
+                            matched.push((route_idx, client_templated || route_templated));
+                        }
+                    }
+                }
+                if matched.is_empty() {
                     continue;
                 }
-                let fetch_count = matched_paths.len() as u32;
+                let fetch_count = matched.len() as u32;
                 let reason_str = format_reason(&keys, fetch_count);
                 let reason_ref = string_pool.add(&reason_str);
 
-                for url in &matched_paths {
-                    if let Some(targets) = route_by_path.get(*url) {
-                        for &route_idx in targets {
-                            fetches_edges.push(Edge {
-                                source: source_node,
-                                target: route_idx,
-                                rel_type: RelType::Fetches,
-                                confidence: 0.9,
-                                reason: reason_ref,
-                            });
-                        }
-                    }
+                for (route_idx, is_templated) in matched {
+                    // Confidence: 0.8 for exact-path matches, 0.6 for any
+                    // templated segment — caller or callee side.
+                    let confidence = if is_templated { 0.6 } else { 0.8 };
+                    fetches_edges.push(Edge {
+                        source: source_node,
+                        target: route_idx,
+                        rel_type: RelType::Fetches,
+                        confidence,
+                        reason: reason_ref,
+                    });
                 }
             }
         }
@@ -1881,6 +1901,20 @@ fn lang_for_path(path: &str) -> Option<response_shapes::Lang> {
         "php" => Some(response_shapes::Lang::Php),
         _ => None,
     }
+}
+
+/// True for file extensions where `fetch_urls::extract` can find HTTP
+/// client call sites. PHP is a server-side language; Python is included
+/// because `requests` / `httpx` are common HTTP client libraries.
+fn is_consumer_extension(path: &str) -> bool {
+    let dot = match path.rfind('.') {
+        Some(d) => d,
+        None => return false,
+    };
+    matches!(
+        &path[dot + 1..],
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py"
+    )
 }
 
 /// Serialize captured resolver decisions to a JSONL file. Schema matches
@@ -3060,20 +3094,34 @@ mod tests {
             ]
         }
 
+        // Shared tmp dir: Pass 1.6b needs consumer file content on disk
+        // to emit Fetches edges (route data comes from LocalGraph, not disk).
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Consumer file fetches GET /users → matches the RawRoute in bar.rs fixture.
+        std::fs::write(
+            tmp.path().join("consumer.ts"),
+            "async function load() { const { id } = await fetch('/users').json(); }",
+        )
+        .unwrap();
+
         // Parallel path (production): no dump enabled
-        let mut parallel_builder = GraphBuilder::new();
+        let mut parallel_builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
         for lg in build_fixtures() {
             parallel_builder.add_graph(lg);
         }
+        // Consumer LocalGraph for the consumer.ts file written above.
+        parallel_builder.add_graph(consumer_local_graph("consumer.ts"));
         let parallel_graph = parallel_builder.build();
 
         // Serial path: dump enabled forces the serial branch
-        let tmp = tempfile::TempDir::new().unwrap();
         let dump_path = tmp.path().join("dump.jsonl");
-        let mut serial_builder = GraphBuilder::new().with_resolver_dump(Some(dump_path.clone()));
+        let mut serial_builder = GraphBuilder::new()
+            .with_repo_root(tmp.path().to_path_buf())
+            .with_resolver_dump(Some(dump_path.clone()));
         for lg in build_fixtures() {
             serial_builder.add_graph(lg);
         }
+        serial_builder.add_graph(consumer_local_graph("consumer.ts"));
         let serial_graph = serial_builder.build();
 
         // Bucketize edges per RelType; include resolved reason in the key so a
@@ -3115,18 +3163,11 @@ mod tests {
             );
         }
 
-        // Emit-zero invariant: Sub-projects 1/5 types not yet emitted by Pass-2.
-        // Note: `Imports` is intentionally post-process only — see
-        // `crates/ecp-analyzer/src/post_process/imports_edges.rs` Tier-1-2-3
-        // resolver for cross-file basename / dir-component indexing that can't
-        // be moved to Pass-2 without breaking its streaming design.
-        // `Implements` lifted by spec §8.2; `Defines` lifted by this PR (§8.4).
-        // Only `Fetches` remains; when it ships, delete this assertion.
-        assert!(
-            !parallel_buckets.contains_key("Fetches"),
-            "RelType Fetches unexpectedly emitted by Pass-2 — \
-             spec §8.5 will lift this; update this assertion when it ships",
-        );
+        // Emit-zero invariant: only `Imports` remains intentionally post-process
+        // only — see `crates/ecp-analyzer/src/post_process/imports_edges.rs`
+        // Tier-1-2-3 resolver for cross-file basename / dir-component indexing
+        // that can't be moved to Pass-2 without breaking its streaming design.
+        // `Implements` lifted §8.2, `Defines` §8.4, `Fetches` (this PR) §8.5.
 
         // Imports is intentionally post-process only (imports_edges.rs Tier-1-2-3
         // resolver); Pass-2 must never emit it.
@@ -3145,8 +3186,8 @@ mod tests {
         assert!(dump_path.exists(), "serial dump path was not taken");
 
         // Fixture coverage: assert each expected category fired at least once.
-        // Implements + Defines required — IThing Interface fixture + scope_defines
-        // post-process must trigger them.
+        // Implements + Defines + Fetches all required — IThing Interface fixture +
+        // scope_defines post-process + RouteIndex post-Pass-2 join must trigger them.
         for required in &[
             "Calls",
             "Extends",
@@ -3155,6 +3196,7 @@ mod tests {
             "References",
             "HandlesRoute",
             "Defines",
+            "Fetches",
         ] {
             assert!(
                 parallel_buckets.contains_key(*required),
@@ -3333,8 +3375,8 @@ mod tests {
         );
         let edge = fetches[0];
         assert!(
-            (edge.confidence - 0.9).abs() < 1e-6,
-            "Fetches confidence must be 0.9 for exact-path matches; got {}",
+            (edge.confidence - 0.8).abs() < 1e-6,
+            "Fetches confidence must be 0.8 for exact-path matches; got {}",
             edge.confidence
         );
         // Target must be the Route node.

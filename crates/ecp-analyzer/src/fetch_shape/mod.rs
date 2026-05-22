@@ -26,6 +26,54 @@ pub mod consumer_keys;
 pub mod fetch_urls;
 pub mod response_shapes;
 
+/// Normalize an HTTP route path for `(method, path)` index lookup.
+///
+/// Applied identically to both the route-server side and the HTTP-client
+/// call side so that `app.get('/api/users/:id', h)` and
+/// `fetch('/api/users/:id')` both normalize to `"api/users/:*"`.
+///
+/// Rules (applied in order):
+/// 1. If the path starts with `http://` or `https://`, the scheme+host are
+///    NOT stripped — external-host URLs intentionally fail to match in-graph
+///    routes (cross-repo topology is handled by `ecp contracts`, not here).
+///    Only relative paths (starting with `/`) are matched.
+/// 2. Strip query string (`/api/users?page=2` → `/api/users`).
+/// 3. Strip leading and trailing `/`.
+/// 4. Replace every path segment that is a parameter placeholder
+///    (`:param`, `{param}`, `<param>`, or `${expr}`) with `:*`.
+///
+/// Returns `(normalized_path, is_templated)`.  `is_templated` is `true`
+/// when at least one placeholder was replaced — the builder uses this to
+/// pick confidence 0.6 (templated) vs 0.8 (exact).
+pub fn normalize_route_path(path: &str) -> (String, bool) {
+    // Strip query string.
+    let path = path.split('?').next().unwrap_or(path);
+
+    // Strip leading `/` and trailing `/`.
+    let path = path.trim_start_matches('/').trim_end_matches('/');
+
+    // Normalize per-segment: `:param` / `{param}` / `<param>` / `${expr}` → `:*`.
+    let mut is_templated = false;
+    let normalized = path
+        .split('/')
+        .map(|seg| {
+            if seg.starts_with(':')
+                || (seg.starts_with('{') && seg.ends_with('}'))
+                || (seg.starts_with('<') && seg.ends_with('>'))
+                || seg.contains("${")
+            {
+                is_templated = true;
+                ":*"
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    (normalized, is_templated)
+}
+
 /// Base reason tag every Fetches edge carries. Downstream parsers
 /// reject reasons that don't start with this token.
 pub const REASON_TAG: &str = "fetch-url-match";
@@ -85,6 +133,78 @@ pub fn parse_reason(reason: &str) -> Option<ParsedReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── normalize_route_path ─────────────────────────────────────────────
+
+    #[test]
+    fn normalize_strips_leading_slash() {
+        let (p, tmpl) = normalize_route_path("/api/users");
+        assert_eq!(p, "api/users");
+        assert!(!tmpl);
+    }
+
+    #[test]
+    fn normalize_express_param() {
+        let (p, tmpl) = normalize_route_path("/api/users/:id");
+        assert_eq!(p, "api/users/:*");
+        assert!(tmpl);
+    }
+
+    #[test]
+    fn normalize_brace_param() {
+        let (p, tmpl) = normalize_route_path("/api/users/{id}");
+        assert_eq!(p, "api/users/:*");
+        assert!(tmpl);
+    }
+
+    #[test]
+    fn normalize_angle_param() {
+        let (p, tmpl) = normalize_route_path("/api/users/<id>");
+        assert_eq!(p, "api/users/:*");
+        assert!(tmpl);
+    }
+
+    #[test]
+    fn normalize_dollar_brace_interp() {
+        // Client-side template literal `/api/users/${id}`
+        let (p, tmpl) = normalize_route_path("/api/users/${id}");
+        assert_eq!(p, "api/users/:*");
+        assert!(tmpl);
+    }
+
+    #[test]
+    fn normalize_strips_query_string() {
+        let (p, tmpl) = normalize_route_path("/api/users?page=2");
+        assert_eq!(p, "api/users");
+        assert!(!tmpl);
+    }
+
+    #[test]
+    fn normalize_external_host_not_stripped() {
+        // External-host URLs are NOT normalized to path-only — they intentionally
+        // produce a different normalized form than in-graph routes so they never
+        // match (cross-repo topology handled by ecp contracts).
+        let (p, _tmpl) = normalize_route_path("https://api.example.com/api/users");
+        assert_ne!(p, "api/users", "external host must not be stripped");
+        // The normalized form retains the host component (after stripping leading `/`).
+        assert!(p.contains("api.example.com"), "host retained: {p}");
+    }
+
+    #[test]
+    fn normalize_strips_trailing_slash() {
+        let (p, tmpl) = normalize_route_path("/api/users/");
+        assert_eq!(p, "api/users");
+        assert!(!tmpl);
+    }
+
+    #[test]
+    fn normalize_exact_path_not_templated() {
+        let (p, tmpl) = normalize_route_path("/api/users/42");
+        assert_eq!(p, "api/users/42");
+        assert!(!tmpl);
+    }
+
+    // ── format_reason / parse_reason ────────────────────────────────────
 
     #[test]
     fn format_bare_no_keys_no_count() {
