@@ -141,6 +141,14 @@ the older change.
 - **size**: S each
 - **links**: PR #334 CI-M-followup commit `fix(build): dir_size tolerant of tantivy background race`；`crates/ecp-analyzer/src/resolution/builder.rs:827-882`
 
+### FU-2026-05-23-004  ·  surfaced in PR fix/reindex-head-sha-drift
+- **owner**: unassigned
+- **scope**: Out-of-band branch switch — 若使用者從 IDE / GUI / 外部終端執行 `git checkout`，PostToolUse hook 不會 fire，下一個 `ecp` read command 仍會在 `main.rs:231` 同步 cold-rebuild 1-2s。本 PR 只蓋了 Bash tool 觸發的路徑（commit/merge/rebase/cherry-pick/pull/checkout/switch/reset）。
+- **why-deferred**: 真正治本要在 `main.rs:231` 把 `ensure_fresh` 從 sync 改成「attach previous SHA L2 + background rebuild for new SHA」雙路徑，涉及 promotion 邏輯 + Engine::load 的 stale-graph 標示；scope 不止 hook 層
+- **next-action**: 設計 spike PR — 在 `auto_ensure::ensure_fresh` Missing 分支加 `attach_latest_sibling_sha` 回退路徑，讀取最近一次 publish 的 commit_dir 作為 warm base，並 fire-and-forget spawn 真正的 build_l2；engine 端要能標示 graph header `is_stale_for_sha: true` 給上層 LLM context 看
+- **size**: M（~150 LOC + integration tests for stale-attach path）
+- **links**: PR fix/reindex-head-sha-drift；`crates/ecp-cli/src/main.rs:231`；`crates/ecp-cli/src/auto_ensure.rs:179-247`
+
 ---
 
 ## Done

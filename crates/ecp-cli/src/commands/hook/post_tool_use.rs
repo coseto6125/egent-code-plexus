@@ -23,10 +23,19 @@ use std::sync::OnceLock;
 
 /// Git-mutation matcher. Compiled once per process — PostToolUse fires
 /// on every Bash tool call so amortising the regex build matters.
+///
+/// `checkout` / `switch` / `reset` cover branch-switch verbs that change
+/// HEAD — without them, the next `ecp` read command would hit
+/// `auto_ensure::ensure_fresh` synchronously and pay the cold-rebuild
+/// cost (~1-2 s on a mid-size repo) on the user's first query instead of
+/// kicking the rebuild to a background spawn here.
 fn git_mutation_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r"\bgit\s+(commit|merge|rebase|cherry-pick|pull)(\s|$)").unwrap()
+        regex::Regex::new(
+            r"\bgit\s+(commit|merge|rebase|cherry-pick|pull|checkout|switch|reset)(\s|$)",
+        )
+        .unwrap()
     })
 }
 
@@ -111,4 +120,50 @@ fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
             failed: &failed,
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_git_mutation;
+
+    #[test]
+    fn commit_verbs_match() {
+        for cmd in [
+            "git commit -m foo",
+            "git merge feature",
+            "git rebase main",
+            "git cherry-pick abc123",
+            "git pull",
+        ] {
+            assert!(is_git_mutation(cmd), "expected match: {cmd}");
+        }
+    }
+
+    #[test]
+    fn branch_switch_verbs_match() {
+        for cmd in [
+            "git checkout main",
+            "git checkout -b feat/x",
+            "git switch develop",
+            "git switch -c new-branch",
+            "git reset --hard HEAD~1",
+        ] {
+            assert!(is_git_mutation(cmd), "expected match: {cmd}");
+        }
+    }
+
+    #[test]
+    fn non_mutating_verbs_dont_match() {
+        for cmd in [
+            "git status",
+            "git log --oneline",
+            "git diff HEAD",
+            "git fetch origin",
+            "git branch -a",
+            "ls -la",
+            "echo \"git commit -m foo\"",
+        ] {
+            assert!(!is_git_mutation(cmd), "expected no match: {cmd}");
+        }
+    }
 }
