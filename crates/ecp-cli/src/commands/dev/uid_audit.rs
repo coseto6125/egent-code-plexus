@@ -167,13 +167,33 @@ fn lang_from_path(p: &str) -> &'static str {
 /// `"<bs_kind>: first=K:P:O:N second=K:P:O:N"` and return the four `second=`
 /// fields. Returns `None` if the format is unexpected — callers count these
 /// as "unparsed" and surface the figure so silent parser drift is visible.
+///
+/// The hint's analyzer-side emitter (`resolution::builder.rs::format!(...)`)
+/// joins four `:`-separated fields. Three of them (`K`/`P`/`N`) are normally
+/// `:`-free, but `O` (`owner_class`) carries Rust path syntax — `crate::mod::Type`
+/// — so a naive `splitn(4, ':')` mis-attributes part of the owner into the
+/// `N` field. Concrete drift caught on Rust corpus: clusters reported
+/// `owner='sealed'` + `name=':FromStreamPriv<T>:InternalCollection'` when the
+/// true split is `owner='sealed::FromStreamPriv<T>'` + `name='InternalCollection'`.
+///
+/// Strategy:
+///   1. `splitn(3, ':')` to peel `kind` and `path` from the front (these are
+///      `:`-free in every parser).
+///   2. `rsplit_once(':')` on the remainder to peel `name` off the right
+///      (names are `:`-free in every parser the uid-collision path touches).
+///   3. Whatever's left in between is `owner_class`, `::` preserved verbatim.
+///
+/// Limitation: if a parser ever emits a name containing `:` (e.g. Swift
+/// selector form `init(foo:bar:)`), the rsplit picks up that trailing `:`
+/// and mis-attributes. uid-collision records aren't issued for Swift
+/// selectors today, so this is theoretical — but worth knowing.
 fn parse_hint(hint: &str) -> Option<(&str, &str, &str, &str)> {
     let second = hint.split(" second=").nth(1)?;
-    let mut parts = second.splitn(4, ':');
-    let kind = parts.next()?;
-    let path = parts.next()?;
-    let owner = parts.next()?;
-    let name = parts.next()?;
+    let mut head = second.splitn(3, ':');
+    let kind = head.next()?;
+    let path = head.next()?;
+    let rest = head.next()?; // owner_class + ':' + name
+    let (owner, name) = rest.rsplit_once(':')?;
     Some((kind, path, owner, name))
 }
 
@@ -350,6 +370,33 @@ mod tests {
         let got = parse_hint(hint).expect("hint must parse");
         assert_eq!(got.2, ""); // owner_class can be empty (top-level)
         assert_eq!(got.3, "main");
+    }
+
+    /// Regression: a naive `splitn(4, ':')` mis-attributes `::` inside Rust
+    /// `owner_class`, surfacing in real `dev uid-audit` output as
+    /// `owner='sealed'` + `name=':FromStreamPriv<T>:InternalCollection'`
+    /// (one cluster per affected file → false fan-out, blocking root-cause
+    /// triage). The current `splitn(3) + rsplit_once` recovers the true split.
+    #[test]
+    fn parse_hint_rust_owner_with_double_colon_preserves_owner() {
+        let hint = "uid-collision: \
+            first=Typedef:tokio-stream/src/stream_ext/collect.rs:sealed::FromStreamPriv<T>:InternalCollection \
+            second=Typedef:tokio-stream/src/stream_ext/collect.rs:sealed::FromStreamPriv<T>:InternalCollection";
+        let (kind, path, owner, name) = parse_hint(hint).expect("hint must parse");
+        assert_eq!(kind, "Typedef");
+        assert_eq!(path, "tokio-stream/src/stream_ext/collect.rs");
+        assert_eq!(owner, "sealed::FromStreamPriv<T>");
+        assert_eq!(name, "InternalCollection");
+    }
+
+    /// Deeply-nested Rust / C++ owner path with multiple `::` separators must
+    /// also survive — `crate::a::b::c::Type::Inner` → owner stays whole.
+    #[test]
+    fn parse_hint_deep_owner_chain_preserved() {
+        let hint = "uid-collision: first=Method:src/a.rs::nop second=Method:src/x.rs:crate::a::b::c::Outer:inner";
+        let (_, _, owner, name) = parse_hint(hint).expect("hint must parse");
+        assert_eq!(owner, "crate::a::b::c::Outer");
+        assert_eq!(name, "inner");
     }
 
     /// Exhaustive coverage: every match arm in `lang_from_path` must have at
