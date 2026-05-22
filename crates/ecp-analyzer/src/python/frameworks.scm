@@ -265,7 +265,10 @@
     (_
       (call
         function: (attribute
-          object: (identifier) @celery.topic
+          object: [
+            (identifier) @celery.topic
+            (attribute attribute: (identifier) @celery.topic)
+          ]
           attribute: (identifier) @_method (#eq? @_method "delay"))))))
 
 ;; Celery (sync): `add.apply_async(...)` inside a function.
@@ -275,7 +278,10 @@
     (_
       (call
         function: (attribute
-          object: (identifier) @celery.topic
+          object: [
+            (identifier) @celery.topic
+            (attribute attribute: (identifier) @celery.topic)
+          ]
           attribute: (identifier) @_method (#eq? @_method "apply_async"))))))
 
 ;; Celery (sync): `app.send_task("tasks.add", ...)` inside a function.
@@ -300,7 +306,10 @@
       (await
         (call
           function: (attribute
-            object: (identifier) @celery.topic
+            object: [
+              (identifier) @celery.topic
+              (attribute attribute: (identifier) @celery.topic)
+            ]
             attribute: (identifier) @_method (#eq? @_method "delay")))))))
 
 ;; Celery (async wrapper): `await add.apply_async(...)` inside an async function.
@@ -311,7 +320,10 @@
       (await
         (call
           function: (attribute
-            object: (identifier) @celery.topic
+            object: [
+              (identifier) @celery.topic
+              (attribute attribute: (identifier) @celery.topic)
+            ]
             attribute: (identifier) @_method (#eq? @_method "apply_async")))))))
 
 ;; Celery (async wrapper): `await app.send_task("tasks.add", ...)` inside an async function.
@@ -325,6 +337,97 @@
             attribute: (identifier) @_send (#eq? @_send "send_task"))
           arguments: (argument_list
             . (string) @celery.topic))))))
+
+;; Assignment-form duplicates — `result = <task>.delay(...)` / `apply_async(...)`
+;; / `app.send_task("...", ...)`. The `(assignment right: ...)` wrapper adds a
+;; depth level over the bare expression-statement form above; SQS uses the same
+;; convention (see lines 568-581). Without these, real-world Celery callers
+;; like `result = tasks.add.delay(a, b)` (the idiomatic Flask/FastAPI pattern)
+;; would silently fall through. Async variants (line below) cover
+;; `result = await ...`.
+
+;; Celery (sync, assignment): `result = add.delay(...)` / `result = mod.task.delay(...)`.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (assignment
+        right: (call
+          function: (attribute
+            object: [
+              (identifier) @celery.topic
+              (attribute attribute: (identifier) @celery.topic)
+            ]
+            attribute: (identifier) @_method (#eq? @_method "delay")))))))
+
+;; Celery (sync, assignment): `result = add.apply_async(args=[...])`.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (assignment
+        right: (call
+          function: (attribute
+            object: [
+              (identifier) @celery.topic
+              (attribute attribute: (identifier) @celery.topic)
+            ]
+            attribute: (identifier) @_method (#eq? @_method "apply_async")))))))
+
+;; Celery (sync, assignment): `result = app.send_task("tasks.add", ...)`.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (assignment
+        right: (call
+          function: (attribute
+            attribute: (identifier) @_send (#eq? @_send "send_task"))
+          arguments: (argument_list
+            . (string) @celery.topic))))))
+
+;; Celery (async, assignment): `result = await add.delay(...)`.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (assignment
+        right: (await
+          (call
+            function: (attribute
+              object: [
+                (identifier) @celery.topic
+                (attribute attribute: (identifier) @celery.topic)
+              ]
+              attribute: (identifier) @_method (#eq? @_method "delay"))))))))
+
+;; Celery (async, assignment): `result = await add.apply_async(...)`.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (assignment
+        right: (await
+          (call
+            function: (attribute
+              object: [
+                (identifier) @celery.topic
+                (attribute attribute: (identifier) @celery.topic)
+              ]
+              attribute: (identifier) @_method (#eq? @_method "apply_async"))))))))
+
+;; Celery (async, assignment): `result = await app.send_task("...", ...)`.
+(function_definition
+  name: (identifier) @celery.fn
+  body: (block
+    (_
+      (assignment
+        right: (await
+          (call
+            function: (attribute
+              attribute: (identifier) @_send (#eq? @_send "send_task"))
+            arguments: (argument_list
+              . (string) @celery.topic)))))))
 
 ;; ---- Redis Python pub/sub (T5-26) ----
 ;; Covers redis (sync) and aioredis (async).

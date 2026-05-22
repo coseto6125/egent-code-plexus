@@ -197,18 +197,13 @@ def enqueue():
     );
 }
 
-/// Chained `module.task.delay(...)` — topic should be "task" (last attribute
-/// segment before `.delay`), not "module".
-///
-/// Tree-sitter resolves the `object` of the outer attribute access to the
-/// `attribute` expression `module.task`; however, `@celery.topic` captures
-/// the `object: (identifier)` node, which only matches when the receiver is a
-/// plain identifier. A chained access like `module.task` has `object: (attribute)`,
-/// not `object: (identifier)`, so it does NOT match the current pattern.
-/// This test documents the current behavior (no capture) rather than assuming
-/// topic="task". Tracked as T5-20-followup for chained attribute support.
+/// Chained `module.task.delay(...)` — topic="task" (last attribute segment
+/// before `.delay`), matching Celery's unqualified registered task-name
+/// convention. Query alternation handles both `(identifier)` and
+/// `(attribute attribute: (identifier))` receivers; arbitrary nesting depth
+/// (e.g. `pkg.mod.task.delay(...)`) captures the last identifier.
 #[test]
-fn test_celery_chained_attribute_delay_no_capture() {
+fn test_celery_chained_attribute_delay_captures_last_segment() {
     let src = r#"
 import celery
 
@@ -216,14 +211,128 @@ def enqueue():
     module.task.delay(1, 2)
 "#;
     let result = run(src, &["celery"]);
-    // Chained access `module.task.delay(...)` — `module.task` is an attribute
-    // node (not a plain identifier), so the `object: (identifier)` capture in
-    // the pattern does not match. Result is empty — documented limitation.
-    assert!(
-        result.is_empty(),
-        "chained attribute delay: current pattern captures plain identifiers only; got {:?}",
+    assert_eq!(
+        result.len(),
+        1,
+        "chained `module.task.delay(...)` should emit one RawEventTopic; got {:?}",
         result
     );
+    assert_eq!(result[0].lib, FrameworkId::Celery);
+    assert_eq!(result[0].direction, PubSub::Publish);
+    assert_eq!(
+        result[0]
+            .topic_literal
+            .as_deref()
+            .expect("topic_literal must be Some"),
+        "task"
+    );
+}
+
+/// Chained `module.task.apply_async(...)` — topic="task". Same alternation as delay.
+#[test]
+fn test_celery_chained_attribute_apply_async_captures_last_segment() {
+    let src = r#"
+import celery
+
+def enqueue():
+    module.task.apply_async(args=[1, 2])
+"#;
+    let result = run(src, &["celery"]);
+    assert_eq!(
+        result.len(),
+        1,
+        "chained `module.task.apply_async(...)` should emit one RawEventTopic; got {:?}",
+        result
+    );
+    assert_eq!(result[0].topic_literal.as_deref(), Some("task"));
+}
+
+/// Deeper chain `pkg.mod.task.delay(...)` — captures rightmost identifier ("task").
+#[test]
+fn test_celery_deep_chained_attribute_delay_captures_last_segment() {
+    let src = r#"
+import celery
+
+def enqueue():
+    pkg.mod.task.delay(1, 2)
+"#;
+    let result = run(src, &["celery"]);
+    assert_eq!(
+        result.len(),
+        1,
+        "deep-chain `pkg.mod.task.delay(...)` should emit one RawEventTopic; got {:?}",
+        result
+    );
+    assert_eq!(result[0].topic_literal.as_deref(), Some("task"));
+}
+
+/// Assignment-form: `result = tasks.add.delay(...)` — idiomatic Flask/FastAPI
+/// pattern where the AsyncResult is captured. Mirrors the SQS convention of
+/// duplicating queries with `(assignment right: ...)` wrap.
+#[test]
+fn test_celery_chained_assignment_delay_captures_last_segment() {
+    let src = r#"
+from celery.result import AsyncResult
+from . import tasks
+
+def enqueue():
+    result = tasks.add.delay(1, 2)
+"#;
+    let result = run(src, &["celery.result"]);
+    assert_eq!(
+        result.len(),
+        1,
+        "`result = tasks.add.delay(...)` should emit one RawEventTopic; got {:?}",
+        result
+    );
+    assert_eq!(result[0].topic_literal.as_deref(), Some("add"));
+}
+
+/// Assignment-form: `result = tasks.add.apply_async(...)`.
+#[test]
+fn test_celery_chained_assignment_apply_async_captures_last_segment() {
+    let src = r#"
+import celery
+
+def enqueue():
+    result = tasks.add.apply_async(args=[1, 2])
+"#;
+    let result = run(src, &["celery"]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].topic_literal.as_deref(), Some("add"));
+}
+
+/// Assignment-form async: `result = await tasks.add.delay(...)`.
+#[test]
+fn test_celery_chained_assignment_await_delay_captures_last_segment() {
+    let src = r#"
+import celery
+
+async def enqueue():
+    result = await tasks.add.delay(1, 2)
+"#;
+    let result = run(src, &["celery"]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].topic_literal.as_deref(), Some("add"));
+}
+
+/// Async-wrapper variant of chained receiver: `await module.task.delay(...)`.
+#[test]
+fn test_celery_chained_await_delay_captures_last_segment() {
+    let src = r#"
+import celery
+
+async def enqueue():
+    await module.task.delay(1, 2)
+"#;
+    let result = run(src, &["celery"]);
+    assert_eq!(
+        result.len(),
+        1,
+        "chained `await module.task.delay(...)` should emit one RawEventTopic; got {:?}",
+        result
+    );
+    assert_eq!(result[0].topic_literal.as_deref(), Some("task"));
 }
 
 /// Async wrapper: `await add.delay(...)` → topic="add", Publish.
