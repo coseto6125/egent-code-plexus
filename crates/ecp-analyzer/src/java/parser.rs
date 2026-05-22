@@ -31,6 +31,11 @@ pub struct JavaProvider {
 }
 
 struct JavaCaptureIndices {
+    /// The `@import` capture on the import_declaration node itself
+    /// (distinct from `import.name` and `import.source`). Cached here so
+    /// the per-capture inner loop avoids `query.capture_index_for_name("import")`
+    /// — that call walks the full capture_names slice every time.
+    import_decl: Option<u32>,
     import_name: Option<u32>,
     import_source: Option<u32>,
     /// Captured `asterisk` node present when the import is a wildcard (`.*`).
@@ -65,6 +70,7 @@ impl JavaProvider {
         );
         let query = Query::new(&language, &query_source)?;
         let indices = JavaCaptureIndices {
+            import_decl: query.capture_index_for_name("import"),
             import_name: query.capture_index_for_name("import.name"),
             import_source: query.capture_index_for_name("import.source"),
             import_wildcard: query.capture_index_for_name("import.wildcard"),
@@ -228,10 +234,8 @@ impl LanguageProvider for JavaProvider {
                 // Track the `@import` pattern node (the import_declaration itself).
                 // The `@import` capture uses the same index in both query patterns,
                 // so whichever fires populates import_decl_node.
-                if let Some(import_idx) = query_capture_index_named(&self.query, "import") {
-                    if cap.index == import_idx {
-                        import_decl_node = Some(cap.node);
-                    }
+                if cap_idx == idx.import_decl {
+                    import_decl_node = Some(cap.node);
                 }
             }
 
@@ -456,13 +460,6 @@ impl LanguageProvider for JavaProvider {
             raw_function_metas,
         })
     }
-}
-
-/// Helper to look up a capture index by name from the compiled query.
-/// Returns `None` if the name does not appear in the query.
-#[inline]
-fn query_capture_index_named(query: &Query, name: &str) -> Option<u32> {
-    query.capture_index_for_name(name)
 }
 
 #[cfg(test)]
