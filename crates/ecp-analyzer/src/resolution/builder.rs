@@ -1517,9 +1517,31 @@ impl GraphBuilder {
         // set directly by each parser. Must run BEFORE the CSR construction below
         // so new edges land in `out_offsets` / `in_offsets`.
         if prof {
+            let n_intra = traces
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.process_type,
+                        ecp_core::algorithms::process_trace::ProcessType::IntraCommunity
+                    )
+                })
+                .count();
+            let n_cross = traces.len() - n_intra;
+            let avg_steps = if traces.is_empty() {
+                0.0
+            } else {
+                traces.iter().map(|t| t.trace.len()).sum::<usize>() as f32 / traces.len() as f32
+            };
+            let avg_spread = if traces.is_empty() {
+                0.0
+            } else {
+                traces.iter().map(|t| t.communities.len()).sum::<usize>() as f32
+                    / traces.len() as f32
+            };
             eprintln!(
-                "prof build.pass4_processes: {:.3}s",
-                _t_pass4.elapsed().as_secs_f32()
+                "prof build.pass4_processes: {:.3}s count={} intra={n_intra} cross={n_cross} avg_steps={avg_steps:.2} avg_spread={avg_spread:.2}",
+                _t_pass4.elapsed().as_secs_f32(),
+                traces.len(),
             );
         }
         let _t_class_mem = std::time::Instant::now();
