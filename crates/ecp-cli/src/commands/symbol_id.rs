@@ -1,40 +1,21 @@
 //! FQN (fully-qualified-name) helpers for `ecp inspect` and `ecp impact`.
-//!
-//! ## Owner-class resolution strategy
-//!
-//! On `main`, the archived `Node` has no `owner_class` field — the field lives
-//! on `RawNode` (intermediate parse stage) and is used to emit `HasMethod`
-//! edges during graph construction but is not persisted. Walking the incoming
-//! edge set for `HasMethod` / `HasProperty` is the zero-copy stopgap.
-//!
-//! Follow-up: when PR #285 (`fix/t1-11-rename-owner-class`) lands and adds
-//! `Node.owner_class: StrRef` to the archived schema, `resolve_owner_class`
-//! collapses to a single field read — O(1) instead of O(in-degree). The
-//! current edge-walk semantics stay correct in the meantime.
 
-use ecp_core::graph::{ArchivedRelType, ArchivedZeroCopyGraph};
+use ecp_core::graph::ArchivedZeroCopyGraph;
 
-/// Resolve the owner class name for a node by scanning its incoming edges for
-/// a `HasMethod` or `HasProperty` edge from a class-kind node.
+/// Resolve the owner class name for a node by reading `Node.owner_class`
+/// directly (added in T1-4 / PR #285). O(1) field read.
 ///
-/// Returns the owning class name when found, `None` for module-level symbols.
-/// The lookup is O(in-degree of node), typically 1 for methods, 0 for free
-/// functions — never a bottleneck in practice.
+/// Returns the owning class name when set, `None` for module-level symbols
+/// (StrRef::default with len=0 — empty string resolves to "").
 pub fn resolve_owner_class(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> Option<&str> {
-    let in_start = graph.in_offsets[node_idx].to_native() as usize;
-    let in_end = graph.in_offsets[node_idx + 1].to_native() as usize;
-    for i in in_start..in_end {
-        let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-        let edge = &graph.edges[edge_idx];
-        if matches!(
-            edge.rel_type,
-            ArchivedRelType::HasMethod | ArchivedRelType::HasProperty
-        ) {
-            let src_idx = edge.source.to_native() as usize;
-            return Some(graph.nodes[src_idx].name.resolve(&graph.string_pool));
-        }
+    let oc = graph.nodes[node_idx]
+        .owner_class
+        .resolve(&graph.string_pool);
+    if oc.is_empty() {
+        None
+    } else {
+        Some(oc)
     }
-    None
 }
 
 /// Format a fully-qualified name from an optional owner class and a bare name.
