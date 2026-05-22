@@ -83,6 +83,94 @@ fn collect_impl_methods(
     }
 }
 
+/// Extract the trait name from `impl Trait for Type`.
+///
+/// Returns the raw text of the `trait:` field (e.g. `"Display"`,
+/// `"zed::Extension"`, `"Iterator<Item = u8>"`).  Returns `None` for
+/// inherent impls (`impl Type { … }`) where no `trait:` field is present.
+///
+/// Callers that need a stable, non-generic token for UID purposes should
+/// strip generics themselves; here we return the raw text so the caller
+/// can decide.
+pub fn impl_trait_name(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
+    let trait_node = impl_node.child_by_field_name("trait")?;
+    node_text(trait_node, source)
+}
+
+/// Walk `node`'s parent chain to find the nearest enclosing `struct_item`
+/// or `enum_item` and return its name.  Used to set `owner_class` for
+/// struct-field `Property` nodes so that two structs with the same field
+/// name do not produce the same UID.
+pub fn enclosing_struct_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        if matches!(n.kind(), "struct_item" | "enum_item") {
+            return n
+                .child_by_field_name("name")
+                .and_then(|nn| node_text(nn, source));
+        }
+        // Stop at impl or source boundaries — don't escape the struct.
+        if matches!(n.kind(), "impl_item" | "source_file") {
+            return None;
+        }
+        current = n.parent();
+    }
+    None
+}
+
+/// Walk `node`'s parent chain to find the nearest enclosing `function_item`
+/// and return its name.  Used to set `owner_class` for items nested inside
+/// functions (e.g. `const`/`fn`/`macro_rules!` defined inside a function
+/// body) so that top-level and function-local definitions with the same name
+/// do not collide on UID.
+pub fn enclosing_function_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        if n.kind() == "function_item" {
+            return n
+                .child_by_field_name("name")
+                .and_then(|nn| node_text(nn, source));
+        }
+        // Stop at source-file boundary.
+        if n.kind() == "source_file" {
+            return None;
+        }
+        current = n.parent();
+    }
+    None
+}
+
+/// Walk `node`'s parent chain to find the nearest enclosing `impl_item` or
+/// `trait_item` and return a discriminating context string for associated types.
+///
+/// - `impl Trait for Type { type Assoc = …; }` → `Some("Trait")` (trait name)
+/// - `impl Type { type Assoc = …; }` → `Some("")` (inherent impl, no trait)
+/// - `trait Trait { type Assoc; }` → `Some("Trait")` (trait definition name)
+/// - top-level type alias → `None`
+///
+/// This ensures that `type Error` in `impl Encoder for Http` and `type Error`
+/// in `impl Decoder for Http` get distinct owner_class values and thus
+/// distinct UIDs.
+pub fn enclosing_impl_or_trait_context(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        if n.kind() == "impl_item" {
+            // Use the trait name for trait-impls; empty string for inherent.
+            return Some(impl_trait_name(&n, source).unwrap_or_default());
+        }
+        if n.kind() == "trait_item" {
+            return n
+                .child_by_field_name("name")
+                .and_then(|nn| node_text(nn, source));
+        }
+        if n.kind() == "source_file" {
+            return None;
+        }
+        current = n.parent();
+    }
+    None
+}
+
 /// Walk `node`'s parent chain to find the innermost enclosing `impl_item`
 /// and return the self-type name.  Returns `None` when the node is not inside
 /// any impl block (free function, module-level item, etc.).

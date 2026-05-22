@@ -1,5 +1,6 @@
 use super::receiver_types::{
-    build_impl_map, collect_local_types, enclosing_impl_type, extract_rust_calls,
+    build_impl_map, collect_local_types, enclosing_function_name, enclosing_impl_or_trait_context,
+    enclosing_impl_type, enclosing_struct_type, extract_rust_calls, impl_trait_name,
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
@@ -275,17 +276,65 @@ impl LanguageProvider for RustProvider {
                         _ => 0,
                     };
 
-                    // At-emit-time parent-chain walk to find the enclosing
-                    // impl_item. Correctly handles two structs with the same
-                    // method name — each function_item's ancestry leads to a
-                    // distinct impl_item, so no HashMap collision.
-                    let owner = if matches!(
-                        k,
-                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    ) {
-                        enclosing_impl_type(root, source)
-                    } else {
-                        None
+                    // At-emit-time parent-chain walk to set owner_class, which
+                    // is one of the four UID inputs.  Each kind has different
+                    // ancestry semantics:
+                    //
+                    // • Method/Constructor/Function inside an impl block → the
+                    //   impl's concrete type (e.g. "Dog").  Functions NOT inside
+                    //   an impl but nested inside another function get the
+                    //   enclosing function name so a local `fn helper()` doesn't
+                    //   collide with a top-level `fn helper()`.
+                    //
+                    // • Impl block itself → trait name for trait-impls
+                    //   (e.g. "Display"), empty string for inherent impls.
+                    //   This distinguishes `impl Dog {}` from
+                    //   `impl Display for Dog {}` in the same file.
+                    //
+                    // • Property (struct/enum field) → enclosing struct/enum name
+                    //   so that `field: T` in two different structs does not
+                    //   collide.
+                    //
+                    // • Typedef (associated type in impl) → impl self-type, so
+                    //   `type Error` in two different impls in the same file
+                    //   does not collide.
+                    //
+                    // • Const/Macro nested inside a function → enclosing function
+                    //   name, so a function-local `const X` does not collide with
+                    //   a file-level `const X`.
+                    let owner = match k {
+                        NodeKind::Method | NodeKind::Constructor => {
+                            enclosing_impl_type(root, source)
+                        }
+                        NodeKind::Function => {
+                            // Prefer impl-type owner (for methods matched by the
+                            // function pattern); fall back to enclosing function
+                            // name for nested free functions.
+                            enclosing_impl_type(root, source)
+                                .or_else(|| enclosing_function_name(root, source))
+                        }
+                        NodeKind::Impl => {
+                            // Trait name for trait-impls; empty string for
+                            // inherent impls (ensures `impl Dog` ≠ `impl Trait
+                            // for Dog` in UID space while keeping inherent-impl
+                            // nodes distinct from trait-impl nodes).
+                            Some(impl_trait_name(&root, source).unwrap_or_default())
+                        }
+                        NodeKind::Property => enclosing_struct_type(root, source),
+                        NodeKind::Typedef => {
+                            // Associated types can appear in impl blocks or
+                            // trait definitions.  Use the trait name (for trait-
+                            // impls) or trait definition name so that `type Error`
+                            // in `impl Encoder for Http` and `type Error` in
+                            // `impl Decoder for Http` get distinct owner_class.
+                            // Falls back to None for top-level type aliases.
+                            enclosing_impl_or_trait_context(root, source)
+                        }
+                        NodeKind::Const | NodeKind::Macro => {
+                            // Const/macro inside a function → use function name.
+                            enclosing_function_name(root, source)
+                        }
+                        _ => None,
                     };
 
                     let mut merged = false;
