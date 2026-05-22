@@ -178,6 +178,7 @@ pub(crate) fn build_inside_locked(
             refs_at_build,
             refs_seen_since: vec![],
             builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+            binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
         };
         let t_meta = std::time::Instant::now();
         CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
@@ -668,6 +669,7 @@ mod tests {
             }],
             refs_seen_since: vec![],
             builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+            binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
         };
         CommitBuildMeta::write_atomic(&base.join("meta.json"), &meta).unwrap();
         CommitBuildMeta::write_atomic(&gen_dir.join("meta.json"), &meta).unwrap();

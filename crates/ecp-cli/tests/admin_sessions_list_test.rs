@@ -59,6 +59,7 @@ fn admin_sessions_list_shows_pure_reference_state() {
         refs_at_build: vec![],
         refs_seen_since: vec![],
         builder_fingerprint: None,
+        binary_commit_sha: None,
     };
     ecp_core::registry::CommitBuildMeta::write_atomic(&commit_dir.join("meta.json"), &cm).unwrap();
 

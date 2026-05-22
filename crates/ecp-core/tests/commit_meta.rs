@@ -18,6 +18,7 @@ fn round_trip_deterministic_json() {
         }],
         refs_seen_since: vec![],
         builder_fingerprint: None,
+        binary_commit_sha: None,
     };
     let s1 = serde_json::to_string(&meta).unwrap();
     let s2 = serde_json::to_string(&meta).unwrap();
@@ -43,6 +44,7 @@ fn atomic_write_round_trip() {
         refs_at_build: vec![],
         refs_seen_since: vec![],
         builder_fingerprint: None,
+        binary_commit_sha: None,
     };
     CommitBuildMeta::write_atomic(&path, &meta).unwrap();
     let read = CommitBuildMeta::read(&path).unwrap();
@@ -64,6 +66,7 @@ fn embedding_status_computed_round_trips() {
         refs_at_build: vec![],
         refs_seen_since: vec![],
         builder_fingerprint: None,
+        binary_commit_sha: None,
     };
     let s = serde_json::to_string(&meta).unwrap();
     let back: CommitBuildMeta = serde_json::from_str(&s).unwrap();

@@ -29,6 +29,7 @@ fn setup_repo_with_l2(tmp: &Path) {
         refs_at_build: vec![],
         refs_seen_since: vec![],
         builder_fingerprint: None,
+        binary_commit_sha: None,
     };
     ecp_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm).unwrap();
 }

@@ -533,6 +533,51 @@ pub fn is_dev_metric_bs_kind(kind: &str) -> bool {
     DEV_METRIC_BS_KINDS.contains(&kind)
 }
 
+/// Field separator inside a uid-collision BlindSpot `hint` string.
+///
+/// ASCII Unit Separator (U+001F) — chosen because legitimate source-code
+/// identifiers may contain `:` (Swift selectors `init(foo:bar:)`, Rust
+/// path syntax `Mod::Type`, Windows paths `C:\…`), so colon-delimited
+/// fields would be ambiguous to round-trip parse.
+///
+/// Producer: [`crate::graph::format_hint`] / `resolution::builder::classify_collision`.
+/// Consumer: `ecp_cli::commands::dev::uid_audit::parse_hint`.
+pub const HINT_FIELD_SEP: char = '\u{1f}';
+
+/// One side (first or second) of a uid-collision pair. Mirrors the fields
+/// that [`format_hint`] writes and [`parse_hint`](../../../ecp_cli/commands/dev/uid_audit/fn.parse_hint.html)
+/// reads back.
+#[derive(Debug, Clone, Copy)]
+pub struct HintFields<'a> {
+    pub kind: &'a str,
+    pub path: &'a str,
+    pub owner: &'a str,
+    pub name: &'a str,
+}
+
+/// Build the `hint` payload for a uid-collision BlindSpot. Format:
+///
+/// ```text
+/// {bs_kind}: first={k}{SEP}{p}{SEP}{o}{SEP}{n} second={k}{SEP}{p}{SEP}{o}{SEP}{n}
+/// ```
+///
+/// where `{SEP}` is [`HINT_FIELD_SEP`] (U+001F). Inverse of
+/// `ecp_cli::commands::dev::uid_audit::parse_hint`.
+pub fn format_hint(bs_kind: &str, first: HintFields<'_>, second: HintFields<'_>) -> String {
+    let sep = HINT_FIELD_SEP;
+    format!(
+        "{bs_kind}: first={}{sep}{}{sep}{}{sep}{} second={}{sep}{}{sep}{}{sep}{}",
+        first.kind,
+        first.path,
+        first.owner,
+        first.name,
+        second.kind,
+        second.path,
+        second.owner,
+        second.name,
+    )
+}
+
 /// Per-Calls-edge dispatch metadata. Sparse: only present for `Edge` whose
 /// `rel_type` is `RelType::Calls`. Sorted by `edge_idx` for binary-search
 /// lookup in `graph_query.rs` hot paths.
