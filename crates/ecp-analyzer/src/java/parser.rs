@@ -5,12 +5,25 @@ use crate::framework_helpers::{collect_jvm_transactional_scopes, has_import_from
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
+/// in `parse_file`.
+const BLIND_SPEC: &[(&str, &str)] = &[
+    (
+        "java-class-forname",
+        "Class.forName(<expr>) — runtime class loading by name; loaded class body is not statically determinable",
+    ),
+    (
+        "java-method-invoke",
+        "<expr>.invoke(...) — reflective method invocation; target method body resolved at runtime via Method handle",
+    ),
+];
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -58,6 +71,9 @@ struct JavaCaptureIndices {
     // Spring @RestController / @Controller route methods.
     spring_route_class: Option<u32>,
     spring_route_handler: Option<u32>,
+    // BlindSpot captures (FU-001 P2a).
+    blind_class_forname: Option<u32>,
+    blind_method_invoke: Option<u32>,
 }
 
 impl JavaProvider {
@@ -90,6 +106,8 @@ impl JavaProvider {
             spring_autowired_target: query.capture_index_for_name("spring.autowired.target"),
             spring_route_class: query.capture_index_for_name("spring.route.class"),
             spring_route_handler: query.capture_index_for_name("spring.route.handler"),
+            blind_class_forname: query.capture_index_for_name("blind.class_forname"),
+            blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
         };
 
         // Pre-resolve capture-name → NodeKind from the spec table so the
@@ -144,6 +162,7 @@ impl LanguageProvider for JavaProvider {
         let mut imports = Vec::new();
         // Buffer Spring refs and emit only if the file imports org.springframework.
         let mut pending_spring_refs: Vec<RawFrameworkRef> = Vec::new();
+        let mut blind_spots: Vec<BlindSpot> = Vec::new();
 
         let idx = &self.indices;
 
@@ -229,6 +248,22 @@ impl LanguageProvider for JavaProvider {
                     route_class_node = Some(cap.node);
                 } else if cap_idx == idx.spring_route_handler {
                     route_handler_node = Some(cap.node);
+                } else if cap_idx == idx.blind_class_forname {
+                    let (kind, hint) = BLIND_SPEC[0];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
+                } else if cap_idx == idx.blind_method_invoke {
+                    let (kind, hint) = BLIND_SPEC[1];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
                 }
 
                 // Track the `@import` pattern node (the import_declaration itself).
@@ -452,7 +487,7 @@ impl LanguageProvider for JavaProvider {
             documents: vec![],
             framework_refs,
             fanout_refs: vec![],
-            blind_spots: vec![],
+            blind_spots,
             schema_fields: None,
             event_topics,
             tx_scopes,

@@ -308,3 +308,23 @@
                   (string_literal) @sqs.topic)))))
         (#eq? @sqs.direction "receiveMessage"))))
 )
+
+;; ---- BlindSpot patterns (FU-001 P2a) ----
+;; Class.forName(<expr>) — runtime class loading by name string. Even with
+;; a literal arg the loaded class body is opaque to the resolver, so this
+;; emits unconditionally (unlike TS/JS import/require which gate on literal).
+((method_invocation
+   object: (identifier) @_obj
+   name: (identifier) @_m) @blind.class_forname
+  (#eq? @_obj "Class")
+  (#eq? @_m "forName"))
+
+;; <any>.invoke(<args>) — reflective dispatch anchor. Per Constraint 3 the
+;; outermost call in a chain `Class.forName(...).getDeclaredMethod(...).invoke(...)`
+;; is the dispatch site; matching `.invoke(...)` on any receiver catches both
+;; the chained form and the staged form (`m.invoke(target, args)`). Spring AOP
+;; / mock proxies also dispatch dynamically through `.invoke(...)`, so the
+;; broader match is informationally correct.
+((method_invocation
+   name: (identifier) @_m) @blind.method_invoke
+  (#eq? @_m "invoke"))
