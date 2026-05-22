@@ -546,6 +546,7 @@ impl LanguageProvider for TypeScriptProvider {
                     crate::event_topic::REDIS_TS,
                     crate::event_topic::KAFKA_NODE,
                     crate::event_topic::RABBITMQ_TS,
+                    crate::event_topic::SQS_TS,
                 ],
                 &imports,
             );

@@ -150,6 +150,7 @@
                   value: (literal_element
                     (interpreted_string_literal) @kafka.topic))))))))))
 
+
 ;; segmentio/kafka-go: WriteMessages inside a method_declaration.
 (method_declaration
   name: (field_identifier) @kafka.go.fn
@@ -169,6 +170,7 @@
                     (#eq? @_mtopic_key "Topic"))
                   value: (literal_element
                     (interpreted_string_literal) @kafka.topic))))))))))
+
 
 ;; Shopify/sarama: msg := &sarama.ProducerMessage{Topic: "topic", ...}
 ;; Captures Topic string literal directly from the struct literal.
@@ -191,3 +193,93 @@
                     (#eq? @_stopic_key "Topic"))
                   value: (literal_element
                     (interpreted_string_literal) @kafka.topic))))))))))
+
+;; ---- AWS SQS Go SDK v2 (T5-18) ----
+;; Pattern: client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String("url")})
+;;          client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String("url")})
+;;
+;; Anchored to function_declaration to capture the enclosing function name
+;; alongside the topic literal in a single match.
+;; Import gate (github.com/aws/aws-sdk-go-v2/service/sqs) enforced at runtime.
+;;
+;; Go AST structure (tree-sitter):
+;;   block > statement_list > expression_statement > call_expression
+;;     arguments > unary_expression > composite_literal
+;;       body > literal_value > keyed_element
+;;         key: literal_element > identifier("QueueUrl")
+;;         value: literal_element > call_expression(aws.String)
+;;           arguments > interpreted_string_literal("url")
+;;
+;; Dynamic QueueUrl (variable identifier, not string literal inside aws.String)
+;; does not produce an interpreted_string_literal → no match → no fabrication.
+
+;; Publish — SendMessage / SendMessageBatch with literal QueueUrl.
+(function_declaration
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (statement_list
+      (expression_statement
+        (call_expression
+          function: (selector_expression
+            field: (field_identifier) @sqs.direction)
+          arguments: (argument_list
+            (unary_expression
+              operand: (composite_literal
+                body: (literal_value
+                  (keyed_element
+                    key: (literal_element
+                      (identifier) @_qk)
+                    value: (literal_element
+                      (call_expression
+                        arguments: (argument_list
+                          (interpreted_string_literal) @sqs.topic))))))))
+          (#match? @sqs.direction "^(SendMessage|SendMessageBatch)$")
+          (#eq? @_qk "QueueUrl"))))))
+
+;; Subscribe — ReceiveMessage with literal QueueUrl.
+(function_declaration
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (statement_list
+      (expression_statement
+        (call_expression
+          function: (selector_expression
+            field: (field_identifier) @sqs.direction)
+          arguments: (argument_list
+            (unary_expression
+              operand: (composite_literal
+                body: (literal_value
+                  (keyed_element
+                    key: (literal_element
+                      (identifier) @_qk)
+                    value: (literal_element
+                      (call_expression
+                        arguments: (argument_list
+                          (interpreted_string_literal) @sqs.topic))))))))
+          (#eq? @sqs.direction "ReceiveMessage")
+          (#eq? @_qk "QueueUrl")))))
+)
+
+;; Method receiver variant — SendMessage / ReceiveMessage inside a method body.
+(method_declaration
+  name: (field_identifier) @sqs.producer_fn
+  body: (block
+    (statement_list
+      (expression_statement
+        (call_expression
+          function: (selector_expression
+            field: (field_identifier) @sqs.direction)
+          arguments: (argument_list
+            (unary_expression
+              operand: (composite_literal
+                body: (literal_value
+                  (keyed_element
+                    key: (literal_element
+                      (identifier) @_qk)
+                    value: (literal_element
+                      (call_expression
+                        arguments: (argument_list
+                          (interpreted_string_literal) @sqs.topic))))))))
+          (#match? @sqs.direction "^(SendMessage|SendMessageBatch|ReceiveMessage)$")
+          (#eq? @_qk "QueueUrl")))))
+)

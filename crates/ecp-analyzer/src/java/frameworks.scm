@@ -226,3 +226,85 @@
         name: (identifier) @redis.direction (#eq? @redis.direction "pSubscribe")
         arguments: (argument_list
           . (string_literal) @redis.topic)))))
+
+;; ---- AWS SQS Java SDK v2 (T5-17) ----
+;; Covers SendMessageRequest / SendMessageBatchRequest builder chain:
+;;   sqsClient.sendMessage(SendMessageRequest.builder().queueUrl("https://…").build())
+;; Anchored to method_declaration to co-capture the enclosing method name.
+;; Import gate (software.amazon.awssdk.services.sqs) enforced at runtime by SQS_JAVA.
+;;
+;; The `queueUrl` method_invocation is a descendant (not a direct child) of the
+;; `sendMessage` / `receiveMessage` method_invocation, reached through the builder
+;; chain `.builder().queueUrl("…").messageBody(…).build()`. Tree-sitter's
+;; unanchored descent lets the pattern match at any nesting depth without
+;; enumerating all possible chain lengths.
+
+;; Publish — sendMessage or sendMessageBatch with a nested .queueUrl("literal").
+;; The `queueUrl` call is a descendant of the outer sendMessage invocation,
+;; reached through the builder chain (.builder().queueUrl("…").extra().build()).
+;; Using an unanchored inner pattern so queueUrl matches at any depth inside
+;; the argument_list regardless of chain length.
+(method_declaration
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @sqs.direction
+        arguments: (argument_list
+          (method_invocation
+            object: (method_invocation
+              name: (identifier) @_qurl (#eq? @_qurl "queueUrl")
+              arguments: (argument_list
+                (string_literal) @sqs.topic))))
+        (#match? @sqs.direction "^(sendMessage|sendMessageBatch)$"))))
+)
+
+;; Deeper chain variant: sendMessage → .build() → .other() → .queueUrl("…")
+(method_declaration
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @sqs.direction
+        arguments: (argument_list
+          (method_invocation
+            object: (method_invocation
+              object: (method_invocation
+                name: (identifier) @_qurl (#eq? @_qurl "queueUrl")
+                arguments: (argument_list
+                  (string_literal) @sqs.topic)))))
+        (#match? @sqs.direction "^(sendMessage|sendMessageBatch)$"))))
+)
+
+;; Subscribe — receiveMessage with a nested .queueUrl("literal"), shallow chain.
+(method_declaration
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @sqs.direction
+        arguments: (argument_list
+          (method_invocation
+            object: (method_invocation
+              name: (identifier) @_qurl (#eq? @_qurl "queueUrl")
+              arguments: (argument_list
+                (string_literal) @sqs.topic))))
+        (#eq? @sqs.direction "receiveMessage"))))
+)
+
+;; Subscribe — receiveMessage with a deeper chain.
+(method_declaration
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (_
+      (method_invocation
+        name: (identifier) @sqs.direction
+        arguments: (argument_list
+          (method_invocation
+            object: (method_invocation
+              object: (method_invocation
+                name: (identifier) @_qurl (#eq? @_qurl "queueUrl")
+                arguments: (argument_list
+                  (string_literal) @sqs.topic)))))
+        (#eq? @sqs.direction "receiveMessage"))))
+)

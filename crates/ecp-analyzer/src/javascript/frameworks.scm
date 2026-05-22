@@ -297,3 +297,97 @@
             (#match? @amqp.direction "^(consume|assertQueue|sendToQueue)$"))
           arguments: (arguments
             . (string) @amqp.topic))))))
+
+;; ---- AWS SQS JavaScript (T5-16) ----
+;; Covers @aws-sdk/client-sqs v3 command pattern:
+;;   await client.send(new SendMessageCommand({ QueueUrl: "https://...", MessageBody: "..." }))
+;;   await client.send(new ReceiveMessageCommand({ QueueUrl: "https://...", ... }))
+;;   await client.send(new SendMessageBatchCommand({ QueueUrl: "https://...", ... }))
+;;   await client.send(new DeleteMessageCommand({ QueueUrl: "https://...", ... }))
+;;
+;; Import gate (`@aws-sdk/client-sqs`) enforced by SQS_JS.import_gate.
+;;
+;; `sqs.direction` captures the Command constructor identifier so
+;; `classify_sqs_direction` can map to Publish vs Subscribe.
+;; `sqs.topic` captures the `QueueUrl` property string value.
+;; `sqs.fn` captures the enclosing function/method name.
+;;
+;; Non-literal QueueUrl (variable/expression) produces no string node
+;; → no match → no fabrication.
+;;
+;; Anchored to `function_declaration` and `method_definition` to co-capture
+;; the enclosing function name. Both sync and await forms handled.
+
+;; SQS: function_declaration (await form — the common case in AWS SDK v3).
+(function_declaration
+  name: (identifier) @sqs.fn
+  body: (statement_block
+    (expression_statement
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @_send (#eq? @_send "send"))
+          arguments: (arguments
+            (new_expression
+              constructor: (identifier) @sqs.direction
+              (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+              arguments: (arguments
+                (object
+                  (pair
+                    key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                    value: (string) @sqs.topic))))))))))
+
+;; SQS: method_definition (await form).
+(method_definition
+  name: (property_identifier) @sqs.fn
+  body: (statement_block
+    (expression_statement
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @_send (#eq? @_send "send"))
+          arguments: (arguments
+            (new_expression
+              constructor: (identifier) @sqs.direction
+              (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+              arguments: (arguments
+                (object
+                  (pair
+                    key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                    value: (string) @sqs.topic))))))))))
+
+;; SQS: function_declaration (sync / Promise.then form).
+(function_declaration
+  name: (identifier) @sqs.fn
+  body: (statement_block
+    (expression_statement
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_send (#eq? @_send "send"))
+        arguments: (arguments
+          (new_expression
+            constructor: (identifier) @sqs.direction
+            (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+            arguments: (arguments
+              (object
+                (pair
+                  key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                  value: (string) @sqs.topic)))))))))
+
+;; SQS: method_definition (sync form).
+(method_definition
+  name: (property_identifier) @sqs.fn
+  body: (statement_block
+    (expression_statement
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_send (#eq? @_send "send"))
+        arguments: (arguments
+          (new_expression
+            constructor: (identifier) @sqs.direction
+            (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+            arguments: (arguments
+              (object
+                (pair
+                  key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                  value: (string) @sqs.topic)))))))))

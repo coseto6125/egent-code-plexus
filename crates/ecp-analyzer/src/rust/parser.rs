@@ -445,6 +445,7 @@ impl LanguageProvider for RustProvider {
                     crate::event_topic::REDIS_RUST,
                     crate::event_topic::KAFKA_RUST,
                     crate::event_topic::RABBITMQ_RUST,
+                    crate::event_topic::SQS_RUST,
                 ],
                 &imports,
             );

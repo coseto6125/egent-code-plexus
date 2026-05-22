@@ -627,6 +627,7 @@ impl LanguageProvider for GoProvider {
                     crate::event_topic::REDIS_GO,
                     crate::event_topic::KAFKA_GO,
                     crate::event_topic::RABBITMQ_GO,
+                    crate::event_topic::SQS_GO,
                 ],
                 &imports,
             );

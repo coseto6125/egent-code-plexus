@@ -378,3 +378,101 @@
           (#eq? @_mproduce "produce"))
         arguments: (arguments
           . (string) @kafka.topic)))))
+
+;; ---- AWS SQS TypeScript (T5-15) ----
+;; Covers @aws-sdk/client-sqs v3 command pattern:
+;;   await client.send(new SendMessageCommand({ QueueUrl: "https://...", MessageBody: "..." }))
+;;   await client.send(new ReceiveMessageCommand({ QueueUrl: "https://...", ... }))
+;;   await client.send(new SendMessageBatchCommand({ QueueUrl: "https://...", ... }))
+;;   await client.send(new DeleteMessageCommand({ QueueUrl: "https://...", ... }))
+;;
+;; Import gate (`@aws-sdk/client-sqs`) enforced by SQS_TS.import_gate.
+;;
+;; `sqs.direction` captures the Command constructor identifier so
+;; `classify_sqs_direction` can map to Publish vs Subscribe.
+;; `sqs.topic` captures the `QueueUrl` property string_fragment.
+;; `sqs.fn` captures the enclosing function/method name.
+;;
+;; Non-literal QueueUrl (variable/expression) produces no `string_fragment`
+;; → no match → no fabrication.
+;;
+;; Anchored to `function_declaration` and `method_definition` to co-capture
+;; the enclosing function name. Both sync and await forms handled.
+
+;; SQS: function_declaration (await form — the common case in AWS SDK v3).
+(function_declaration
+  name: (identifier) @sqs.fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @_send (#eq? @_send "send"))
+          arguments: (arguments
+            (new_expression
+              constructor: (identifier) @sqs.direction
+              (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+              arguments: (arguments
+                (object
+                  (pair
+                    key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                    value: (string
+                      (string_fragment) @sqs.topic)))))))))))
+
+;; SQS: method_definition (await form).
+(method_definition
+  name: (property_identifier) @sqs.fn
+  body: (statement_block
+    (_
+      (await_expression
+        (call_expression
+          function: (member_expression
+            property: (property_identifier) @_send (#eq? @_send "send"))
+          arguments: (arguments
+            (new_expression
+              constructor: (identifier) @sqs.direction
+              (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+              arguments: (arguments
+                (object
+                  (pair
+                    key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                    value: (string
+                      (string_fragment) @sqs.topic)))))))))))
+
+;; SQS: function_declaration (sync form — for non-async wrappers or Promise.then chains).
+(function_declaration
+  name: (identifier) @sqs.fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_send (#eq? @_send "send"))
+        arguments: (arguments
+          (new_expression
+            constructor: (identifier) @sqs.direction
+            (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+            arguments: (arguments
+              (object
+                (pair
+                  key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                  value: (string
+                    (string_fragment) @sqs.topic))))))))))
+
+;; SQS: method_definition (sync form).
+(method_definition
+  name: (property_identifier) @sqs.fn
+  body: (statement_block
+    (_
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @_send (#eq? @_send "send"))
+        arguments: (arguments
+          (new_expression
+            constructor: (identifier) @sqs.direction
+            (#match? @sqs.direction "^(SendMessageCommand|SendMessageBatchCommand|ReceiveMessageCommand|DeleteMessageCommand)$")
+            arguments: (arguments
+              (object
+                (pair
+                  key: (property_identifier) @_qk (#eq? @_qk "QueueUrl")
+                  value: (string
+                    (string_fragment) @sqs.topic))))))))))

@@ -518,3 +518,67 @@
               (type (identifier) @sqlalchemy.type))))
         right: (call
           function: (identifier) @_mc (#eq? @_mc "mapped_column"))))))
+
+;; ---- AWS SQS Python (T5-14) ----
+;; Covers boto3 (sync) and aioboto3 (async).
+;; Import gate (`boto3`, `aioboto3`) enforced by SQS_PYTHON.import_gate.
+;;
+;; Pattern: `sqs.send_message(QueueUrl="https://…", MessageBody="…")`
+;;          `sqs.receive_message(QueueUrl="https://…", …)`
+;;          `sqs.send_message_batch(QueueUrl="https://…", Entries=[…])`
+;;
+;; `sqs.topic` captures the string literal passed as the `QueueUrl` keyword arg.
+;; `sqs.direction` captures the method name so `classify_sqs_direction` can
+;; resolve Publish vs Subscribe direction.
+;;
+;; Non-literal QueueUrl (variable identifier) produces no string capture →
+;; no RawEventTopic emitted (no fabrication).
+;;
+;; Anchored to `function_definition` to co-capture the enclosing function name.
+
+;; boto3 (sync): sqs.send_message(QueueUrl="literal", ...) inside a function.
+;; Also matches: response = sqs.receive_message(QueueUrl="...", ...) — the
+;; `(assignment right: ...)` wrapper adds a depth level handled by the second
+;; pattern below.
+(function_definition
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (_
+      (call
+        function: (attribute
+          attribute: (identifier) @sqs.direction
+          (#match? @sqs.direction "^(send_message|send_message_batch|receive_message|delete_message)$"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @_qk (#eq? @_qk "QueueUrl")
+            value: (string) @sqs.topic))))))
+
+;; boto3 (sync): response = sqs.receive_message(QueueUrl="literal", ...) — assignment form.
+(function_definition
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (_
+      (assignment
+        right: (call
+          function: (attribute
+            attribute: (identifier) @sqs.direction
+            (#match? @sqs.direction "^(send_message|send_message_batch|receive_message|delete_message)$"))
+          arguments: (argument_list
+            (keyword_argument
+              name: (identifier) @_qk (#eq? @_qk "QueueUrl")
+              value: (string) @sqs.topic)))))))
+
+;; aioboto3 (async): await sqs.send_message(QueueUrl="literal", ...) inside async function.
+(function_definition
+  name: (identifier) @sqs.producer_fn
+  body: (block
+    (_
+      (await
+        (call
+          function: (attribute
+            attribute: (identifier) @sqs.direction
+            (#match? @sqs.direction "^(send_message|send_message_batch|receive_message|delete_message)$"))
+          arguments: (argument_list
+            (keyword_argument
+              name: (identifier) @_qk (#eq? @_qk "QueueUrl")
+              value: (string) @sqs.topic)))))))

@@ -253,3 +253,55 @@
               field: (field_identifier) @redis.direction (#eq? @redis.direction "psubscribe"))
             arguments: (arguments
               . (string_literal) @redis.topic)))))))
+
+;; ---- AWS SQS Rust SDK (T5-19) ----
+;; Covers the fluent-builder pattern used by `aws-sdk-sqs`:
+;;   client.send_message().queue_url("https://…").send().await
+;;   client.receive_message().queue_url("https://…").send().await
+;;
+;; Import gate (aws_sdk_sqs) enforced at runtime by SQS_RUST.
+;;
+;; Rust AST: the fluent chain evaluates left-to-right, so the AST node for
+;; `send_message().queue_url("…")` is:
+;;   call_expression                     ← the .queue_url("…") call
+;;     field_expression
+;;       value: call_expression          ← the .send_message() call
+;;         field_expression
+;;           field: "send_message"
+;;       field: "queue_url"
+;;     arguments: (arguments (string_literal))
+;;
+;; Outer wrappers (.message_body().send().await.unwrap()) add call_expression
+;; layers on top — ignored; we only care about the queue_url call itself.
+;;
+;; No function anchor: tree-sitter Rust named-field `body: (block (...))` does
+;; not provide descendant matching, and the call is buried too deep in the chain
+;; for a fixed-depth body-anchored pattern to be reliable.  `enclosing_fn` is
+;; left empty (pool.add("")) — acceptable; the real value is the topic + direction.
+;;
+;; When `.queue_url` receives a variable identifier (not a string literal), the
+;; `(string_literal)` pattern does not match → no fabrication.
+
+;; Publish — send_message / send_message_batch immediately before .queue_url("literal").
+(call_expression
+  function: (field_expression
+    value: (call_expression
+      function: (field_expression
+        field: (field_identifier) @sqs.direction))
+    field: (field_identifier) @_qurl)
+  arguments: (arguments
+    (string_literal) @sqs.topic)
+  (#match? @sqs.direction "^(send_message|send_message_batch)$")
+  (#eq? @_qurl "queue_url"))
+
+;; Subscribe — receive_message immediately before .queue_url("literal").
+(call_expression
+  function: (field_expression
+    value: (call_expression
+      function: (field_expression
+        field: (field_identifier) @sqs.direction))
+    field: (field_identifier) @_qurl)
+  arguments: (arguments
+    (string_literal) @sqs.topic)
+  (#eq? @sqs.direction "receive_message")
+  (#eq? @_qurl "queue_url"))
