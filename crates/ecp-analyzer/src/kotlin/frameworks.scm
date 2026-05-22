@@ -115,3 +115,23 @@
           (value_arguments
             . (value_argument
               (string_literal) @kafka.topic)))))))
+
+;; ---- BlindSpot patterns (FU-001 P2b) ----
+;; Class.forName(<expr>) — runtime class loading via Java reflection bridge.
+;; Receiver `Class` must be a direct simple_identifier (excludes `a.b.forName`).
+((call_expression
+   (navigation_expression
+     (simple_identifier) @_obj
+     (navigation_suffix
+       (simple_identifier) @_m))) @blind.class_forname
+  (#eq? @_obj "Class")
+  (#eq? @_m "forName"))
+
+;; <any>.invoke(<args>) — reflective dispatch anchor for the chain
+;; `Class.forName(...).getDeclaredMethod(...).invoke(...)`. Matches any
+;; receiver since the `invoke` method name is the load-bearing signal.
+((call_expression
+   (navigation_expression
+     (navigation_suffix
+       (simple_identifier) @_m))) @blind.method_invoke
+  (#eq? @_m "invoke"))
