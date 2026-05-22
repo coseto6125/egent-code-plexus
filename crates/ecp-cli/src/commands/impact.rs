@@ -907,6 +907,31 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
         if args.include_heuristic && !heur_results.is_empty() {
             sym_entry["heuristic_edges"] = json!(heur_results);
         }
+        // CLI-entry / orphan-symbol fallback: when upstream-only mode returns
+        // no callers, also attach direct downstream callees so reviewers see
+        // what the symbol actually invokes (useful for clap dispatch entries,
+        // public-API surfaces with no in-repo callers, etc.). Cheap because
+        // depth is capped at 1.
+        //
+        // `det_results` always contains the start node at depth=0; "no callers"
+        // means ≤1 entry (only the start node itself, no upstream reached).
+        if args.direction == Direction::Up && det_results.len() <= 1 {
+            let (downstream_results, _, _, _) = run_bfs(
+                graph,
+                start_idx,
+                &Direction::Down,
+                1, // depth = 1, direct callees only
+                min_conf,
+                effective_include_tests,
+                &rel_filter,
+                args.include_heuristic,
+            );
+            // Only attach when there are actual callees (depth > 0); the start
+            // node at depth=0 is always present, so > 1 means real callees exist.
+            if downstream_results.len() > 1 {
+                sym_entry["downstream_callees"] = json!(downstream_results);
+            }
+        }
         impact_by_symbol.push(sym_entry);
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
