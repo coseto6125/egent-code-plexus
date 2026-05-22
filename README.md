@@ -172,6 +172,32 @@ Admin namespace (`ecp admin <cmd>` — hidden from top-level help):
 All commands resolve `.ecp/graph.bin` from CWD unless `--graph <path>` is given. Agent-facing commands are non-interactive by design — every flag surfaces via `--help`, every output stream is parseable.
 Run `ecp admin` with no subcommand to open the interactive admin TUI for index maintenance, host integrations, config, groups, and diagnostics.
 
+### Provable verdicts (LLM code review)
+
+`ecp review --verdicts` emits a pre-computed set of provable code-review verdicts derived from `ecp diff` sections. Instead of asking an LLM to re-derive caller relationships from a raw diff, hand the JSON output directly as review context.
+
+```bash
+ecp review --since main --verdicts --format json
+```
+
+**Severity model:**
+
+| Severity | Rule |
+|---|---|
+| `RISK` | Cross-file callers exist (symbol imported by other modules), or public symbol was removed, or blindspot in modified file |
+| `WARN` | Intra-file callers only (one file), or route modified |
+| `INFO` | No callers found, or new public surface added |
+
+**Verdict kinds:**
+
+- `SIGNATURE_OR_BODY_CHANGED` — symbol's source changed; severity escalates by caller reachability
+- `NEW_PUBLIC_SURFACE` — public-level symbol added (Function / Method / Class / Struct / Enum / Trait / Route / EventTopic / SchemaField)
+- `REMOVED_PUBLIC_SURFACE` — public-level symbol deleted (always RISK)
+- `ROUTE_CONTRACT_CHANGED` — HTTP route added / removed / modified
+- `BLINDSPOT_IN_DIFF_REGION` — eval / dynamic dispatch / reflection inside changed file
+
+Every verdict cites the exact diff section and graph fact that triggered it; see [Provable Verdicts Design Spec](./docs/specs/2026-05-22-review-verdicts.md) for semantics, provability invariants, and deferred features.
+
 ---
 
 ## MCP server (for LLM hosts)
