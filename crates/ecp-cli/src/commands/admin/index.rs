@@ -567,6 +567,24 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
 }
 
 fn should_analyze_path(path: &std::path::Path) -> bool {
+    // Skip mason brick templates — paths containing `__brick__/` are mustache
+    // template source, not real code. Parsing them produces only noise (every
+    // brick with the same template structure emits identical symbol names) and
+    // contributes ~511 Dart Annotation uid-collisions on the sample corpus.
+    // We also reject any path component containing `{{` or `}}` (mason
+    // interpolation expressions that appear in the path itself, e.g.
+    // `{{name.snakeCase()}}/widget.dart`).
+    if path.components().any(|c| {
+        if let std::path::Component::Normal(s) = c {
+            let s = s.to_string_lossy();
+            s == "__brick__" || s.contains("{{") || s.contains("}}")
+        } else {
+            false
+        }
+    }) {
+        return false;
+    }
+
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if matches!(file_name, "Dockerfile" | "dockerfile") {
         return true;
@@ -657,4 +675,29 @@ fn is_github_actions_workflow(path: &std::path::Path) -> bool {
         prev_is_github = component.as_os_str() == ".github";
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_analyze_path;
+    use std::path::Path;
+
+    #[test]
+    fn skips_mason_brick_template_dir() {
+        assert!(!should_analyze_path(Path::new(
+            "bricks/feature/__brick__/lib/widget.dart"
+        )));
+    }
+
+    #[test]
+    fn skips_mustache_interpolated_path_component() {
+        assert!(!should_analyze_path(Path::new(
+            "bricks/feature/{{name.snakeCase()}}/widget.dart"
+        )));
+    }
+
+    #[test]
+    fn keeps_real_dart_path() {
+        assert!(should_analyze_path(Path::new("lib/main.dart")));
+    }
 }

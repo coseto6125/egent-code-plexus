@@ -40,6 +40,31 @@ pub struct GoProvider {
     capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
+/// Walk up the AST from `node` (a `field_identifier` inside a
+/// `field_declaration`) to find the name of the enclosing named struct type.
+///
+/// Tree shape for a named struct:
+///   `field_identifier` → `field_declaration` → `field_declaration_list`
+///   → `struct_type` → `type_spec` (which has `name: type_identifier`)
+///
+/// For fields in anonymous inline structs there is no enclosing `type_spec`,
+/// so this returns `None` (uid remains without owner_class — collisions inside
+/// a single anonymous struct are already impossible because of line position).
+fn enclosing_struct_type(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = node.parent()?;
+    while current.kind() != "struct_type" {
+        current = current.parent()?;
+    }
+    let parent = current.parent()?;
+    if parent.kind() != "type_spec" {
+        return None;
+    }
+    let name_node = parent.child_by_field_name("name")?;
+    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+        .ok()
+        .map(String::from)
+}
+
 /// Walk up the AST from `node` until a `function_declaration` or
 /// `method_declaration` is found. Returns the enclosing function name —
 /// receiver methods are qualified as `RecvType.MethodName` so two methods
@@ -205,7 +230,6 @@ impl LanguageProvider for GoProvider {
             // source_file so body-local `var` blocks don't match here.
             let mut is_file_var = false;
             let mut file_var_name_nodes: Vec<tree_sitter::Node> = Vec::new();
-            let mut file_var_root_node = None;
 
             // Short-var `x := expr` — no type field in the grammar.
             let mut is_local = false;
@@ -289,7 +313,6 @@ impl LanguageProvider for GoProvider {
                     }
                 } else if cap_idx == idx_variable {
                     is_file_var = true;
-                    file_var_root_node = Some(cap.node);
                 } else if cap_idx == idx_variable_name {
                     file_var_name_nodes.push(cap.node);
                 } else if cap_idx == idx_local {
@@ -312,7 +335,9 @@ impl LanguageProvider for GoProvider {
 
             // Emit one Property per struct-field name, sharing the field's
             // type text. Span is the name token (keeps multi-name decls
-            // distinct).
+            // distinct). owner_class = enclosing named struct type so two
+            // structs with a same-named field (e.g. `FooBarFileStruct::File`
+            // and `FooBarFileFailStruct::File`) get distinct uids.
             for name_node in &field_name_nodes {
                 if let Ok(name_str) =
                     std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
@@ -321,6 +346,7 @@ impl LanguageProvider for GoProvider {
                     let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
                     let start = name_node.start_position();
                     let end = name_node.end_position();
+                    let owner = enclosing_struct_type(*name_node, source);
                     nodes.push(RawNode {
                         decorators: vec![],
                         name,
@@ -335,7 +361,7 @@ impl LanguageProvider for GoProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
-                        owner_class: None,
+                        owner_class: owner,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[name_node.start_byte()..name_node.end_byte()],
                         ),
@@ -386,39 +412,59 @@ impl LanguageProvider for GoProvider {
             // Pushed to `file_var_pending` here; merged into `nodes` after the
             // match loop so the typed `@var` path (which runs in the same loop
             // but as a separate match) always takes precedence over this path.
+            //
+            // The `@variable` capture anchors at `source_file` (the whole file
+            // node), so `file_var_root_node` is the source_file node. Using its
+            // end_position() for span would mismatch the `@var` path's span
+            // (which uses var_spec end), defeating the dedup check. We walk up
+            // from the name identifier to find its parent `var_spec` instead,
+            // so both paths produce the same (name_start, var_spec_end) span.
             if is_file_var {
-                if let Some(root) = file_var_root_node {
-                    for n in &file_var_name_nodes {
-                        if let Ok(name_str) =
-                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                        {
-                            if name_str == "_" {
-                                continue;
-                            }
-                            let name = name_str.to_string();
-                            let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
-                            let start = n.start_position();
-                            let end = root.end_position();
-                            file_var_pending.push(RawNode {
-                                decorators: vec![],
-                                name,
-                                kind: NodeKind::Variable,
-                                is_exported,
-                                heritage: vec![],
-                                type_annotation: None,
-                                span: (
-                                    start.row as u32,
-                                    start.column as u32,
-                                    end.row as u32,
-                                    end.column as u32,
-                                ),
-                                calls: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[root.start_byte()..root.end_byte()],
-                                ),
-                            });
+                for n in &file_var_name_nodes {
+                    if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
+                    {
+                        if name_str == "_" {
+                            continue;
                         }
+                        // Walk up: identifier → var_spec (could be
+                        // identifier → var_spec directly, or through
+                        // var_spec_list). Stop at the first var_spec ancestor.
+                        let var_spec_root = {
+                            let mut cur = n.parent();
+                            loop {
+                                match cur {
+                                    None => break None,
+                                    Some(p) if p.kind() == "var_spec" => break Some(p),
+                                    Some(p) => cur = p.parent(),
+                                }
+                            }
+                        };
+                        let Some(var_spec) = var_spec_root else {
+                            continue;
+                        };
+                        let name = name_str.to_string();
+                        let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
+                        let start = n.start_position();
+                        let end = var_spec.end_position();
+                        file_var_pending.push(RawNode {
+                            decorators: vec![],
+                            name,
+                            kind: NodeKind::Variable,
+                            is_exported,
+                            heritage: vec![],
+                            type_annotation: None,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                            owner_class: None,
+                            content_hash: ecp_core::uid::xxh3_64_bytes(
+                                &source[var_spec.start_byte()..var_spec.end_byte()],
+                            ),
+                        });
                     }
                 }
             }
