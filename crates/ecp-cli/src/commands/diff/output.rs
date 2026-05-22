@@ -158,8 +158,12 @@ fn emit_text(env: &DiffPayload) {
         );
         println!("  unknown:");
         println!(
-            "    blindspots_in_diff_region: {}",
+            "    blindspots_in_diff_region:          {}",
             s.unknown.blindspots_in_diff_region.len()
+        );
+        println!(
+            "    indirect_dispatches_in_diff_region: {}",
+            s.unknown.indirect_dispatches_in_diff_region.len()
         );
         for p in s.certain.files_added.iter().take(limit) {
             println!("  [FILE+]    {p}");
@@ -204,6 +208,22 @@ fn emit_text(env: &DiffPayload) {
         }
         for b in s.unknown.blindspots_in_diff_region.iter().take(limit) {
             println!("  [BLIND]    {}:{} ({})", b.path, b.line, b.kind);
+        }
+        for id in s
+            .unknown
+            .indirect_dispatches_in_diff_region
+            .iter()
+            .take(limit)
+        {
+            let label = if id.dispatch_type.is_empty() {
+                "<unknown>"
+            } else {
+                id.dispatch_type.as_str()
+            };
+            println!(
+                "  [INDIR]    {}:{} {} via {} in {}",
+                id.path, id.line, id.kind, label, id.caller
+            );
         }
     }
 }

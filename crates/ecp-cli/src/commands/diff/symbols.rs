@@ -19,7 +19,7 @@
 
 use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::engine::Engine;
-use ecp_core::graph::{ArchivedNodeKind, ArchivedRelType, NodeKind};
+use ecp_core::graph::{ArchivedNodeKind, ArchivedRelType, CallMeta, FunctionMeta, NodeKind};
 use ecp_core::EcpError;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -68,6 +68,10 @@ struct Snapshot {
     /// BlindSpots indexed by file_path for fast lookup during diff-region
     /// filtering.
     blindspots: FxHashMap<String, Vec<BlindSpotRef>>,
+    /// Indirect call sites (CallMeta FLAG_DYNAMIC_DISPATCH | FLAG_CALLBACK)
+    /// indexed by caller's file_path. Test-code callers are pre-filtered via
+    /// FunctionMeta FLAG_TEST so verdict noise stays low.
+    indirect_dispatches: FxHashMap<String, Vec<IndirectDispatchRef>>,
 }
 
 // ── Output schema ─────────────────────────────────────────────────────────
@@ -97,6 +101,13 @@ pub struct HeuristicBucket {
 #[derive(Debug, Serialize, Default)]
 pub struct UnknownBucket {
     pub blindspots_in_diff_region: Vec<BlindSpotRef>,
+    /// CallMeta-derived indirect call sites (DYNAMIC_DISPATCH / CALLBACK)
+    /// inside the diff region. Semantically distinct from BlindSpot —
+    /// target candidates exist in graph edges, but the LLM still needs to
+    /// scan all impls/callers because dispatch is non-direct. See
+    /// `docs/specs/2026-05-23-blindspot-cross-lang-design.md` for the
+    /// two-pipeline distinction.
+    pub indirect_dispatches_in_diff_region: Vec<IndirectDispatchRef>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -173,6 +184,30 @@ pub struct BlindSpotRef {
     pub hint: String,
 }
 
+/// Indirect call site captured by `indirect_dispatch.rs` (`CallMeta`
+/// FLAG_DYNAMIC_DISPATCH / FLAG_CALLBACK). Distinguished from `BlindSpotRef`
+/// because the target candidates ARE in the graph — but a refactor of the
+/// call site requires verifying all impls (dynamic_dispatch) or all
+/// closure-passing call sites (callback) still satisfy the contract.
+///
+/// `line` is the caller function's start line, NOT the exact call site —
+/// `CallMeta` only carries `edge_idx`, not per-call line. Acceptable
+/// approximation: "this function in your diff contains an indirect call".
+#[derive(Debug, Serialize, Clone)]
+pub struct IndirectDispatchRef {
+    pub path: String,
+    pub line: u32,
+    /// `"dynamic_dispatch"` (vtable / trait-object / interface) or
+    /// `"callback"` (Fn / FnMut / FnOnce / fn-ptr / closure parameter).
+    pub kind: String,
+    /// Source-form of the dispatch type when known
+    /// (e.g. `"Box<dyn Trait>"`, `"FnPtr"`, `"foo_ops_t"`). Empty when the
+    /// language detector did not record one.
+    pub dispatch_type: String,
+    /// Caller function/method name (the symbol containing the indirect call).
+    pub caller: String,
+}
+
 // ── Extraction ────────────────────────────────────────────────────────────
 
 fn kind_str(k: &ArchivedNodeKind) -> &'static str {
@@ -231,11 +266,63 @@ fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
             });
     }
 
+    // `function_metas` is sorted by node_idx (graph.rs invariant) — build a
+    // direct map for O(log n) is_test lookup. FxHashMap is overkill here
+    // (binary search would also work), but the map matches the access
+    // pattern downstream and the table is small.
+    let test_callers: FxHashSet<u32> = graph
+        .function_metas
+        .iter()
+        .filter(|fm| (fm.flags.to_native() & FunctionMeta::FLAG_TEST) != 0)
+        .map(|fm| fm.node_idx.to_native())
+        .collect();
+
+    let mut indirect_dispatches: FxHashMap<String, Vec<IndirectDispatchRef>> = FxHashMap::default();
+    let indirect_mask = CallMeta::FLAG_DYNAMIC_DISPATCH | CallMeta::FLAG_CALLBACK;
+    for cm in graph.call_metas.iter() {
+        let flags = cm.flags;
+        if flags & indirect_mask == 0 {
+            continue;
+        }
+        let edge_idx = cm.edge_idx.to_native() as usize;
+        let Some(edge) = graph.edges.get(edge_idx) else {
+            continue;
+        };
+        let caller_idx = edge.source.to_native();
+        if test_callers.contains(&caller_idx) {
+            continue;
+        }
+        let Some(caller_node) = graph.nodes.get(caller_idx as usize) else {
+            continue;
+        };
+        let Some(file_node) = graph.files.get(caller_node.file_idx.to_native() as usize) else {
+            continue;
+        };
+        let path = file_node.path.resolve(&graph.string_pool).to_string();
+        // FLAG_DYNAMIC_DISPATCH takes precedence over CALLBACK when both
+        // happen to be set (rare but legal — dyn-typed callback). LLM
+        // surfacing the stronger signal is more useful.
+        let kind = if flags & CallMeta::FLAG_DYNAMIC_DISPATCH != 0 {
+            "dynamic_dispatch"
+        } else {
+            "callback"
+        };
+        let entry = IndirectDispatchRef {
+            path: path.clone(),
+            line: caller_node.span.0.to_native(),
+            kind: kind.into(),
+            dispatch_type: cm.dispatch_type.resolve(&graph.string_pool).to_string(),
+            caller: caller_node.name.resolve(&graph.string_pool).to_string(),
+        };
+        indirect_dispatches.entry(path).or_default().push(entry);
+    }
+
     Ok((
         Snapshot {
             symbols,
             files,
             blindspots,
+            indirect_dispatches,
         },
         engine,
     ))
@@ -479,6 +566,19 @@ pub fn diff(
     }
     diff_blindspots.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
     out.unknown.blindspots_in_diff_region = diff_blindspots;
+
+    let mut diff_indirects: Vec<IndirectDispatchRef> = diff_files
+        .iter()
+        .filter_map(|p| current.snap.indirect_dispatches.get(*p))
+        .flat_map(|v| v.iter().cloned())
+        .collect();
+    diff_indirects.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then(a.line.cmp(&b.line))
+            .then(a.caller.cmp(&b.caller))
+    });
+    out.unknown.indirect_dispatches_in_diff_region = diff_indirects;
 
     Ok(out)
 }

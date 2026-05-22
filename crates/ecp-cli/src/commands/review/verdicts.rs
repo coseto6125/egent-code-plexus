@@ -14,7 +14,7 @@
 
 use crate::commands::diff::routes::{RouteConsumer, RoutesDiff};
 use crate::commands::diff::symbols::{
-    BlindSpotRef, CallerRef, CrossFileCaller, SymbolRef, SymbolsDiff,
+    BlindSpotRef, CallerRef, CrossFileCaller, IndirectDispatchRef, SymbolRef, SymbolsDiff,
 };
 use crate::commands::diff::DiffPayload;
 use rustc_hash::FxHashMap;
@@ -60,6 +60,15 @@ pub enum VerdictKind {
     /// BlindSpotRecord inside one of the modified files; callers downstream
     /// of that site cannot be enumerated.
     BlindspotInDiffRegion,
+    /// `symbols.unknown.indirect_dispatches_in_diff_region` — `CallMeta`
+    /// marks an indirect dispatch (vtable / trait-object / interface call,
+    /// or callback / Fn / fn-ptr) inside a function in the diff region.
+    /// Candidate targets ARE in the graph (unlike BlindSpot), but the
+    /// refactor must verify all impls / closure-passing call sites still
+    /// satisfy the contract. Currently emitted by `indirect_dispatch.rs`
+    /// for C / C++ / Rust / JS / TS / Python; other langs see no signal
+    /// here yet (FU-001 P1–P7 BlindSpot emitter rollout).
+    IndirectDispatchInDiffRegion,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +268,18 @@ fn verdicts_from_symbols(s: &SymbolsDiff) -> Vec<Verdict> {
         out.push(blindspot_verdict(bs));
     }
 
+    // ── IndirectDispatchInDiffRegion ────────────────────────────────────
+    // Surface CallMeta-flagged indirect calls in the diff region. Severity
+    // stays Warn (mirrors BlindSpot): targets exist in graph, so it's not
+    // RISK, but a refactor still needs LLM attention because direct caller
+    // chasing won't enumerate the actual runtime target.
+    out.extend(
+        s.unknown
+            .indirect_dispatches_in_diff_region
+            .iter()
+            .map(indirect_dispatch_verdict),
+    );
+
     out
 }
 
@@ -373,6 +394,28 @@ fn symbol_verdict(
             sym.kind,
             display_qualified(&sym.owner_class, &sym.name)
         ),
+        intra_callers: None,
+        cross_callers: None,
+    }
+}
+
+fn indirect_dispatch_verdict(id: &IndirectDispatchRef) -> Verdict {
+    let dispatch_label = if id.dispatch_type.is_empty() {
+        "<unknown>"
+    } else {
+        id.dispatch_type.as_str()
+    };
+    let detail = format!(
+        "indirect {} via {} in {} — verify all impls / callback sites still satisfy contract",
+        id.kind, dispatch_label, id.caller,
+    );
+    Verdict {
+        kind: VerdictKind::IndirectDispatchInDiffRegion,
+        severity: Severity::Warn,
+        path: id.path.clone(),
+        line: Some(id.line),
+        symbol: Some(id.caller.clone()),
+        detail,
         intra_callers: None,
         cross_callers: None,
     }
@@ -517,12 +560,66 @@ mod tests {
                     kind: "dynamic_call".into(),
                     hint: "callback".into(),
                 }],
+                ..Default::default()
             },
             ..Default::default()
         };
         let v = verdicts_from_symbols(&s);
         assert_eq!(v[0].kind, VerdictKind::BlindspotInDiffRegion);
         assert_eq!(v[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn indirect_dispatch_emits_warn_with_dispatch_type_in_detail() {
+        let s = SymbolsDiff {
+            unknown: UnknownBucket {
+                indirect_dispatches_in_diff_region: vec![IndirectDispatchRef {
+                    path: "src/handler.rs".into(),
+                    line: 17,
+                    kind: "dynamic_dispatch".into(),
+                    dispatch_type: "Box<dyn Handler>".into(),
+                    caller: "run".into(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let v = verdicts_from_symbols(&s);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, VerdictKind::IndirectDispatchInDiffRegion);
+        assert_eq!(v[0].severity, Severity::Warn);
+        assert_eq!(v[0].symbol.as_deref(), Some("run"));
+        assert!(
+            v[0].detail.contains("Box<dyn Handler>"),
+            "expected dispatch_type in detail; got: {}",
+            v[0].detail
+        );
+        assert!(
+            v[0].detail.contains("dynamic_dispatch"),
+            "expected kind in detail; got: {}",
+            v[0].detail
+        );
+    }
+
+    #[test]
+    fn indirect_dispatch_callback_with_unknown_dispatch_type_renders_placeholder() {
+        let s = SymbolsDiff {
+            unknown: UnknownBucket {
+                indirect_dispatches_in_diff_region: vec![IndirectDispatchRef {
+                    path: "src/loop.c".into(),
+                    line: 99,
+                    kind: "callback".into(),
+                    dispatch_type: String::new(),
+                    caller: "dispatch_loop".into(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let v = verdicts_from_symbols(&s);
+        assert_eq!(v[0].kind, VerdictKind::IndirectDispatchInDiffRegion);
+        assert!(v[0].detail.contains("<unknown>"));
+        assert!(v[0].detail.contains("callback"));
     }
 
     #[test]
