@@ -14,10 +14,10 @@ pub struct CypherArgs {
     /// - Variable-length:    (a)-[:Calls*1..3]->(b)
     /// - Label alternation:  (a:Function|Method)
     /// - WHERE:              =, <>, <, <=, >, >=, AND, OR, NOT, IN, =~, CONTAINS, STARTS WITH, ENDS WITH
-    /// - Properties:         a.name, a.kind, a.filePath, a.uid, a.ownerClass, a.content,
-    ///                       a.is_test, a.is_async, a.is_static, a.is_abstract,
-    ///                       a.is_generator, a.is_extern, a.visibility, a.decorators,
-    ///                       r.confidence, r.reason, r.rel_type
+    /// - Properties (node):  name, kind, filePath, uid, ownerClass, content,
+    ///   is_test, is_async, is_static, is_abstract, is_generator, is_extern,
+    ///   visibility, decorators
+    /// - Properties (edge):  confidence, reason, rel_type
     /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
     /// - Pipeline:           WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
     /// - Output shaping:     RETURN [DISTINCT], ORDER BY, SKIP, LIMIT
