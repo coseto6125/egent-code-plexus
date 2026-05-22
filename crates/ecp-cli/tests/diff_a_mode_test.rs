@@ -229,12 +229,6 @@ fn a_mode_symbols_diff_two_graphs() {
     let added = certain["symbols_added"]
         .as_array()
         .expect("symbols_added must be array");
-    if added.is_empty() {
-        eprintln!(
-            "FULL PARSED JSON:\n{}",
-            serde_json::to_string_pretty(&parsed).unwrap()
-        );
-    }
     let bar_added = added
         .iter()
         .any(|s| s.get("name").and_then(|n| n.as_str()) == Some("bar"));
