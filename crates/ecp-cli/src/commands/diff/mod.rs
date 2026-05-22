@@ -6,6 +6,7 @@
 
 use clap::{Args, ValueEnum};
 use ecp_core::EcpError;
+use std::path::PathBuf;
 
 pub mod baseline;
 pub mod bindings;
@@ -13,12 +14,14 @@ pub mod contracts;
 pub mod git_guard;
 pub mod output;
 pub mod routes;
+pub mod symbols;
 
 #[derive(Debug)]
 pub struct DiffPayload {
     pub bindings: Option<bindings::BindingsDiff>,
     pub routes: Option<routes::RoutesDiff>,
     pub contracts: Option<contracts::ContractsDiff>,
+    pub symbols: Option<symbols::SymbolsDiff>,
     pub baseline_ref: String,
     pub baseline_sha: String,
     pub current_ref: String,
@@ -26,25 +29,38 @@ pub struct DiffPayload {
     pub verbose: bool,
 }
 
-/// Section of the graph to diff. `All` = bindings + routes + contracts.
+/// Section of the graph to diff. `All` = bindings + routes + contracts + symbols.
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq, Hash)]
 #[value(rename_all = "lowercase")]
 pub enum DiffSection {
     Bindings,
     Routes,
     Contracts,
+    Symbols,
     All,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct DiffArgs {
-    /// Comma-separated section(s) to diff: bindings, routes, contracts, or all.
+    /// Comma-separated section(s) to diff: bindings, routes, contracts, symbols, or all.
     #[arg(long, value_delimiter = ',', required = true)]
     pub section: Vec<DiffSection>,
 
-    /// Git ref to compare against: branch / tag / commit SHA / HEAD~N / PR/<n>. No default.
-    #[arg(long, required = true)]
-    pub baseline: String,
+    /// Git ref to compare against: branch / tag / commit SHA / HEAD~N / PR/<n>.
+    /// Required unless `--baseline-graph` is supplied (A-mode snapshot diff).
+    #[arg(long, required_unless_present = "baseline_graph")]
+    pub baseline: Option<String>,
+
+    /// A-mode: path to baseline `graph.bin` (skip git checkout + re-index).
+    /// When set, requires `--current-graph` and restricts sections to those
+    /// that read directly from graph.bin (routes / contracts / symbols).
+    #[arg(long, conflicts_with = "baseline", requires = "current_graph")]
+    pub baseline_graph: Option<PathBuf>,
+
+    /// A-mode: path to current `graph.bin`. Required when `--baseline-graph`
+    /// is supplied.
+    #[arg(long, requires = "baseline_graph")]
+    pub current_graph: Option<PathBuf>,
 
     /// Output format. Omit for the LLM-tuned default; pass
     /// `--format text|json|toon` for the alternative renderings.
@@ -67,28 +83,79 @@ pub fn run(args: DiffArgs) -> Result<(), EcpError> {
 }
 
 pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
+    let want_bindings = args
+        .section
+        .iter()
+        .any(|s| matches!(s, DiffSection::Bindings | DiffSection::All));
+    let want_routes = args
+        .section
+        .iter()
+        .any(|s| matches!(s, DiffSection::Routes | DiffSection::All));
+    let want_contracts = args
+        .section
+        .iter()
+        .any(|s| matches!(s, DiffSection::Contracts | DiffSection::All));
+    let want_symbols = args
+        .section
+        .iter()
+        .any(|s| matches!(s, DiffSection::Symbols | DiffSection::All));
+
+    // ── A-mode: two graph.bin paths, no git checkout ────────────────────
+    if let (Some(bg), Some(cg)) = (args.baseline_graph.as_ref(), args.current_graph.as_ref()) {
+        if want_bindings {
+            return Err(EcpError::Output(
+                "--section bindings cannot run in --baseline-graph mode \
+                 (bindings needs a resolver JSONL dump, not graph.bin)"
+                    .into(),
+            ));
+        }
+        let routes_diff = if want_routes {
+            let b = routes::extract(bg)?;
+            let c = routes::extract(cg)?;
+            Some(routes::diff(&b, &c))
+        } else {
+            None
+        };
+        let contracts_diff = if want_contracts {
+            let b = contracts::extract(bg)?;
+            let c = contracts::extract(cg)?;
+            Some(contracts::diff(&b, &c))
+        } else {
+            None
+        };
+        let symbols_diff = if want_symbols {
+            let b = symbols::extract(bg)?;
+            let c = symbols::extract(cg)?;
+            Some(symbols::diff(&b, &c)?)
+        } else {
+            None
+        };
+        return Ok(DiffPayload {
+            bindings: None,
+            routes: routes_diff,
+            contracts: contracts_diff,
+            symbols: symbols_diff,
+            baseline_ref: bg.display().to_string(),
+            baseline_sha: String::new(),
+            current_ref: cg.display().to_string(),
+            current_sha: String::new(),
+            verbose: args.verbose,
+        });
+    }
+
+    // ── B/C-mode: --baseline <ref> (or PR/<n>) ──────────────────────────
+    let baseline_ref = args
+        .baseline
+        .as_deref()
+        .ok_or_else(|| EcpError::Output("--baseline or --baseline-graph required".into()))?;
+
     let repo_dir = match args.repo.as_deref() {
         Some(p) => std::path::PathBuf::from(p),
         None => std::env::current_dir().map_err(|e| EcpError::Output(format!("cwd: {e}")))?,
     };
 
-    let baseline_sha = baseline::resolve(&args.baseline, &repo_dir)?;
+    let baseline_sha = baseline::resolve(baseline_ref, &repo_dir)?;
     let current_sha = baseline::resolve("HEAD", &repo_dir)?;
-
-    let want_bindings = args
-        .section
-        .iter()
-        .any(|s| matches!(s, DiffSection::Bindings | DiffSection::All));
-
-    let want_routes = args
-        .section
-        .iter()
-        .any(|s| matches!(s, DiffSection::Routes | DiffSection::All));
-
-    let want_contracts = args
-        .section
-        .iter()
-        .any(|s| matches!(s, DiffSection::Contracts | DiffSection::All));
 
     // Fast-path: identical SHAs → nothing could have changed.
     if baseline_sha == current_sha {
@@ -96,7 +163,8 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
             bindings: want_bindings.then(bindings::BindingsDiff::default),
             routes: want_routes.then(routes::RoutesDiff::default),
             contracts: want_contracts.then(contracts::ContractsDiff::default),
-            baseline_ref: args.baseline.clone(),
+            symbols: want_symbols.then(symbols::SymbolsDiff::default),
+            baseline_ref: baseline_ref.to_string(),
             baseline_sha,
             current_ref: "HEAD".to_string(),
             current_sha,
@@ -107,11 +175,12 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
     let mut bindings_diff: Option<bindings::BindingsDiff> = None;
     let mut routes_diff: Option<routes::RoutesDiff> = None;
     let mut contracts_diff: Option<contracts::ContractsDiff> = None;
+    let mut symbols_diff: Option<symbols::SymbolsDiff> = None;
 
     // Single admin index per state (current + baseline). The dump writes
     // both the resolver JSONL (for bindings) and graph.bin (for routes /
-    // contracts) as side effects of one analyze pass — so we run it ONCE
-    // per state regardless of which sections are requested.
+    // contracts / symbols) as side effects of one analyze pass — so we run
+    // it ONCE per state regardless of which sections are requested.
     let current_jsonl =
         std::env::temp_dir().join(format!("ecp-diff-current-{}.jsonl", std::process::id()));
     let baseline_jsonl =
@@ -153,6 +222,12 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
         contracts_diff = Some(contracts::diff(&baseline_contracts, &current_contracts));
     }
 
+    if want_symbols {
+        let baseline_snap = symbols::extract(&baseline_graph_tmp)?;
+        let current_snap = symbols::extract(&current_graph)?;
+        symbols_diff = Some(symbols::diff(&baseline_snap, &current_snap)?);
+    }
+
     let _ = std::fs::remove_file(&current_jsonl);
     let _ = std::fs::remove_file(&baseline_jsonl);
     let _ = std::fs::remove_file(&baseline_graph_tmp);
@@ -161,7 +236,8 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
         bindings: bindings_diff,
         routes: routes_diff,
         contracts: contracts_diff,
-        baseline_ref: args.baseline.clone(),
+        symbols: symbols_diff,
+        baseline_ref: baseline_ref.to_string(),
         baseline_sha,
         current_ref: "HEAD".to_string(),
         current_sha,
