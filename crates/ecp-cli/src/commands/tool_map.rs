@@ -30,6 +30,7 @@ use crate::output::{emit, OutputFormat};
 use clap::Args;
 use ecp_core::graph::ArchivedFileCategory;
 use ecp_core::EcpError;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -124,9 +125,14 @@ impl Category {
 
 /// Classify an import source. Matches the catalog exactly, or by `pkg/...`
 /// sub-path prefix so `axios/lib/foo` still classifies as `axios`.
+/// Avoids per-call `format!("{pkg}/")` allocation by using strip_prefix.
 fn classify_source(src: &str) -> Option<Category> {
     for (pkg, cat) in PACKAGE_CATEGORY {
-        if src == *pkg || src.starts_with(&format!("{pkg}/")) {
+        if src == *pkg
+            || src
+                .strip_prefix(pkg)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
             return Some(*cat);
         }
     }
@@ -210,53 +216,67 @@ pub fn build_payload(args: &ToolMapArgs, engine: &Engine) -> Result<serde_json::
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    for file in graph.files.iter() {
-        // `Example` is intentionally NOT skipped: framework example apps
-        // (NestJS `sample/`, Flask `examples/tutorial/`) demonstrate the
-        // canonical tool / handler shapes a user would copy from. Only
-        // `Test` (test fixtures) and `Reference` (vendor / node_modules)
-        // are filtered. Symmetric with the routes.rs and builder.rs
-        // route-emission filters.
-        if matches!(
-            file.category,
-            ArchivedFileCategory::Test | ArchivedFileCategory::Reference
-        ) {
-            continue;
-        }
-        let rel = file.path.resolve(&graph.string_pool);
-        let abs = repo_root.join(rel);
-        let Ok(src) = std::fs::read_to_string(&abs) else {
-            continue;
-        };
-
-        // Step 1: per-file binding map — name → (category, package).
-        let bindings = collect_tool_bindings(rel, &src);
-        if bindings.is_empty() {
-            continue;
-        }
-
-        // Step 2: scan body for binding usage (`<binding>.x(...)` or bare
-        // `<binding>(...)`). Skip lines that look like the import declaration
-        // itself so we don't double-count.
-        for (line_idx, line) in src.lines().enumerate() {
-            if is_import_line(rel, line) {
-                continue;
+    // Per-file scan is independent (no cross-file mutable state). Rayon
+    // parallelises the fs::read + binding scan; results merge once.
+    //
+    // `Example` is intentionally NOT skipped: framework example apps
+    // (NestJS `sample/`, Flask `examples/tutorial/`) demonstrate the
+    // canonical tool / handler shapes a user would copy from. Only
+    // `Test` (test fixtures) and `Reference` (vendor / node_modules)
+    // are filtered. Symmetric with the routes.rs and builder.rs
+    // route-emission filters.
+    let per_file_hits: Vec<(Category, serde_json::Value)> = graph
+        .files
+        .par_iter()
+        .filter(|file| {
+            !matches!(
+                file.category,
+                ArchivedFileCategory::Test | ArchivedFileCategory::Reference
+            )
+        })
+        .flat_map_iter(|file| {
+            let rel = file.path.resolve(&graph.string_pool);
+            let abs = repo_root.join(rel);
+            let Ok(src) = std::fs::read_to_string(&abs) else {
+                return Vec::new().into_iter();
+            };
+            let bindings = collect_tool_bindings(rel, &src);
+            if bindings.is_empty() {
+                return Vec::new().into_iter();
             }
-            for hit in find_binding_uses(line, &bindings) {
-                if !category_allowed(hit.category) {
+            // Scan body for binding usage (`<binding>.x(...)` or bare
+            // `<binding>(...)`). Skip lines that look like the import
+            // declaration itself so we don't double-count.
+            let mut hits = Vec::new();
+            for (line_idx, line) in src.lines().enumerate() {
+                if is_import_line(rel, line) {
                     continue;
                 }
-                let entry = serde_json::json!({
-                    "callee": hit.callee,
-                    "package": hit.package,
-                    "filePath": rel,
-                    "line": line_idx + 1,
-                    "col": hit.col + 1,
-                });
-                let key = hit.category.as_key();
-                calls.get_mut(key).expect("bucket pre-seeded").push(entry);
-                *totals.get_mut(key).expect("bucket pre-seeded") += 1;
+                for hit in find_binding_uses(line, &bindings) {
+                    if !category_allowed(hit.category) {
+                        continue;
+                    }
+                    hits.push((
+                        hit.category,
+                        serde_json::json!({
+                            "callee": hit.callee,
+                            "package": hit.package,
+                            "filePath": rel,
+                            "line": line_idx + 1,
+                            "col": hit.col + 1,
+                        }),
+                    ));
+                }
             }
+            hits.into_iter()
+        })
+        .collect();
+
+    for (cat, entry) in per_file_hits {
+        let key = cat.as_key();
+        if let Some(bucket) = calls.get_mut(key) {
+            bucket.push(entry);
+            *totals.get_mut(key).expect("bucket pre-seeded") += 1;
         }
     }
 
