@@ -47,7 +47,7 @@ impl PeerHarness {
             watcher_pid: None,
             last_drained_offset: 0,
         };
-        SessionMeta::write_atomic(&session_dir.join("meta.json"), &meta).unwrap();
+        SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
 
         let bin: PathBuf = env!("CARGO_BIN_EXE_ecp").into();
         let child = Command::new(&bin)

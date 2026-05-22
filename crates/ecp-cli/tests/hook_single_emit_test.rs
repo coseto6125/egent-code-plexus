@@ -20,7 +20,7 @@ fn write_meta(session_dir: &std::path::Path, sid: &str) {
         r#"{{"version":1,"session_id":"{sid}","pid":{pid},"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
         pid = std::process::id()
     );
-    std::fs::write(session_dir.join("meta.json"), meta).unwrap();
+    std::fs::write(session_dir.join("session_meta.json"), meta).unwrap();
 }
 
 fn fire(event: &str, envelope: &str, sid: &str, repo_root: &std::path::Path) -> Vec<u8> {
