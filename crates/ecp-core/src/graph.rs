@@ -91,6 +91,45 @@ impl RelType {
     pub const fn is_heuristic(self) -> bool {
         matches!(self, Self::MirrorsField | Self::EventTopicMirror)
     }
+
+    /// Static variant name. Mirrors `NodeKind::as_str` so cypher's
+    /// `type(r)` scalar and `graph_query`'s rel-filter share one rendering.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Defines => "Defines",
+            Self::Imports => "Imports",
+            Self::Calls => "Calls",
+            Self::Extends => "Extends",
+            Self::Implements => "Implements",
+            Self::HasMethod => "HasMethod",
+            Self::HasProperty => "HasProperty",
+            Self::Accesses => "Accesses",
+            Self::HandlesRoute => "HandlesRoute",
+            Self::StepInProcess => "StepInProcess",
+            Self::References => "References",
+            Self::Fetches => "Fetches",
+            Self::MirrorsField => "MirrorsField",
+            Self::Publishes => "Publishes",
+            Self::Subscribes => "Subscribes",
+            Self::EventTopicMirror => "EventTopicMirror",
+            Self::OpensTxScope => "OpensTxScope",
+            Self::Overrides => "Overrides",
+        }
+    }
+}
+
+impl From<&ArchivedRelType> for RelType {
+    /// Zero-copy conversion — same pattern as `From<&ArchivedNodeKind> for
+    /// NodeKind` above. Both are `#[repr(u8)]` with identical discriminant
+    /// layout; reading via raw pointer avoids the 18-arm match that compounds
+    /// the SIGSEGV risk documented on the NodeKind impl.
+    ///
+    /// SAFETY: `ArchivedRelType` is rkyv's archive of a `#[repr(u8)]` enum
+    /// with the same discriminants as `RelType`. Bad discriminant byte only
+    /// arises from a malformed `graph.bin` that already failed `validate_header`.
+    fn from(a: &ArchivedRelType) -> Self {
+        unsafe { std::ptr::read(a as *const ArchivedRelType as *const RelType) }
+    }
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]

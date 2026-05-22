@@ -92,10 +92,13 @@ fn execute_inner(
     let expanded_items: Vec<(String, ReturnExpr)> =
         expand_return_items(&query.return_.items, bindings.first())?;
 
-    // RETURN projection — detect aggregation in expanded items.
+    // RETURN projection — detect aggregation in expanded items. Scalar
+    // function calls (`type(r)`, `id(n)`, `labels(n)`) are NOT aggregates and
+    // must not trigger the group-by path; they project per-row in the else
+    // branch via `eval_return_expr`.
     let has_agg = expanded_items
         .iter()
-        .any(|(_, e)| matches!(e, ReturnExpr::FunCall { .. }));
+        .any(|(_, e)| matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)));
 
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<Value>> = Vec::new();
@@ -104,7 +107,9 @@ fn execute_inner(
         // Partition expanded items into group-key items and aggregate items.
         let group_items: Vec<&(String, ReturnExpr)> = expanded_items
             .iter()
-            .filter(|(_, e)| !matches!(e, ReturnExpr::FunCall { .. }))
+            .filter(
+                |(_, e)| !matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)),
+            )
             .collect();
         // Build column names.
         for (col, _) in &expanded_items {
@@ -149,8 +154,13 @@ fn execute_inner(
                     args,
                 } = expr
                 {
-                    let v = apply_aggregate(name, *distinct, args, group, graph, cache)?;
-                    row.push(v);
+                    if is_aggregate_fn(name) {
+                        let v = apply_aggregate(name, *distinct, args, group, graph, cache)?;
+                        row.push(v);
+                    } else {
+                        // Scalar FunCall lives in group_items; its value is in key_vals.
+                        row.push(key_iter.next().cloned().unwrap_or(Value::Null));
+                    }
                 } else {
                     row.push(key_iter.next().cloned().unwrap_or(Value::Null));
                 }
@@ -369,7 +379,12 @@ fn eval_return_expr(
             }
         }
         ReturnExpr::Star => Ok(Value::Null),
-        ReturnExpr::FunCall { .. } => Ok(Value::Null),
+        ReturnExpr::FunCall { name, args, .. } => {
+            // Aggregate FunCalls reach this path only when the caller already
+            // verified there is no aggregate in the projection — so treating
+            // them as scalar is a safe no-op (returns Null).
+            Ok(eval_scalar_funcall(name, args, b, graph))
+        }
     }
 }
 
@@ -425,7 +440,7 @@ fn eval_return_item_rich(
         }
         ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph, cache),
         ReturnExpr::Star => Value::Null,
-        ReturnExpr::FunCall { .. } => Value::Null,
+        ReturnExpr::FunCall { name, args, .. } => eval_scalar_funcall(name, args, b, graph),
     }
 }
 
@@ -439,19 +454,25 @@ fn exec_with(
     let has_agg = wc
         .items
         .iter()
-        .any(|i| matches!(i.expr, ReturnExpr::FunCall { .. }));
+        .any(|i| matches!(&i.expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)));
 
     let mut out: Vec<Binding> = if has_agg {
         // Partition WITH items into group-key items and aggregate items.
+        // Scalar FunCalls (`type(r)` etc.) stay in `group_items` so they
+        // contribute to the grouping key and emit per-row in the result.
         let group_items: Vec<&ReturnItem> = wc
             .items
             .iter()
-            .filter(|i| !matches!(i.expr, ReturnExpr::FunCall { .. }))
+            .filter(
+                |i| !matches!(&i.expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)),
+            )
             .collect();
         let agg_items: Vec<&ReturnItem> = wc
             .items
             .iter()
-            .filter(|i| matches!(i.expr, ReturnExpr::FunCall { .. }))
+            .filter(
+                |i| matches!(&i.expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)),
+            )
             .collect();
 
         type GroupEntry = (Vec<(String, Value)>, Vec<Binding>);
@@ -547,6 +568,63 @@ fn exec_with(
     }
 
     Ok(out)
+}
+
+/// Names recognized as aggregate functions. Anything else parsed as a
+/// FunCall is treated as a scalar function (`type(r)`, `id(n)`, `labels(n)`).
+/// Pre-uppercased — the parser normalizes (`parser.rs:382/398/572/588`).
+fn is_aggregate_fn(name: &str) -> bool {
+    matches!(name, "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "COLLECT")
+}
+
+/// Evaluate a scalar (non-aggregate) function call. Returns `Value::Null` for
+/// unknown functions rather than erroring — matches the OpenCypher convention
+/// that missing-data scalars degrade gracefully (see graph_query rel-type
+/// `matches!` path). Supports the three functions LLM agents reach for most:
+/// `type(r)` → edge rel-type as Str; `id(n)` → node index as Int;
+/// `labels(n)` → single-element list of node-kind Str.
+fn eval_scalar_funcall(
+    name: &str,
+    args: &[Expr],
+    b: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+) -> Value {
+    match name {
+        "TYPE" => {
+            // type(r) — args[0] must be a Var bound to an edge.
+            let Some(Expr::Var(var)) = args.first() else {
+                return Value::Null;
+            };
+            let Some(&eidx) = b.edge_vars.get(var) else {
+                return Value::Null;
+            };
+            let e = &graph.edges[eidx as usize];
+            Value::Str(RelType::from(&e.rel_type).as_str().to_string())
+        }
+        "ID" => {
+            // id(n) — args[0] must be a Var bound to a node.
+            let Some(Expr::Var(var)) = args.first() else {
+                return Value::Null;
+            };
+            let Some(&idx) = b.node_vars.get(var) else {
+                return Value::Null;
+            };
+            Value::Int(idx as i64)
+        }
+        "LABELS" => {
+            // labels(n) — single-kind list per ecp's one-label-per-node model.
+            let Some(Expr::Var(var)) = args.first() else {
+                return Value::Null;
+            };
+            let Some(&idx) = b.node_vars.get(var) else {
+                return Value::Null;
+            };
+            Value::List(vec![Value::Str(
+                archived_kind_str(&graph.nodes[idx as usize]).to_string(),
+            )])
+        }
+        _ => Value::Null,
+    }
 }
 
 /// Evaluate one aggregate function over a group of bindings.
@@ -1759,6 +1837,62 @@ mod tests {
             .unwrap();
             let r = execute(&q, g, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Scalar functions: type(r), id(n), labels(n) — must NOT be routed
+    // through apply_aggregate (regression for FunCall-flagged-as-aggregate bug).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exec_scalar_type_of_edge() {
+        with_two(|g| {
+            let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN type(r)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Str("Calls".into()));
+        });
+    }
+
+    #[test]
+    fn exec_scalar_id_of_node() {
+        with_two(|g| {
+            let q = parse("MATCH (a:Function) RETURN id(a)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2);
+            // First node's id is its index in graph.nodes.
+            assert!(matches!(r.rows[0][0], Value::Int(_)));
+        });
+    }
+
+    #[test]
+    fn exec_scalar_labels_of_node() {
+        with_two(|g| {
+            let q = parse("MATCH (a:Function) WHERE a.name = 'caller' RETURN labels(a)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            match &r.rows[0][0] {
+                Value::List(xs) => {
+                    assert_eq!(xs.len(), 1);
+                    assert_eq!(xs[0], Value::Str("Function".into()));
+                }
+                v => panic!("expected labels list, got {v:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn exec_scalar_mixed_with_aggregate() {
+        // type(r) used as group key alongside count(*) aggregate.
+        with_two(|g| {
+            let q =
+                parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN type(r), count(*) AS c")
+                    .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Str("Calls".into()));
+            assert_eq!(r.rows[0][1], Value::Int(1));
         });
     }
 
