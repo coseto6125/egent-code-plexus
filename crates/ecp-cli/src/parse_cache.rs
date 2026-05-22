@@ -74,11 +74,19 @@ impl ParseCache {
 
     /// Persist a freshly parsed `LocalGraph`. Uses `atomic_write_bytes_no_fsync`
     /// (tmp + rename, no `sync_all`): parse-cache blobs are content-addressable
-    /// + fully regeneratable from source, so a torn write on crash is
-    ///   recoverable (the corrupt-entry guard in `get()` deletes and the next
-    ///   miss reparses). Skipping the fsync converts a per-file ~2ms sync syscall
-    ///   into a kernel-deferred write — on cold-index over 14k files this drops
-    ///   the cache-write phase from ~30s to <1s.
+    /// and fully regeneratable from source, so a torn write on crash is
+    /// recoverable (the corrupt-entry guard in `get()` deletes and the next
+    /// miss reparses). Skipping the fsync converts a per-file ~2ms sync syscall
+    /// into a kernel-deferred write — on cold-index over 14k files this drops
+    /// the cache-write phase from ~30s to <1s.
+    ///
+    /// Retained for integration tests (`tests/parse_cache.rs`). Production
+    /// callers use the inlined serialize-then-background-write path in
+    /// `commands::admin::index` (CI-A) which avoids holding the global rayon
+    /// pool while disk writes drain. `#[allow(dead_code)]` because the lib
+    /// target has no internal caller; tests are a separate compilation target
+    /// so the dead-code lint can't see them.
+    #[allow(dead_code)]
     pub fn put(&self, graph: &LocalGraph) -> std::io::Result<()> {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(graph).map_err(std::io::Error::other)?;
         atomic_write_bytes_no_fsync(&self.path_for(&graph.content_hash), &bytes)
