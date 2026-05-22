@@ -19,11 +19,12 @@
 
 ## Status snapshot
 
-Last refreshed 2026-05-22 (late night) — closes the roadmap dev side
-including the full T5 detector matrix (4 transports shipped + SQS PR
-#310 ready to merge), T5-32 doc / T5-33 heuristic / T5-34 CLI all
-landed, T10-4 Outbox half PR #323 ready to merge. Source-of-truth
-columns:
+Last refreshed 2026-05-22 (post-final-merge) — closes the roadmap dev
+side. Full T5 detector matrix shipped (5 transports × up to 6 langs;
+Celery non-Python documented SKIP per OQ-10), T5-32 coverage doc /
+T5-33 `EventTopicMirror` heuristic / T5-34 `find-event-mirrors` CLI
+all on `origin/main`, T10-4 `find-transaction-patterns` (Saga + Outbox)
+shipped. Source-of-truth columns:
 
 - `grep evidence` cites the actual symbol / file the verification looked
   at — so future drift can re-check the same anchor instead of guessing
@@ -68,23 +69,23 @@ columns:
 | 5 (event) | T5-2 Kafka Python | shipped #289 | first concrete event-topic detector; validates T5-1 dispatcher pattern |
 | 5 (event) | T5-3..T5-7 Kafka (TS/JS/Java/Kotlin/Go/Rust) | shipped #303 | consolidated PR per "kafka/redis way" — TS+JS + Java + Kotlin (bonus, JVM symmetry) + Go + Rust; Python already in via #289. 37 tests across 7 lang suites. clients: kafkajs/node-rdkafka, org.apache.kafka/spring-kafka, segmentio/sarama/confluent-kafka-go, rdkafka |
 | 5 (event) | T5-8..T5-13 RabbitMQ (Python/TS/JS/Java/Go/Rust) | shipped #297 | consolidated 6-lang PR; pika/aio_pika/kombu (Py) + amqplib/amqp-connection-manager (TS/JS) + spring-amqp/rabbitmq.client (Java) + amqp091-go/streadway (Go) + lapin/amiquip (Rust). 43 tests. #326 follow-up unbreaks 6 RabbitMQ test files after T5-33's Box<str> migration |
-| 5 (event) | T5-14..T5-19 SQS (Python/TS/JS/Java/Go/Rust) | **PR #310 open** — auto-merge enabled, waiting CI | 6 langs in one PR; boto3/aioboto3 (Py) + @aws-sdk/client-sqs (TS/JS) + aws-sdk Java/Go/Rust. Topic = QueueUrl literal. 29 tests across 6 suites |
+| 5 (event) | T5-14..T5-19 SQS (Python/TS/JS/Java/Go/Rust) | shipped #310 | 6-lang consolidated PR; boto3/aioboto3 (Py) + @aws-sdk/client-sqs (TS/JS) + aws-sdk Java/Go/Rust. Topic = QueueUrl literal. 29 tests across 6 suites |
 | 5 (event) | T5-20 Celery Python | shipped #307 | `event_topic/celery_python.rs` covers `delay`/`apply_async` (receiver-id topic) + `send_task` (string-literal topic). 9 tests. `FrameworkId::Celery` discriminant 16 |
 | 5 (event) | T5-21..T5-25 Celery non-Python | **SKIP per roadmap OQ-10** | no first-class Celery clients in TS/JS/Java/Go/Rust. `celery-java`/`gocelery` exist but <1% adoption; non-Python Celery producers caught by RabbitMQ/Redis detectors as basic_publish anyway |
 | 5 (event) | T5-26..T5-31 Redis pub/sub (6 langs) | shipped #306 | consolidated 6-lang PR; redis/aioredis (Py) + redis/ioredis (TS/JS) + spring-data-redis/jedis/lettuce (Java) + go-redis/redigo (Go) + redis crate (Rust). 48 tests. `FrameworkId::Redis` discriminant 17 |
 | 5 (event) | T5-32 coverage matrix doc | shipped #318 | `docs/event-topic-coverage.md` — 30-row (lib×lang) matrix grouped by transport; durability semantics called out (Kafka durable / RabbitMQ queued / SQS queued / Celery broker-backed / Redis fire-and-forget); schema gaps + SKIP rationale documented |
 | 5 (event) | T5-33 `EventTopicMirror` heuristic | shipped #321 | `post_process/event_topic_mirrors.rs` — Phase 1 promotes `RawEventTopic` to `EventTopic` nodes + `Publishes`/`Subscribes` edges; Phase 2 pairs by `(canonical_topic, lib_u8)` and emits `EventTopicMirror` heuristic edges at confidence 0.85. Same-lib gate; cross-lib pairing deferred. Schema migration: `RawEventTopic.topic_literal`/`enclosing_fn` `StrRef` → `Box<str>` (mirrors T4-7 pattern). 7 tests. #326 unbreaks RabbitMQ test files post-migration |
-| 5 (event) | T5-34 `find-event-mirrors` CLI | **PR #327 open** — auto-merge enabled, waiting CI | `commands/find_event_mirrors.rs` walks `EventTopicMirror` edges and joins `(publisher_fn, EventTopic, subscriber_fn)`. Filters: `--min-confidence`, `--topic <glob>`, `--lib` (no-op forward-compat — `FrameworkId` not yet persisted on `EventTopic`, follow-up). Text/JSON/TOON output. 10 tests. Re-opened from #324 (orphaned by stacked-PR squash) |
+| 5 (event) | T5-34 `find-event-mirrors` CLI | shipped #327 | `commands/find_event_mirrors.rs` walks `EventTopicMirror` edges and joins `(publisher_fn, EventTopic, subscriber_fn)`. Filters: `--min-confidence`, `--topic <glob>`, `--lib` (no-op forward-compat — `FrameworkId` not yet persisted on `EventTopic`, follow-up). Text/JSON/TOON output. 10 tests. Re-opened from #324 (orphaned by stacked-PR squash) |
 | 10 | T10-1 + T10-2 + T10-3 (collapsed) | shipped #275 | `RawTxScope` packed + `NodeKind::TransactionScope` + `OpensTxScope` edge |
 | 10 | T10-4 `find-transaction-patterns` CLI (Saga half) | shipped #311 | `crates/ecp-cli/src/commands/find_tx_patterns.rs`. Detects `<verb>_<noun>` ↔ `compensate/undo/rollback_<verb>_<noun>` on same class. Confidence 0.6 base, bumped to 0.8 when compensator calls operation (Calls edge); cap 0.85 |
-| 10 | T10-4 Outbox half (complete) | **PR #323 open** — auto-merge enabled, waiting CI | Extends `find_tx_patterns.rs` with OutboxDetector: name-pattern match on `OutboxEvent`/`EventOutbox`/`MessageOutbox` Class/Struct → BFS through `Calls` edges → cross-reference with `EventTopic Publish` sites. `requires_verification: true`. Also wires `post_process::event_topics` into builder pass. 15 CLI tests + 1696 analyzer tests pass |
+| 10 | T10-4 Outbox half (complete) | shipped #323 | Extends `find_tx_patterns.rs` with OutboxDetector: name-pattern match on `OutboxEvent`/`EventOutbox`/`MessageOutbox` Class/Struct → BFS through `Calls` edges → cross-reference with `EventTopic Publish` sites. `requires_verification: true`. Also wires `post_process::event_topics` into builder pass. 15 CLI tests + 1696 analyzer tests pass |
 | Phase 5 | T-P1 parity baselines refresh | shipped #325 | 14-lang baselines regenerated with new schema node kinds (`SchemaField`/`EventTopic`/`TransactionScope`); dump-script side already shipped #288. `scripts/parity/round9_baseline.txt` is the new authoritative reference |
 | Phase 5 | T-P2 user-doc updates | shipped #320 | `find-schema-bindings` + `find-transaction-patterns` documented in skill files + README + `install_hook.rs` embedded skill text |
 | CI | Docs-only PR short-circuit | shipped #287 | `detect-changes` job + step-level `if:` gating |
 
 ### Things to highlight (vs. literal reading of body below)
 
-- **Dev side closed**: T1 / T4 / T5 (T5-3..T5-13, T5-20, T5-26..T5-31 + T5-32 doc + T5-33 mirror) / T7 / T10 Saga / Phase 5 docs / T-P1 baselines all on `origin/main`. Three PRs in CI auto-merge queue: **#310** (T5-14..19 SQS), **#327** (T5-34 CLI), **#323** (T10-4 Outbox half). Once those merge, the entire roadmap is complete except the documented SKIPs (T5-21..25 Celery non-Python, per OQ-10).
+- **Dev side fully closed**: T1 / T4 / T5 (T5-2..T5-20, T5-26..T5-34 inclusive) / T7 / T10 (Saga #311 + Outbox #323) / Phase 5 docs / T-P1 baselines / T-P2 user-doc all on `origin/main`. Final three PRs landed 2026-05-22: **#310** (T5-14..T5-19 SQS), **#327** (T5-34 CLI), **#323** (T10-4 Outbox). Entire numbered-task roadmap is complete except the documented SKIPs (T5-21..T5-25 Celery non-Python, per OQ-10) and one tracked follow-up (`FrameworkId` persistence on `EventTopic` node → makes `find-event-mirrors --lib` filter functional).
 - **T5 detector consolidation pattern**: 4 of 5 transports landed as single-PR-per-transport (Kafka #303 = 6 langs, RabbitMQ #297 = 6 langs, Redis #306 = 6 langs, SQS #310 = 6 langs); only Celery split (Python #307 shipped + non-Python SKIP). Kafka Python (#289) shipped earlier as the first transport; later consolidations followed the "kafka/redis way" of one PR per transport.
 - **T5-33 forced a schema migration** mid-flight: `RawEventTopic.{topic_literal, enclosing_fn}` moved from `StrRef` (pool-scoped, dangling after per-file parser drop) to `Box<str>` (owned), mirroring the T4-7 `RawSchemaField` precedent. Touched 6 lang parsers + 9 test files. #326 follow-up unbreaks 6 RabbitMQ tests that pre-dated the migration.
 - **T1-6 chose Option B (real win)**, not the no-op the original spec
