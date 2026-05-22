@@ -283,3 +283,22 @@
           (#match? @sqs.direction "^(SendMessage|SendMessageBatch|ReceiveMessage)$")
           (#eq? @_qk "QueueUrl")))))
 )
+
+;; ---- BlindSpot patterns (FU-001 P3) ----
+;; <expr>.MethodByName(name) — reflect-specific symbol; narrow anchor for
+;; the runtime method-resolution chain (followed by .Call(...) dispatch).
+((call_expression
+   function: (selector_expression
+     field: (field_identifier) @_m)) @blind.reflect_method_by_name
+  (#eq? @_m "MethodByName"))
+
+;; plugin.Open("file.so") — dynamic library load. The follow-up .Lookup(...)
+;; symbol fetch is deferred (needs import gate to suppress non-plugin .Lookup
+;; false positives, e.g. dns.Lookup); plugin.Open as a package-qualified
+;; call is unambiguous.
+((call_expression
+   function: (selector_expression
+     operand: (identifier) @_p
+     field: (field_identifier) @_m)) @blind.plugin_open
+  (#eq? @_p "plugin")
+  (#eq? @_m "Open"))
