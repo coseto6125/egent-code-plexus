@@ -449,30 +449,43 @@ fn resolve_csproj_max_depth() -> u8 {
 }
 
 pub fn parse_csproj_files(repo_path: &Path) -> Vec<CsprojMeta> {
-    let mut results = Vec::new();
+    // CI-N: replace the per-thread serial recursive read_dir walk with the
+    // `ignore::WalkBuilder` parallel walker. The old impl issued one syscall
+    // per directory on the main thread (.sample_repo: 2022 dirs at depth 4)
+    // — measurable share of parse_configs wall. The new impl fans the walk
+    // across rayon workers and uses `.csproj`-only collection.
     let max_depth = resolve_csproj_max_depth();
-    collect_csproj(repo_path, repo_path, 0, max_depth, &mut results);
-    results
-}
-
-fn collect_csproj(root: &Path, dir: &Path, depth: u8, max_depth: u8, out: &mut Vec<CsprojMeta>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() && depth < max_depth {
-            collect_csproj(root, &path, depth + 1, max_depth, out);
-        } else if path
-            .extension()
-            .map(|e| e.eq_ignore_ascii_case("csproj"))
-            .unwrap_or(false)
-        {
-            if let Some(meta) = parse_single_csproj(&path, root) {
-                out.push(meta);
-            }
-        }
-    }
+    let (tx, rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let repo_root = repo_path.to_path_buf();
+    ignore::WalkBuilder::new(repo_path)
+        .hidden(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .git_global(false)
+        .require_git(false)
+        .max_depth(Some(max_depth as usize))
+        .build_parallel()
+        .run(|| {
+            let tx = tx.clone();
+            Box::new(move |result| {
+                if let Ok(entry) = result {
+                    let path = entry.path();
+                    if path.is_file()
+                        && path
+                            .extension()
+                            .map(|e| e.eq_ignore_ascii_case("csproj"))
+                            .unwrap_or(false)
+                    {
+                        let _ = tx.send(path.to_path_buf());
+                    }
+                }
+                ignore::WalkState::Continue
+            })
+        });
+    drop(tx);
+    rx.into_iter()
+        .filter_map(|p| parse_single_csproj(&p, &repo_root))
+        .collect()
 }
 
 fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
