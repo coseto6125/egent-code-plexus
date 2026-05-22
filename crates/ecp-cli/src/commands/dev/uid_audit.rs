@@ -14,7 +14,7 @@
 //!
 //! Each cluster key is `(lang, second_kind, second_owner, second_name)`,
 //! parsed from the BlindSpot's `hint` field (format
-//! `"{bs_kind}: first={k}:{p}:{o}:{n} second={k}:{p}:{o}:{n}"`).
+//! `"{bs_kind}: first={k}\x1f{p}\x1f{o}\x1f{n} second={k}\x1f{p}\x1f{o}\x1f{n}"`).
 
 use crate::commands::group::impact::latest_graph_path_for;
 use crate::output::{emit, OutputFormat};
@@ -135,36 +135,36 @@ fn resolve_graph_path(
 }
 
 /// Parse `BlindSpotRecord.hint` of shape
-/// `"<bs_kind>: first=K:P:O:N second=K:P:O:N"` and return the four `second=`
+/// `"<bs_kind>: first=K\x1fP\x1fO\x1fN second=K\x1fP\x1fO\x1fN"` and return the four `second=`
 /// fields. Returns `None` if the format is unexpected — callers count these
 /// as "unparsed" and surface the figure so silent parser drift is visible.
 ///
 /// The hint's analyzer-side emitter (`resolution::builder.rs::format!(...)`)
-/// joins four `:`-separated fields. Three of them (`K`/`P`/`N`) are normally
-/// `:`-free, but `O` (`owner_class`) carries Rust path syntax — `crate::mod::Type`
-/// — so a naive `splitn(4, ':')` mis-attributes part of the owner into the
-/// `N` field. Concrete drift caught on Rust corpus: clusters reported
-/// `owner='sealed'` + `name=':FromStreamPriv<T>:InternalCollection'` when the
-/// true split is `owner='sealed::FromStreamPriv<T>'` + `name='InternalCollection'`.
-///
-/// Strategy:
-///   1. `splitn(3, ':')` to peel `kind` and `path` from the front (these are
-///      `:`-free in every parser).
-///   2. `rsplit_once(':')` on the remainder to peel `name` off the right
-///      (names are `:`-free in every parser the uid-collision path touches).
-///   3. Whatever's left in between is `owner_class`, `::` preserved verbatim.
-///
-/// Limitation: if a parser ever emits a name containing `:` (e.g. Swift
-/// selector form `init(foo:bar:)`), the rsplit picks up that trailing `:`
-/// and mis-attributes. uid-collision records aren't issued for Swift
-/// selectors today, so this is theoretical — but worth knowing.
+/// joins the four fields with `\x1F` (ASCII Unit Separator, U+001F). This
+/// delimiter is safe for any parser-emitted value including Rust `::` paths
+/// (`sealed::FromStreamPriv<T>`) and Swift selectors (`init(foo:bar:)`),
+/// neither of which contains `\x1F` in practice.
 fn parse_hint(hint: &str) -> Option<(&str, &str, &str, &str)> {
-    let second = hint.split(" second=").nth(1)?;
-    let mut head = second.splitn(3, ':');
-    let kind = head.next()?;
-    let path = head.next()?;
-    let rest = head.next()?; // owner_class + ':' + name
-    let (owner, name) = rest.rsplit_once(':')?;
+    let (_kind_label, rest) = hint.split_once(": first=")?;
+    let (first_part, second_part) = rest.split_once(" second=")?;
+    let mut ff = first_part.split('\u{1f}');
+    let mut sf = second_part.split('\u{1f}');
+    // Consume first= fields (we only need second= for clustering, but validate
+    // that first= is well-formed so malformed hints surface as hint_unparsed).
+    let _fk = ff.next()?;
+    let _fp = ff.next()?;
+    let _fo = ff.next()?;
+    let _fn_ = ff.next()?;
+    if ff.next().is_some() {
+        return None; // too many fields
+    }
+    let kind = sf.next()?;
+    let path = sf.next()?;
+    let owner = sf.next()?;
+    let name = sf.next()?;
+    if sf.next().is_some() {
+        return None; // too many fields
+    }
     Some((kind, path, owner, name))
 }
 
@@ -361,38 +361,82 @@ fn print_text_body(report: &Report, graph_path: &std::path::Path) {
 mod tests {
     use super::*;
 
+    // Helper: build a hint string with \x1F separators (mirrors builder.rs emit).
+    fn make_hint(
+        bs_kind: &str,
+        fk: &str,
+        fp: &str,
+        fo: &str,
+        fn_: &str,
+        sk: &str,
+        sp: &str,
+        so: &str,
+        sn: &str,
+    ) -> String {
+        format!(
+            "{}: first={}\x1f{}\x1f{}\x1f{} second={}\x1f{}\x1f{}\x1f{}",
+            bs_kind, fk, fp, fo, fn_, sk, sp, so, sn,
+        )
+    }
+
     #[test]
     fn parse_hint_extracts_second_fields() {
-        let hint =
-            "uid-collision: first=Variable:src/a.py:Outer:File second=Variable:src/b.py:Inner:File";
-        let got = parse_hint(hint).expect("hint must parse");
+        let hint = make_hint(
+            "uid-collision",
+            "Variable",
+            "src/a.py",
+            "Outer",
+            "File",
+            "Variable",
+            "src/b.py",
+            "Inner",
+            "File",
+        );
+        let got = parse_hint(&hint).expect("hint must parse");
         assert_eq!(got, ("Variable", "src/b.py", "Inner", "File"));
     }
 
     #[test]
     fn parse_hint_missing_second_returns_none() {
-        assert!(parse_hint("uid-collision: first=Variable:src/a.py:Outer:File").is_none());
+        // No " second=" segment at all — parse must fail cleanly.
+        assert!(parse_hint("uid-collision: first=Variable\x1fsrc/a.py\x1fOuter\x1fFile").is_none());
     }
 
     #[test]
     fn parse_hint_empty_owner_is_kept_as_empty() {
-        let hint = "uid-collision: first=Variable:src/a.py::File second=Function:src/b.go::main";
-        let got = parse_hint(hint).expect("hint must parse");
+        let hint = make_hint(
+            "uid-collision",
+            "Variable",
+            "src/a.py",
+            "",
+            "File",
+            "Function",
+            "src/b.go",
+            "",
+            "main",
+        );
+        let got = parse_hint(&hint).expect("hint must parse");
         assert_eq!(got.2, ""); // owner_class can be empty (top-level)
         assert_eq!(got.3, "main");
     }
 
-    /// Regression: a naive `splitn(4, ':')` mis-attributes `::` inside Rust
-    /// `owner_class`, surfacing in real `dev uid-audit` output as
-    /// `owner='sealed'` + `name=':FromStreamPriv<T>:InternalCollection'`
-    /// (one cluster per affected file → false fan-out, blocking root-cause
-    /// triage). The current `splitn(3) + rsplit_once` recovers the true split.
+    /// Regression: Rust `owner_class` contains `::` — must survive intact now
+    /// that the delimiter is `\x1F` (no ambiguity). Previously required the
+    /// fragile `splitn(3) + rsplit_once` workaround; now straightforward split.
     #[test]
     fn parse_hint_rust_owner_with_double_colon_preserves_owner() {
-        let hint = "uid-collision: \
-            first=Typedef:tokio-stream/src/stream_ext/collect.rs:sealed::FromStreamPriv<T>:InternalCollection \
-            second=Typedef:tokio-stream/src/stream_ext/collect.rs:sealed::FromStreamPriv<T>:InternalCollection";
-        let (kind, path, owner, name) = parse_hint(hint).expect("hint must parse");
+        let hint = make_hint(
+            "uid-collision",
+            "Typedef",
+            "tokio-stream/src/stream_ext/collect.rs",
+            "sealed::FromStreamPriv<T>",
+            "InternalCollection",
+            "Typedef",
+            "tokio-stream/src/stream_ext/collect.rs",
+            "sealed::FromStreamPriv<T>",
+            "InternalCollection",
+        );
+        let (kind, path, owner, name) = parse_hint(&hint).expect("hint must parse");
         assert_eq!(kind, "Typedef");
         assert_eq!(path, "tokio-stream/src/stream_ext/collect.rs");
         assert_eq!(owner, "sealed::FromStreamPriv<T>");
@@ -403,10 +447,84 @@ mod tests {
     /// also survive — `crate::a::b::c::Type::Inner` → owner stays whole.
     #[test]
     fn parse_hint_deep_owner_chain_preserved() {
-        let hint = "uid-collision: first=Method:src/a.rs::nop second=Method:src/x.rs:crate::a::b::c::Outer:inner";
-        let (_, _, owner, name) = parse_hint(hint).expect("hint must parse");
+        let hint = make_hint(
+            "uid-collision",
+            "Method",
+            "src/a.rs",
+            "",
+            "nop",
+            "Method",
+            "src/x.rs",
+            "crate::a::b::c::Outer",
+            "inner",
+        );
+        let (_, _, owner, name) = parse_hint(&hint).expect("hint must parse");
         assert_eq!(owner, "crate::a::b::c::Outer");
         assert_eq!(name, "inner");
+    }
+
+    /// Swift selector regression: `name` contains literal `:` characters
+    /// (`init(foo:bar:)`). With the old `:` separator strategy this would
+    /// mis-attribute via `rsplit_once`. With `\x1F` it is unambiguous.
+    #[test]
+    fn test_parse_hint_handles_colon_in_name() {
+        let hint = make_hint(
+            "uid-collision",
+            "Method",
+            "Sources/Foo/Foo.swift",
+            "Foo",
+            "other",
+            "Method",
+            "Sources/Foo/Foo.swift",
+            "Foo",
+            "init(foo:bar:)",
+        );
+        let (kind, path, owner, name) = parse_hint(&hint).expect("hint must parse");
+        assert_eq!(kind, "Method");
+        assert_eq!(path, "Sources/Foo/Foo.swift");
+        assert_eq!(owner, "Foo");
+        assert_eq!(name, "init(foo:bar:)");
+    }
+
+    /// Rust `owner_class` with `::` is already covered by
+    /// `parse_hint_rust_owner_with_double_colon_preserves_owner`, but this
+    /// variant exercises a different call-site (prev/first= slot) to confirm
+    /// symmetry — and is the case mentioned in PR #345 as the original bug.
+    #[test]
+    fn test_parse_hint_preserves_rust_double_colon_in_owner() {
+        let hint = make_hint(
+            "uid-collision",
+            "Struct",
+            "src/lib.rs",
+            "sealed::FromStreamPriv<T>",
+            "Inner",
+            "Struct",
+            "src/lib.rs",
+            "sealed::FromStreamPriv<T>",
+            "Inner",
+        );
+        let (_, _, owner, name) = parse_hint(&hint).expect("hint must parse");
+        assert_eq!(owner, "sealed::FromStreamPriv<T>");
+        assert_eq!(name, "Inner");
+    }
+
+    /// Path containing `:` (e.g. Windows drive letter or URL-encoded segment)
+    /// must be preserved intact — `\x1F` is not present in any real path.
+    #[test]
+    fn test_parse_hint_handles_path_with_colon() {
+        let hint = make_hint(
+            "uid-collision",
+            "Function",
+            "C:/project/src/a.cpp",
+            "",
+            "foo",
+            "Function",
+            "C:/project/src/b.cpp",
+            "",
+            "foo",
+        );
+        let (_, path, _, _) = parse_hint(&hint).expect("hint must parse");
+        assert_eq!(path, "C:/project/src/b.cpp");
     }
 
     /// Sanity: language label comes from the canonical

@@ -494,8 +494,9 @@ impl GraphBuilder {
                     } else {
                         ""
                     };
+                    // US (\x1F) separates owner_class/name etc. — these may legitimately contain `:` (Swift selectors, Rust `::`).
                     let hint = format!(
-                        "{}: first={}:{}:{}:{} second={}:{}:{}:{}",
+                        "{}: first={}\u{1f}{}\u{1f}{}\u{1f}{} second={}\u{1f}{}\u{1f}{}\u{1f}{}",
                         bs_kind,
                         prev_kind,
                         prev_path,
