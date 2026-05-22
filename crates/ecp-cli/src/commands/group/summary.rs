@@ -1,7 +1,10 @@
-//! `ecp group coverage <name>` — health report for all group members.
+//! `ecp group summary <name>` — health report for all group members.
 //!
-//! Delegates to `commands::coverage::build_repo_health` per member; results
+//! Delegates to `commands::summary::build_repo_health` per member; results
 //! are concatenated in parallel and emitted as a flat array.
+//!
+//! Was `ecp group coverage` pre-rename; the `coverage` alias is kept for one
+//! release for back-compat (see clap `#[command(alias = "coverage")]`).
 
 use clap::Args;
 use ecp_core::registry::{resolve_home_ecp, RegistryFile};
@@ -9,12 +12,12 @@ use ecp_core::EcpError;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 
-use crate::commands::coverage::build_repo_health;
 use crate::commands::group::lookup_member;
+use crate::commands::summary::build_repo_health;
 use crate::repo_selector::ResolvedRepo;
 
 #[derive(Args, Debug, Clone)]
-pub struct CoverageArgs {
+pub struct SummaryArgs {
     /// Group name.
     pub name: String,
     /// JSON output.
@@ -22,7 +25,7 @@ pub struct CoverageArgs {
     pub json: bool,
 }
 
-pub fn run(args: CoverageArgs) -> Result<(), EcpError> {
+pub fn run(args: SummaryArgs) -> Result<(), EcpError> {
     let home_ecp = resolve_home_ecp();
     let registry_path = home_ecp.join("registry.json");
     let reg = RegistryFile::read_or_empty(&registry_path)?;
@@ -55,7 +58,7 @@ pub fn run(args: CoverageArgs) -> Result<(), EcpError> {
 
     if resolved.is_empty() {
         if args.json {
-            println!("{}", json!({ "coverage": { "per_repo": [] } }));
+            println!("{}", json!({ "summary": { "per_repo": [] } }));
         } else {
             eprintln!("no members in group '{}'", args.name);
         }
@@ -76,7 +79,7 @@ fn emit(per_repo: &[Value], json: bool) {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({ "coverage": { "per_repo": per_repo } }))
+            serde_json::to_string_pretty(&json!({ "summary": { "per_repo": per_repo } }))
                 .unwrap_or_default()
         );
     } else {

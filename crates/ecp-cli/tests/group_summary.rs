@@ -1,10 +1,12 @@
-//! Tests for `ecp group coverage`.
+//! Tests for `ecp group summary`.
 //!
 //! Strategy:
 //! - Smoke tests: `--help` exits 0 and unknown-group exits non-zero.
 //! - Wiring test: 2-repo fixture indexed + grouped → JSON
-//!   `coverage.per_repo` array with 2 entries, each having
+//!   `summary.per_repo` array with 2 entries, each having
 //!   `repo`, `frameworks`, `freshness`, `metrics`, and `blind_spots` keys.
+//! - Back-compat: the legacy `group coverage` alias still routes to the
+//!   same handler for one release.
 
 use std::fs;
 use std::path::Path;
@@ -56,9 +58,9 @@ fn read_dir_names(home_ecp: &Path) -> Vec<String> {
 // ── Smoke tests ───────────────────────────────────────────────────────────────
 
 #[test]
-fn group_coverage_help_exits_zero() {
+fn group_summary_help_exits_zero() {
     let out = Command::new(ecp_bin())
-        .args(["group", "coverage", "--help"])
+        .args(["group", "summary", "--help"])
         .output()
         .expect("ecp spawn failed");
     assert!(
@@ -74,9 +76,9 @@ fn group_coverage_help_exits_zero() {
 }
 
 #[test]
-fn group_coverage_unknown_group_exits_nonzero() {
+fn group_summary_unknown_group_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = run_ecp(&["group", "coverage", "__no_such_group__"], tmp.path());
+    let out = run_ecp(&["group", "summary", "__no_such_group__"], tmp.path());
     assert!(
         !out.status.success(),
         "expected non-zero exit for unknown group"
@@ -88,12 +90,27 @@ fn group_coverage_unknown_group_exits_nonzero() {
     );
 }
 
+/// Back-compat: `ecp group coverage` must still route to the same handler
+/// while the alias lives. Drop this when the alias is retired.
+#[test]
+fn group_coverage_alias_help_exits_zero() {
+    let out = Command::new(ecp_bin())
+        .args(["group", "coverage", "--help"])
+        .output()
+        .expect("ecp spawn failed");
+    assert!(
+        out.status.success(),
+        "expected exit 0 for `group coverage --help` (alias); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // ── Wiring / JSON-shape test ──────────────────────────────────────────────────
 
-/// 2-repo fixture: JSON output must have `coverage.per_repo` with 2 entries,
+/// 2-repo fixture: JSON output must have `summary.per_repo` with 2 entries,
 /// each carrying the full health payload keys.
 #[test]
-fn group_coverage_json_shape_two_repos() {
+fn group_summary_json_shape_two_repos() {
     let home_tmp = tempfile::tempdir().unwrap();
     let repos_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
@@ -122,10 +139,10 @@ fn group_coverage_json_shape_two_repos() {
         );
     }
 
-    let out = run_ecp(&["group", "coverage", "covgrp", "--json"], home);
+    let out = run_ecp(&["group", "summary", "covgrp", "--json"], home);
     assert!(
         out.status.success(),
-        "group coverage failed:\nstdout: {}\nstderr: {}",
+        "group summary failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -133,9 +150,9 @@ fn group_coverage_json_shape_two_repos() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("output must be valid JSON");
 
-    let per_repo = v["coverage"]["per_repo"]
+    let per_repo = v["summary"]["per_repo"]
         .as_array()
-        .expect("`coverage.per_repo` must be an array");
+        .expect("`summary.per_repo` must be an array");
     assert_eq!(
         per_repo.len(),
         2,

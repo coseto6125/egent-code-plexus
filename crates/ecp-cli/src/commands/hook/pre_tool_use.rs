@@ -114,7 +114,7 @@ fn extract_pattern(tool: &str, tool_input: &serde_json::Value) -> Option<String>
                 .unwrap_or("");
             // Do NOT pass through `strip_shell_quotes` here — it deletes the
             // entire quoted block, which is precisely where the grep / rg
-            // pattern lives (e.g. `rg "coverage_blind_spots"`). The downstream
+            // pattern lives (e.g. `rg "summary_blind_spots"`). The downstream
             // token-level `cleaned` filter in `extract_from_shell` peels the
             // surviving quote characters off each token. `strip_shell_quotes`
             // is still the right tool for `post_tool_use` git-mutation
@@ -180,10 +180,10 @@ mod tests {
         // Regression: `strip_shell_quotes` used to delete the entire quoted
         // block, leaving the hook to pick up the next non-flag token (often
         // a pipe-side `head` / `tail`) and surface unrelated graph noise.
-        let cmd = r#"git show abc:foo.rs | grep -nE "coverage_blind_spots" | head -20"#;
+        let cmd = r#"git show abc:foo.rs | grep -nE "summary_blind_spots" | head -20"#;
         assert_eq!(
             extract_from_shell(cmd),
-            Some("coverage_blind_spots".to_string())
+            Some("summary_blind_spots".to_string())
         );
     }
 

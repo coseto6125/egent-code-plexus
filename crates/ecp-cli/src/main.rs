@@ -65,8 +65,11 @@ enum Commands {
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),
     /// Registry + repo health (indexed repos, freshness, frameworks, blind spots).
+    /// `blind_spots` lists only LLM-actionable opacity (dynamic-import / reflection / eval);
+    /// parser-metric buckets (uid-collision / overload / ifdef-redef) live under `ecp dev uid_audit`.
     /// External-client (HTTP/DB/Redis/queue) usage detail: see `ecp tool-map`.
-    Coverage(commands::coverage::CoverageArgs),
+    #[command(alias = "coverage")]
+    Summary(commands::summary::SummaryArgs),
     /// List HTTP routes; with path, show handler + caller chain
     Routes(commands::routes::RoutesArgs),
     /// Cross-repo API contracts inventory (routes / queue / RPC)
@@ -102,7 +105,7 @@ enum Commands {
     Watch(commands::watch::WatchArgs),
     /// Multi-session peer collaboration (status / diff / log / gc + Ƀ messaging)
     Peers(commands::peers::PeersArgs),
-    /// LLM-workflow audit aggregator — runs impact, coverage (blind-spot),
+    /// LLM-workflow audit aggregator — runs impact, summary (blind-spot),
     /// egress (tool-map), shape-check, and resolver-diff over changed files in
     /// one shot, filtered to high-confidence signals only.
     Review(commands::review::ReviewArgs),
@@ -172,8 +175,8 @@ fn main() {
     match &cli.command {
         Commands::HookHandle(args) => run_no_graph!(commands::hook_handle::run(args.clone())),
         Commands::HookWatcher(args) => run_no_graph!(commands::hook_watcher::run(args.clone())),
-        Commands::Coverage(args) => {
-            run_no_graph!(commands::coverage::run(args.clone(), &cli.graph))
+        Commands::Summary(args) => {
+            run_no_graph!(commands::summary::run(args.clone(), &cli.graph))
         }
         Commands::Contracts(args) => run_no_graph!(commands::contracts::run(args.clone())),
         Commands::Diff(args) => run_no_graph!(commands::diff::run(args.clone())),
@@ -198,7 +201,7 @@ fn main() {
         Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
         Commands::FindSchemaBindings(_) => None,
         Commands::FindEventMirrors(_) => None,
-        Commands::Coverage(_)
+        Commands::Summary(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
         | Commands::Admin { .. }
@@ -242,7 +245,7 @@ fn main() {
         Commands::FindTransactionPatterns(args) => commands::find_tx_patterns::run(args, &engine),
         Commands::FindSchemaBindings(args) => commands::find_schema_bindings::run(args, &engine),
         Commands::FindEventMirrors(args) => commands::find_event_mirrors::run(args, &engine),
-        Commands::Coverage(_)
+        Commands::Summary(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
         | Commands::Admin { .. }
@@ -270,7 +273,7 @@ fn main() {
 fn check_group_atom(cli: &Cli) {
     // The `repo: Option<String>` accessor lives on each variant's args struct,
     // so the match has to enumerate them. Pull the value out first; bail
-    // fast for commands without a `--repo` field (contracts/coverage are
+    // fast for commands without a `--repo` field (contracts/summary are
     // already protected via resolve_top_level; peers/admin/hooks don't expose
     // a group-aware selector).
     let (repo_opt, hint): (Option<&str>, Option<&str>) = match &cli.command {

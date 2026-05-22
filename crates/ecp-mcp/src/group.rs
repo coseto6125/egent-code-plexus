@@ -36,7 +36,7 @@ fn tool_group() -> DerivedTool {
             "properties": {
                 "subcmd": {
                     "type": "string",
-                    "enum": ["sync", "status", "contracts", "impact", "find", "coverage"],
+                    "enum": ["sync", "status", "contracts", "impact", "find", "summary"],
                     "description": "Which group operation to run. Each subcmd uses a disjoint subset of the args below."
                 },
                 "name": {

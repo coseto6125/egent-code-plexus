@@ -69,17 +69,17 @@ fn find_at_group_errors_with_hint() {
 }
 
 #[test]
-fn coverage_at_group_errors_with_hint() {
+fn summary_at_group_errors_with_hint() {
     let home = TempDir::new().unwrap();
     make_home_with_group(home.path(), "demo");
     let out = Command::new(ecp_bin())
         .env("HOME", home.path())
-        .args(["coverage", "--repo", "@demo"])
+        .args(["summary", "--repo", "@demo"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("ecp group coverage"), "got: {stderr}");
+    assert!(stderr.contains("ecp group summary"), "got: {stderr}");
 }
 
 // ── Commands with a direct `ecp group <verb>` analog ───────────────────────

@@ -115,7 +115,7 @@ fn list_routes(
         eprintln!(
             "No HTTP routes detected.\n\
              → Possible causes: framework not yet supported, no route declarations found,\n\
-             or a coverage gap. Run `ecp coverage --detailed` for framework scan details."
+             or a coverage gap. Run `ecp summary --detailed` for framework scan details."
         );
     } else if results.is_empty() && !include_tests {
         eprintln!(

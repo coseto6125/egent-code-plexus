@@ -40,7 +40,7 @@ pub fn run(
     let mut findings: Vec<Finding> = Vec::new();
 
     findings.extend(run_impact(&scope_strs, repo_dir, engine, since));
-    findings.extend(run_coverage(&scope_strs, engine));
+    findings.extend(run_summary(&scope_strs, engine));
     findings.extend(run_tool_map(
         &scope_strs,
         engine,
@@ -170,10 +170,10 @@ pub fn impact_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> 
     findings
 }
 
-// ── coverage (BlindSpot) helper ──────────────────────────────────────────────
+// ── summary (BlindSpot) helper ───────────────────────────────────────────────
 
-fn run_coverage(file_scope: &HashSet<String>, engine: &Engine) -> Vec<Finding> {
-    // coverage::build_payload with --repo needs a path arg, but for blind-spot
+fn run_summary(file_scope: &HashSet<String>, engine: &Engine) -> Vec<Finding> {
+    // summary::build_payload with --repo needs a path arg, but for blind-spot
     // extraction we need to read the graph's blind_spots directly.
     // Use the engine's graph to avoid a subprocess round-trip.
     let graph = match engine.graph() {
@@ -202,23 +202,23 @@ fn run_coverage(file_scope: &HashSet<String>, engine: &Engine) -> Vec<Finding> {
         .collect()
 }
 
-/// Mine the coverage payload's per-repo `blind_spots.by_kind` aggregate.
+/// Mine the summary payload's per-repo `blind_spots.by_kind` aggregate.
 /// The aggregate has no file-level granularity, so each (repo, kind) pair
 /// yields ONE finding attributed to the repo's path — never fanned-out per
 /// scope file (that would fabricate attribution). Production callers should
-/// prefer `run_coverage`, which reads `graph.blind_spots` directly and
+/// prefer `run_summary`, which reads `graph.blind_spots` directly and
 /// preserves file paths.
 ///
-/// `run_coverage` (binary path) reads `graph.blind_spots` directly from the
+/// `run_summary` (binary path) reads `graph.blind_spots` directly from the
 /// engine, so this `&Value`-based variant has no in-crate caller and `cargo`
 /// flags it as dead. Kept `pub` to mirror the library API surface that the
 /// four sibling constituents expose (`impact_findings`, `tool_map_findings`,
 /// `shape_check_findings`, `resolver_diff_findings`) for future consumers
-/// that hold a serialized coverage payload but no engine.
+/// that hold a serialized summary payload but no engine.
 #[allow(dead_code)]
-pub fn coverage_blind_spots(v: &Value) -> Vec<Finding> {
+pub fn summary_blind_spots(v: &Value) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let Some(per_repo) = v.pointer("/coverage/per_repo").and_then(|v| v.as_array()) else {
+    let Some(per_repo) = v.pointer("/summary/per_repo").and_then(|v| v.as_array()) else {
         return findings;
     };
     for repo in per_repo {
@@ -560,9 +560,9 @@ mod tests {
     }
 
     #[test]
-    fn coverage_blind_spots_maps_per_repo_findings() {
+    fn summary_blind_spots_maps_per_repo_findings() {
         let v = json!({
-            "coverage": {
+            "summary": {
                 "per_repo": [
                     {
                         "repo": "myrepo",
@@ -576,7 +576,7 @@ mod tests {
                 ]
             }
         });
-        let findings = coverage_blind_spots(&v);
+        let findings = summary_blind_spots(&v);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source, Source::BlindSpot);
         assert!(findings[0].message.contains("dynamic-import"));

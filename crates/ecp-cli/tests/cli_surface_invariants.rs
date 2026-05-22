@@ -61,7 +61,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "impact",
     "rename",
     "cypher",
-    "coverage",
+    "summary",
     "routes",
     "contracts",
     "diff",
@@ -83,7 +83,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
 
 /// `ecp group <subcmd>` — keep in sync with `GroupCommands` enum in
 /// `crates/ecp-cli/src/commands/group/mod.rs`.
-const GROUP_SUBCMDS: &[&str] = &["sync", "status", "contracts", "impact", "find", "coverage"];
+const GROUP_SUBCMDS: &[&str] = &["sync", "status", "contracts", "impact", "find", "summary"];
 
 /// `ecp peers <subcmd>` — keep in sync with `PeersCmd` enum.
 const PEERS_SUBCMDS: &[&str] = &["status", "diff", "log", "say", "inbox", "thread", "gc"];
@@ -358,7 +358,7 @@ fn mcp_ecp_group_advertised_flags_exist_in_cli_help() {
             ],
         ),
         ("find", &["--merge", "--limit", "--batch", "--json"]),
-        ("coverage", &["--json"]),
+        ("summary", &["--json"]),
     ];
 
     for (subcmd, expected_flags) in cases {
