@@ -39,6 +39,13 @@ fn list_refs_pointing_at(worktree: &Path, sha_hex: &str) -> io::Result<Vec<Strin
         .current_dir(worktree)
         .output()?;
     if !out.status.success() {
+        // Non-git: no refs to enumerate. Caller falls back to `commit__<sha>`
+        // dirname, where `<sha>` is the synthetic path-bound digest from
+        // `head_sha_hex`. Treating non-git as "0 refs" keeps the picker
+        // shape uniform; the synthetic digest is stable per canonical path.
+        if crate::git_cache::common_dir(worktree).is_err() {
+            return Ok(Vec::new());
+        }
         return Err(io::Error::other("git for-each-ref failed"));
     }
     let s = std::str::from_utf8(&out.stdout).map_err(io::Error::other)?;

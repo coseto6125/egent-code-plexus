@@ -239,18 +239,32 @@ pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
         .args(["rev-parse", "HEAD"])
         .current_dir(worktree)
         .output()?;
-    if !out.status.success() {
-        return Err(io::Error::other("git rev-parse HEAD failed"));
+    if out.status.success() {
+        return Ok(std::str::from_utf8(&out.stdout)
+            .map_err(io::Error::other)?
+            .trim()
+            .to_string());
     }
-    Ok(std::str::from_utf8(&out.stdout)
-        .map_err(io::Error::other)?
-        .trim()
-        .to_string())
+    // Non-git fallback: synthesize a stable 40-hex SHA-shaped digest from the
+    // canonical worktree path. The cache path layout stays uniform
+    // (`branch_main__<hex40>.gen.X/`) so downstream code is unchanged; staleness
+    // detection still flows through the mtime walk in `auto_ensure`.
+    // Identity is path-bound — moving the dir invalidates this digest, treated
+    // as a new repo (acceptable for ad-hoc indexing of non-VCS source trees).
+    let canonical = std::fs::canonicalize(worktree)?;
+    let h = xxhash_rust::xxh3::xxh3_128(canonical.to_string_lossy().as_bytes());
+    Ok(format!("{h:040x}"))
 }
 
 pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io::Result<bool> {
     if head_sha_hex(worktree)? != sha {
         return Ok(false);
+    }
+    // Non-git: the synthetic digest from head_sha_hex is path-bound — equality
+    // above already establishes "we're at the expected snapshot". No dirty-tree
+    // concept applies; treat as clean and index the worktree directly.
+    if crate::git_cache::common_dir(worktree).is_err() {
+        return Ok(true);
     }
     let out = safe_exec::git()
         .args(["diff-index", "--quiet", "HEAD"])
@@ -432,6 +446,15 @@ fn git_common_dir_string(worktree: &Path) -> io::Result<String> {
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(worktree)
         .output()?;
+    if !out.status.success() {
+        // Non-git: store the canonical worktree path as `common_dir`. Mirrors
+        // `find_by_path` in `repo_selector.rs`, which also falls back to the
+        // canonical worktree path when git is unavailable. Both sides converge
+        // on the same string so registry lookup succeeds for nogit repos.
+        return Ok(std::fs::canonicalize(worktree)?
+            .to_string_lossy()
+            .into_owned());
+    }
     let s = std::str::from_utf8(&out.stdout)
         .map_err(io::Error::other)?
         .trim();

@@ -183,13 +183,17 @@ fn git_common_dir_canonical(cwd: &Path) -> Option<std::path::PathBuf> {
         .current_dir(cwd)
         .output()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    if out.status.success() {
+        let s = std::str::from_utf8(&out.stdout).ok()?.trim();
+        let p = std::path::PathBuf::from(s);
+        let resolved = if p.is_absolute() { p } else { cwd.join(p) };
+        return std::fs::canonicalize(resolved).ok();
     }
-    let s = std::str::from_utf8(&out.stdout).ok()?.trim();
-    let p = std::path::PathBuf::from(s);
-    let resolved = if p.is_absolute() { p } else { cwd.join(p) };
-    std::fs::canonicalize(resolved).ok()
+    // Non-git: fall back to canonical cwd. The build path
+    // (`orchestrator::git_common_dir_string`) writes the same string into the
+    // registry's `common_dir` field on non-git builds, so `find_by_path` can
+    // still resolve `--repo /path/to/nogit-dir` to the right alias.
+    std::fs::canonicalize(cwd).ok()
 }
 
 fn push_unique(seen: &mut HashSet<String>, out: &mut Vec<ResolvedRepo>, alias: &RepoAlias) {

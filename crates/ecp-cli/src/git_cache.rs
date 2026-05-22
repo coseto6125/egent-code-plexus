@@ -90,15 +90,18 @@ fn read_head_sha(cwd: &Path) -> Option<String> {
         .current_dir(cwd)
         .output()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    if out.status.success() {
+        let s = std::str::from_utf8(&out.stdout).ok()?.trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
     }
-    let s = std::str::from_utf8(&out.stdout).ok()?.trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    // Non-git fallback: synthesize a stable 40-hex digest from canonical path.
+    // Mirrors `orchestrator::head_sha_hex` so cache identity stays consistent
+    // between the writer (build_l2) and the reader (graph_path::resolve_v2).
+    let canonical = std::fs::canonicalize(cwd).ok()?;
+    let h = xxhash_rust::xxh3::xxh3_128(canonical.to_string_lossy().as_bytes());
+    Some(format!("{h:040x}"))
 }
 
 /// Cached `git rev-parse --git-common-dir`. Returns the resolved absolute path

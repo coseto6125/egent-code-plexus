@@ -68,10 +68,47 @@ fn two_worktrees_same_repo_yield_same_dir_name() {
     assert_eq!(n1, n2, "two worktrees of same repo must share dir name");
 }
 
+/// Non-git directory falls back to canonical-path-based identity so ad-hoc
+/// indexing (vendored sources, code dumps, archive extracts) works without
+/// requiring `git init`. Identity rule: `<basename(canonical_cwd)>__<hash>`.
 #[test]
-fn cwd_not_in_repo_errors() {
+fn cwd_not_in_repo_yields_path_based_identity() {
     let tmp = tempfile::tempdir().unwrap();
-    assert!(repo_dir_name_for_cwd(tmp.path()).is_err());
+    let name = repo_dir_name_for_cwd(tmp.path())
+        .expect("non-git fallback should succeed for any readable directory");
+
+    assert!(name.contains("__"), "must contain hash separator: {name}");
+    let (prefix, hash) = name.rsplit_once("__").unwrap();
+    assert!(!prefix.is_empty(), "basename prefix must be non-empty");
+    assert_eq!(hash.len(), 8, "hash suffix must be 8 hex chars: {name}");
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "hash must be hex: {hash}"
+    );
+}
+
+/// Same canonical path → same identity on repeated calls (stable across
+/// process invocations). Prerequisite for cache hit / re-index detection.
+#[test]
+fn cwd_not_in_repo_identity_stable_across_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let n1 = repo_dir_name_for_cwd(tmp.path()).unwrap();
+    let n2 = repo_dir_name_for_cwd(tmp.path()).unwrap();
+    assert_eq!(n1, n2);
+}
+
+/// Two distinct non-git paths produce distinct identities (no canonical-path
+/// collision under the 8-hex truncation in practice).
+#[test]
+fn two_distinct_nogit_dirs_yield_distinct_identities() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a");
+    let b = tmp.path().join("b");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let na = repo_dir_name_for_cwd(&a).unwrap();
+    let nb = repo_dir_name_for_cwd(&b).unwrap();
+    assert_ne!(na, nb, "distinct paths must yield distinct identities");
 }
 
 #[test]
