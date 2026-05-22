@@ -416,12 +416,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- Formula/egent-code-plexus.rb; then
+          git add Formula/egent-code-plexus.rb
+
+          # `git diff --quiet -- <path>` returns 0 on an untracked file (no tracked
+          # diff), so the first-ever push would silently exit without committing.
+          # Compare against HEAD via the staged index instead — covers both new
+          # file and content change.
+          if git diff --cached --quiet -- Formula/egent-code-plexus.rb; then
             echo "Homebrew formula is already up to date."
             exit 0
           fi
 
-          git add Formula/egent-code-plexus.rb
           git commit -m "egent-code-plexus ${GITHUB_REF_NAME}"
           git push
 
