@@ -305,3 +305,27 @@
     (string_literal) @sqs.topic)
   (#eq? @sqs.direction "receive_message")
   (#eq? @_qurl "queue_url"))
+
+;; ---- BlindSpot patterns (FU-001 P4) ----
+;; transmute::<..., fn(...)>(ptr) — bit-cast to function pointer. Match
+;; generic_function calls whose path ends in `transmute` and whose turbofish
+;; contains a function_type. Non-fn transmutes (numeric reinterpret) are
+;; ignored. Indirect dispatch through `dyn Trait` / Fn callbacks is handled
+;; separately by `indirect_dispatch.rs` (CallMeta path) — do NOT duplicate here.
+((call_expression
+   function: (generic_function
+     function: (_) @_fn
+     type_arguments: (type_arguments
+       (function_type)))) @blind.transmute_fn
+  (#match? @_fn "transmute$"))
+
+;; libloading::Library::get(...) — dynamic symbol load from a dlopen'd
+;; library. Fully-qualified 3-segment form only; the 2-segment `Library::get`
+;; (post `use libloading::Library;`) and method form `lib.get::<...>(...)`
+;; are deferred follow-ups (need import-presence gate / type inference).
+((call_expression
+   function: (scoped_identifier
+     path: (scoped_identifier
+       path: (identifier) @_p1 (#eq? @_p1 "libloading")
+       name: (identifier) @_p2 (#eq? @_p2 "Library"))
+     name: (identifier) @_p3 (#eq? @_p3 "get"))) @blind.libloading_get)

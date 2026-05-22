@@ -9,11 +9,24 @@ use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_in
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
+/// in `parse_file`.
+const BLIND_SPEC: &[(&str, &str)] = &[
+    (
+        "rs-transmute-fn",
+        "transmute::<_, fn(...)>(ptr) — bit-cast to a function pointer; target function not statically determinable",
+    ),
+    (
+        "rs-libloading-get",
+        "libloading::Library::get(...) — dynamic symbol load from dlopen'd library; target function resolved at runtime",
+    ),
+];
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -56,6 +69,9 @@ struct RustCaptureIndices {
     axum_handler: Option<u32>,
     actix_method: Option<u32>,
     actix_handler: Option<u32>,
+    // BlindSpot captures (FU-001 P4).
+    blind_transmute_fn: Option<u32>,
+    blind_libloading_get: Option<u32>,
 }
 
 impl RustProvider {
@@ -89,6 +105,8 @@ impl RustProvider {
             axum_handler: query.capture_index_for_name("axum.route.handler"),
             actix_method: query.capture_index_for_name("actix.route.method"),
             actix_handler: query.capture_index_for_name("actix.route.handler"),
+            blind_transmute_fn: query.capture_index_for_name("blind.transmute_fn"),
+            blind_libloading_get: query.capture_index_for_name("blind.libloading_get"),
         };
 
         // Pre-resolve capture-name → NodeKind from the spec table so the
@@ -124,6 +142,7 @@ impl LanguageProvider for RustProvider {
 
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
+        let mut blind_spots: Vec<BlindSpot> = Vec::new();
 
         let idx = &self.indices;
 
@@ -242,6 +261,22 @@ impl LanguageProvider for RustProvider {
                     actix_method = Some(cap.node);
                 } else if cap_idx == idx.actix_handler {
                     actix_handler = Some(cap.node);
+                } else if cap_idx == idx.blind_transmute_fn {
+                    let (kind, hint) = BLIND_SPEC[0];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
+                } else if cap_idx == idx.blind_libloading_get {
+                    let (kind, hint) = BLIND_SPEC[1];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
                 }
             }
 
@@ -510,7 +545,7 @@ impl LanguageProvider for RustProvider {
             documents: vec![],
             framework_refs,
             fanout_refs: vec![],
-            blind_spots: vec![],
+            blind_spots,
             schema_fields: None,
             event_topics,
             tx_scopes: None,
