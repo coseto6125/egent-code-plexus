@@ -935,8 +935,8 @@ fn node_matches(
     np: &NodePat,
     graph: &ArchivedZeroCopyGraph,
 ) -> bool {
-    // Deserialize once; reused by both label filter and `kind` prop filter below.
-    let kind: NodeKind = rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&node.kind).unwrap();
+    // Zero-cost discriminant read; reused by both label filter and `kind` prop filter below.
+    let kind: NodeKind = NodeKind::from(&node.kind);
     if !np.kinds.is_empty() && !np.kinds.contains(&kind) {
         return false;
     }
@@ -985,9 +985,7 @@ fn walk_rel(from: u32, rel: &RelPat, graph: &ArchivedZeroCopyGraph) -> Vec<(u32,
         if rel.types.is_empty() {
             return true;
         }
-        let rt: RelType =
-            rkyv::deserialize::<RelType, rkyv::rancor::Error>(&edge.rel_type).unwrap();
-        rel.types.contains(&rt)
+        rel.types.contains(&RelType::from(&edge.rel_type))
     };
 
     if matches!(dir, Direction::Out | Direction::Both) {
@@ -1041,12 +1039,10 @@ fn eval_expr(
             // so `value_key` partitions on edge identity for DISTINCT.
             if let Some(&eidx) = b.edge_vars.get(var) {
                 let e = &graph.edges[eidx as usize];
-                let rt: RelType =
-                    rkyv::deserialize::<RelType, rkyv::rancor::Error>(&e.rel_type).unwrap();
                 return Ok(Value::EdgeRef {
                     src: e.source.to_native(),
                     tgt: e.target.to_native(),
-                    rel_type: rt,
+                    rel_type: RelType::from(&e.rel_type),
                     confidence: e.confidence.to_native(),
                     reason: e.reason.resolve(&graph.string_pool).to_string(),
                 });
@@ -1218,24 +1214,19 @@ fn prop_value(
         return match prop {
             "confidence" => Value::Float(e.confidence.to_native() as f64),
             "reason" => Value::Str(e.reason.resolve(&graph.string_pool).to_string()),
-            "rel_type" => {
-                let rt: RelType =
-                    rkyv::deserialize::<RelType, rkyv::rancor::Error>(&e.rel_type).unwrap();
-                Value::Str(format!("{rt:?}"))
-            }
+            "rel_type" => Value::Str(RelType::from(&e.rel_type).as_str().to_string()),
             _ => Value::Null,
         };
     }
     Value::Null
 }
 
-/// Deserialize an archived node's kind once and resolve to its static
-/// variant name (`"Function"`, `"Class"`, …). Shared by the NodeRef
-/// projection, the `n.kind` property, and the WHERE label-test arm so a
-/// future Display tweak on `NodeKind` lands at one site instead of three.
+/// Zero-cost archived-kind → static variant name (`"Function"`, `"Class"`, …).
+/// Shared by the NodeRef projection, the `n.kind` property, and the WHERE
+/// label-test arm so a future Display tweak on `NodeKind` lands at one site
+/// instead of three.
 fn archived_kind_str(node: &crate::graph::ArchivedNode) -> &'static str {
-    let kind: NodeKind = rkyv::deserialize::<NodeKind, rkyv::rancor::Error>(&node.kind).unwrap();
-    kind.as_str()
+    NodeKind::from(&node.kind).as_str()
 }
 
 /// Resolve a single property from an archived node.

@@ -138,11 +138,7 @@ fn bfs(
                     let edge = &graph.edges[edge_idx];
 
                     if let Some(allowed) = config.allowed_rel_types {
-                        let rel: crate::graph::RelType = rkyv::deserialize::<
-                            crate::graph::RelType,
-                            rkyv::rancor::Error,
-                        >(&edge.rel_type)
-                        .unwrap();
+                        let rel = crate::graph::RelType::from(&edge.rel_type);
                         if !allowed.contains(&rel) {
                             continue;
                         }
@@ -161,11 +157,7 @@ fn bfs(
                 let edges_slice = &graph.edges[s..e];
                 for edge in edges_slice {
                     if let Some(allowed) = config.allowed_rel_types {
-                        let rel: crate::graph::RelType = rkyv::deserialize::<
-                            crate::graph::RelType,
-                            rkyv::rancor::Error,
-                        >(&edge.rel_type)
-                        .unwrap();
+                        let rel = crate::graph::RelType::from(&edge.rel_type);
                         if !allowed.contains(&rel) {
                             continue;
                         }
