@@ -152,7 +152,28 @@ fn detect_collisions(
     new_name: &str,
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
 ) -> Vec<String> {
+    // O(log N + collisions) via the v9 name_index instead of scanning all
+    // nodes. The legacy O(N) scan is preserved as a fallback when the index
+    // is empty (legacy graph.bin from v8 — engine::load already rejects
+    // these, but defensively).
     let mut locs = Vec::new();
+    if !graph.name_index.is_empty() {
+        for idx in graph.nodes_by_name(new_name) {
+            let node = &graph.nodes[idx as usize];
+            let file_idx = node.file_idx.to_native() as usize;
+            let file_path = if file_idx < graph.files.len() {
+                graph.files[file_idx]
+                    .path
+                    .resolve(&graph.string_pool)
+                    .to_owned()
+            } else {
+                "<unknown>".to_owned()
+            };
+            let start_line = node.span.0.to_native();
+            locs.push(format!("{file_path}:{start_line}"));
+        }
+        return locs;
+    }
     for node in graph.nodes.iter() {
         if node.name.resolve(&graph.string_pool) == new_name {
             let file_idx = node.file_idx.to_native() as usize;

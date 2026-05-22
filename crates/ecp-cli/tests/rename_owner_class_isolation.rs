@@ -148,7 +148,7 @@ fn two_class_validate_graph(foo_file: &str, bar_file: &str) -> Vec<u8> {
     ];
 
     let n = nodes.len();
-    let name_index: Vec<u32> = (0..n as u32).collect();
+    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
 
     serialize_graph(&ZeroCopyGraph {
         magic: GRAPH_MAGIC,
@@ -352,7 +352,7 @@ fn test_rename_bare_name_hits_top_level_function() {
             out_offsets: vec![0u32, 0],
             in_offsets: vec![0u32, 0],
             in_edge_idx: vec![],
-            name_index: vec![0],
+            name_index: Vec::new(),
             process_start: 1,
             ..ZeroCopyGraph::default()
         })

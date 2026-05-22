@@ -167,7 +167,7 @@ fn synthetic_graph_with_mirrors_field() -> Vec<u8> {
     // in_offsets: consumer has 1 incoming (edge 0), producer has 0.
     let in_offsets = vec![0u32, 0u32, 1u32];
     let in_edge_idx = vec![0u32];
-    let name_index: Vec<u32> = (0..n as u32).collect();
+    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
 
     let graph = ZeroCopyGraph {
         string_pool: pool.bytes,

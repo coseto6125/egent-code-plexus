@@ -111,7 +111,7 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
         in_offsets.push(in_edge_idx.len() as u32);
     }
 
-    let name_index: Vec<u32> = (0..n as u32).collect();
+    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
 
     let graph = ZeroCopyGraph {
         magic: GRAPH_MAGIC,

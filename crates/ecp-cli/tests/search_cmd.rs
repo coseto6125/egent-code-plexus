@@ -61,7 +61,7 @@ fn seed_repo(home_ecp: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]
         out_offsets: vec![0; (n + 1) as usize],
         in_offsets: vec![0; (n + 1) as usize],
         in_edge_idx: vec![],
-        name_index: (0..n).collect(),
+        name_index: Vec::new(),
         process_start: n,
         traces_offsets: vec![0],
         traces_data: vec![],

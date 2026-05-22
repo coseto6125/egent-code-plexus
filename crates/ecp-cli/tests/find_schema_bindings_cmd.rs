@@ -182,7 +182,7 @@ fn build_graph(sfs: &[SfSpec], mirrors: &[(usize, usize, f32)]) -> Vec<u8> {
         }
     }
 
-    let name_index: Vec<u32> = (0..n as u32).collect();
+    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
 
     let graph = ZeroCopyGraph {
         magic: GRAPH_MAGIC,

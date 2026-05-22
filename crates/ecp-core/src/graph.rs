@@ -18,7 +18,7 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     1-cycle `FxHashMap` lookup; eliminates string-pool dereference on hot paths.
 /// v8: `Node.content_hash: u64` added — per-symbol xxh3_64 of raw source bytes
 ///     for T7-4/5/6 incremental skip (equal hash ↔ body unchanged).
-pub const GRAPH_FORMAT_VERSION: u32 = 8;
+pub const GRAPH_FORMAT_VERSION: u32 = 9;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -401,6 +401,23 @@ pub struct Node {
     pub content_hash: u64,
 }
 
+/// Sorted entry in `ZeroCopyGraph.name_index`: maps a `xxh3_64(name)` hash
+/// to the node index. The builder writes entries sorted by `name_hash`,
+/// enabling O(log N) binary-search lookup of "all nodes with this name".
+/// Hash collisions disambiguate by re-resolving the actual name from the
+/// string pool and string-comparing.
+///
+/// Practical impact: `ecp find <name>`, `ecp rename <old> <new>` (collision
+/// detection), `ecp inspect <name>`, and cypher `MATCH {name: "..."}`
+/// previously did O(N) linear scans through `graph.nodes`. With this index
+/// they become O(log N + collision_count).
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct NameIndexEntry {
+    pub name_hash: u64,
+    pub node_idx: u32,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct Edge {
@@ -623,7 +640,9 @@ pub struct ZeroCopyGraph {
     pub out_offsets: Vec<u32>,
     pub in_offsets: Vec<u32>,
     pub in_edge_idx: Vec<u32>,
-    pub name_index: Vec<u32>,
+    /// Sorted `(xxh3_64(name), node_idx)` pairs — see `NameIndexEntry`.
+    /// Replaces the v8 placeholder `Vec<u32>` that was never populated.
+    pub name_index: Vec<NameIndexEntry>,
 
     /// Boundary index: `nodes[process_start..]` are all `NodeKind::Process`.
     /// For node_idx >= process_start, `process_k = node_idx - process_start`
@@ -670,6 +689,38 @@ impl ZeroCopyGraph {
             .binary_search_by_key(&node_idx, |m| m.node_idx)
             .ok()
             .map(|i| &self.function_metas[i])
+    }
+}
+
+impl ArchivedZeroCopyGraph {
+    /// Look up all node indices with the given name via the v9 name_index.
+    /// O(log N + hash_collisions). Returns an iterator that filters
+    /// collisions by re-resolving each candidate's name from the string pool.
+    ///
+    /// Empty result is valid: name not present in the graph. Callers that
+    /// need to know if the symbol was indexed at all should also check
+    /// `name_index.is_empty()` to differentiate v8-built caches (empty
+    /// placeholder) from genuine "no match" — though v9-only graphs are the
+    /// only ones engine::load accepts.
+    pub fn nodes_by_name<'a>(&'a self, name: &'a str) -> impl Iterator<Item = u32> + 'a {
+        let target_hash = crate::uid::xxh3_64_bytes(name.as_bytes());
+        let entries = self.name_index.as_slice();
+        // Binary search for ANY entry with the target hash; then walk
+        // outward to collect all entries sharing that hash (sorted index).
+        let start = entries.partition_point(|e| e.name_hash.to_native() < target_hash);
+        entries
+            .iter()
+            .skip(start)
+            .take_while(move |e| e.name_hash.to_native() == target_hash)
+            .filter_map(move |e| {
+                let idx = e.node_idx.to_native();
+                let node = &self.nodes[idx as usize];
+                if node.name.resolve(&self.string_pool) == name {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
     }
 }
 

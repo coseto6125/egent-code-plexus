@@ -67,7 +67,7 @@ fn fixture_archived(bytes: &mut Vec<u8>) -> &ArchivedZeroCopyGraph {
         out_offsets: vec![0, 0, 0, 0],
         in_offsets: vec![0, 0, 0, 0],
         in_edge_idx: vec![],
-        name_index: vec![0, 1, 2],
+        name_index: Vec::new(),
         process_start: 3,
         traces_offsets: vec![],
         traces_data: vec![],

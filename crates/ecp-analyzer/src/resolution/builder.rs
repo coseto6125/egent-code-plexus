@@ -1657,6 +1657,28 @@ impl GraphBuilder {
         // happen in practice, but defensive), keep the first (most specific).
         call_metas.dedup_by_key(|m| m.edge_idx);
 
+        // Build the v9 name_index: sorted (xxh3_64(name), node_idx) pairs.
+        // O(N) hash + O(N log N) sort, run once at build end. Lookup callers
+        // (find / rename / inspect / cypher MATCH {name: ...}) drop from O(N)
+        // to O(log N + collision_count).
+        let mut name_index: Vec<ecp_core::graph::NameIndexEntry> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, n)| {
+                // Skip tombstone nodes (uid-collision survivors with empty name
+                // pushed by the uniqueness invariant); they have no useful name.
+                let name = string_pool.resolve(&n.name);
+                if name.is_empty() {
+                    return None;
+                }
+                Some(ecp_core::graph::NameIndexEntry {
+                    name_hash: ecp_core::uid::xxh3_64_bytes(name.as_bytes()),
+                    node_idx: idx as u32,
+                })
+            })
+            .collect();
+        name_index.sort_unstable_by_key(|e| e.name_hash);
+
         ZeroCopyGraph {
             magic: ecp_core::graph::GRAPH_MAGIC,
             version: ecp_core::graph::GRAPH_FORMAT_VERSION,
@@ -1667,7 +1689,7 @@ impl GraphBuilder {
             out_offsets,
             in_offsets,
             in_edge_idx,
-            name_index: Vec::new(), // To be implemented if name indexing is needed
+            name_index,
             process_start: process_start_idx,
             traces_offsets,
             traces_data,

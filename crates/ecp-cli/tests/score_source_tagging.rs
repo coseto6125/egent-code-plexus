@@ -51,7 +51,7 @@ fn make_graph(names: &[&str]) -> ZeroCopyGraph {
         out_offsets,
         in_offsets,
         in_edge_idx: vec![],
-        name_index: vec![],
+        name_index: Vec::new(),
         process_start: n as u32,
         traces_offsets: vec![],
         traces_data: vec![],

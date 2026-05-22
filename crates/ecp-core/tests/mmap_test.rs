@@ -38,7 +38,7 @@ fn test_mmap_graph_access() {
         out_offsets: vec![0, 0],
         in_offsets: vec![0, 0],
         in_edge_idx: vec![],
-        name_index: vec![0],
+        name_index: Vec::new(),
         process_start: 1,
         traces_offsets: vec![],
         traces_data: vec![],
