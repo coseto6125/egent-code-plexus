@@ -71,6 +71,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "review",
     "find-transaction-patterns",
     "find-schema-bindings",
+    "find-event-mirrors",
     // Hidden
     "admin",
     "group",
