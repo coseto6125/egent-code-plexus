@@ -11,7 +11,16 @@ use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode}
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Query, QueryCursor};
+
+thread_local! {
+    static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
+        let mut parser = tree_sitter::Parser::new();
+        let language = tree_sitter_php::LANGUAGE_PHP.into();
+        parser.set_language(&language).expect("Failed to set PHP language");
+        parser
+    });
+}
 
 /// Laravel route detection import gate. Ported from upstream
 /// `gitnexus/src/core/group/extractors/http-patterns/php.ts:34-42`.
@@ -137,6 +146,38 @@ pub struct PhpProvider {
     /// looks up by integer index — equivalent perf to the previous
     /// hard-coded if-chain, but the source of truth lives in `spec.rs`.
     capture_kind_by_idx: Vec<Option<NodeKind>>,
+    /// All capture indices resolved once at provider construction.
+    /// Cuts ~25 `query.capture_index_for_name()` calls per parse_file
+    /// (~73k hashmap lookups across the 2907-file .sample_repo corpus).
+    indices: PhpCaptureIndices,
+}
+
+struct PhpCaptureIndices {
+    type_function: Option<u32>,
+    type_method: Option<u32>,
+    export: Option<u32>,
+    heritage: Option<u32>,
+    decorator: Option<u32>,
+    import_source: Option<u32>,
+    import_alias: Option<u32>,
+    import_prefix: Option<u32>,
+    function: Option<u32>,
+    class: Option<u32>,
+    interface: Option<u32>,
+    method: Option<u32>,
+    property: Option<u32>,
+    namespace: Option<u32>,
+    trait_: Option<u32>,
+    enum_: Option<u32>,
+    const_: Option<u32>,
+    route_call: Option<u32>,
+    route_scope: Option<u32>,
+    route_method: Option<u32>,
+    route_path: Option<u32>,
+    route_chained_call: Option<u32>,
+    route_chained_object: Option<u32>,
+    laravel_call: Option<u32>,
+    laravel_args: Option<u32>,
 }
 
 impl PhpProvider {
@@ -156,9 +197,38 @@ impl PhpProvider {
             .map(|name| PhpSpec::CAPTURE_KIND.get(name).copied())
             .collect();
 
+        let indices = PhpCaptureIndices {
+            type_function: query.capture_index_for_name("type.function"),
+            type_method: query.capture_index_for_name("type.method"),
+            export: query.capture_index_for_name("export"),
+            heritage: query.capture_index_for_name("heritage"),
+            decorator: query.capture_index_for_name("decorator"),
+            import_source: query.capture_index_for_name("import.source"),
+            import_alias: query.capture_index_for_name("import.alias"),
+            import_prefix: query.capture_index_for_name("import.prefix"),
+            function: query.capture_index_for_name("function"),
+            class: query.capture_index_for_name("class"),
+            interface: query.capture_index_for_name("interface"),
+            method: query.capture_index_for_name("method"),
+            property: query.capture_index_for_name("property"),
+            namespace: query.capture_index_for_name("namespace"),
+            trait_: query.capture_index_for_name("trait"),
+            enum_: query.capture_index_for_name("enum"),
+            const_: query.capture_index_for_name("const"),
+            route_call: query.capture_index_for_name("route.call"),
+            route_scope: query.capture_index_for_name("route.scope"),
+            route_method: query.capture_index_for_name("route.method"),
+            route_path: query.capture_index_for_name("route.path"),
+            route_chained_call: query.capture_index_for_name("route.chained.call"),
+            route_chained_object: query.capture_index_for_name("route.chained.object"),
+            laravel_call: query.capture_index_for_name("laravel.route.call"),
+            laravel_args: query.capture_index_for_name("laravel.route.args"),
+        };
+
         Ok(Self {
             query,
             capture_kind_by_idx,
+            indices,
         })
     }
 }
@@ -169,11 +239,8 @@ impl LanguageProvider for PhpProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let language = tree_sitter_php::LANGUAGE_PHP.into();
-        let mut parser = Parser::new();
-        parser.set_language(&language)?;
-
-        let tree = parse_with_budget(&mut parser, source, ParseBudget::DEFAULT)
+        let tree = PARSER
+            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse php file"))?;
 
         let mut cursor = QueryCursor::new();
@@ -187,40 +254,37 @@ impl LanguageProvider for PhpProvider {
         let mut imports = Vec::new();
         let mut routes = Vec::new();
 
-        let idx_type_function = self.query.capture_index_for_name("type.function");
-        let idx_type_method = self.query.capture_index_for_name("type.method");
-        let idx_export = self.query.capture_index_for_name("export");
-        let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_decorator = self.query.capture_index_for_name("decorator");
+        let idx = &self.indices;
+        let idx_type_function = idx.type_function;
+        let idx_type_method = idx.type_method;
+        let idx_export = idx.export;
+        let idx_heritage = idx.heritage;
+        let idx_decorator = idx.decorator;
 
-        let idx_import_source = self.query.capture_index_for_name("import.source");
-        let idx_import_alias = self.query.capture_index_for_name("import.alias");
-        let idx_import_prefix = self.query.capture_index_for_name("import.prefix");
+        let idx_import_source = idx.import_source;
+        let idx_import_alias = idx.import_alias;
+        let idx_import_prefix = idx.import_prefix;
 
-        let idx_function = self.query.capture_index_for_name("function");
-        let idx_class = self.query.capture_index_for_name("class");
-        let idx_interface = self.query.capture_index_for_name("interface");
-        let idx_method = self.query.capture_index_for_name("method");
-        let idx_property = self.query.capture_index_for_name("property");
+        let idx_function = idx.function;
+        let idx_class = idx.class;
+        let idx_interface = idx.interface;
+        let idx_method = idx.method;
+        let idx_property = idx.property;
 
-        let idx_namespace = self.query.capture_index_for_name("namespace");
-        let idx_trait = self.query.capture_index_for_name("trait");
-        let idx_enum = self.query.capture_index_for_name("enum");
-        let idx_const = self.query.capture_index_for_name("const");
+        let idx_namespace = idx.namespace;
+        let idx_trait = idx.trait_;
+        let idx_enum = idx.enum_;
+        let idx_const = idx.const_;
 
-        let idx_route_call = self.query.capture_index_for_name("route.call");
-        let idx_route_scope = self.query.capture_index_for_name("route.scope");
-        let idx_route_method = self.query.capture_index_for_name("route.method");
-        let idx_route_path = self.query.capture_index_for_name("route.path");
-        // Chained-call variant: `Route::middleware(...)->get('/x', ...)`.
-        let idx_route_chained_call = self.query.capture_index_for_name("route.chained.call");
-        let idx_route_chained_object = self.query.capture_index_for_name("route.chained.object");
+        let idx_route_call = idx.route_call;
+        let idx_route_scope = idx.route_scope;
+        let idx_route_method = idx.route_method;
+        let idx_route_path = idx.route_path;
+        let idx_route_chained_call = idx.route_chained_call;
+        let idx_route_chained_object = idx.route_chained_object;
 
-        // Laravel `Route::method('/path', <handler>)`. The outer call
-        // anchors the match; the parser walks the `arguments` node to
-        // extract path + handler shape.
-        let idx_laravel_call = self.query.capture_index_for_name("laravel.route.call");
-        let idx_laravel_args = self.query.capture_index_for_name("laravel.route.args");
+        let idx_laravel_call = idx.laravel_call;
+        let idx_laravel_args = idx.laravel_args;
 
         // Pending Laravel framework refs; emitted after the loop if the
         // `Illuminate` import gate matches.
