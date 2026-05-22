@@ -1071,6 +1071,7 @@ impl LanguageProvider for PythonProvider {
         let tx_scopes = resolve_tx_scopes(&nodes, &pending_tx_scopes);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);
 
         // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
         // per-file parser scope can drop cleanly without dangling-pool risk.
