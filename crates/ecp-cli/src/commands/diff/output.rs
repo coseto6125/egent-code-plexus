@@ -42,6 +42,12 @@ fn build_json(env: &DiffPayload) -> Value {
             serde_json::to_value(c).unwrap_or(Value::Null),
         );
     }
+    if let Some(s) = &env.symbols {
+        sections.insert(
+            "symbols".into(),
+            serde_json::to_value(s).unwrap_or(Value::Null),
+        );
+    }
     serde_json::json!({
         "baseline": {"ref": env.baseline_ref, "sha": env.baseline_sha},
         "current":  {"ref": env.current_ref, "sha": env.current_sha},
@@ -124,6 +130,80 @@ fn emit_text(env: &DiffPayload) {
         }
         for chg in c.modified.iter().take(limit) {
             println!("  [MODIFIED] {}:{}", chg.after.kind, chg.after.identifier);
+        }
+    }
+
+    if let Some(s) = &env.symbols {
+        println!("\n─ Section: symbols ─");
+        println!("  certain:");
+        println!("    files_added:        {}", s.certain.files_added.len());
+        println!("    files_removed:      {}", s.certain.files_removed.len());
+        println!("    symbols_added:      {}", s.certain.symbols_added.len());
+        println!(
+            "    symbols_removed:    {}",
+            s.certain.symbols_removed.len()
+        );
+        println!(
+            "    symbols_changed:    {}",
+            s.certain.symbols_changed.len()
+        );
+        println!(
+            "    intra_file_callers: {}",
+            s.certain.intra_file_callers.len()
+        );
+        println!("  heuristic:");
+        println!(
+            "    cross_file_callers: {}",
+            s.heuristic.cross_file_callers.len()
+        );
+        println!("  unknown:");
+        println!(
+            "    blindspots_in_diff_region: {}",
+            s.unknown.blindspots_in_diff_region.len()
+        );
+        for p in s.certain.files_added.iter().take(limit) {
+            println!("  [FILE+]    {p}");
+        }
+        for p in s.certain.files_removed.iter().take(limit) {
+            println!("  [FILE-]    {p}");
+        }
+        for sym in s.certain.symbols_added.iter().take(limit) {
+            println!(
+                "  [SYM+]     {}::{}::{} ({})",
+                sym.path, sym.owner_class, sym.name, sym.kind
+            );
+        }
+        for sym in s.certain.symbols_removed.iter().take(limit) {
+            println!(
+                "  [SYM-]     {}::{}::{} ({})",
+                sym.path, sym.owner_class, sym.name, sym.kind
+            );
+        }
+        for ch in s.certain.symbols_changed.iter().take(limit) {
+            println!(
+                "  [SYM~]     {}::{}::{} ({}) {} → {}",
+                ch.path, ch.owner_class, ch.name, ch.kind, ch.baseline_hash, ch.current_hash
+            );
+        }
+        for callers in s.certain.intra_file_callers.iter().take(limit) {
+            println!(
+                "  [INTRA]    {}::{} <- {} caller(s)",
+                callers.target_path,
+                callers.target_name,
+                callers.callers.len()
+            );
+        }
+        for c in s.heuristic.cross_file_callers.iter().take(limit) {
+            println!(
+                "  [CROSS]    {}::{} <- {} candidate(s), min_conf={:.2}",
+                c.target_path,
+                c.target_name,
+                c.candidates.len(),
+                c.min_confidence
+            );
+        }
+        for b in s.unknown.blindspots_in_diff_region.iter().take(limit) {
+            println!("  [BLIND]    {}:{} ({})", b.path, b.line, b.kind);
         }
     }
 }

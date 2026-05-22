@@ -73,6 +73,7 @@ mod tests {
             files: Some(vec!["a.rs".into(), "b.rs".into()]),
             repo: None,
             format: None,
+            verdicts: false,
         };
         // resolve returns the explicit list without touching git.
         let v = resolve(&args, &PathBuf::from(".")).unwrap();

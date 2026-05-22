@@ -136,9 +136,14 @@ enum Commands {
 }
 
 fn main() {
-    // Default to WARN so tantivy / parser INFO chatter doesn't reach agents'
-    // stderr. RUST_LOG=info / debug overrides for human debugging.
+    // Default to WARN so tantivy / parser INFO chatter doesn't pollute
+    // agents' output. Writer is stderr so `ecp ... --format json | jq` and
+    // test harnesses parsing stdout stay clean; logs still surface for
+    // human debugging via 2>&1 or capturing stderr.
+    // `tracing_subscriber::fmt()` defaults to stdout — must opt into
+    // stderr explicitly. RUST_LOG=info|debug overrides the level.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),

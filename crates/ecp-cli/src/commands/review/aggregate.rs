@@ -419,7 +419,9 @@ fn run_resolver_diff(
     };
     let args = DiffArgs {
         section: vec![DiffSection::Bindings],
-        baseline: since.to_string(),
+        baseline: Some(since.to_string()),
+        baseline_graph: None,
+        current_graph: None,
         format: None,
         verbose: false,
         repo: Some(repo_dir.to_string_lossy().into_owned()),
