@@ -117,6 +117,30 @@ the older change.
 - **size**: M（決策 + 2 邊改 ~50 LOC）
 - **links**: PR #345 PR description 末段；`docs/vs-gitnexus.md`「honest unknown beats fabricated edge」
 
+### FU-2026-05-23-001  ·  surfaced in PR #334
+- **owner**: unassigned
+- **scope**: CI-L #3+：剩 16 個 parser（cpp / c / go / ruby / solidity / move / hcl / cairo / verilog / lua / zig / svelte / astro / sql / bash / vue / dockerfile / markdown / yaml / vyper / javascript）尚未套用 `<Lang>CaptureIndices` 模板。當前 #334 已涵蓋 Java / PHP / Kotlin / C# / Swift / Dart / Crystal / Python / TypeScript / Rust 共 10 lang。
+- **why-deferred**: code-consistency 收尾、非 perf hot-path（profile 已顯示這些 parser 的 capture_index_for_name 不是瓶頸）。bundle 進 #334 會稀釋 PR scope。
+- **next-action**: 新分支 `perf/parser-capture-indices-batch3` off main，依 PHP 模板套用；每 parser 約 30-100 LOC；分批 ship 4-5 個一個 PR 避免單 PR 過大
+- **size**: M（~16 langs × ~50 LOC avg = ~800 LOC，分 3-4 PR）
+- **links**: PR #334 commits `4d3a6217 perf(parsers): CaptureIndices Kotlin/C#/Swift/Dart/Crystal`、`f20a360e perf(php): CI-L #1`；PHP 模板 `crates/ecp-analyzer/src/php/parser.rs:142-260`
+
+### FU-2026-05-23-002  ·  surfaced in PR #334
+- **owner**: unassigned
+- **scope**: step3a parse_only 是 cold-ingest 最大殘量（1.06s / 53% wall），但 rayon par_iter 已飽和；下個 ROI 在 per-parser tree-sitter 工作（Java 2346µs/file / PHP 1702µs/file / C 5866µs/file）。need per-parser deep-dive — 例如 stamp_owner_class_by_span 的 O(C·K) 邏輯、extract_calls 的 attach_to_enclosing 線性掃描、framework_helpers 的 enclosing_function_name 反覆掃描。
+- **why-deferred**: 各 parser 改動 risk-vs-reward 不均，需 14-lang parity 重 verify；不適合 cold-ingest 系列 PR 一次解
+- **next-action**: 新 spike PR `perf/parser-internals-spike` — 先 instrument 出 Java parser 各 helper 的 µs breakdown，鎖定 top-3 hotspot 再個別 PR
+- **size**: M-L per-parser；spike S
+- **links**: PR #334 per-provider prof（`crates/ecp-core/src/analyzer/pipeline.rs:418`）；`crates/ecp-analyzer/src/framework_helpers.rs:102-189`；`crates/ecp-analyzer/src/calls.rs:105-126`
+
+### FU-2026-05-23-003  ·  surfaced in PR #334
+- **owner**: unassigned
+- **scope**: pass16_fetch_shape (0.075s = 4% wall) 與 update_repo_meta 之 dir_size walkdir 都是序列 — 前者 per-file scan 各語言獨立可平行；後者目前已用 `if let Ok(m) = e.metadata()` 容錯但仍是序列 walk
+- **why-deferred**: pass16 par_iter 與 CI-H 模板同形但 ROI 小；dir_size 即使平行化也只省 ms 級別（advisory stats）
+- **next-action**: 若未來總時長要進一步壓到 1.5s 以下再啟動；目前 1.87s median 已達 -40% 目標
+- **size**: S each
+- **links**: PR #334 CI-M-followup commit `fix(build): dir_size tolerant of tantivy background race`；`crates/ecp-analyzer/src/resolution/builder.rs:827-882`
+
 ---
 
 ## Done
