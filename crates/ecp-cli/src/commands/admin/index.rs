@@ -251,27 +251,54 @@ pub fn run_analyzer_for_paths(
     let t_cache_put = std::time::Instant::now();
     // Write back only fresh parses. Cache hits return the same blob we'd
     // re-serialize on put — the existence stat skips that round-trip for
-    // the (~99% on typical commits) hit fraction. Parallelize via
-    // `par_iter` (rayon picks `num_cpus` workers — no hardcoded thread
-    // count). Each `put` is now fsync-free (see `parse_cache::put` doc),
-    // so the workers don't serialize on disk-sync syscalls.
+    // the (~99% on typical commits) hit fraction.
+    //
+    // CI-A: serialize on the foreground (needs &LocalGraph; can't outlive
+    // local_graphs into add_graph), but dispatch the disk writes to a
+    // detached background thread. Step 4's build_global_graph (~0.6s on
+    // .sample_repo) runs in parallel with these writes; the build_l2 wall
+    // drops by ~0.3s on a fresh cache.
+    //
+    // Each `put` is fsync-free (see `parse_cache::put` doc) so a worker
+    // crash or process kill mid-write is recoverable — the corrupt-entry
+    // guard in `get()` deletes and reparses on next miss.
     let put_count = if let Some(cache) = cache_ref {
         use rayon::prelude::*;
-        local_graphs
+        let to_write: Vec<(std::path::PathBuf, Vec<u8>)> = local_graphs
             .par_iter()
             .filter(|g| !cache.path_for(&g.content_hash).exists())
-            .map(|g| {
-                if let Err(e) = cache.put(g) {
-                    tracing::warn!("parse_cache: put failed for {:?}: {}", g.file_path, e);
+            .filter_map(|g| match rkyv::to_bytes::<rkyv::rancor::Error>(g) {
+                Ok(bytes) => Some((cache.path_for(&g.content_hash), bytes.into_vec())),
+                Err(e) => {
+                    tracing::warn!("parse_cache: serialize failed for {:?}: {}", g.file_path, e);
+                    None
                 }
             })
-            .count()
+            .collect();
+        let count = to_write.len();
+        if !to_write.is_empty() {
+            // Sequential disk write on a dedicated thread (NOT a rayon
+            // par_iter) so the foreground's pass2_imports_resolve doesn't
+            // fight the global rayon pool for CPU. Each
+            // atomic_write_bytes_no_fsync goes to pagecache — kernel-buffered,
+            // no fsync, so a single thread keeps up. Without this guard, the
+            // initial CI-A draft saw pass2 jump from 36ms to 225ms (6×) due
+            // to rayon contention.
+            std::thread::spawn(move || {
+                for (path, bytes) in to_write {
+                    if let Err(e) = ecp_core::registry::atomic_write_bytes_no_fsync(&path, &bytes) {
+                        tracing::warn!("parse_cache: bg write failed for {:?}: {}", path, e);
+                    }
+                }
+            });
+        }
+        count
     } else {
         0
     };
     if prof {
         eprintln!(
-            "prof step3b.cache_puts: {:.2}s ({} puts)",
+            "prof step3b.cache_puts_dispatch: {:.2}s ({} puts queued)",
             t_cache_put.elapsed().as_secs_f32(),
             put_count
         );
