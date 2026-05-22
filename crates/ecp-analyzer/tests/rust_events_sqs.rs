@@ -5,16 +5,12 @@
 
 use ecp_analyzer::event_topic::{extract_event_topics, SQS_RUST};
 use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 const QUERIES_SCM: &str = include_str!("../src/rust/queries.scm");
 const FRAMEWORKS_SCM: &str = include_str!("../src/rust/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<ecp_core::analyzer::types::RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -33,16 +29,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQS_RUST],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[SQS_RUST], &imports)
 }
 
 /// Literal queue_url in send_message fluent chain → RawEventTopic Publish.
@@ -61,7 +48,7 @@ async fn publish_order(client: &Client, payload: &str) {
         .unwrap();
 }
 "#;
-    let (result, pool) = run(src, &["aws_sdk_sqs"]);
+    let result = run(src, &["aws_sdk_sqs"]);
     assert_eq!(
         result.len(),
         1,
@@ -75,9 +62,10 @@ async fn publish_order(client: &Client, payload: &str) {
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
         .topic_literal
+        .as_deref()
         .expect("topic_literal must be Some for literal queue_url");
     assert_eq!(
-        pool.resolve(&lit),
+        lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
     );
 }
@@ -98,7 +86,7 @@ async fn publish_order(client: &Client, queue_url: &str, payload: &str) {
         .unwrap();
 }
 "#;
-    let (result, _pool) = run(src, &["aws_sdk_sqs"]);
+    let result = run(src, &["aws_sdk_sqs"]);
     assert!(
         result.is_empty(),
         "variable queue_url must not produce a RawEventTopic; got {:?}",
@@ -120,7 +108,7 @@ async fn publish_order(payload: &str) {
     map.insert("queue_url", "https://sqs.us-east-1.amazonaws.com/123456789012/orders");
 }
 "#;
-    let (result, _pool) = run(src, &["std::collections::HashMap"]);
+    let result = run(src, &["std::collections::HashMap"]);
     assert!(
         result.is_empty(),
         "non-SQS import must produce nothing; got {:?}",

@@ -5,15 +5,11 @@
 
 use ecp_analyzer::event_topic::{extract_event_topics, SQS_PYTHON};
 use ecp_core::analyzer::types::{FrameworkId, PubSub, RawImport};
-use ecp_core::pool::StringPool;
 use tree_sitter::{Parser, Query};
 
 const FRAMEWORKS_SCM: &str = include_str!("../src/python/frameworks.scm");
 
-fn run(
-    src: &str,
-    import_sources: &[&str],
-) -> (Vec<ecp_core::analyzer::types::RawEventTopic>, StringPool) {
+fn run(src: &str, import_sources: &[&str]) -> Vec<ecp_core::analyzer::types::RawEventTopic> {
     let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&lang).expect("set_language");
@@ -28,16 +24,7 @@ fn run(
             binding_kind: None,
         })
         .collect();
-    let mut pool = StringPool::new();
-    let result = extract_event_topics(
-        &tree,
-        src.as_bytes(),
-        &query,
-        &[SQS_PYTHON],
-        &imports,
-        &mut pool,
-    );
-    (result, pool)
+    extract_event_topics(&tree, src.as_bytes(), &query, &[SQS_PYTHON], &imports)
 }
 
 /// boto3 (sync) send_message with literal QueueUrl → Publish.
@@ -52,7 +39,7 @@ def publish_order(sqs, payload):
         MessageBody=payload,
     )
 "#;
-    let (result, pool) = run(src, &["boto3"]);
+    let result = run(src, &["boto3"]);
     assert_eq!(
         result.len(),
         1,
@@ -63,9 +50,10 @@ def publish_order(sqs, payload):
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
         .topic_literal
+        .as_deref()
         .expect("topic_literal must be Some for literal QueueUrl");
     assert_eq!(
-        pool.resolve(&lit),
+        lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
     );
 }
@@ -82,7 +70,7 @@ def consume_orders(sqs):
         MaxNumberOfMessages=10,
     )
 "#;
-    let (result, pool) = run(src, &["boto3"]);
+    let result = run(src, &["boto3"]);
     assert_eq!(
         result.len(),
         1,
@@ -91,9 +79,12 @@ def consume_orders(sqs):
     );
     assert_eq!(result[0].lib, FrameworkId::Sqs);
     assert_eq!(result[0].direction, PubSub::Subscribe);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
     assert_eq!(
-        pool.resolve(&lit),
+        lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
     );
 }
@@ -110,7 +101,7 @@ async def publish_order(sqs, payload):
         MessageBody=payload,
     )
 "#;
-    let (result, pool) = run(src, &["aioboto3"]);
+    let result = run(src, &["aioboto3"]);
     assert_eq!(
         result.len(),
         1,
@@ -119,9 +110,12 @@ async def publish_order(sqs, payload):
     );
     assert_eq!(result[0].lib, FrameworkId::Sqs);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
     assert_eq!(
-        pool.resolve(&lit),
+        lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
     );
 }
@@ -138,7 +132,7 @@ def publish_batch(sqs, entries):
         Entries=entries,
     )
 "#;
-    let (result, pool) = run(src, &["boto3"]);
+    let result = run(src, &["boto3"]);
     assert_eq!(
         result.len(),
         1,
@@ -146,9 +140,12 @@ def publish_batch(sqs, entries):
     );
     assert_eq!(result[0].lib, FrameworkId::Sqs);
     assert_eq!(result[0].direction, PubSub::Publish);
-    let lit = result[0].topic_literal.expect("topic_literal must be Some");
+    let lit = result[0]
+        .topic_literal
+        .as_deref()
+        .expect("topic_literal must be Some");
     assert_eq!(
-        pool.resolve(&lit),
+        lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
     );
 }
@@ -165,7 +162,7 @@ def publish_order(sqs, queue_url, payload):
         MessageBody=payload,
     )
 "#;
-    let (result, _pool) = run(src, &["boto3"]);
+    let result = run(src, &["boto3"]);
     assert!(
         result.is_empty(),
         "variable QueueUrl must not produce a RawEventTopic; got {:?}",
@@ -185,7 +182,7 @@ def publish_order(sqs, payload):
         MessageBody=payload,
     )
 "#;
-    let (result, _pool) = run(src, &["my_queue_lib"]);
+    let result = run(src, &["my_queue_lib"]);
     assert!(
         result.is_empty(),
         "non-SQS import must produce nothing; got {:?}",
