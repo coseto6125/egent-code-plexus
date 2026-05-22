@@ -77,9 +77,17 @@ truth instead of guesses.
 | CI-A | Defer cache_puts to background | 🔴 -11% | shipped | 4b706e5e | dedicated thread (NOT rayon) avoids pass2 contention |
 | CI-B | Defer tantivy index to background | 🔴 -10% | shipped | b4bb98a6 | dispatched in orchestrator AFTER rename — stale-path race resolved |
 | CI-C | function_meta lines.collect hoist | 🟡 micro | shipped | f9216097 | Go + C — per-function → per-file; surfaces on Go-heavy + low-core |
-| CI-E | mmap source bytes per file | 🔴 -18% | shipped | (next) | step3a 1.95s → 1.45s — 5-run stable; skips fs::read user-space copy |
+| CI-E | mmap source bytes per file | 🔴 -18% | shipped | 6e5434de | step3a 1.95s → 1.45s — 5-run stable; skips fs::read user-space copy |
+| CI-G | Leiden max_passes cap=3 + threshold-dispatched parallel refine | 🔴 Leiden -45% | shipped | 5c519cf0 | 12/12 parity bit-identical (6 seeds × 2 corpora) |
+| CI-H | class_membership outer par_iter + Cow path_str | 🟡 -post-process | shipped | 80cfa6d7 | per-file edge emission parallelised |
+| CI-I | imports_edges merge basename/dir_component idx + Cow | 🟡 -post-process | shipped | 125f16c5 | single-pass index build |
+| CI-J | uid_seen: kill 4-String alloc per node | 🔴 pass1 -45% | shipped | 7ed7e6ef | map<u64, u32> + reconstruct on collision only (~1M allocs saved on 245k-node corpus) |
+| CI-K | Java parser: hoist stray capture_index_for_name | 🟡 micro | shipped | 46f87b31 | per-call → resolved-once in provider |
+| CI-L #1 | PHP parser: thread_local parser + cached capture indices | 🟡 micro | shipped | e01b6324 | resolves 25 capture indices once; reusable parser instance |
+| **CI-M** | tantivy background handle join on CLI exit | 🟢 correctness | shipped | 07146a1f | fixes Linux+macOS test race; foreground perf preserved (eprintln before join) |
 | CI-D | pass3 community Leiden | 🟡 6% | **deferred** | — | algorithmic — see §8 for full analysis |
 | CI-F | parallel Leiden local_move | 🟡 6% | **deferred** | — | reanalyzed — same conclusion as CI-D; see §8 |
+| CI-L #2+ | thread_local parser for Kotlin / C# / Swift / Dart / Crystal | 🟡 micro | **deferred-to-perf-pr** | — | follow-up PR after #334 ships; same pattern as CI-L #1 / CI-K |
 
 **Final benchmark (.sample_repo, 16814 files, 262k nodes):**
 
