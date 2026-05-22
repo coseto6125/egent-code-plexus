@@ -82,6 +82,10 @@ pub enum Expr {
     Prop(String, String),
     Lit(Literal),
     In(Box<Expr>, Vec<Literal>),
+    /// `scalar IN collection_property` — RHS is a graph property that resolves
+    /// to a `Value::List`. Distinct from `In` (literal list on RHS) so the
+    /// common literal-list case avoids `eval_expr` overhead.
+    InCollection(Box<Expr>, Box<Expr>),
     Regex(Box<Expr>, String),
     StartsWith(Box<Expr>, String),
     EndsWith(Box<Expr>, String),
