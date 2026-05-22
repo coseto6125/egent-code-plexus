@@ -56,9 +56,9 @@ Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase
 
 | Query | Median | Notes |
 |---|---|---|
-| `coverage` (registry overview) | **1.4 ms** | smallest read — just registry mmap |
+| `summary` (registry overview) | **1.4 ms** | smallest read — just registry mmap |
 | `routes` (HTTP route map across repo) | **142.3 ms** | enumerates declarative + imperative |
-| `coverage --detailed` (frameworks + blind-spots) | **143.4 ms** | full registry + per-framework scoring |
+| `summary --detailed` (frameworks + blind-spots) | **143.4 ms** | full registry + per-framework scoring |
 | `impact <symbol> --direction down` | **145.0 ms** | BFS over Calls / Extends edges |
 | `inspect <symbol>` (signature + callers + callees) | **145.6 ms** | symbol resolution + 1-hop traversal |
 | `find <name> --mode bm25` (lexical search) | **154.5 ms** | Tantivy query + 5-bucket partition |
@@ -133,7 +133,7 @@ ecp routes
 ecp routes /api/users --method POST     # route → handler → caller chain
 ```
 
-Read-side commands accept `--format text|json|toon`. Default per command is the token-cheapest representation (mostly `toon`; `find` defaults to `text`; `cypher`/`coverage` default to `json`).
+Read-side commands accept `--format text|json|toon`. Default per command is the token-cheapest representation (mostly `toon`; `find` defaults to `text`; `cypher`/`summary` default to `json`).
 
 ---
 
@@ -150,7 +150,7 @@ Two tiers — **agent commands** at top level (query/refactor/verify) and **admi
 | `impact <name> --direction <up\|down>` | Blast-radius traversal with confidence filtering. `--since <ref>` for change-set impact. |
 | `rename --symbol <old> --new-name <new>` | AST-aware multi-file rename across 14 languages. Always `--dry-run` first. |
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body. |
-| `coverage` | Registry overview, framework coverage, blind-spot catalog, graph freshness. |
+| `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness. (Was `coverage`; the old verb still works as an alias.) |
 | `routes [<path>]` | Enumerate HTTP routes (declarative + imperative); with `<path>` show handler + callers. |
 | `contracts` | Cross-repo API contract inventory (routes / queue / RPC). |
 | `diff` | Resolver-delta — edge-level binding tier-degradation + route / contract changes. |

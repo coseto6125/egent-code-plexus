@@ -63,7 +63,7 @@ user indexed).
 ## Universal (always offer 1)
 
 - Bookmark this summary file (`~/.ecp/onboarding-summary.md`) — a future agent session can read it to know what was set up.
-- Run `ecp coverage --repo @all --detailed` to inspect registry health.
+- Run `ecp summary --repo @all --detailed` to inspect registry health.
 - Run `ecp admin mcp tools` to list the MCP tools currently exposed.
 
 ## When persona is fully `unknown`

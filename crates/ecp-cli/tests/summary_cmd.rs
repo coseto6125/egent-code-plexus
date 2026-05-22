@@ -1,4 +1,4 @@
-//! Integration tests for `ecp coverage`.
+//! Integration tests for `ecp summary`.
 //!
 //! Tests validate:
 //!   1. Without `--repo`: registry-level overview (indexed_repos + groups).
@@ -15,31 +15,31 @@ fn ecp_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ecp")
 }
 
-/// Run `ecp coverage [args]` with a synthetic HOME (empty registry) and
+/// Run `ecp summary [args]` with a synthetic HOME (empty registry) and
 /// return stdout as a String.
-fn run_coverage_empty_registry(extra: &[&str]) -> String {
+fn run_summary_empty_registry(extra: &[&str]) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(ecp_bin())
-        .args(["coverage"])
+        .args(["summary"])
         .args(extra)
         .env("HOME", tmp.path())
         .env("ECP_HOME", tmp.path().join(".ecp"))
         .output()
-        .expect("coverage failed to spawn");
+        .expect("summary failed to spawn");
     assert!(
         out.status.success(),
-        "coverage exited non-zero: stderr={}",
+        "summary exited non-zero: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Run `ecp coverage [args]` against a registry that has one registered repo.
+/// Run `ecp summary [args]` against a registry that has one registered repo.
 /// The repo is a real temp dir indexed via `ecp admin index`. Indexing now
 /// upserts the global registry (the only writer that does — `admin group`
 /// requires a pre-existing entry, `admin register` doesn't exist as a
 /// subcommand), so this is the canonical setup path.
-fn run_coverage_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempDir) {
+fn run_summary_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempDir) {
     let home_tmp = tempfile::tempdir().unwrap();
     let repo_tmp = tempfile::tempdir().unwrap();
 
@@ -62,15 +62,15 @@ fn run_coverage_with_registered_repo(extra: &[&str]) -> (String, tempfile::TempD
     );
 
     let out = Command::new(ecp_bin())
-        .args(["coverage"])
+        .args(["summary"])
         .args(extra)
         .current_dir(repo_tmp.path())
         .env("HOME", home_tmp.path())
         .output()
-        .expect("coverage failed to spawn");
+        .expect("summary failed to spawn");
     assert!(
         out.status.success(),
-        "coverage exited non-zero: stderr={}",
+        "summary exited non-zero: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     (String::from_utf8_lossy(&out.stdout).into_owned(), home_tmp)
@@ -110,57 +110,57 @@ fn init_git_repo(repo: &Path) {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-/// Without `--repo`, coverage must emit a registry-level overview that
+/// Without `--repo`, summary must emit a registry-level overview that
 /// includes the `indexed_repos` and `groups` keys.
 #[test]
-fn coverage_without_repo_lists_registry() {
-    let stdout = run_coverage_empty_registry(&["--format", "json"]);
+fn summary_without_repo_lists_registry() {
+    let stdout = run_summary_empty_registry(&["--format", "json"]);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("coverage --format json is not valid JSON: {e}\nstdout: {stdout}")
+        panic!("summary --format json is not valid JSON: {e}\nstdout: {stdout}")
     });
 
-    let coverage = &v["coverage"];
+    let summary = &v["summary"];
     assert!(
-        coverage.is_object(),
-        "expected coverage object in output:\n{stdout}"
+        summary.is_object(),
+        "expected summary object in output:\n{stdout}"
     );
     assert!(
-        coverage.get("indexed_repos").is_some(),
+        summary.get("indexed_repos").is_some(),
         "missing indexed_repos key:\n{stdout}"
     );
     assert!(
-        coverage.get("groups").is_some(),
+        summary.get("groups").is_some(),
         "missing groups key:\n{stdout}"
     );
     // No per_repo when --repo omitted.
     assert!(
-        coverage.get("per_repo").is_none(),
+        summary.get("per_repo").is_none(),
         "unexpected per_repo when no --repo given:\n{stdout}"
     );
 }
 
-/// Default toon format must not panic; output should contain "coverage".
+/// Default toon format must not panic; output should be non-empty.
 #[test]
-fn coverage_default_format_succeeds() {
-    let stdout = run_coverage_empty_registry(&[]);
+fn summary_default_format_succeeds() {
+    let stdout = run_summary_empty_registry(&[]);
     assert!(
         !stdout.is_empty(),
-        "coverage produced no output in toon format"
+        "summary produced no output in toon format"
     );
 }
 
 /// With `--repo .` pointing to a registered repo, per-repo health sections
 /// (frameworks, freshness, blind_spots) must be present. External-client
-/// usage (HTTP/DB/Redis/queue) is intentionally NOT a coverage section —
+/// usage (HTTP/DB/Redis/queue) is intentionally NOT a summary section —
 /// see the standalone `ecp tool-map` command.
 #[test]
-fn coverage_with_repo_includes_health_sections() {
-    let (stdout, _home) = run_coverage_with_registered_repo(&["--format", "json", "--repo", "."]);
+fn summary_with_repo_includes_health_sections() {
+    let (stdout, _home) = run_summary_with_registered_repo(&["--format", "json", "--repo", "."]);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("coverage --format json is not valid JSON: {e}\nstdout: {stdout}")
+        panic!("summary --format json is not valid JSON: {e}\nstdout: {stdout}")
     });
 
-    let per_repo = v["coverage"]["per_repo"]
+    let per_repo = v["summary"]["per_repo"]
         .as_array()
         .expect("per_repo must be an array");
     assert!(
@@ -183,43 +183,35 @@ fn coverage_with_repo_includes_health_sections() {
     );
     assert!(
         entry.get("externals_summary").is_none(),
-        "externals_summary should NOT be a coverage section (use `ecp tool-map`)"
+        "externals_summary should NOT be a summary section (use `ecp tool-map`)"
     );
 }
 
-/// `--repo @unknown-group` must not panic and must exit 0 (groups don't crash
-/// if they don't exist). The command treats unknown selectors as non-fatal
-/// when the registry is empty.
-///
-/// NOTE: In the current implementation, an unknown group DOES return an error
-/// because `repo_selector::resolve` returns `ResolveError::GroupNotFound`.
-/// This test verifies the actual behaviour — the command exits non-zero for
-/// unknown selectors, which is acceptable.
+/// `--repo @unknown-group` must not panic. An unknown group returns exit 1
+/// with an error message (not a panic) per the current selector behaviour.
 #[test]
-fn coverage_at_group_unknown_does_not_panic() {
+fn summary_at_group_unknown_does_not_panic() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(ecp_bin())
-        .args(["coverage", "--repo", "@unknown-group", "--format", "json"])
+        .args(["summary", "--repo", "@unknown-group", "--format", "json"])
         .env("HOME", tmp.path())
         .output()
-        .expect("coverage failed to spawn");
-    // Must not segfault / panic — any clean exit is acceptable.
-    // An unknown group returns exit 1 with an error message (not a panic).
+        .expect("summary failed to spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("thread") || !stderr.contains("panic"),
-        "coverage panicked on unknown group:\n{stderr}"
+        "summary panicked on unknown group:\n{stderr}"
     );
 }
 
 /// Verify the `--help` output surfaces the command with its flags.
 #[test]
-fn coverage_help_output() {
+fn summary_help_output() {
     let out = Command::new(ecp_bin())
-        .args(["coverage", "--help"])
+        .args(["summary", "--help"])
         .output()
-        .expect("coverage --help failed to spawn");
-    assert!(out.status.success(), "coverage --help exited non-zero");
+        .expect("summary --help failed to spawn");
+    assert!(out.status.success(), "summary --help exited non-zero");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("--repo") || stdout.contains("repo"),

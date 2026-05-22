@@ -93,7 +93,7 @@ pub enum ResolveError {
 
 /// Thin wrapper around `resolve` that rejects `@<group>` atoms before
 /// expansion. Top-level commands (`search` / `find` / `contracts` /
-/// `coverage`) call this so users get a clear migration hint pointing at
+/// `summary`) call this so users get a clear migration hint pointing at
 /// `ecp group <verb>`. `@all` and single-repo selectors pass through
 /// unchanged.
 pub fn resolve_top_level(

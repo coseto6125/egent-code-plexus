@@ -364,7 +364,7 @@ fn routes_empty_includes_framework_hint() {
     assert!(
         combined.contains("No HTTP routes")
             || combined.contains("framework")
-            || combined.contains("coverage")
+            || combined.contains("summary")
             || combined.contains("0 routes"),
         "missing framework hint on empty fixture:\nstdout={stdout}\nstderr={stderr}"
     );

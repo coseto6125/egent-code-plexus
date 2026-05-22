@@ -522,7 +522,7 @@ pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> 
     RepoMeta::write_atomic(&meta_path, &rm)?;
 
     // Sync the global registry. Without this, `contracts --repo @all`,
-    // `coverage`, and any other Registry-backed reader is blind to repos
+    // `summary`, and any other Registry-backed reader is blind to repos
     // indexed since the registry was last (manually) rebuilt — `rebuild_from_disk`
     // was the only writer the build path ever touched, and it has zero callers
     // outside the v2 migration probe. Lock order: caller holds per-repo

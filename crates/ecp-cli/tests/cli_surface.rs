@@ -33,7 +33,7 @@ fn top_level_lists_agent_commands() {
         "impact",
         "rename",
         "cypher",
-        "coverage",
+        "summary",
         "routes",
         "contracts",
         "tool-map",

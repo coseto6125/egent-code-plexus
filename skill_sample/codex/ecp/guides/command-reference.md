@@ -23,7 +23,7 @@ description: Detailed `ecp` command reference aligned with `ecp --help` and `ecp
 | Route / contract delta — edge view | `ecp diff --section all --baseline <ref> --repo .` |
 | Route response-shape drift detection | `ecp shape-check --route <path>? --repo .` |
 | External HTTP / DB / Redis / queue usage | `ecp tool-map` |
-| Registry health / freshness / blind spots | `ecp coverage` |
+| Registry health / freshness / blind spots | `ecp summary` (was `ecp coverage`; alias kept one release) |
 | Multi-session peer collaboration | `ecp peers` |
 | LLM-workflow audit over changed files | `ecp review` |
 

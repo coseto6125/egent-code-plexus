@@ -29,7 +29,7 @@ fn error_with_cause_three_lines() {
     let msg = error_with_cause(
         "Index build failed",
         "framework not recognized",
-        "ecp coverage --blind-spots",
+        "ecp summary --blind-spots",
     );
     let lines: Vec<&str> = msg.lines().collect();
     assert_eq!(lines.len(), 3);

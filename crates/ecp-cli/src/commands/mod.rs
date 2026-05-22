@@ -1,7 +1,7 @@
 pub mod admin;
 pub mod contracts;
-pub mod coverage;
 pub mod cypher;
+pub mod dev;
 pub mod diff;
 pub mod find;
 pub mod find_event_mirrors;
@@ -21,6 +21,7 @@ pub mod rename;
 pub mod review;
 pub mod routes;
 pub mod shape_check;
+pub mod summary;
 pub mod symbol_id;
 pub mod tool_map;
 pub mod verify_resolver;

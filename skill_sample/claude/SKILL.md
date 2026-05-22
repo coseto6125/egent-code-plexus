@@ -24,7 +24,7 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | Verify references in a changed file resolve in the graph | `ecp scan <file> --repo .` |
 | HTTP consumer → Route shape drift detection | `ecp shape-check --route <path>? --repo .` (no `--route` = scan all routes; drift = consumer reads key not in Route's response/error keys) |
 | Binding tier / route / contract delta — edge view | `ecp diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required; accepts branch / tag / SHA / `HEAD~N` / `PR/<n>`. Multi-select via `,`. Formats: text / json / toon. Use `--verbose` for full lists.) |
-| Registry health / freshness / frameworks / blind spots | `ecp coverage` (registry-wide) or `ecp coverage --repo @all --detailed` |
+| Registry health / freshness / frameworks / blind spots | `ecp summary` (registry-wide) or `ecp summary --repo @all --detailed`. (Was `ecp coverage`; the old verb is kept as an alias for one release.) |
 | String literals / config keys / vendored / generated / fs layout | grep / glob |
 | MCP host integration / install hooks / config TUI / **MCP server (`mcp serve\|tools`)** / **resolver vs LSP oracle benchmark (`verify-resolver`)** | `ecp admin` (hidden namespace) |
 

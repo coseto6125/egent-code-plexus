@@ -53,7 +53,7 @@ The reason is consumer-specific: an LLM agent acts on what the graph says. If `e
 
 A symbol-context dump in MCP-rich form might be 800 tokens. The same dump in TOON is closer to 200, with no information loss for an agent that knows the schema. Multiplied across the 20–50 queries an agent fires per task, this saves multi-kilobyte chunks of context window per task — which an agent will spend on thinking instead of layout.
 
-`ecp` picks the cheapest format per command as the default: most read commands default to `toon`; `find` defaults to plain `text` (already minimal); `cypher` and `coverage` default to `json` (structurally rich, expected to be parsed). Override anywhere with `--format`.
+`ecp` picks the cheapest format per command as the default: most read commands default to `toon`; `find` defaults to plain `text` (already minimal); `cypher` and `summary` default to `json` (structurally rich, expected to be parsed). Override anywhere with `--format`.
 
 ## 5. Language breadth vs depth
 
@@ -72,7 +72,7 @@ The honest tradeoff: GitNexus knows more about *any one* of its 14 languages tha
 | LLM-facing area | GitNexus | EgentCodePlexus |
 |---|---|---|
 | Agent integration | MCP server, resources, prompts, setup, hooks, generated skills | Stateless CLI + optional MCP server (`ecp admin mcp serve`) |
-| Core query commands | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `inspect`, `find`, `impact`, `routes`, `cypher`, `coverage`, `rename`, `contracts`, `diff` |
+| Core query commands | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `inspect`, `find`, `impact`, `routes`, `cypher`, `summary`, `rename`, `contracts`, `diff` |
 | Workflow tools | rich MCP resources, generated repo skills | `tool-map` (egress calls), `shape-check` (response-shape drift), `review` (audit aggregator), `peers` (multi-session collab) |
 | Search | BM25 + semantic + RRF hybrid (documented) | Tantivy BM25 + per-name substring fallback |
 | Storage | Node.js + LadybugDB | Rust + `rkyv` zero-copy mmap |

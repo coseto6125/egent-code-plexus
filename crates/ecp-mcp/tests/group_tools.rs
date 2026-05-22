@@ -90,7 +90,7 @@ async fn ecp_group_advertises_all_subcmds() {
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    for sub in ["sync", "status", "contracts", "impact", "find", "coverage"] {
+    for sub in ["sync", "status", "contracts", "impact", "find", "summary"] {
         assert!(allowed.iter().any(|s| s == sub), "subcmd `{sub}` missing");
     }
     // `search` was folded into `find` (post-PR-146 consolidation); guard
@@ -245,7 +245,7 @@ fn contracts_emits_filters_as_kebab_flags() {
 }
 
 #[test]
-fn coverage_emits_minimal_argv() {
+fn summary_emits_minimal_argv() {
     let _guard = stub_guard();
     let dir = TempDir::new().unwrap();
     let stub = echo_stub(dir.path());
@@ -253,10 +253,10 @@ fn coverage_emits_minimal_argv() {
     let out = run_spawn(
         &stub,
         &tool,
-        &json!({"subcmd": "coverage", "name": "demo", "json": true}),
+        &json!({"subcmd": "summary", "name": "demo", "json": true}),
     )
     .unwrap();
-    assert!(out.contains("group coverage"), "got: {out:?}");
+    assert!(out.contains("group summary"), "got: {out:?}");
     assert!(out.contains("demo"), "got: {out:?}");
     assert!(out.contains("--json"), "got: {out:?}");
 }

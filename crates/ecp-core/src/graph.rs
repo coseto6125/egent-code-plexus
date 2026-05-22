@@ -513,6 +513,26 @@ pub struct BlindSpotRecord {
     pub hint: StrRef,
 }
 
+/// BlindSpot kind emitted by `resolution::builder::classify_collision` for
+/// uid hash collisions. Exposed as a const so consumers
+/// (`ecp dev uid-audit`) match against it without re-typing the literal.
+pub const BS_KIND_UID_COLLISION: &str = "uid-collision";
+
+/// Type-2 "parser-metric" BlindSpot kinds — emitted by the resolver's
+/// `classify_collision` for uid hash collisions, overloaded methods, and
+/// `#ifdef` redefinitions. These are parser-maintainer signal, NOT
+/// LLM-actionable source-code opacity (which is Type-1: `python-eval`,
+/// `python-exec`, `dynamic-import`, etc.).
+///
+/// `ecp summary.blind_spots` filters these out so its LLM-facing surface
+/// stays focused; `ecp dev uid-audit` inspects them.
+pub const DEV_METRIC_BS_KINDS: &[&str] = &[BS_KIND_UID_COLLISION, "method-overload", "ifdef-redef"];
+
+/// True iff `kind` is one of [`DEV_METRIC_BS_KINDS`].
+pub fn is_dev_metric_bs_kind(kind: &str) -> bool {
+    DEV_METRIC_BS_KINDS.contains(&kind)
+}
+
 /// Per-Calls-edge dispatch metadata. Sparse: only present for `Edge` whose
 /// `rel_type` is `RelType::Calls`. Sorted by `edge_idx` for binary-search
 /// lookup in `graph_query.rs` hot paths.

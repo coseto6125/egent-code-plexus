@@ -58,7 +58,9 @@ pub enum AdminCommands {
     },
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
-    /// Diff resolver dump against language oracle (ecp-dev QA)
+    /// Diff resolver dump against language oracle (ecp-dev QA).
+    /// Deprecated: moved to `ecp dev verify-resolver`. Kept here as an
+    /// alias for one release.
     VerifyResolver(crate::commands::verify_resolver::VerifyResolverArgs),
 }
 

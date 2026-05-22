@@ -1,11 +1,11 @@
 pub mod contracts;
-pub mod coverage;
 pub mod extractors;
 pub mod find;
 pub mod impact;
 pub mod matching;
 pub mod status;
 pub mod storage;
+pub mod summary;
 pub mod sync;
 pub mod types;
 
@@ -34,7 +34,8 @@ pub enum GroupCommands {
     /// from stdin and re-applies the merge mode per pattern.
     Find(find::FindArgs),
     /// Health report for all group members (per-repo concat)
-    Coverage(coverage::CoverageArgs),
+    #[command(alias = "coverage")]
+    Summary(summary::SummaryArgs),
 }
 
 pub fn run(cmd: GroupCommands) -> Result<(), EcpError> {
@@ -44,7 +45,7 @@ pub fn run(cmd: GroupCommands) -> Result<(), EcpError> {
         GroupCommands::Contracts(args) => contracts::run(args),
         GroupCommands::Impact(args) => impact::run(args),
         GroupCommands::Find(args) => find::run(args),
-        GroupCommands::Coverage(args) => coverage::run(args),
+        GroupCommands::Summary(args) => summary::run(args),
     }
 }
 

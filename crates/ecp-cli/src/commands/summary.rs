@@ -1,4 +1,5 @@
-//! `ecp coverage` — unified registry + repo health entry point.
+//! `ecp summary` — unified registry + repo health entry point.
+//! (Was `ecp coverage` pre-rename; the `coverage` alias is kept for one release.)
 //!
 //! Folds doctor + status + list + summarize into one command:
 //!
@@ -6,6 +7,12 @@
 //! - `--repo <sel>`  → per-repo health (frameworks / freshness / blind spots)
 //!   for each resolved repo
 //! - `--repo @group` → same, aggregated for all group members
+//!
+//! `blind_spots` here lists only Type 1 (LLM-signal) buckets: source-code
+//! opacity sites such as dynamic-import / reflection / eval / exec. Type 2
+//! parser-metric buckets (uid-collision / method-overload / ifdef-redef) are
+//! exposed via the hidden `ecp dev uid-audit` instead — keeping this surface
+//! focused on what an LLM consumer can act on.
 //!
 //! External-client (HTTP/DB/Redis/queue) usage detail is intentionally NOT
 //! folded here — that requires per-callsite binding analysis whose granularity
@@ -23,7 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug, Clone)]
-pub struct CoverageArgs {
+pub struct SummaryArgs {
     /// Repository selector (path | name | @group | @all | csv mix).
     /// If omitted: registry-level overview only.
     #[arg(long)]
@@ -41,13 +48,13 @@ pub struct CoverageArgs {
     pub format: Option<String>,
 }
 
-pub fn run(args: CoverageArgs, _graph_arg: &Path) -> Result<(), EcpError> {
+pub fn run(args: SummaryArgs, _graph_arg: &Path) -> Result<(), EcpError> {
     let format = OutputFormat::parse(args.format.as_deref());
     let payload = build_payload(&args, _graph_arg)?;
     emit(&payload, format)
 }
 
-pub fn build_payload(args: &CoverageArgs, _graph_arg: &Path) -> Result<Value, EcpError> {
+pub fn build_payload(args: &SummaryArgs, _graph_arg: &Path) -> Result<Value, EcpError> {
     let home_ecp = resolve_home_ecp();
     let registry = Registry::open(&home_ecp)
         .map_err(|e| EcpError::InvalidArgument(format!("registry open: {e}")))?;
@@ -64,9 +71,8 @@ pub fn build_payload(args: &CoverageArgs, _graph_arg: &Path) -> Result<Value, Ec
         let selector = crate::repo_selector::parse(repo_sel)
             .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
         let cwd_str = cwd.to_string_lossy();
-        let resolved =
-            crate::repo_selector::resolve_top_level(&selector, reg, &cwd_str, "coverage")
-                .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
+        let resolved = crate::repo_selector::resolve_top_level(&selector, reg, &cwd_str, "summary")
+            .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
         let per_repo: Vec<Value> = resolved
             .iter()
             .map(|r| build_repo_health(r, args.detailed))
@@ -80,7 +86,7 @@ pub fn build_payload(args: &CoverageArgs, _graph_arg: &Path) -> Result<Value, Ec
         sections.insert("groups".into(), build_groups_overview(reg));
     }
 
-    Ok(json!({ "coverage": Value::Object(sections) }))
+    Ok(json!({ "summary": Value::Object(sections) }))
 }
 
 // ── Registry overview helpers ────────────────────────────────────────────────
@@ -368,12 +374,20 @@ fn fetch_blind_spots(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'sta
 }
 
 /// Group `graph.blind_spots` by their `kind` tag (e.g. `dynamic-import`,
-/// `reflection`). Keys borrow zero-copy from `graph.string_pool`; the
-/// `BTreeMap` makes the output deterministic for snapshot-style assertions.
+/// `reflection`), excluding Type 2 parser-metric buckets — those are for
+/// parser maintainers, not LLM consumers, and live under `ecp dev uid-audit`.
+/// The filter set is owned by [`ecp_core::graph::is_dev_metric_bs_kind`] so
+/// `ecp dev uid-audit` and any future Type-2-aware consumer agree on which
+/// kinds are dev-metric without re-typing the literals here.
+/// Keys borrow zero-copy from `graph.string_pool`; the `BTreeMap` makes the
+/// output deterministic for snapshot-style assertions.
 fn count_blind_spots(graph: &ArchivedZeroCopyGraph) -> Value {
     let mut by_kind: BTreeMap<&str, u32> = BTreeMap::new();
     for bs in graph.blind_spots.iter() {
         let kind = bs.kind.resolve(&graph.string_pool);
+        if ecp_core::graph::is_dev_metric_bs_kind(kind) {
+            continue;
+        }
         *by_kind.entry(kind).or_insert(0) += 1;
     }
     let total: u32 = by_kind.values().sum();
@@ -430,6 +444,43 @@ mod tests {
             let v = count_blind_spots(archived);
             assert_eq!(v["total"], json!(0));
             assert!(v["by_kind"].as_object().unwrap().is_empty());
+        });
+    }
+
+    /// `summary.blind_spots` is the LLM-facing surface; Type 2 parser-metric
+    /// kinds (uid-collision / method-overload / ifdef-redef) must be excluded
+    /// so the surface stays focused on source-code opacity an LLM can act on.
+    /// Inspecting Type 2 buckets is `ecp dev uid-audit`'s job.
+    #[test]
+    fn count_blind_spots_excludes_dev_metric_kinds() {
+        let mut pool = StringPool::new();
+        let kind_dyn = pool.add("dynamic-import");
+        let kind_uidc = pool.add("uid-collision");
+        let kind_mo = pool.add("method-overload");
+        let kind_idef = pool.add("ifdef-redef");
+        let path = pool.add("src/x.py");
+        let hint = pool.add("");
+        let bs = |k| BlindSpotRecord {
+            kind: k,
+            file_path: path,
+            start_row: 1,
+            start_col: 0,
+            end_row: 1,
+            end_col: 10,
+            hint,
+        };
+        let mut g = empty_graph(pool);
+        g.blind_spots = vec![bs(kind_dyn), bs(kind_uidc), bs(kind_mo), bs(kind_idef)];
+
+        with_archived(g, |archived| {
+            let v = count_blind_spots(archived);
+            // Only Type 1 (`dynamic-import`) survives the filter; the three
+            // Type 2 kinds are stripped.
+            assert_eq!(v["total"], json!(1));
+            assert_eq!(v["by_kind"]["dynamic-import"], json!(1));
+            assert!(v["by_kind"].get("uid-collision").is_none());
+            assert!(v["by_kind"].get("method-overload").is_none());
+            assert!(v["by_kind"].get("ifdef-redef").is_none());
         });
     }
 

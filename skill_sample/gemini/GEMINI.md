@@ -23,7 +23,7 @@ This skill provides the structural-knowledge layer for autonomous AI coding agen
 | Detect drift between consumer access and Route shape | `ecp shape-check --route <path>?` |
 | Enumerate calls to external clients (HTTP/DB/Redis) | `ecp tool-map` |
 | LLM-workflow audit (impact + drift + egress) | `ecp review --baseline <ref>` |
-| Registry health / frameworks / blind spots | `ecp coverage` |
+| Registry health / frameworks / blind spots | `ecp summary` (was `ecp coverage`; alias kept one release) |
 
 ## Tool Optimization for Gemini CLI
 1. **Code symbol** → `run_shell_command(command="ecp inspect --name X")`.

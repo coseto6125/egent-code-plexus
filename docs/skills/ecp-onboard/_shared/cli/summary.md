@@ -1,6 +1,8 @@
-Registry + repo health (indexed repos, freshness, frameworks, blind spots). External-client (HTTP/DB/Redis/queue) usage detail: see `ecp tool-map`
+Registry + repo health (indexed repos, freshness, frameworks, blind spots). `blind_spots` lists only LLM-actionable opacity (dynamic-import / reflection / eval); parser-metric buckets (uid-collision / overload / ifdef-redef) live under `ecp dev uid-audit`. External-client (HTTP/DB/Redis/queue) usage detail: see `ecp tool-map`.
 
-Usage: ecp coverage [OPTIONS]
+Usage: ecp summary [OPTIONS]
+
+Note: `ecp coverage` is kept as an alias for one release; new code should use `ecp summary`.
 
 Options:
       --repo <REPO>      Repository selector (path | name | @group | @all | csv mix). If omitted: registry-level overview only

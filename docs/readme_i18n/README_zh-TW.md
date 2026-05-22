@@ -56,9 +56,9 @@
 
 | 查詢 | 中位數 | 備註 |
 |---|---|---|
-| `coverage` (註冊表總覽) | **1.4 ms** | 最小讀取 — 僅 mmap 註冊表 |
+| `summary` (註冊表總覽) | **1.4 ms** | 最小讀取 — 僅 mmap 註冊表 |
 | `routes` (全專案 HTTP 路由圖譜) | **142.3 ms** | 列舉聲明式 + 指令式定義 |
-| `coverage --detailed` (框架 + 盲區) | **143.4 ms** | 完整註冊表 + 各框架評分 |
+| `summary --detailed` (框架 + 盲區) | **143.4 ms** | 完整註冊表 + 各框架評分 |
 | `impact <symbol> --direction down` | **145.0 ms** | 遍歷 Calls / Extends 邊 (BFS) |
 | `inspect <symbol>` (簽名 + 呼叫鏈) | **145.6 ms** | 符號解析 + 1-hop 遍歷 |
 | `find <name> --mode bm25` (詞法搜尋) | **154.5 ms** | Tantivy 查詢 + 5 個儲存桶分區 |
@@ -133,7 +133,7 @@ ecp routes
 ecp routes /api/users --method POST     # 路由 → 處理器 → 呼叫鏈
 ```
 
-讀取端命令接受 `--format text|json|toon`。預設為該命令最省 Token 的格式（多數為 `toon`；`find` 預設為 `text`；`cypher`/`coverage` 預設為 `json`）。
+讀取端命令接受 `--format text|json|toon`。預設為該命令最省 Token 的格式（多數為 `toon`；`find` 預設為 `text`；`cypher`/`summary` 預設為 `json`）。
 
 ---
 
@@ -148,7 +148,7 @@ ecp routes /api/users --method POST     # 路由 → 處理器 → 呼叫鏈
 | `impact <name> --direction <up\|down>` | 帶信心度過濾的爆炸半徑 traversal。`--since <ref>` 用於變更集影響分析。 |
 | `rename --symbol <old> --new-name <new>` | AST 感知的跨檔重命名 (14 種語言)。務必先執行 `--dry-run`。 |
 | `cypher '<query>'` | openCypher 逃生艙；`m.content` 返回原始碼。 |
-| `coverage` | Registry 總覽、框架覆蓋率、盲區目錄、圖譜新鮮度。 |
+| `summary` | Registry 總覽、框架覆蓋率、LLM 可行動的盲區目錄、圖譜新鮮度。（原 `coverage`；舊名稱保留為別名一個版本。）|
 | `routes [<path>]` | 列出 HTTP 路由；帶 `<path>` 時顯示處理器 + 呼叫者。 |
 | `contracts` | 跨 repo 的 API 合約清單 (routes / queue / RPC)。 |
 | `diff` | 解析器 Delta — 邊界綁定層級降級 + 路由 / 合約變更。 |

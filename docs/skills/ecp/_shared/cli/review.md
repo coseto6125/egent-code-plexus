@@ -9,7 +9,7 @@ ecp review --baseline origin/main
 
 ## Checks Performed
 - `impact`: Blast radius of changed symbols.
-- `coverage`: Check for blind spots in changed files.
+- `summary`: Check for blind spots in changed files.
 - `tool-map`: Egress changes (new external calls).
 - `shape-check`: Route response drift.
 - `diff`: Resolver binding tier degradation.
