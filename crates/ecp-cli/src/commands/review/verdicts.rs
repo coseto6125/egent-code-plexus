@@ -14,9 +14,10 @@
 
 use crate::commands::diff::routes::RoutesDiff;
 use crate::commands::diff::symbols::{
-    BlindSpotRef, CrossFileCallersOf, IntraFileCallersOf, SymbolChange, SymbolRef, SymbolsDiff,
+    BlindSpotRef, CallerRef, CrossFileCaller, SymbolRef, SymbolsDiff,
 };
 use crate::commands::diff::DiffPayload;
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 /// Single review verdict. `kind` is the discriminator; `detail` is a
@@ -135,14 +136,70 @@ fn severity_rank(s: Severity) -> u8 {
 fn verdicts_from_symbols(s: &SymbolsDiff) -> Vec<Verdict> {
     let mut out: Vec<Verdict> = Vec::new();
 
+    // Build (target_path, target_name) → caller-slice maps once before the
+    // changed-symbol loop. Without these, attaching callers to each verdict
+    // is O(M × N) — for M=100 changed symbols × N=50 caller buckets, that's
+    // 5 000 string compares on a hot path. The map-lookup variant is O(M).
+    let intra_by_target: FxHashMap<(&str, &str), &[CallerRef]> = s
+        .certain
+        .intra_file_callers
+        .iter()
+        .map(|p| {
+            (
+                (p.target_path.as_str(), p.target_name.as_str()),
+                p.callers.as_slice(),
+            )
+        })
+        .collect();
+    let cross_by_target: FxHashMap<(&str, &str), &[CrossFileCaller]> = s
+        .heuristic
+        .cross_file_callers
+        .iter()
+        .map(|p| {
+            (
+                (p.target_path.as_str(), p.target_name.as_str()),
+                p.candidates.as_slice(),
+            )
+        })
+        .collect();
+
     // ── SignatureOrBodyChanged ──────────────────────────────────────────
     // Synthesize cross-section: attach matching intra-file + cross-file
     // callers to each changed symbol. Severity escalates with caller
     // count (Risk if cross-file callers exist, Warn if intra-file only,
     // Info if no callers — internal-only change).
     for ch in &s.certain.symbols_changed {
-        let intra = find_intra_callers_for(&s.certain.intra_file_callers, ch);
-        let cross = find_cross_callers_for(&s.heuristic.cross_file_callers, ch);
+        let key = (ch.path.as_str(), ch.name.as_str());
+        let intra: Vec<VerdictCaller> = intra_by_target
+            .get(&key)
+            .map(|callers| {
+                callers
+                    .iter()
+                    .map(|c| VerdictCaller {
+                        path: ch.path.clone(),
+                        name: c.name.clone(),
+                        kind: c.kind.clone(),
+                        line: c.line,
+                        confidence: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cross: Vec<VerdictCaller> = cross_by_target
+            .get(&key)
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .map(|c| VerdictCaller {
+                        path: c.path.clone(),
+                        name: c.name.clone(),
+                        kind: c.kind.clone(),
+                        line: c.line,
+                        confidence: Some(c.confidence),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let severity = if !cross.is_empty() {
             Severity::Risk
         } else if !intra.is_empty() {
@@ -252,42 +309,6 @@ fn verdicts_from_routes(r: &RoutesDiff) -> Vec<Verdict> {
     out
 }
 
-fn find_intra_callers_for(pool: &[IntraFileCallersOf], ch: &SymbolChange) -> Vec<VerdictCaller> {
-    pool.iter()
-        .find(|p| p.target_path == ch.path && p.target_name == ch.name)
-        .map(|p| {
-            p.callers
-                .iter()
-                .map(|c| VerdictCaller {
-                    path: ch.path.clone(),
-                    name: c.name.clone(),
-                    kind: c.kind.clone(),
-                    line: c.line,
-                    confidence: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn find_cross_callers_for(pool: &[CrossFileCallersOf], ch: &SymbolChange) -> Vec<VerdictCaller> {
-    pool.iter()
-        .find(|p| p.target_path == ch.path && p.target_name == ch.name)
-        .map(|p| {
-            p.candidates
-                .iter()
-                .map(|c| VerdictCaller {
-                    path: c.path.clone(),
-                    name: c.name.clone(),
-                    kind: c.kind.clone(),
-                    line: c.line,
-                    confidence: Some(c.confidence),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn symbol_verdict(
     sym: &SymbolRef,
     kind: VerdictKind,
@@ -340,8 +361,8 @@ fn display_qualified(owner_class: &str, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::commands::diff::symbols::{
-        BlindSpotRef as BS, CertainBucket, CrossFileCaller, HeuristicBucket, SymbolChange,
-        SymbolsDiff, UnknownBucket,
+        BlindSpotRef as BS, CertainBucket, CrossFileCallersOf, HeuristicBucket, IntraFileCallersOf,
+        SymbolChange, SymbolsDiff, UnknownBucket,
     };
 
     fn ch(path: &str, name: &str, line: u32) -> SymbolChange {
