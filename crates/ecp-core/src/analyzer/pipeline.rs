@@ -19,6 +19,24 @@ fn resolve_max_file_bytes() -> u64 {
         .unwrap_or(MAX_FILE_BYTES_DEFAULT)
 }
 
+/// Holds the bytes for one parsed file. `Mmap` is the zero-copy fast path;
+/// `Owned` is the `fs::read` fallback for small files or filesystems lacking
+/// mmap. Both deref to `&[u8]` for the parser + hasher.
+enum SourceBuf {
+    Mmap(memmap2::Mmap),
+    Owned(Vec<u8>),
+}
+
+impl SourceBuf {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            SourceBuf::Mmap(m) => m,
+            SourceBuf::Owned(v) => v,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct AnalyzerPipeline {
     providers: Vec<Box<dyn LanguageProvider>>,
@@ -314,21 +332,51 @@ impl AnalyzerPipeline {
                         let Some(provider) = self.find_provider(&rel_path) else {
                             return;
                         };
-                        // Skip oversized files before `fs::read` to keep the
+                        // Skip oversized files before reading to keep the
                         // worker thread from materialising a multi-GiB blob
                         // into memory. metadata() is one fstat — cheap.
-                        if let Ok(meta) = std::fs::metadata(&abs_path) {
-                            if meta.len() > max_file_bytes {
-                                return;
+                        let file_len = match std::fs::metadata(&abs_path) {
+                            Ok(meta) => {
+                                if meta.len() > max_file_bytes {
+                                    return;
+                                }
+                                meta.len()
                             }
-                        }
-                        let source = match std::fs::read(&abs_path) {
-                            Ok(s) => s,
                             Err(_) => return,
                         };
 
+                        // CI-E: mmap source bytes instead of `fs::read`. The
+                        // tree-sitter parsers + content hasher consume `&[u8]`,
+                        // so mmap drops the user-space copy. Fall back to
+                        // `fs::read` on:
+                        //   - small files (<4KB ≈ one page) where mmap setup
+                        //     cost outweighs the saved copy
+                        //   - mmap failure (filesystems lacking mmap, e.g.
+                        //     some FUSE mounts, /proc, /sys)
+                        //   - `ECP_NO_MMAP=1` env kill-switch
+                        const MMAP_MIN_BYTES: u64 = 4096;
+                        let use_mmap =
+                            file_len >= MMAP_MIN_BYTES && std::env::var_os("ECP_NO_MMAP").is_none();
+                        let source_buf: SourceBuf = if use_mmap {
+                            match std::fs::File::open(&abs_path)
+                                .and_then(|f| unsafe { memmap2::Mmap::map(&f) })
+                            {
+                                Ok(m) => SourceBuf::Mmap(m),
+                                Err(_) => match std::fs::read(&abs_path) {
+                                    Ok(v) => SourceBuf::Owned(v),
+                                    Err(_) => return,
+                                },
+                            }
+                        } else {
+                            match std::fs::read(&abs_path) {
+                                Ok(v) => SourceBuf::Owned(v),
+                                Err(_) => return,
+                            }
+                        };
+                        let source: &[u8] = source_buf.as_slice();
+
                         let content_hash: [u8; 8] =
-                            xxhash_rust::xxh3::xxh3_64(&source).to_le_bytes();
+                            xxhash_rust::xxh3::xxh3_64(source).to_le_bytes();
 
                         // Cache fast-path: skip parse if a hit comes back
                         // with the exact same content hash. Path is the
@@ -340,7 +388,7 @@ impl AnalyzerPipeline {
 
                         // Cache miss / no cache: regular parse path.
                         let t_parse = std::time::Instant::now();
-                        let result = provider.parse_file(&rel_path, &source);
+                        let result = provider.parse_file(&rel_path, source);
                         let parse_ns = t_parse.elapsed().as_nanos() as u64;
                         if let Some(t) = times {
                             let mut m = t.lock().unwrap();

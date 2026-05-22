@@ -28,6 +28,7 @@ regex = "1"
 tracing = "0.1"
 phf = { version = "0.13", features = ["macros"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+memmap2 = "0.9.10"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }
