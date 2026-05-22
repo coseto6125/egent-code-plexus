@@ -167,6 +167,56 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     }
 }
 
+/// Nested-definition owner stamping for Python / JavaScript / TypeScript.
+///
+/// After `stamp_owner_class_by_span` has set `owner_class` for class members,
+/// some nodes remain with `owner_class = None` even though they are physically
+/// nested inside another function (e.g. `def wrapper()` inside a decorator
+/// outer function, `function list()` inside another JS function). Two such
+/// nodes with the same name but different outer functions share the uid
+/// `(kind, path, "", name)` → uid-collision BlindSpot.
+///
+/// This pass resolves that: for every node whose `owner_class` is still `None`
+/// AND whose span is wholly contained inside a `Function`/`Method` node's span,
+/// set `owner_class` to the **innermost** such enclosing function's name.
+///
+/// Top-level (module-scope) definitions are untouched — they have no enclosing
+/// function, so their `owner_class` remains `None` (correct behaviour: module-
+/// level names are unique by name within a file).
+///
+/// Complexity: O(N·F) where N = total nodes, F = function count per file.
+/// Both are small in practice (typical files: <100 nodes, <30 functions).
+pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
+    // Snapshot (name, span) for all Function/Method nodes. We collect by value
+    // so the subsequent mutable iteration over `nodes` doesn't borrow-conflict.
+    let fn_spans: Vec<(String, Span)> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| (n.name.clone(), n.span))
+        .collect();
+    if fn_spans.is_empty() {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        // Only stamp nodes that didn't receive an owner from the class pass.
+        if node.owner_class.is_some() {
+            continue;
+        }
+        let span = node.span;
+        // Find the innermost enclosing Function/Method.
+        let owner = fn_spans
+            .iter()
+            // The enclosing function must *strictly* contain this node —
+            // a function cannot be its own owner.
+            .filter(|(_, s)| *s != span && span_contains(*s, span))
+            .min_by_key(|(_, s)| span_area(*s))
+            .map(|(name, _)| name.clone());
+        if owner.is_some() {
+            node.owner_class = owner;
+        }
+    }
+}
+
 /// Enumerate `Function`/`Method` `RawNode` whose span lies inside `class_span`,
 /// skipping dunder methods (`__init__`, `__repr__`, ...) and `exclude_name`
 /// (the caller — prevents self-fan-out).

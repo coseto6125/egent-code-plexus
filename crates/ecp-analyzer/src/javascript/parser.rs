@@ -531,6 +531,7 @@ impl LanguageProvider for JavaScriptProvider {
         );
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);
 
         let event_topics = {
             let topics = crate::event_topic::extract_event_topics(
