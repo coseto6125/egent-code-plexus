@@ -907,14 +907,11 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
         if args.include_heuristic && !heur_results.is_empty() {
             sym_entry["heuristic_edges"] = json!(heur_results);
         }
-        // CLI-entry / orphan-symbol fallback: when upstream-only mode returns
-        // no callers, also attach direct downstream callees so reviewers see
-        // what the symbol actually invokes (useful for clap dispatch entries,
-        // public-API surfaces with no in-repo callers, etc.). Cheap because
-        // depth is capped at 1.
-        //
-        // `det_results` always contains the start node at depth=0; "no callers"
-        // means ≤1 entry (only the start node itself, no upstream reached).
+        // Orphan-symbol fallback: when upstream-only mode finds no callers,
+        // attach depth-1 downstream callees so the changed symbol still
+        // exposes structural signal (its callees) instead of an empty
+        // `impact: []`. `det_results.len() <= 1` relies on the documented
+        // `run_bfs` start-node-at-depth-0 invariant.
         if args.direction == Direction::Up && det_results.len() <= 1 {
             let (downstream_results, _, _, _) = run_bfs(
                 graph,
@@ -926,8 +923,6 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
                 &rel_filter,
                 args.include_heuristic,
             );
-            // Only attach when there are actual callees (depth > 0); the start
-            // node at depth=0 is always present, so > 1 means real callees exist.
             if downstream_results.len() > 1 {
                 sym_entry["downstream_callees"] = json!(downstream_results);
             }
@@ -1061,6 +1056,11 @@ fn direction_str(dir: &Direction) -> &'static str {
 ///
 /// `--include-tests` / `--relation-types` / `min_conf` are applied here;
 /// `--kind` / `--file` emission-only filtering is NOT applied here.
+///
+/// **Invariant:** the deterministic result vec always begins with the start
+/// node itself at `depth = 0` (so `len() == 1` means "no neighbours reached").
+/// Callers relying on this for orphan-detection (see `impact_with_baseline`'s
+/// downstream fallback) MUST be updated if this invariant changes.
 #[allow(clippy::too_many_arguments)]
 fn run_bfs(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
