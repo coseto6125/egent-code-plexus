@@ -139,16 +139,17 @@ fn resolve_graph_path(
 /// fields. Returns `None` if the format is unexpected — callers count these
 /// as "unparsed" and surface the figure so silent parser drift is visible.
 ///
-/// The hint's analyzer-side emitter (`resolution::builder.rs::format!(...)`)
-/// joins the four fields with `\x1F` (ASCII Unit Separator, U+001F). This
-/// delimiter is safe for any parser-emitted value including Rust `::` paths
-/// (`sealed::FromStreamPriv<T>`) and Swift selectors (`init(foo:bar:)`),
-/// neither of which contains `\x1F` in practice.
+/// The hint's analyzer-side emitter is [`ecp_core::graph::format_hint`]; the
+/// fields are joined with [`ecp_core::graph::HINT_FIELD_SEP`] (ASCII Unit
+/// Separator, U+001F). This delimiter is safe for any parser-emitted value
+/// including Rust `::` paths (`sealed::FromStreamPriv<T>`) and Swift
+/// selectors (`init(foo:bar:)`), neither of which contains `\x1F`.
 fn parse_hint(hint: &str) -> Option<(&str, &str, &str, &str)> {
+    let sep = ecp_core::graph::HINT_FIELD_SEP;
     let (_kind_label, rest) = hint.split_once(": first=")?;
     let (first_part, second_part) = rest.split_once(" second=")?;
-    let mut ff = first_part.split('\u{1f}');
-    let mut sf = second_part.split('\u{1f}');
+    let mut ff = first_part.split(sep);
+    let mut sf = second_part.split(sep);
     // Consume first= fields (we only need second= for clustering, but validate
     // that first= is well-formed so malformed hints surface as hint_unparsed).
     let _fk = ff.next()?;
@@ -360,38 +361,25 @@ fn print_text_body(report: &Report, graph_path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecp_core::graph::{format_hint, HintFields};
 
-    // Helper: build a hint string with \x1F separators (mirrors builder.rs emit).
-    #[allow(clippy::too_many_arguments)]
-    fn make_hint(
-        bs_kind: &str,
-        fk: &str,
-        fp: &str,
-        fo: &str,
-        fn_: &str,
-        sk: &str,
-        sp: &str,
-        so: &str,
-        sn: &str,
-    ) -> String {
-        format!(
-            "{}: first={}\x1f{}\x1f{}\x1f{} second={}\x1f{}\x1f{}\x1f{}",
-            bs_kind, fk, fp, fo, fn_, sk, sp, so, sn,
-        )
+    // Test sugar: positional shortcut for HintFields. Keeps fixtures compact
+    // while letting parse_hint round-trip the canonical format_hint output.
+    fn h<'a>(kind: &'a str, path: &'a str, owner: &'a str, name: &'a str) -> HintFields<'a> {
+        HintFields {
+            kind,
+            path,
+            owner,
+            name,
+        }
     }
 
     #[test]
     fn parse_hint_extracts_second_fields() {
-        let hint = make_hint(
+        let hint = format_hint(
             "uid-collision",
-            "Variable",
-            "src/a.py",
-            "Outer",
-            "File",
-            "Variable",
-            "src/b.py",
-            "Inner",
-            "File",
+            h("Variable", "src/a.py", "Outer", "File"),
+            h("Variable", "src/b.py", "Inner", "File"),
         );
         let got = parse_hint(&hint).expect("hint must parse");
         assert_eq!(got, ("Variable", "src/b.py", "Inner", "File"));
@@ -405,16 +393,10 @@ mod tests {
 
     #[test]
     fn parse_hint_empty_owner_is_kept_as_empty() {
-        let hint = make_hint(
+        let hint = format_hint(
             "uid-collision",
-            "Variable",
-            "src/a.py",
-            "",
-            "File",
-            "Function",
-            "src/b.go",
-            "",
-            "main",
+            h("Variable", "src/a.py", "", "File"),
+            h("Function", "src/b.go", "", "main"),
         );
         let got = parse_hint(&hint).expect("hint must parse");
         assert_eq!(got.2, ""); // owner_class can be empty (top-level)
@@ -426,16 +408,20 @@ mod tests {
     /// fragile `splitn(3) + rsplit_once` workaround; now straightforward split.
     #[test]
     fn parse_hint_rust_owner_with_double_colon_preserves_owner() {
-        let hint = make_hint(
+        let hint = format_hint(
             "uid-collision",
-            "Typedef",
-            "tokio-stream/src/stream_ext/collect.rs",
-            "sealed::FromStreamPriv<T>",
-            "InternalCollection",
-            "Typedef",
-            "tokio-stream/src/stream_ext/collect.rs",
-            "sealed::FromStreamPriv<T>",
-            "InternalCollection",
+            h(
+                "Typedef",
+                "tokio-stream/src/stream_ext/collect.rs",
+                "sealed::FromStreamPriv<T>",
+                "InternalCollection",
+            ),
+            h(
+                "Typedef",
+                "tokio-stream/src/stream_ext/collect.rs",
+                "sealed::FromStreamPriv<T>",
+                "InternalCollection",
+            ),
         );
         let (kind, path, owner, name) = parse_hint(&hint).expect("hint must parse");
         assert_eq!(kind, "Typedef");
@@ -448,16 +434,10 @@ mod tests {
     /// also survive — `crate::a::b::c::Type::Inner` → owner stays whole.
     #[test]
     fn parse_hint_deep_owner_chain_preserved() {
-        let hint = make_hint(
+        let hint = format_hint(
             "uid-collision",
-            "Method",
-            "src/a.rs",
-            "",
-            "nop",
-            "Method",
-            "src/x.rs",
-            "crate::a::b::c::Outer",
-            "inner",
+            h("Method", "src/a.rs", "", "nop"),
+            h("Method", "src/x.rs", "crate::a::b::c::Outer", "inner"),
         );
         let (_, _, owner, name) = parse_hint(&hint).expect("hint must parse");
         assert_eq!(owner, "crate::a::b::c::Outer");
@@ -469,16 +449,10 @@ mod tests {
     /// mis-attribute via `rsplit_once`. With `\x1F` it is unambiguous.
     #[test]
     fn test_parse_hint_handles_colon_in_name() {
-        let hint = make_hint(
+        let hint = format_hint(
             "uid-collision",
-            "Method",
-            "Sources/Foo/Foo.swift",
-            "Foo",
-            "other",
-            "Method",
-            "Sources/Foo/Foo.swift",
-            "Foo",
-            "init(foo:bar:)",
+            h("Method", "Sources/Foo/Foo.swift", "Foo", "other"),
+            h("Method", "Sources/Foo/Foo.swift", "Foo", "init(foo:bar:)"),
         );
         let (kind, path, owner, name) = parse_hint(&hint).expect("hint must parse");
         assert_eq!(kind, "Method");
@@ -493,16 +467,10 @@ mod tests {
     /// symmetry — and is the case mentioned in PR #345 as the original bug.
     #[test]
     fn test_parse_hint_preserves_rust_double_colon_in_owner() {
-        let hint = make_hint(
+        let hint = format_hint(
             "uid-collision",
-            "Struct",
-            "src/lib.rs",
-            "sealed::FromStreamPriv<T>",
-            "Inner",
-            "Struct",
-            "src/lib.rs",
-            "sealed::FromStreamPriv<T>",
-            "Inner",
+            h("Struct", "src/lib.rs", "sealed::FromStreamPriv<T>", "Inner"),
+            h("Struct", "src/lib.rs", "sealed::FromStreamPriv<T>", "Inner"),
         );
         let (_, _, owner, name) = parse_hint(&hint).expect("hint must parse");
         assert_eq!(owner, "sealed::FromStreamPriv<T>");
@@ -513,16 +481,10 @@ mod tests {
     /// must be preserved intact — `\x1F` is not present in any real path.
     #[test]
     fn test_parse_hint_handles_path_with_colon() {
-        let hint = make_hint(
+        let hint = format_hint(
             "uid-collision",
-            "Function",
-            "C:/project/src/a.cpp",
-            "",
-            "foo",
-            "Function",
-            "C:/project/src/b.cpp",
-            "",
-            "foo",
+            h("Function", "C:/project/src/a.cpp", "", "foo"),
+            h("Function", "C:/project/src/b.cpp", "", "foo"),
         );
         let (_, path, _, _) = parse_hint(&hint).expect("hint must parse");
         assert_eq!(path, "C:/project/src/b.cpp");

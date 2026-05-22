@@ -494,18 +494,20 @@ impl GraphBuilder {
                     } else {
                         ""
                     };
-                    // US (\x1F) separates owner_class/name etc. — these may legitimately contain `:` (Swift selectors, Rust `::`).
-                    let hint = format!(
-                        "{}: first={}\u{1f}{}\u{1f}{}\u{1f}{} second={}\u{1f}{}\u{1f}{}\u{1f}{}",
+                    let hint = ecp_core::graph::format_hint(
                         bs_kind,
-                        prev_kind,
-                        prev_path,
-                        prev_owner,
-                        prev_name,
-                        raw_node.kind.as_str(),
-                        path_str,
-                        raw_node.owner_class.as_deref().unwrap_or(""),
-                        raw_node.name,
+                        ecp_core::graph::HintFields {
+                            kind: prev_kind,
+                            path: prev_path,
+                            owner: prev_owner,
+                            name: prev_name,
+                        },
+                        ecp_core::graph::HintFields {
+                            kind: raw_node.kind.as_str(),
+                            path: &path_str,
+                            owner: raw_node.owner_class.as_deref().unwrap_or(""),
+                            name: &raw_node.name,
+                        },
                     );
                     collision_blind_spots.push(BlindSpotRecord {
                         kind: string_pool.add(bs_kind),
