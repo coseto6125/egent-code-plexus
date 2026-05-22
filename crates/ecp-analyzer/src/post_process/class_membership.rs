@@ -20,7 +20,9 @@ use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::{Edge, NodeKind, RelType};
 use ecp_core::pool::StringPool;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 
 /// Emit `HasMethod` / `HasProperty` edges by walking the raw per-file
 /// `LocalGraph`s and resolving names back to node indices via `SymbolTable`.
@@ -42,73 +44,94 @@ pub fn emit_edges(
     let reason = string_pool.add("post_process:class_membership");
     let reason_impl = string_pool.add("post_process:class_membership:rust_impl");
 
-    let mut emitted = 0usize;
+    // Per-file work is independent: writes go to a thread-local edge buffer
+    // and only `symbol_table` (read-only) is shared. Same parallel pattern as
+    // post_process::imports_edges.
+    let chunk_results: Vec<(usize, Vec<Edge>)> = local_graphs
+        .par_iter()
+        .map(|local_graph| {
+            let raws = &local_graph.nodes;
 
-    for local_graph in local_graphs {
-        let raws = &local_graph.nodes;
-
-        // T7-6: skip class_membership for files whose every symbol is unchanged.
-        if let Some(skip_map) = symbol_skip_set {
+            // Forward-slash normalize once. Linux/macOS paths have no `\\`
+            // → reuse the borrowed cow without allocating.
             let raw_path = local_graph.file_path.to_string_lossy();
-            let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
-                std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
+            let path_str_cow: Cow<'_, str> = if raw_path.contains('\\') {
+                Cow::Owned(raw_path.replace('\\', "/"))
             } else {
                 raw_path
             };
-            if let Some(skip_uids) = skip_map.get(path_str.as_ref()) {
-                let all_unchanged = raws.iter().all(|n| {
-                    let uid = ecp_core::uid::compute(
-                        n.kind,
-                        &path_str,
-                        n.owner_class.as_deref(),
-                        &n.name,
-                    );
-                    skip_uids.contains(&uid)
-                });
-                if all_unchanged {
-                    continue;
+            let path_str: &str = &path_str_cow;
+
+            // T7-6: skip class_membership for files whose every symbol is unchanged.
+            if let Some(skip_map) = symbol_skip_set {
+                if let Some(skip_uids) = skip_map.get(path_str) {
+                    let all_unchanged = raws.iter().all(|n| {
+                        let uid = ecp_core::uid::compute(
+                            n.kind,
+                            path_str,
+                            n.owner_class.as_deref(),
+                            &n.name,
+                        );
+                        skip_uids.contains(&uid)
+                    });
+                    if all_unchanged {
+                        return (0, Vec::new());
+                    }
                 }
             }
-        }
 
-        // Pre-pass: collect Class-like nodes + group by name. Both passes hot-loop
-        // over this O(N) once-per-file index instead of re-scanning `raws`
-        // for kind=Class on every member lookup. Typical K = #classes/file
-        // is 1-10, so this drops both passes from O(N²) to O(N·K) and lets
-        // class-free files short-circuit cleanly.
-        // Includes Struct/Trait/Interface so Rust `struct Foo` + `impl Foo`
-        // bridge correctly now that structs no longer emit as Class.
-        let mut classes: Vec<(&str, Span)> = Vec::new();
-        let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
-        for n in raws {
-            if matches!(
-                n.kind,
-                NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
-            ) {
-                classes.push((n.name.as_str(), n.span));
-                classes_by_name
-                    .entry(n.name.as_str())
-                    .or_default()
-                    .push(n.span);
+            // Pre-pass: collect Class-like nodes + group by name. Both passes hot-loop
+            // over this O(N) once-per-file index instead of re-scanning `raws`
+            // for kind=Class on every member lookup. Typical K = #classes/file
+            // is 1-10, so this drops both passes from O(N²) to O(N·K) and lets
+            // class-free files short-circuit cleanly.
+            // Includes Struct/Trait/Interface so Rust `struct Foo` + `impl Foo`
+            // bridge correctly now that structs no longer emit as Class.
+            let mut classes: Vec<(&str, Span)> = Vec::new();
+            let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
+            for n in raws {
+                if matches!(
+                    n.kind,
+                    NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
+                ) {
+                    classes.push((n.name.as_str(), n.span));
+                    classes_by_name
+                        .entry(n.name.as_str())
+                        .or_default()
+                        .push(n.span);
+                }
             }
-        }
-        if classes.is_empty() {
-            continue;
-        }
+            if classes.is_empty() {
+                return (0, Vec::new());
+            }
 
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+            let mut local_edges: Vec<Edge> = Vec::new();
+            let mut local_emitted = 0usize;
+            local_emitted += emit_pass1_span(
+                raws,
+                &classes,
+                path_str,
+                symbol_table,
+                reason,
+                &mut local_edges,
+            );
+            local_emitted += emit_pass2_rust_impl(
+                raws,
+                &classes_by_name,
+                path_str,
+                symbol_table,
+                reason_impl,
+                &mut local_edges,
+            );
+            (local_emitted, local_edges)
+        })
+        .collect();
 
-        emitted += emit_pass1_span(raws, &classes, &path_str, symbol_table, reason, edges_out);
-        emitted += emit_pass2_rust_impl(
-            raws,
-            &classes_by_name,
-            &path_str,
-            symbol_table,
-            reason_impl,
-            edges_out,
-        );
+    let mut emitted = 0usize;
+    for (count, mut local_edges) in chunk_results {
+        emitted += count;
+        edges_out.append(&mut local_edges);
     }
-
     emitted
 }
 
