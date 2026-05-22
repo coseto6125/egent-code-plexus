@@ -461,18 +461,23 @@ fn parse_comparison(c: &mut Cursor) -> Result<Expr, CypherError> {
 
     // Postfix-style operators
     if c.eat(&Token::In) {
-        c.expect(&Token::LBracket)?;
-        let mut items = Vec::new();
-        if !c.check(&Token::RBracket) {
-            loop {
-                items.push(parse_literal(c)?);
-                if !c.eat(&Token::Comma) {
-                    break;
+        if c.check(&Token::LBracket) {
+            c.pos += 1; // consume LBracket
+            let mut items = Vec::new();
+            if !c.check(&Token::RBracket) {
+                loop {
+                    items.push(parse_literal(c)?);
+                    if !c.eat(&Token::Comma) {
+                        break;
+                    }
                 }
             }
+            c.expect(&Token::RBracket)?;
+            return Ok(Expr::In(Box::new(lhs), items));
         }
-        c.expect(&Token::RBracket)?;
-        return Ok(Expr::In(Box::new(lhs), items));
+        // `scalar IN var.prop` — RHS is a collection property reference.
+        let rhs = parse_primary(c)?;
+        return Ok(Expr::InCollection(Box::new(lhs), Box::new(rhs)));
     }
     if c.eat(&Token::RegexMatch) {
         let pat = match c.advance() {

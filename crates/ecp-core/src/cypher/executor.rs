@@ -1074,6 +1074,14 @@ fn eval_expr(
                 lits.iter().any(|l| values_eq(&v, &lit_to_value(l))),
             ))
         }
+        InCollection(scalar, collection) => {
+            let needle = eval_expr(scalar, b, graph, cache)?;
+            let haystack = eval_expr(collection, b, graph, cache)?;
+            Ok(Value::Bool(match &haystack {
+                Value::List(items) => items.iter().any(|item| values_eq(&needle, item)),
+                _ => false,
+            }))
+        }
         Regex(lhs, pat) => {
             let v = eval_expr(lhs, b, graph, cache)?;
             if !cache.regex_cache.contains_key(pat) {
@@ -1180,7 +1188,7 @@ fn prop_value(
             // If the computed value is a NodeRef, resolve the property from the graph.
             Value::NodeRef { idx, .. } => {
                 let n = &graph.nodes[*idx as usize];
-                node_prop_value(n, prop, graph, cache)
+                node_prop_value(n, *idx, prop, graph, cache)
             }
             // EdgeRef: resolve edge properties.
             Value::EdgeRef {
@@ -1207,7 +1215,7 @@ fn prop_value(
     }
     if let Some(&idx) = b.node_vars.get(var) {
         let n = &graph.nodes[idx as usize];
-        return node_prop_value(n, prop, graph, cache);
+        return node_prop_value(n, idx, prop, graph, cache);
     }
     if let Some(&edge_idx) = b.edge_vars.get(var) {
         let e = &graph.edges[edge_idx as usize];
@@ -1230,9 +1238,12 @@ fn archived_kind_str(node: &crate::graph::ArchivedNode) -> &'static str {
 }
 
 /// Resolve a single property from an archived node.
+/// `node_idx` is the position of `n` in `graph.nodes` — needed for the sparse
+/// `function_metas` binary-search lookup.
 /// `cache` is used for the `content` property (C12).
 fn node_prop_value(
     n: &crate::graph::ArchivedNode,
+    node_idx: u32,
     prop: &str,
     graph: &ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
@@ -1273,8 +1284,93 @@ fn node_prop_value(
                 .unwrap_or_default();
             Value::Str(slice)
         }
+        // ── FunctionMeta flag properties ────────────────────────────────────
+        // FunctionMeta is sparse (only Function/Method/Constructor nodes).
+        // Nodes without a record return safe defaults (false / 0 / empty list)
+        // so WHERE m.is_async = true works without needing a Null check.
+        "is_test" | "isTest" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_TEST,
+        )),
+        "is_async" | "isAsync" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_ASYNC,
+        )),
+        "is_static" | "isStatic" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_STATIC,
+        )),
+        "is_abstract" | "isAbstract" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_ABSTRACT,
+        )),
+        "is_generator" | "isGenerator" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_GENERATOR,
+        )),
+        "is_extern" | "isExtern" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_EXTERN,
+        )),
+        "visibility" => Value::Int(archived_fm_visibility(graph, node_idx) as i64),
+        "decorators" => archived_fm_decorators(graph, node_idx),
         _ => Value::Null,
     }
+}
+
+/// Return true when the node's FunctionMeta has the given flag set.
+/// Nodes with no FunctionMeta record return false (sparse-record default).
+fn archived_fm_flag(graph: &ArchivedZeroCopyGraph, node_idx: u32, flag: u16) -> bool {
+    match graph
+        .function_metas
+        .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
+    {
+        Ok(i) => graph.function_metas[i].flags.to_native() & flag != 0,
+        Err(_) => false,
+    }
+}
+
+/// Return the 3-bit visibility code for the node's FunctionMeta.
+/// Nodes with no FunctionMeta record return 0 (public default).
+fn archived_fm_visibility(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> u8 {
+    match graph
+        .function_metas
+        .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
+    {
+        Ok(i) => ((graph.function_metas[i].flags.to_native() >> 6) & 0b111) as u8,
+        Err(_) => 0,
+    }
+}
+
+/// Return the decorators list for the node's FunctionMeta.
+/// Decorator names are normalized: leading `@` stripped so Python `app.get`
+/// and Java `@Override` are both queryable as `Override` / `app.get`.
+/// Nodes with no FunctionMeta record return an empty list.
+/// TODO: the per-row Vec allocation here is unavoidable with the current
+/// Value::List representation; profile if decorators filtering becomes a hotspot.
+fn archived_fm_decorators(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Value {
+    let items = match graph
+        .function_metas
+        .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
+    {
+        Ok(i) => graph.function_metas[i]
+            .decorators
+            .iter()
+            .map(|d| {
+                let s = d.resolve(&graph.string_pool);
+                let normalized = s.strip_prefix('@').unwrap_or(s);
+                Value::Str(normalized.to_string())
+            })
+            .collect(),
+        Err(_) => vec![],
+    };
+    Value::List(items)
 }
 
 fn eval_binop(op: Op, l: &Value, r: &Value) -> bool {
@@ -2558,5 +2654,305 @@ mod tests {
         // span (0,0,2,1) covers "function hello() {\n  return 42;\n}"
         assert!(content.contains("function hello"), "content: {content:?}");
         assert!(content.contains("return 42"), "content: {content:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // FunctionMeta property whitelist tests
+    // Fixture: 6 nodes —
+    //   0: "sync_fn"   Function, no FunctionMeta (sparse-record absent)
+    //   1: "async_fn"  Function, is_async=true
+    //   2: "test_fn"   Function, is_test=true
+    //   3: "both_fn"   Function, is_test=true + is_async=true
+    //   4: "override_method" Method, decorators=["@Override"], private
+    //   5: "py_route"  Function, decorators=["app.get"], no flags
+    // -----------------------------------------------------------------------
+
+    fn build_function_meta_graph() -> Vec<u8> {
+        use crate::graph::{FunctionMeta, NodeKind};
+
+        let mut pool = StringPool::new();
+        let fp = pool.add("src/x.ts");
+
+        let n_sync = pool.add("sync_fn");
+        let n_async = pool.add("async_fn");
+        let n_test = pool.add("test_fn");
+        let n_both = pool.add("both_fn");
+        let n_override = pool.add("override_method");
+        let n_route = pool.add("py_route");
+
+        let dec_override = pool.add("@Override");
+        let dec_appget = pool.add("app.get");
+
+        // visibility=private (2) encodes into bits 6-8: 2 << 6 = 0x80
+        const PRIVATE_VISIBILITY: u16 = 2 << 6;
+
+        let g = ZeroCopyGraph {
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
+            fingerprint: [0; 32],
+            string_pool: pool.bytes,
+            files: vec![File {
+                path: fp,
+                mtime: 0,
+                content_hash: [0u8; 8],
+                category: FileCategory::Source,
+            }],
+            nodes: vec![
+                Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "sync_fn"),
+                    name: n_sync,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (0, 0, 1, 0),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+                Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "async_fn"),
+                    name: n_async,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (2, 0, 3, 0),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+                Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "test_fn"),
+                    name: n_test,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (4, 0, 5, 0),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+                Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "both_fn"),
+                    name: n_both,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (6, 0, 7, 0),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+                Node {
+                    uid: crate::uid::compute(NodeKind::Method, "src/x.ts", None, "override_method"),
+                    name: n_override,
+                    file_idx: 0,
+                    kind: NodeKind::Method,
+                    span: (8, 0, 9, 0),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+                Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "py_route"),
+                    name: n_route,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (10, 0, 11, 0),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+            ],
+            edges: vec![],
+            out_offsets: vec![0, 0, 0, 0, 0, 0, 0],
+            in_offsets: vec![0, 0, 0, 0, 0, 0, 0],
+            in_edge_idx: vec![],
+            name_index: vec![],
+            process_start: 6,
+            traces_offsets: vec![],
+            traces_data: vec![],
+            blind_spots: vec![],
+            route_shapes: vec![],
+            call_metas: vec![],
+            // node_idx 0 intentionally absent (tests sparse-record absence for sync_fn)
+            function_metas: vec![
+                FunctionMeta {
+                    node_idx: 1,
+                    flags: FunctionMeta::FLAG_ASYNC,
+                    params: vec![],
+                    return_type: StrRef::default(),
+                    decorators: vec![],
+                },
+                FunctionMeta {
+                    node_idx: 2,
+                    flags: FunctionMeta::FLAG_TEST,
+                    params: vec![],
+                    return_type: StrRef::default(),
+                    decorators: vec![],
+                },
+                FunctionMeta {
+                    node_idx: 3,
+                    flags: FunctionMeta::FLAG_TEST | FunctionMeta::FLAG_ASYNC,
+                    params: vec![],
+                    return_type: StrRef::default(),
+                    decorators: vec![],
+                },
+                FunctionMeta {
+                    node_idx: 4,
+                    flags: PRIVATE_VISIBILITY,
+                    params: vec![],
+                    return_type: StrRef::default(),
+                    decorators: vec![dec_override],
+                },
+                FunctionMeta {
+                    node_idx: 5,
+                    flags: 0,
+                    params: vec![],
+                    return_type: StrRef::default(),
+                    decorators: vec![dec_appget],
+                },
+            ],
+            kind_offsets: vec![],
+            kind_node_idx: vec![],
+        };
+        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+    }
+
+    fn with_fm<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
+        let bytes = build_function_meta_graph();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        f(archived);
+    }
+
+    // a) async-only filter returns async functions, excludes sync
+    #[test]
+    fn fm_is_async_filter_returns_async_excludes_sync() {
+        with_fm(|g| {
+            let q =
+                parse("MATCH (f:Function|Method) WHERE f.is_async = true RETURN f.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            let names: Vec<_> = r
+                .rows
+                .iter()
+                .map(|row| match &row[0] {
+                    Value::Str(s) => s.clone(),
+                    other => panic!("expected Str, got {other:?}"),
+                })
+                .collect();
+            assert!(names.contains(&"async_fn".to_string()), "async_fn missing");
+            assert!(names.contains(&"both_fn".to_string()), "both_fn missing");
+            assert!(
+                !names.contains(&"sync_fn".to_string()),
+                "sync_fn must be excluded"
+            );
+        });
+    }
+
+    // b) is_test filter with mixed test/non-test nodes
+    #[test]
+    fn fm_is_test_filter_mixed_nodes() {
+        with_fm(|g| {
+            let q =
+                parse("MATCH (f:Function|Method) WHERE f.is_test = true RETURN f.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            let names: Vec<_> = r
+                .rows
+                .iter()
+                .map(|row| match &row[0] {
+                    Value::Str(s) => s.clone(),
+                    other => panic!("expected Str, got {other:?}"),
+                })
+                .collect();
+            assert!(names.contains(&"test_fn".to_string()), "test_fn missing");
+            assert!(names.contains(&"both_fn".to_string()), "both_fn missing");
+            assert!(
+                !names.contains(&"async_fn".to_string()),
+                "async_fn must be excluded"
+            );
+            assert!(
+                !names.contains(&"sync_fn".to_string()),
+                "sync_fn must be excluded"
+            );
+        });
+    }
+
+    // c) decorators IN-membership: Java @Override queryable without @
+    #[test]
+    fn fm_decorator_in_membership() {
+        with_fm(|g| {
+            let q =
+                parse("MATCH (m:Function|Method) WHERE 'Override' IN m.decorators RETURN m.name")
+                    .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "expected exactly override_method");
+            assert_eq!(r.rows[0][0], Value::Str("override_method".into()));
+        });
+    }
+
+    // d) decorator @ normalization: Python app.get and Java @Override both queryable without @
+    #[test]
+    fn fm_decorator_at_normalization() {
+        with_fm(|g| {
+            // app.get has no @ — queryable as-is
+            let q_py =
+                parse("MATCH (f:Function|Method) WHERE 'app.get' IN f.decorators RETURN f.name")
+                    .unwrap();
+            let r_py = execute(&q_py, g, Path::new(".")).unwrap();
+            assert_eq!(r_py.rows.len(), 1, "expected py_route for app.get");
+            assert_eq!(r_py.rows[0][0], Value::Str("py_route".into()));
+
+            // @Override stored as "@Override" but normalized to "Override"
+            let q_java =
+                parse("MATCH (m:Function|Method) WHERE 'Override' IN m.decorators RETURN m.name")
+                    .unwrap();
+            let r_java = execute(&q_java, g, Path::new(".")).unwrap();
+            assert_eq!(
+                r_java.rows.len(),
+                1,
+                "expected override_method for Override"
+            );
+            assert_eq!(r_java.rows[0][0], Value::Str("override_method".into()));
+
+            // raw "@Override" with leading @ should NOT match after normalization
+            let q_raw =
+                parse("MATCH (m:Function|Method) WHERE '@Override' IN m.decorators RETURN m.name")
+                    .unwrap();
+            let r_raw = execute(&q_raw, g, Path::new(".")).unwrap();
+            assert!(r_raw.rows.is_empty(), "@Override with @ should not match");
+        });
+    }
+
+    // e) visibility = 2 returns only private nodes
+    #[test]
+    fn fm_visibility_private_filter() {
+        with_fm(|g| {
+            let q =
+                parse("MATCH (f:Function|Method) WHERE f.visibility = 2 RETURN f.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "expected exactly override_method");
+            assert_eq!(r.rows[0][0], Value::Str("override_method".into()));
+        });
+    }
+
+    // f) node with NO FunctionMeta: is_async returns false (not Null), decorators returns empty list
+    #[test]
+    fn fm_absent_record_returns_safe_defaults() {
+        with_fm(|g| {
+            // sync_fn has no FunctionMeta record
+            let q = parse(
+                "MATCH (f:Function) WHERE f.name = 'sync_fn' RETURN f.is_async, f.decorators",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(
+                r.rows[0][0],
+                Value::Bool(false),
+                "is_async must be false, not Null"
+            );
+            assert_eq!(
+                r.rows[0][1],
+                Value::List(vec![]),
+                "decorators must be empty list, not Null"
+            );
+        });
     }
 }
