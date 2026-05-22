@@ -1,0 +1,5 @@
+# Auto-union merges for the follow-ups log so parallel worktrees can each
+# append entries to `## Open` without conflict. Note: only line-add conflicts
+# auto-merge; concurrent edits to the SAME entry still surface as a conflict
+# (intentional — manual resolution forces a re-read of both versions).
+FOLLOWUPS.md merge=union
