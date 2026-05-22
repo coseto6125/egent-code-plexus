@@ -149,6 +149,14 @@ the older change.
 - **size**: M（~150 LOC + integration tests for stale-attach path）
 - **links**: PR fix/reindex-head-sha-drift；`crates/ecp-cli/src/main.rs:231`；`crates/ecp-cli/src/auto_ensure.rs:179-247`
 
+### FU-2026-05-23-005  ·  surfaced in PR #352
+- **owner**: unassigned
+- **scope**: `archived_fm_decorators` 在 cypher WHERE eval 路徑上每 row 配一個全新的 `Vec<Value::Str>`。Cypher 引擎的 `Value` 型別目前只支援 owned variants（沒有 borrowed-slice / cow 版本），所以 `m.decorators` 屬性無法 zero-allocation 表達。Decorator-dense 的查詢（Spring `@Injectable` / Hilt DI / Django `@route`）若同時跑 `IN m.decorators` 過濾，per-row alloc 會出現在 WHERE eval hot path。
+- **why-deferred**: 根因在 `crates/ecp-core/src/cypher/value.rs` 的 `Value` 型別設計，要改成 borrowed-aware 變體（`Value::ListRef(&[ArchivedStrRef])` 之類）才能消除分配；超出 PR #352 的「whitelist 擴充」scope
+- **next-action**: 先 profile — 在 `.sample_repo` 跑 `MATCH (m:Method) WHERE 'Injectable' IN m.decorators RETURN m.name`，confirm decorator List allocation 進不進 top-5 hotspot。若進入再開設計 PR：`Value` 加 borrowed 變體 + eval 端優先採用，fallback 才物化成 owned `Value::List`
+- **size**: S (profile) → M (redesign if confirmed)
+- **links**: PR #352；`crates/ecp-core/src/cypher/executor.rs` `archived_fm_decorators` TODO comment
+
 ---
 
 ## Done
