@@ -603,124 +603,161 @@ public class OrderService {
     );
 }
 
-// ── Go (db.Begin / db.BeginTx call-site) ────────────────────────────────
+// ── Ruby (ActiveRecord / Sequel block-form transaction) ─────────────────────
 
 #[test]
-fn go_db_begin_emits_gosqltx_scope() {
-    use ecp_analyzer::go::parser::GoProvider;
+fn ruby_model_transaction_do_emits_active_record_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    let p = GoProvider::new().expect("provider");
-    let src = r#"package db
-
-import "database/sql"
-
-func createUser(db *sql.DB) error {
-    tx, err := db.Begin()
-    if err != nil {
-        return err
-    }
-    defer tx.Rollback()
-    return tx.Commit()
-}
-
-func listUsers(db *sql.DB) {}
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+class UserService
+  def create_user(attrs)
+    User.transaction do
+      user = User.create!(attrs)
+      AuditLog.record(user.id)
+    end
+  end
+end
 "#;
     let g = p
-        .parse_file(Path::new("users.go"), src.as_bytes())
+        .parse_file(Path::new("user_service.rb"), src.as_bytes())
         .expect("parse");
-    let s = scopes(&g);
-    assert_eq!(s.len(), 1, "one tx_scope expected; got: {:?}", s.len());
-    assert_eq!(fn_name_of_scope(&g, &s[0]), "createUser");
-    assert_eq!(s[0].framework(), FrameworkId::GoSqlTx);
-}
-
-#[test]
-fn go_db_begin_tx_emits_gosqltx_scope() {
-    use ecp_analyzer::go::parser::GoProvider;
-    use ecp_core::analyzer::provider::LanguageProvider;
-    use std::path::Path;
-
-    let p = GoProvider::new().expect("provider");
-    let src = r#"package db
-
-import (
-    "context"
-    "database/sql"
-)
-
-func transferFunds(ctx context.Context, db *sql.DB) error {
-    tx, err := db.BeginTx(ctx, nil)
-    if err != nil {
-        return err
-    }
-    defer tx.Rollback()
-    return tx.Commit()
-}
-"#;
-    let g = p
-        .parse_file(Path::new("transfer.go"), src.as_bytes())
-        .expect("parse");
-    let s = scopes(&g);
-    assert_eq!(s.len(), 1, "one tx_scope expected for BeginTx");
-    assert_eq!(fn_name_of_scope(&g, &s[0]), "transferFunds");
-    assert_eq!(s[0].framework(), FrameworkId::GoSqlTx);
-}
-
-#[test]
-fn go_multiple_begin_in_same_fn_deduplicates_to_one_scope() {
-    use ecp_analyzer::go::parser::GoProvider;
-    use ecp_core::analyzer::provider::LanguageProvider;
-    use std::path::Path;
-
-    let p = GoProvider::new().expect("provider");
-    // Two db.Begin() calls inside the same function — must emit exactly one scope.
-    let src = r#"package db
-
-import "database/sql"
-
-func multiTx(db *sql.DB) error {
-    tx1, _ := db.Begin()
-    defer tx1.Rollback()
-    tx2, _ := db.Begin()
-    defer tx2.Rollback()
-    return nil
-}
-"#;
-    let g = p
-        .parse_file(Path::new("multi.go"), src.as_bytes())
-        .expect("parse");
-    let s = scopes(&g);
     assert_eq!(
-        s.len(),
+        scopes(&g).len(),
         1,
-        "multiple Begin() in same function must produce exactly one scope (got {})",
-        s.len()
+        "one tx_scope expected; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
     );
-    assert_eq!(fn_name_of_scope(&g, &s[0]), "multiTx");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "create_user");
+    assert_eq!(
+        scopes(&g)[0].framework(),
+        FrameworkId::RubyActiveRecordTransaction
+    );
 }
 
 #[test]
-fn go_begin_outside_function_produces_no_scope() {
-    use ecp_analyzer::go::parser::GoProvider;
+fn ruby_active_record_base_transaction_do_emits_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    let p = GoProvider::new().expect("provider");
-    // A file with no functions at all — Begin() would be top-level (impossible
-    // in real Go, but the parser must not panic and must emit zero scopes).
-    let src = r#"package db
-
-import "database/sql"
-
-var DB *sql.DB
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+class PaymentService
+  def process_payment(amount)
+    ActiveRecord::Base.transaction do
+      debit_account(amount)
+      credit_ledger(amount)
+    end
+  end
+end
 "#;
     let g = p
-        .parse_file(Path::new("nofunc.go"), src.as_bytes())
+        .parse_file(Path::new("payment_service.rb"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 1, "one tx_scope expected");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "process_payment");
+    assert_eq!(
+        scopes(&g)[0].framework(),
+        FrameworkId::RubyActiveRecordTransaction
+    );
+}
+
+#[test]
+fn ruby_module_level_function_transaction_do_emits_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+def transfer(from, to, amount)
+  ActiveRecord::Base.transaction do
+    from.debit(amount)
+    to.credit(amount)
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("transfer.rb"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected for module-level fn"
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transfer");
+    assert_eq!(
+        scopes(&g)[0].framework(),
+        FrameworkId::RubyActiveRecordTransaction
+    );
+}
+
+#[test]
+fn ruby_multiple_transaction_do_in_same_function_deduped_to_one_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+class AccountService
+  def complex_operation
+    User.transaction do
+      step_one
+    end
+    User.transaction do
+      step_two
+    end
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("account_service.rb"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "multiple transaction do blocks in same fn must dedup to one scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "complex_operation");
+}
+
+#[test]
+fn ruby_transaction_without_do_block_emits_no_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    // Rare proc-form: `transaction(some_proc)` — no do_block → should NOT match.
+    let src = r#"
+class UserService
+  def create_user(attrs)
+    tx_proc = proc { User.create!(attrs) }
+    User.transaction(tx_proc)
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("user_service.rb"), src.as_bytes())
         .expect("parse");
     assert!(
         scopes(&g).is_empty(),
-        "no functions → no tx_scopes expected"
+        "transaction() without do_block must not emit tx_scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
     );
 }

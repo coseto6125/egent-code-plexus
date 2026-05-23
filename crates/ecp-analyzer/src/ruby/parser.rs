@@ -2,13 +2,15 @@ use super::receiver_types::extract_ruby_calls_and_path_literals;
 use super::spec::RubySpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, push_blind_spot, FrameworkPatternSpec,
+    detect_ast_framework_patterns, point_in_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, RawRoute};
+use ecp_core::analyzer::types::{
+    BlindSpot, FrameworkId, LocalGraph, RawImport, RawNode, RawRoute, RawTxScope,
+};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use std::path::Path;
@@ -245,6 +247,83 @@ fn detect_module_as_enum(
             stack.push(child);
         }
     }
+}
+
+/// Walk the Ruby AST for `call` nodes whose method is `transaction` and that
+/// have a `do_block` child (the `Model.transaction do ... end` / Sequel
+/// `DB.transaction do ... end` idiom). Emits one `RawTxScope` per enclosing
+/// function — multiple `transaction do` blocks in the same function are
+/// deduplicated to one scope.
+///
+/// Conservative match: receiver is not validated. `User.transaction do`,
+/// `ActiveRecord::Base.transaction do`, and even `obj.transaction do` all
+/// match. False positives from non-ActiveRecord `transaction` methods are
+/// acceptable as v1 noise per the design spec.
+///
+/// `transaction(some_proc)` without a `do_block` (the rare proc-form) is
+/// intentionally NOT matched — no `do_block` child → no scope emitted.
+fn collect_ruby_transaction_scopes(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    nodes: &[RawNode],
+) -> Option<Box<[RawTxScope]>> {
+    // Collect distinct function node indices that contain a transaction do block.
+    let mut seen_fn_idxs: Vec<u32> = Vec::new();
+    let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
+
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call" && is_transaction_do_block_call(n, source) {
+            let row = n.start_position().row as u32;
+            let col = n.start_position().column as u32;
+            if let Some(fn_idx) = nodes.iter().enumerate().find_map(|(i, node)| {
+                matches!(
+                    node.kind,
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                )
+                .then(|| point_in_span(node.span, row, col).then_some(i as u32))
+                .flatten()
+            }) {
+                if !seen_fn_idxs.contains(&fn_idx) {
+                    seen_fn_idxs.push(fn_idx);
+                }
+            }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+
+    if seen_fn_idxs.is_empty() {
+        return None;
+    }
+    let scopes: Box<[RawTxScope]> = seen_fn_idxs
+        .into_iter()
+        .map(|idx| RawTxScope::new(idx, FrameworkId::RubyActiveRecordTransaction))
+        .collect();
+    Some(scopes)
+}
+
+/// True iff `call_node` has method name `"transaction"` AND a `do_block`
+/// direct child (the block-form idiom). The `do_block` is not a named field
+/// in tree-sitter-ruby; it's an unnamed child that follows the argument list.
+///
+/// `transaction(some_proc)` without a `do_block` returns false — the proc-form
+/// is intentionally excluded from TransactionScope emission.
+#[inline]
+fn is_transaction_do_block_call(call_node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let method_ok = call_node
+        .child_by_field_name("method")
+        .and_then(|m| std::str::from_utf8(&source[m.start_byte()..m.end_byte()]).ok())
+        .is_some_and(|s| s == "transaction");
+    if !method_ok {
+        return false;
+    }
+    let mut c = call_node.walk();
+    let has_do_block = call_node
+        .children(&mut c)
+        .any(|child| child.kind() == "do_block");
+    has_do_block
 }
 
 pub struct RubyProvider {
@@ -821,6 +900,12 @@ impl LanguageProvider for RubyProvider {
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
+        // Block-form transaction detection: walk AST for `call` nodes with
+        // method=`transaction` + `do_block` child. Must run after `nodes` is
+        // fully populated (stamp_owner_class_by_span finalises spans) so
+        // span-containment lookup for the enclosing function is accurate.
+        let tx_scopes = collect_ruby_transaction_scopes(tree.root_node(), source, &nodes);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -833,7 +918,7 @@ impl LanguageProvider for RubyProvider {
             blind_spots,
             schema_fields: None,
             event_topics: None,
-            tx_scopes: None,
+            tx_scopes,
             path_literals: (!raw_path_literals.is_empty())
                 .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
