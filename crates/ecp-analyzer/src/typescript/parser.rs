@@ -2,8 +2,8 @@ use super::receiver_types::{collect_local_types, extract_ts_calls_and_path_liter
 use super::spec::TypeScriptSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    enclosing_function_name, has_import_from, js_ts_first_arg_is_literal_string, node_span,
-    push_blind_spot, MODULE_LEVEL_SOURCE,
+    collect_typeorm_transactional_scopes, enclosing_function_name, has_import_from,
+    js_ts_first_arg_is_literal_string, node_span, push_blind_spot, MODULE_LEVEL_SOURCE,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -757,6 +757,9 @@ impl LanguageProvider for TypeScriptProvider {
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);
 
+        let tx_scopes =
+            collect_typeorm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
+
         // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
         // per-file parser scope can drop cleanly without dangling-pool risk.
         let fields = crate::schema_field::extract_schema_fields(
@@ -799,7 +802,7 @@ impl LanguageProvider for TypeScriptProvider {
             blind_spots,
             schema_fields,
             event_topics,
-            tx_scopes: None,
+            tx_scopes,
             path_literals,
             call_metas,
             raw_function_metas,

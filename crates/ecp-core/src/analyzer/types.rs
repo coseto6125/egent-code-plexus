@@ -347,6 +347,7 @@ impl FrameworkId {
             20 => Self::Unknown,
             21 => Self::DotNetTransactional,
             22 => Self::SymfonyTransactional,
+            // FU-2026-05-23-009 cross-lang expansion variants.
             23 => Self::TypeOrmTransactional,
             24 => Self::RustTransaction,
             25 => Self::DartTransaction,

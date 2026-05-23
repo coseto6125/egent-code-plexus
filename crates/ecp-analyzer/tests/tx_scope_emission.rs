@@ -496,3 +496,169 @@ public class OrderService {
         name
     );
 }
+
+// ── TypeScript (TypeORM @Transactional) ─────────────────────────────────────
+
+#[test]
+fn typescript_class_method_with_transactional_parens_emits_typeorm_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class UserService {
+  @Transactional()
+  async createUser(data: string): Promise<void> { }
+
+  async listUsers(): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("user.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "createUser");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+}
+
+#[test]
+fn typescript_class_method_with_bare_transactional_emits_typeorm_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class TransferService {
+  @Transactional
+  async transferFunds(from: string, to: string): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("transfer.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transferFunds");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+}
+
+#[test]
+fn typescript_class_method_with_transactional_args_emits_typeorm_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class PaymentService {
+  @Transactional({ propagation: 'REQUIRES_NEW' })
+  async processPayment(amount: number): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("payment.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "arg-bearing @Transactional(...) should emit one scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "processPayment");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+}
+
+#[test]
+fn typescript_transactional_on_class_does_not_emit_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    // @Transactional on a class (not a method) — NodeKind::Class is not in
+    // the scopeable_kinds list for TypeORM, so no RawTxScope should emit.
+    let src = r#"
+@Transactional()
+export class OrderService {
+  async placeOrder(): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("order.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert!(
+        scopes(&g).is_empty(),
+        "@Transactional on a Class must not produce tx_scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert!(g.tx_scopes.is_none());
+}
+
+#[test]
+fn typescript_multiple_transactional_methods_emit_multiple_scopes() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class AccountService {
+  @Transactional()
+  async deposit(amount: number): Promise<void> { }
+
+  @Transactional()
+  async withdraw(amount: number): Promise<void> { }
+
+  async readBalance(): Promise<number> { return 0; }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("account.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 2, "two tx_scopes expected");
+    let names: Vec<&str> = scopes(&g).iter().map(|s| fn_name_of_scope(&g, s)).collect();
+    assert!(names.contains(&"deposit"), "deposit missing: {:?}", names);
+    assert!(names.contains(&"withdraw"), "withdraw missing: {:?}", names);
+}
+
+#[test]
+fn typescript_no_transactional_produces_no_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class UserService {
+  async getUser(id: string): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("user.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert!(scopes(&g).is_empty(), "no tx_scope expected");
+    assert!(g.tx_scopes.is_none());
+}
