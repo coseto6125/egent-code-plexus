@@ -9,10 +9,10 @@
 //!
 //! Property-based strategy: pick a random file from the 14-lang polyglot
 //! fixture, apply one of 5 edit types, then assert parity.
-//! Smoke variant: 20 cases, ~5 s. Heavy variant: 200 cases, `#[ignore]`.
+//! Smoke variant: 20 cases, <1 s. Heavy variant: 200 cases, `#[ignore]`.
 
 use ecp_cli::git::DiffScope;
-use ecp_cli::reanalyze::{make_pipeline, reanalyze_files};
+use ecp_cli::reanalyze::{pipeline, reanalyze_files};
 use ecp_core::graph::NodeKind;
 use proptest::prelude::*;
 use std::collections::BTreeSet;
@@ -201,9 +201,16 @@ fn snapshot_from_local_graph(nodes: &[ecp_core::analyzer::types::RawNode]) -> Fi
 // ── parse helpers ────────────────────────────────────────────────────────────
 
 /// Fresh parse via the direct pipeline path (equivalent to full-build).
+///
+/// Uses the process-wide cached `pipeline()` accessor (same one
+/// `reanalyze_files` consumes) instead of `make_pipeline()` — rebuilding
+/// all 21 tree-sitter providers per parse cost ~0.6 s/call, which at
+/// ~60 parses per smoke run dominated wall time (~37 s of pure rebuild
+/// work). Sharing the cached pipeline is parity-safe because
+/// `analyze` is stateless w.r.t. the pipeline instance (no cache is
+/// populated in this code path).
 fn parse_direct(abs: &Path, rel: &Path) -> FileSnapshot {
-    let pipeline = make_pipeline();
-    let graphs = pipeline.analyze(vec![(abs.to_path_buf(), rel.to_path_buf())]);
+    let graphs = pipeline().analyze(vec![(abs.to_path_buf(), rel.to_path_buf())]);
     let nodes = graphs
         .into_iter()
         .next()
@@ -301,7 +308,7 @@ fn run_parity_cases(cases: u32) {
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-/// Smoke: 20 proptest cases, ~5 s on dev machine. Gates every PR.
+/// Smoke: 20 proptest cases, <1 s on dev machine. Gates every PR.
 #[test]
 fn parity_gate_smoke() {
     run_parity_cases(20);
