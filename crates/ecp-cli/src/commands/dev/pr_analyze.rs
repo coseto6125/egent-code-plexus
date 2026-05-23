@@ -377,6 +377,7 @@ pub fn classify_risk(impact_size: usize) -> Risk {
 pub struct SiblingPr {
     pub number: u32,
     #[serde(rename = "headRefOid")]
+    #[allow(dead_code)]
     pub head_ref_oid: String,
 }
 
@@ -397,8 +398,6 @@ pub trait GhClient {
     /// Write (create or update) the marker comment with this PR's impact set.
     fn write_cached_impact(&self, pr: u32, impact_set: &[String]) -> Result<(), EcpError>;
 }
-
-pub const CACHE_MARKER: &str = "<!-- ecp-impact-cache:V1 -->";
 
 use std::collections::BTreeSet;
 
@@ -669,8 +668,8 @@ mod tests {
             Ok(self
                 .siblings
                 .iter()
-                .cloned()
                 .filter(|p| p.number != exclude)
+                .cloned()
                 .collect())
         }
         fn read_cached_impact(&self, pr: u32) -> Result<Option<Vec<String>>, EcpError> {
