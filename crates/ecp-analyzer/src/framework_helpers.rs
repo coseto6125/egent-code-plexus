@@ -13,6 +13,12 @@ use ecp_core::graph::NodeKind;
 
 pub type Span = (u32, u32, u32, u32);
 
+/// Scalar literal kinds that qualify an object pair value as a valid
+/// enum-imitation member. Function, call, identifier, and template
+/// expressions with substitutions are excluded: they indicate a plain
+/// options object, not a discriminated-union enum imitation.
+pub(crate) const SCALAR_VALUE_KINDS: &[&str] = &["number", "string", "true", "false", "null"];
+
 /// One framework's textual signature: a name, a confidence value, a reason
 /// tag, and the substrings that prove the framework is in use.
 ///

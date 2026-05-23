@@ -8,6 +8,7 @@ use crate::framework_helpers::{
     enclosing_fn_idx_by_span, enclosing_function_name, has_import_from, node_span, push_blind_spot,
     MODULE_LEVEL_SOURCE,
 };
+use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
@@ -45,24 +46,6 @@ const BLIND_IOTA_CONST_BLOCK: (&str, &str) = (
     "const ( ... iota ) block with ≥2 entries — Go enum imitation; verify before treating as plain Const set",
 );
 
-/// Walk a subtree and return true if any node has kind `"iota"`.
-///
-/// tree-sitter-go gives `iota` its own node kind (not `identifier`), so
-/// checking `node.kind() == "iota"` is sufficient — no source-text comparison
-/// needed.
-fn subtree_contains_iota(node: tree_sitter::Node<'_>) -> bool {
-    if node.kind() == "iota" {
-        return true;
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if subtree_contains_iota(child) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Scan all top-level `const_declaration` blocks in the file and emit a
 /// BlindSpot for any that are Go enum imitations: ≥2 `const_spec` children
 /// where at least one spec's value expression contains the identifier `iota`.
@@ -94,7 +77,7 @@ fn detect_iota_const_blocks(
             // The value field of a const_spec holds the expression after `=`.
             // Specs that omit the value (Go iota elision) have no value child.
             if let Some(val) = spec.child_by_field_name("value") {
-                if subtree_contains_iota(val) {
+                if subtree_contains_kind(val, "iota") {
                     has_iota = true;
                 }
             }

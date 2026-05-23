@@ -4,6 +4,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     collect_typeorm_transactional_scopes, enclosing_function_name, has_import_from,
     js_ts_first_arg_is_literal_string, node_span, push_blind_spot, MODULE_LEVEL_SOURCE,
+    SCALAR_VALUE_KINDS,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -39,12 +40,6 @@ const BLIND_SPEC: &[(&str, &str)] = &[
         "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
     ),
 ];
-
-/// Scalar literal kinds that qualify an object pair value as a valid
-/// enum-imitation member. Function, call, identifier, and template
-/// expressions with substitutions are excluded: they indicate a plain
-/// options object, not a discriminated-union enum imitation.
-const SCALAR_VALUE_KINDS: &[&str] = &["number", "string", "true", "false", "null"];
 
 /// True iff the `object` node has ≥ `min` `pair` children where every
 /// value is a scalar literal (number / string / bool / null).

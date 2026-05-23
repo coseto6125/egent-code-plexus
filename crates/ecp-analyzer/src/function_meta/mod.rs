@@ -55,7 +55,7 @@ pub(super) fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
 /// Recursive descent: returns true iff any descendant (or `node` itself)
 /// has `node.kind() == kind`. Used by cpp/php/ruby extractors to detect
 /// `yield_expression`, `throw_expression`, etc. anywhere inside a fn body.
-pub(super) fn subtree_contains_kind(node: Node<'_>, kind: &str) -> bool {
+pub(crate) fn subtree_contains_kind(node: Node<'_>, kind: &str) -> bool {
     if node.kind() == kind {
         return true;
     }

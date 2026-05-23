@@ -3,7 +3,7 @@ use super::spec::JavaScriptSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_function_name, has_import_from, js_ts_first_arg_is_literal_string, node_span,
-    push_blind_spot, MODULE_LEVEL_SOURCE,
+    push_blind_spot, MODULE_LEVEL_SOURCE, SCALAR_VALUE_KINDS,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -81,10 +81,7 @@ fn check_object_freeze_enum(node: &tree_sitter::Node) -> Option<bool> {
             let value = (0..pair.child_count())
                 .filter_map(|i| pair.child(i as u32))
                 .next_back();
-            matches!(
-                value.as_ref().map(|v| v.kind()),
-                Some("number" | "string" | "true" | "false" | "null")
-            )
+            value.is_some_and(|v| SCALAR_VALUE_KINDS.contains(&v.kind()))
         })
         .count();
 
