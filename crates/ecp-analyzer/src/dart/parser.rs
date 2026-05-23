@@ -404,7 +404,11 @@ impl LanguageProvider for DartProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
-            path_literals: None,
+            path_literals: {
+                let lits =
+                    super::path_literals::extract_dart_path_literals(tree.root_node(), source);
+                (!lits.is_empty()).then(|| lits.into_boxed_slice())
+            },
             call_metas: vec![],
             raw_function_metas,
         })
