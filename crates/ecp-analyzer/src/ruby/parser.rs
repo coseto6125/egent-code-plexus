@@ -2,7 +2,7 @@ use super::receiver_types::extract_ruby_calls_and_path_literals;
 use super::spec::RubySpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, point_in_span, push_blind_spot, FrameworkPatternSpec,
+    detect_ast_framework_patterns, enclosing_fn_idx_by_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -274,16 +274,11 @@ fn collect_ruby_transaction_scopes(
 
     while let Some(n) = stack.pop() {
         if n.kind() == "call" && is_transaction_do_block_call(n, source) {
+            // Shared helper: smallest-area enclosing fn (was first-match before
+            // FU-034 — nested-fn scenarios resolved to the OUTER fn).
             let row = n.start_position().row as u32;
             let col = n.start_position().column as u32;
-            if let Some(fn_idx) = nodes.iter().enumerate().find_map(|(i, node)| {
-                matches!(
-                    node.kind,
-                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                )
-                .then(|| point_in_span(node.span, row, col).then_some(i as u32))
-                .flatten()
-            }) {
+            if let Some(fn_idx) = enclosing_fn_idx_by_span(nodes, row, col) {
                 seen_fn_idxs.insert(fn_idx);
             }
         }

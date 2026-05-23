@@ -169,6 +169,33 @@ pub fn enclosing_function_name(nodes: &[RawNode], inner_span: Span) -> Option<St
         .map(|n| n.name.clone())
 }
 
+/// Find the innermost `Function`/`Method`/`Constructor` `RawNode` whose span
+/// contains the point `(row, col)`. Returns the node's index into `nodes` as
+/// `u32`, or `None` if no enclosing fn (module-level call).
+///
+/// Used by tx-scope detectors (Go / Ruby / Dart …) to recover the enclosing
+/// function from a call-site position. Picks the smallest area via [`span_area`]
+/// so nested-fn scenarios (`fn outer() { fn inner() { db.transaction(...) }}`)
+/// resolve to the innermost match consistently across languages — previously
+/// each detector inlined a divergent formula (Go used `dr * 10_000 + …`, Dart
+/// used `<< 16` shift, Ruby used first-match with no min-area selection).
+///
+/// Constructor is included so a tx-scope inside `def initialize` (Ruby) or a
+/// Dart `factory`/generative constructor resolves correctly.
+pub fn enclosing_fn_idx_by_span(nodes: &[RawNode], row: u32, col: u32) -> Option<u32> {
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            matches!(
+                n.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            ) && point_in_span(n.span, row, col)
+        })
+        .min_by_key(|(_, n)| span_area(n.span))
+        .map(|(idx, _)| idx as u32)
+}
+
 /// Find the innermost class-like `RawNode` containing `inner_span`.
 /// Returns `(class_name, class_span)`, or `None` if no enclosing class
 /// (module-level fn/call). Accepts `Class | Struct | Trait | Interface`
@@ -717,6 +744,69 @@ mod tests {
             binding_kind: None,
         }];
         assert!(has_import_from(&imps, &["fastapi"]));
+    }
+
+    fn fn_node(name: &str, span: Span, kind: NodeKind) -> RawNode {
+        RawNode {
+            name: name.to_string(),
+            kind,
+            span,
+            is_exported: false,
+            heritage: Vec::new(),
+            type_annotation: None,
+            decorators: Vec::new(),
+            calls: Vec::new(),
+            owner_class: None,
+            content_hash: 0,
+        }
+    }
+
+    #[test]
+    fn enclosing_fn_idx_picks_innermost_when_nested() {
+        // outer spans rows 0..20; inner spans rows 5..10. A point at (row=7, col=3)
+        // falls inside both — helper must pick the smaller-area inner fn. The
+        // pre-FU-034 Ruby detector used first-match `find_map` and would have
+        // returned `outer` here in DFS-pre-order parser emission.
+        let nodes = vec![
+            fn_node("outer", (0, 0, 20, 0), NodeKind::Function),
+            fn_node("inner", (5, 0, 10, 0), NodeKind::Function),
+        ];
+        let idx = enclosing_fn_idx_by_span(&nodes, 7, 3).expect("must find enclosing fn");
+        assert_eq!(idx, 1, "innermost (inner) fn idx expected");
+    }
+
+    #[test]
+    fn enclosing_fn_idx_returns_none_for_module_level() {
+        let nodes = vec![fn_node("foo", (10, 0, 20, 0), NodeKind::Function)];
+        // Point above any fn span — module-level call site.
+        assert!(enclosing_fn_idx_by_span(&nodes, 2, 0).is_none());
+    }
+
+    #[test]
+    fn enclosing_fn_idx_handles_constructor_kind() {
+        // Constructor must be picked when it's the innermost containing fn —
+        // Ruby `def initialize` / Dart factory / generative constructor.
+        let nodes = vec![
+            fn_node("outer", (0, 0, 20, 0), NodeKind::Function),
+            fn_node("init", (5, 0, 10, 0), NodeKind::Constructor),
+        ];
+        let idx = enclosing_fn_idx_by_span(&nodes, 7, 0).expect("must find enclosing");
+        assert_eq!(
+            idx, 1,
+            "Constructor at idx 1 should win over outer Function"
+        );
+    }
+
+    #[test]
+    fn enclosing_fn_idx_ignores_non_fn_kinds() {
+        // A Class span tighter than the Function span — must not be selected
+        // (only Function/Method/Constructor are valid tx-scope owners).
+        let nodes = vec![
+            fn_node("C", (0, 0, 30, 0), NodeKind::Class),
+            fn_node("m", (5, 0, 25, 0), NodeKind::Method),
+        ];
+        let idx = enclosing_fn_idx_by_span(&nodes, 10, 0).expect("must find enclosing");
+        assert_eq!(idx, 1, "Method (idx 1) chosen even when Class is smaller");
     }
 }
 

@@ -5,7 +5,7 @@ use super::receiver_types::{
 use super::spec::GoSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    enclosing_function_name, has_import_from, node_span, push_blind_spot, span_contains,
+    enclosing_fn_idx_by_span, enclosing_function_name, has_import_from, node_span, push_blind_spot,
     MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -203,7 +203,7 @@ fn collect_go_sql_tx_scopes(
     source: &[u8],
     nodes: &[RawNode],
 ) -> Option<Box<[RawTxScope]>> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut scopes: Vec<RawTxScope> = Vec::new();
 
     let mut cursor = root.walk();
@@ -218,38 +218,15 @@ fn collect_go_sql_tx_scopes(
                             &source[field_node.start_byte()..field_node.end_byte()],
                         ) {
                             if matches!(method_name, "Begin" | "BeginTx") {
-                                // Recover the call's span and find the enclosing fn index.
+                                // Resolve the enclosing fn via the shared
+                                // span-area helper so Go / Ruby / Dart agree
+                                // on innermost-match in nested-fn scenarios.
                                 let call_start = node.start_position();
-                                let call_end = node.end_position();
-                                let call_span = (
-                                    crate::calls::safe_row(call_start.row),
-                                    u32::try_from(call_start.column).unwrap_or(u32::MAX),
-                                    crate::calls::safe_row(call_end.row),
-                                    u32::try_from(call_end.column).unwrap_or(u32::MAX),
-                                );
-                                // Find the innermost Function/Method containing this call.
-                                let enclosing_idx = nodes
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, n)| {
-                                        matches!(n.kind, NodeKind::Function | NodeKind::Method)
-                                            && span_contains(n.span, call_span)
-                                    })
-                                    .min_by_key(|(_, n)| {
-                                        let (r1, c1, r2, c2) = n.span;
-                                        let dr = r2.saturating_sub(r1) as u64;
-                                        dr * 10_000
-                                            + c2 as u64
-                                            + 10_000u64.saturating_sub(c1 as u64)
-                                    })
-                                    .map(|(idx, _)| idx);
-
-                                if let Some(idx) = enclosing_idx {
+                                let row = crate::calls::safe_row(call_start.row);
+                                let col = u32::try_from(call_start.column).unwrap_or(u32::MAX);
+                                if let Some(idx) = enclosing_fn_idx_by_span(nodes, row, col) {
                                     if seen.insert(idx) {
-                                        scopes.push(RawTxScope::new(
-                                            idx as u32,
-                                            FrameworkId::GoSqlTx,
-                                        ));
+                                        scopes.push(RawTxScope::new(idx, FrameworkId::GoSqlTx));
                                     }
                                 }
                             }

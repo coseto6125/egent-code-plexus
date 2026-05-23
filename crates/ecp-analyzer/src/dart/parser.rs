@@ -2,7 +2,7 @@ use super::receiver_types::{collect_bindings, extract_dart_calls_and_path_litera
 use super::spec::DartSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, push_blind_spot, span_contains, FrameworkPatternSpec,
+    detect_ast_framework_patterns, enclosing_fn_idx_by_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -477,29 +477,12 @@ fn collect_dart_tx_scopes(
     let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if n.kind() == "call_expression" && is_tx_call(n, source) {
-            let call_span = (
-                n.start_position().row as u32,
-                n.start_position().column as u32,
-                n.end_position().row as u32,
-                n.end_position().column as u32,
-            );
-            // Recover enclosing Function / Method by span containment.
-            let enclosing = nodes
-                .iter()
-                .enumerate()
-                .filter(|(_, node)| {
-                    matches!(node.kind, NodeKind::Function | NodeKind::Method)
-                        && span_contains(node.span, call_span)
-                })
-                .min_by_key(|(_, node)| {
-                    let (sr, sc, er, ec) = node.span;
-                    // Prefer smallest span (innermost enclosing fn).
-                    ((er as i64 - sr as i64) << 16) + (ec as i64 - sc as i64)
-                });
-            if let Some((idx, _)) = enclosing {
-                let idx_u32 = idx as u32;
-                if seen_indices.insert(idx_u32) {
-                    scopes.push(RawTxScope::new(idx_u32, FrameworkId::DartTransaction));
+            // Shared helper agrees with Go / Ruby on innermost-fn match.
+            let row = n.start_position().row as u32;
+            let col = n.start_position().column as u32;
+            if let Some(idx) = enclosing_fn_idx_by_span(nodes, row, col) {
+                if seen_indices.insert(idx) {
+                    scopes.push(RawTxScope::new(idx, FrameworkId::DartTransaction));
                 }
             }
         }
