@@ -1,49 +1,51 @@
 # EgentCodePlexus
 
+Structural code knowledge for AI agents. One-shot CLI, zero-copy mmap, ~140 ms per query.
+
+`cold index 2.60 s · query p50 142 ms · 31 languages · BlindSpot edges (no hallucinated dispatch) · 60× upstream gitnexus`
+
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coseto6125/egent-code-plexus/badge)](https://scorecard.dev/viewer/?uri=github.com/coseto6125/egent-code-plexus)
-[![Star History Chart](https://api.star-history.com/svg?repos=coseto6125/egent-code-plexus&type=Date)](https://star-history.com/#coseto6125/egent-code-plexus&Date)
+[![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/coseto6125/egent-code-plexus/releases)
+[![macOS](https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/releases)
+[![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/releases)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/skill_sample/claude/SKILL.md)
+[![Codex CLI](https://img.shields.io/badge/Codex_CLI-412991?style=for-the-badge&logo=openai&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/skill_sample/codex/ecp/SKILL.md)
+[![Cursor](https://img.shields.io/badge/Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/docs/skills/ecp-onboard/guides/04-mcp.md)
 
-A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero-copy mmap, sub-second per query.
-
-[繁體中文 (Traditional Chinese)](./docs/readme_i18n/README_zh-TW.md)
-
----
-
-## 🎯 Mission
-
-`ecp` exists to be the structural-knowledge layer that an autonomous AI coding agent calls 20–50 times per task. Every design decision falls out of that one premise:
-
-- **Built for agents, not IDEs.** Output is token-cheap (TOON / compact JSON), every flag surfaces via `--help`, every command is non-interactive and stdout-parseable. No UI, no human-skim layout cruft eating the agent's context window.
-- **No warm-up, no daemon.** Each invocation `mmap`s a zero-copy `rkyv` graph file and exits. Read queries return in **~140–170 ms** *including process startup*; a 22k-file repo cold-indexes in under 3 s. An agent can fire dozens of queries per task without amortising a server boot, and there is no "daemon died, please restart" failure mode.
-- **Honest answers over readable graphs.** When a call site can't be statically resolved (dynamic dispatch, unresolved import, reflection), `ecp` emits a `BlindSpot` record — not a guessed edge. An agent that acts on a hallucinated dependency is much more expensive than one that gets an "I don't know" it can route around.
-- **Polyglot reach.** 31 languages parsed at the structural level so modern multi-stack repos (service code + Dockerfiles + GitHub Actions + Terraform + SQL + smart contracts) stop being black holes the moment you leave the main language.
-
-🎙️ **[Agent Interviews](./interviews/README.md)** — See how real AI agents (Gemini CLI, Codex) use and evaluate `ecp` in autonomous workflows.
-
-Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model (a structural knowledge graph of a repo), rewritten in Rust for a different audience. Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE.md); see [NOTICES.md](./LICENSES/NOTICES.md) for required attribution.
+**English** · [繁體中文](./docs/readme_i18n/README_zh-TW.md) · [简体中文](./docs/readme_i18n/README_zh-CN.md) · [Español](./docs/readme_i18n/README_es.md) · [Русский](./docs/readme_i18n/README_ru.md) · [हिन्दी](./docs/readme_i18n/README_hi.md) · [日本語](./docs/readme_i18n/README_ja.md) · [한국어](./docs/readme_i18n/README_ko.md) · [Português (BR)](./docs/readme_i18n/README_pt-BR.md)
 
 ---
 
-## ⚡ Performance
+## The case
 
-The Mission section above is *why* `ecp` is built the way it is. This section is the receipts.
+Code agents fan out 20–50 lookups per task. Grep returns strings; an autonomous agent needs symbols, callers, edges, and an honest signal when the static graph runs out.
 
-### Head-to-head vs. upstream GitNexus
+`ecp` is the structural-knowledge layer that is:
 
-Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase (TypeScript) using `scripts/parity/benchmark_vs_gitnexus.py`:
+- **stateless.** Every invocation `mmap`s a zero-copy `rkyv` graph and exits. No daemon to keep warm, no "server died, restart" failure mode.
+- **honest.** Unresolvable call sites (dynamic dispatch, unresolved import, reflection) become `BlindSpot` records. An agent that acts on a hallucinated dependency costs more than one that gets an "I don't know" and routes around.
+- **token-cheap.** Default output is TOON (compact key:value). Every flag surfaces via `--help`. Every command is non-interactive and stdout-parseable.
+- **polyglot.** 31 languages parsed at the structural level — service code, Dockerfiles, GitHub Actions, Terraform, SQL, and smart contracts stay legible the moment you leave the main language.
+
+Built on top of [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same conceptual model, rewritten in Rust for a different audience. 🎙️ [Agent interviews](./interviews/README.md) — Gemini CLI and Codex evaluate `ecp` in autonomous workflows.
+
+## Receipts
+
+Head-to-head vs. upstream GitNexus, measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase (TypeScript) using `scripts/parity/benchmark_vs_gitnexus.py`:
 
 | Phase | ecp (Rust) | gitnexus (Node) | Speedup |
 |---|---|---|---|
-| **Cold Index** | **~970 ms** | ~58 s | **60×** |
-| **Symbol Context** | **~70 ms** | ~430 ms | **6×** |
-| **Blast Radius** | **~70 ms** | ~460 ms | **6×** |
-| **Cypher Query** | **~70 ms** | ~400 ms | **5×** |
+| Cold Index | **~970 ms** | ~58 s | **60×** |
+| Symbol Context | **~70 ms** | ~430 ms | **6×** |
+| Blast Radius | **~70 ms** | ~460 ms | **6×** |
+| Cypher Query | **~70 ms** | ~400 ms | **5×** |
 
-*Note: `ecp` query latency includes full process startup (no daemon). GitNexus (v1.6.5) query latency is against a warm, indexed repo via its CLI.*
+`ecp` numbers include full process startup (no daemon). GitNexus (v1.6.5) numbers are against a warm, indexed repo via its CLI.
 
-### Scalability — single run on `.sample_repo` (a 2.1 GB polyglot collection of ~40 real-world open source projects across 25+ languages, used for cross-language stress testing)
+<details>
+<summary><b>Scalability — single run on <code>.sample_repo</code></b> (2.1 GB polyglot, ~40 OSS projects, 25+ languages)</summary>
 
-**Ingest performance:**
+**Ingest performance**
 
 | Phase | Value |
 |---|---|
@@ -52,7 +54,7 @@ Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase
 | Wall-clock (Incremental) | **4.9 ms** (xxh3_64 hash walk, zero dirty files) |
 | Hardware | AMD Ryzen 9 9950X (16 logical), 39.2 GiB RAM, Linux 6.6.87 |
 
-**Per-query latency (including process startup):**
+**Per-query latency** (including process startup)
 
 | Query | Median | Notes |
 |---|---|---|
@@ -60,37 +62,58 @@ Measured on the [gitnexus](https://github.com/abhigyanpatwari/GitNexus) codebase
 | `routes` (HTTP route map across repo) | **142.3 ms** | enumerates declarative + imperative |
 | `summary --detailed` (frameworks + blind-spots) | **143.4 ms** | full registry + per-framework scoring |
 | `impact <symbol> --direction down` | **145.0 ms** | BFS over Calls / Extends edges |
-| `inspect <symbol>` (signature + callers + callees) | **145.6 ms** | symbol resolution + 1-hop traversal |
-| `find <name> --mode bm25` (lexical search) | **154.5 ms** | Tantivy query + 5-bucket partition |
-| `cypher 'MATCH (a:Class)-[:HasMethod]->(b:Method) ...'` | **161.5 ms** | one pattern, one row returned |
+| `inspect <symbol>` | **145.6 ms** | symbol resolution + 1-hop traversal |
+| `find <name> --mode bm25` | **154.5 ms** | Tantivy query + 5-bucket partition |
+| `cypher 'MATCH (a:Class)-[:HasMethod]->(b:Method) ...'` | **161.5 ms** | one pattern, one row |
 | `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **174.2 ms** | broader pattern, more matches |
 | `impact --baseline HEAD~1` (change-set blast radius) | **359.0 ms** | git diff + parallel per-file parse + BFS |
 
 Reproduce: `python scripts/benchmark/benchmark_ecp.py`.
 
----
+</details>
 
-## vs. upstream GitNexus
+## vs. upstream gitnexus
 
-Same conceptual model, different audience. `ecp` is **not** a drop-in replacement — choose based on who reads the graph and what they do with it.
+Same conceptual model, different audience. `ecp` is **not** a drop-in replacement — choose based on who reads the graph.
 
 | Dimension | EgentCodePlexus | GitNexus |
 |---|---|---|
 | Primary consumer | Autonomous AI code agents | Human devs + IDE integration |
 | Runtime | Stateless one-shot CLI (zero warm-up) | Long-running MCP server |
-| Performance | **< 2.5s cold index / < 150ms query** | ~60s cold index / ~400ms query |
+| Performance | **< 2.5 s cold index / < 150 ms query** | ~60 s cold index / ~400 ms query |
 | Unresolved edge | `BlindSpot` record (honest unknown) | Heuristic guess |
 | Default output | TOON / compact JSON (token-cheap) | Wiki / UI rendering |
 | Languages | 31 (14 deep + 17 structural) | 14 (deep, 9-dimension) |
 | Storage | Rust + `rkyv` zero-copy mmap | Node.js + LadybugDB |
 
-**Full breakdown of all 8 dimensions, philosophy, and decision matrix → [docs/vs-gitnexus.md](./docs/vs-gitnexus.md)**
+Full 8-dimension breakdown + decision matrix → [docs/vs-gitnexus.md](./docs/vs-gitnexus.md).
 
----
+## 30-second demo
 
-## 📦 Install
+```bash
+$ ecp impact parse_with_budget --direction upstream --format toon
+```
 
-Prebuilt binaries are published with each GitHub Release. The installer scripts fall back to a cargo source build only when a matching release asset is unavailable.
+```text
+target          parse_with_budget
+  kind          Function
+  file          crates/ecp-analyzer/src/parse_budget.rs:28
+risk_level      HIGH
+direct_callers  22 across 22 files
+  crates/ecp-analyzer/src/python/parser.rs:48      Method parse_file
+  crates/ecp-analyzer/src/rust/parser.rs:142       Method parse_file
+  crates/ecp-analyzer/src/typescript/parser.rs:73  Method parse_file
+  crates/ecp-analyzer/src/go/parser.rs:69          Method parse_file
+  ... (18 more language parsers)
+transitive      231 symbols across language detection + pipeline
+blind_spots     0
+```
+
+One process, one mmap, ~140 ms. Real symbol from this repo — every per-language `parser.rs` fans in via the budget primitive. Read-side commands accept `--format text|json|toon`; the default per command is whichever encoding is cheapest in tokens.
+
+## Install
+
+Prebuilt binaries ship with every GitHub Release. The installer scripts fall back to a cargo source build only when a matching release asset is unavailable.
 
 ```bash
 # Linux / macOS
@@ -103,24 +126,25 @@ iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/ins
 cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked
 ```
 
-Optional CPU-tuned source build:
+<details>
+<summary>CPU-tuned source build</summary>
 
 ```bash
 repo=https://github.com/coseto6125/egent-code-plexus
 RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" egent-code-plexus --bin ecp --locked --profile release-dist
 ```
 
----
+</details>
 
-## 🚀 Quick start
+## Quick start
 
 ```bash
-# 1. Index the current repo (incremental; first query also auto-indexes)
+# 1. Index the current repo (incremental; first query auto-indexes too)
 ecp admin index --repo .
 
 # 2. Locate a symbol — exact name by default
 ecp find loginUser
-ecp find login --mode bm25       # ranked BM25, top-K partitioned by source/tests/ref/doc/config
+ecp find login --mode bm25       # ranked BM25, top-K bucketed by source/tests/ref/doc/config
 
 # 3. Blast radius — who breaks if I change this?
 ecp impact validateUser --direction upstream
@@ -136,21 +160,19 @@ ecp routes /api/users --method POST     # route → handler → caller chain
 ecp impact --literal session_meta.json  # 14 langs; sink:read / sink:write / sink:join / sink:free
 ```
 
-Read-side commands accept `--format text|json|toon`. Default per command is the token-cheapest representation (mostly `toon`; `find` defaults to `text`; `cypher`/`summary` default to `json`).
-
----
+Read-side commands accept `--format text|json|toon`. Default per command is the token-cheapest representation (mostly `toon`; `find` defaults to `text`; `cypher` defaults to `json`).
 
 ## CLI surface
 
-Two tiers — **agent commands** at top level (query/refactor/verify) and **admin commands** under `ecp admin` (registry/hooks/destructive). Run `ecp --help` and `ecp admin --help` for full flag matrices.
+Two tiers — **agent commands** at top level (query / refactor / verify) and **admin commands** under `ecp admin` (registry / hooks / destructive). Run `ecp --help` and `ecp admin --help` for full flag matrices.
 
 | Command | Purpose |
 |---|---|
 | `inspect <name>` | One symbol → metadata, decorators, signature, callers, callees, 1-hop impact, contained methods / properties / enum variants |
 | `find <pattern>` | Locate symbols — exact (default) · `--mode fuzzy` substring · `--mode bm25` lexical ranking; bm25 partitions output into source / tests / reference / document / config buckets |
-| `find-schema-bindings <field>` | Surface MirrorsField heuristic edges + blind-spot candidates (schema field mirrors across classes / services). Format: toon (default) or json. |
-| `find-transaction-patterns [--class <Name>]` | Detect Saga compensate/undo/rollback name-pairs on same class. Confidence ≥0.75 tier:POSSIBLY_RELATED, <0.75 tier:BLIND_SPOT. Outbox half deferred (T5-33). |
-| `impact <name> --direction <up\|down>` | Blast-radius traversal with confidence filtering. `--since <ref>` for change-set impact. |
+| `find-schema-bindings <field>` | Surface MirrorsField heuristic edges + blind-spot candidates (schema field mirrors across classes / services). |
+| `find-transaction-patterns [--class <Name>]` | Detect Saga compensate/undo/rollback name-pairs on same class. Confidence ≥0.75 tier:POSSIBLY_RELATED, <0.75 tier:BLIND_SPOT. |
+| `impact <name> --direction <up\|down>` | Blast-radius traversal with confidence filtering. `--baseline <ref>` for change-set impact (also `--literal <V>` for PathLiteral split-brain). |
 | `rename --symbol <old> --new-name <new>` | AST-aware multi-file rename across 14 languages. Always `--dry-run` first. |
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body. |
 | `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness. (Was `coverage`; the old verb still works as an alias.) |
@@ -159,10 +181,11 @@ Two tiers — **agent commands** at top level (query/refactor/verify) and **admi
 | `diff` | Resolver-delta — edge-level binding tier-degradation + route / contract changes. |
 | `tool-map` | Calls to external HTTP / DB / Redis / queue clients via per-file import-binding analysis. |
 | `shape-check` | Drift between HTTP consumer access patterns and Route response shapes. |
-| `peers` | Multi-session peer collaboration: `status` / `diff` / `say` / `inbox` / `log` / `thread` / `watch` / `gc`. See [Multi-session peer sync](#multi-session-peer-sync). |
-| `review` | Aggregated LLM-workflow audit: runs impact + coverage + tool-map + shape-check + diff in one shot, filtered to high-confidence signals. |
+| `peers` | Multi-session peer collaboration: `status` / `diff` / `say` / `inbox` / `log` / `thread` / `watch` / `gc`. |
+| `review` | LLM-workflow audit aggregator — impact + summary + tool-map + shape-check + diff, filtered to high-confidence signals. |
 
-Admin namespace (`ecp admin <cmd>` — hidden from top-level help):
+<details>
+<summary><b>Admin namespace</b> — <code>ecp admin &lt;cmd&gt;</code> (registry / hooks / destructive)</summary>
 
 | Command | Purpose |
 |---|---|
@@ -171,9 +194,12 @@ Admin namespace (`ecp admin <cmd>` — hidden from top-level help):
 | `install-hook` | Install the git reference-transaction hook (auto-track branch switches). |
 | `config` | Interactive TOML wizard for `.ecp/config.toml`. |
 | `mcp serve` / `mcp tools` | MCP server (stdio) for LLM hosts; `tools` lists the exposed tool surface. |
+| `claude install / codex install / gemini install` | Scriptable host integration (skills, hooks, MCP entries). |
+| `verify-resolver` | Diff resolver dump against a language oracle (ecp-dev QA). |
 
-All commands resolve `.ecp/graph.bin` from CWD unless `--graph <path>` is given. Agent-facing commands are non-interactive by design — every flag surfaces via `--help`, every output stream is parseable.
-Run `ecp admin` with no subcommand to open the interactive admin TUI for index maintenance, host integrations, config, groups, and diagnostics.
+</details>
+
+All commands resolve `.ecp/graph.bin` from CWD unless `--graph <path>` is given. Agent-facing commands are non-interactive by design. Run `ecp admin` with no subcommand to open the interactive admin TUI.
 
 ### Multi-session peer sync
 
@@ -236,99 +262,79 @@ ecp review --since main --verdicts --format json
 
 Every verdict cites the exact diff section and graph fact that triggered it; see [Provable Verdicts Design Spec](./docs/specs/2026-05-22-review-verdicts.md) for semantics, provability invariants, and deferred features.
 
----
+## MCP server
 
-## MCP server (for LLM hosts)
-
-`ecp` ships an MCP server exposing core commands as MCP tools. Hosts that speak MCP (Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI) can register `ecp` and call the tools autonomously.
+`ecp` ships an MCP server exposing core commands as MCP tools. Hosts that speak MCP (Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI) register `ecp` and call the tools autonomously.
 
 ```bash
 ecp admin mcp tools          # inspect what tools will be exposed
-ecp admin mcp serve          # run the server (default: spawn mode, fresh subprocess per call)
+ecp admin mcp serve          # run the server
 ```
 
-Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.json`):
+Scripted host install:
+
+```bash
+ecp admin claude install mcp-server
+ecp admin gemini install skills
+```
+
+Progressive path (TUI): `ecp admin → Agent Integrations → MCP → <host> → install`.
+
+<details>
+<summary><b>Manual mcp.json snippet</b> — Cursor / Windsurf / Cline (no scripted installer yet)</summary>
+
+These hosts read an `mcp.json` (or equivalent) but the file location varies per IDE. Paste this server entry into the host's MCP config; the binary just needs to be on `$PATH`:
 
 ```json
 {
   "mcpServers": {
-    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
+    "ecp": {
+      "command": "ecp",
+      "args": ["admin", "mcp", "serve"]
+    }
   }
 }
 ```
 
-Progressive path for human operators:
+Per-host file:
 
-```text
-ecp admin
-→ Agent Integrations
-→ MCP
-→ <host>
-→ install
-```
+- **Cursor** → `~/.cursor/mcp.json` (global) or `<repo>/.cursor/mcp.json` (per-project)
+- **Windsurf** → `~/.codeium/windsurf/mcp_config.json`
+- **Cline** → VS Code settings → `cline.mcpServers` (object keyed the same way)
 
-## Codex CLI native integration
+After saving, restart the IDE; verify with `ecp admin mcp tools` matches what the host now lists.
 
-The Codex native path is separate from MCP. It prepares a patch for an `openai/codex` fork instead of editing the running Codex installation directly:
+</details>
 
-Progressive path for human operators:
+<details>
+<summary><b>Codex CLI native integration</b> (separate from MCP — prepares a patch for an openai/codex fork)</summary>
 
-```text
-ecp admin
-→ Agent Integrations
-→ Codex CLI
-→ install
-→ native-tools
-```
+The Codex native path doesn't edit the running Codex installation; it writes a patch you apply to an `openai/codex` fork.
 
-Bundled skills use the same progressive path:
+Progressive path: `ecp admin → Agent Integrations → Codex CLI → install → native-tools`.
 
-```text
-ecp admin
-→ Agent Integrations
-→ Codex CLI
-→ install
-→ skills
-→ all | ecp | simplify
-```
-
-Scripted path for AI agents and automation:
+Scripted:
 
 ```bash
 ecp admin codex install native-tools
-ecp admin codex install skills all
-ecp admin codex install skills ecp
-ecp admin codex install skills simplify
+ecp admin codex install skills all       # or: ecp | simplify
 ```
 
-The bundled skills teach workflow selection that command help cannot infer by itself:
+Bundled skills teach workflow selection that command help can't infer:
 
 | Skill | Use when |
 |---|---|
-| `ecp` | The agent needs to decide whether graph-aware symbol, impact, route, contract, or rename workflows are better than grep / file reads. |
-| `simplify` | The agent is reviewing changed code and should start from ecp impact, blind spots, egress, shape drift, and resolver deltas before reading raw diffs. |
+| `ecp` | Agent needs to decide whether graph-aware symbol / impact / route / contract / rename workflows beat grep / file reads. |
+| `simplify` | Agent is reviewing changed code and should start from `ecp impact`, blind spots, egress, shape drift, and resolver deltas before reading raw diffs. |
 
-The `native-tools` component writes:
-
-```text
-~/.config/ecp/host-integration/codex-cli.patch
-```
-
-Apply the patch in your Codex CLI fork, then wire the generated module into Codex's tool registry:
+The `native-tools` component writes `~/.config/ecp/host-integration/codex-cli.patch`. Apply in your fork:
 
 ```bash
 cd /path/to/openai-codex-fork
 git apply ~/.config/ecp/host-integration/codex-cli.patch
 ```
 
-To verify a fork that already has the native marker, set `ECP_CODEX_CLI_CHECKOUT` before checking status in the TUI:
-
-```bash
-ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin
-# Agent Integrations → Codex CLI → status
-```
-
-The equivalent scripted checks are:
+Verify a fork that already has the native marker:
 
 ```bash
 ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin codex status
@@ -336,56 +342,60 @@ ecp admin codex uninstall native-tools
 ecp admin codex uninstall skills all
 ```
 
----
+</details>
 
 ## Architecture
 
 ```
 crates/
-├── ecp-core        # Zero-copy graph (rkyv + mmap), incremental cache, graph queries
-├── ecp-analyzer    # Tree-sitter parsers, HTTP route detector, framework confidence
-├── ecp-mcp         # MCP server (stdio) — exposes core commands as tools
-└── ecp-cli         # `ecp` binary, Tantivy BM25 engine, token-optimized output
+├── ecp-core        Zero-copy graph (rkyv + mmap), incremental cache, graph queries
+├── ecp-analyzer    Tree-sitter parsers, HTTP route detector, framework confidence
+├── ecp-mcp         MCP server (stdio) — exposes core commands as tools
+└── ecp-cli         `ecp` binary, Tantivy BM25 engine, token-optimized output
 ```
 
-Parse → resolve → serialize runs through an MPSC channel into a single builder thread that assembles the graph and writes a zero-copy `.ecp/graph.bin`. Read paths (`inspect`, `cypher`, `impact`, …) mmap this file directly. The xxh3_64 content cache keeps incremental rebuilds at sub-second on a 22k-file repo.
-
----
+Parse → resolve → serialize runs through an MPSC channel into a single builder thread that assembles the graph and writes a zero-copy `.ecp/graph.bin`. Read paths (`inspect`, `cypher`, `impact`, …) mmap this file directly. The xxh3_64 content cache keeps incremental rebuilds sub-second on a 22k-file repo.
 
 ## Language coverage
 
 31 languages parsed at the structural level (functions / classes / methods / imports / calls). 14 of them — the original GitNexus set — get full-depth coverage across imports, named bindings, exports, heritage, types, constructors, config, frameworks, entry points, calls, and rename. The remaining 17 are structural-only (Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig).
 
-📊 **[Full Language Capability Matrix](./docs/language-matrix.md)** — Detailed per-language status and rationale.
+📊 [Full Language Capability Matrix](./docs/language-matrix.md) — per-language status and rationale.
 
----
-
-## ⚙️ Tuning
+## Tuning
 
 | Env var | Default | Effect |
 |---|---|---|
 | `ECP_MAX_FILE_BYTES` | `16777216` (16 MiB) | Skip source files larger than this during ingest. Caps worst-case worker RAM at `num_threads × MAX`. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | Directory recursion depth for `*.csproj` discovery. Raise for deeply-nested .NET monorepos. |
 
----
+## License
 
-## License & acknowledgments
+Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE.md). Personal use, research, hobby projects, and noncommercial organizations are permitted. **Commercial use is not granted by this license** — contact upstream GitNexus author [Abhigyan Patwari](https://github.com/abhigyanpatwari) for commercial rights. See [NOTICES.md](./LICENSES/NOTICES.md) for required attribution.
 
-Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE.md). Personal use, research, hobby projects, and noncommercial organizations are explicitly permitted. **Commercial use is not granted by this license** — contact the upstream GitNexus author Abhigyan Patwari for commercial rights.
+<details>
+<summary><b>Built on</b> (acknowledgments)</summary>
 
-Built on:
-- [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — original design, CLI surface, and conceptual model
-- [tree-sitter](https://tree-sitter.github.io/) — robust incremental AST parsing
+- [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — original design, CLI surface, conceptual model
+- [tree-sitter](https://tree-sitter.github.io/) — incremental AST parsing
 - [rkyv](https://rkyv.org/) — zero-copy deserialization framework
-- [Tantivy](https://github.com/quickwit-oss/tantivy) — blazing fast Rust full-text search engine
+- [Tantivy](https://github.com/quickwit-oss/tantivy) — Rust BM25 search engine
 - [Rayon](https://github.com/rayon-rs/rayon) — data parallelism for multi-core concurrent AST parsing
-- [xxhash (xxh3_64)](https://xxhash.com/) — extremely fast non-cryptographic hashing for content-based incremental indexing
-- [DashMap](https://github.com/xacrimon/dashmap) — high-performance concurrent hash maps for graph assembly
+- [xxhash (xxh3_64)](https://xxhash.com/) — content-based incremental indexing
+- [DashMap](https://github.com/xacrimon/dashmap) — concurrent hash maps for graph assembly
 - [memmap2](https://github.com/RazrFalcon/memmap2-rs) — zero-copy memory mapping for sub-millisecond graph access
-- [msgspec](https://github.com/jcrist/msgspec) — high-performance JSON serialization for inter-process communication
+- [msgspec](https://github.com/jcrist/msgspec) — fast JSON serialization for IPC
 
-Onboarding for AI agents (URL bootstrap, Claude Code skill, plugin install) lives at `docs/skills/ecp-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit/audit-concurrency.sh`.
+Onboarding for AI agents lives at `docs/skills/ecp-onboard/`. Concurrency invariants and how to re-verify them: `./scripts/audit/audit-concurrency.sh`.
+
+</details>
 
 ## Release status
 
-The current verified install path is `cargo install --git ...`, which builds `ecp` from source. Release installers already contain the checksum and provenance-verification flow, but they require a published tag and release assets before the binary download path can be end-to-end verified. The agent-facing onboarding skill is documented in [docs/skills/ecp-onboard/ONBOARDING.md](./docs/skills/ecp-onboard/ONBOARDING.md); it is intended to guide users through install, first index, optional groups, MCP wiring, and next steps. The assisted configuration/setup flow is still being refined.
+The current verified install path is `cargo install --git ...`, which builds `ecp` from source. Release installers already contain the checksum and provenance-verification flow, but they require a published tag and release assets before the binary download path can be end-to-end verified. The agent-facing onboarding skill at [docs/skills/ecp-onboard/ONBOARDING.md](./docs/skills/ecp-onboard/ONBOARDING.md) guides users through install, first index, optional groups, MCP wiring, and next steps — the assisted setup flow is still being refined.
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=coseto6125/egent-code-plexus&type=Date)](https://star-history.com/#coseto6125/egent-code-plexus&Date)

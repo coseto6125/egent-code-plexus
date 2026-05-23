@@ -54,35 +54,66 @@ Wait for user choice.
 
 ## Step 4: Record choice
 
+Tag each chosen IDE as `scripted` (driven by `ecp admin <agent>
+install`) or `paste-snippet` (no scripted installer; user pastes the
+snippet). Phase 05 runs the scripted ones and prints snippets for the
+rest.
+
 ```yaml
 mcp_targets:
   - ide: claude-code
-    config_path: ~/.claude/.mcp.json  # or the per-project equivalent
+    mode: scripted
+    command: ecp admin claude install mcp-server
+    status: queued
+  - ide: codex
+    mode: scripted
+    command: ecp admin codex install skills
+    status: queued
+  - ide: gemini
+    mode: scripted
+    command: ecp admin gemini install skills
     status: queued
   - ide: cursor
-    config_path: ~/.cursor/mcp.json
+    mode: paste-snippet
+    snippet_target: ~/.cursor/mcp.json
+    status: queued
+  - ide: zed
+    mode: paste-snippet
+    snippet_target: ~/.config/zed/settings.json
     status: queued
   # ... one entry per chosen IDE
 ```
 
-## Step 5: Confirm explicit write consent
+Resolve the exact `command` via `ecp admin <agent> install --help` at
+apply time — components evolve between versions.
 
-Per Directive 5 in SKILL.md, the wizard MUST NOT write to user files
-outside `~/.ecp/onboarding-summary.md` without consent. Show the user
-the exact paths the wizard will write to in Phase 05, and ask:
+## Step 5: Confirm before apply
+
+Per Directive 5 in SKILL.md, the wizard never edits IDE config files
+directly. Restate the Phase 05 plan and wait for confirmation:
 
 ```
-I'll write these files in Phase 05:
-  - ~/.claude/.mcp.json   (Claude Code)
-  - ~/.cursor/mcp.json    (Cursor)
+Phase 05 will run:
+  - ecp admin claude install mcp-server   (Claude Code)
+  - ecp admin codex install skills        (Codex)
+  - ecp admin gemini install skills       (Gemini)
 
-Reply: yes / no / show-content
+Then print paste snippets for:
+  - ~/.cursor/mcp.json            (Cursor)
+  - ~/.config/zed/settings.json   (Zed)
+
+The only file the wizard writes itself is
+~/.ecp/onboarding-summary.md.
+
+Reply: yes / no / show-snippet
 ```
 
-If `show-content`, display the JSON the wizard would write (template
+If `show-snippet`, display the snippet for the requested IDE (template
 below), then re-ask.
 
-### MCP config template
+### Paste snippet for unscripted IDEs
+
+Standard MCP-servers schema (Cursor, most generic clients):
 
 ```json
 {
@@ -95,9 +126,10 @@ below), then re-ask.
 }
 ```
 
-For IDEs that use a different schema (e.g., Continue.dev uses
-`~/.continue/config.json` with a `models` + `mcpServers` mix), look up
-the exact format in the IDE's docs at apply time — do not guess.
+For IDEs that use a different schema (e.g., Continue.dev's
+`~/.continue/config.json` mixes `models` + `mcpServers`, Zed has its
+own `context_servers` block), look up the exact format in the IDE's
+docs at apply time rather than guessing.
 
 ## Step 6: Advance to Phase 05
 

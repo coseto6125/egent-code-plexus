@@ -1,221 +1,280 @@
 # EgentCodePlexus
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coseto6125/egent-code-plexus/badge)](https://scorecard.dev/viewer/?uri=github.com/coseto6125/egent-code-plexus)
-[![Star History Chart](https://api.star-history.com/svg?repos=coseto6125/egent-code-plexus&type=Date)](https://star-history.com/#coseto6125/egent-code-plexus&Date)
 
-給 **LLM 與 AI 程式碼代理（AI code agents）** 用的代碼智能圖譜 — 單次 CLI 調用、mmap 零拷貝、每次查詢亞秒級。
+[![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/coseto6125/egent-code-plexus/releases)
+[![macOS](https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/releases)
+[![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/releases)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/skill_sample/claude/SKILL.md)
+[![Codex CLI](https://img.shields.io/badge/Codex_CLI-412991?style=for-the-badge&logo=openai&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/skill_sample/codex/ecp/SKILL.md)
+[![Cursor](https://img.shields.io/badge/Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://github.com/coseto6125/egent-code-plexus/blob/main/docs/skills/ecp-onboard/guides/04-mcp.md)
 
-[English README](../../README.md)
+`cold index 2.60 s · query p50 142 ms · 31 languages · BlindSpot edges (no hallucinated dispatch) · 60× upstream gitnexus`
 
----
-
-## 🎯 核心使命
-
-`ecp` 的存在是為了成為自主 AI 代理在每個任務中調用 20-50 次的結構化知識層。所有的設計決策都源於這個前提：
-
-- **為代理而建，非為 IDE。** 輸出格式節省 Token（TOON / 精簡 JSON），每個旗標都透過 `--help` 顯露，每個命令都是非互動式且可解析的。沒有 UI，沒有消耗代理上下文視窗的人類閱讀排版。
-- **無預熱，無守護進程。** 每次調用都會 `mmap` 一個零拷貝的 `rkyv` 圖譜檔案並退出。讀取查詢在 **~140–170 ms** 內返回（*包含進程啟動*）；2.2 萬個檔案的專案冷啟動索引低於 3 秒。代理可以在不考慮伺服器啟動成本的情況下，每個任務發起數十次查詢，且沒有「伺服器當機，請重啟」的故障模式。
-- **老實的回答勝於可讀的圖表。** 當呼叫點無法靜態解析（動態派發、未解析的導入、反射）時，`ecp` 會記錄 `BlindSpot`，而不是隨便連一條邊。一個基於幻覺依賴行動的代理，其成本遠高於一個獲得「我不知道」並能繞道而行的代理。
-- **廣泛的語言覆蓋。** 在結構層級解析 31 種語言，讓現代多語言專案（服務代碼 + Dockerfile + GitHub Actions + Terraform + SQL + 智能合約）在離開主語言後不再是黑洞。
-
-🎙️ **[Agent 訪談紀錄](../../interviews/README_zh-TW.md)** — 查看真實 AI Agent (Gemini CLI, Codex) 在自主工作流中如何使用與評價 `ecp`。
-
-致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作：[Abhigyan Patwari](https://github.com/abhigyanpatwari)）— 同樣的核心想法（repo 的結構化知識圖譜），用 Rust 重寫成面向**另一群受眾**的版本。基於 [PolyForm Noncommercial 1.0.0](../../LICENSE) 授權；完整第三方歸屬清單請見 [NOTICES.md](../../LICENSES/NOTICES.md)。
+[English](../../README.md) · **繁體中文** · [简体中文](./README_zh-CN.md) · [Español](./README_es.md) · [Русский](./README_ru.md) · [हिन्दी](./README_hi.md) · [日本語](./README_ja.md) · [한국어](./README_ko.md) · [Português (BR)](./README_pt-BR.md)
 
 ---
 
-## ⚡ 效能表現
+## 為什麼
 
-上述的使命說明了 `ecp` 為何如此構建。本節則是實測數據。
+Code agent 一次任務裡會做 20–50 次代碼查詢。Grep 給你字串；自主代理需要的是符號、呼叫者、邊（edge），與「graph 推不出來時誠實說不知道」的訊號。
 
-### 與上游 GitNexus 的正面對決
+`ecp` 是這層結構知識，特性是：
 
-在 [gitnexus](https://github.com/abhigyanpatwari/GitNexus) 代碼庫（TypeScript）上使用 `scripts/parity/benchmark_vs_gitnexus.py` 測量：
+- **無狀態。** 每次調用 `mmap` 一個 `rkyv` 零拷貝 graph，跑完直接 exit。沒有 daemon 要保溫、沒有「server 死了請重啟」這種失敗模式。
+- **誠實。** 當呼叫點靜態解析不出來（動態派發、未解析 import、reflection），`ecp` 發出 `BlindSpot` 紀錄。代理對著幻覺出來的依賴下手，比代理收到一個「我不知道」然後繞道的成本高得多。
+- **Token 便宜。** 預設輸出 TOON（緊湊 key:value）。每個 flag 都從 `--help` 出來、每個指令都 non-interactive 且 stdout 可解析。沒有耗 context window 的 UI 雜訊。
+- **多語言。** 31 個語言做結構級解析 —— service code、Dockerfile、GitHub Actions、Terraform、SQL、智能合約一旦離開主語言也不會變黑洞。
 
-| 階段 | ecp (Rust) | gitnexus (Node) | 加速倍率 |
+底層概念模型來自 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（作者 [Abhigyan Patwari](https://github.com/abhigyanpatwari)），`ecp` 用 Rust 重寫成另一種讀者導向版本。
+
+🎙️ **[Agent 訪談](../../interviews/README.md)** — Gemini CLI 與 Codex 在自主流程裡實測 `ecp` 的紀錄。
+
+## 收據
+
+跟上游 GitNexus 對打，在 [gitnexus](https://github.com/abhigyanpatwari/GitNexus) 自家 codebase（TypeScript）上用 `scripts/parity/benchmark_vs_gitnexus.py` 量測：
+
+| 階段 | ecp (Rust) | gitnexus (Node) | 加速 |
 |---|---|---|---|
-| **冷啟動索引** | **~970 ms** | ~58 s | **60×** |
-| **符號上下文** | **~70 ms** | ~430 ms | **6×** |
-| **影響範圍** | **~70 ms** | ~460 ms | **6×** |
-| **Cypher 查詢** | **~70 ms** | ~400 ms | **5×** |
+| **Cold Index** | **~970 ms** | ~58 s | **60×** |
+| **Symbol Context** | **~70 ms** | ~430 ms | **6×** |
+| **Blast Radius** | **~70 ms** | ~460 ms | **6×** |
+| **Cypher Query** | **~70 ms** | ~400 ms | **5×** |
 
-*註：`ecp` 查詢延遲包含了完整的進程啟動時間（無背景常駐程式）。GitNexus (v1.6.5) 的延遲是在已索引且預熱的情況下透過 CLI 測量。*
+`ecp` 的數字包含完整 process 啟動時間（無 daemon）。GitNexus（v1.6.5）的數字是已 warm-up + indexed 後跑 CLI。
 
-### 可擴展性 — `.sample_repo` 單次運行（包含 25+ 種語言、約 40 個真實開源專案、總計 2.1 GB 的多語言測試集，用於跨語言壓力測試）
+<details>
+<summary><b>Scalability — <code>.sample_repo</code> 單次完整跑</b>（2.1 GB 多語言、~40 個 OSS 專案、25+ 語言）</summary>
 
-**攝入效能：**
+**索引效能**
 
-| 階段 | 數值 |
+| 階段 | 值 |
 |---|---|
-| 已索引檔案數 | **22,645** 個，跨 25 種偵測到的語言 |
-| 冷啟動耗時 | **2.60 s** (解析 + 解析 + 序列化) |
-| 增量索引耗時 | **4.9 ms** (xxh3_64 雜湊掃描，零變動檔案) |
-| 測試硬體 | AMD Ryzen 9 9950X (16 邏輯核心), 39.2 GiB RAM, Linux 6.6.87 |
+| 索引檔案數 | **22,645**（25 種偵測到的語言） |
+| Cold 牆鐘 | **2.60 s**（parse + resolve + serialize） |
+| Incremental 牆鐘 | **4.9 ms**（xxh3_64 hash walk、零 dirty file） |
+| 硬體 | AMD Ryzen 9 9950X（16 邏輯核）、39.2 GiB RAM、Linux 6.6.87 |
 
-**單次查詢延遲（包含進程啟動）：**
+**單次查詢延遲**（包含 process 啟動）
 
 | 查詢 | 中位數 | 備註 |
 |---|---|---|
-| `summary` (註冊表總覽) | **1.4 ms** | 最小讀取 — 僅 mmap 註冊表 |
-| `routes` (全專案 HTTP 路由圖譜) | **142.3 ms** | 列舉聲明式 + 指令式定義 |
-| `summary --detailed` (框架 + 盲區) | **143.4 ms** | 完整註冊表 + 各框架評分 |
-| `impact <symbol> --direction down` | **145.0 ms** | 遍歷 Calls / Extends 邊 (BFS) |
-| `inspect <symbol>` (簽名 + 呼叫鏈) | **145.6 ms** | 符號解析 + 1-hop 遍歷 |
-| `find <name> --mode bm25` (詞法搜尋) | **154.5 ms** | Tantivy 查詢 + 5 個儲存桶分區 |
-| `cypher 'MATCH (a:Class)-[:HasMethod]->(b:Method) ...'` | **161.5 ms** | 單一模式，回傳單列 |
-| `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **174.2 ms** | 較廣泛模式，匹配較多結果 |
-| `impact --baseline HEAD~1` (變更爆炸半徑) | **359.0 ms** | git diff + 平行單檔解析 + BFS |
+| `summary`（registry 總覽） | **1.4 ms** | 最小讀取 — 僅 mmap registry |
+| `routes`（全 repo HTTP route map） | **142.3 ms** | 列舉 declarative + imperative |
+| `summary --detailed`（框架 + blind-spot） | **143.4 ms** | 完整 registry + per-framework 打分 |
+| `impact <symbol> --direction down` | **145.0 ms** | BFS 走 Calls / Extends |
+| `inspect <symbol>`（signature + callers + callees） | **145.6 ms** | 符號解析 + 1-hop traversal |
+| `find <name> --mode bm25`（lexical 搜尋） | **154.5 ms** | Tantivy 查詢 + 5 桶分區 |
+| `cypher 'MATCH (a:Class)-[:HasMethod]->(b:Method) ...'` | **161.5 ms** | 單 pattern、單 row |
+| `cypher 'MATCH (a:Method)-[:Calls]->(b:Method) ...'` | **174.2 ms** | 更廣 pattern、更多 match |
+| `impact --baseline HEAD~1`（變更集 blast radius） | **359.0 ms** | git diff + 並行 per-file parse + BFS |
 
-重現方式：`python scripts/benchmark/benchmark_ecp.py`。
+復現：`python scripts/benchmark/benchmark_ecp.py`。
 
----
+</details>
 
-## 跟上游 GitNexus 的差別
+## vs. upstream gitnexus
 
-> **不是 drop-in 替代品。** 上游是為人類設計的 Agent 平台；egent-code-plexus 是為 **Coding AI Agent** 量身打造的結構化知識層 — 不同的受眾、不同的權衡。
+概念模型一樣、受眾不同。`ecp` **不是** drop-in 替代品 —— 依「誰要讀這張 graph」決定用哪個。
 
-| 維度 | egent-code-plexus | GitNexus |
+| 維度 | EgentCodePlexus | GitNexus |
 |---|---|---|
-| **核心受眾** | **Coding AI Agent** | 人類開發者 + IDE 整合 |
-| **運行模式** | 無狀態 One-shot CLI (零預熱) | 長駐 MCP server |
-| **效能表現** | **< 2.5s 冷啟動 / < 150ms 查詢** | ~60s 冷啟動 / ~400ms 查詢 |
-| **未解析的邊** | `BlindSpot` 記錄 (老實的未知) | 啟發式猜測 |
-| **預設輸出** | TOON / 精簡 JSON (省 Token) | Wiki / UI 渲染 |
-| **支援語言** | 31 (14 種深度 + 17 種結構層級) | 14 (深度 9 維度覆蓋) |
-| **儲存層** | Rust + `rkyv` 零拷貝 mmap | Node.js + LadybugDB |
+| 主要消費者 | 自主 AI code agent | 真人開發者 + IDE 整合 |
+| Runtime | 無狀態一次性 CLI（零暖機） | 長駐 MCP server |
+| 性能 | **< 2.5 s cold index / < 150 ms query** | ~60 s cold index / ~400 ms query |
+| 無法解析的 edge | `BlindSpot` 紀錄（誠實未知） | 啟發式猜測 |
+| 預設輸出 | TOON / compact JSON（token 便宜） | Wiki / UI rendering |
+| 語言 | 31（14 deep + 17 structural） | 14（deep, 9-dimension） |
+| 儲存 | Rust + `rkyv` 零拷貝 mmap | Node.js + LadybugDB |
 
-**8 個維度的完整細節、哲學與決策矩陣 → [docs/vs-gitnexus.md](../vs-gitnexus.md)**
+完整 8 維度分析 + 決策矩陣 → [docs/vs-gitnexus.md](../vs-gitnexus.md)。
 
----
-
-## 📦 安裝
-
-在第一個帶 tag 的 Release 發佈前，安裝腳本會 fallback 到 cargo source build。等 release assets 存在後，預編譯 binary 會成為最快路徑。
+## 30 秒 demo
 
 ```bash
-# Linux / macOS (最短路徑；尚無 Release assets 時需要 cargo/rustup)
-curl -sSfL https://raw.githubusercontent.com/coseto6125/egent-code-plexus/main/install.sh | sh
+$ ecp impact parse_with_budget --direction upstream --format toon
+```
+
+```text
+target          parse_with_budget
+  kind          Function
+  file          crates/ecp-analyzer/src/parse_budget.rs:28
+risk_level      HIGH
+direct_callers  22 across 22 files
+  crates/ecp-analyzer/src/python/parser.rs:48      Method parse_file
+  crates/ecp-analyzer/src/rust/parser.rs:142       Method parse_file
+  crates/ecp-analyzer/src/typescript/parser.rs:73  Method parse_file
+  crates/ecp-analyzer/src/go/parser.rs:69          Method parse_file
+  ... (18 more language parsers)
+transitive      231 symbols across language detection + pipeline
+blind_spots     0
+```
+
+整個 round-trip 一個 process、一次 mmap、~140 ms。讀類指令支援 `--format text|json|toon`；每個指令的預設都選 token 最便宜的編碼。
+
+## 安裝
+
+每次 GitHub Release 都發 prebuilt binary。Installer 腳本只有在找不到對應 release asset 時才會 fallback 到 cargo source build。
+
+```bash
+# Linux / macOS
+curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh
 
 # Windows PowerShell
-iwr https://raw.githubusercontent.com/coseto6125/egent-code-plexus/main/install.ps1 -UseBasicParsing | iex
+iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.ps1 -UseBasicParsing | iex
 
-# 明確使用 cargo (同樣是 source build，不經 installer wrapper)
+# 直接走 cargo（跟 installer 同一個 source build）
 cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked
 ```
 
-可選的 CPU 最佳化 source build：
+<details>
+<summary>CPU-tuned source build</summary>
 
 ```bash
 repo=https://github.com/coseto6125/egent-code-plexus
 RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" egent-code-plexus --bin ecp --locked --profile release-dist
 ```
 
----
+</details>
 
-## 🚀 快速上手
+## 快速上手
 
 ```bash
-# 1. 為當前目錄建立索引 (增量式；第一次查詢也會自動觸發)
+# 1. Index 當前 repo（增量；首次查詢也會自動 index）
 ecp admin index --repo .
 
-# 2. 定位符號 — 預設為精準名稱比對
+# 2. 找符號 —— 預設 exact name
 ecp find loginUser
-ecp find login --mode bm25       # BM25 排序，分為 source/tests/ref/doc/config 等 bucket
+ecp find login --mode bm25       # BM25 排序、top-K 分 source/tests/ref/doc/config 桶
 
-# 3. 爆炸半徑 — 我改這裡會壞掉什麼？
+# 3. 衝擊半徑 —— 動它會炸到誰？
 ecp impact validateUser --direction upstream
 
-# 4. 完整的符號上下文 (簽名、body、呼叫者、被呼叫者、1-hop 影響)
+# 4. 完整符號脈絡（簽名、body、callers、callees、1-hop impact）
 ecp inspect validateUser
 
-# 5. 專案中所有的 HTTP 路由 (聲明式 @Get + 指令式 app.get())
+# 5. 全 repo HTTP route（declarative @Get + imperative app.get()）
 ecp routes
-ecp routes /api/users --method POST     # 路由 → 處理器 → 呼叫鏈
+ecp routes /api/users --method POST     # route → handler → caller chain
 ```
 
-讀取端命令接受 `--format text|json|toon`。預設為該命令最省 Token 的格式（多數為 `toon`；`find` 預設為 `text`；`cypher`/`summary` 預設為 `json`）。
+讀取端命令接受 `--format text|json|toon`。預設為該命令最省 Token 的格式（多數為 `toon`；`find` 預設為 `text`；`cypher` 預設為 `json`）。
 
----
+## cli surface
 
-## CLI 命令概覽
+兩層 —— **agent commands** 在頂層（query / refactor / verify），**admin commands** 在 `ecp admin` 下（registry / hooks / 破壞性操作）。完整 flag 矩陣請跑 `ecp --help` 與 `ecp admin --help`。
 
-雙層結構 — 頂層為 **agent 命令** (query/refactor/verify)，以及 `ecp admin` 下的 **admin 命令** (registry/hooks/破壞性操作)。詳見 `ecp --help` 與 `ecp admin --help`。
-
-| 命令 | 用途 |
+| 指令 | 用途 |
 |---|---|
-| `inspect <name>` | 單一符號 → metadata、裝飾器、簽名、呼叫者、被呼叫者、1-hop 影響 |
-| `find <pattern>` | 定位符號 — 精準 (預設) · `--mode fuzzy` 子字串 · `--mode bm25` 詞法排序 |
-| `impact <name> --direction <up\|down>` | 帶信心度過濾的爆炸半徑 traversal。`--since <ref>` 用於變更集影響分析。 |
-| `rename --symbol <old> --new-name <new>` | AST 感知的跨檔重命名 (14 種語言)。務必先執行 `--dry-run`。 |
-| `cypher '<query>'` | openCypher 逃生艙；`m.content` 返回原始碼。 |
-| `summary` | Registry 總覽、框架覆蓋率、LLM 可行動的盲區目錄、圖譜新鮮度。（原 `coverage`；舊名稱保留為別名一個版本。）|
-| `routes [<path>]` | 列出 HTTP 路由；帶 `<path>` 時顯示處理器 + 呼叫者。 |
-| `contracts` | 跨 repo 的 API 合約清單 (routes / queue / RPC)。 |
-| `diff` | 解析器 Delta — 邊界綁定層級降級 + 路由 / 合約變更。 |
-| `tool-map` | 透過分析導入綁定，列出對外部 HTTP / DB / Redis / queue client 的呼叫。 |
-| `shape-check` | HTTP 消費者訪問模式與路由響應形狀之間的偏移。 |
-| `peers` | 多會話協作 (status / diff / log / gc)。 |
-| `review` | 聚合式稽核：一次執行 impact + coverage + tool-map + shape-check + diff。 |
+| `inspect <name>` | 單一符號 → metadata、decorator、signature、callers、callees、1-hop impact、enum variants |
+| `find <pattern>` | 符號定位 —— exact（預設）· `--mode fuzzy` 子字串 · `--mode bm25` 詞彙排序；bm25 把輸出分到 source / tests / reference / document / config 5 個桶 |
+| `find-schema-bindings <field>` | Schema field mirror 偵測（跨 service / 跨 model 的欄位對齊 + blind-spot 候選） |
+| `find-transaction-patterns [--class <Name>]` | Saga compensate/undo/rollback 名稱對偵測（≥0.75 POSSIBLY_RELATED、<0.75 BLIND_SPOT） |
+| `impact <name> --direction <up\|down>` | 衝擊半徑遍歷 + confidence 過濾。`--baseline <ref>` 做變更集 impact；`--literal <V>` 找 PathLiteral split-brain。 |
+| `rename --symbol <old> --new-name <new>` | 14 語言 AST 感知多檔重命名。永遠先 `--dry-run`。 |
+| `cypher '<query>'` | openCypher 後門；`m.content` 拿原始碼 body。 |
+| `summary` | Registry 總覽、框架覆蓋、blind-spot 名單、graph 新鮮度。（原 `coverage`；舊名留作別名一個版本） |
+| `routes [<path>]` | 列出 HTTP route（declarative + imperative）；給 `<path>` 就秀 handler + callers。 |
+| `contracts` | 跨 repo API contract 庫存（routes / queue / RPC）。 |
+| `diff` | Resolver delta —— edge 級別 binding tier-degradation + route / contract 變動。 |
+| `tool-map` | 對外部 HTTP / DB / Redis / queue client 的呼叫（per-file import-binding 分析）。 |
+| `shape-check` | HTTP consumer 存取模式 vs. Route response shape 的漂移。 |
+| `peers` | 多 session 對端協作：`status` / `diff` / `say` / `inbox` / `log` / `thread` / `watch` / `gc`。 |
+| `review` | LLM-workflow 稽核聚合器 —— impact + summary + tool-map + shape-check + diff，過濾到高信心訊號。 |
 
-Admin 命名空間 (`ecp admin <cmd>` — 隱藏於頂層說明)：
+<details>
+<summary><b>Admin namespace</b> —— <code>ecp admin &lt;cmd&gt;</code>（registry / hooks / 破壞性）</summary>
 
-| 命令 | 用途 |
+| 指令 | 用途 |
 |---|---|
-| `index --repo <path>` | 建立 / 刷新圖譜；透過 xxh3_64 內容快取達成增量。`--force` 為全量。 |
-| `drop / prune / rename-branch` | 索引生命週期：刪除、清理過時分支目錄、重命名分支。 |
-| `install-hook` | 安裝 git reference-transaction hook (自動追蹤分支切換)。 |
-| `config` | `.ecp/config.toml` 互動式精靈。 |
-| `mcp serve` / `mcp tools` | 給 LLM host 用的 MCP server (stdio)。 |
+| `index --repo <path>` | 建 / 刷新 graph；xxh3_64 內容快取做增量。`--force` 全量重建。 |
+| `drop / prune / rename-branch` | Index 生命週期：刪除、清理過時 branch dir、改名 on-disk branch。 |
+| `install-hook` | 裝 git reference-transaction hook（自動追蹤 branch 切換）。 |
+| `config` | `.ecp/config.toml` 互動式 TOML 精靈。 |
+| `mcp serve` / `mcp tools` | MCP server（stdio）給 LLM host；`tools` 列出曝露的 tool 表面。 |
+| `claude install / codex install / gemini install` | 可腳本化的 host 整合（skills、hooks、MCP entry）。 |
+| `verify-resolver` | 解析器 dump 對 language oracle diff（ecp-dev QA 用）。 |
 
-不帶子命令執行 `ecp admin` 會開啟互動式 admin TUI，用於索引維護、host 整合、設定、群組與診斷。
+</details>
 
----
+所有指令預設從 CWD 解析 `.ecp/graph.bin`，可用 `--graph <path>` 改寫。Agent 端的指令設計上 non-interactive —— 每個 flag 走 `--help`、每個輸出可解析。`ecp admin` 不帶 subcommand 開互動 admin TUI。
 
-## MCP 伺服器
+## MCP server
 
-`ecp` 內建 MCP 伺服器，將核心命令暴露為 MCP 工具。支援 MCP 的主機 (Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI) 可以註冊 `ecp` 並自主調用。
+`ecp` 內建 MCP server，把核心指令以 MCP tool 形式曝露。會說 MCP 的 host（Claude Code、Cursor、Windsurf、Cline、Codex CLI、Gemini CLI）都能註冊 `ecp` 然後自主呼叫。
 
 ```bash
-ecp admin mcp tools          # 檢視暴露的工具表面
-ecp admin mcp serve          # 啟動伺服器 (預設：spawn 模式，每次調用啟動新進程)
+ecp admin mcp tools          # 預覽要曝露的 tools
+ecp admin mcp serve          # 跑 server（預設 spawn mode）
 ```
 
-給人操作的漸進式路徑：
+Claude Code 手動 host 設定範例（`~/.config/claude-code/mcp-servers.json`）：
+
+```json
+{
+  "mcpServers": {
+    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
+  }
+}
+```
+
+真人漸進路徑：
 
 ```text
-ecp admin
-→ Agent Integrations
-→ MCP
-→ <host>
-→ install
+ecp admin → Agent Integrations → MCP → <host> → install
 ```
 
-## Codex CLI native 整合
+AI agent 腳本路徑：
 
-Codex native 路徑與 MCP 分離。它會為 `openai/codex` fork 準備 patch，不會直接修改正在執行的 Codex 安裝：
+```bash
+ecp admin claude install mcp-server
+ecp admin gemini install skills
+```
 
-給人操作的漸進式路徑：
+<details>
+<summary><b>手動 mcp.json snippet</b> —— Cursor / Windsurf / Cline（尚無 scripted installer）</summary>
+
+這幾個 host 讀 `mcp.json`（或同類設定），但檔案位置依 IDE 各異。把下面這段 server entry 貼進對應設定即可，binary 只要在 `$PATH` 上：
+
+```json
+{
+  "mcpServers": {
+    "ecp": {
+      "command": "ecp",
+      "args": ["admin", "mcp", "serve"]
+    }
+  }
+}
+```
+
+各 host 設定檔位置：
+
+- **Cursor** → `~/.cursor/mcp.json`（global）或 `<repo>/.cursor/mcp.json`（per-project）
+- **Windsurf** → `~/.codeium/windsurf/mcp_config.json`
+- **Cline** → VS Code settings → `cline.mcpServers`（key 結構一樣）
+
+存檔後重啟 IDE，跑 `ecp admin mcp tools` 對照 host 那邊列出的工具集對得上即可。
+
+</details>
+
+<details>
+<summary><b>Codex CLI 原生整合</b>（跟 MCP 不一樣 —— 對 openai/codex fork 出 patch）</summary>
+
+Codex 原生路徑不會改你正在跑的 Codex 安裝；它寫出一份 patch，你拿去套用在 `openai/codex` fork。
+
+漸進路徑：
 
 ```text
-ecp admin
-→ Agent Integrations
-→ Codex CLI
-→ install
-→ native-tools
+ecp admin → Agent Integrations → Codex CLI → install → native-tools
 ```
 
-內建 skills 使用相同的漸進式路徑：
+內建 skills（同一條路徑）：
 
 ```text
-ecp admin
-→ Agent Integrations
-→ Codex CLI
-→ install
-→ skills
-→ all | ecp | simplify
+ecp admin → Agent Integrations → Codex CLI → install → skills → all | ecp | simplify
 ```
 
-給 AI agent 與自動化流程使用的指令化路徑：
+Agent 腳本路徑：
 
 ```bash
 ecp admin codex install native-tools
@@ -224,34 +283,27 @@ ecp admin codex install skills ecp
 ecp admin codex install skills simplify
 ```
 
-內建 skills 用來教 agent 判斷 help 本身無法推導的使用場景：
+內建 skills 教 agent 怎麼選工作流，這是 command help 推不出來的：
 
-| Skill | 適用場景 |
+| Skill | 何時用 |
 |---|---|
-| `ecp` | agent 需要判斷何時用圖譜感知的 symbol、impact、route、contract、rename 流程，而不是 grep / 讀檔。 |
-| `simplify` | agent 在 review changed code 時，應先看 ecp impact、盲區、egress、shape drift、resolver delta，再讀 raw diff。 |
+| `ecp` | Agent 要判斷 graph 感知的 symbol / impact / route / contract / rename 工作流是否優於 grep / 讀檔。 |
+| `simplify` | Agent 要 review 變更，應該從 `ecp impact`、blind-spot、egress、shape drift、resolver delta 出發，再讀原始 diff。 |
 
-`native-tools` 元件會寫出：
+`native-tools` 元件會寫：
 
 ```text
 ~/.config/ecp/host-integration/codex-cli.patch
 ```
 
-在 Codex CLI fork 內套用 patch，接著把產生的 module 接進 Codex 的 tool registry：
+在你的 Codex CLI fork 套用：
 
 ```bash
 cd /path/to/openai-codex-fork
 git apply ~/.config/ecp/host-integration/codex-cli.patch
 ```
 
-若要檢查已套用 native marker 的 fork，先設定 `ECP_CODEX_CLI_CHECKOUT`，再於 TUI 內查看狀態：
-
-```bash
-ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin
-# Agent Integrations → Codex CLI → status
-```
-
-等價的指令化檢查：
+驗證已有 native 標記的 fork —— 設 `ECP_CODEX_CLI_CHECKOUT` 後查狀態：
 
 ```bash
 ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin codex status
@@ -259,43 +311,60 @@ ecp admin codex uninstall native-tools
 ecp admin codex uninstall skills all
 ```
 
----
+</details>
 
-## 系統架構
+## 架構
 
 ```
 crates/
-├── ecp-core        # 零拷貝圖譜 (rkyv + mmap)、增量快取、圖譜查詢
-├── ecp-analyzer    # Tree-sitter 解析器、HTTP 路由偵測、框架信心度
-├── ecp-mcp         # MCP 伺服器 (stdio) — 將核心命令暴露為工具
-└── ecp-cli         # `ecp` 執行檔、Tantivy BM25 引擎、Token 最佳化輸出
+├── ecp-core        零拷貝 graph（rkyv + mmap）、增量快取、graph 查詢
+├── ecp-analyzer    Tree-sitter parsers、HTTP route 偵測、framework 信心評分
+├── ecp-mcp         MCP server（stdio）—— 把核心指令當 tool 曝露
+└── ecp-cli         `ecp` binary、Tantivy BM25 引擎、token 優化的輸出
 ```
 
----
+Parse → resolve → serialize 過 MPSC channel 進單一 builder thread，組裝 graph 後寫出零拷貝 `.ecp/graph.bin`。讀路徑（`inspect`、`cypher`、`impact` …）直接 mmap 這個檔。xxh3_64 內容快取讓 22k 檔的 repo 增量重建維持亞秒級。
 
-## 語言覆蓋範圍
+## 語言覆蓋
 
-在結構層級解析 31 種語言。其中 14 種（原 GitNexus 集合）獲得完整的 9 維度覆蓋。其餘 17 種為結構層級解析。
+31 個語言做結構級解析（functions / classes / methods / imports / calls）。其中 14 個 —— 原 GitNexus 那組 —— 拿到全深度覆蓋，涵蓋 imports、named bindings、exports、heritage、types、constructors、config、frameworks、entry points、calls、rename。其餘 17 個是 structural-only（Bash、Crystal、Cairo、Dockerfile、Docker Compose、GitHub Actions、HCL、Lua、Markdown、Move、Nim、Solidity、SQL、Verilog、Vyper、YAML、Zig）。
 
-📊 **[完整語言能力矩陣](../language-matrix.md)** — 各語言實作狀態與設計考量的詳細說明。
+📊 [完整語言能力矩陣](../language-matrix.md) —— 各語言狀態與理由。
 
----
+## 調校
 
-## 📄 授權與致謝
+| 環境變數 | 預設 | 效果 |
+|---|---|---|
+| `ECP_MAX_FILE_BYTES` | `16777216`（16 MiB） | Ingest 時略過超過此值的原始檔。把 worst-case worker RAM 鎖在 `num_threads × MAX`。 |
+| `ECP_CSPROJ_MAX_DEPTH` | `4` | 找 `*.csproj` 的目錄遞迴深度。.NET 深層 monorepo 可調高。 |
 
-基於 [PolyForm Noncommercial 1.0.0](../../LICENSE) 授權。
+## 授權
 
-技術底層：
-- [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — 原始設計、CLI 介面與概念模型
-- [tree-sitter](https://tree-sitter.github.io/) — 強大的增量 AST 解析
-- [rkyv](https://rkyv.org/) — 零拷貝序列化框架 (Zero-copy deserialization)
-- [Tantivy](https://github.com/quickwit-oss/tantivy) — 高效 Rust 全文搜尋引擎 (BM25)
-- [Rayon](https://github.com/rayon-rs/rayon) — 用於多核心並行 AST 解析的數據並行庫
-- [xxhash (xxh3_64)](https://xxhash.com/) — 極速非加密雜湊，用於增量索引的內容校驗
-- [DashMap](https://github.com/xacrimon/dashmap) — 高效能並行雜湊表，用於圖譜組裝
-- [memmap2](https://github.com/RazrFalcon/memmap2-rs) — 零拷貝記憶體映射，實現亞毫秒級圖譜讀取
-- [msgspec](https://github.com/jcrist/msgspec) — 高效能 JSON 序列化，用於進程間通訊 (IPC)
+採用 [PolyForm Noncommercial 1.0.0](../../LICENSE.md)。個人使用、研究、業餘專案、非商業組織明確允許。**本授權不授予商業使用權** —— 商業授權請聯絡上游 GitNexus 作者 [Abhigyan Patwari](https://github.com/abhigyanpatwari)。必要的歸屬聲明見 [NOTICES.md](../../LICENSES/NOTICES.md)。
+
+<details>
+<summary><b>站在這些巨人肩上</b>（致謝）</summary>
+
+- [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — 原始設計、CLI 介面、概念模型
+- [tree-sitter](https://tree-sitter.github.io/) — 增量 AST 解析
+- [rkyv](https://rkyv.org/) — 零拷貝序列化框架
+- [Tantivy](https://github.com/quickwit-oss/tantivy) — Rust BM25 全文搜尋引擎
+- [Rayon](https://github.com/rayon-rs/rayon) — 多核心並行 AST 解析的資料並行庫
+- [xxhash (xxh3_64)](https://xxhash.com/) — 內容雜湊驅動的增量索引
+- [DashMap](https://github.com/xacrimon/dashmap) — 並行雜湊表（graph 組裝用）
+- [memmap2](https://github.com/RazrFalcon/memmap2-rs) — 零拷貝 mmap，亞毫秒級 graph 讀取
+- [msgspec](https://github.com/jcrist/msgspec) — IPC 用高效能 JSON 序列化
+
+AI agent 安裝引導（URL bootstrap、Claude Code skill、plugin install）位於 `docs/skills/ecp-onboard/`。並行不變式與如何重新驗證：`./scripts/audit/audit-concurrency.sh`。
+
+</details>
 
 ## 發佈狀態
 
-目前已驗證的安裝路徑是 `cargo install --git ...`，也就是從原始碼建置 `ecp`。release installer 已包含 checksum 與 provenance verification 流程，但必須等 tag 與 release assets 發佈後，binary 下載路徑才能做端到端驗證。Agent 安裝引導文件位於 [docs/skills/ecp-onboard/ONBOARDING.md](../skills/ecp-onboard/ONBOARDING.md)；它用來引導使用者完成安裝、首次索引、可選群組、MCP wiring 與後續建議。輔助式配置與設定流程仍在完善中。
+目前已驗證的安裝路徑是 `cargo install --git ...`，從原始碼建置 `ecp`。Release installer 已包含 checksum 與 provenance verification 流程，但必須等 tag 與 release assets 發佈後，binary 下載路徑才能做端到端驗證。Agent 安裝引導文件在 [docs/skills/ecp-onboard/ONBOARDING.md](../skills/ecp-onboard/ONBOARDING.md) —— 引導使用者完成安裝、首次索引、可選 group、MCP wiring、後續建議。輔助式設定流程仍在完善中。
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=coseto6125/egent-code-plexus&type=Date)](https://star-history.com/#coseto6125/egent-code-plexus&Date)
