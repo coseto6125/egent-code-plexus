@@ -338,6 +338,118 @@ class AccountService {
     assert!(names.contains(&"withdraw"), "withdraw missing: {:?}", names);
 }
 
+// ── Dart (Drift / sqflite / Firestore call-site form) ──────────────────────
+
+#[test]
+fn dart_drift_transaction_closure_emits_scope() {
+    use ecp_analyzer::dart::parser::DartProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = DartProvider::new().expect("provider");
+    let src = r#"
+class UserDao {
+  final AppDatabase db;
+  Future<void> createUser(String name) async {
+    await db.transaction(() async {
+      // insert user
+    });
+  }
+  Future<void> listUsers() async {}
+}
+"#;
+    let g = p
+        .parse_file(Path::new("user_dao.dart"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "createUser");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::DartTransaction);
+}
+
+#[test]
+fn dart_firestore_run_transaction_emits_scope() {
+    use ecp_analyzer::dart::parser::DartProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = DartProvider::new().expect("provider");
+    let src = r#"
+Future<void> transfer(String fromId, String toId) async {
+  await firestore.runTransaction((tx) async {
+    // transfer funds
+  });
+}
+"#;
+    let g = p
+        .parse_file(Path::new("transfer.dart"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 1, "one tx_scope expected");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transfer");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::DartTransaction);
+}
+
+#[test]
+fn dart_transaction_without_closure_arg_produces_no_scope() {
+    use ecp_analyzer::dart::parser::DartProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    // `.transaction()` with a non-closure arg — false-positive guard.
+    let p = DartProvider::new().expect("provider");
+    let src = r#"
+Future<void> doWork() async {
+  await client.transaction("begin");
+}
+"#;
+    let g = p
+        .parse_file(Path::new("work.dart"), src.as_bytes())
+        .expect("parse");
+    assert!(
+        scopes(&g).is_empty(),
+        "transaction(string) must not produce tx_scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dart_two_transaction_calls_in_same_fn_emit_one_scope() {
+    use ecp_analyzer::dart::parser::DartProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = DartProvider::new().expect("provider");
+    let src = r#"
+Future<void> doMigration() async {
+  await db.transaction(() async { /* step 1 */ });
+  await db.transaction(() async { /* step 2 */ });
+}
+"#;
+    let g = p
+        .parse_file(Path::new("migration.dart"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "per-function dedup: two tx calls in one fn → one scope; got {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "doMigration");
+}
+
 // ── Layer 2: post-process integration tests ────────────────────────────────
 
 #[test]
@@ -494,5 +606,556 @@ public class OrderService {
         name.contains("spring-transactional"),
         "scope name must contain framework label: {:?}",
         name
+    );
+}
+
+// ── Ruby (ActiveRecord / Sequel block-form transaction) ─────────────────────
+
+#[test]
+fn ruby_model_transaction_do_emits_active_record_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+class UserService
+  def create_user(attrs)
+    User.transaction do
+      user = User.create!(attrs)
+      AuditLog.record(user.id)
+    end
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("user_service.rb"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "create_user");
+    assert_eq!(
+        scopes(&g)[0].framework(),
+        FrameworkId::RubyActiveRecordTransaction
+    );
+}
+
+#[test]
+fn ruby_active_record_base_transaction_do_emits_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+class PaymentService
+  def process_payment(amount)
+    ActiveRecord::Base.transaction do
+      debit_account(amount)
+      credit_ledger(amount)
+    end
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("payment_service.rb"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 1, "one tx_scope expected");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "process_payment");
+    assert_eq!(
+        scopes(&g)[0].framework(),
+        FrameworkId::RubyActiveRecordTransaction
+    );
+}
+
+#[test]
+fn ruby_module_level_function_transaction_do_emits_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+def transfer(from, to, amount)
+  ActiveRecord::Base.transaction do
+    from.debit(amount)
+    to.credit(amount)
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("transfer.rb"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected for module-level fn"
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transfer");
+    assert_eq!(
+        scopes(&g)[0].framework(),
+        FrameworkId::RubyActiveRecordTransaction
+    );
+}
+
+#[test]
+fn ruby_multiple_transaction_do_in_same_function_deduped_to_one_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    let src = r#"
+class AccountService
+  def complex_operation
+    User.transaction do
+      step_one
+    end
+    User.transaction do
+      step_two
+    end
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("account_service.rb"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "multiple transaction do blocks in same fn must dedup to one scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "complex_operation");
+}
+
+#[test]
+fn ruby_transaction_without_do_block_emits_no_scope() {
+    use ecp_analyzer::ruby::parser::RubyProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RubyProvider::new().expect("provider");
+    // Rare proc-form: `transaction(some_proc)` — no do_block → should NOT match.
+    let src = r#"
+class UserService
+  def create_user(attrs)
+    tx_proc = proc { User.create!(attrs) }
+    User.transaction(tx_proc)
+  end
+end
+"#;
+    let g = p
+        .parse_file(Path::new("user_service.rb"), src.as_bytes())
+        .expect("parse");
+    assert!(
+        scopes(&g).is_empty(),
+        "transaction() without do_block must not emit tx_scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ── TypeScript TypeORM @Transactional (FU-009 / recovered from sub-agent commit 40fa08b2) ──
+#[test]
+fn typescript_class_method_with_transactional_parens_emits_typeorm_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class UserService {
+  @Transactional()
+  async createUser(data: string): Promise<void> { }
+
+  async listUsers(): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("user.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "createUser");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+}
+
+#[test]
+fn typescript_class_method_with_bare_transactional_emits_typeorm_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class TransferService {
+  @Transactional
+  async transferFunds(from: string, to: string): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("transfer.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "one tx_scope expected; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transferFunds");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+}
+
+#[test]
+fn typescript_class_method_with_transactional_args_emits_typeorm_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class PaymentService {
+  @Transactional({ propagation: 'REQUIRES_NEW' })
+  async processPayment(amount: number): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("payment.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "arg-bearing @Transactional(...) should emit one scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "processPayment");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+}
+
+#[test]
+fn typescript_transactional_on_class_does_not_emit_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    // @Transactional on a class (not a method) — NodeKind::Class is not in
+    // the scopeable_kinds list for TypeORM, so no RawTxScope should emit.
+    let src = r#"
+@Transactional()
+export class OrderService {
+  async placeOrder(): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("order.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert!(
+        scopes(&g).is_empty(),
+        "@Transactional on a Class must not produce tx_scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert!(g.tx_scopes.is_none());
+}
+
+#[test]
+fn typescript_multiple_transactional_methods_emit_multiple_scopes() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class AccountService {
+  @Transactional()
+  async deposit(amount: number): Promise<void> { }
+
+  @Transactional()
+  async withdraw(amount: number): Promise<void> { }
+
+  async readBalance(): Promise<number> { return 0; }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("account.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 2, "two tx_scopes expected");
+    let names: Vec<&str> = scopes(&g).iter().map(|s| fn_name_of_scope(&g, s)).collect();
+    assert!(names.contains(&"deposit"), "deposit missing: {:?}", names);
+    assert!(names.contains(&"withdraw"), "withdraw missing: {:?}", names);
+}
+
+#[test]
+fn typescript_no_transactional_produces_no_scope() {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = TypeScriptProvider::new().expect("provider");
+    let src = r#"
+export class UserService {
+  async getUser(id: string): Promise<void> { }
+}
+"#;
+    let g = p
+        .parse_file(Path::new("user.service.ts"), src.as_bytes())
+        .expect("parse");
+    assert!(scopes(&g).is_empty(), "no tx_scope expected");
+    assert!(g.tx_scopes.is_none());
+}
+
+// ── Rust #[transaction] (FU-009 / recovered from sub-agent commit fab36241) ──
+#[test]
+fn rust_transaction_attr_on_free_function_emits_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+#[transaction]
+pub async fn create_user(pool: &PgPool, data: UserDto) -> Result<User, Error> {
+    // ...
+}
+
+pub fn list_users() {}
+"#;
+    let g = p
+        .parse_file(Path::new("users.rs"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 1, "one tx_scope expected");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "create_user");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::RustTransaction);
+}
+
+#[test]
+fn rust_transaction_attr_on_impl_method_emits_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+struct UserService;
+
+impl UserService {
+    #[transaction]
+    pub fn create_user(&self) {}
+
+    pub fn list_users(&self) {}
+}
+"#;
+    let g = p
+        .parse_file(Path::new("service.rs"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 1, "one tx_scope expected");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "create_user");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::RustTransaction);
+}
+
+#[test]
+fn rust_transaction_attr_with_args_emits_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+#[transaction(rollback)]
+pub fn transfer_funds() {}
+"#;
+    let g = p
+        .parse_file(Path::new("payment.rs"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "arg-bearing #[transaction(...)] must emit scope"
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transfer_funds");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::RustTransaction);
+}
+
+#[test]
+fn rust_test_attr_does_not_emit_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+#[test]
+fn test_something() {}
+
+#[tokio::test]
+async fn test_async() {}
+
+#[derive(Transaction)]
+struct Foo;
+
+pub fn plain_fn() {}
+"#;
+    let g = p
+        .parse_file(Path::new("lib.rs"), src.as_bytes())
+        .expect("parse");
+    assert!(
+        scopes(&g).is_empty(),
+        "#[test] / #[tokio::test] / #[derive(Transaction)] must not emit tx_scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert!(g.tx_scopes.is_none());
+}
+
+// ── Go db.Begin() call-site (FU-009 / recovered from sub-agent commit 69754f3c) ──
+
+#[test]
+fn go_db_begin_emits_gosqltx_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = GoProvider::new().expect("provider");
+    let src = r#"package db
+
+import "database/sql"
+
+func createUser(db *sql.DB) error {
+    tx, err := db.Begin()
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback()
+    return tx.Commit()
+}
+
+func listUsers(db *sql.DB) {}
+"#;
+    let g = p
+        .parse_file(Path::new("users.go"), src.as_bytes())
+        .expect("parse");
+    let s = scopes(&g);
+    assert_eq!(s.len(), 1, "one tx_scope expected; got: {:?}", s.len());
+    assert_eq!(fn_name_of_scope(&g, &s[0]), "createUser");
+    assert_eq!(s[0].framework(), FrameworkId::GoSqlTx);
+}
+
+#[test]
+fn go_db_begin_tx_emits_gosqltx_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = GoProvider::new().expect("provider");
+    let src = r#"package db
+
+import (
+    "context"
+    "database/sql"
+)
+
+func transferFunds(ctx context.Context, db *sql.DB) error {
+    tx, err := db.BeginTx(ctx, nil)
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback()
+    return tx.Commit()
+}
+"#;
+    let g = p
+        .parse_file(Path::new("transfer.go"), src.as_bytes())
+        .expect("parse");
+    let s = scopes(&g);
+    assert_eq!(s.len(), 1, "one tx_scope expected for BeginTx");
+    assert_eq!(fn_name_of_scope(&g, &s[0]), "transferFunds");
+    assert_eq!(s[0].framework(), FrameworkId::GoSqlTx);
+}
+
+#[test]
+fn go_multiple_begin_in_same_fn_deduplicates_to_one_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = GoProvider::new().expect("provider");
+    // Two db.Begin() calls inside the same function — must emit exactly one scope.
+    let src = r#"package db
+
+import "database/sql"
+
+func multiTx(db *sql.DB) error {
+    tx1, _ := db.Begin()
+    defer tx1.Rollback()
+    tx2, _ := db.Begin()
+    defer tx2.Rollback()
+    return nil
+}
+"#;
+    let g = p
+        .parse_file(Path::new("multi.go"), src.as_bytes())
+        .expect("parse");
+    let s = scopes(&g);
+    assert_eq!(
+        s.len(),
+        1,
+        "multiple Begin() in same function must produce exactly one scope (got {})",
+        s.len()
+    );
+    assert_eq!(fn_name_of_scope(&g, &s[0]), "multiTx");
+}
+
+#[test]
+fn go_begin_outside_function_produces_no_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = GoProvider::new().expect("provider");
+    // A file with no functions at all — Begin() would be top-level (impossible
+    // in real Go, but the parser must not panic and must emit zero scopes).
+    let src = r#"package db
+
+import "database/sql"
+
+var DB *sql.DB
+"#;
+    let g = p
+        .parse_file(Path::new("nofunc.go"), src.as_bytes())
+        .expect("parse");
+    assert!(
+        scopes(&g).is_empty(),
+        "no functions → no tx_scopes expected"
     );
 }

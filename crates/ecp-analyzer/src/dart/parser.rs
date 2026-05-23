@@ -2,13 +2,15 @@ use super::receiver_types::{collect_bindings, extract_dart_calls_and_path_litera
 use super::spec::DartSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, push_blind_spot, FrameworkPatternSpec,
+    detect_ast_framework_patterns, push_blind_spot, span_contains, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{
+    BlindSpot, FrameworkId, LocalGraph, RawImport, RawNode, RawTxScope,
+};
 
 /// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
 /// in `parse_file`.
@@ -433,6 +435,7 @@ impl LanguageProvider for DartProvider {
             crate::function_meta::dart::extract(tree.root_node(), source, &nodes, file_category);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        let tx_scopes = collect_dart_tx_scopes(tree.root_node(), source, &nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -445,13 +448,102 @@ impl LanguageProvider for DartProvider {
             blind_spots,
             schema_fields: None,
             event_topics: None,
-            tx_scopes: None,
+            tx_scopes,
             path_literals: (!raw_path_literals.is_empty())
                 .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })
     }
+}
+
+/// Walk the Dart AST for `.transaction(closure)` / `.runTransaction(closure)`
+/// call-site patterns (Drift, sqflite, Firestore). The scope is the ENCLOSING
+/// Function or Method — one `RawTxScope` per unique enclosing node (dedup by
+/// node index). Call-site form, not annotation form: scope is span-based.
+///
+/// Audit verdict: no Dart framework uses an `@Transaction`-style annotation.
+/// All three major frameworks (Drift, sqflite, Firestore) use a `.transaction()`
+/// / `.runTransaction()` call with a function literal / closure argument.
+/// This detector covers all three idioms with a single method-name match.
+fn collect_dart_tx_scopes(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    nodes: &[RawNode],
+) -> Option<Box<[RawTxScope]>> {
+    let mut seen_indices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut scopes: Vec<RawTxScope> = Vec::new();
+
+    let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" && is_tx_call(n, source) {
+            let call_span = (
+                n.start_position().row as u32,
+                n.start_position().column as u32,
+                n.end_position().row as u32,
+                n.end_position().column as u32,
+            );
+            // Recover enclosing Function / Method by span containment.
+            let enclosing = nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| {
+                    matches!(node.kind, NodeKind::Function | NodeKind::Method)
+                        && span_contains(node.span, call_span)
+                })
+                .min_by_key(|(_, node)| {
+                    let (sr, sc, er, ec) = node.span;
+                    // Prefer smallest span (innermost enclosing fn).
+                    ((er as i64 - sr as i64) << 16) + (ec as i64 - sc as i64)
+                });
+            if let Some((idx, _)) = enclosing {
+                let idx_u32 = idx as u32;
+                if seen_indices.insert(idx_u32) {
+                    scopes.push(RawTxScope::new(idx_u32, FrameworkId::DartTransaction));
+                }
+            }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+
+    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
+}
+
+/// Return true iff `call` is a `.transaction(closure)` or `.runTransaction(closure)` invocation:
+/// - the callee is a `member_expression` whose `property` matches one of `TX_METHODS`
+/// - the first positional argument is a `function_expression`
+fn is_tx_call(call: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    const TX_METHODS: &[&str] = &["transaction", "runTransaction"];
+
+    let Some(function) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if function.kind() != "member_expression" {
+        return false;
+    }
+    let Some(prop) = function.child_by_field_name("property") else {
+        return false;
+    };
+    let Ok(method_name) = std::str::from_utf8(&source[prop.start_byte()..prop.end_byte()]) else {
+        return false;
+    };
+    if !TX_METHODS.contains(&method_name) {
+        return false;
+    }
+    // Verify at least one argument is a function literal / closure.
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut c = args.walk();
+    for child in args.children(&mut c) {
+        if child.kind() == "function_expression" {
+            return true;
+        }
+    }
+    false
 }
 
 /// Synthesize a Typedef RawNode from a tree-sitter-dart misparse:

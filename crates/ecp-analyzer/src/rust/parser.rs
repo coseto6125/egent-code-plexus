@@ -5,7 +5,10 @@ use super::receiver_types::{
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
-use crate::framework_helpers::{has_import_from, node_span, push_blind_spot, MODULE_LEVEL_SOURCE};
+use crate::framework_helpers::{
+    collect_rust_transactional_scopes, has_import_from, node_span, push_blind_spot,
+    MODULE_LEVEL_SOURCE,
+};
 use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -403,6 +406,15 @@ impl LanguageProvider for RustProvider {
                                     if existing.owner_class.is_none() {
                                         existing.owner_class = owner.clone();
                                     }
+                                    // Merge decorators from this match (attribute-aware
+                                    // patterns in frameworks.scm fire after the base
+                                    // queries.scm pattern; the base push has empty
+                                    // decorators, the attribute pattern carries them).
+                                    for d in &decorators {
+                                        if !existing.decorators.contains(d) {
+                                            existing.decorators.push(d.clone());
+                                        }
+                                    }
                                     merged = true;
                                 }
                                 break;
@@ -564,6 +576,9 @@ impl LanguageProvider for RustProvider {
         // free items, so `scope_defines::Pass2` can emit `Module(foo) → bar`.
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
+        let tx_scopes =
+            collect_rust_transactional_scopes(&nodes, &[NodeKind::Function, NodeKind::Method]);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -576,7 +591,7 @@ impl LanguageProvider for RustProvider {
             blind_spots,
             schema_fields: None,
             event_topics,
-            tx_scopes: None,
+            tx_scopes,
             path_literals,
             call_metas,
             raw_function_metas,

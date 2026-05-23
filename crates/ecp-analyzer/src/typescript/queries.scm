@@ -153,6 +153,33 @@
   (#not-eq? @method.name "constructor")
 ) @method
 
+;; Method decorators — tree-sitter-typescript attaches decorators as named field
+;; children of `class_body` (siblings of `method_definition`, not children of it).
+;; The `.` anchor ensures the decorator immediately precedes the method_definition
+;; (no intervening nodes), preventing a decorator from matching all later methods.
+;; This pattern fires alongside the generic @method pattern above; the merge logic
+;; (span + name equality) in parser.rs adds the decorator to the existing RawNode.
+;; Needed for @Transactional and similar method-level annotation detection.
+(class_body
+  decorator: (decorator) @decorator
+  .
+  (method_definition
+    name: (property_identifier) @method.name
+    (#not-eq? @method.name "constructor")
+  ) @method
+)
+
+;; Decorated exported functions — `export @Dec async function foo() {}`.
+;; The decorator lives on the export_statement node (same position quirk as
+;; exported classes). The merge logic adds the decorator to the existing
+;; Function RawNode created by the generic @function pattern above.
+(export_statement
+  decorator: (decorator) @decorator
+  (function_declaration
+    name: (identifier) @function.name
+  ) @function
+) @export
+
 (method_signature
   name: (property_identifier) @method.name
 ) @method

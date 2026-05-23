@@ -222,6 +222,51 @@ pub enum FrameworkId {
     /// Distinct from Spring: PHP 8 attributes use `#[Attr]` syntax; Symfony
     /// transaction semantics (Doctrine ORM session) differ from Spring JPA.
     SymfonyTransactional,
+    // ── Transaction scopes (T10 family — FU-2026-05-23-009 cross-lang expansion) ──
+    //
+    // The next 6 variants pre-allocate rkyv discriminant slots for
+    // languages whose parser support is added in sibling commits. Slots
+    // are reserved here in ONE place so parallel parser commits don't
+    // race on discriminant positions (rkyv discriminants are positional
+    // and append-only — reordering would break every existing graph.bin).
+    //
+    /// TypeScript / NestJS TypeORM `@Transactional` decorator.
+    /// Distinct from Spring/Symfony: TS attribute syntax is `@Attr` (same
+    /// as Spring) but the runtime is TypeORM / typeorm-transactional —
+    /// nested-tx semantics + propagation flags differ from JPA.
+    TypeOrmTransactional,
+    /// Rust `#[transaction]` proc-macro attribute (sqlx, diesel, sea-orm
+    /// flavours). Distinct from Symfony's PHP `#[Attr]` — Rust attributes
+    /// are compile-time macros expanding to RAII guards, whereas PHP 8
+    /// attributes are runtime-reflected. LLM refactor queries must not
+    /// conflate the two.
+    RustTransaction,
+    /// Dart Drift `transaction(() async { ... })` call-site form, OR
+    /// any `@DriftTransaction` annotation if a framework offers one.
+    /// Block-form transaction scope — the scope is the closure body, not
+    /// an annotated function. Distinct from annotation-form variants
+    /// because containment is span-based, not decorator-based.
+    DartTransaction,
+    /// Go `db.Begin()` / `db.BeginTx(ctx, opts)` call-site. Scope = the
+    /// enclosing function. Different detector pattern from annotation-form
+    /// (no decorator on the function); parser walks the call AST and
+    /// emits the enclosing function as the tx-scope owner via span
+    /// containment. Most-used Go idiom — covers `database/sql` and
+    /// `gorm.Begin()` variants.
+    GoSqlTx,
+    /// Ruby `Model.transaction do ... end` block-form (ActiveRecord /
+    /// Sequel idiom). Scope = the block body, recovered via span
+    /// containment of the enclosing function. FU-2026-05-23-018 had
+    /// carved this out as separate scope; consolidated here under
+    /// FU-009's full cross-lang expansion per session directive.
+    RubyActiveRecordTransaction,
+    /// Swift framework-level transactional patterns — most Swift code
+    /// uses Core Data `performAndWait` blocks or GRDB `dbQueue.write
+    /// { ... }`. Slot reserved; parser may emit zero matches if no
+    /// supported framework is detected (parsers wontfix on lang audit
+    /// are expected — see PR description for which langs landed real
+    /// detectors).
+    SwiftTransactional,
 }
 
 pub const FRAMEWORK_NAMES: &[&str] = &[
@@ -248,6 +293,14 @@ pub const FRAMEWORK_NAMES: &[&str] = &[
     "unknown",
     "dotnet-transactional",
     "symfony-transactional",
+    // FU-2026-05-23-009 cross-lang expansion — order MUST match the
+    // FrameworkId enum discriminants above.
+    "typeorm-transactional",
+    "rust-transaction",
+    "dart-transaction",
+    "go-sql-tx",
+    "ruby-activerecord-transaction",
+    "swift-transactional",
 ];
 
 impl FrameworkId {
@@ -294,10 +347,27 @@ impl FrameworkId {
             20 => Self::Unknown,
             21 => Self::DotNetTransactional,
             22 => Self::SymfonyTransactional,
+            23 => Self::TypeOrmTransactional,
+            24 => Self::RustTransaction,
+            25 => Self::DartTransaction,
+            26 => Self::GoSqlTx,
+            27 => Self::RubyActiveRecordTransaction,
+            28 => Self::SwiftTransactional,
             _ => Self::Unknown,
         }
     }
 }
+
+// Compile-time guard: FRAMEWORK_NAMES MUST have exactly as many entries as
+// there are FrameworkId variants (highest discriminant + 1). Catches
+// "added an enum variant, forgot the FRAMEWORK_NAMES string" at compile
+// time instead of as a runtime panic in `as_str()`.
+const _: () = {
+    assert!(
+        FRAMEWORK_NAMES.len() == FrameworkId::SwiftTransactional as usize + 1,
+        "FRAMEWORK_NAMES length must equal FrameworkId variant count"
+    );
+};
 
 /// ORM / schema model field detected at static-analysis time.
 ///
