@@ -87,7 +87,11 @@ jobs:
 
           case "$EVENT_NAME" in
             pull_request)
-              git fetch --no-tags --depth=1 origin "$BASE_REF"
+              # No --depth=1: checkout used fetch-depth: 0, so we already
+              # have full history. A shallow fetch here would truncate
+              # origin/$BASE_REF to its tip and break the merge-base lookup
+              # (origin/main...HEAD → "no merge base").
+              git fetch --no-tags origin "$BASE_REF"
               diff_range="origin/$BASE_REF...HEAD"
               ;;
             push)
