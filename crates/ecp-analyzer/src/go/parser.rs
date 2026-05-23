@@ -37,6 +37,77 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     ),
 ];
 
+const BLIND_IOTA_CONST_BLOCK: (&str, &str) = (
+    "go-iota-const-block",
+    "const ( ... iota ) block with ≥2 entries — Go enum imitation; verify before treating as plain Const set",
+);
+
+/// Walk a subtree and return true if any node has kind `"iota"`.
+///
+/// tree-sitter-go gives `iota` its own node kind (not `identifier`), so
+/// checking `node.kind() == "iota"` is sufficient — no source-text comparison
+/// needed.
+fn subtree_contains_iota(node: tree_sitter::Node<'_>) -> bool {
+    if node.kind() == "iota" {
+        return true;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if subtree_contains_iota(child) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Scan all top-level `const_declaration` blocks in the file and emit a
+/// BlindSpot for any that are Go enum imitations: ≥2 `const_spec` children
+/// where at least one spec's value expression contains the identifier `iota`.
+///
+/// Single-line `const X = 1` uses `const_declaration` too but has exactly one
+/// `const_spec`, so the ≥2 guard excludes it. Function-body const blocks are
+/// legal Go but rare; we limit to `source_file` direct children to match the
+/// existing const/var design (see `function_body_const_is_dropped` test).
+fn detect_iota_const_blocks(
+    root: tree_sitter::Node<'_>,
+    path: &Path,
+    is_test_file: bool,
+    blind_spots: &mut Vec<BlindSpot>,
+) {
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() != "const_declaration" {
+            continue;
+        }
+        // Count const_spec children and check for iota in any spec's value.
+        let mut spec_count = 0u32;
+        let mut has_iota = false;
+        let mut inner = child.walk();
+        for spec in child.children(&mut inner) {
+            if spec.kind() != "const_spec" {
+                continue;
+            }
+            spec_count += 1;
+            // The value field of a const_spec holds the expression after `=`.
+            // Specs that omit the value (Go iota elision) have no value child.
+            if let Some(val) = spec.child_by_field_name("value") {
+                if subtree_contains_iota(val) {
+                    has_iota = true;
+                }
+            }
+        }
+        if spec_count >= 2 && has_iota {
+            push_blind_spot(
+                blind_spots,
+                BLIND_IOTA_CONST_BLOCK,
+                &child,
+                path,
+                is_test_file,
+            );
+        }
+    }
+}
+
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
@@ -162,6 +233,8 @@ impl LanguageProvider for GoProvider {
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+
+        detect_iota_const_blocks(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
