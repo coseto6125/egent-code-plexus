@@ -235,6 +235,18 @@ fn execute_inner(
         }
     }
 
+    // Width invariant — every row must carry exactly one value per
+    // projected column. Downstream consumers (e.g. `cypher::build_payload`
+    // in the CLI) collapse single-column rows to scalars and fall back to
+    // null on empty rows; a violation here would silently surface as a
+    // legitimate null result. Caught in debug builds before it leaves the
+    // executor.
+    debug_assert!(
+        rows.iter().all(|row| row.len() == columns.len()),
+        "cypher executor invariant: every row must have row.len() == columns.len() (expected {})",
+        columns.len()
+    );
+
     Ok(QueryResult { columns, rows })
 }
 
@@ -2950,6 +2962,34 @@ mod tests {
                 Value::List(vec![]),
                 "decorators must be empty list, not Null"
             );
+        });
+    }
+
+    // Width invariant — pins the contract that every emitted row has
+    // exactly `columns.len()` values across the representative projection
+    // shapes (single-column / multi-column / aggregation). The CLI layer
+    // (`cypher::build_payload`) relies on this to flatten single-column
+    // rows to scalars without ambiguity.
+    #[test]
+    fn row_width_matches_columns_for_all_projection_shapes() {
+        with_two(|g| {
+            // single column
+            let q = parse("MATCH (n:Function) RETURN n.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.columns.len(), 1);
+            assert!(r.rows.iter().all(|row| row.len() == 1));
+
+            // multi column
+            let q =
+                parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN a.name, b.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.columns.len(), 2);
+            assert!(r.rows.iter().all(|row| row.len() == 2));
+
+            // aggregation (COUNT) — 1 group, 1 column
+            let q = parse("MATCH (n:Function) RETURN count(n)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.iter().all(|row| row.len() == r.columns.len()));
         });
     }
 }
