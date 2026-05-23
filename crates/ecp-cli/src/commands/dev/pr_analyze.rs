@@ -99,8 +99,11 @@ struct ChangedSymbol {
     /// `"Function"`, `"Method"`, `"Struct"`, `"Module"`, etc.
     #[allow(dead_code)]
     pub kind: String,
-    /// Repo-relative path (forward slashes).
+    /// Repo-relative path (forward slashes). No longer consumed (area
+    /// classification uses `git diff --name-only` for comment-only-diff
+    /// coverage) but kept so the deserializer doesn't fail on the field.
     #[serde(rename = "filePath")]
+    #[allow(dead_code)]
     pub file_path: String,
     #[allow(dead_code)]
     pub line: u32,
@@ -156,15 +159,10 @@ struct ImpactJson {
 }
 
 impl ImpactJson {
-    /// Unique repo-relative file paths that contain at least one changed symbol.
-    pub fn changed_files(&self) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
-        self.changed_symbols
-            .iter()
-            .filter(|s| seen.insert(s.file_path.clone()))
-            .map(|s| s.file_path.clone())
-            .collect()
-    }
+    // Note: `changed_files()` was here but symbol-derived files miss
+    // comment-only / whitespace-only diffs (zero symbols, but real path
+    // change). `run()` now calls `git diff --name-only` directly via
+    // `git_diff_files` so area classification works for docs PRs too.
 
     /// All symbol names reachable from changed symbols (depth > 0), deduplicated.
     /// Used to size the impact set for risk classification.
@@ -246,9 +244,14 @@ pub struct PrAnalyzeArgs {
 }
 
 pub fn run(args: PrAnalyzeArgs, _cli_graph: &std::path::Path) -> Result<(), EcpError> {
-    // 1. Shell out to ecp impact to get changed symbols + impact closure
+    // 1. Shell out to ecp impact to get changed symbols + impact closure.
+    //    Comment-only or whitespace-only diffs return 0 changed_symbols, so
+    //    impact.changed_files() (which derives from changed_symbols[].filePath)
+    //    would be empty even when files DID change — pull the file list
+    //    directly from git instead so area classification still works for
+    //    docs/comment-only PRs.
     let impact = run_impact_subprocess(&args.baseline)?;
-    let changed_files: Vec<String> = impact.changed_files();
+    let changed_files = git_diff_files(&args.baseline, &args.pr_head)?;
     let changed_files_pb: Vec<std::path::PathBuf> =
         changed_files.iter().map(std::path::PathBuf::from).collect();
 
@@ -362,6 +365,31 @@ fn git_rev_parse(reference: &str) -> Result<String, EcpError> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Lists files changed between baseline..pr_head, regardless of whether the
+/// diff carried semantic symbol changes. Needed because comment-only edits
+/// (typo fixes, doc tweaks, WHY-comment adds) don't produce changed_symbols
+/// in `ecp impact` output but DO change files — `classify_area` still needs
+/// to know the touched paths to assign the right Mergify queue.
+fn git_diff_files(baseline: &str, pr_head: &str) -> Result<Vec<String>, EcpError> {
+    let out = safe_exec::git()
+        .args(["diff", "--name-only", &format!("{baseline}..{pr_head}")])
+        .output()
+        .map_err(EcpError::Io)?;
+    if !out.status.success() {
+        return Err(EcpError::GitDiff {
+            reason: format!(
+                "git diff --name-only {baseline}..{pr_head}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 fn path_area(p: &Path) -> Option<Area> {
     let s = p.to_string_lossy().replace('\\', "/");
     if s.starts_with("crates/ecp-analyzer/src/") && s.ends_with(".rs") {
@@ -441,9 +469,12 @@ use std::collections::BTreeSet;
 /// For each sibling PR with the queue label, compute the overlap between
 /// THIS PR's changed_symbols and the sibling's cached impact_set.
 ///
-/// If a sibling has no cached impact (e.g. race-condition on near-simultaneous
-/// pushes), it is reported with overlap_symbols = ["__pending_analysis__"] —
-/// a conservative signal so Mergify holds off until next tick.
+/// If a sibling has no cached impact (e.g. race on near-simultaneous pushes,
+/// or first sibling in a new batch), it is SKIPPED — not reported as a
+/// conflict. Reporting missing-cache as conflict creates a deadlock when
+/// N PRs push together: each sees N-1 uncached siblings and blocks itself.
+/// Mergify's speculative trial catches any actual conflict at test time,
+/// so a missed cache here is a graph-aware-skip not a real safety hole.
 pub fn detect_cross_pr_conflicts<G: GhClient>(
     gh: &G,
     queue_label: &str,
@@ -457,10 +488,9 @@ pub fn detect_cross_pr_conflicts<G: GhClient>(
     for sibling in siblings {
         match gh.read_cached_impact(sibling.number)? {
             None => {
-                out.push(CrossPrConflict {
-                    pr: sibling.number,
-                    overlap_symbols: vec!["__pending_analysis__".to_string()],
-                });
+                // No cache yet — don't block on graph-unknown. Mergify's
+                // speculative trial catches real conflicts at test time.
+                continue;
             }
             Some(other_impact) => {
                 let other_set: BTreeSet<&String> = other_impact.iter().collect();
@@ -681,9 +711,10 @@ mod tests {
         assert_eq!(parsed.changed_symbol_names(), vec!["FnA", "MethodB"]);
         // 3 unique callers at depth > 0: CallerC, CallerD, CallerE
         assert_eq!(parsed.impact_set_names().len(), 3);
-        // 1 unique file
+        // file_path still parses (even though run() reads files from git
+        // diff directly now — see ImpactJson note re: changed_files removal).
         assert_eq!(
-            parsed.changed_files()[0],
+            parsed.changed_symbols[0].file_path,
             "crates/ecp-cli/src/commands/impact.rs"
         );
     }
@@ -777,9 +808,12 @@ mod tests {
     }
 
     #[test]
-    fn cross_pr_conflict_missing_cache_is_conservative() {
-        // Sibling PR exists but has no cached impact yet (race condition).
-        // Spec: treat as conflict to be conservative.
+    fn cross_pr_conflict_missing_cache_skipped() {
+        // Sibling PR exists but has no cached impact yet (race on
+        // near-simultaneous pushes). Should be SKIPPED — reporting it as a
+        // conflict creates a deadlock where N parallel PRs all see N-1
+        // uncached siblings and block themselves. Mergify's speculative
+        // trial catches any real conflict at test time.
         let gh = MockGh::new(
             vec![SiblingPr {
                 number: 101,
@@ -790,15 +824,15 @@ mod tests {
         let conflicts =
             detect_cross_pr_conflicts(&gh, "merge-queue", "main", 100, &["FnA".to_string()])
                 .unwrap();
-        assert_eq!(conflicts.len(), 1);
-        assert_eq!(
-            conflicts[0].overlap_symbols,
-            vec!["__pending_analysis__".to_string()]
-        );
+        assert!(conflicts.is_empty(), "uncached sibling should be skipped");
     }
 
     #[test]
     fn cross_pr_conflict_excludes_self() {
+        // Sibling 101 has overlapping cached impact — should be reported.
+        // Self (100) must not even appear in the candidate list.
+        let mut cached = HashMap::new();
+        cached.insert(101, vec!["FnA".into(), "FnZ".into()]);
         let gh = MockGh::new(
             vec![
                 SiblingPr {
@@ -810,7 +844,7 @@ mod tests {
                     head_ref_oid: "abc".into(),
                 },
             ],
-            HashMap::new(),
+            cached,
         );
         let conflicts =
             detect_cross_pr_conflicts(&gh, "merge-queue", "main", 100, &["FnA".to_string()])
