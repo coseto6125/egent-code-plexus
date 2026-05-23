@@ -39,19 +39,18 @@ const BLIND_SPEC: &[(&str, &str)] = &[
 /// - body has 0 `property_declaration` children (no instance state)
 /// - the class is not itself an `enum_declaration` (those are first-class 8.1+)
 ///
-/// Returns each matching class-span so the caller can append to `blind_spots`.
+/// Pushes matching class-spans directly into `out`.
 fn detect_enum_imitation_blind_spots(
     root: tree_sitter::Node<'_>,
     path: &Path,
     is_test_file: bool,
-) -> Vec<ecp_core::analyzer::types::BlindSpot> {
+    out: &mut Vec<ecp_core::analyzer::types::BlindSpot>,
+) {
     const SPEC: (&str, &str) = (
         "php-enum-imitation",
         "class with \u{2265}2 const members and no instance properties \
          \u{2014} may be a pre-8.1 enum imitation; verify before treating as plain Class",
     );
-
-    let mut out = Vec::new();
     let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
 
     while let Some(node) = stack.pop() {
@@ -68,7 +67,7 @@ fn detect_enum_imitation_blind_spots(
                     }
                 }
                 if const_count >= 2 && prop_count == 0 {
-                    push_blind_spot(&mut out, SPEC, &node, path, is_test_file);
+                    push_blind_spot(out, SPEC, &node, path, is_test_file);
                     // Don't descend into the class body — emit one BlindSpot
                     // per class, not per nested class (nested class with
                     // identical shape would produce its own stack iteration).
@@ -84,7 +83,6 @@ fn detect_enum_imitation_blind_spots(
             }
         }
     }
-    out
 }
 
 /// True iff the first positional argument of `call_node` is a PHP string
@@ -798,11 +796,7 @@ impl LanguageProvider for PhpProvider {
         // it can still emit for classes whose class_declaration node was
         // captured by the query (those are in `nodes`; the blind_spot is a
         // separate signal).
-        blind_spots.extend(detect_enum_imitation_blind_spots(
-            tree.root_node(),
-            path,
-            is_test_file,
-        ));
+        detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         let tx_scopes =

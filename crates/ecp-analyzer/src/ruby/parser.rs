@@ -193,7 +193,6 @@ fn is_scalar_rhs(node: &Node<'_>) -> bool {
 /// the RHS a `call` node, not a scalar literal. This is conservative by design.
 fn detect_module_as_enum(
     root: Node<'_>,
-    _source: &[u8],
     path: &Path,
     is_test_file: bool,
     out: &mut Vec<BlindSpot>,
@@ -773,13 +772,7 @@ impl LanguageProvider for RubyProvider {
         // Detect module-as-enum imitation: walk AST for qualifying module nodes
         // and emit BlindSpotRecord. Done after the query loop so it is
         // independent of tree-sitter query captures.
-        detect_module_as_enum(
-            tree.root_node(),
-            source,
-            path,
-            is_test_file,
-            &mut blind_spots,
-        );
+        detect_module_as_enum(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         // Helper: locate the smallest-span class RawNode whose body contains
         // `line`. Returns its index in `nodes`. Shared between mixin
