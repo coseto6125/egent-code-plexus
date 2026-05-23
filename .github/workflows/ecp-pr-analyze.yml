@@ -52,15 +52,32 @@ jobs:
           toolchain: stable
           components: ""
 
-      - name: Cache ecp graph + cargo
-        uses: actions/cache@v4
+      # Two separate caches — Rust artifacts vs ecp's graph index store.
+      # Mixing them in actions/cache@v4 (the old setup) bloated the cache
+      # with target/incremental/ and didn't pass cargo's fingerprint check
+      # on restore → every run did a cold 11-minute build despite cache HIT.
+      # Swatinem/rust-cache filters target/ properly and auto-includes the
+      # rustc version in the key, so restores actually let cargo skip recompile.
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          path: |
-            ${{ env.ECP_HOME }}
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ecp-pr-analyze-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          # Share with ci.yml's ubuntu test + code-quality jobs (same
+          # workspace, same lockfile, same OS) — first pr-analyze after
+          # any ci.yml run finds target/ already warm.
+          shared-key: linux-build
+          cache-on-failure: true
+          cache-workspace-crates: true
+
+      - name: Cache ecp graph index
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.ECP_HOME }}
+          # Keyed by main HEAD SHA so a fresh PR opened after main moves
+          # still finds the freshest viable starting graph (restore-keys
+          # gives the fallback chain for partial hits).
+          key: ecp-graph-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            ecp-graph-${{ runner.os }}-
 
       - name: Build ecp (release)
         run: cargo build -p egent-code-plexus --bin ecp --release
