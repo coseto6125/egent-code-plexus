@@ -260,6 +260,58 @@ fn no_sibling_falls_back_to_sync_build() {
     );
 }
 
+/// A first Missing probe in a long-lived process can happen before any sibling
+/// graph exists, forcing a sync build. That negative lookup must not poison the
+/// process cache; after the sync build publishes SHA-1, a later SHA-2 should
+/// warm-attach to it.
+#[test]
+fn no_sibling_lookup_does_not_poison_later_warm_attach() {
+    let _env_guard = lock_env();
+    let _snap = EnvSnapshot::take();
+
+    let repo_tmp = TempDir::new().unwrap();
+    let cache_tmp = TempDir::new().unwrap();
+    let repo = repo_tmp.path();
+    let cache = cache_tmp.path();
+
+    git_init_with_commit(repo);
+
+    std::env::set_var("HOME", cache);
+    std::env::remove_var("ECP_HOME");
+    test_counters::reset();
+
+    let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
+    let first_resolved = graph_path::resolve(legacy_sentinel, repo);
+    let first = auto_ensure::ensure_fresh(&first_resolved, repo)
+        .expect("first ensure_fresh should sync-build without sibling");
+    assert!(
+        matches!(first, EnsureFreshOutcome::Ready),
+        "expected initial sync build, got {:?}",
+        first
+    );
+    assert_eq!(
+        test_counters::warm_attach_calls(),
+        0,
+        "initial no-sibling path must not warm-attach"
+    );
+
+    add_second_commit(repo);
+
+    let second_resolved = graph_path::resolve(legacy_sentinel, repo);
+    let second = auto_ensure::ensure_fresh(&second_resolved, repo)
+        .expect("second ensure_fresh should warm-attach to the first build");
+    assert!(
+        matches!(second, EnsureFreshOutcome::WarmAttach { .. }),
+        "expected later warm-attach after sync build published a sibling, got {:?}",
+        second
+    );
+    assert_eq!(
+        test_counters::warm_attach_calls(),
+        1,
+        "later missing SHA must warm-attach despite the earlier no-sibling lookup"
+    );
+}
+
 // ── Test 4 ────────────────────────────────────────────────────────────────────
 
 /// `is_stale_for_sha` flag propagates through `Engine::load_warm` and is false

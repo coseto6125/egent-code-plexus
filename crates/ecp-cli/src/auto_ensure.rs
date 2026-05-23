@@ -352,8 +352,10 @@ fn attach_latest_sibling_sha(worktree_root: &Path) -> Option<PathBuf> {
         }
     }
     let result = attach_latest_sibling_sha_uncached(worktree_root);
-    if let Ok(mut map) = cache.lock() {
-        map.insert(worktree_root.to_path_buf(), result.clone());
+    if result.is_some() {
+        if let Ok(mut map) = cache.lock() {
+            map.insert(worktree_root.to_path_buf(), result.clone());
+        }
     }
     result
 }
