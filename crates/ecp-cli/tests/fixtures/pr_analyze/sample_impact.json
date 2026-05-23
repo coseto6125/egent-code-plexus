@@ -1,0 +1,40 @@
+{
+  "status": "success",
+  "baseline": "HEAD~1",
+  "changed_symbols": [
+    {
+      "name": "FnA",
+      "kind": "Function",
+      "filePath": "crates/ecp-cli/src/commands/impact.rs",
+      "line": 42,
+      "change_type": "modified"
+    },
+    {
+      "name": "MethodB",
+      "kind": "Function",
+      "filePath": "crates/ecp-cli/src/commands/impact.rs",
+      "line": 99,
+      "change_type": "added"
+    }
+  ],
+  "impact_by_symbol": [
+    {
+      "symbol": "FnA",
+      "filePath": "crates/ecp-cli/src/commands/impact.rs",
+      "impact": [
+        { "name": "FnA", "kind": "Function", "depth": 0, "uid": "1111" },
+        { "name": "CallerC", "kind": "Function", "depth": 1, "uid": "2222" },
+        { "name": "CallerD", "kind": "Function", "depth": 2, "uid": "3333" }
+      ]
+    },
+    {
+      "symbol": "MethodB",
+      "filePath": "crates/ecp-cli/src/commands/impact.rs",
+      "impact": [
+        { "name": "MethodB", "kind": "Function", "depth": 0, "uid": "4444" },
+        { "name": "CallerE", "kind": "Function", "depth": 1, "uid": "5555" }
+      ]
+    }
+  ],
+  "hidden_heuristic_edges": 0
+}
