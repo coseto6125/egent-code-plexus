@@ -1,40 +1,61 @@
+# Mergify config.
+#
+# Per Mergify best practice:
+# - queue_rules pin `base=` so cross-target-branch PRs can't batch together
+#   (Mergify speculative-trial would re-base each onto the wrong tip).
+# - One pull_request_rule per (area, base) pair selects the target queue
+#   explicitly; without an explicit routing rule, Mergify can't know which
+#   area-specific queue a PR belongs in.
+# - Priority is set declaratively per rule via `queue.priority`, so the
+#   risk-low PRs land at the front of their area queue.
+#
+# The required-check list is duplicated across routing rules — YAML anchors
+# splice nested lists which Mergify rejects, so DRY isn't available here.
+# Keep the list synced with `gh api repos/.../branches/main/protection`.
+#
+# Adding a new target branch (e.g. `develop`): replicate the 5 queue_rules
+# under `develop-*` names + 5 routing pull_request_rules with `base=develop`.
+
 queue_rules:
-  - name: test-only
+  - name: main-test-only
     conditions:
+      - base=main
       - check-success=ecp/cross-pr-conflict
-      - label=ecp:area-test
     batch_size: 10
     batch_max_wait_time: 30s
 
-  - name: parser-changes
+  - name: main-parser-changes
     conditions:
+      - base=main
       - check-success=ecp/cross-pr-conflict
-      - label=ecp:area-parser
     batch_size: 1
 
-  - name: cli-changes
+  - name: main-cli-changes
     conditions:
+      - base=main
       - check-success=ecp/cross-pr-conflict
-      - label=ecp:area-cli
     batch_size: 3
     batch_max_wait_time: 2m
 
-  - name: docs-only
+  - name: main-docs-only
     conditions:
+      - base=main
       - check-success=ecp/cross-pr-conflict
-      - label=ecp:area-docs
     batch_size: 20
     batch_max_wait_time: 10s
 
-  - name: default
+  - name: main-default
     conditions:
+      - base=main
       - check-success=ecp/cross-pr-conflict
     batch_size: 2
 
 pull_request_rules:
-  - name: queue if labeled merge-queue
+  - name: route area-test to main-test-only
     conditions:
+      - base=main
       - label=merge-queue
+      - label=ecp:area-test
       - check-success=Test (all platforms)
       - check-success=Code Quality (Linting & Formatting)
       - check-success=Supply-chain (audit & deny)
@@ -43,7 +64,67 @@ pull_request_rules:
       - check-success=dependency-review
     actions:
       queue:
-        name: default
+        name: main-test-only
+
+  - name: route area-parser to main-parser-changes
+    conditions:
+      - base=main
+      - label=merge-queue
+      - label=ecp:area-parser
+      - check-success=Test (all platforms)
+      - check-success=Code Quality (Linting & Formatting)
+      - check-success=Supply-chain (audit & deny)
+      - check-success=Lint GitHub Actions workflows
+      - check-success=CodeQL
+      - check-success=dependency-review
+    actions:
+      queue:
+        name: main-parser-changes
+
+  - name: route area-cli to main-cli-changes
+    conditions:
+      - base=main
+      - label=merge-queue
+      - label=ecp:area-cli
+      - check-success=Test (all platforms)
+      - check-success=Code Quality (Linting & Formatting)
+      - check-success=Supply-chain (audit & deny)
+      - check-success=Lint GitHub Actions workflows
+      - check-success=CodeQL
+      - check-success=dependency-review
+    actions:
+      queue:
+        name: main-cli-changes
+
+  - name: route area-docs to main-docs-only
+    conditions:
+      - base=main
+      - label=merge-queue
+      - label=ecp:area-docs
+      - check-success=Test (all platforms)
+      - check-success=Code Quality (Linting & Formatting)
+      - check-success=Supply-chain (audit & deny)
+      - check-success=Lint GitHub Actions workflows
+      - check-success=CodeQL
+      - check-success=dependency-review
+    actions:
+      queue:
+        name: main-docs-only
+
+  - name: route default to main-default
+    conditions:
+      - base=main
+      - label=merge-queue
+      - -label~=^ecp:area-
+      - check-success=Test (all platforms)
+      - check-success=Code Quality (Linting & Formatting)
+      - check-success=Supply-chain (audit & deny)
+      - check-success=Lint GitHub Actions workflows
+      - check-success=CodeQL
+      - check-success=dependency-review
+    actions:
+      queue:
+        name: main-default
 
   - name: high priority for low-risk
     conditions:

@@ -2,8 +2,10 @@ name: ecp PR analyze
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  push:
-    branches: [main]
+  # No `push` trigger: ecp/cross-pr-conflict status is anchored to the
+  # PR HEAD commit and computed against merge-base, so a base-branch
+  # update doesn't invalidate it. Mergify re-runs its speculative trial
+  # natively on base movement.
 
 # Each PR's analysis runs independently; multiple PRs can run in parallel.
 # Re-runs on the same PR cancel in-flight (only the latest analysis matters).
@@ -86,6 +88,7 @@ jobs:
             --baseline "$BASE" \
             --pr-head HEAD \
             --pr-number ${{ github.event.pull_request.number }} \
+            --base-branch "$BASE_REF" \
             --format json \
             > /tmp/analysis.json
           cat /tmp/analysis.json
