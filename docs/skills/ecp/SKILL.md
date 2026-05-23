@@ -43,3 +43,22 @@ These are detailed manuals for specific commands and concepts.
 
 - `_shared/cli/` — Command-specific flag references (e.g., `inspect`, `impact`, `cypher`).
 - `_shared/refs/` — Conceptual background (e.g., Cypher syntax, Repo resolution).
+
+---
+
+## 🔬 Schema Introspection (graph-loadless)
+
+When you need to know **what ecp can detect** without loading any repo's graph:
+
+| Command | Output |
+|---|---|
+| `ecp schema blindspots` | Per-language BlindSpot emitter coverage (14 langs, ~31 kinds total) |
+| `ecp schema reltypes` | All 19 RelType edges + LLM-utility category (A/B/C) + heuristic flag |
+| `ecp schema node-kinds` | All 28 NodeKind variants + the load-bearing same-name distinctions (Struct vs Class, Trait vs Interface, etc.) |
+| `ecp schema graph-version` | Current rkyv `graph.bin` format version + bump history |
+
+All four default to `--format json` (agent-consumable). Pass `--format text` for a human-readable table.
+
+**Use case**: when `INDIRECT_DISPATCH_IN_DIFF_REGION` verdict is empty for a Java/Go/etc. PR, `ecp schema blindspots` disambiguates "no dispatch in diff" from "parser doesn't detect that pattern yet".
+
+**`BlindSpotRecord` carries `is_test: bool`** — verdict layer filters out test-region BlindSpots from prod-refactor warnings. Test fixtures that legitimately use eval/reflection/dlsym to exercise prod code no longer surface noise.

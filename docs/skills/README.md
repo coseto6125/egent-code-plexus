@@ -5,19 +5,31 @@ Each `*.md` here is the **canonical** copy; the runtime location is
 `~/.claude/skills/<name>/SKILL.md` (or `${CLAUDE_HOME}/skills/<name>/SKILL.md`),
 which Claude Code reads at session start.
 
-## Manual sync
+## Installation: LLM-driven (no install script by design)
 
-There is no symlink or auto-sync hook by design — installing the skill on a
-new machine is a one-liner:
+Skill install / re-install is **LLM-driven** — invoked by the agent
+(typically via an `/init`-style command) or by an `ecp skill install`
+subcommand (planned, not yet implemented). The repo is the source of
+truth; the agent reads `docs/skills/<name>/` and writes the resolved
+content to `~/.claude/skills/<name>/SKILL.md`.
+
+**Do not propose `scripts/install-skill.sh`, Makefile targets, or rsync
+hooks.** The LLM is the canonical installer; auto-sync mechanisms add
+moving parts without solving anything the LLM doesn't already handle.
+
+### Manual fallback
+
+While the LLM-driven path is the canonical install, a one-liner
+fallback for new machines remains:
 
 ```bash
 mkdir -p ~/.claude/skills/ecp
-cp docs/skills/ecp.md ~/.claude/skills/ecp/SKILL.md
+cp docs/skills/ecp/SKILL.md ~/.claude/skills/ecp/SKILL.md
 ```
 
-When editing, change the repo copy first, commit, then propagate to
-`~/.claude/skills/` so future PRs against this skill have a single review
-point.
+When editing, change the repo copy first, commit, then re-run the
+install flow (LLM or manual `cp`) so future PRs against this skill
+have a single review point.
 
 ## Why repo-versioned
 
