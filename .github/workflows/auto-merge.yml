@@ -2,9 +2,15 @@ name: Auto-merge ready PRs
 # Enables GitHub native auto-merge on any non-draft PR. GitHub then waits
 # for:
 #   - All required status checks (defined in branch protection) to pass
-#   - The PR branch to be up-to-date with main (handled by
-#     auto-update-pr-branches.yml)
+#   - `ecp/cross-pr-conflict` (from ecp-pr-analyze.yml) gates against
+#     siblings labeled `merge-queue` so non-overlapping PRs merge in
+#     parallel without waiting on each other
 # …and merges automatically when both are satisfied.
+#
+# We add `merge-queue` label right after arming so the PR is in scope
+# for cross-pr-conflict scanning. Without it, ecp dev pr-analyze sees
+# zero siblings and reports "no conflict" — a false negative that
+# defeats the parallel-merge gate.
 #
 # Per-area serialization (Mergify's queue_rules equivalent) is not enforced
 # at workflow level — GitHub's auto-merge engine processes PRs first-ready-
@@ -43,6 +49,10 @@ jobs:
           set -euo pipefail
           if gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch 2>&1; then
             echo "✓ auto-merge enabled for #$PR"
+            # Add `merge-queue` label so ecp dev pr-analyze includes this
+            # PR in its sibling scan. `--add-label` is idempotent (no-op
+            # if already present), so re-firing the workflow is safe.
+            gh pr edit "$PR" --repo "$REPO" --add-label merge-queue
           else
             # Common no-op causes: PR already merged, conflict, branch
             # protection requires review we don't have. Surface as warning
