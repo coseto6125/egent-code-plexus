@@ -173,7 +173,12 @@ pub fn classify_sink(callee: Option<&str>) -> (SinkKind, SinkConfidence) {
         | "ReadAllBytes" | "ReadAllLines" | "readFile" | "readFileSync" | "ReadFile" | "slurp"
         | "read_all" | "readAsString" | "readAsStringSync" | "readAsBytes"
         // pathlib.Path snake_case equivalents (FU-2026-05-23-023 Python chain promotion)
-        | "read_bytes" => (Read, High),
+        | "read_bytes"
+        // Swift labelled-arg constructors (FU-2026-05-23-023 Swift): the
+        // enclosing_callee promotes the arg label over the type name, so
+        // `String(contentsOfFile: ...)` and `Data(contentsOf: ...)` see
+        // the label as the callee.
+        | "contentsOfFile" | "contentsOf" => (Read, High),
 
         // ── HIGH-confidence writes ────────────────────────────────────
         "write_all" | "atomic_write" | "atomic_write_json" | "writeFile" | "writeFileSync"
@@ -183,7 +188,13 @@ pub fn classify_sink(callee: Option<&str>) -> (SinkKind, SinkConfidence) {
         // the readText/readBytes/readLines listed in HIGH reads above.
         | "writeText" | "writeBytes" | "appendText" | "appendBytes"
         // pathlib.Path snake_case equivalents (FU-2026-05-23-023 Python chain promotion)
-        | "write_text" | "write_bytes" => (Write, High),
+        | "write_text" | "write_bytes"
+        // Swift labelled-arg writes (FU-2026-05-23-023 Swift):
+        // `str.write(toFile: "...", atomically:, encoding:)`,
+        // `Data.write(toFile: "...")`. enclosing_callee promotes the
+        // `toFile:` label over the bare `write` so the LLM consumer
+        // distinguishes file writes from generic stream writes.
+        | "toFile" => (Write, High),
 
         // ── MEDIUM (overloaded with non-file IO writes) ───────────────
         "write" => (Write, Medium),
