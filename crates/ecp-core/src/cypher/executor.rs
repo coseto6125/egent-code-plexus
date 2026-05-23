@@ -110,61 +110,102 @@ fn execute_inner(
                 |(_, e)| !matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)),
             )
             .collect();
-        // Build column names.
-        for (col, _) in &expanded_items {
-            columns.push(col.clone());
-        }
 
-        // Group bindings by key values.
-        let mut groups: Vec<(Vec<Value>, Vec<Binding>)> = Vec::new();
-        let mut key_index: HashMap<String, usize> = HashMap::new();
-
-        for b in &bindings {
-            let key_vals: Result<Vec<Value>, CypherError> = group_items
-                .iter()
-                .map(|(_, e)| eval_return_expr(e, b, graph, cache))
-                .collect();
-            let key_vals = key_vals?;
-            let key_str: String = key_vals
-                .iter()
-                .map(value_key)
-                .collect::<Vec<_>>()
-                .join("\x00");
-            let entry = key_index.entry(key_str.clone()).or_insert_with(|| {
-                groups.push((key_vals.clone(), Vec::new()));
-                groups.len() - 1
-            });
-            groups[*entry].1.push(b.clone());
-        }
-
-        // If no bindings at all but RETURN has only aggregates (no group keys),
-        // emit one row with COUNT=0 etc.
-        if groups.is_empty() && group_items.is_empty() {
-            groups.push((vec![], vec![]));
-        }
-
-        for (key_vals, group) in &groups {
-            let mut row = Vec::new();
-            let mut key_iter = key_vals.iter();
-            for (_, expr) in &expanded_items {
+        // Identify aggregate positions once so the per-row loop avoids re-scanning.
+        // Each entry: (expanded_items index, is_count_star, arg expr, name, distinct).
+        let agg_positions: Vec<(usize, bool, Option<&Expr>, &str, bool)> = expanded_items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, e))| {
                 if let ReturnExpr::FunCall {
                     name,
                     distinct,
                     args,
-                } = expr
+                } = e
                 {
                     if is_aggregate_fn(name) {
-                        let v = apply_aggregate(name, *distinct, args, group, graph, cache)?;
-                        row.push(v);
-                    } else {
-                        // Scalar FunCall lives in group_items; its value is in key_vals.
-                        row.push(key_iter.next().cloned().unwrap_or(Value::Null));
+                        let is_cs = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
+                        let arg = if is_cs { None } else { args.first() };
+                        return Some((i, is_cs, arg, name.as_str(), *distinct));
                     }
-                } else {
-                    row.push(key_iter.next().cloned().unwrap_or(Value::Null));
+                }
+                None
+            })
+            .collect();
+
+        // Fast path: ungrouped COUNT(*) is just the binding count — no per-row work.
+        if group_items.is_empty() && agg_positions.len() == 1 && agg_positions[0].1
+        // is_count_star
+        {
+            columns = expanded_items.iter().map(|(col, _)| col.clone()).collect();
+            rows.push(vec![Value::Int(bindings.len() as i64)]);
+        } else {
+            // Build column names.
+            for (col, _) in &expanded_items {
+                columns.push(col.clone());
+            }
+
+            // Groups keyed by serialized group-key string.
+            // Value: (key_vals, Vec<Accumulator> — one per agg_position slot).
+            let mut groups: Vec<(Vec<Value>, Vec<Accumulator>)> = Vec::new();
+            let mut key_index: HashMap<String, usize> = HashMap::new();
+
+            for b in &bindings {
+                let key_vals: Result<Vec<Value>, CypherError> = group_items
+                    .iter()
+                    .map(|(_, e)| eval_return_expr(e, b, graph, cache))
+                    .collect();
+                let key_vals = key_vals?;
+                let key_str: String = key_vals
+                    .iter()
+                    .map(value_key)
+                    .collect::<Vec<_>>()
+                    .join("\x00");
+                let slot = *key_index.entry(key_str).or_insert_with(|| {
+                    let accums = agg_positions
+                        .iter()
+                        .map(|(_, _, _, name, distinct)| Accumulator::new(name, *distinct))
+                        .collect();
+                    groups.push((key_vals.clone(), accums));
+                    groups.len() - 1
+                });
+                let accums = &mut groups[slot].1;
+                for (ai, (_, is_cs, arg_expr, _, _)) in agg_positions.iter().enumerate() {
+                    let v = if *is_cs {
+                        Value::Null
+                    } else {
+                        eval_expr(arg_expr.unwrap(), b, graph, cache)?
+                    };
+                    accums[ai].feed(v, *is_cs);
                 }
             }
-            rows.push(row);
+
+            // If no bindings at all and no group keys: emit one zero-row.
+            if groups.is_empty() && group_items.is_empty() {
+                let accums = agg_positions
+                    .iter()
+                    .map(|(_, _, _, name, distinct)| Accumulator::new(name, *distinct))
+                    .collect();
+                groups.push((vec![], accums));
+            }
+
+            for (key_vals, accums) in groups {
+                let mut row = Vec::with_capacity(expanded_items.len());
+                let mut key_iter = key_vals.into_iter();
+                let mut agg_iter = accums.into_iter();
+                for (_, expr) in &expanded_items {
+                    if let ReturnExpr::FunCall { name, .. } = expr {
+                        if is_aggregate_fn(name) {
+                            row.push(agg_iter.next().unwrap().finalize());
+                        } else {
+                            row.push(key_iter.next().unwrap_or(Value::Null));
+                        }
+                    } else {
+                        row.push(key_iter.next().unwrap_or(Value::Null));
+                    }
+                }
+                rows.push(row);
+            }
         }
     } else {
         // No aggregation: simple row-by-row projection.
@@ -486,9 +527,31 @@ fn exec_with(
             )
             .collect();
 
-        type GroupEntry = (Vec<(String, Value)>, Vec<Binding>);
-        // Group bindings by key values.
-        let mut groups: Vec<GroupEntry> = Vec::new();
+        // Aggregate positions for the WITH clause.
+        let with_agg_specs: Vec<(String, bool, Option<&Expr>, &str, bool)> = agg_items
+            .iter()
+            .map(|ai| {
+                let col = ai
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| return_item_default_col(ai));
+                if let ReturnExpr::FunCall {
+                    name,
+                    distinct,
+                    args,
+                } = &ai.expr
+                {
+                    let is_cs = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
+                    let arg = if is_cs { None } else { args.first() };
+                    (col, is_cs, arg, name.as_str(), *distinct)
+                } else {
+                    unreachable!("agg_items filtered to FunCall aggregates")
+                }
+            })
+            .collect();
+
+        type WithGroupEntry = (Vec<(String, Value)>, Vec<Accumulator>);
+        let mut groups: Vec<WithGroupEntry> = Vec::new();
         let mut key_index: HashMap<String, usize> = HashMap::new();
 
         for b in &bindings {
@@ -508,34 +571,34 @@ fn exec_with(
                 .map(|(_, v)| value_key(v))
                 .collect::<Vec<_>>()
                 .join("\x00");
-            let entry = key_index.entry(key_str).or_insert_with(|| {
-                groups.push((key_pairs.clone(), Vec::new()));
+            let slot = *key_index.entry(key_str).or_insert_with(|| {
+                let accums = with_agg_specs
+                    .iter()
+                    .map(|(_, _, _, name, distinct)| Accumulator::new(name, *distinct))
+                    .collect();
+                groups.push((key_pairs.clone(), accums));
                 groups.len() - 1
             });
-            groups[*entry].1.push(b.clone());
+            let accums = &mut groups[slot].1;
+            for (ai, (_, is_cs, arg_expr, _, _)) in with_agg_specs.iter().enumerate() {
+                let v = if *is_cs {
+                    Value::Null
+                } else {
+                    eval_expr(arg_expr.unwrap(), b, graph, cache)?
+                };
+                accums[ai].feed(v, *is_cs);
+            }
         }
 
         // Produce one output Binding per group.
         let mut result = Vec::with_capacity(groups.len());
-        for (key_pairs, group) in &groups {
+        for (key_pairs, accums) in groups {
             let mut computed: HashMap<String, Value> = HashMap::new();
             for (col, val) in key_pairs {
-                computed.insert(col.clone(), val.clone());
+                computed.insert(col, val);
             }
-            for ai in &agg_items {
-                let col = ai
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| return_item_default_col(ai));
-                if let ReturnExpr::FunCall {
-                    name,
-                    distinct,
-                    args,
-                } = &ai.expr
-                {
-                    let v = apply_aggregate(name, *distinct, args, group, graph, cache)?;
-                    computed.insert(col, v);
-                }
+            for ((col, _, _, _, _), accum) in with_agg_specs.iter().zip(accums) {
+                computed.insert(col.clone(), accum.finalize());
             }
             result.push(Binding {
                 node_vars: HashMap::new(),
@@ -638,159 +701,167 @@ fn eval_scalar_funcall(
     }
 }
 
-/// Evaluate one aggregate function over a group of bindings.
-fn apply_aggregate(
-    name: &str,
-    distinct: bool,
-    args: &[Expr],
-    group: &[Binding],
-    graph: &ArchivedZeroCopyGraph,
-    cache: &mut ContentCache,
-) -> Result<Value, CypherError> {
-    // COUNT(*) sentinel: args = [Lit(Null)]
-    let is_count_star = matches!(args, [Expr::Lit(Literal::Null)]);
+/// Per-aggregate in-place accumulator — eliminates per-row `Binding` clones from
+/// the grouping loop. Each variant holds only the running state needed to produce
+/// the final scalar; no `Binding` references are retained after the row is consumed.
+///
+/// `u64` for Counter: the JVM Guava corpus has 55k+ Method nodes and a `usize`
+/// counter would require an explicit cast on finalize; `u64` makes the intent clear.
+enum Accumulator {
+    Counter(u64),
+    CounterDistinct(HashSet<String>),
+    Summer {
+        sum_i: i64,
+        sum_f: f64,
+        has_float: bool,
+    },
+    MinAccum(Option<Value>),
+    MaxAccum(Option<Value>),
+    Collector(Vec<Value>),
+    CollectorDistinct(Vec<Value>, HashSet<String>),
+    Avg {
+        sum: f64,
+        count: u64,
+    },
+}
 
-    match name {
-        "COUNT" => {
-            if is_count_star {
-                return Ok(Value::Int(group.len() as i64));
+impl Accumulator {
+    fn new(name: &str, distinct: bool) -> Self {
+        match name {
+            "COUNT" => {
+                if distinct {
+                    Accumulator::CounterDistinct(HashSet::new())
+                } else {
+                    Accumulator::Counter(0)
+                }
             }
-            let arg = &args[0];
-            if distinct {
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let mut cnt = 0i64;
-                for b in group {
-                    let v = eval_expr(arg, b, graph, cache)?;
-                    if !matches!(v, Value::Null) {
-                        let k = value_key(&v);
-                        if seen.insert(k) {
-                            cnt += 1;
+            "SUM" => Accumulator::Summer {
+                sum_i: 0,
+                sum_f: 0.0,
+                has_float: false,
+            },
+            "MIN" => Accumulator::MinAccum(None),
+            "MAX" => Accumulator::MaxAccum(None),
+            "COLLECT" => {
+                if distinct {
+                    Accumulator::CollectorDistinct(Vec::new(), HashSet::new())
+                } else {
+                    Accumulator::Collector(Vec::new())
+                }
+            }
+            "AVG" => Accumulator::Avg { sum: 0.0, count: 0 },
+            _ => Accumulator::Counter(0),
+        }
+    }
+
+    /// Feed one row's projected value into this accumulator.
+    /// `is_count_star`: if true this is `COUNT(*)` — value is ignored, row itself counts.
+    fn feed(&mut self, v: Value, is_count_star: bool) {
+        match self {
+            Accumulator::Counter(n) => {
+                if is_count_star || !matches!(v, Value::Null) {
+                    *n += 1;
+                }
+            }
+            Accumulator::CounterDistinct(seen) => {
+                if !matches!(v, Value::Null) {
+                    seen.insert(value_key(&v));
+                }
+            }
+            Accumulator::Summer {
+                sum_i,
+                sum_f,
+                has_float,
+            } => match v {
+                Value::Int(i) => *sum_i += i,
+                Value::Float(f) => {
+                    *sum_f += f;
+                    *has_float = true;
+                }
+                _ => {}
+            },
+            Accumulator::MinAccum(cur) => {
+                if !matches!(v, Value::Null) {
+                    *cur = Some(match cur.take() {
+                        None => v,
+                        Some(prev) => {
+                            if eval_binop(Op::Lt, &v, &prev) {
+                                v
+                            } else {
+                                prev
+                            }
                         }
-                    }
-                }
-                Ok(Value::Int(cnt))
-            } else {
-                let mut cnt = 0i64;
-                for b in group {
-                    let v = eval_expr(arg, b, graph, cache)?;
-                    if !matches!(v, Value::Null) {
-                        cnt += 1;
-                    }
-                }
-                Ok(Value::Int(cnt))
-            }
-        }
-        "SUM" => {
-            let arg = &args[0];
-            let mut sum_i: i64 = 0;
-            let mut sum_f: f64 = 0.0;
-            let mut has_float = false;
-            for b in group {
-                match eval_expr(arg, b, graph, cache)? {
-                    Value::Int(i) => sum_i += i,
-                    Value::Float(f) => {
-                        sum_f += f;
-                        has_float = true;
-                    }
-                    _ => {}
+                    });
                 }
             }
-            if has_float {
-                Ok(Value::Float(sum_f + sum_i as f64))
-            } else {
-                Ok(Value::Int(sum_i))
-            }
-        }
-        "MIN" => {
-            let arg = &args[0];
-            let mut min: Option<Value> = None;
-            for b in group {
-                let v = eval_expr(arg, b, graph, cache)?;
-                if matches!(v, Value::Null) {
-                    continue;
-                }
-                min = Some(match min {
-                    None => v,
-                    Some(cur) => {
-                        if eval_binop(Op::Lt, &v, &cur) {
-                            v
-                        } else {
-                            cur
+            Accumulator::MaxAccum(cur) => {
+                if !matches!(v, Value::Null) {
+                    *cur = Some(match cur.take() {
+                        None => v,
+                        Some(prev) => {
+                            if eval_binop(Op::Gt, &v, &prev) {
+                                v
+                            } else {
+                                prev
+                            }
                         }
-                    }
-                });
-            }
-            Ok(min.unwrap_or(Value::Null))
-        }
-        "MAX" => {
-            let arg = &args[0];
-            let mut max: Option<Value> = None;
-            for b in group {
-                let v = eval_expr(arg, b, graph, cache)?;
-                if matches!(v, Value::Null) {
-                    continue;
-                }
-                max = Some(match max {
-                    None => v,
-                    Some(cur) => {
-                        if eval_binop(Op::Gt, &v, &cur) {
-                            v
-                        } else {
-                            cur
-                        }
-                    }
-                });
-            }
-            Ok(max.unwrap_or(Value::Null))
-        }
-        "AVG" => {
-            let arg = &args[0];
-            let mut sum: f64 = 0.0;
-            let mut cnt: i64 = 0;
-            for b in group {
-                match eval_expr(arg, b, graph, cache)? {
-                    Value::Int(i) => {
-                        sum += i as f64;
-                        cnt += 1;
-                    }
-                    Value::Float(f) => {
-                        sum += f;
-                        cnt += 1;
-                    }
-                    _ => {}
+                    });
                 }
             }
-            if cnt == 0 {
-                Ok(Value::Null)
-            } else {
-                Ok(Value::Float(sum / cnt as f64))
-            }
-        }
-        "COLLECT" => {
-            let arg = &args[0];
-            let mut items: Vec<Value> = Vec::new();
-            let mut seen: Option<std::collections::HashSet<String>> = if distinct {
-                Some(std::collections::HashSet::new())
-            } else {
-                None
-            };
-            for b in group {
-                let v = eval_expr(arg, b, graph, cache)?;
-                if matches!(v, Value::Null) {
-                    continue;
+            Accumulator::Collector(items) => {
+                if !matches!(v, Value::Null) {
+                    items.push(v);
                 }
-                if let Some(ref mut s) = seen {
-                    if !s.insert(value_key(&v)) {
-                        continue;
+            }
+            Accumulator::CollectorDistinct(items, seen) => {
+                if !matches!(v, Value::Null) {
+                    let k = value_key(&v);
+                    if seen.insert(k) {
+                        items.push(v);
                     }
                 }
-                items.push(v);
             }
-            Ok(Value::List(items))
+            Accumulator::Avg { sum, count } => match v {
+                Value::Int(i) => {
+                    *sum += i as f64;
+                    *count += 1;
+                }
+                Value::Float(f) => {
+                    *sum += f;
+                    *count += 1;
+                }
+                _ => {}
+            },
         }
-        _ => Err(CypherError::Exec {
-            msg: format!("unknown aggregate function '{name}'"),
-        }),
+    }
+
+    fn finalize(self) -> Value {
+        match self {
+            Accumulator::Counter(n) => Value::Int(n as i64),
+            Accumulator::CounterDistinct(seen) => Value::Int(seen.len() as i64),
+            Accumulator::Summer {
+                sum_i,
+                sum_f,
+                has_float,
+            } => {
+                if has_float {
+                    Value::Float(sum_f + sum_i as f64)
+                } else {
+                    Value::Int(sum_i)
+                }
+            }
+            Accumulator::MinAccum(v) => v.unwrap_or(Value::Null),
+            Accumulator::MaxAccum(v) => v.unwrap_or(Value::Null),
+            Accumulator::Collector(items) => Value::List(items),
+            Accumulator::CollectorDistinct(items, _) => Value::List(items),
+            Accumulator::Avg { sum, count } => {
+                if count == 0 {
+                    Value::Null
+                } else {
+                    Value::Float(sum / count as f64)
+                }
+            }
+        }
     }
 }
 
@@ -3119,6 +3190,113 @@ mod tests {
             assert!(
                 r.rows.is_empty(),
                 "non-list InCollection must return false: {r:?}"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Accumulator semantics: empty input, NULL-skipping, collect order,
+    // GROUP BY with multiple aggregates.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn agg_count_star_empty_bindings_returns_zero() {
+        // No nodes of kind Class: COUNT(*) over empty binding set = 0 (not NULL).
+        with_lone(|g| {
+            let q = parse("MATCH (n:Class) RETURN COUNT(*)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Int(0));
+        });
+    }
+
+    #[test]
+    fn agg_count_expr_empty_bindings_returns_zero() {
+        with_lone(|g| {
+            let q = parse("MATCH (n:Class) RETURN COUNT(n.name)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Int(0));
+        });
+    }
+
+    #[test]
+    fn agg_min_max_empty_bindings_return_null() {
+        // OpenCypher: MIN/MAX over empty set = NULL.
+        with_lone(|g| {
+            let q = parse("MATCH (n:Class) RETURN MIN(n.uid), MAX(n.uid)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Null, "MIN empty -> Null");
+            assert_eq!(r.rows[0][1], Value::Null, "MAX empty -> Null");
+        });
+    }
+
+    #[test]
+    fn agg_avg_empty_bindings_returns_null() {
+        with_lone(|g| {
+            let q = parse("MATCH (n:Class) RETURN AVG(n.uid)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Null, "AVG empty -> Null");
+        });
+    }
+
+    #[test]
+    fn agg_count_star_single_binding() {
+        // One node -> COUNT(*) = 1.
+        with_lone(|g| {
+            let q = parse("MATCH (n:Function) RETURN COUNT(*)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows[0][0], Value::Int(1));
+        });
+    }
+
+    #[test]
+    fn agg_count_star_many_bindings() {
+        // Fan fixture has 3 Function nodes.
+        with_fan(|g| {
+            let q = parse("MATCH (n:Function) RETURN COUNT(*)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows[0][0], Value::Int(3));
+        });
+    }
+
+    #[test]
+    fn agg_collect_preserves_insertion_order() {
+        // fan -Calls-> leaf_a (edge 0), fan -Calls-> leaf_b (edge 1).
+        // Pattern traversal order must be preserved by COLLECT.
+        with_fan(|g| {
+            let q =
+                parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN COLLECT(b.name)").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            let list = match &r.rows[0][0] {
+                Value::List(v) => v.clone(),
+                other => panic!("expected List, got {other:?}"),
+            };
+            assert_eq!(list.len(), 2);
+            assert_eq!(list[0], Value::Str("leaf_a".into()));
+            assert_eq!(list[1], Value::Str("leaf_b".into()));
+        });
+    }
+
+    #[test]
+    fn agg_group_by_multiple_aggregates() {
+        // fan->leaf_a (conf=0.8), fan->leaf_b (conf=0.6).
+        // GROUP BY a.name with COUNT(*) and SUM(r.confidence) in same RETURN.
+        with_fan(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a.name, COUNT(*), SUM(r.confidence)",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Str("fan".into()));
+            assert_eq!(r.rows[0][1], Value::Int(2));
+            assert!(
+                matches!(r.rows[0][2], Value::Float(f) if (f - 1.4).abs() < 1e-6),
+                "SUM should be ~1.4, got {:?}",
+                r.rows[0][2]
             );
         });
     }
