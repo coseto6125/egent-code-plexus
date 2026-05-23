@@ -208,12 +208,23 @@ pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, S
 /// their parsers emit variants as free `RawNode`s without an enclosing-enum
 /// back-reference.
 pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
-    let class_spans: Vec<(String, Span)> = nodes
+    // Combined container pool: classes + namespaces/modules. Tightest span wins
+    // regardless of container kind so a method inside `class Foo` inside
+    // `namespace App` gets `owner_class = "Foo"` (the class, not the namespace).
+    // PR #359's `scope_defines::Pass2` then emits `Namespace → child` only for
+    // nodes whose owner_class matches a Namespace/Module name in the same file
+    // — class members fall through cleanly because their owner is a class.
+    let owner_spans: Vec<(String, Span)> = nodes
         .iter()
         .filter(|n| {
             matches!(
                 n.kind,
-                NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
+                NodeKind::Class
+                    | NodeKind::Struct
+                    | NodeKind::Trait
+                    | NodeKind::Interface
+                    | NodeKind::Namespace
+                    | NodeKind::Module
             )
         })
         .map(|n| (n.name.clone(), n.span))
@@ -226,7 +237,7 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
         .map(|n| (n.name.clone(), n.span))
         .collect();
 
-    if class_spans.is_empty() && enum_spans.is_empty() {
+    if owner_spans.is_empty() && enum_spans.is_empty() {
         return;
     }
 
@@ -236,8 +247,8 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
             node.kind,
             NodeKind::Method | NodeKind::Function | NodeKind::Constructor | NodeKind::Property
         ) {
-            // Members: find the tightest enclosing class span.
-            class_spans
+            // Members: find the tightest enclosing container span.
+            owner_spans
                 .iter()
                 .filter(|(_, s)| span_contains(*s, span))
                 .min_by_key(|(_, s)| span_area(*s))
@@ -250,10 +261,13 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
                 | NodeKind::Struct
                 | NodeKind::Enum
                 | NodeKind::Annotation
+                | NodeKind::Namespace
+                | NodeKind::Module
         ) {
-            // Nested type declarations: find the tightest enclosing class span
-            // that is strictly larger (exclude self-containment where spans are equal).
-            class_spans
+            // Nested type / nested namespace declarations: find the tightest
+            // enclosing container span that is strictly larger (exclude
+            // self-containment where spans are equal).
+            owner_spans
                 .iter()
                 .filter(|(_, s)| *s != span && span_contains(*s, span))
                 .min_by_key(|(_, s)| span_area(*s))
@@ -268,7 +282,10 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
         } else {
             continue;
         };
-        if owner.is_some() {
+        // Preserve owner_class set explicitly by the parser (e.g. Rust's
+        // enclosing-impl detection at emit time). Span-based stamping only
+        // fills in the gap when nothing else has claimed ownership.
+        if owner.is_some() && node.owner_class.is_none() {
             node.owner_class = owner;
         }
     }

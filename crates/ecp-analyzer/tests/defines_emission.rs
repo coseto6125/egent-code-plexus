@@ -55,12 +55,14 @@ fn count_edges_of_type(graph: &ZeroCopyGraph, rel: RelType) -> usize {
     graph.edges.iter().filter(|e| e.rel_type == rel).count()
 }
 
-// ── 1. Namespace + Class — C# (both top-level from File perspective) ─────────
+// ── 1. Namespace + Class — C# ─────────────────────────────────────────────────
 //
-// The C# parser emits namespace as NodeKind::Namespace with owner_class=None,
-// and the enclosed class Foo with owner_class=None (stamp_owner_class_by_span
-// only stamps for class-type containers, not namespaces). Both receive
-// File→Defines edges via the owner_class=None gate.
+// `stamp_owner_class_by_span` now treats Namespace as a container kind, so
+// the enclosed `class Foo` carries `owner_class = Some("App.Api")` and
+// `scope_defines::Pass2` emits `Namespace(App.Api) → Class(Foo)` instead of
+// `File → Foo`. The no-duplication invariant from `scope_defines.rs:9-11`
+// then keeps `File → Foo` suppressed (members of a Namespace/Module are
+// covered by their container, not the file).
 
 #[test]
 fn csharp_namespace_and_enclosed_class() {
@@ -77,10 +79,15 @@ namespace App.Api {
         pairs.iter().any(|(s, t)| s == "Api.cs" && t == "App.Api"),
         "expected File->Defines->Namespace(App.Api); got: {pairs:?}"
     );
-    // File (Api.cs) → Class (Foo) — namespace members have owner_class=None
+    // Namespace (App.Api) → Class (Foo) — FU-016 Pass2 emission
     assert!(
-        pairs.iter().any(|(s, t)| s == "Api.cs" && t == "Foo"),
-        "expected File->Defines->Class(Foo); got: {pairs:?}"
+        pairs.iter().any(|(s, t)| s == "App.Api" && t == "Foo"),
+        "expected Namespace(App.Api)->Defines->Class(Foo); got: {pairs:?}"
+    );
+    // No duplicate File->Foo edge — Foo is owned by the namespace.
+    assert!(
+        !pairs.iter().any(|(s, t)| s == "Api.cs" && t == "Foo"),
+        "File->Foo should NOT be emitted when Foo is namespaced; got: {pairs:?}"
     );
 }
 
@@ -107,9 +114,11 @@ function bar() {}
 
 // ── 3. Module + nested Function — Rust ───────────────────────────────────────
 //
-// Rust `mod foo { pub fn bar() {} }` emits foo (Module, owner_class=None) and
-// bar (Function, owner_class=None — Rust only sets owner_class for impl blocks,
-// not module items). Both receive File→Defines edges.
+// `mod foo { pub fn bar() {} }` — FU-016 added a `stamp_owner_class_by_span`
+// pass to the Rust parser tail, so `bar` carries `owner_class = Some("foo")`
+// and `scope_defines::Pass2` emits `Module(foo) → Function(bar)` instead of
+// `File → bar`. `impl Foo` ownership set earlier in the parser is preserved
+// via the `owner_class.is_none()` guard in `framework_helpers`.
 
 #[test]
 fn rust_module_and_nested_function() {
@@ -126,10 +135,15 @@ mod foo {
         pairs.iter().any(|(s, t)| s == "lib.rs" && t == "foo"),
         "expected File->Defines->Module(foo); got: {pairs:?}"
     );
-    // File → Function(bar) — bar is also top-level from SymbolTable perspective
+    // Module(foo) → Function(bar) — FU-016 Pass2 emission
     assert!(
-        pairs.iter().any(|(_, t)| t == "bar"),
-        "expected Defines edge targeting function `bar`; got: {pairs:?}"
+        pairs.iter().any(|(s, t)| s == "foo" && t == "bar"),
+        "expected Module(foo)->Defines->Function(bar); got: {pairs:?}"
+    );
+    // No duplicate File->bar edge — bar is owned by the module.
+    assert!(
+        !pairs.iter().any(|(s, t)| s == "lib.rs" && t == "bar"),
+        "File->bar should NOT be emitted when bar is module-owned; got: {pairs:?}"
     );
 }
 

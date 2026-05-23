@@ -557,6 +557,13 @@ impl LanguageProvider for RustProvider {
         let path_literals =
             (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
 
+        // FU-016: fill module ownership for items inside `mod foo { ... }`.
+        // `enclosing_impl_type` already populated `impl Foo` method ownership;
+        // `stamp_owner_class_by_span` preserves those (see the `is_none()` guard
+        // in framework_helpers) and only fills the gap for module-resident
+        // free items, so `scope_defines::Pass2` can emit `Module(foo) → bar`.
+        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
