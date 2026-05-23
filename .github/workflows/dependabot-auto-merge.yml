@@ -39,6 +39,13 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # auto-update-pr-branches.yml uses GraphQL REBASE under PAT,
+          # which rewrites the committer and invalidates Dependabot's
+          # original GPG signature. Without this flag, every post-rebase
+          # sync event fails at "PR is not from Dependabot". The author
+          # filter (`if: user.login == 'dependabot[bot]'` at job level)
+          # still guarantees only Dependabot-authored PRs reach this step.
+          skip-commit-verification: true
 
       - name: Enable auto-merge for patch + minor
         if: |
