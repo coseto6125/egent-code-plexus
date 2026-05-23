@@ -204,10 +204,128 @@ pub struct PrAnalyzeArgs {
 }
 
 pub fn run(args: PrAnalyzeArgs, _cli_graph: &std::path::Path) -> Result<(), EcpError> {
-    // Stub — implemented incrementally in later tasks.
-    let _ = args;
-    eprintln!("pr-analyze: not yet implemented");
+    // 1. Shell out to ecp impact to get changed symbols + impact closure
+    let impact = run_impact_subprocess(&args.baseline)?;
+    let changed_files: Vec<String> = impact.changed_files();
+    let changed_files_pb: Vec<std::path::PathBuf> =
+        changed_files.iter().map(std::path::PathBuf::from).collect();
+
+    // 2. Classify
+    let area = classify_area(&changed_files_pb);
+    let impact_set_names = impact.impact_set_names();
+    let risk = classify_risk(impact_set_names.len());
+
+    // 3. Cross-PR conflicts (real gh client unless --dry-run)
+    let changed_symbol_names = impact.changed_symbol_names();
+    let gh = RealGhClient;
+    let conflicts = if args.dry_run {
+        Vec::new() // dry-run skips network — preserves test ergonomics
+    } else {
+        detect_cross_pr_conflicts(
+            &gh,
+            &args.queue_label,
+            args.pr_number,
+            &changed_symbol_names,
+        )?
+    };
+
+    // 4. Update own cache comment so future sibling analyses see this PR's impact
+    if !args.dry_run {
+        gh.write_cached_impact(args.pr_number, &impact_set_names)?;
+    }
+
+    // 5. Resolve head/baseline SHAs via git rev-parse for reporting
+    let head_sha = git_rev_parse(&args.pr_head)?;
+    let baseline_sha = git_rev_parse(&args.baseline)?;
+
+    // 6. Build suggested labels
+    let mut suggested_labels = Vec::new();
+    if let Some(a) = area {
+        let area_str = serde_json::to_value(a)
+            .map_err(|e| EcpError::InvalidArgument(format!("encode area: {e}")))?;
+        let area_kebab = area_str
+            .as_str()
+            .ok_or_else(|| EcpError::InvalidArgument("area not a string".into()))?;
+        suggested_labels.push(format!("ecp:area-{area_kebab}"));
+    }
+    let risk_str = serde_json::to_value(risk)
+        .map_err(|e| EcpError::InvalidArgument(format!("encode risk: {e}")))?;
+    let risk_kebab = risk_str
+        .as_str()
+        .ok_or_else(|| EcpError::InvalidArgument("risk not a string".into()))?;
+    suggested_labels.push(format!("ecp:risk-{risk_kebab}"));
+
+    // 7. Build commit status suggestion
+    let suggested_status = if conflicts.is_empty() {
+        StatusSuggestion {
+            context: "ecp/cross-pr-conflict".to_string(),
+            state: "success".to_string(),
+            description: "No semantic conflict with queued PRs".to_string(),
+        }
+    } else {
+        let prs: Vec<String> = conflicts.iter().map(|c| format!("#{}", c.pr)).collect();
+        let mut desc = format!("Conflicts with {}", prs.join(", "));
+        if desc.len() > 140 {
+            desc.truncate(137);
+            desc.push_str("...");
+        }
+        StatusSuggestion {
+            context: "ecp/cross-pr-conflict".to_string(),
+            state: "pending".to_string(),
+            description: desc,
+        }
+    };
+
+    // 8. Assemble + emit
+    let out = PrAnalyzeOutput {
+        pr_number: args.pr_number,
+        head_sha,
+        baseline_sha,
+        area,
+        risk,
+        impact_size: impact_set_names.len(),
+        changed_symbols: changed_symbol_names,
+        cross_pr_conflicts: conflicts,
+        suggested_labels,
+        suggested_status,
+    };
+
+    match args.format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&out)
+                    .map_err(|e| EcpError::InvalidArgument(format!("emit JSON: {e}")))?
+            );
+        }
+        _ => {
+            eprintln!(
+                "PR #{}  area={:?}  risk={:?}  impact={}  conflicts={}",
+                out.pr_number,
+                out.area,
+                out.risk,
+                out.impact_size,
+                out.cross_pr_conflicts.len()
+            );
+        }
+    }
+
     Ok(())
+}
+
+fn git_rev_parse(reference: &str) -> Result<String, EcpError> {
+    use std::process::Command;
+    let out = Command::new("git")
+        .args(["rev-parse", reference])
+        .output()
+        .map_err(|e| EcpError::InvalidArgument(format!("git rev-parse {reference}: {e}")))?;
+    if !out.status.success() {
+        return Err(EcpError::InvalidArgument(format!(
+            "git rev-parse {reference} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn path_area(p: &Path) -> Option<Area> {
