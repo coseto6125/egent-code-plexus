@@ -7,24 +7,25 @@
 //! resolution in `repo_identity` that's 5-12ms of pure startup overhead on
 //! every command — visible in the 10ms warm-query budget.
 //!
-//! Cache is keyed by canonical cwd. HEAD entries piggy-back on the
-//! `<common_dir>/HEAD` mtime so mid-process checkouts (`ecp diff` does this
+//! Cache is keyed by canonical cwd. HEAD entries piggy-back on the current
+//! HEAD target's mtime so mid-process commits/checkouts (`ecp diff` does this
 //! via `GitGuard`) transparently invalidate without explicit `clear()` calls.
 //! Common-dir entries cache for the process lifetime — git's common-dir does
 //! not move under us.
 
 use std::collections::HashMap;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
+use std::{fs, io};
 
 use crate::git::safe_exec;
 
 #[derive(Default)]
 struct Cache {
-    /// `(value, HEAD-file-mtime)` — mtime stamped from `<common_dir>/HEAD`
-    /// at insert time; on hit, restat and invalidate on mismatch.
+    /// `(value, HEAD-target-mtime)` — mtime stamped from the loose ref pointed
+    /// at by `<common_dir>/HEAD`, or HEAD itself for detached checkouts.
+    /// On hit, restat and invalidate on mismatch.
     head_sha: HashMap<PathBuf, (Option<String>, Option<SystemTime>)>,
     common_dir: HashMap<PathBuf, io::Result<PathBuf>>,
 }
@@ -42,7 +43,7 @@ fn canon_key(cwd: &Path) -> PathBuf {
 
 /// Cached `git rev-parse HEAD` → 40-char hex. None when not a git repo or git
 /// fails. Cache key is canonical cwd; HEAD mutations (`git commit`, `git
-/// checkout`, etc.) invalidate transparently via `<common_dir>/HEAD` mtime.
+/// checkout`, etc.) invalidate transparently via HEAD target mtime.
 pub fn head_sha(cwd: &Path) -> Option<String> {
     let key = canon_key(cwd);
     let head_mtime = head_file_mtime(cwd);
@@ -61,12 +62,22 @@ pub fn head_sha(cwd: &Path) -> Option<String> {
     computed
 }
 
-/// mtime of `<common_dir>/HEAD` — sentinel for cache invalidation. Returns
-/// `None` when the file isn't statable; the caller treats `None == None` as
-/// a valid cache hit (i.e. non-git repos stay cached for the process).
+/// mtime of HEAD's current target — sentinel for cache invalidation. For a
+/// normal branch this is `.git/refs/heads/<branch>`, because `.git/HEAD`
+/// usually stays unchanged across commits. Detached HEAD uses `.git/HEAD`.
+/// Returns `None` when no git sentinel is statable; the caller treats
+/// `None == None` as a valid cache hit for non-git synthetic SHAs.
 fn head_file_mtime(cwd: &Path) -> Option<SystemTime> {
     let common = common_dir(cwd).ok()?;
-    std::fs::metadata(common.join("HEAD"))
+    let head = common.join("HEAD");
+    let head_content = fs::read_to_string(&head).ok()?;
+    let path = head_content
+        .strip_prefix("ref:")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or(head, |r| common.join(r));
+    fs::metadata(&path)
+        .or_else(|_| fs::metadata(common.join("packed-refs")))
         .ok()
         .and_then(|m| m.modified().ok())
 }
