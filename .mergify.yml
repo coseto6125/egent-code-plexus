@@ -39,7 +39,7 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-      - check-success=ecp/cross-pr-conflict
+      - status-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
     batch_size: 10
@@ -56,7 +56,7 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-      - check-success=ecp/cross-pr-conflict
+      - status-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
     batch_size: 1
@@ -72,7 +72,7 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-      - check-success=ecp/cross-pr-conflict
+      - status-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
     batch_size: 3
@@ -89,7 +89,7 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-      - check-success=ecp/cross-pr-conflict
+      - status-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
     batch_size: 20
@@ -108,7 +108,7 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-      - check-success=ecp/cross-pr-conflict
+      - status-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
     batch_size: 2
