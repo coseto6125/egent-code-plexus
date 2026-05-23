@@ -248,6 +248,7 @@ fn format_hits_emits_legacy_style_called_by_and_calls_block() {
         signature: "Function parseConfig".to_string(),
         caller_count: 2,
         callers: vec!["loadSettings".to_string(), "initApp".to_string()],
+        callee_count: 1,
         callees: vec!["tokenize".to_string()],
         category: ecp_core::graph::FileCategory::Source,
     };
@@ -278,6 +279,7 @@ fn format_hits_skips_empty_caller_callee_lines() {
         signature: "Function orphan".to_string(),
         caller_count: 0,
         callers: vec![],
+        callee_count: 0,
         callees: vec![],
         category: ecp_core::graph::FileCategory::Source,
     };
