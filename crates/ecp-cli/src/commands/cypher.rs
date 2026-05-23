@@ -110,10 +110,26 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
 /// projected column. The reader can still tell rows are scalars from
 /// `columns.len() == 1`; the saving is one nesting level (plus a
 /// disorienting `[1]:` toon prefix per row).
+///
+/// The executor SHOULD emit `row.len() == columns.len()` for every row,
+/// but degenerate empty rows have historically been tolerated and the
+/// unit test `build_payload_single_column_empty_row_yields_null` pins
+/// the null-fallback contract. An LLM that sees `null` cannot tell a
+/// legitimate null projection (`OPTIONAL MATCH` miss) apart from this
+/// defensive fallback — so emit a stderr warning whenever the fallback
+/// fires. The JSON shape stays flat null for backwards compatibility.
 fn build_payload(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
     let rows_json: Vec<serde_json::Value> = if columns.len() == 1 {
         rows.into_iter()
-            .map(|mut row| row.pop().unwrap_or(serde_json::Value::Null))
+            .map(|mut row| match row.pop() {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "warning: cypher executor returned empty row for single-column projection — surfacing as null"
+                    );
+                    serde_json::Value::Null
+                }
+            })
             .collect()
     } else {
         rows.into_iter().map(serde_json::Value::Array).collect()

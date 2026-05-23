@@ -99,6 +99,8 @@ fn build_payload_with_hints(
     let mut total_fetches: u64 = 0;
     let mut drift_count: u64 = 0;
     let mut filter_matched_count: usize = 0;
+    let mut unparseable_fetches: u64 = 0;
+    let mut unknown_target_shapes: Vec<serde_json::Value> = Vec::new();
 
     for edge in graph.edges.iter() {
         if !matches!(&edge.rel_type, ArchivedRelType::Fetches) {
@@ -108,11 +110,20 @@ fn build_payload_with_hints(
 
         let reason_str = edge.reason.resolve(&graph.string_pool);
         let Some(parsed) = parse_reason(reason_str) else {
+            unparseable_fetches += 1;
             continue;
         };
 
         let target_idx = edge.target.to_native();
         let Some((resp_keys, err_keys)) = shapes.get(&target_idx) else {
+            // Surface "there's a Fetches edge here but the target has no
+            // ResponseShape/ErrorShape on file" instead of dropping silently.
+            // LLMs need to distinguish "no drift" from "couldn't check".
+            let route_node = &graph.nodes[target_idx as usize];
+            unknown_target_shapes.push(serde_json::json!({
+                "route_uid": route_node.uid.to_native().to_string(),
+                "route_name": route_node.name.resolve(&graph.string_pool),
+            }));
             continue;
         };
 
@@ -188,6 +199,9 @@ fn build_payload_with_hints(
         "total_fetches": total_fetches,
         "drift_count": drift_count,
         "drift": report_entries,
+        // Always-written silent-drop signals (safe defaults 0 / []).
+        "unparseable_fetches": unparseable_fetches,
+        "unknown_target_shapes": unknown_target_shapes,
     });
     Ok((value, hints))
 }
@@ -195,12 +209,22 @@ fn build_payload_with_hints(
 fn render_text(value: &serde_json::Value) -> serde_json::Value {
     let total = value["total_fetches"].as_u64().unwrap_or(0);
     let drift_count = value["drift_count"].as_u64().unwrap_or(0);
+    let unparseable = value["unparseable_fetches"].as_u64().unwrap_or(0);
+    let unknown_shapes = value["unknown_target_shapes"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     let header = if drift_count == 0 {
         format!("shape_check: {total} Fetches edge(s), 0 drift detected.")
     } else {
         format!("shape_check: {total} Fetches edge(s), {drift_count} with drift")
     };
     let mut lines: Vec<serde_json::Value> = vec![serde_json::Value::String(header)];
+    if unparseable > 0 || unknown_shapes > 0 {
+        lines.push(serde_json::Value::String(format!(
+            "note: {unparseable} unparseable Fetches reason(s), {unknown_shapes} route(s) with no known ResponseShape — drift was NOT checked for these"
+        )));
+    }
     if let Some(drift) = value["drift"].as_array() {
         if !drift.is_empty() {
             lines.push(serde_json::Value::String(String::new()));
