@@ -65,6 +65,37 @@ const SWIFT_FRAMEWORKS: &[FrameworkPatternSpec] = &[
     },
 ];
 
+// ── FU-2026-05-23-009: Swift TransactionScope audit outcome ──
+//
+// AUDIT VERDICT: wontfix in v1. No canonical Swift transaction pattern.
+//
+// Investigated patterns:
+//   1. Core Data `context.performAndWait { ... }` — NOT a true transaction;
+//      lock-based thread-safety, not ACID. Excluded.
+//   2. GRDB `dbQueue.write { db in ... }` — True transaction; requires
+//      receiver-type inference (`DatabaseQueue` type) to avoid false positives.
+//   3. Realm `realm.write { ... }` — True transaction; same challenge.
+//   4. SQLite.swift `db.transaction { ... }` — Clearest pattern (named
+//      literally "transaction"), but generic `obj.transaction { ... }` would
+//      fire on many non-DB receiver types (false positive risk).
+//
+// Swift ecosystem is fragmented across iOS (CoreData), server-side (GRDB),
+// and legacy code (SQLite.swift / plain Realm). Implementing a robust
+// detector requires:
+//   - Tracking imports (CoreData, GRDB, RealmSwift, SQLite)
+//   - Inferring receiver types from variable assignments or known names
+//   - Per-framework heuristics (dbQueue vs realm vs db vs connection)
+//   - Tree-sitter query extension for trailing-closure call patterns
+//
+// Estimated cost: 120-150 LOC parser + 10-15 LOC tree-sitter query.
+// Risk: High false-positive rate without type inference (any obj.write { ... }).
+//
+// FrameworkId::SwiftTransactional slot is reserved by setup commit
+// (fb20e5dc). Revisit as FU if user demand surfaces for a specific framework
+// (e.g., "I need GRDB transaction tracking"). Until then, zero scopes emitted
+// is the correct outcome — no framework found, not a missing detector.
+//
+
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
