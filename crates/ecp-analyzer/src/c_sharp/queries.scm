@@ -130,3 +130,21 @@
 (file_scoped_namespace_declaration
   name: (_) @namespace.name
 ) @namespace
+
+;; ---- BlindSpot patterns (FU-001 P2c) ----
+;; Activator.CreateInstance(<expr>) — runtime type instantiation. Receiver
+;; constrained to direct identifier "Activator" to exclude `a.b.CreateInstance`.
+((invocation_expression
+   function: (member_access_expression
+     expression: (identifier) @_obj
+     name: (identifier) @_m)) @blind.activator_create
+  (#eq? @_obj "Activator")
+  (#eq? @_m "CreateInstance"))
+
+;; <any>.Invoke(<args>) — reflective MethodInfo.Invoke or Delegate.Invoke.
+;; Per Constraint 3 the outermost call in a chain
+;; `t.GetMethod(name).Invoke(target, args)` is the dispatch site.
+((invocation_expression
+   function: (member_access_expression
+     name: (identifier) @_m)) @blind.method_invoke
+  (#eq? @_m "Invoke"))
