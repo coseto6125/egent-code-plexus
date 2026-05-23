@@ -74,7 +74,7 @@ impl CommitIndex {
             };
             let freshness = Freshness {
                 generation: parsed.generation,
-                mtime: commit_dir_freshness(&entry.path()),
+                mtime: commit_dir_mtime(&entry.path()),
             };
             match candidates.get(&parsed.sha) {
                 Some((_existing, existing)) if *existing >= freshness => {}
@@ -137,7 +137,15 @@ impl CommitIndex {
     }
 }
 
-fn commit_dir_freshness(path: &Path) -> SystemTime {
+/// Read the freshest mtime available on a commit dir: prefer `meta.json`,
+/// fall back to `graph.bin`, finally the dir itself. Returns
+/// `SystemTime::UNIX_EPOCH` if every stat fails — that loses every
+/// same-SHA tie under the [`Freshness`] order, which is the safe default
+/// for a half-broken / not-yet-published dir.
+///
+/// Only the *secondary* tie-breaker after the parsed [`Generation`] suffix —
+/// generation tuples are the authoritative freshness signal post-FU-045.
+fn commit_dir_mtime(path: &Path) -> SystemTime {
     path.join("meta.json")
         .metadata()
         .and_then(|m| m.modified())

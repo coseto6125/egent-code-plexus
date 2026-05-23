@@ -8,8 +8,8 @@ use crate::commit_lookup::CommitIndex;
 use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use ecp_core::registry::{
-    resolve_home_ecp, CommitBuildMeta, EmbeddingStatus, RefRecord, RegistryFile, RepoAlias,
-    RepoMeta, SourceType, BUILDER_FINGERPRINT,
+    resolve_home_ecp, CommitBuildMeta, EmbeddingStatus, Generation, RefRecord, RegistryFile,
+    RepoAlias, RepoMeta, SourceType, BUILDER_FINGERPRINT,
 };
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
@@ -318,13 +318,17 @@ fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("commit");
-    let generation = format!(
-        "{name}.gen.{}.{}.{}",
-        chrono::Utc::now().timestamp_millis(),
-        std::process::id(),
-        GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    base_commit_dir.with_file_name(generation)
+    // `Generation::format_suffix` is the single source of truth for the
+    // on-disk suffix shape, mirrored by `parse_generation_suffix` in
+    // `ecp-core/src/registry/dirname.rs`. Wrap-around at u32::MAX of the
+    // process-local counter is safe — the (timestamp_ms, pid) prefix still
+    // disambiguates across the wrap window.
+    let gen = Generation {
+        timestamp_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        pid: std::process::id(),
+        counter: GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed) as u32,
+    };
+    base_commit_dir.with_file_name(format!("{name}{}", gen.format_suffix()))
 }
 
 fn sha_bytes(sha_hex: &str) -> Option<[u8; 20]> {

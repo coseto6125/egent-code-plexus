@@ -43,6 +43,17 @@ pub struct Generation {
     pub counter: u32,
 }
 
+impl Generation {
+    /// `.gen.<timestamp_ms>.<pid>.<counter>` — the on-disk suffix shape.
+    /// Single source of truth for the wire format; both
+    /// [`CommitDirName::format`] and `orchestrator::publish_dir_for`
+    /// concatenate this onto the base dir name so a future format change
+    /// (e.g. a fourth field) touches one site, not three.
+    pub fn format_suffix(&self) -> String {
+        format!(".gen.{}.{}.{}", self.timestamp_ms, self.pid, self.counter)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitDirName {
     pub source_type: SourceType,
@@ -114,7 +125,7 @@ impl CommitDirName {
         };
         match self.generation {
             None => base,
-            Some(g) => format!("{base}.gen.{}.{}.{}", g.timestamp_ms, g.pid, g.counter),
+            Some(g) => format!("{base}{}", g.format_suffix()),
         }
     }
 
@@ -127,7 +138,7 @@ impl CommitDirName {
 /// formats:
 /// - `1234567890123.4567.42` → `(1234567890123, 4567, 42)` (current 3-tuple)
 /// - `1234567890123.4567`    → `(1234567890123, 4567, 0)` (no counter — early prototype)
-/// - `1234567890123`         → `(1234567890123, 0, 0)` (single-int, pre-PR-#???)
+/// - `1234567890123`         → `(1234567890123, 0, 0)` (older single-int format)
 /// - `not-a-number...`       → `None` (unrecognised; tie-breaker treats as base)
 ///
 /// `None` is the safe fallback because the call site treats `None < Some(_)`,
