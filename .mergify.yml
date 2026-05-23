@@ -17,6 +17,15 @@
 # The required-check list is duplicated across queue_conditions — YAML
 # anchors splice nested lists which Mergify rejects, so DRY isn't available.
 # Keep the list synced with `gh api repos/.../branches/main/protection`.
+#
+# Where does `ecp/cross-pr-conflict` belong?
+# queue_conditions, NOT merge_conditions. Mergify's speculative trial
+# creates a fresh commit (PR diff + main tip) — ecp-pr-analyze.yml
+# triggers on `pull_request` events only, so the trial commit has no
+# cross-pr-conflict status reported against it. Anything required in
+# merge_conditions would thus block the trial indefinitely → dequeue
+# (PR #386 was the live repro). Keeping the check in queue_conditions
+# evaluates it on the PR HEAD where the status actually exists.
 
 queue_rules:
   - name: main-test-only
@@ -30,9 +39,9 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
+      - check-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
-      - check-success=ecp/cross-pr-conflict
     batch_size: 10
     batch_max_wait_time: 30s
 
@@ -47,9 +56,9 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
+      - check-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
-      - check-success=ecp/cross-pr-conflict
     batch_size: 1
 
   - name: main-cli-changes
@@ -63,9 +72,9 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
+      - check-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
-      - check-success=ecp/cross-pr-conflict
     batch_size: 3
     batch_max_wait_time: 2m
 
@@ -80,9 +89,9 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
+      - check-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
-      - check-success=ecp/cross-pr-conflict
     batch_size: 20
     batch_max_wait_time: 10s
 
@@ -99,9 +108,9 @@ queue_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
+      - check-success=ecp/cross-pr-conflict
     merge_conditions:
       - base=main
-      - check-success=ecp/cross-pr-conflict
     batch_size: 2
 
 # Priority overrides: deferred to FU-2026-05-23-037.
