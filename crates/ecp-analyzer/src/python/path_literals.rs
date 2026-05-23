@@ -70,15 +70,8 @@ fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLi
     })
 }
 
-/// Strip surrounding quotes from a Python `string` node text.
-///
-/// Handles:
-/// - `"foo"`, `'foo'`
-/// - `"""foo"""`, `'''foo'''`
-/// - Prefixes `r`, `b`, `u`, `rb`, `br`, `f`, `fr`, `rf` (case-insensitive)
-///   (f-strings are already rejected by the caller via `interpolation` check)
-///
-/// Returns `None` if the shape is malformed or non-UTF8.
+/// Triple-quote + prefix combos (r/b/u/rb/br/f/fr/rf) handled; f-strings
+/// are pre-filtered by the caller's `interpolation` child check.
 fn strip_quotes(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     let mut i = 0;

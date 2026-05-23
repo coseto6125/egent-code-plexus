@@ -52,16 +52,14 @@ fn has_path_separator(s: &str) -> bool {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            return match bytes.get(i + 1) {
-                Some(b'n' | b't' | b'r' | b'0' | b'\'' | b'"' | b'x' | b'u') => {
-                    i += 2;
-                    continue;
-                }
-                Some(_) | None => true,
-            };
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
         }
-        i += 1;
+        match bytes.get(i + 1) {
+            Some(b'n' | b't' | b'r' | b'0' | b'\'' | b'"' | b'x' | b'u') => i += 2,
+            Some(_) | None => return true,
+        }
     }
     false
 }
@@ -125,14 +123,7 @@ impl SinkConfidence {
 }
 
 /// Render the `Edge.reason` payload for a `UsesPathLiteral` edge.
-///
-/// `sink:free` always implies `confidence:high` (the catchall is unambiguous);
-/// otherwise the confidence tag is included so consumers can filter without
-/// re-parsing.
 pub fn sink_reason(kind: SinkKind, conf: SinkConfidence) -> String {
-    if matches!(kind, SinkKind::Free) {
-        return format!("sink:{}|confidence:high", kind.as_str());
-    }
     format!("sink:{}|confidence:{}", kind.as_str(), conf.as_str())
 }
 

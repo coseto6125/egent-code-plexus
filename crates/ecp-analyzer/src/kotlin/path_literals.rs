@@ -88,16 +88,8 @@ fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLi
     })
 }
 
-/// Strip surrounding quotes from a Kotlin string literal.
-/// - `"foo"` → `foo`  (string_literal: the node text includes the quotes)
-/// - `"""foo"""` → `foo`  (multiline_string_literal: triple-quote; literal backslashes)
-///
-/// Kotlin `string_literal` node text: `"<content>"` where content is the
-/// concatenation of `string_content` and `escape_seq` child texts — tree-sitter
-/// delivers the full source slice including quotes. We strip one level.
-///
-/// For `multiline_string_literal` (`"""..."""`), no escape sequences are
-/// processed — backslashes are literal in triple-quoted strings.
+/// Multiline `"""..."""` content is trimmed of surrounding whitespace since
+/// Kotlin's source indentation leaks into the captured slice.
 fn strip_quotes(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     // multiline_string_literal: `"""..."""`

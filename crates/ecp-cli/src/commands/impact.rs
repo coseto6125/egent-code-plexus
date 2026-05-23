@@ -418,29 +418,36 @@ pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, EcpErr
 /// classification (`sink:read|confidence:high`, `sink:write|confidence:medium`,
 /// `sink:free|confidence:high`, etc.).
 fn build_literal_payload(value: &str, engine: &Engine) -> Result<Value, EcpError> {
-    use ecp_core::graph::{ArchivedNodeKind, ArchivedRelType};
+    use ecp_core::graph::ArchivedRelType;
 
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
 
+    // Pre-build (target_node_idx → edge) map for UsesPathLiteral edges in a
+    // single O(|edges|) pass. Without this, the per-match `edges.iter().find`
+    // below was O(matches × edges) — at ~500k edges and a popular literal
+    // matching dozens of sites, that's tens of millions of comparisons and
+    // breaches the <30 ms per-query budget.
+    let lit_edge: HashMap<u32, &_> = graph
+        .edges
+        .iter()
+        .filter(|e| matches!(e.rel_type, ArchivedRelType::UsesPathLiteral))
+        .map(|e| (e.target.to_native(), e))
+        .collect();
+
     let mut sites: Vec<Value> = Vec::new();
-    for (idx, node) in graph.nodes.iter().enumerate() {
-        if !matches!(node.kind, ArchivedNodeKind::PathLiteral) {
-            continue;
-        }
+    // `nodes_by_kind` walks the v10 CSR (kind_offsets / kind_node_idx) so we
+    // touch only PathLiteral entries, not the full nodes vec.
+    for idx_u32 in graph.nodes_by_kind(NodeKind::PathLiteral) {
+        let idx = idx_u32 as usize;
+        let node = &graph.nodes[idx];
         if node.name.resolve(&graph.string_pool) != value {
             continue;
         }
         let file_node = &graph.files[node.file_idx.to_native() as usize];
         let file_path = file_node.path.resolve(&graph.string_pool);
 
-        let lit_idx_u32 = idx as u32;
-        let (enclosing_name, sink_reason) = graph
-            .edges
-            .iter()
-            .find(|e| {
-                e.target.to_native() == lit_idx_u32
-                    && matches!(e.rel_type, ArchivedRelType::UsesPathLiteral)
-            })
+        let (enclosing_name, sink_reason) = lit_edge
+            .get(&idx_u32)
             .map(|e| {
                 let src_idx = e.source.to_native() as usize;
                 let src_name = graph.nodes[src_idx]

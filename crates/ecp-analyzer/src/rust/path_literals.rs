@@ -63,9 +63,8 @@ fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLi
     })
 }
 
-/// Strip surrounding quotes from a Rust `string_literal` / `raw_string_literal`
-/// capture text. Handles `"foo"`, `b"foo"`, `r"foo"`, `r#"foo"#`, `br#"foo"#`.
-/// Returns `None` if shape is malformed or non-UTF8 inside.
+/// Raw (`r#...`) and byte-raw (`br#...`) variants need hash-count match for
+/// closing delim; plain `b"..."` / `"..."` take the simpler boundary path.
 fn strip_quotes(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     let mut i = 0;
