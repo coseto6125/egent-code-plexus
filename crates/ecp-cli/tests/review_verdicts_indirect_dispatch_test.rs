@@ -89,6 +89,10 @@ fn commit(repo: &std::path::Path, msg: &str) {
 fn indirect_dispatch_verdict_fires_on_rust_dyn_trait_in_diff() {
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path();
+    // FU-2026-05-23-047: keep $HOME (→ ~/.ecp/) OUTSIDE the worktree so the
+    // background tantivy writer spawned by build_l2 cannot race with the
+    // `git stash push -u` that GitGuard runs inside `ecp review --verdicts`.
+    let ecp_home = TempDir::new().expect("ecp_home tempdir");
 
     git(repo, &["init", "-q", "-b", "main"]);
     std::fs::create_dir(repo.join("src")).unwrap();
@@ -121,7 +125,7 @@ fn indirect_dispatch_verdict_fires_on_rust_dyn_trait_in_diff() {
             "json",
         ])
         .current_dir(repo)
-        .env("HOME", repo)
+        .env("HOME", ecp_home.path())
         .env("ECP_NO_PROGRESS", "1")
         .output()
         .expect("run ecp review --verdicts");

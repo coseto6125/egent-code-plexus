@@ -34,6 +34,13 @@ function bar() {
 fn review_verdicts_intra_caller_marks_warn() {
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path();
+    // FU-2026-05-23-047: keep $HOME (→ ~/.ecp/) OUTSIDE the worktree so the
+    // background tantivy writer spawned by build_l2 cannot race with the
+    // `git stash push -u` that GitGuard runs inside `ecp review --verdicts`.
+    // Production users always have ~/.ecp/ in $HOME, sibling to the repo,
+    // so stash never touches it; only test fixtures that overload HOME=repo
+    // make the directory untracked-and-inside-the-worktree.
+    let ecp_home = TempDir::new().expect("ecp_home tempdir");
 
     let out = Command::new("git")
         .args(["init", "-q", "-b", "main"])
@@ -123,7 +130,7 @@ fn review_verdicts_intra_caller_marks_warn() {
             "json",
         ])
         .current_dir(repo)
-        .env("HOME", repo)
+        .env("HOME", ecp_home.path())
         .env("ECP_NO_PROGRESS", "1")
         .output()
         .expect("run ecp review verdicts");

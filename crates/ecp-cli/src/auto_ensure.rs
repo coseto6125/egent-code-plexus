@@ -32,10 +32,17 @@ pub mod test_counters {
 
     pub static REANALYZE_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
     pub static BUILD_L2_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// FU-2026-05-23-047: incremented every time `ensure_fresh` synchronously
+    /// joins the background tantivy writer because `~/.ecp/` resolves to a
+    /// path inside the current worktree. Observed by the regression test in
+    /// `tests/ensure_fresh_tantivy_drain.rs`; in normal prod (cache root
+    /// sibling to the repo) this counter stays at 0.
+    pub static TANTIVY_JOIN_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     pub fn reset() {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
         BUILD_L2_CALL_COUNT.store(0, Ordering::Relaxed);
+        TANTIVY_JOIN_COUNT.store(0, Ordering::Relaxed);
     }
 
     pub fn reanalyze_calls() -> usize {
@@ -44,6 +51,10 @@ pub mod test_counters {
 
     pub fn build_l2_calls() -> usize {
         BUILD_L2_CALL_COUNT.load(Ordering::Relaxed)
+    }
+
+    pub fn tantivy_join_calls() -> usize {
+        TANTIVY_JOIN_COUNT.load(Ordering::Relaxed)
     }
 }
 
@@ -185,8 +196,9 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
             let start = std::time::Instant::now();
             // build_l2 → build_inside_locked writes the HEAD-SHA sidecar in
             // the background as its final step; no extra write needed here.
-            crate::build::orchestrator::build_l2(worktree_root, None)
+            let mut result = crate::build::orchestrator::build_l2(worktree_root, None)
                 .map_err(|e| format!("build_l2: {e}"))?;
+            drain_tantivy_if_inside_worktree(&mut result, worktree_root);
             eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
             Ok(())
         }
@@ -200,8 +212,9 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
                 test_counters::BUILD_L2_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let start = std::time::Instant::now();
-                crate::build::orchestrator::build_l2(worktree_root, None)
+                let mut result = crate::build::orchestrator::build_l2(worktree_root, None)
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
+                drain_tantivy_if_inside_worktree(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
             } else {
                 // Header-compatible + dirty files: incremental refresh path (T7-4).
@@ -244,6 +257,29 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<(), Strin
             }
             Ok(())
         }
+    }
+}
+
+/// FU-2026-05-23-047: when `resolve_home_ecp()` resolves to a path NESTED
+/// under the current worktree, the background tantivy writer spawned by
+/// `build_l2` (orchestrator.rs:233) will race with any subsequent
+/// `git stash push -u` or `git status` — `git` enumerates and removes
+/// untracked directories, but the writer keeps appending `.tmpXXX` segment
+/// files into `tantivy/`, producing "Directory not empty" / "No such file".
+///
+/// In normal production layouts (`~/.ecp/` is sibling to the repo, not
+/// inside it), the prefix check is false and we keep the perf optimisation
+/// of returning before the tantivy thread finishes. The only callers that
+/// trip this are test fixtures that overload `HOME=$REPO` and the unusual
+/// `ECP_HOME=$REPO/.cache` setup.
+fn drain_tantivy_if_inside_worktree(
+    result: &mut crate::build::orchestrator::BuildResult,
+    worktree_root: &Path,
+) {
+    let cache_root = ecp_core::registry::resolve_home_ecp();
+    if cache_root.starts_with(worktree_root) {
+        result.join_background();
+        test_counters::TANTIVY_JOIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
