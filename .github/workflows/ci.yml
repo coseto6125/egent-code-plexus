@@ -76,18 +76,38 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          # Push to main: always treat as code change (final validation).
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            echo "Event is '$EVENT_NAME' (not pull_request) — defaulting code=true"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
 
-          git fetch --no-tags --depth=1 origin "$BASE_REF"
-          CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD")
-          echo "Changed files:"
+          case "$EVENT_NAME" in
+            pull_request)
+              git fetch --no-tags --depth=1 origin "$BASE_REF"
+              diff_range="origin/$BASE_REF...HEAD"
+              ;;
+            push)
+              # $BEFORE_SHA is the previous HEAD on this ref; 0..0 means
+              # branch creation / force-push with no common ancestor — be
+              # conservative and treat as code change.
+              if [[ -z "$BEFORE_SHA" || "$BEFORE_SHA" =~ ^0+$ ]]; then
+                echo "No before SHA — defaulting code=true"
+                echo "code=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              diff_range="$BEFORE_SHA...HEAD"
+              ;;
+            *)
+              # merge_group / workflow_dispatch / anything else: don't try
+              # to classify (merge_group's combined diff base is fiddly;
+              # workflow_dispatch is an explicit "run everything" signal).
+              echo "Event '$EVENT_NAME' — defaulting code=true"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          CHANGED=$(git diff --name-only "$diff_range")
+          echo "Changed files (range: $diff_range):"
           while IFS= read -r file; do echo "  $file"; done <<< "$CHANGED"
 
           # Positive list — anything outside it is docs/config/license-only.
@@ -152,32 +172,32 @@ jobs:
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           echo "::endgroup::"
 
-  # ==================== Cross-Platform Tests (nextest, sharded) ====================
-  # Sharding: ~3177 tests split into 4 partitions per platform via
-  # `cargo nextest --partition count:N/4`. All 4 shards on a given OS
-  # compile the same target/ (only test selection differs at runtime),
-  # so the Swatinem rust-cache `shared-key` is identical across shards
-  # — first finisher saves, others no-op (GHA cache "exists, skip"
-  # semantics). Wall-clock per platform: ~7m → ~2m45s.
+  # ==================== Cross-Platform Tests (nextest) ====================
+  # One nextest job per platform (no sharding). Sharding (PR #362) was
+  # reverted because 9–12 concurrent jobs per push push the free-tier
+  # GHA concurrency window into rate-limit territory when multiple PR
+  # workflows run in parallel. With this matrix, push:main fires 3 test
+  # jobs; PR fires 0 (entire job gated below).
   #
   # Aggregated status is exposed via the `test-result` job below as a
   # single required check ("Test (all platforms)") — branch protection
-  # cares about that one name, not the 8 individual shard jobs.
+  # cares about that one name, not the individual OS contexts.
   test:
-    name: Test on ${{ matrix.os }} (shard ${{ matrix.shard }}/4)
+    name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     needs: detect-changes
     strategy:
       fail-fast: false
       matrix:
-        # Windows moved to nightly (.github/workflows/ci-windows-nightly.yml):
-        # the windows-latest runner has a known partner-runner-images bash
-        # startup race (#169) that flakes ~5% of PR runs, and Rust CLI code
-        # here is platform-agnostic (uses `dirs` / `PathBuf` everywhere).
-        # Windows still validates on schedule + push-to-main + workflow_dispatch.
-        os: [ubuntu-latest, macos-latest]
-        shard: [1, 2, 3, 4]
-    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # Heavy test matrix only runs on push-to-main / merge_group / workflow_dispatch
+    # — PR-time skips entirely to keep iteration latency low. PR-time signal
+    # comes from `code-quality` (fmt + clippy) + `audit` + `actionlint`; full
+    # cross-platform / sharded test runs once post-merge. test-result aggregator
+    # below treats `skipped` as success so PRs aren't blocked.
+    if: |
+      github.event_name != 'pull_request'
+      && !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]'))
     env:
       # 14 tree-sitter parsers × 30+ test binaries × debug-info defaulted to
       # `true` produced ~30 GB in target/debug/deps/ and filled the ubuntu
@@ -188,7 +208,7 @@ jobs:
     steps:
       - name: Short-circuit for docs-only PR
         if: needs.detect-changes.outputs.code != 'true'
-        run: echo "✓ Docs-only PR — skipping cargo nextest on ${{ matrix.os }} shard ${{ matrix.shard }}/4"
+        run: echo "✓ Docs-only PR — skipping cargo nextest on ${{ matrix.os }}"
 
       - name: Harden the runner (Audit all outbound calls)
         if: needs.detect-changes.outputs.code == 'true'
@@ -249,12 +269,11 @@ jobs:
           cache-on-failure: true
           cache-workspace-crates: true
 
-      - name: Run tests (nextest, sharded)
+      - name: Run tests (nextest)
         if: needs.detect-changes.outputs.code == 'true'
         run: |
-          echo "::group::cargo nextest (shard ${{ matrix.shard }}/4)"
-          cargo nextest run --workspace --all-features --no-fail-fast \
-            --partition count:${{ matrix.shard }}/4
+          echo "::group::cargo nextest"
+          cargo nextest run --workspace --all-features --no-fail-fast
           echo "::endgroup::"
 
   # ==================== Test aggregator (required-check facade) ====================
