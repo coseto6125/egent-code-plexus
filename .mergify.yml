@@ -126,16 +126,19 @@ pull_request_rules:
       queue:
         name: main-default
 
+  # Mergify queue priority is integer; lower = merges first.
+  # Default queue priority = 2000. risk-low → 1000 (jump ahead),
+  # risk-high → 5000 (wait behind normal-risk PRs).
   - name: high priority for low-risk
     conditions:
       - label=ecp:risk-low
     actions:
       queue:
-        priority: high
+        priority: 1000
 
   - name: low priority for high-risk
     conditions:
       - label=ecp:risk-high
     actions:
       queue:
-        priority: low
+        priority: 5000
