@@ -134,7 +134,7 @@ The 14 mainstream rows below match the ones above. Edge IDs map to
 | Rust | ✓ | ✓ | ✓ | — | ✓ | ✓ |
 | PHP | ✓ | partial[^php-enum] | ✓ | ✓ (Symfony) | ✓ | ✓ |
 | Ruby | ✓ | n/a[^rb-enum] | — | — | ✓ | ✓ |
-| Swift | ✓ | ✓ | ✓ | — | ✓ | ✓ |
+| Swift | ✓ | ✓ | ✓ | —[^sw-tx] | ✓ | ✓ |
 | C | ✓ | n/a[^c-enum] | — | — | ✓ | ✓ |
 | C++ | ✓ | ✓ | — | — | ✓ | ✓ |
 | Dart | ✓ | ✓ | ✓ | — | ✓ | ✓ |
@@ -186,6 +186,25 @@ object literal" idiom isn't first-class enough to model as `EnumVariant`.
 [^rb-enum]: Ruby uses module constants for enum-like patterns; no `EnumVariant` semantics.
 
 [^c-enum]: C `enum` constants are integer aliases — emitted as `Const`, not `EnumVariant`. C++ `enum class` is first-class and IS captured.
+
+[^sw-tx]: Swift TransactionScope is wontfix in v1 (FU-2026-05-23-009, ✅ done
+in PR #380 for the 5 sibling langs; Swift slot reserved by setup commit
+`fb20e5dc`, no detector wired). Audit found no canonical pattern across
+the Swift ecosystem:
+
+- Core Data `context.performAndWait { … }` — lock-based thread-safety, not ACID. Excluded.
+- GRDB `dbQueue.write { db in … }` — true transaction; needs `DatabaseQueue` receiver-type inference to avoid false positives.
+- Realm `realm.write { … }` — true transaction; same receiver-type challenge.
+- SQLite.swift `db.transaction { … }` — clearest name, but generic `obj.transaction { … }` fires on many non-DB receivers.
+
+A robust detector requires import tracking (CoreData / GRDB / RealmSwift /
+SQLite), receiver-type inference from variable assignments, per-framework
+heuristics (`dbQueue` vs `realm` vs `db`), and a tree-sitter query
+extension for trailing-closure call patterns — estimated 120-150 LOC
+parser + 10-15 LOC query, with high false-positive risk without type
+inference. Revisit when a specific framework (e.g., GRDB) has concrete
+LLM demand; until then, zero scopes emitted is the correct outcome — no
+framework found, not a missing detector.
 
 ## Call detection design
 

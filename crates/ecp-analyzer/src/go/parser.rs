@@ -193,28 +193,15 @@ fn collect_go_sql_tx_scopes(
     // Walk entire tree depth-first.
     loop {
         let node = cursor.node();
-        if node.kind() == "call_expression" {
-            if let Some(fn_field) = node.child_by_field_name("function") {
-                if fn_field.kind() == "selector_expression" {
-                    if let Some(field_node) = fn_field.child_by_field_name("field") {
-                        if let Ok(method_name) = std::str::from_utf8(
-                            &source[field_node.start_byte()..field_node.end_byte()],
-                        ) {
-                            if matches!(method_name, "Begin" | "BeginTx") {
-                                // Resolve the enclosing fn via the shared
-                                // span-area helper so Go / Ruby / Dart agree
-                                // on innermost-match in nested-fn scenarios.
-                                let call_start = node.start_position();
-                                let row = crate::calls::safe_row(call_start.row);
-                                let col = u32::try_from(call_start.column).unwrap_or(u32::MAX);
-                                if let Some(idx) = enclosing_fn_idx_by_span(nodes, row, col) {
-                                    if seen.insert(idx) {
-                                        scopes.push(RawTxScope::new(idx, FrameworkId::GoSqlTx));
-                                    }
-                                }
-                            }
-                        }
-                    }
+        if node.kind() == "call_expression" && is_db_begin_call(node, source) {
+            // Resolve the enclosing fn via the shared span-area helper so
+            // Go / Ruby / Dart agree on innermost-match in nested-fn scenarios.
+            let call_start = node.start_position();
+            let row = crate::calls::safe_row(call_start.row);
+            let col = u32::try_from(call_start.column).unwrap_or(u32::MAX);
+            if let Some(idx) = enclosing_fn_idx_by_span(nodes, row, col) {
+                if seen.insert(idx) {
+                    scopes.push(RawTxScope::new(idx, FrameworkId::GoSqlTx));
                 }
             }
         }
@@ -232,6 +219,27 @@ fn collect_go_sql_tx_scopes(
             }
         }
     }
+}
+
+/// True iff `call` is a `db.Begin()` / `db.BeginTx(...)` invocation: the callee
+/// is a `selector_expression` whose `field` matches `Begin` or `BeginTx`.
+/// Conservative — method name only, no receiver-type check (acceptable false
+/// positives for non-DB `.Begin()` calls in v1, per `collect_go_sql_tx_scopes`).
+#[inline]
+fn is_db_begin_call(call: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let Some(function) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if function.kind() != "selector_expression" {
+        return false;
+    }
+    let Some(field) = function.child_by_field_name("field") else {
+        return false;
+    };
+    let Ok(method_name) = std::str::from_utf8(&source[field.start_byte()..field.end_byte()]) else {
+        return false;
+    };
+    matches!(method_name, "Begin" | "BeginTx")
 }
 
 impl GoProvider {
