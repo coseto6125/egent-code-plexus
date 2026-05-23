@@ -1,0 +1,94 @@
+name: Auto-update PR branches
+# Whenever main moves, refresh every eligible open PR's branch via
+# GitHub's update-branch API (the programmatic "Update branch" button).
+# Refreshed branches re-trigger CI; once CI is green and auto-merge is
+# enabled (see auto-merge.yml), GitHub merges without manual clicks.
+#
+# Eligibility: non-draft, targeting main, has auto-merge already armed
+# (`.autoMergeRequest != null` from `gh pr list`). Drafts and explicitly
+# un-armed PRs are skipped on purpose — author hasn't opted in.
+#
+# Conflict handling: if update-branch returns a merge-conflict response,
+# the PR gets a one-time marker comment (`<!-- auto-update-conflict -->`)
+# and the workflow exits non-zero so GitHub emails the author its usual
+# CI-failure notification.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '*/15 * * * *'   # safety net for missed push events / token blips
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-update-branches
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update eligible PR branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          prs=$(gh pr list --repo "$REPO" --state open --base main \
+            --json number,isDraft,autoMergeRequest,headRefName \
+            --jq '.[] | select(.isDraft == false and .autoMergeRequest != null) | "\(.number)\t\(.headRefName)"')
+
+          if [ -z "$prs" ]; then
+            echo "no eligible PRs to update"
+            exit 0
+          fi
+
+          conflicts=()
+          while IFS=$'\t' read -r pr branch; do
+            response=$(gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" 2>&1 || true)
+            case "$response" in
+              *successfully*)
+                echo "✓ updated #$pr ($branch)"
+                ;;
+              *"up to date"*)
+                # Includes "already up to date" and "up-to-date" variants;
+                # earlier explicit *"already up"* pattern was redundant
+                # (shellcheck SC2221).
+                echo "= #$pr ($branch) already current"
+                ;;
+              *conflict*)
+                # *"Merge conflict"* was a strict subset of *conflict*
+                # and so could never fire on its own (shellcheck SC2222).
+                echo "✗ #$pr ($branch) conflict — author needed"
+                conflicts+=("$pr")
+                # Post a one-time marker comment so author gets a GitHub
+                # notification. Marker survives across re-runs so we don't
+                # spam on every push to main.
+                marker="<!-- auto-update-conflict -->"
+                existing=$(gh pr view "$pr" --repo "$REPO" --json comments \
+                  --jq ".comments[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
+                if [ -z "$existing" ]; then
+                  # printf keeps the multi-line body inside one bash var so
+                  # YAML's block-scalar indentation rules stay happy. The
+                  # backticks in the format string are intentional Markdown
+                  # code formatting — shellcheck SC2016 is a false positive
+                  # because printf treats them as literal characters.
+                  # shellcheck disable=SC2016
+                  body=$(printf '%s\n\n🚨 **Auto-update-branch failed** — merge conflict with `main` (trigger commit `%s`). Please rebase / merge manually. This comment posts only once per conflict; delete it to let the bot re-notify on the next event.' "$marker" "$TRIGGER_SHA")
+                  gh pr comment "$pr" --repo "$REPO" --body "$body" || true
+                fi
+                ;;
+              *)
+                echo "✗ #$pr ($branch) unexpected response: $response"
+                conflicts+=("$pr")
+                ;;
+            esac
+          done <<< "$prs"
+
+          if [ "${#conflicts[@]}" -gt 0 ]; then
+            echo "::error::PRs needing manual intervention: ${conflicts[*]}"
+            exit 1
+          fi
