@@ -61,10 +61,17 @@ pub struct CrossPrConflict {
     pub overlap_symbols: Vec<String>,
 }
 
+#[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum CommitState {
+    Success,
+    Pending,
+}
+
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct StatusSuggestion {
     pub context: String,
-    pub state: String, // "success" | "pending"
+    pub state: CommitState,
     pub description: String,
 }
 
@@ -277,7 +284,7 @@ pub fn run(args: PrAnalyzeArgs, _cli_graph: &std::path::Path) -> Result<(), EcpE
     let suggested_status = if conflicts.is_empty() {
         StatusSuggestion {
             context: "ecp/cross-pr-conflict".to_string(),
-            state: "success".to_string(),
+            state: CommitState::Success,
             description: "No semantic conflict with queued PRs".to_string(),
         }
     } else {
@@ -289,7 +296,7 @@ pub fn run(args: PrAnalyzeArgs, _cli_graph: &std::path::Path) -> Result<(), EcpE
         }
         StatusSuggestion {
             context: "ecp/cross-pr-conflict".to_string(),
-            state: "pending".to_string(),
+            state: CommitState::Pending,
             description: desc,
         }
     };
