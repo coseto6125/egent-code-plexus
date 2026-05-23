@@ -8,7 +8,7 @@
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
-use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
+use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     match node.kind() {
@@ -22,9 +22,6 @@ fn build_from_string(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw)?;
-    if !is_path_shaped(value) {
-        return None;
-    }
     emit(str_node, value, source)
 }
 
@@ -43,14 +40,15 @@ fn build_from_template(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiter
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     // Template string outer bytes are backticks.
     let value = strip_backticks(raw)?;
-    if !is_path_shaped(value) {
-        return None;
-    }
     emit(str_node, value, source)
 }
 
 fn emit(str_node: Node<'_>, value: &str, source: &[u8]) -> Option<RawPathLiteral> {
     let callee = enclosing_callee(str_node, source);
+    // Sink-override: ext-change callees accept short non-path-shaped values.
+    if !is_path_shaped(value) && !is_ext_change_callee(callee.as_deref()) {
+        return None;
+    }
     let (kind, conf) = classify_sink(callee.as_deref());
     let reason = sink_reason(kind, conf);
 

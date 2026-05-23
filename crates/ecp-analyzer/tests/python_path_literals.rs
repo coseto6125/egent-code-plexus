@@ -53,6 +53,36 @@ def shout():
 }
 
 #[test]
+fn pathlib_chain_read_text_classified_high() {
+    let src = r#"
+def load():
+    return Path("config.json").read_text()
+"#;
+    let lits = parse_path_literals(src);
+    let lit = find_by_value(&lits, "config.json");
+    assert_eq!(
+        lit.sink_reason, "sink:read|confidence:high",
+        "got: {}",
+        lit.sink_reason
+    );
+}
+
+#[test]
+fn pathlib_chain_write_text_classified_high() {
+    let src = r#"
+def save(data):
+    Path("output.json").write_text(data)
+"#;
+    let lits = parse_path_literals(src);
+    let lit = find_by_value(&lits, "output.json");
+    assert_eq!(
+        lit.sink_reason, "sink:write|confidence:high",
+        "got: {}",
+        lit.sink_reason
+    );
+}
+
+#[test]
 fn pr357_minirepro_both_literals_surface() {
     let src = r#"
 def reader():

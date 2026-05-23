@@ -43,11 +43,10 @@ fun load(): String {
     let lit = find_by_value(&lits, "session_meta.json");
     assert_eq!(lit.enclosing_symbol.as_deref(), Some("load"));
     assert_eq!(lit.enclosing_owner, None);
-    // Sink classification for `File("x").readText()` Kotlin chain is left
-    // to P2 (the immediate parent call is the `File(...)` constructor; the
-    // chained `.readText()` requires flow analysis to surface as the sink).
-    // The literal value extraction + enclosing-fn resolution are sufficient
-    // for the LLM-utility split-brain detection use case at this phase.
+    // FU-2026-05-23-023: `File("x").readText()` chain promotes the sink
+    // from the constructor (`File` → join|medium) to the terminal method
+    // (`readText` → read|high).
+    assert_eq!(lit.sink_reason, "sink:read|confidence:high");
 }
 
 #[test]
@@ -61,11 +60,11 @@ class FileWriter {
 }
 "#;
     let lits = parse_path_literals(src);
-    // output.json may surface from the File("output.json") constructor call (join sink)
-    // or from writeText (write sink). Either way the literal must surface.
     let lit = find_by_value(&lits, "output.json");
     assert_eq!(lit.enclosing_symbol.as_deref(), Some("dump"));
     assert_eq!(lit.enclosing_owner.as_deref(), Some("FileWriter"));
+    // FU-2026-05-23-023: same promotion for write chain.
+    assert_eq!(lit.sink_reason, "sink:write|confidence:high");
 }
 
 #[test]

@@ -12,7 +12,7 @@
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
-use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
+use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     // Skip f-strings: they contain `interpolation` children.
@@ -28,11 +28,10 @@ pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Optio
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw)?;
-    if !is_path_shaped(value) {
+    let callee = enclosing_callee(str_node, source);
+    if !is_path_shaped(value) && !is_ext_change_callee(callee.as_deref()) {
         return None;
     }
-
-    let callee = enclosing_callee(str_node, source);
     let (kind, conf) = classify_sink(callee.as_deref());
     let reason = sink_reason(kind, conf);
 
@@ -100,18 +99,82 @@ fn strip_quotes(raw: &str) -> Option<&str> {
 }
 
 /// Climb from a string literal to find the enclosing `call` and resolve its
-/// callee name. Returns `None` when the literal is not a direct argument.
+/// callee name. Python AST shape for `Path("x.json").read_text()`:
+/// ```text
+/// call (outer — read_text())
+///   attribute (Path("x.json").read_text)
+///     call (inner — Path(...))
+///       identifier "Path"
+///       argument_list
+///         string "x.json"    ← str_node
+///     "."
+///     identifier "read_text"
+///   argument_list ()
+/// ```
+///
+/// FU-2026-05-23-023 — when the inner call is chained via an `attribute`
+/// node that is the `function` child of an outer `call`, promote to the
+/// terminal method name if it's in the high-confidence read/write list.
+/// Falls back to the inner call's callee (e.g. `Path`) otherwise.
 fn enclosing_callee(str_node: Node<'_>, source: &[u8]) -> Option<String> {
     let parent = str_node.parent()?;
     if parent.kind() != "argument_list" {
         return None;
     }
-    let call = parent.parent()?;
-    if call.kind() != "call" {
+    let inner_call = parent.parent()?;
+    if inner_call.kind() != "call" {
         return None;
     }
-    let function = call.child_by_field_name("function")?;
+
+    if let Some(terminal) = terminal_chained_callee(inner_call, source) {
+        if is_high_confidence_chain_terminal(&terminal) {
+            return Some(terminal);
+        }
+    }
+
+    let function = inner_call.child_by_field_name("function")?;
     callee_name(function, source)
+}
+
+/// Walk outward from `inner_call` through one `attribute` wrapper to find the
+/// outer chained `call`, and return its method name.
+fn terminal_chained_callee(inner_call: Node<'_>, source: &[u8]) -> Option<String> {
+    let attr = inner_call.parent()?;
+    if attr.kind() != "attribute" {
+        return None;
+    }
+    let outer = attr.parent()?;
+    if outer.kind() != "call" {
+        return None;
+    }
+    // `attribute`'s last child is the method `identifier`.
+    let mut c = attr.walk();
+    let mut method_node: Option<Node<'_>> = None;
+    for child in attr.children(&mut c) {
+        if child.kind() == "identifier" {
+            method_node = Some(child);
+        }
+    }
+    let m = method_node?;
+    std::str::from_utf8(&source[m.start_byte()..m.end_byte()])
+        .ok()
+        .map(str::to_string)
+}
+
+/// Names that justify chain-terminal promotion. Each must match a
+/// `classify_sink` HIGH-confidence entry. `write_text` / `write_bytes` /
+/// `read_bytes` are pending addition to `path_literal::classify_sink` (parent
+/// session batch); they are listed here so promotion fires once the table
+/// is updated — adding them now causes no regression (classify_sink returns
+/// Free for unknown names, same as the non-promoted fallback).
+fn is_high_confidence_chain_terminal(name: &str) -> bool {
+    matches!(
+        name,
+        // reads (pathlib.Path)
+        "read_text" | "read_bytes"
+        // writes
+        | "write_text" | "write_bytes"
+    )
 }
 
 fn callee_name(function: Node<'_>, source: &[u8]) -> Option<String> {

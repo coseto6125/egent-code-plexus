@@ -127,6 +127,32 @@ pub fn sink_reason(kind: SinkKind, conf: SinkConfidence) -> String {
     format!("sink:{}|confidence:{}", kind.as_str(), conf.as_str())
 }
 
+/// Returns `true` when `callee` is a HIGH-confidence ExtChange operation
+/// (`with_extension`, `with_file_name`, `set_extension`, etc.). Per-lang
+/// extractors use this as a sink-override: when the callee is a known
+/// ext-change op, the literal value (`"json"`, `"toml"`, ...) is accepted
+/// even if `is_path_shaped` rejects it as too short / too plain.
+///
+/// Conservative: only HIGH-confidence ext-change names; bare extension
+/// strings appearing in unknown callees still get the `is_path_shaped`
+/// gate so option/error tokens like `"json"` (passed to a serde format
+/// picker) don't accidentally land in the path-literal index.
+pub fn is_ext_change_callee(callee: Option<&str>) -> bool {
+    let Some(name) = callee else {
+        return false;
+    };
+    matches!(
+        trailing_ident(name),
+        "with_extension"
+            | "with_file_name"
+            | "set_extension"
+            | "set_file_name"
+            // C++ std::filesystem::path equivalents
+            | "replace_extension"
+            | "replace_filename"
+    )
+}
+
 /// Classify a call-site sink based on the resolved callee name produced by
 /// the per-language `extract_<lang>_calls` helpers. The input may include
 /// a receiver prefix (`Dog.method`, `Path::new`, `fs.readFile`) — only the
@@ -151,14 +177,30 @@ pub fn classify_sink(callee: Option<&str>) -> (SinkKind, SinkConfidence) {
         // ── HIGH-confidence reads (name uniquely identifies a read op) ──
         "read_to_string" | "read_to_end" | "readText" | "read_text" | "ReadAllText"
         | "ReadAllBytes" | "ReadAllLines" | "readFile" | "readFileSync" | "ReadFile" | "slurp"
-        | "read_all" | "readAsString" | "readAsStringSync" | "readAsBytes" => (Read, High),
+        | "read_all" | "readAsString" | "readAsStringSync" | "readAsBytes"
+        // pathlib.Path snake_case equivalents (FU-2026-05-23-023 Python chain promotion)
+        | "read_bytes"
+        // Swift labelled-arg constructors (FU-2026-05-23-023 Swift): the
+        // enclosing_callee promotes the arg label over the type name, so
+        // `String(contentsOfFile: ...)` and `Data(contentsOf: ...)` see
+        // the label as the callee.
+        | "contentsOfFile" | "contentsOf" => (Read, High),
 
         // ── HIGH-confidence writes ────────────────────────────────────
         "write_all" | "atomic_write" | "atomic_write_json" | "writeFile" | "writeFileSync"
         | "WriteFile" | "WriteAllText" | "WriteAllBytes" | "WriteAllLines"
-        | "file_put_contents" | "writeAsString" | "writeAsStringSync" | "writeAsBytes" => {
-            (Write, High)
-        }
+        | "file_put_contents" | "writeAsString" | "writeAsStringSync" | "writeAsBytes"
+        // Kotlin stdlib + java.io.File.writeText/writeBytes; symmetric with
+        // the readText/readBytes/readLines listed in HIGH reads above.
+        | "writeText" | "writeBytes" | "appendText" | "appendBytes"
+        // pathlib.Path snake_case equivalents (FU-2026-05-23-023 Python chain promotion)
+        | "write_text" | "write_bytes"
+        // Swift labelled-arg writes (FU-2026-05-23-023 Swift):
+        // `str.write(toFile: "...", atomically:, encoding:)`,
+        // `Data.write(toFile: "...")`. enclosing_callee promotes the
+        // `toFile:` label over the bare `write` so the LLM consumer
+        // distinguishes file writes from generic stream writes.
+        | "toFile" => (Write, High),
 
         // ── MEDIUM (overloaded with non-file IO writes) ───────────────
         "write" => (Write, Medium),
@@ -172,7 +214,11 @@ pub fn classify_sink(callee: Option<&str>) -> (SinkKind, SinkConfidence) {
         "create" | "Create" => (OpenWrite, High),
 
         // ── Path construction ─────────────────────────────────────────
-        "with_file_name" | "with_extension" => (ExtChange, High),
+        // ExtChange: pair with `is_ext_change_callee` (above) to enable the
+        // sink-override for short non-path-shaped values like `"json"`.
+        "with_file_name" | "with_extension" | "set_extension" | "set_file_name"
+        // C++ std::filesystem::path equivalents
+        | "replace_extension" | "replace_filename" => (ExtChange, High),
         "Path" | "PathBuf" | "Paths" | "URL" => (Join, High),
         "new" => (Join, Medium),
         "from" => (Join, Medium),
@@ -278,6 +324,32 @@ mod tests {
         let (k, c) = classify_sink(Some("unrelated_fn"));
         assert_eq!(k, SinkKind::Free);
         assert_eq!(c, SinkConfidence::High);
+    }
+
+    #[test]
+    fn is_ext_change_callee_recognises_canonical_names() {
+        assert!(is_ext_change_callee(Some("with_extension")));
+        assert!(is_ext_change_callee(Some("with_file_name")));
+        assert!(is_ext_change_callee(Some("set_extension")));
+        assert!(is_ext_change_callee(Some("Path::with_extension")));
+        assert!(is_ext_change_callee(Some("foo.bar.with_extension")));
+        assert!(!is_ext_change_callee(None));
+        assert!(!is_ext_change_callee(Some("read_to_string")));
+        assert!(!is_ext_change_callee(Some("join")));
+    }
+
+    #[test]
+    fn classify_sink_extchange_high_for_ext_change_names() {
+        for name in [
+            "with_extension",
+            "with_file_name",
+            "set_extension",
+            "set_file_name",
+        ] {
+            let (k, c) = classify_sink(Some(name));
+            assert_eq!(k, SinkKind::ExtChange, "kind mismatch for {name}");
+            assert_eq!(c, SinkConfidence::High, "confidence mismatch for {name}");
+        }
     }
 
     #[test]

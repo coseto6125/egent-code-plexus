@@ -159,19 +159,33 @@ struct ImpactJson {
 }
 
 impl ImpactJson {
-    // Note: `changed_files()` was here but symbol-derived files miss
-    // comment-only / whitespace-only diffs (zero symbols, but real path
-    // change). `run()` now calls `git diff --name-only` directly via
-    // `git_diff_files` so area classification works for docs PRs too.
+    /// Files that contain at least one *semantically* changed symbol.
+    /// Distinct from `git_diff_files(...)` (used by `run()` for area
+    /// classification): symbol-derived view skips whitespace-only and
+    /// comment-only diffs, where the git-diff view includes them. PR #390
+    /// switched `run()` to git-diff so docs-only PRs classify correctly,
+    /// but this view stays in the library surface so future LLM consumers
+    /// can ask "which files actually had code changes?" without re-deriving
+    /// from `changed_symbols` themselves. Mirrors `impact_set_names` /
+    /// `changed_symbol_names` for derived-view symmetry on ImpactJson.
+    #[allow(dead_code)]
+    pub fn changed_files(&self) -> Vec<String> {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        self.changed_symbols
+            .iter()
+            .filter(|s| seen.insert(s.file_path.as_str()))
+            .map(|s| s.file_path.clone())
+            .collect()
+    }
 
     /// All symbol names reachable from changed symbols (depth > 0), deduplicated.
     /// Used to size the impact set for risk classification.
     pub fn impact_set_names(&self) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         self.impact_by_symbol
             .iter()
             .flat_map(|entry| entry.impact.iter())
-            .filter(|e| e.depth > 0 && seen.insert(e.name.clone()))
+            .filter(|e| e.depth > 0 && seen.insert(e.name.as_str()))
             .map(|e| e.name.clone())
             .collect()
     }
@@ -251,12 +265,15 @@ pub fn run(args: PrAnalyzeArgs, _cli_graph: &std::path::Path) -> Result<(), EcpE
     //    directly from git instead so area classification still works for
     //    docs/comment-only PRs.
     let impact = run_impact_subprocess(&args.baseline)?;
+    // PR #390: use git diff so comment-only / whitespace-only changes (which
+    // produce zero `changed_symbols`) still classify into the right area.
+    // FU-043: `classify_area` is now generic over `AsRef<Path>` so the
+    // `Vec<String>` from git diff can feed it without a `Vec<PathBuf>`
+    // shim allocation.
     let changed_files = git_diff_files(&args.baseline, &args.pr_head)?;
-    let changed_files_pb: Vec<std::path::PathBuf> =
-        changed_files.iter().map(std::path::PathBuf::from).collect();
 
     // 2. Classify
-    let area = classify_area(&changed_files_pb);
+    let area = classify_area(&changed_files);
     let impact_set_names = impact.impact_set_names();
     let risk = classify_risk(impact_set_names.len());
 
@@ -334,15 +351,11 @@ pub fn run(args: PrAnalyzeArgs, _cli_graph: &std::path::Path) -> Result<(), EcpE
                     .map_err(|e| EcpError::Serialization(format!("emit JSON: {e}")))?
             );
         }
-        _ => {
-            eprintln!(
-                "PR #{}  area={:?}  risk={:?}  impact={}  conflicts={}",
-                out.pr_number,
-                out.area,
-                out.risk,
-                out.impact_size,
-                out.cross_pr_conflicts.len()
-            );
+        OutputFormat::Llm | OutputFormat::Toon | OutputFormat::Text => {
+            return Err(EcpError::InvalidArgument(format!(
+                "pr-analyze only supports --format json (got {:?}); the output is consumed by Mergify CI hooks which require JSON",
+                args.format
+            )));
         }
     }
 
@@ -409,13 +422,13 @@ fn path_area(p: &Path) -> Option<Area> {
 
 /// Returns `Some(area)` only when ALL changed paths agree on the same area.
 /// Mixed-area PRs return `None` and fall to the `default` queue per spec.
-pub fn classify_area(paths: &[std::path::PathBuf]) -> Option<Area> {
+pub fn classify_area<P: AsRef<Path>>(paths: &[P]) -> Option<Area> {
     if paths.is_empty() {
         return None;
     }
-    let first = path_area(&paths[0])?;
+    let first = path_area(paths[0].as_ref())?;
     for p in &paths[1..] {
-        if path_area(p)? != first {
+        if path_area(p.as_ref())? != first {
             return None;
         }
     }
@@ -682,7 +695,8 @@ mod tests {
 
     #[test]
     fn area_empty_returns_none() {
-        assert_eq!(classify_area(&[]), None);
+        let empty: [std::path::PathBuf; 0] = [];
+        assert_eq!(classify_area(&empty), None);
     }
 
     #[test]

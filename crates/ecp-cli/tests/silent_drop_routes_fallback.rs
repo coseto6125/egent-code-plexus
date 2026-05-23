@@ -8,62 +8,12 @@
 //! Contract: payload always carries `total_fuzzy_candidates`, `shown`, and
 //! `zero_score_omitted`, with `shown <= total_fuzzy_candidates`.
 
+mod common;
+
+use common::{ecp_bin, init_and_analyze, write};
+
 use serde_json::Value;
-use std::path::Path;
 use std::process::Command;
-
-fn ecp_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ecp")
-}
-
-fn write(repo: &Path, rel: &str, body: &str) {
-    let full = repo.join(rel);
-    if let Some(parent) = full.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(full, body).unwrap();
-}
-
-fn init_and_analyze(repo: &Path) {
-    let out = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-
-    let _ = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    let _ = Command::new("git")
-        .args([
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "init",
-        ])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-
-    let out = Command::new(ecp_bin())
-        .args(["admin", "index", "--repo", "."])
-        .current_dir(repo)
-        .env("HOME", repo)
-        .output()
-        .expect("admin index failed to spawn");
-    assert!(
-        out.status.success(),
-        "admin index failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 // 6 distinct routes so take(5) triggers (> 5 candidates) and the fuzzy
 // fallback has enough material to expose total_fuzzy_candidates vs shown.

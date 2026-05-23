@@ -17,17 +17,16 @@
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
-use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
+use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw, str_node.kind() == "raw_string_literal")?;
-    if !is_path_shaped(value) {
+    let callee = enclosing_callee(str_node, source);
+    if !is_path_shaped(value) && !is_ext_change_callee(callee.as_deref()) {
         return None;
     }
-
-    let callee = enclosing_callee(str_node, source);
     let (kind, conf) = classify_sink(callee.as_deref());
     let reason = sink_reason(kind, conf);
 
@@ -131,17 +130,62 @@ fn strip_quotes(raw: &str, is_raw: bool) -> Option<&str> {
     }
 }
 
+/// FU-2026-05-23-023 — C++ AST mirrors Rust: chained calls take the shape
+/// `call_expression > field_expression > call_expression`, with the
+/// `field_identifier` carrying the method name. Walk outward from the
+/// inner constructor to find a terminal HIGH-confidence file-op
+/// (`replace_extension` on `std::filesystem::path`, `read` / `write` on
+/// stream temporaries). No transparent adapter step needed — C++ chains
+/// don't introduce `.unwrap()` style adapters between constructor and
+/// terminal.
 fn enclosing_callee(str_node: Node<'_>, source: &[u8]) -> Option<String> {
     let parent = str_node.parent()?;
     if parent.kind() != "argument_list" {
         return None;
     }
-    let call = parent.parent()?;
-    if call.kind() != "call_expression" {
+    let inner_call = parent.parent()?;
+    if inner_call.kind() != "call_expression" {
         return None;
     }
-    let function = call.child_by_field_name("function")?;
+
+    if let Some(terminal) = terminal_chained_callee(inner_call, source) {
+        if is_high_confidence_chain_terminal(&terminal) {
+            return Some(terminal);
+        }
+    }
+
+    let function = inner_call.child_by_field_name("function")?;
     callee_name(function, source)
+}
+
+/// Walk one chain step: `inner_call → field_expression → outer_call`.
+/// Returns the outer call's `field_identifier` text, or `None` if the
+/// inner call isn't chained.
+fn terminal_chained_callee(inner_call: Node<'_>, source: &[u8]) -> Option<String> {
+    let field = inner_call.parent()?;
+    if field.kind() != "field_expression" {
+        return None;
+    }
+    let outer_call = field.parent()?;
+    if outer_call.kind() != "call_expression" {
+        return None;
+    }
+    let field_id = field.child_by_field_name("field")?;
+    std::str::from_utf8(&source[field_id.start_byte()..field_id.end_byte()])
+        .ok()
+        .map(str::to_string)
+}
+
+/// HIGH-confidence chain-terminal names for C++. Aligned with the
+/// entries currently in `classify_sink` / `is_ext_change_callee` after
+/// adding `replace_extension` (this commit). Stream `read`/`write` are
+/// intentionally omitted — they're MEDIUM by design (overloaded with
+/// non-file IO).
+fn is_high_confidence_chain_terminal(name: &str) -> bool {
+    matches!(
+        name,
+        "replace_extension" | "replace_filename" | "with_extension" | "with_file_name"
+    )
 }
 
 fn callee_name(function: Node<'_>, source: &[u8]) -> Option<String> {

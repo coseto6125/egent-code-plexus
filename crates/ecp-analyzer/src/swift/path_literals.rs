@@ -9,15 +9,14 @@
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
-use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
+use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let value = extract_string_content(str_node, source)?;
-    if !is_path_shaped(value) {
+    let callee = enclosing_callee(str_node, source);
+    if !is_path_shaped(value) && !is_ext_change_callee(callee.as_deref()) {
         return None;
     }
-
-    let callee = enclosing_callee(str_node, source);
     let (kind, conf) = classify_sink(callee.as_deref());
     let reason = sink_reason(kind, conf);
 
@@ -115,23 +114,85 @@ fn strip_raw_string_swift(raw: &str) -> Option<&str> {
 }
 
 /// Climb the AST to find the enclosing call expression callee in Swift.
-/// Swift call shapes: `call_expression` has a `function` field.
+///
+/// Swift has two distinct idioms for path I/O, both routed via argument
+/// labels rather than chain-terminal method names:
+///
+/// 1. **Labelled-argument constructors** — `String(contentsOfFile: "x")`,
+///    `Data(contentsOf: url)`. Function is a bare `simple_identifier` (type
+///    name); the meaningful part is the argument label.
+///
+/// 2. **Navigation chains with labelled args** — `"str".write(toFile: "x")`,
+///    `data.write(toFile: "x")`. Function is a `navigation_expression`
+///    whose trailing ident is the chained method (`write`); the labelled
+///    argument still carries the read/write intent (`toFile` ⇒ file write
+///    rather than a stream write).
+///
+/// In both cases we prefer the argument label when it resolves to a
+/// `classify_sink` HIGH entry, otherwise fall back to the function text.
 fn enclosing_callee(str_node: Node<'_>, source: &[u8]) -> Option<String> {
     let mut cur = str_node.parent();
+    // Track the most recent value_argument we climb through so we can read
+    // its label when we reach a call_expression.
+    let mut enclosing_arg: Option<Node<'_>> = None;
     while let Some(n) = cur {
         match n.kind() {
+            "value_argument" => {
+                if enclosing_arg.is_none() {
+                    enclosing_arg = Some(n);
+                }
+                cur = n.parent();
+            }
             "call_expression" => {
-                let fn_node = n.child_by_field_name("function")?;
+                // Swift grammar has no named `function` field on call_expression;
+                // child(0) is always the callee expression.
+                let fn_node = n.child(0)?;
+                // Promote the argument label when it resolves to a HIGH-confidence
+                // file-op name — covers both labelled-arg constructors
+                // (function is `simple_identifier`) and labelled-arg chains
+                // (function is `navigation_expression`).
+                if let Some(label) = enclosing_arg.and_then(|arg| arg_label(arg, source)) {
+                    if is_high_confidence_label(&label) {
+                        return Some(label);
+                    }
+                }
                 let text =
                     std::str::from_utf8(&source[fn_node.start_byte()..fn_node.end_byte()]).ok()?;
                 return Some(text.to_string());
             }
-            "argument" | "value_arguments" | "tuple_expression" | "labeled_statement" => {
+            "argument" | "value_arguments" | "call_suffix" | "tuple_expression"
+            | "labeled_statement" => {
                 cur = n.parent();
             }
             // Stop climbing past function bodies.
             "function_body" | "lambda_literal" | "source_file" => return None,
             _ => cur = n.parent(),
+        }
+    }
+    None
+}
+
+/// Argument labels that justify promotion over the bare function callee.
+/// Each must match a HIGH-confidence entry in `classify_sink`; the LLM
+/// gains nothing from promotion if the label still classifies as Free.
+fn is_high_confidence_label(label: &str) -> bool {
+    matches!(label, "contentsOfFile" | "contentsOf" | "toFile")
+}
+
+/// Extract the label text from a `value_argument` node.
+/// `value_argument` → `value_argument_label` → `simple_identifier`
+fn arg_label(arg: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut c = arg.walk();
+    for child in arg.children(&mut c) {
+        if child.kind() == "value_argument_label" {
+            let mut c2 = child.walk();
+            for lc in child.children(&mut c2) {
+                if lc.kind() == "simple_identifier" {
+                    return std::str::from_utf8(&source[lc.start_byte()..lc.end_byte()])
+                        .ok()
+                        .map(str::to_string);
+                }
+            }
         }
     }
     None

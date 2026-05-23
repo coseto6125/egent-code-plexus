@@ -51,6 +51,12 @@ struct ShapeCheckHints {
     /// to a Route whose path matched. CLI emits this to stderr from `run`;
     /// library callers ignore it.
     unmatched_route_filter: Option<String>,
+    /// Silent-drop counters surfaced verbatim by `render_text` — typed copies
+    /// of the JSON payload fields so the text renderer doesn't need to
+    /// reach back into the serialized value via `.as_u64() / .as_bool()`.
+    unparseable_fetches: u64,
+    unknown_target_shapes_total: u64,
+    unknown_target_shapes_truncated: bool,
 }
 
 /// Library API: returns the JSON payload only, dropping stderr hints.
@@ -197,12 +203,17 @@ fn build_payload_with_hints(
         }));
     }
 
+    let unknown_target_shapes_truncated =
+        unknown_target_shapes_total > unknown_target_shapes.len() as u64;
     let hints = ShapeCheckHints {
         unmatched_route_filter: args
             .route
             .as_ref()
             .filter(|_| filter_matched_count == 0)
             .cloned(),
+        unparseable_fetches,
+        unknown_target_shapes_total,
+        unknown_target_shapes_truncated,
     };
     let value = serde_json::json!({
         "status": "success",
@@ -213,36 +224,29 @@ fn build_payload_with_hints(
         "unparseable_fetches": unparseable_fetches,
         "unknown_target_shapes": unknown_target_shapes,
         // True iff the cap kicked in — LLM should treat the list as a sample.
-        "unknown_target_shapes_truncated": unknown_target_shapes_total
-            > unknown_target_shapes.len() as u64,
+        "unknown_target_shapes_truncated": unknown_target_shapes_truncated,
         "unknown_target_shapes_total": unknown_target_shapes_total,
     });
     Ok((value, hints))
 }
 
-fn render_text(value: &serde_json::Value) -> serde_json::Value {
+fn render_text(value: &serde_json::Value, hints: &ShapeCheckHints) -> serde_json::Value {
     let total = value["total_fetches"].as_u64().unwrap_or(0);
     let drift_count = value["drift_count"].as_u64().unwrap_or(0);
-    let unparseable = value["unparseable_fetches"].as_u64().unwrap_or(0);
-    let unknown_shapes = value["unknown_target_shapes_total"]
-        .as_u64()
-        .unwrap_or_else(|| {
-            value["unknown_target_shapes"]
-                .as_array()
-                .map(|a| a.len() as u64)
-                .unwrap_or(0)
-        });
     let header = if drift_count == 0 {
         format!("shape_check: {total} Fetches edge(s), 0 drift detected.")
     } else {
         format!("shape_check: {total} Fetches edge(s), {drift_count} with drift")
     };
     let mut lines: Vec<serde_json::Value> = vec![serde_json::Value::String(header)];
-    if unparseable > 0 || unknown_shapes > 0 {
-        let truncated = value["unknown_target_shapes_truncated"]
-            .as_bool()
-            .unwrap_or(false);
-        let trunc_note = if truncated { " (list truncated)" } else { "" };
+    if hints.unparseable_fetches > 0 || hints.unknown_target_shapes_total > 0 {
+        let trunc_note = if hints.unknown_target_shapes_truncated {
+            " (list truncated)"
+        } else {
+            ""
+        };
+        let unparseable = hints.unparseable_fetches;
+        let unknown_shapes = hints.unknown_target_shapes_total;
         lines.push(serde_json::Value::String(format!(
             "note: {unparseable} unparseable Fetches reason(s), {unknown_shapes} route(s) with no known ResponseShape{trunc_note} — drift was NOT checked for these"
         )));
@@ -282,7 +286,7 @@ pub fn run(args: ShapeCheckArgs, engine: &crate::engine::Engine) -> Result<(), e
         eprintln!("No routes match `{filter}` in the graph.");
     }
     let emit_value = if matches!(format, OutputFormat::Text) {
-        render_text(&value)
+        render_text(&value, &hints)
     } else {
         value
     };
