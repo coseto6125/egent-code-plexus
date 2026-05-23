@@ -3,7 +3,7 @@
 Use this guide if `ecp` cannot find a symbol that you know exists in the source.
 
 ## 1. Check Index Freshness
-- `ecp` usually auto-refreshes. If it didn't, run [`ecp admin index --repo . --force`](../_shared/refs/indexing.md).
+- `ecp` usually auto-refreshes. If it didn't, run [`ecp admin index --repo . --force`](../_shared/refs/indexing.md). `--repo` is required — pass `.` for cwd or an absolute path.
 
 ## 2. Fuzzy Match
 - Try [`ecp find <FRAGMENT> --mode fuzzy`](../_shared/cli/find.md).

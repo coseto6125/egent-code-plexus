@@ -22,6 +22,9 @@ Before modifying a function or class, always run `ecp impact` to see who calls i
 ### Directive 3: Automatic Indexing
 `ecp` auto-detects changes and rebuilds the index on demand. You rarely need to run `ecp admin index` manually. If a symbol is missing, try `ecp find --mode fuzzy`.
 
+### Directive 4: Grep When It's Actually Right
+Use grep / Read for: string literals, error messages, config keys (toml / yaml / json), vendored / generated code, file-system layout (`find . -name ...`). `ecp` parses code, not text — for non-code text, grep is the correct tool.
+
 ---
 
 ## ⚡ Quick Reference (command × use-case)
@@ -36,11 +39,28 @@ Before modifying a function or class, always run `ecp impact` to see who calls i
 | `ecp inspect --name <n>` | Full context: signature + body + edges + callers |
 
 ### Impact / blast radius
+
+`ecp impact` has three **mutually exclusive** modes — pick by what you have:
+
+**Symbol mode** (you know the symbol name):
 | Command | Use for |
 |---|---|
-| `ecp impact <name>` | Upstream callers + risk_level (default depth 5) |
-| `ecp impact <n> --direction down --depth N` | Custom traversal |
-| `ecp impact --baseline origin/main` | All symbols changed in a PR diff |
+| `ecp impact <name>` | Upstream callers + risk_level (default depth 5, direction `up`) |
+| `ecp impact <n> --direction down --depth N` | Custom traversal (`up` / `down` / `both`) |
+
+**Baseline mode** (no symbol — derive from git diff):
+| Command | Use for |
+|---|---|
+| `ecp impact --baseline origin/main` | All symbols changed between baseline and HEAD |
+
+**Literal mode** (path-string sink lookup):
+| Command | Use for |
+|---|---|
+| `ecp impact --literal session_meta.json` | Every read/write site of a path string, classified (`sink:read` / `sink:write` / `sink:join` / `sink:free` / …). For split-brain bugs (one part writes `meta.json`, another reads `session_meta.json`) |
+
+**Related (edge-level, not symbol-level)**:
+| Command | Use for |
+|---|---|
 | `ecp diff` | Edge-level resolver delta (binding tier-degradation, route / contract changes) |
 
 ### Architecture / cross-cutting
@@ -51,7 +71,8 @@ Before modifying a function or class, always run `ecp impact` to see who calls i
 | `ecp contracts` | Cross-repo API contracts |
 | `ecp tool-map` | External HTTP / DB / Redis / queue calls |
 | `ecp shape-check` | HTTP consumer ↔ Route response shape drift |
-| `ecp processes [trace <pat>]` | Execution-flow community detection |
+| `ecp processes` | List execution-flow Process nodes (Leiden community + BFS detection at index time) |
+| `ecp processes trace <pat>` | Dump full Function / Method step sequence for a matching Process — cleaner than `impact --direction down` when you want the actual execution order |
 | `ecp review` | Full audit (impact + summary + tool-map + shape-check + diff) |
 | `ecp rename <old> <new>` | AST-aware multi-file rename |
 
@@ -69,9 +90,6 @@ Before modifying a function or class, always run `ecp impact` to see who calls i
 | `ecp schema graph-version` | rkyv `graph.bin` format version + bump history |
 
 All `schema` commands default to `--format json` (agent-consumable); pass `--format text` for a human table.
-
-### When grep IS correct
-String literals · error messages · config keys in toml / yaml / json · vendored / generated code · file-system layout (`find . -name ...`).
 
 ---
 
@@ -92,7 +110,5 @@ Match your current task to a guide.
 
 These are detailed manuals for specific commands and concepts.
 
-- `_shared/cli/` — Command-specific flag references (e.g., `inspect`, `impact`, `cypher`).
+- `_shared/cli/` — Command-specific flag references (e.g., `inspect`, `impact`, `cypher`, `processes`).
 - `_shared/refs/` — Conceptual background (e.g., Cypher syntax, Repo resolution).
-
-`BlindSpotRecord` carries `is_test: bool` — verdict layer filters test-region BlindSpots from prod-refactor warnings so legitimate test fixtures (eval / reflection / dlsym to exercise prod code) don't surface noise.

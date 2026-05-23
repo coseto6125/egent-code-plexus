@@ -9,8 +9,8 @@ ecp find "pattern" [--mode <MODE>] [--repo <PATH>]
 
 ## Modes
 - **exact** (default): Find exact name matches. Returns single top-ranked definition unless `--all` is passed.
-- **fuzzy**: Lighter alternative for partial matches.
-- **bm25**: Ranked lexical search via Tantivy. Returns top-K partitioned into buckets:
+- **fuzzy**: Substring match for partial / mistyped names. Returns single top-ranked hit (or all via `--all`) — same output shape as `exact`.
+- **bm25**: Ranked lexical search via Tantivy. Returns top-K partitioned into buckets (multi-result, multi-bucket — different output shape from `exact` / `fuzzy`):
   - `source`: Production code hits.
   - `tests`: Test code.
   - `reference`: References/usages.

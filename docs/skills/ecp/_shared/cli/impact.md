@@ -10,11 +10,11 @@ Two modes:
 ### Symbol blast radius (default mode)
 
 ```bash
-ecp impact <SYMBOL> --direction upstream [--repo <PATH>]
+ecp impact <SYMBOL> [--direction up] [--repo <PATH>]
 ```
 
 - `<SYMBOL>`: Positional argument or `--target X`.
-- `--direction`: `upstream` (who calls me), `downstream` (who I call), or `both`.
+- `--direction`: `up` (who calls me — default), `down` (who I call), or `both`.
 - `--baseline origin/main`: Compare against a branch to see impact of staged changes.
 - `--kind`, `--file_path`: Filter the results.
 - `--include-tests`: Include test files in the impact analysis.

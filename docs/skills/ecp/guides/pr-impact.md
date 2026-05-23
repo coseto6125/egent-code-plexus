@@ -4,7 +4,7 @@ Use this guide before submitting a PR or when reviewing changes to assess the ri
 
 ## 1. Pre-edit Check
 Before changing a function:
-- Run [`ecp impact <SYMBOL> --direction upstream`](../_shared/cli/impact.md).
+- Run [`ecp impact <SYMBOL>`](../_shared/cli/impact.md). (Default direction is `up` — upstream callers.)
 - If risk is HIGH/CRITICAL, analyze if the change breaks shared contracts.
 
 ## 2. Post-edit Audit
