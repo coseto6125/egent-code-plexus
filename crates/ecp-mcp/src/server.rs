@@ -33,6 +33,13 @@ impl EcpMcpServer {
         // it — without this manual injection, LLM clients cannot reach the
         // sub-subcommands at all. Discriminator: `subcmd`.
         tools.extend(crate::group::group_tools());
+        // `ecp schema` is `#[command(hide = true)]` for the same reason as
+        // `ecp group` — its nested sub-subcommands (`blindspots` /
+        // `reltypes` / `node-kinds` / `graph-version`) need a hand-rolled
+        // tool with a `subcmd` discriminator so MCP clients can reach
+        // them. Retain guards against a future visibility flip.
+        tools.retain(|t| t.name != "ecp_schema");
+        tools.extend(crate::schema_mcp::schema_tools());
         let rmcp_tools = build_rmcp_tools(&tools);
         Ok(Self {
             self_exe,

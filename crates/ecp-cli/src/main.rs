@@ -135,6 +135,12 @@ enum Commands {
     /// Per-language BlindSpot emitter inventory (`schema blindspots`) —
     /// distinguishes "no blind spot in this diff" from "ecp doesn't detect
     /// this dispatch pattern yet" so LLM-context builders can flag gaps.
+    /// Hidden because clap's nested-subcommand surface can't be flattened
+    /// into a single MCP tool — the matching `ecp_schema` tool is
+    /// hand-rolled in `crates/ecp-mcp/src/schema_mcp.rs` with a `subcmd`
+    /// discriminator. CLI users keep full `--help` access via
+    /// `ecp schema --help` (hidden subcommands still respond to help).
+    #[command(hide = true)]
     Schema(commands::schema::SchemaArgs),
     /// List detected Process (execution-flow) nodes, or `processes trace
     /// <pattern>` to dump the full Function/Method step sequence for a

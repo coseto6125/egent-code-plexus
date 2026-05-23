@@ -97,6 +97,13 @@ const PEERS_SUBCMDS: &[&str] = &[
 /// the default (list view) and is already covered by TOP_LEVEL_COMMANDS.
 const PROCESSES_SUBCMDS: &[&str] = &["trace"];
 
+/// `ecp schema <subcmd>` — keep in sync with `SchemaCommands` enum in
+/// `crates/ecp-cli/src/commands/schema.rs` AND with the `subcmd` enum
+/// in `crates/ecp-mcp/src/schema_mcp.rs`. The hand-rolled MCP tool is
+/// the only path MCP clients have to reach these subcommands because
+/// `Schema` is `#[command(hide = true)]`.
+const SCHEMA_SUBCMDS: &[&str] = &["blindspots", "reltypes", "node-kinds", "graph-version"];
+
 /// `ecp admin <subcmd>` — top-level admin operations.
 const ADMIN_SUBCMDS: &[&str] = &[
     "install-hook",
@@ -182,6 +189,13 @@ fn every_processes_subcommand_has_help() {
     for sub in PROCESSES_SUBCMDS {
         // `trace` requires a positional <pattern>; --help must still exit 0.
         assert_help_ok(&["processes", sub]);
+    }
+}
+
+#[test]
+fn every_schema_subcommand_has_help() {
+    for sub in SCHEMA_SUBCMDS {
+        assert_help_ok(&["schema", sub]);
     }
 }
 
@@ -342,6 +356,25 @@ fn mcp_ecp_peers_subcmds_are_real_cli_paths() {
     }
 }
 
+#[test]
+fn mcp_ecp_schema_subcmds_are_real_cli_paths() {
+    let tool = ecp_mcp::schema_mcp::schema_tools()
+        .into_iter()
+        .find(|t| t.name == "ecp_schema")
+        .expect("ecp_schema tool missing from registry");
+    let allowed = enum_values(&tool.schema, "subcmd");
+    assert!(!allowed.is_empty(), "ecp_schema subcmd enum is empty");
+    for sub in &allowed {
+        assert_help_ok(&["schema", sub]);
+    }
+    let inventory: Vec<String> = SCHEMA_SUBCMDS.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        sorted(allowed),
+        sorted(inventory),
+        "ecp_schema MCP schema and SCHEMA_SUBCMDS inventory disagree"
+    );
+}
+
 // ── 3. MCP-advertised flags must exist in the real CLI --help ────────────────
 
 /// For each (subcmd, expected_flags) tuple below, every flag must appear
@@ -430,7 +463,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
     );
     let listing = String::from_utf8_lossy(&out.stdout);
 
-    for must_have in ["ecp_peers", "ecp_group"] {
+    for must_have in ["ecp_peers", "ecp_group", "ecp_schema"] {
         let count = listing.matches(must_have).count();
         assert!(
             count >= 1,
