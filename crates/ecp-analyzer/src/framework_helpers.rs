@@ -532,6 +532,96 @@ pub fn collect_symfony_transactional_scopes(
     (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
 }
 
+// ── FU-2026-05-23-009 cross-lang expansion: annotation-form helpers ──
+
+/// Match a TypeScript / NestJS `@Transactional` decorator string as
+/// captured by tree-sitter. Covers bare `@Transactional` plus
+/// argument-bearing forms `@Transactional({ propagation: ... })`.
+/// The typeorm-transactional npm package is the dominant runtime.
+#[inline]
+pub fn is_typeorm_transactional(decorator: &str) -> bool {
+    decorator == "@Transactional"
+        || decorator == "@Transactional()"
+        || decorator.starts_with("@Transactional(")
+}
+
+/// Collect `RawTxScope` entries for Method / Function nodes whose decorator
+/// list contains a TypeORM-style `@Transactional` decorator.
+pub fn collect_typeorm_transactional_scopes(
+    nodes: &[RawNode],
+    scopeable_kinds: &[NodeKind],
+) -> Option<Box<[RawTxScope]>> {
+    let scopes: Vec<RawTxScope> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            scopeable_kinds.contains(&n.kind)
+                && n.decorators.iter().any(|d| is_typeorm_transactional(d))
+        })
+        .map(|(idx, _)| RawTxScope::new(idx as u32, FrameworkId::TypeOrmTransactional))
+        .collect();
+    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
+}
+
+/// Match a Rust `#[transaction]` proc-macro attribute string as captured
+/// by tree-sitter (the entire `#[...]` text). Covers sqlx / diesel /
+/// sea-orm flavours plus argument-bearing forms `#[transaction(rollback)]`.
+#[inline]
+pub fn is_rust_transactional(decorator: &str) -> bool {
+    decorator == "#[transaction]"
+        || decorator == "#[transaction()]"
+        || decorator.starts_with("#[transaction(")
+}
+
+/// Collect `RawTxScope` entries for Function / Method nodes whose decorator
+/// list contains a Rust `#[transaction]` proc-macro attribute.
+pub fn collect_rust_transactional_scopes(
+    nodes: &[RawNode],
+    scopeable_kinds: &[NodeKind],
+) -> Option<Box<[RawTxScope]>> {
+    let scopes: Vec<RawTxScope> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            scopeable_kinds.contains(&n.kind)
+                && n.decorators.iter().any(|d| is_rust_transactional(d))
+        })
+        .map(|(idx, _)| RawTxScope::new(idx as u32, FrameworkId::RustTransaction))
+        .collect();
+    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
+}
+
+// ── FU-2026-05-23-009 cross-lang expansion: NON-annotation patterns ──
+//
+// The four FrameworkId slots below (GoSqlTx, RubyActiveRecordTransaction,
+// DartTransaction, SwiftTransactional) need detector patterns that DON'T
+// dispatch off a decorator string — they're call-site / block-form. Each
+// parser implements the detection inline (no centralised helper):
+//
+// **Go (FrameworkId::GoSqlTx)** — walk the AST for call expressions
+// matching `db.Begin()` / `db.BeginTx(ctx, opts)` / receiver-typed
+// `*sql.DB.Begin()` / `*gorm.DB.Begin()`. Recover the enclosing
+// Function via `enclosing_function_name` + span containment. Emit ONE
+// RawTxScope per enclosing function (not per call site — multiple
+// `db.Begin()` in the same function = one scope).
+//
+// **Ruby (FrameworkId::RubyActiveRecordTransaction)** — walk for
+// `method_call` nodes whose method is `transaction` followed by a
+// `do_block` (ActiveRecord / Sequel idiom). Recover enclosing function;
+// emit one scope per enclosing fn. This consolidates the block-form
+// scope previously carved out as FU-2026-05-23-018.
+//
+// **Dart (FrameworkId::DartTransaction)** — Drift's
+// `database.transaction(() async { ... })`. Detect the `transaction`
+// method call where the argument is a closure / function expression.
+// If no recognised framework, emit zero scopes (audit-only outcome OK).
+//
+// **Swift (FrameworkId::SwiftTransactional)** — Core Data
+// `context.performAndWait { ... }` or GRDB `dbQueue.write { ... }`.
+// Slot reserved; parser may emit zero scopes if no recognised framework
+// is found — surface that as an audit finding in the PR rather than
+// forcing a synthetic detector.
+
 /// Inclusive containment test: `(row, col)` lies within `span`'s
 /// `(start_row, start_col, end_row, end_col)` range. Used to recover a
 /// `RawNode` index from a captured identifier's position when the capture
