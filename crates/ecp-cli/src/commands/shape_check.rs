@@ -95,12 +95,19 @@ fn build_payload_with_hints(
         })
         .collect();
 
+    // Cap the unknown-shape list so a microservice repo where most Fetches
+    // point at external endpoints doesn't balloon the JSON payload (and the
+    // LLM consumer's token budget) with thousands of tiny Maps. Beyond the
+    // cap we still count for the truncated flag.
+    const UNKNOWN_TARGET_SHAPES_CAP: usize = 50;
+
     let mut report_entries: Vec<serde_json::Value> = Vec::new();
     let mut total_fetches: u64 = 0;
     let mut drift_count: u64 = 0;
     let mut filter_matched_count: usize = 0;
     let mut unparseable_fetches: u64 = 0;
     let mut unknown_target_shapes: Vec<serde_json::Value> = Vec::new();
+    let mut unknown_target_shapes_total: u64 = 0;
 
     for edge in graph.edges.iter() {
         if !matches!(&edge.rel_type, ArchivedRelType::Fetches) {
@@ -119,11 +126,14 @@ fn build_payload_with_hints(
             // Surface "there's a Fetches edge here but the target has no
             // ResponseShape/ErrorShape on file" instead of dropping silently.
             // LLMs need to distinguish "no drift" from "couldn't check".
-            let route_node = &graph.nodes[target_idx as usize];
-            unknown_target_shapes.push(serde_json::json!({
-                "route_uid": route_node.uid.to_native().to_string(),
-                "route_name": route_node.name.resolve(&graph.string_pool),
-            }));
+            unknown_target_shapes_total += 1;
+            if unknown_target_shapes.len() < UNKNOWN_TARGET_SHAPES_CAP {
+                let route_node = &graph.nodes[target_idx as usize];
+                unknown_target_shapes.push(serde_json::json!({
+                    "route_uid": route_node.uid.to_native().to_string(),
+                    "route_name": route_node.name.resolve(&graph.string_pool),
+                }));
+            }
             continue;
         };
 
@@ -202,6 +212,10 @@ fn build_payload_with_hints(
         // Always-written silent-drop signals (safe defaults 0 / []).
         "unparseable_fetches": unparseable_fetches,
         "unknown_target_shapes": unknown_target_shapes,
+        // True iff the cap kicked in — LLM should treat the list as a sample.
+        "unknown_target_shapes_truncated": unknown_target_shapes_total
+            > unknown_target_shapes.len() as u64,
+        "unknown_target_shapes_total": unknown_target_shapes_total,
     });
     Ok((value, hints))
 }
@@ -210,10 +224,14 @@ fn render_text(value: &serde_json::Value) -> serde_json::Value {
     let total = value["total_fetches"].as_u64().unwrap_or(0);
     let drift_count = value["drift_count"].as_u64().unwrap_or(0);
     let unparseable = value["unparseable_fetches"].as_u64().unwrap_or(0);
-    let unknown_shapes = value["unknown_target_shapes"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
+    let unknown_shapes = value["unknown_target_shapes_total"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            value["unknown_target_shapes"]
+                .as_array()
+                .map(|a| a.len() as u64)
+                .unwrap_or(0)
+        });
     let header = if drift_count == 0 {
         format!("shape_check: {total} Fetches edge(s), 0 drift detected.")
     } else {
@@ -221,8 +239,12 @@ fn render_text(value: &serde_json::Value) -> serde_json::Value {
     };
     let mut lines: Vec<serde_json::Value> = vec![serde_json::Value::String(header)];
     if unparseable > 0 || unknown_shapes > 0 {
+        let truncated = value["unknown_target_shapes_truncated"]
+            .as_bool()
+            .unwrap_or(false);
+        let trunc_note = if truncated { " (list truncated)" } else { "" };
         lines.push(serde_json::Value::String(format!(
-            "note: {unparseable} unparseable Fetches reason(s), {unknown_shapes} route(s) with no known ResponseShape — drift was NOT checked for these"
+            "note: {unparseable} unparseable Fetches reason(s), {unknown_shapes} route(s) with no known ResponseShape{trunc_note} — drift was NOT checked for these"
         )));
     }
     if let Some(drift) = value["drift"].as_array() {

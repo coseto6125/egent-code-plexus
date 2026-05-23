@@ -560,7 +560,11 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             })
             .collect();
         if impl_count > 0 {
-            omitted_kinds.insert("Impl".to_string(), serde_json::json!(impl_count));
+            omitted_kinds.insert(
+                crate::commands::format::kind_to_str(&ecp_core::graph::ArchivedNodeKind::Impl)
+                    .to_string(),
+                serde_json::json!(impl_count),
+            );
         }
         kept
     } else {
@@ -610,8 +614,11 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
                 block["heuristic_note"].clone(),
             );
         }
-        if !result["omitted_kinds"].as_object().unwrap().is_empty() {
-            let impl_n = result["omitted_kinds"]["Impl"].as_u64().unwrap_or(0);
+        if !omitted_kinds.is_empty() {
+            let impl_n = omitted_kinds
+                .get("Impl")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             eprintln!(
                 "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
             );
