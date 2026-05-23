@@ -62,9 +62,22 @@ impl EcpMcpServer {
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?
             .clone();
         let binary = self.self_exe.clone();
-        tokio::task::spawn_blocking(move || crate::spawn::run_spawn(&binary, &tool, &args))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn task: {e}"))?
+        let ts = crate::telemetry::rfc3339_now();
+        let start = std::time::Instant::now();
+        let result =
+            tokio::task::spawn_blocking(move || crate::spawn::run_spawn(&binary, &tool, &args))
+                .await
+                .map_err(|e| anyhow::anyhow!("spawn task: {e}"))?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let ok = result.is_ok();
+        let record = crate::telemetry::CallRecord {
+            ts: &ts,
+            tool: name,
+            duration_ms,
+            ok,
+        };
+        crate::telemetry::append(&record);
+        result
     }
 }
 

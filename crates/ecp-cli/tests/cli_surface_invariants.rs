@@ -74,6 +74,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "find-event-mirrors",
     "schema",
     "processes",
+    "insight",
     // Hidden
     "admin",
     "group",

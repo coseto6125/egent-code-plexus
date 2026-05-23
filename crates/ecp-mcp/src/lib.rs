@@ -15,3 +15,4 @@ pub mod schema;
 pub mod schema_mcp;
 pub mod server;
 pub mod spawn;
+pub mod telemetry;

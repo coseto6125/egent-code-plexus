@@ -14,6 +14,7 @@ pub mod hook;
 pub mod hook_handle;
 pub mod hook_watcher;
 pub mod impact;
+pub mod insight;
 pub mod inspect;
 pub mod mcp;
 pub mod peers;

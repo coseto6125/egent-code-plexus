@@ -908,7 +908,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ecp-core",
  "rmcp",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

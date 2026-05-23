@@ -147,6 +147,10 @@ enum Commands {
     /// matching process. Surfaces the Leiden-community + BFS detection
     /// already emitted at index time (`pass4_processes` in builder.rs).
     Processes(commands::processes::ProcessesArgs),
+    /// MCP call telemetry aggregator — per-tool p50/p99/error-rate + hourly
+    /// bucket counts. Reads ~/.ecp/telemetry/<repo>/calls.jsonl written by
+    /// the MCP server. Schema is unstable (v1).
+    Insight(commands::insight::InsightArgs),
 }
 
 fn main() {
@@ -213,6 +217,7 @@ fn main() {
         Commands::Peers(args) => run_no_graph!(commands::peers::run(args.clone())),
         Commands::Group { cmd } => run_no_graph!(commands::group::run(cmd.clone())),
         Commands::Schema(args) => run_no_graph!(commands::schema::run(args.clone())),
+        Commands::Insight(args) => run_no_graph!(commands::insight::run(args.clone())),
         _ => {} // fall through to graph-loading path
     }
 
@@ -242,7 +247,8 @@ fn main() {
         | Commands::Watch(_)
         | Commands::Peers(_)
         | Commands::Group { .. }
-        | Commands::Schema(_) => None,
+        | Commands::Schema(_)
+        | Commands::Insight(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -289,7 +295,8 @@ fn main() {
         | Commands::Watch(_)
         | Commands::Peers(_)
         | Commands::Group { .. }
-        | Commands::Schema(_) => unreachable!("handled before graph load"),
+        | Commands::Schema(_)
+        | Commands::Insight(_) => unreachable!("handled before graph load"),
     };
     if let Err(e) = result {
         eprintln!("Command failed: {e}");
