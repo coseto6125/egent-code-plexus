@@ -1,6 +1,4 @@
-// TODO(FU-future): surface binary_commit_sha mismatch in summary output
 //! `ecp summary` — unified registry + repo health entry point.
-//! (Was `ecp coverage` pre-rename; the `coverage` alias is kept for one release.)
 //!
 //! Folds doctor + status + list + summarize into one command:
 //!
@@ -24,7 +22,7 @@ use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use ecp_core::graph::ArchivedZeroCopyGraph;
-use ecp_core::registry::{resolve_home_ecp, Registry, RegistryFile};
+use ecp_core::registry::{resolve_home_ecp, CommitBuildMeta, Registry, RegistryFile};
 use ecp_core::EcpError;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -198,6 +196,32 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
             None => Value::Null,
         },
     );
+
+    // Surface graph-builder vs current-binary SHA mismatch (FU-005). Helps
+    // detect "the binary that built this graph is older than the running ecp"
+    // — common cause of unexplained stale behavior after a `cargo install`.
+    let graph_builder_sha: Option<String> = graph_path
+        .parent()
+        .map(|d| d.join("meta.json"))
+        .and_then(|p| CommitBuildMeta::read(&p).ok())
+        .and_then(|m| m.binary_commit_sha);
+    let current_binary_sha = env!("ECP_GIT_SHA");
+    map.insert(
+        "graph_builder_sha".into(),
+        graph_builder_sha
+            .as_deref()
+            .map(|s| json!(s))
+            .unwrap_or(Value::Null),
+    );
+    map.insert("current_binary_sha".into(), json!(current_binary_sha));
+    if let Some(g) = graph_builder_sha.as_deref() {
+        if g != current_binary_sha {
+            eprintln!(
+                "warn: graph built by ecp@{} differs from current binary ecp@{}; run `ecp admin index --force` if results look stale",
+                g, current_binary_sha
+            );
+        }
+    }
 
     let _ = detailed;
     out
