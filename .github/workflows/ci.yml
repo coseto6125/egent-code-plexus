@@ -385,6 +385,16 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
 
+    # Workflow-level perms (contents: read) aren't enough — reviewdog defaults
+    # to the `github-pr-check` reporter, which POSTs to /repos/.../check-runs
+    # and needs `checks: write`. Without these overrides the step 401s
+    # whenever actionlint actually finds an issue to report; passes silently
+    # when there's nothing to publish, hiding the bug for ages.
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
