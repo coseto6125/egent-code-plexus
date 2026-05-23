@@ -21,11 +21,16 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` / `unlabeled` listed so adding the `ci:run` label fires a
+    # workflow run. Defaults [opened, synchronize, reopened] must be re-
+    # declared because specifying `types:` drops the implicit defaults.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     branches: [main]
   # Merge queue: GitHub builds a temporary `gh-readonly-queue/main/...` branch
   # combining PRs + main, and runs CI on that combined state. Without this
   # trigger, the queue would hang waiting for required-checks to report.
   merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -190,14 +195,25 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    # Heavy test matrix only runs on push-to-main / merge_group / workflow_dispatch
-    # — PR-time skips entirely to keep iteration latency low. PR-time signal
-    # comes from `code-quality` (fmt + clippy) + `audit` + `actionlint`; full
-    # cross-platform / sharded test runs once post-merge. test-result aggregator
-    # below treats `skipped` as success so PRs aren't blocked.
+    # PR-time test gating: the author opts in by adding the `ci:run` label.
+    # Pattern is the GitHub-personal-repo substitute for merge queue / self-
+    # approve (PR authors can't approve their own PRs). Once labeled,
+    # subsequent `synchronize` events keep firing test as long as the label
+    # is present; remove the label to pause test on further pushes.
+    #
+    # Non-PR events (push:main / merge_group / workflow_dispatch) always run
+    # test — they're the post-merge / pre-merge-queue / manual paths and have
+    # no opt-in semantic.
+    #
+    # test-result aggregator below distinguishes PR-skipped (blocking — author
+    # forgot the label) from non-PR-skipped (allowed — docs-only short-circuit
+    # on push:main is legitimate).
     if: |
-      github.event_name != 'pull_request'
-      && !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]'))
+      !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]'))
+      && (
+        github.event_name != 'pull_request'
+        || contains(github.event.pull_request.labels.*.name, 'ci:run')
+      )
     env:
       # 14 tree-sitter parsers × 30+ test binaries × debug-info defaulted to
       # `true` produced ~30 GB in target/debug/deps/ and filled the ubuntu
@@ -277,15 +293,21 @@ jobs:
           echo "::endgroup::"
 
   # ==================== Test aggregator (required-check facade) ====================
-  # Collapses the 8 sharded `test` jobs (2 OS × 4 shards) into a single
-  # named check. Branch protection requires this one name instead of
-  # listing all 8 shard contexts — keeps required-checks list stable
-  # if shard count changes later.
+  # Collapses the matrix `test` jobs into a single named check. Branch
+  # protection requires this one name instead of listing every per-OS
+  # context — keeps required-checks list stable across matrix changes.
   #
-  # `if: always()` ensures this job runs even when shards fail, so the
-  # facade reports the real aggregate (rather than going "queued forever"
-  # and timing out the merge). The exit-1 short-circuit converts any
-  # non-success result from a shard into an overall failure here.
+  # `if: always()` ensures this job runs even when shards fail (otherwise
+  # it would go "queued forever" and time out the merge).
+  #
+  # Skip-handling rules:
+  #   - `success` → pass (real green)
+  #   - `skipped` on non-PR event → pass (docs-only short-circuit on push:main
+  #     is legitimate; nothing to validate)
+  #   - `skipped` on PR event → FAIL (author opted out by not adding `ci:run`
+  #     label, but branch protection requires test green before merge — this
+  #     forces the label to come on before merge can happen)
+  #   - anything else (failure / cancelled) → FAIL
   test-result:
     name: Test (all platforms)
     runs-on: ubuntu-latest
@@ -295,10 +317,19 @@ jobs:
       - name: Aggregate shard results
         env:
           TEST_RESULT: ${{ needs.test.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          echo "test job aggregate result: $TEST_RESULT"
-          if [ "$TEST_RESULT" = "success" ] || [ "$TEST_RESULT" = "skipped" ]; then
+          echo "test job aggregate result: $TEST_RESULT (event: $EVENT_NAME)"
+          if [ "$TEST_RESULT" = "success" ]; then
             exit 0
+          fi
+          if [ "$TEST_RESULT" = "skipped" ] && [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "✓ Skipped on $EVENT_NAME — docs-only short-circuit OK"
+            exit 0
+          fi
+          if [ "$TEST_RESULT" = "skipped" ]; then
+            echo "::error::Test was skipped on PR — add 'ci:run' label to fire it before merge"
+            exit 1
           fi
           echo "::error::At least one test shard failed or was cancelled"
           exit 1
