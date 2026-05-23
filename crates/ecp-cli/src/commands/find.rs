@@ -623,11 +623,9 @@ fn run_single(
         compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
     let buckets = BucketedResults::partition(hits);
     let summary = if truncated_total > (MULTI_CAP as u64) {
-        eprintln!(
-            "note: substring fallback truncated — {truncated_total} matches scanned, {MULTI_CAP} kept; rebuild Tantivy index via `ecp admin index` to drop this cap"
-        );
+        eprintln!("note: search truncated — {truncated_total} matches found, {MULTI_CAP} kept");
         Some(format!(
-            "substring fallback truncated: {truncated_total} matches scanned, {MULTI_CAP} kept"
+            "search truncated: {truncated_total} matches found, {MULTI_CAP} kept"
         ))
     } else {
         None
@@ -693,12 +691,13 @@ fn tantivy_hits(
     repo_label: &Option<String>,
     index_dir: &std::path::Path,
 ) -> (Vec<Hit>, u64) {
-    let scored = match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
-        Some(s) => s,
-        // Index unavailable / corrupt / parse error — fall through so
-        // hook context isn't silently empty.
-        None => return substring_hits(graph, pattern, kind_set, repo_label),
-    };
+    let (scored, tantivy_total) =
+        match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
+            Some(s) => s,
+            // Index unavailable / corrupt / parse error — fall through so
+            // hook context isn't silently empty.
+            None => return substring_hits(graph, pattern, kind_set, repo_label),
+        };
     // Index ran cleanly. An empty scored vec means BM25 ruled out every
     // symbol; we MUST NOT fall back to substring scan, since that would
     // surface 0.4-scored noise the trusted index already rejected.
@@ -725,11 +724,7 @@ fn tantivy_hits(
             hits.push(hit);
         }
     }
-    // Tantivy uses MULTI_CAP as the search limit — the index pre-caps the
-    // result set, so a returned `scored.len()` of MULTI_CAP indicates
-    // potential overflow but we have no signal here. Surface 0 (== no
-    // substring-fallback truncation) and let downstream emit reflect that.
-    (hits, 0)
+    (hits, tantivy_total)
 }
 
 /// Fallback BM25-shaped scan when no tantivy index is on disk.

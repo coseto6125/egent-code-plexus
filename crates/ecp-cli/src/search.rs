@@ -3,7 +3,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tantivy::schema::*;
-use tantivy::{collector::TopDocs, query::QueryParser, Index, IndexWriter, ReloadPolicy};
+use tantivy::{
+    collector::{Count, TopDocs},
+    query::QueryParser,
+    Index, IndexWriter, ReloadPolicy,
+};
 
 pub struct TantivyEngine;
 
@@ -175,12 +179,19 @@ impl TantivyEngine {
     /// - `None` — index unavailable (missing dir, open failed, reader
     ///   build failed, query parse error). Caller should fall back to
     ///   substring scan so the hook still produces context.
-    /// - `Some(empty)` — index opened cleanly, query ran, BM25
+    /// - `Some((empty, 0))` — index opened cleanly, query ran, BM25
     ///   genuinely matched nothing. Caller MUST NOT fall back, since
     ///   substring scan would produce noisy 0.4 hits that the trusted
     ///   index already ruled out.
-    /// - `Some(vec)` — ranked uids + scores.
-    pub fn search(index_dir: &Path, query_str: &str, limit: usize) -> Option<Vec<(f32, String)>> {
+    /// - `Some((vec, total))` — ranked uids + scores; `total` is the
+    ///   exact document count matching the query across the whole index.
+    ///   When `total > limit`, the result set was capped and downstream
+    ///   consumers can surface the truncation to LLM callers.
+    pub fn search(
+        index_dir: &Path,
+        query_str: &str,
+        limit: usize,
+    ) -> Option<(Vec<(f32, String)>, u64)> {
         let index_dir = index_dir.join("tantivy");
         if !index_dir.exists() {
             return None;
@@ -199,8 +210,13 @@ impl TantivyEngine {
         let query_parser = QueryParser::for_index(&index, vec![name_field]);
         let expanded = tokenize_identifier(query_str);
         let query = query_parser.parse_query(&expanded).ok()?;
-        let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(limit).order_by_score())
+        // Count runs alongside TopDocs at zero extra cost — tantivy's tuple
+        // collector fuses both in a single index scan pass.
+        let (total_count, top_docs) = searcher
+            .search(
+                &query,
+                &(Count, TopDocs::with_limit(limit).order_by_score()),
+            )
             .ok()?;
 
         let mut results = Vec::with_capacity(top_docs.len());
@@ -214,7 +230,7 @@ impl TantivyEngine {
             }
         }
 
-        Some(results)
+        Some((results, total_count as u64))
     }
 }
 
@@ -293,5 +309,82 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with("main__abc123.building.tantivy.dead."));
+    }
+
+    // ── TantivyEngine::search total-count tests ───────────────────────────────
+
+    use ecp_core::graph::{Node, NodeKind, ZeroCopyGraph};
+    use ecp_core::pool::{StrRef, StringPool};
+    use tempfile::TempDir;
+
+    fn build_graph_with_names(names: &[&str]) -> ZeroCopyGraph {
+        let mut pool = StringPool::new();
+        let nodes: Vec<Node> = names
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let name_ref = pool.add(name);
+                Node {
+                    uid: i as u64,
+                    name: name_ref,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (1, 0, 2, 0),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                }
+            })
+            .collect();
+        let node_count = nodes.len();
+        ZeroCopyGraph {
+            string_pool: pool.bytes,
+            nodes,
+            out_offsets: vec![0u32; node_count + 1],
+            in_offsets: vec![0u32; node_count + 1],
+            ..ZeroCopyGraph::default()
+        }
+    }
+
+    fn index_dir_for(graph: &ZeroCopyGraph) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        super::TantivyEngine::build_index(dir.path(), graph).unwrap();
+        dir
+    }
+
+    #[test]
+    fn search_total_equals_hit_count_when_below_cap() {
+        // 3 nodes all matching "parse" — well below any MULTI_CAP
+        let names = ["parseConfig", "parseFile", "parseToken"];
+        let graph = build_graph_with_names(&names);
+        let dir = index_dir_for(&graph);
+
+        let (hits, total) = super::TantivyEngine::search(dir.path(), "parse", 100)
+            .expect("index should be readable");
+        assert_eq!(
+            hits.len(),
+            total as usize,
+            "total must equal returned hit count when no cap applied"
+        );
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn search_total_exceeds_hits_when_cap_applied() {
+        // 110 nodes all matching "handler" — more than the MULTI_CAP of 100
+        let names: Vec<String> = (0..110).map(|i| format!("handler{i}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let graph = build_graph_with_names(&name_refs);
+        let dir = index_dir_for(&graph);
+
+        let cap = 100;
+        let (hits, total) = super::TantivyEngine::search(dir.path(), "handler", cap)
+            .expect("index should be readable");
+        assert_eq!(hits.len(), cap, "result set capped at limit");
+        assert!(
+            total > cap as u64,
+            "total must exceed cap when index has more matches"
+        );
+        assert_eq!(total, 110);
     }
 }

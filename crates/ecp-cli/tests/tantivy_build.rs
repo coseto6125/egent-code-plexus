@@ -86,7 +86,7 @@ fn build_index_happy_path_returns_ok_and_is_queryable() {
 
     TantivyEngine::build_index(index_dir, &graph).expect("happy path must succeed");
 
-    let hits =
+    let (hits, _total) =
         TantivyEngine::search(index_dir, "resolve_symbol", 100).expect("index must be queryable");
     let expected_uid =
         ecp_core::uid::compute(NodeKind::Function, "src/main.rs", None, "resolve_symbol")
@@ -114,7 +114,7 @@ fn build_index_wipes_stale_directory_left_by_prior_abort() {
     let graph = make_graph_with_names(&["fresh_symbol"]);
     TantivyEngine::build_index(index_dir_root, &graph).expect("stale dir must self-heal");
 
-    let hits = TantivyEngine::search(index_dir_root, "fresh_symbol", 100)
+    let (hits, _total) = TantivyEngine::search(index_dir_root, "fresh_symbol", 100)
         .expect("index must be queryable");
     let expected_uid =
         ecp_core::uid::compute(NodeKind::Function, "src/main.rs", None, "fresh_symbol").to_string();
