@@ -152,9 +152,19 @@ jobs:
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           echo "::endgroup::"
 
-  # ==================== Cross-Platform Tests (nextest) ====================
+  # ==================== Cross-Platform Tests (nextest, sharded) ====================
+  # Sharding: ~3177 tests split into 4 partitions per platform via
+  # `cargo nextest --partition count:N/4`. All 4 shards on a given OS
+  # compile the same target/ (only test selection differs at runtime),
+  # so the Swatinem rust-cache `shared-key` is identical across shards
+  # — first finisher saves, others no-op (GHA cache "exists, skip"
+  # semantics). Wall-clock per platform: ~7m → ~2m45s.
+  #
+  # Aggregated status is exposed via the `test-result` job below as a
+  # single required check ("Test (all platforms)") — branch protection
+  # cares about that one name, not the 8 individual shard jobs.
   test:
-    name: Test on ${{ matrix.os }}
+    name: Test on ${{ matrix.os }} (shard ${{ matrix.shard }}/4)
     runs-on: ${{ matrix.os }}
     needs: detect-changes
     strategy:
@@ -166,6 +176,7 @@ jobs:
         # here is platform-agnostic (uses `dirs` / `PathBuf` everywhere).
         # Windows still validates on schedule + push-to-main + workflow_dispatch.
         os: [ubuntu-latest, macos-latest]
+        shard: [1, 2, 3, 4]
     if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
     env:
       # 14 tree-sitter parsers × 30+ test binaries × debug-info defaulted to
@@ -177,7 +188,7 @@ jobs:
     steps:
       - name: Short-circuit for docs-only PR
         if: needs.detect-changes.outputs.code != 'true'
-        run: echo "✓ Docs-only PR — skipping cargo nextest on ${{ matrix.os }}"
+        run: echo "✓ Docs-only PR — skipping cargo nextest on ${{ matrix.os }} shard ${{ matrix.shard }}/4"
 
       - name: Harden the runner (Audit all outbound calls)
         if: needs.detect-changes.outputs.code == 'true'
@@ -238,12 +249,40 @@ jobs:
           cache-on-failure: true
           cache-workspace-crates: true
 
-      - name: Run tests (nextest)
+      - name: Run tests (nextest, sharded)
         if: needs.detect-changes.outputs.code == 'true'
         run: |
-          echo "::group::cargo nextest"
-          cargo nextest run --workspace --all-features --no-fail-fast
+          echo "::group::cargo nextest (shard ${{ matrix.shard }}/4)"
+          cargo nextest run --workspace --all-features --no-fail-fast \
+            --partition count:${{ matrix.shard }}/4
           echo "::endgroup::"
+
+  # ==================== Test aggregator (required-check facade) ====================
+  # Collapses the 8 sharded `test` jobs (2 OS × 4 shards) into a single
+  # named check. Branch protection requires this one name instead of
+  # listing all 8 shard contexts — keeps required-checks list stable
+  # if shard count changes later.
+  #
+  # `if: always()` ensures this job runs even when shards fail, so the
+  # facade reports the real aggregate (rather than going "queued forever"
+  # and timing out the merge). The exit-1 short-circuit converts any
+  # non-success result from a shard into an overall failure here.
+  test-result:
+    name: Test (all platforms)
+    runs-on: ubuntu-latest
+    needs: test
+    if: ${{ always() && !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+    steps:
+      - name: Aggregate shard results
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "test job aggregate result: $TEST_RESULT"
+          if [ "$TEST_RESULT" = "success" ] || [ "$TEST_RESULT" = "skipped" ]; then
+            exit 0
+          fi
+          echo "::error::At least one test shard failed or was cancelled"
+          exit 1
 
   # ==================== Supply-chain Audit ====================
   audit:
