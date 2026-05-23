@@ -680,4 +680,69 @@ mod tests {
         assert_eq!(result.commit_dir, gen_dir);
         assert_eq!(result.sha_hex, sha_hex);
     }
+
+    /// FU-2026-05-23-045 regression: the tie-breaker MUST prefer the
+    /// generation dir for the same SHA even when filesystem mtime favours
+    /// the base (e.g. base was just `touch`ed by an `auto_ensure` sidecar
+    /// write while gen_dir's `meta.json` ages in place).
+    ///
+    /// Pre-fix behaviour used raw mtime as the tie-breaker, which would
+    /// pick base here and silently shadow the newer generation. Post-fix
+    /// the generation tuple takes precedence over mtime.
+    #[test]
+    fn wait_for_completion_prefers_generation_dir_even_when_base_mtime_is_newer() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("commits");
+        fs::create_dir_all(&parent).unwrap();
+
+        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
+        let base = parent.join(format!("branch_main__{sha_hex}"));
+        let gen_dir = parent.join(format!("branch_main__{sha_hex}.gen.1730000000000.42.7"));
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&gen_dir).unwrap();
+
+        let meta = CommitBuildMeta {
+            version: 1,
+            sha: sha_hex.to_string(),
+            source_type: SourceType::Branch,
+            source_id: Some("main".to_string()),
+            built_from_worktree: "repo".to_string(),
+            built_at: "2026-05-20T00:00:00Z".to_string(),
+            parent_sha: None,
+            node_count: 1,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![RefRecord {
+                ref_name: "refs/heads/main".to_string(),
+                seen_at: "2026-05-20T00:00:00Z".to_string(),
+            }],
+            refs_seen_since: vec![],
+            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+            binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
+        };
+        CommitBuildMeta::write_atomic(&base.join("meta.json"), &meta).unwrap();
+        CommitBuildMeta::write_atomic(&gen_dir.join("meta.json"), &meta).unwrap();
+
+        // Force the WRONG mtime ordering: base.meta.json is 1 hour AHEAD of
+        // gen_dir.meta.json. Pre-FU-045 the tie-breaker would pick base
+        // (newer mtime wins). Post-fix, generation tuple dominates and
+        // gen_dir still wins despite older mtime.
+        let now = SystemTime::now();
+        let gen_meta_handle = std::fs::File::open(gen_dir.join("meta.json")).unwrap();
+        gen_meta_handle
+            .set_modified(now - Duration::from_secs(3600))
+            .unwrap();
+        let base_meta_handle = std::fs::File::open(base.join("meta.json")).unwrap();
+        base_meta_handle.set_modified(now).unwrap();
+
+        let building = parent.join(format!("branch_main__{sha_hex}.building"));
+        let result = wait_for_completion(&building, &base).unwrap();
+
+        assert_eq!(
+            result.commit_dir, gen_dir,
+            "generation tuple must dominate mtime; base.mtime > gen_dir.mtime here \
+             but gen_dir must still win"
+        );
+    }
 }
