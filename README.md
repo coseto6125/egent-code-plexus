@@ -16,7 +16,7 @@ A code intelligence graph for **LLMs and AI code agents** — one-shot CLI, zero
 - **Built for agents, not IDEs.** Output is token-cheap (TOON / compact JSON), every flag surfaces via `--help`, every command is non-interactive and stdout-parseable. No UI, no human-skim layout cruft eating the agent's context window.
 - **No warm-up, no daemon.** Each invocation `mmap`s a zero-copy `rkyv` graph file and exits. Read queries return in **~140–170 ms** *including process startup*; a 22k-file repo cold-indexes in under 3 s. An agent can fire dozens of queries per task without amortising a server boot, and there is no "daemon died, please restart" failure mode.
 - **Honest answers over readable graphs.** When a call site can't be statically resolved (dynamic dispatch, unresolved import, reflection), `ecp` emits a `BlindSpot` record — not a guessed edge. An agent that acts on a hallucinated dependency is much more expensive than one that gets an "I don't know" it can route around.
-- **Polyglot reach.** 31 languages parsed at the structural level so modern multi-stack repos (service code + Dockerfiles + GitHub Actions + Terraform + SQL + smart contracts) stop being black holes the moment you leave the main language.
+- **Polyglot reach.** 31+ languages parsed at the structural level so modern multi-stack repos (service code + Dockerfiles + GitHub Actions + Terraform + SQL + smart contracts) stop being black holes the moment you leave the main language.
 
 🎙️ **[Agent Interviews](./interviews/README.md)** — See how real AI agents (Gemini CLI, Codex) use and evaluate `ecp` in autonomous workflows.
 
