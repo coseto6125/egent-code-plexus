@@ -65,11 +65,19 @@ jobs:
           egress-policy: audit
 
       - name: Checkout code
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           # Need history to diff PR head against base ref.
           fetch-depth: 0
           persist-credentials: false
+
+      # Diagnostic only fires on checkout failure; re-fails the job at end
+      # so the green/red signal stays accurate. See action.yml for context.
+      - name: Diagnose checkout failure
+        if: steps.checkout.conclusion == 'failure'
+        uses: ./.github/actions/diagnose-checkout-failure
 
       - name: Classify changed paths
         id: filter
@@ -145,9 +153,15 @@ jobs:
 
       - name: Checkout code
         if: needs.detect-changes.outputs.code == 'true'
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Diagnose checkout failure
+        if: needs.detect-changes.outputs.code == 'true' && steps.checkout.conclusion == 'failure'
+        uses: ./.github/actions/diagnose-checkout-failure
 
       - name: Install Rust toolchain
         if: needs.detect-changes.outputs.code == 'true'
@@ -236,9 +250,15 @@ jobs:
 
       - name: Checkout code
         if: needs.detect-changes.outputs.code == 'true'
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Diagnose checkout failure
+        if: needs.detect-changes.outputs.code == 'true' && steps.checkout.conclusion == 'failure'
+        uses: ./.github/actions/diagnose-checkout-failure
 
       - name: Install Rust toolchain
         if: needs.detect-changes.outputs.code == 'true'
@@ -336,9 +356,15 @@ jobs:
 
       - name: Checkout code
         if: needs.detect-changes.outputs.code == 'true'
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Diagnose checkout failure
+        if: needs.detect-changes.outputs.code == 'true' && steps.checkout.conclusion == 'failure'
+        uses: ./.github/actions/diagnose-checkout-failure
 
       - name: Install Rust toolchain (audit 需要 cargo metadata 來解 Cargo.lock)
         if: needs.detect-changes.outputs.code == 'true'
@@ -402,9 +428,15 @@ jobs:
           egress-policy: audit
 
       - name: Checkout code
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Diagnose checkout failure
+        if: steps.checkout.conclusion == 'failure'
+        uses: ./.github/actions/diagnose-checkout-failure
 
       - name: Run actionlint
         uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d # v1.72.0

@@ -1,0 +1,116 @@
+name: Diagnose checkout failure
+description: |
+  Dumps the runner environment, git config, includeIf path resolution,
+  and credentials file existence when actions/checkout fails. Used to
+  pin down the intermittent "could not read Username" / "Bad credentials"
+  flake. Re-fails the job at the end so the diagnostic doesn't silently
+  convert a failure into a pass.
+
+  Wire-up:
+    - uses: actions/checkout@<sha>
+      id: checkout
+      continue-on-error: true
+      with: ...
+    - uses: ./.github/actions/diagnose-checkout-failure
+      if: steps.checkout.conclusion == 'failure'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set +e
+        echo "::group::Runtime environment"
+        echo "PWD: $(pwd)"
+        echo "HOME: ${HOME:-(unset)}"
+        echo "GIT_DIR: ${GIT_DIR:-(unset)}"
+        echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE:-(unset)}"
+        echo "RUNNER_OS: ${RUNNER_OS:-(unset)}"
+        echo "RUNNER_TEMP: ${RUNNER_TEMP:-(unset)}"
+        echo "RUNNER_TOOL_CACHE: ${RUNNER_TOOL_CACHE:-(unset)}"
+        echo "GITHUB_EVENT_NAME: ${GITHUB_EVENT_NAME:-(unset)}"
+        echo "::endgroup::"
+
+        echo "::group::Tool versions"
+        git --version
+        echo "git config diagnostics:"
+        git config --show-origin --show-scope --list 2>&1 | head -40 || true
+        echo "::endgroup::"
+
+        echo "::group::Workspace state"
+        ls -la "$GITHUB_WORKSPACE" 2>&1 | head -20
+        echo ""
+        echo "readlink -f \$GITHUB_WORKSPACE: $(readlink -f "$GITHUB_WORKSPACE")"
+        echo "readlink -f \$GITHUB_WORKSPACE/.git: $(readlink -f "$GITHUB_WORKSPACE/.git" 2>&1)"
+        echo "::endgroup::"
+
+        echo "::group::.git/config (if exists)"
+        if [ -f "$GITHUB_WORKSPACE/.git/config" ]; then
+          cat "$GITHUB_WORKSPACE/.git/config"
+        else
+          echo "(no .git/config)"
+        fi
+        echo "::endgroup::"
+
+        echo "::group::Resolved gitdir from workspace"
+        if [ -d "$GITHUB_WORKSPACE/.git" ]; then
+          cd "$GITHUB_WORKSPACE"
+          echo "git rev-parse --git-dir: $(git rev-parse --git-dir 2>&1)"
+          echo "git rev-parse --absolute-git-dir: $(git rev-parse --absolute-git-dir 2>&1)"
+          echo "Effective config (after includeIf evaluation):"
+          git config --list --show-origin 2>&1 | head -60
+        else
+          echo "(no .git directory)"
+        fi
+        echo "::endgroup::"
+
+        echo "::group::includeIf credentials files referenced"
+        if [ -f "$GITHUB_WORKSPACE/.git/config" ]; then
+          # Pull out every includeIf .path = <file>; check if the file exists
+          # and (for visibility) show whether it's the expected extraheader.
+          # Sed strips the leading whitespace+key= so we get just the path.
+          grep -E '^\s*path = ' "$GITHUB_WORKSPACE/.git/config" 2>/dev/null | \
+            sed -E 's/^\s*path = //' | while IFS= read -r p; do
+              if [ -f "$p" ]; then
+                echo "  ✓ EXISTS: $p"
+                # Mask the token but show structure (extraheader presence)
+                grep -E '(\[|extraheader)' "$p" 2>&1 | sed 's/AUTHORIZATION:.*/AUTHORIZATION: ***/'
+              else
+                echo "  ✗ MISSING: $p"
+              fi
+            done
+        else
+          echo "(no .git/config to inspect)"
+        fi
+        echo "::endgroup::"
+
+        echo "::group::Any leftover credentials files in runner temp"
+        ls -la "${RUNNER_TEMP:-/tmp}/git-credentials-"*.config 2>&1 || echo "(none in RUNNER_TEMP)"
+        ls -la /tmp/git-credentials-*.config 2>&1 || echo "(none in /tmp)"
+        ls -la /github/runner_temp/git-credentials-*.config 2>&1 || echo "(none in /github/runner_temp)"
+        echo "::endgroup::"
+
+        echo "::group::Mount layout (symlink detection)"
+        # If workspace path contains symlinks, includeIf's gitdir pattern
+        # may match before resolution but not after — surface this.
+        echo "df -h on workspace:"
+        df -h "$GITHUB_WORKSPACE" 2>&1 | head -3
+        echo ""
+        echo "Component-by-component readlink:"
+        IFS=/ read -ra parts <<< "$GITHUB_WORKSPACE"
+        path=""
+        for part in "${parts[@]}"; do
+          [ -z "$part" ] && continue
+          path="$path/$part"
+          resolved=$(readlink -f "$path" 2>&1)
+          if [ "$path" != "$resolved" ]; then
+            echo "  $path → $resolved  (DIFFERENT)"
+          else
+            echo "  $path"
+          fi
+        done
+        echo "::endgroup::"
+
+        echo ""
+        echo "::error::actions/checkout failed; diagnostic captured above. Re-failing job intentionally."
+        exit 1
