@@ -254,10 +254,11 @@ pub(crate) fn build_inside_locked(
         // without walking the working tree. Last step on the build path, detached
         // to a background thread so the build's wall-clock isn't bumped by the
         // tiny 41-byte write.
-        crate::auto_ensure::write_head_sha_sidecar_with_sha(
-            &publish_dir.join("graph.bin"),
-            sha_hex,
-        );
+        let graph_bin = publish_dir.join("graph.bin");
+        crate::auto_ensure::write_head_sha_sidecar_with_sha(&graph_bin, sha_hex);
+        // Version sidecar lets `attach_latest_sibling_sha` skip the 10-50ms
+        // mmap + rkyv::access validation on warm-attach. Same detached pattern.
+        crate::auto_ensure::write_compatible_version_sidecar(&graph_bin);
 
         Ok(BuildResult {
             commit_dir: publish_dir,
