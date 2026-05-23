@@ -16,14 +16,19 @@ on:
   pull_request:
     types: [opened, ready_for_review, synchronize, reopened]
 
+# Workflow-level perms are read-only (OpenSSF Scorecard Token-Permissions
+# requires this). Write scopes the `enable` job actually needs are
+# declared at job-level below.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   enable:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    permissions:
+      contents: write          # gh pr merge mutates the PR's merge state
+      pull-requests: write     # enablePullRequestAutoMerge mutation
     steps:
       - name: Enable auto-merge
         env:

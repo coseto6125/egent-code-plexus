@@ -23,12 +23,15 @@ name: Auto-update PR branches
 on:
   push:
     branches: [main]
-  schedule:
-    - cron: '*/15 * * * *'   # safety net for missed push events / token blips
+  # Cron safety net dropped — GitHub push events are reliable enough in
+  # practice, and `*/15 * * * *` was burning ~20% of GHA free-tier
+  # minutes on no-ops (most cron firings have no eligible PR).
 
+# Workflow-level perms are read-only (OpenSSF Scorecard Token-Permissions
+# requires this). Write scopes the `update` job actually needs are
+# declared at job-level below.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: auto-update-branches
@@ -37,6 +40,9 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write          # updatePullRequestBranch mutation rebases
+      pull-requests: write     # ditto; also for `gh pr comment` on conflict
     steps:
       - name: Update eligible PR branches
         env:
