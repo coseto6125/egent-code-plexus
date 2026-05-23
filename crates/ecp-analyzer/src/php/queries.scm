@@ -105,3 +105,26 @@
   name: (name) @laravel.route.method
     (#match? @laravel.route.method "^(get|post|put|patch|delete|options|any)$")
   arguments: (arguments) @laravel.route.args) @laravel.route.call
+
+;; ---- BlindSpot patterns (FU-001 P5a) ----
+;; eval(<expr>) — runtime PHP code execution. PHP `eval` is a language
+;; construct, not a function — tree-sitter-php emits `(include_expression)`
+;; for `include/require` and a dedicated `(eval_intrinsic)` (or similar)
+;; node — but the call_user_func-style match here works on most grammar
+;; versions where eval appears as a function_call_expression.
+((function_call_expression
+   function: (name) @_fn) @blind.eval
+  (#eq? @_fn "eval"))
+
+;; call_user_func(<callable>, ...) — variable-callable dispatch. The parser
+;; gates emission on the first argument being non-literal (per Constraint 2);
+;; `call_user_func('strlen', ...)` is statically resolvable and skipped.
+((function_call_expression
+   function: (name) @_fn) @blind.call_user_func
+  (#eq? @_fn "call_user_func"))
+
+;; $<var>(...) — variable function call. PHP allows calling any variable
+;; that holds a callable, so the target is bound at runtime via the
+;; variable value.
+((function_call_expression
+   function: (variable_name)) @blind.variable_call)

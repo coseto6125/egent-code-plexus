@@ -7,11 +7,48 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, QueryCursor};
+
+/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
+/// in `parse_file`.
+const BLIND_SPEC: &[(&str, &str)] = &[
+    (
+        "php-eval",
+        "eval(arg) — runtime PHP code execution; argument expression is not statically determinable as a callee",
+    ),
+    (
+        "php-call-user-func",
+        "call_user_func(<callable>, ...) with non-literal callable — dispatch through a variable or expression resolved at runtime",
+    ),
+    (
+        "php-variable-call",
+        "$<var>(...) — variable-function call; target callable bound at runtime via the variable's value",
+    ),
+];
+
+/// True iff the first positional argument of `call_node` is a PHP string
+/// literal (the call_user_func("known_function", ...) shape). Tree-sitter
+/// PHP uses `string` for double-quoted and `string_literal` for the legacy
+/// node — accept either to be robust across grammar versions.
+fn first_arg_is_literal_string(call_node: &Node) -> bool {
+    let Some(args) = call_node.child_by_field_name("arguments") else {
+        return false;
+    };
+    let Some(first_arg) = args.named_child(0) else {
+        return false;
+    };
+    // PHP wraps args in `argument` nodes — descend into the first named child
+    // to see the actual value.
+    let value = first_arg.named_child(0).unwrap_or(first_arg);
+    matches!(
+        value.kind(),
+        "string" | "string_literal" | "encapsed_string"
+    )
+}
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -178,6 +215,10 @@ struct PhpCaptureIndices {
     route_chained_object: Option<u32>,
     laravel_call: Option<u32>,
     laravel_args: Option<u32>,
+    // BlindSpot captures (FU-001 P5a).
+    blind_eval: Option<u32>,
+    blind_call_user_func: Option<u32>,
+    blind_variable_call: Option<u32>,
 }
 
 impl PhpProvider {
@@ -223,6 +264,9 @@ impl PhpProvider {
             route_chained_object: query.capture_index_for_name("route.chained.object"),
             laravel_call: query.capture_index_for_name("laravel.route.call"),
             laravel_args: query.capture_index_for_name("laravel.route.args"),
+            blind_eval: query.capture_index_for_name("blind.eval"),
+            blind_call_user_func: query.capture_index_for_name("blind.call_user_func"),
+            blind_variable_call: query.capture_index_for_name("blind.variable_call"),
         };
 
         Ok(Self {
@@ -253,6 +297,7 @@ impl LanguageProvider for PhpProvider {
             rustc_hash::FxHashMap::default();
         let mut imports = Vec::new();
         let mut routes = Vec::new();
+        let mut blind_spots: Vec<BlindSpot> = Vec::new();
 
         let idx = &self.indices;
         let idx_type_function = idx.type_function;
@@ -285,6 +330,10 @@ impl LanguageProvider for PhpProvider {
 
         let idx_laravel_call = idx.laravel_call;
         let idx_laravel_args = idx.laravel_args;
+
+        let idx_blind_eval = idx.blind_eval;
+        let idx_blind_call_user_func = idx.blind_call_user_func;
+        let idx_blind_variable_call = idx.blind_variable_call;
 
         // Pending Laravel framework refs; emitted after the loop if the
         // `Illuminate` import gate matches.
@@ -414,6 +463,32 @@ impl LanguageProvider for PhpProvider {
                     laravel_call_span = Some(node_span(&cap.node));
                 } else if Some(cap_idx) == idx_laravel_args {
                     laravel_args_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_blind_eval {
+                    let (kind, hint) = BLIND_SPEC[0];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
+                } else if Some(cap_idx) == idx_blind_call_user_func {
+                    if !first_arg_is_literal_string(&cap.node) {
+                        let (kind, hint) = BLIND_SPEC[1];
+                        blind_spots.push(BlindSpot {
+                            kind: kind.to_string(),
+                            file_path: path.to_path_buf(),
+                            span: node_span(&cap.node),
+                            hint: hint.to_string(),
+                        });
+                    }
+                } else if Some(cap_idx) == idx_blind_variable_call {
+                    let (kind, hint) = BLIND_SPEC[2];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
                 }
             }
 
@@ -664,7 +739,7 @@ impl LanguageProvider for PhpProvider {
             documents: vec![],
             framework_refs,
             fanout_refs: vec![],
-            blind_spots: vec![],
+            blind_spots,
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
