@@ -247,7 +247,9 @@ ecp admin mcp tools          # inspect what tools will be exposed
 ecp admin mcp serve          # run the server (default: spawn mode, fresh subprocess per call)
 ```
 
-Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.json`):
+Manual host config snippets — all four hosts share the same Anthropic MCP server shape, only the file path differs:
+
+**Claude Code** — `~/.config/claude-code/mcp-servers.json`:
 
 ```json
 {
@@ -256,6 +258,38 @@ Manual host config example for Claude Code (`~/.config/claude-code/mcp-servers.j
   }
 }
 ```
+
+**Cursor** — `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
+  }
+}
+```
+
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
+  }
+}
+```
+
+**Cline** (VS Code extension) — `cline_mcp_settings.json` (right-click the MCP icon in the extension panel → "Edit MCP Settings"):
+
+```json
+{
+  "mcpServers": {
+    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
+  }
+}
+```
+
+After saving the config, the host will spawn `ecp admin mcp serve` per call (stateless one-shot mode — no warm-up cost). Verify the registration with `ecp admin mcp tools` and the host's own tool inspector.
 
 Progressive path for human operators:
 
@@ -319,6 +353,14 @@ Apply the patch in your Codex CLI fork, then wire the generated module into Code
 ```bash
 cd /path/to/openai-codex-fork
 git apply ~/.config/ecp/host-integration/codex-cli.patch
+```
+
+Or let `ecp` fork + clone + apply via the `gh` CLI in one shot (requires `gh auth status` to be green):
+
+```bash
+ecp admin codex install native-tools --auto-fork
+# default fork checkout: ~/.config/ecp/host-integration/codex-fork/
+# override with --fork-dir <path> or $ECP_CODEX_FORK_DIR
 ```
 
 To verify a fork that already has the native marker, set `ECP_CODEX_CLI_CHECKOUT` before checking status in the TUI:

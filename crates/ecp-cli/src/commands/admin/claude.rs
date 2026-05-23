@@ -46,7 +46,11 @@ pub enum ClaudeComponent {
 pub enum ClaudeSkillTarget {
     /// Install every bundled Claude skill.
     All,
-    /// Review skill: when changed-code review should start from ecp impact and risk signals.
+    /// Command-selection skill: when graph-aware ecp workflows beat plain grep
+    /// or help output. Sourced from the canonical `docs/skills/ecp/`.
+    Ecp,
+    /// Review skill: when changed-code review should start from ecp impact
+    /// and risk signals.
     Simplify,
 }
 
@@ -128,11 +132,8 @@ fn uninstall_skills(target: ClaudeSkillTarget) -> Result<(), EcpError> {
 }
 
 fn source_skill_dir(skill: ClaudeSkillTarget) -> Result<PathBuf, EcpError> {
-    let path = std::env::current_dir()
-        .map_err(|e| EcpError::Output(format!("current_dir: {e}")))?
-        .join("skill_sample")
-        .join("claude")
-        .join(skill.name());
+    let cwd = std::env::current_dir().map_err(|e| EcpError::Output(format!("current_dir: {e}")))?;
+    let path = source_skill_dir_at(skill, &cwd);
     if path.join("SKILL.md").exists() {
         Ok(path)
     } else {
@@ -141,6 +142,20 @@ fn source_skill_dir(skill: ClaudeSkillTarget) -> Result<PathBuf, EcpError> {
             skill.name(),
             path.display()
         )))
+    }
+}
+
+/// Path-resolution split out from `source_skill_dir` so unit tests can pin
+/// the skill → repo-subdir mapping without touching process-global cwd
+/// (`std::env::set_current_dir` races with parallel tests).
+///
+/// `ecp` skill: canonical source is `docs/skills/ecp/` per
+/// `docs/skills/README.md` (single source-of-truth for runtime
+/// `~/.claude/skills/ecp/`). Others ship from `skill_sample/claude/`.
+fn source_skill_dir_at(skill: ClaudeSkillTarget, cwd: &std::path::Path) -> PathBuf {
+    match skill {
+        ClaudeSkillTarget::Ecp => cwd.join("docs").join("skills").join("ecp"),
+        _ => cwd.join("skill_sample").join("claude").join(skill.name()),
     }
 }
 
@@ -159,14 +174,55 @@ impl ClaudeSkillTarget {
     fn name(self) -> &'static str {
         match self {
             ClaudeSkillTarget::All => "all",
+            ClaudeSkillTarget::Ecp => "ecp",
             ClaudeSkillTarget::Simplify => "simplify",
         }
     }
 
     fn expand(self) -> &'static [ClaudeSkillTarget] {
         match self {
-            ClaudeSkillTarget::All => &[ClaudeSkillTarget::Simplify],
+            ClaudeSkillTarget::All => &[ClaudeSkillTarget::Ecp, ClaudeSkillTarget::Simplify],
+            ClaudeSkillTarget::Ecp => &[ClaudeSkillTarget::Ecp],
             ClaudeSkillTarget::Simplify => &[ClaudeSkillTarget::Simplify],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skills_all_expands_to_ecp_and_simplify() {
+        // `All` must cover both bundled skills — previously only Simplify,
+        // which left the canonical ecp skill (`docs/skills/ecp/`) out of the
+        // install set and the global ~/.claude/skills/ecp went stale.
+        let all = ClaudeSkillTarget::All.expand();
+        assert_eq!(all.len(), 2);
+        assert!(matches!(all[0], ClaudeSkillTarget::Ecp));
+        assert!(matches!(all[1], ClaudeSkillTarget::Simplify));
+    }
+
+    #[test]
+    fn source_skill_dir_at_ecp_points_at_docs_skills() {
+        // `Ecp` sources from `docs/skills/ecp/` (canonical), not the
+        // `skill_sample/claude/` codex-style sample dir. Pure path resolution —
+        // no cwd manipulation so the test is parallel-safe.
+        let cwd = std::path::Path::new("/fake/repo");
+        let path = source_skill_dir_at(ClaudeSkillTarget::Ecp, cwd);
+        assert_eq!(path, PathBuf::from("/fake/repo/docs/skills/ecp"));
+    }
+
+    #[test]
+    fn source_skill_dir_at_simplify_uses_skill_sample() {
+        // Other skills (Simplify) keep the legacy `skill_sample/claude/`
+        // pattern — only Ecp diverges to the canonical doc path. Pure path
+        // resolution — no cwd manipulation so the test is parallel-safe.
+        let cwd = std::path::Path::new("/fake/repo");
+        let path = source_skill_dir_at(ClaudeSkillTarget::Simplify, cwd);
+        assert_eq!(
+            path,
+            PathBuf::from("/fake/repo/skill_sample/claude/simplify")
+        );
     }
 }
