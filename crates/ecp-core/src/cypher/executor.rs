@@ -1086,6 +1086,27 @@ fn eval_expr(
             ))
         }
         InCollection(scalar, collection) => {
+            // Pushdown: `<StringLiteral> IN <NodeVar>.decorators` is the canonical
+            // decorator-filter shape fired by agents on every query. Recognizing it
+            // here avoids materializing the entire Value::List (binary_search +
+            // N string allocs) and instead walks the archived rkyv slice directly.
+            // The generic path remains correct for every other InCollection shape.
+            if let Some((var, needle)) = const_str_in_decorators(scalar, collection) {
+                let node_idx = b.node_vars.get(var).copied().or_else(|| {
+                    // WITH-rebind may store a NodeRef in computed.
+                    b.computed.get(var).and_then(|v| {
+                        if let Value::NodeRef { idx, .. } = v {
+                            Some(*idx)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if let Some(idx) = node_idx {
+                    return Ok(Value::Bool(archived_decorator_contains(graph, idx, needle)));
+                }
+                // var is unbound or not a node — generic path produces correct Null/false.
+            }
             let needle = eval_expr(scalar, b, graph, cache)?;
             let haystack = eval_expr(collection, b, graph, cache)?;
             Ok(Value::Bool(match &haystack {
@@ -1380,6 +1401,39 @@ fn archived_fm_decorators(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Value
         Err(_) => vec![],
     };
     Value::List(items)
+}
+
+/// If `scalar IN collection` matches the shape `Lit(Str(needle)) IN Prop(var, "decorators")`,
+/// return `(var_name, needle_str)`. The restriction to exactly `"decorators"` keeps the
+/// pushdown narrow — only the proven hot pattern; all other shapes fall through.
+fn const_str_in_decorators<'e>(
+    scalar: &'e Expr,
+    collection: &'e Expr,
+) -> Option<(&'e str, &'e str)> {
+    let needle = match scalar {
+        Expr::Lit(Literal::Str(s)) => s.as_str(),
+        _ => return None,
+    };
+    match collection {
+        Expr::Prop(var, prop) if prop == "decorators" => Some((var.as_str(), needle)),
+        _ => None,
+    }
+}
+
+/// Walk the archived decorator slice for `node_idx` and return true if any entry,
+/// after stripping a leading `@`, equals `needle`. Zero heap allocation — reads
+/// directly from the rkyv-archived string pool.
+fn archived_decorator_contains(graph: &ArchivedZeroCopyGraph, node_idx: u32, needle: &str) -> bool {
+    match graph
+        .function_metas
+        .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
+    {
+        Ok(i) => graph.function_metas[i].decorators.iter().any(|d| {
+            let s = d.resolve(&graph.string_pool);
+            s.strip_prefix('@').unwrap_or(s) == needle
+        }),
+        Err(_) => false,
+    }
 }
 
 fn eval_binop(op: Op, l: &Value, r: &Value) -> bool {
@@ -2990,6 +3044,82 @@ mod tests {
             let q = parse("MATCH (n:Function) RETURN count(n)").unwrap();
             let r = execute(&q, g, Path::new(".")).unwrap();
             assert!(r.rows.iter().all(|row| row.len() == r.columns.len()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Predicate pushdown: `<StringLiteral> IN <var>.decorators`
+    // Fast path walks the archived rkyv slice directly (no Value::List alloc).
+    // Tests verify: match, non-match, empty-list, and fallback paths.
+    // -----------------------------------------------------------------------
+
+    // g1) pushdown: matching literal returns Bool(true) via fast path
+    #[test]
+    fn pushdown_decorator_in_match_returns_true() {
+        with_fm(|g| {
+            let q =
+                parse("MATCH (m:Function|Method) WHERE 'Override' IN m.decorators RETURN m.name")
+                    .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Str("override_method".into()));
+        });
+    }
+
+    // g2) pushdown: non-matching literal returns Bool(false) — node excluded
+    #[test]
+    fn pushdown_decorator_in_nonmatch_returns_false() {
+        with_fm(|g| {
+            let q = parse(
+                "MATCH (m:Function|Method) WHERE 'NoSuchDecorator' IN m.decorators RETURN m.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "no node has 'NoSuchDecorator': {r:?}");
+        });
+    }
+
+    // g3) pushdown: node with no FunctionMeta record (empty decorator list) returns false, not panic
+    #[test]
+    fn pushdown_decorator_in_empty_list_returns_false() {
+        with_fm(|g| {
+            // sync_fn (node 0) has no FunctionMeta → decorators absent → must be false
+            let q = parse(
+                "MATCH (f:Function) WHERE f.name = 'sync_fn' AND 'Override' IN f.decorators RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "sync_fn has no decorators: {r:?}");
+        });
+    }
+
+    // g4) generic IN over a literal list (not a PropAccess) must fall through to generic path
+    #[test]
+    fn generic_in_literal_list_still_works() {
+        with_two(|g| {
+            let q = parse("MATCH (a:Function) WHERE a.name IN ['caller', 'callee'] RETURN a.name")
+                .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2, "both caller and callee must match: {r:?}");
+        });
+    }
+
+    // g5) InCollection over a non-decorators prop (e.g. m.kind) must use generic path
+    // This test uses the fan fixture and checks that a non-decorators collection
+    // falls through correctly (produces empty result since Value::Str != Value::List).
+    #[test]
+    fn generic_in_collection_non_decorator_prop_falls_through() {
+        with_fan(|g| {
+            // m.kind is a Str, not a List — generic path returns false for every node,
+            // so the WHERE eliminates all rows.
+            let q = parse("MATCH (m:Function) WHERE 'Function' IN m.kind RETURN m.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            // m.kind evaluates to Value::Str("Function"), not Value::List — generic
+            // InCollection arm returns false → zero rows pass the WHERE filter.
+            assert!(
+                r.rows.is_empty(),
+                "non-list InCollection must return false: {r:?}"
+            );
         });
     }
 }
