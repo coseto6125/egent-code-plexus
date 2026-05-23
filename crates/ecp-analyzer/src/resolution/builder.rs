@@ -1652,6 +1652,20 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        // Decorates edge emission — promotes `RawNode.decorators` to first-class
+        // `Decorates` edges from decorated symbols to `Annotation` nodes (resolved
+        // or synthetic). Runs before File-node loop so synthetic Annotation nodes
+        // land in the raw-symbol index range, consistent with EventTopic / SchemaField.
+        let decorates_resolver =
+            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        crate::post_process::decorates_edges::emit_edges(
+            &self.local_graphs,
+            &decorates_resolver,
+            &mut string_pool,
+            &mut nodes,
+            &mut edges,
+        );
+
         // Append one `NodeKind::File` node per LocalGraph at the tail of
         // `nodes` (idx >= raw-node count). Doing it here — AFTER all passes
         // that index symbols by SymbolTable + use raw node idx ranges —
@@ -3015,7 +3029,10 @@ mod tests {
                             is_exported: true,
                             heritage: vec![],
                             type_annotation: None,
-                            decorators: vec![],
+                            // Fixture: provides a Decorates-emit data point so
+                            // the coverage assertion below can guard against
+                            // regression when decorates_edges.rs is modified.
+                            decorators: vec!["@MyAnnotation".into()],
                             calls: vec![],
                             owner_class: None,
                             content_hash: 0,
@@ -3186,8 +3203,9 @@ mod tests {
         assert!(dump_path.exists(), "serial dump path was not taken");
 
         // Fixture coverage: assert each expected category fired at least once.
-        // Implements + Defines + Fetches all required — IThing Interface fixture +
-        // scope_defines post-process + RouteIndex post-Pass-2 join must trigger them.
+        // Implements + Defines + Fetches + Decorates all required — covers
+        // IThing Interface fixture, scope_defines post-process, RouteIndex
+        // post-Pass-2 join, and Decorates post-process.
         for required in &[
             "Calls",
             "Extends",
@@ -3197,6 +3215,7 @@ mod tests {
             "HandlesRoute",
             "Defines",
             "Fetches",
+            "Decorates",
         ] {
             assert!(
                 parallel_buckets.contains_key(*required),

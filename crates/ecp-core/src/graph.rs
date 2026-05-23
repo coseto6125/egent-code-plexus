@@ -83,6 +83,7 @@ impl std::str::FromStr for RelType {
             "EVENTTOPICMIRROR" | "EVENT_TOPIC_MIRROR" => Ok(RelType::EventTopicMirror),
             "OPENSTXSCOPE" | "OPENS_TX_SCOPE" => Ok(RelType::OpensTxScope),
             "OVERRIDES" => Ok(RelType::Overrides),
+            "DECORATES" => Ok(RelType::Decorates),
             _ => Err(()),
         }
     }
@@ -115,6 +116,7 @@ impl RelType {
             Self::EventTopicMirror => "EventTopicMirror",
             Self::OpensTxScope => "OpensTxScope",
             Self::Overrides => "Overrides",
+            Self::Decorates => "Decorates",
         }
     }
 }
@@ -396,6 +398,24 @@ pub enum RelType {
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     Overrides,
+    /// Edge from a decorated symbol (Class / Function / Method / Property /
+    /// Constructor) to an `Annotation` node OR a resolved annotation class.
+    ///
+    /// LLM-utility filter (C) Edge semantics: decorator-driven dispatch
+    /// (Spring `@Injectable`, Hilt DI, Django `@receiver`, Rust `#[derive]`,
+    /// C# `[Authorize]`) is invisible to graph queries without this edge;
+    /// refactors must use grep + manual cross-reference. With this edge:
+    ///   `MATCH (c:Class)-[:Decorates]->(a:Annotation {name:"Injectable"}) RETURN c`
+    ///   `ecp impact <annotation>` traverses all use sites directly.
+    ///
+    /// Resolution: decorator names are resolved via the same `Resolver` used
+    /// by Calls/Implements. On resolver hit the edge targets the resolved
+    /// class. On miss a synthetic `NodeKind::Annotation` node (deduped per
+    /// name across the whole graph) is emitted as the target.
+    ///
+    /// Appended at the END to preserve rkyv discriminants for existing
+    /// `graph.bin` files.
+    Decorates,
 }
 
 impl ArchivedRelType {

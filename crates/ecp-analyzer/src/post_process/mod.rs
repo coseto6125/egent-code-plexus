@@ -7,6 +7,7 @@
 //! derivations that fix gaps no single parser is responsible for filling.
 
 pub mod class_membership;
+pub mod decorates_edges;
 pub mod enum_variant_defines;
 pub mod event_topic_mirrors;
 pub mod imports_edges;

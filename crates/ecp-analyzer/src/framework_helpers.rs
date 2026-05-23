@@ -555,3 +555,201 @@ mod tests {
         assert!(has_import_from(&imps, &["fastapi"]));
     }
 }
+
+/// Normalize a raw decorator/attribute/annotation string captured from any
+/// language to a `(lookup_name, full_name)` pair list.
+///
+/// Returns `Vec` to handle multi-arg derive: `#[derive(Serialize, Deserialize)]`
+/// yields `[("Serialize","Serialize"), ("Deserialize","Deserialize")]`.
+///
+/// Language-specific raw formats handled:
+/// - Python: `property`, `functools.cached_property`, `app.get` (no prefix)
+/// - TS/JS/Java/Kotlin/Swift/Dart: `@Foo`, `@Foo(args)` (leading `@`)
+/// - C#: `[Foo]`, `[FooAttribute]` (bracket-wrapped; `Attribute` suffix stripped)
+/// - PHP: `#[Foo]`, `#[Foo(args)]` (leading `#[`)
+/// - Rust: `#[test]`, `#[derive(A, B)]` (leading `#[`; derive expanded)
+///
+/// Resolution semantics:
+/// - `lookup_name` is the bare identifier used for `Resolver::resolve_symbol`.
+/// - `full_name` is the canonical name stored on synthetic `Annotation` nodes
+///   (dotted-module prefix kept: `functools.cached_property`).
+/// - Parameterized forms drop arguments: `@Cached(ttl=60)` → `("Cached","Cached")`.
+/// - Dotted last-segment for lookup: `@functools.cached_property` →
+///   lookup `"cached_property"`, full `"functools.cached_property"`.
+pub fn normalize_decorator(raw: &str) -> Vec<(String, String)> {
+    let s = raw.trim();
+
+    // ── Rust / PHP: `#[...]` ─────────────────────────────────────────────
+    // `#[derive(A, B, C)]` → multiple pairs.  Other attrs → single pair.
+    if let Some(inner) = s
+        .strip_prefix("#[")
+        .and_then(|t| t.strip_suffix(']'))
+        .map(str::trim)
+    {
+        if let Some(args) = inner
+            .strip_prefix("derive(")
+            .and_then(|t| t.strip_suffix(')'))
+        {
+            // `derive(A, B, C)` → expand each argument.
+            return args
+                .split(',')
+                .map(|a| {
+                    let n = a.trim().to_string();
+                    (n.clone(), n)
+                })
+                .filter(|(n, _)| !n.is_empty())
+                .collect();
+        }
+        // Other Rust/PHP attrs: `#[test]`, `#[Route('/')]`.
+        let name = bare_ident(inner);
+        if name.is_empty() {
+            return vec![];
+        }
+        return vec![(name.to_string(), name.to_string())];
+    }
+
+    // ── C# / PHP attribute_list: `[Foo]` or `[Foo(args)]` ───────────────
+    // tree-sitter-c-sharp `attribute_list` captures the full `[...]` text.
+    if let Some(inner) = s.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        // Skip if it looks like `#[...]` already handled above, or empty.
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return vec![];
+        }
+        let name = bare_ident(inner);
+        // Strip C# `Attribute` suffix so `[AuthorizeAttribute]` → `Authorize`.
+        let lookup = name.strip_suffix("Attribute").unwrap_or(name);
+        return vec![(lookup.to_string(), name.to_string())];
+    }
+
+    // ── `@Foo` / `@Foo(args)` ────────────────────────────────────────────
+    if let Some(rest) = s.strip_prefix('@') {
+        let name = bare_dotted(rest);
+        if name.is_empty() {
+            return vec![];
+        }
+        let lookup = dotted_last(name);
+        return vec![(lookup.to_string(), name.to_string())];
+    }
+
+    // ── Plain identifier / dotted path (Python) ──────────────────────────
+    let name = bare_dotted(s);
+    if name.is_empty() {
+        return vec![];
+    }
+    let lookup = dotted_last(name);
+    vec![(lookup.to_string(), name.to_string())]
+}
+
+/// Return the bare identifier portion of a raw decorator string, stopping at
+/// `(`, `[`, space, or end.  E.g. `"Route('/path')"` → `"Route"`.
+#[inline]
+fn bare_ident(s: &str) -> &str {
+    s.split(|c: char| c == '(' || c == '[' || c.is_whitespace())
+        .next()
+        .unwrap_or("")
+        .trim()
+}
+
+/// Like `bare_ident` but allows dots (dotted paths like `app.get`).
+#[inline]
+fn bare_dotted(s: &str) -> &str {
+    s.split(|c: char| c == '(' || c == '[' || c == '{' || c.is_whitespace())
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.')
+}
+
+/// Last segment of a dotted name: `"functools.cached_property"` → `"cached_property"`.
+#[inline]
+fn dotted_last(s: &str) -> &str {
+    s.rsplit('.').next().unwrap_or(s)
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_decorator;
+
+    #[test]
+    fn python_plain() {
+        assert_eq!(
+            normalize_decorator("property"),
+            vec![("property".into(), "property".into())]
+        );
+    }
+
+    #[test]
+    fn python_dotted() {
+        assert_eq!(
+            normalize_decorator("functools.cached_property"),
+            vec![("cached_property".into(), "functools.cached_property".into())]
+        );
+    }
+
+    #[test]
+    fn at_simple() {
+        assert_eq!(
+            normalize_decorator("@Override"),
+            vec![("Override".into(), "Override".into())]
+        );
+    }
+
+    #[test]
+    fn at_parameterized() {
+        assert_eq!(
+            normalize_decorator("@Cached(ttl=60)"),
+            vec![("Cached".into(), "Cached".into())]
+        );
+    }
+
+    #[test]
+    fn at_dotted() {
+        assert_eq!(
+            normalize_decorator("@functools.cached_property"),
+            vec![("cached_property".into(), "functools.cached_property".into())]
+        );
+    }
+
+    #[test]
+    fn csharp_bracket() {
+        assert_eq!(
+            normalize_decorator("[Authorize]"),
+            vec![("Authorize".into(), "Authorize".into())]
+        );
+    }
+
+    #[test]
+    fn csharp_attribute_suffix_stripped() {
+        assert_eq!(
+            normalize_decorator("[AuthorizeAttribute]"),
+            vec![("Authorize".into(), "AuthorizeAttribute".into())]
+        );
+    }
+
+    #[test]
+    fn rust_test_attr() {
+        assert_eq!(
+            normalize_decorator("#[test]"),
+            vec![("test".into(), "test".into())]
+        );
+    }
+
+    #[test]
+    fn rust_derive_single() {
+        assert_eq!(
+            normalize_decorator("#[derive(Serialize)]"),
+            vec![("Serialize".into(), "Serialize".into())]
+        );
+    }
+
+    #[test]
+    fn rust_derive_multi() {
+        assert_eq!(
+            normalize_decorator("#[derive(Serialize, Deserialize)]"),
+            vec![
+                ("Serialize".into(), "Serialize".into()),
+                ("Deserialize".into(), "Deserialize".into()),
+            ]
+        );
+    }
+}

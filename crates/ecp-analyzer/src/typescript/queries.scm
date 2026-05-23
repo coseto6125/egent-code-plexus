@@ -99,7 +99,11 @@
   (class_heritage (implements_clause (type_identifier) @heritage))?
 ) @class
 
+;; Exported class: TS grammar attaches decorators to export_statement, not
+;; class_declaration, when the pattern is `@Dec export class Foo {}`.
+;; Capture from both positions so both decorator styles resolve.
 (export_statement
+  (decorator)* @decorator
   (class_declaration
     (decorator)* @decorator
     name: (type_identifier) @class.name
@@ -119,7 +123,9 @@
   (class_heritage (implements_clause (type_identifier) @heritage))?
 ) @class
 
+;; Exported abstract class — same decorator-position quirk as regular exported class.
 (export_statement
+  (decorator)* @decorator
   (abstract_class_declaration
     (decorator)* @decorator
     name: (type_identifier) @class.name

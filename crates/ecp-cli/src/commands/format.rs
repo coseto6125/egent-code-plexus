@@ -56,5 +56,6 @@ pub fn rel_to_str(rel: &ArchivedRelType) -> &'static str {
         ArchivedRelType::EventTopicMirror => "event_topic_mirror",
         ArchivedRelType::OpensTxScope => "opens_tx_scope",
         ArchivedRelType::Overrides => "overrides",
+        ArchivedRelType::Decorates => "decorates",
     }
 }
