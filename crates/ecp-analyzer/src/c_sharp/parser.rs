@@ -417,7 +417,11 @@ impl LanguageProvider for CSharpProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes,
-            path_literals: None,
+            path_literals: {
+                let lits =
+                    super::path_literals::extract_csharp_path_literals(tree.root_node(), source);
+                (!lits.is_empty()).then(|| lits.into_boxed_slice())
+            },
             call_metas: vec![],
             raw_function_metas,
         })
