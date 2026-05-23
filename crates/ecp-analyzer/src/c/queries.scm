@@ -92,3 +92,12 @@
       (identifier) @var.name
       (pointer_declarator (identifier) @var.name)
     ]) @var)
+
+;; ---- BlindSpot patterns (FU-001 P7a) ----
+;; dlsym(<handle>, <name>) — runtime symbol resolution. CallMeta's
+;; function-pointer dispatch (indirect_dispatch.rs) already covers later
+;; calls through the returned pointer; this anchor lets the LLM see the
+;; dynamic load site itself.
+((call_expression
+   function: (identifier) @_fn) @blind.dlsym
+  (#eq? @_fn "dlsym"))
