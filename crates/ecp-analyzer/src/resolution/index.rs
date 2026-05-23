@@ -558,6 +558,21 @@ impl SymbolTable {
     pub fn file_of(&self, node_id: u32) -> Option<&str> {
         self.id_to_file.get(&node_id).map(|s| s.as_str())
     }
+
+    /// O(1) kind lookup by node id. Used by Pass-2 heritage dispatch to
+    /// distinguish Interface/Trait targets (→ Implements) from concrete class
+    /// targets (→ Extends) without a secondary resolver round-trip.
+    ///
+    /// Returns `NodeKind::File` (the `#[default]` variant) for ids outside
+    /// the registered range — tombstone slots still push a kind, so valid ids
+    /// are always in-range; an out-of-range id signals a resolver bug and the
+    /// safe fallback is the non-interface default.
+    pub fn node_kind(&self, node_id: u32) -> NodeKind {
+        self.node_kinds
+            .get(node_id as usize)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

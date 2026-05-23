@@ -1070,6 +1070,7 @@ impl GraphBuilder {
         }
 
         let reason_heritage = string_pool.add("heritage");
+        let reason_implements = string_pool.add("pass2:implements");
         let reason_type = string_pool.add("type_annotation");
         let reason_call = string_pool.add("call");
 
@@ -1185,8 +1186,10 @@ impl GraphBuilder {
                         raw_node,
                         current_node_idx,
                         reason_heritage,
+                        reason_implements,
                         reason_type,
                         reason_call,
+                        &symbol_table,
                         &mut edges,
                         lookup,
                         &mut pending_call_metas_global,
@@ -1275,8 +1278,10 @@ impl GraphBuilder {
                             raw_node,
                             current_node_idx,
                             reason_heritage,
+                            reason_implements,
                             reason_type,
                             reason_call,
+                            symbol_table_ref,
                             &mut local_edges,
                             lookup,
                             &mut local_pending,
@@ -1900,8 +1905,10 @@ fn pass2_emit_node_edges(
     raw_node: &RawNode,
     current_node_idx: u32,
     reason_heritage: StrRef,
+    reason_implements: StrRef,
     reason_type: StrRef,
     reason_call: StrRef,
+    symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
@@ -1914,12 +1921,21 @@ fn pass2_emit_node_edges(
             ResolveTarget::Type,
         );
         for (target_id, confidence) in targets {
+            // Kind-based dispatch: Interface/Trait targets → Implements,
+            // concrete class targets → Extends. The resolved target's NodeKind
+            // IS the relationship definition — no per-language parser change
+            // needed (Java `implements`, Kotlin `:`, Go structural, Rust
+            // `impl For` all converge on the same heritage list).
+            let (rel_type, reason) = match symbol_table.node_kind(target_id) {
+                NodeKind::Interface | NodeKind::Trait => (RelType::Implements, reason_implements),
+                _ => (RelType::Extends, reason_heritage),
+            };
             edges.push(Edge {
                 source: current_node_idx,
                 target: target_id,
-                rel_type: RelType::Extends,
+                rel_type,
                 confidence,
-                reason: reason_heritage,
+                reason,
             });
         }
     }
@@ -2844,10 +2860,11 @@ mod tests {
     ///   (b) include the resolved `reason` string in the equality predicate;
     ///   (c) add a `HandlesRoute` fixture to fire that emit branch;
     ///   (d) pin emit-zero invariant for Sub-projects 1/5 types
-    ///       (Imports, Defines, Implements, Fetches).
+    ///       (Imports, Defines, Fetches); Implements lifted here (§8.2).
     ///
     /// The fixtures cover these edge-emission categories:
-    ///   * heritage (`Extends`) — Class with base
+    ///   * heritage (`Extends`) — Class Foo extends concrete Class Bar
+    ///   * heritage (`Implements`) — Class Implementor implements Interface IThing
     ///   * calls (`Calls`) — Function with callee
     ///   * type_annotation (`Accesses`)
     ///   * framework_refs (`References` via Spring fixture)
@@ -2863,18 +2880,34 @@ mod tests {
                 LocalGraph {
                     file_path: "src/foo.rs".into(),
                     content_hash: [0; 8],
-                    nodes: vec![RawNode {
-                        name: "Foo".into(),
-                        kind: NodeKind::Class,
-                        span: (0, 0, 10, 0),
-                        is_exported: true,
-                        heritage: vec!["Bar".into()],
-                        type_annotation: Some("Other".into()),
-                        decorators: vec![],
-                        calls: vec!["other_fn".into()],
-                        owner_class: None,
-                        content_hash: 0,
-                    }],
+                    nodes: vec![
+                        RawNode {
+                            name: "Foo".into(),
+                            kind: NodeKind::Class,
+                            span: (0, 0, 10, 0),
+                            is_exported: true,
+                            heritage: vec!["Bar".into()],
+                            type_annotation: Some("Other".into()),
+                            decorators: vec![],
+                            calls: vec!["other_fn".into()],
+                            owner_class: None,
+                            content_hash: 0,
+                        },
+                        // Implementor → IThing exercises the Implements branch
+                        // of the kind-based heritage dispatch (§8.2).
+                        RawNode {
+                            name: "Implementor".into(),
+                            kind: NodeKind::Class,
+                            span: (12, 0, 20, 0),
+                            is_exported: true,
+                            heritage: vec!["IThing".into()],
+                            type_annotation: None,
+                            decorators: vec![],
+                            calls: vec![],
+                            owner_class: None,
+                            content_hash: 0,
+                        },
+                    ],
                     documents: vec![],
                     imports: vec![],
                     routes: vec![],
@@ -2957,6 +2990,35 @@ mod tests {
                     call_metas: vec![],
                     raw_function_metas: vec![],
                 },
+                // iface.rs: defines Interface IThing so the Implementor →
+                // IThing heritage edge dispatches to Implements (not Extends).
+                LocalGraph {
+                    file_path: "src/iface.rs".into(),
+                    content_hash: [0; 8],
+                    nodes: vec![RawNode {
+                        name: "IThing".into(),
+                        kind: NodeKind::Interface,
+                        span: (0, 0, 3, 0),
+                        is_exported: true,
+                        heritage: vec![],
+                        type_annotation: None,
+                        decorators: vec![],
+                        calls: vec![],
+                        owner_class: None,
+                        content_hash: 0,
+                    }],
+                    documents: vec![],
+                    imports: vec![],
+                    routes: vec![],
+                    framework_refs: vec![],
+                    fanout_refs: vec![],
+                    blind_spots: vec![],
+                    schema_fields: None,
+                    event_topics: None,
+                    tx_scopes: None,
+                    call_metas: vec![],
+                    raw_function_metas: vec![],
+                },
             ]
         }
 
@@ -3020,8 +3082,8 @@ mod tests {
         // `crates/ecp-analyzer/src/post_process/imports_edges.rs` Tier-1-2-3
         // resolver for cross-file basename / dir-component indexing that can't
         // be moved to Pass-2 without breaking its streaming design.
-        // Update this list when remaining types (Defines/Implements/Fetches) ship.
-        for unimplemented in &["Defines", "Implements", "Fetches"] {
+        // `Implements` is lifted by this PR (§8.2). Update when Defines/Fetches ship.
+        for unimplemented in &["Defines", "Fetches"] {
             assert!(
                 !parallel_buckets.contains_key(*unimplemented),
                 "RelType {unimplemented} unexpectedly emitted (parallel) — \
@@ -3046,7 +3108,15 @@ mod tests {
         assert!(dump_path.exists(), "serial dump path was not taken");
 
         // Fixture coverage: assert each expected category fired at least once.
-        for required in &["Calls", "Extends", "Accesses", "References", "HandlesRoute"] {
+        // Implements is now required — the IThing Interface fixture must trigger it.
+        for required in &[
+            "Calls",
+            "Extends",
+            "Implements",
+            "Accesses",
+            "References",
+            "HandlesRoute",
+        ] {
             assert!(
                 parallel_buckets.contains_key(*required),
                 "fixture failed to trigger {required} emit",
