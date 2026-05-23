@@ -268,6 +268,9 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 }
             }
 
+            if !node.has_owning_file() {
+                return None;
+            }
             let file = &graph.files[node.file_idx.to_native() as usize];
             let is_exact = matches!(mode, FindMode::Exact);
             if !args.include_tests
@@ -738,6 +741,9 @@ fn build_hit(
         if !ks.iter().any(|k| k == &node_kind_str) {
             return None;
         }
+    }
+    if !node.has_owning_file() {
+        return None;
     }
     let name = node.name.resolve(&graph.string_pool);
     let file_entry = &graph.files[node.file_idx.to_native() as usize];

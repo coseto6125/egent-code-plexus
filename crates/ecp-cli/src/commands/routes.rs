@@ -373,6 +373,9 @@ fn inspect_route(
                 continue;
             }
             let handler_node = &graph.nodes[handler_idx];
+            if !handler_node.has_owning_file() {
+                continue;
+            }
             let handler_file = &graph.files[handler_node.file_idx.to_native() as usize];
 
             handlers_out.push(serde_json::json!({
@@ -429,6 +432,9 @@ fn bfs_upstream(
     while let Some((curr_idx, curr_depth, via)) = queue.pop_front() {
         if curr_idx != seed_idx {
             let curr_node = &graph.nodes[curr_idx];
+            if !curr_node.has_owning_file() {
+                continue;
+            }
             let file_node = &graph.files[curr_node.file_idx.to_native() as usize];
             let (via_reason, via_confidence) = via
                 .as_ref()

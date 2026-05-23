@@ -225,6 +225,11 @@ fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
         if !is_diffable_kind(nk) {
             continue;
         }
+        // Synthetic Annotation nodes (resolver-miss fallback) have no
+        // owning file and cannot key into a SymbolKey path.
+        if !node.has_owning_file() {
+            continue;
+        }
         let path = graph.files[node.file_idx.to_native() as usize]
             .path
             .resolve(&graph.string_pool)
@@ -369,6 +374,9 @@ fn collect_callers_for_changed(
 
         for (src_idx, edge_idx) in incoming {
             let src_node = &graph.nodes[src_idx as usize];
+            if !src_node.has_owning_file() {
+                continue;
+            }
             let src_path = graph.files[src_node.file_idx.to_native() as usize]
                 .path
                 .resolve(&graph.string_pool)

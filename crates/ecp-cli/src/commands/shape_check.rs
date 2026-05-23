@@ -146,6 +146,9 @@ fn build_payload_with_hints(
 
         let source_idx = edge.source.to_native() as usize;
         let consumer_node = &graph.nodes[source_idx];
+        if !consumer_node.has_owning_file() {
+            continue;
+        }
         let consumer_uid_str = consumer_node.uid.to_native().to_string();
         let consumer_uid = consumer_uid_str.as_str();
         let consumer_name = consumer_node.name.resolve(&graph.string_pool);

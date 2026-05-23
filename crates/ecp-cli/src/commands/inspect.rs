@@ -391,6 +391,11 @@ where
         if matches!(source_node.kind, ecp_core::graph::ArchivedNodeKind::File) {
             continue;
         }
+        // Synthetic Annotation nodes (Decorates resolver-miss) carry
+        // SYNTHETIC_FILE_IDX — skip from incoming traversal display.
+        if !source_node.has_owning_file() {
+            continue;
+        }
         let source_file = &graph.files[source_node.file_idx.to_native() as usize];
         let source_file_path = source_file.path.resolve(&graph.string_pool);
         let source_kind = kind_to_str(&source_node.kind);
@@ -406,6 +411,9 @@ where
     let mut results = Vec::new();
     while let Some(idx) = queue.pop_front() {
         let n = &graph.nodes[idx];
+        if !n.has_owning_file() {
+            continue;
+        }
         let file = &graph.files[n.file_idx.to_native() as usize];
         results.push(serde_json::json!({
             "name": n.name.resolve(&graph.string_pool),
@@ -440,6 +448,12 @@ fn search_nodes<'a>(
 
     let name_owner_matches = |node: &ecp_core::graph::ArchivedNode, base_idx: usize| -> bool {
         if node.name.resolve(&graph.string_pool) != bare_name {
+            return false;
+        }
+        // Synthetic Annotation nodes (resolver-miss fallback from
+        // `decorates_edges`) carry SYNTHETIC_FILE_IDX and have no file:line;
+        // they're not meaningful inspect targets.
+        if !node.has_owning_file() {
             return false;
         }
         if let Some(owner) = owner_filter {

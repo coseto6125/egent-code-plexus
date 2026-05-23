@@ -233,11 +233,12 @@ pub fn schema_field_names_per_file(
     let mut out: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
     for idx in graph.nodes_by_kind(ecp_core::graph::NodeKind::SchemaField) {
         let n = &graph.nodes[idx as usize];
-        let fi = n.file_idx.to_native() as usize;
-        if fi >= graph.files.len() {
+        if !n.has_owning_file() {
             continue;
         }
-        let raw_path = graph.files[fi].path.resolve(&graph.string_pool);
+        let raw_path = graph.files[n.file_idx.to_native() as usize]
+            .path
+            .resolve(&graph.string_pool);
         let path_str = if raw_path.contains('\\') {
             raw_path.replace('\\', "/")
         } else {

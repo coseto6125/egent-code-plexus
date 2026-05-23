@@ -974,6 +974,9 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     let mut per_symbol_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for &start_idx in &changed_node_indices {
         let node = &graph.nodes[start_idx];
+        if !node.has_owning_file() {
+            continue;
+        }
         let sym_name = node.name.resolve(&graph.string_pool).to_string();
         let sym_file = graph.files[node.file_idx.to_native() as usize]
             .path
@@ -1179,6 +1182,11 @@ fn run_bfs(
 
     while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
         let curr_node = &graph.nodes[curr_idx];
+        // BFS via `Decorates` edges can reach synthetic Annotation nodes
+        // (SYNTHETIC_FILE_IDX); they have no file:line to report.
+        if !curr_node.has_owning_file() {
+            continue;
+        }
         let file_idx = curr_node.file_idx.to_native() as usize;
 
         if !include_tests {

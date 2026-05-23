@@ -34,17 +34,16 @@ impl ContentCache {
     }
 
     fn body_for_file(&mut self, graph: &ArchivedZeroCopyGraph, file_idx: u32) -> Option<&str> {
+        if file_idx == crate::graph::SYNTHETIC_FILE_IDX {
+            return None;
+        }
         self.files
             .entry(file_idx)
             .or_insert_with(|| {
-                if (file_idx as usize) < graph.files.len() {
-                    let rel = graph.files[file_idx as usize]
-                        .path
-                        .resolve(&graph.string_pool);
+                graph.files.get(file_idx as usize).and_then(|f| {
+                    let rel = f.path.resolve(&graph.string_pool);
                     std::fs::read_to_string(self.repo_root.join(rel)).ok()
-                } else {
-                    None
-                }
+                })
             })
             .as_deref()
     }
@@ -410,8 +409,8 @@ fn eval_return_item_rich(
             }
             if let Some(&idx) = b.node_vars.get(var) {
                 let n = &graph.nodes[idx as usize];
-                let fi = n.file_idx.to_native() as usize;
-                let file_path = if fi < graph.files.len() {
+                let file_path = if n.has_owning_file() {
+                    let fi = n.file_idx.to_native() as usize;
                     graph.files[fi].path.resolve(&graph.string_pool).to_string()
                 } else {
                     String::new()
@@ -1261,14 +1260,12 @@ fn node_prop_value(
             }
         }
         "kind" => Value::Str(archived_kind_str(n).to_string()),
-        "filePath" => {
+        "filePath" => Value::Str(if n.has_owning_file() {
             let fi = n.file_idx.to_native() as usize;
-            Value::Str(if fi < graph.files.len() {
-                graph.files[fi].path.resolve(&graph.string_pool).to_string()
-            } else {
-                String::new()
-            })
-        }
+            graph.files[fi].path.resolve(&graph.string_pool).to_string()
+        } else {
+            String::new()
+        }),
         "content" => {
             // Lazy file read + span slice.
             let file_idx = n.file_idx.to_native();

@@ -160,9 +160,8 @@ fn detect_collisions(
     if !graph.name_index.is_empty() {
         for idx in graph.nodes_by_name(new_name) {
             let node = &graph.nodes[idx as usize];
-            let file_idx = node.file_idx.to_native() as usize;
-            let file_path = if file_idx < graph.files.len() {
-                graph.files[file_idx]
+            let file_path = if node.has_owning_file() {
+                graph.files[node.file_idx.to_native() as usize]
                     .path
                     .resolve(&graph.string_pool)
                     .to_owned()
@@ -176,9 +175,8 @@ fn detect_collisions(
     }
     for node in graph.nodes.iter() {
         if node.name.resolve(&graph.string_pool) == new_name {
-            let file_idx = node.file_idx.to_native() as usize;
-            let file_path = if file_idx < graph.files.len() {
-                graph.files[file_idx]
+            let file_path = if node.has_owning_file() {
+                graph.files[node.file_idx.to_native() as usize]
                     .path
                     .resolve(&graph.string_pool)
                     .to_owned()
@@ -324,7 +322,8 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             .filter(|(_, n)| {
                 // Fast-reject by u32 len before string resolve: cheaper than
                 // a pool dereference + strcmp when owner_class lengths differ.
-                n.owner_class.len.to_native() == owner_len
+                n.has_owning_file()
+                    && n.owner_class.len.to_native() == owner_len
                     && n.name.resolve(&graph.string_pool) == name
                     && n.owner_class.resolve(&graph.string_pool) == owner
             })
@@ -337,7 +336,8 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             .iter()
             .enumerate()
             .filter(|(_, n)| {
-                n.name.resolve(&graph.string_pool) == target_symbol
+                n.has_owning_file()
+                    && n.name.resolve(&graph.string_pool) == target_symbol
                     && n.owner_class.len.to_native() == 0
             })
             .map(|(i, _)| i)
@@ -378,7 +378,9 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
                     }
                 } else {
                     let src = &graph.nodes[edge.source.to_native() as usize];
-                    affected_file_idx.insert(src.file_idx.to_native() as usize);
+                    if src.has_owning_file() {
+                        affected_file_idx.insert(src.file_idx.to_native() as usize);
+                    }
                 }
             }
 
