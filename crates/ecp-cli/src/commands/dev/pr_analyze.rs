@@ -121,6 +121,16 @@ pub fn classify_area(paths: &[std::path::PathBuf]) -> Option<Area> {
     Some(first)
 }
 
+/// Risk bucket from impact set size. Thresholds 5/30 are dev-machine
+/// measurements on this repo; revisit after a month of real usage.
+pub fn classify_risk(impact_size: usize) -> Risk {
+    match impact_size {
+        0..=5 => Risk::Low,
+        6..=30 => Risk::Medium,
+        _ => Risk::High,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +182,23 @@ mod tests {
     #[test]
     fn area_empty_returns_none() {
         assert_eq!(classify_area(&[]), None);
+    }
+
+    #[test]
+    fn risk_low_boundary() {
+        assert_eq!(classify_risk(0), Risk::Low);
+        assert_eq!(classify_risk(5), Risk::Low);
+    }
+
+    #[test]
+    fn risk_medium_boundary() {
+        assert_eq!(classify_risk(6), Risk::Medium);
+        assert_eq!(classify_risk(30), Risk::Medium);
+    }
+
+    #[test]
+    fn risk_high_boundary() {
+        assert_eq!(classify_risk(31), Risk::High);
+        assert_eq!(classify_risk(1000), Risk::High);
     }
 }
