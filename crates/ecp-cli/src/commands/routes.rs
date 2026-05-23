@@ -272,6 +272,8 @@ fn inspect_route(
             .map(|r| (similarity(wanted_path, &r.2), r))
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let total_fuzzy_candidates = scored.len() as u64;
+        let zero_score_omitted = scored.iter().filter(|(s, _)| *s == 0.0).count() as u64;
         let candidates: Vec<serde_json::Value> = scored
             .iter()
             .take(5)
@@ -287,12 +289,23 @@ fn inspect_route(
                 })
             })
             .collect();
+        let shown = candidates.len() as u64;
+        let omitted = total_fuzzy_candidates - shown;
+
+        if matches!(fmt, OutputFormat::Text) && omitted > 0 {
+            eprintln!(
+                "note: {omitted} fuzzy candidate(s) omitted (shown {shown} of {total_fuzzy_candidates})"
+            );
+        }
 
         let result = serde_json::json!({
             "status": "not_found",
             "route_pattern": wanted_path,
             "method": wanted_method,
             "candidates": candidates,
+            "total_fuzzy_candidates": total_fuzzy_candidates,
+            "shown": shown,
+            "zero_score_omitted": zero_score_omitted,
         });
         return emit(&result, fmt);
     }

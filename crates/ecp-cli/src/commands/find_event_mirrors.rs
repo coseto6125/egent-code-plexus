@@ -245,11 +245,12 @@ fn collect_mirrors(
     min_confidence: f32,
     topic_glob: Option<&str>,
     lib_filter: Option<&str>,
-) -> Vec<MirrorRow> {
+) -> (Vec<MirrorRow>, u64) {
     // Iterate EventTopic nodes via the v10 kind_offsets CSR; O(EventTopics)
     // instead of O(total_nodes). Detector commands on polyglot repos where
     // EventTopic is a tiny fraction of total nodes see the biggest win.
     let mut rows: Vec<MirrorRow> = Vec::new();
+    let mut filtered_out: u64 = 0;
 
     for et_pub_idx_u32 in graph.nodes_by_kind(ecp_core::graph::NodeKind::EventTopic) {
         let et_pub_idx = et_pub_idx_u32 as usize;
@@ -265,6 +266,7 @@ fn collect_mirrors(
 
         for (et_sub_idx, confidence) in mirror_targets(graph, et_pub_idx) {
             if confidence < min_confidence {
+                filtered_out += 1;
                 continue;
             }
 
@@ -285,7 +287,7 @@ fn collect_mirrors(
         }
     }
 
-    rows
+    (rows, filtered_out)
 }
 
 fn row_to_json(graph: &ArchivedZeroCopyGraph, row: &MirrorRow) -> Value {
@@ -307,7 +309,7 @@ pub fn run(args: FindEventMirrorsArgs, engine: &Engine) -> Result<(), EcpError> 
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
 
-    let rows = collect_mirrors(
+    let (rows, filtered_out) = collect_mirrors(
         graph,
         args.min_confidence,
         args.topic.as_deref(),
@@ -319,11 +321,19 @@ pub fn run(args: FindEventMirrorsArgs, engine: &Engine) -> Result<(), EcpError> 
     // Text format: table to stdout directly (not wrapped in JSON envelope).
     if matches!(format, OutputFormat::Text) {
         println!("{}", render_text(&mirrors));
+        if filtered_out > 0 {
+            eprintln!(
+                "note: {filtered_out} mirror(s) filtered out; lower --min-confidence (currently {:.2}) to see them",
+                args.min_confidence,
+            );
+        }
         return Ok(());
     }
 
     let result = json!({
         "mirrors": mirrors,
+        "filtered_out": filtered_out,
+        "threshold_used": args.min_confidence,
         "summary": {
             "mirror_count": mirror_count,
             "lib_filter": args.lib,

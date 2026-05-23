@@ -198,6 +198,16 @@ pub struct FindMatch {
 pub struct FindResult {
     pub found: bool,
     pub matches: Vec<FindMatch>,
+    /// Total exact/fuzzy candidates considered before default truncation.
+    /// Surfaces silent take(1) so LLM consumers can tell `matches.len() == 1`
+    /// apart from "1 of N picked".
+    pub total_candidates: u32,
+    /// matches.len() — equals total_candidates when `--all` is set.
+    pub returned: u32,
+    /// Fuzzy-mode matches dropped because they live in a Test file and
+    /// `--include-tests` wasn't passed. Always 0 in Exact mode (test
+    /// exclusion only applies to Fuzzy).
+    pub tests_excluded: u32,
     pub status: String,
 }
 
@@ -246,6 +256,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             .collect()
     });
 
+    let mut tests_excluded: u32 = 0;
     let mut candidates: Vec<(usize, u32, u8, String)> = graph
         .nodes
         .iter()
@@ -277,6 +288,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 && !is_exact
                 && matches!(file.category, ArchivedFileCategory::Test)
             {
+                tests_excluded += 1;
                 return None;
             }
 
@@ -294,6 +306,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             .then_with(|| a.3.cmp(&b.3))
     });
 
+    let total_candidates = candidates.len() as u32;
     let selected: Vec<_> = if args.all {
         candidates
     } else {
@@ -317,7 +330,9 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
         })
         .collect();
 
-    let found = !matches.is_empty();
+    let returned = matches.len() as u32;
+    let found = returned > 0;
+    let omitted = total_candidates - returned;
 
     match format {
         OutputFormat::Text => {
@@ -332,12 +347,25 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                     m.kind, m.file, m.line, test_tag, m.name, m.caller_count
                 );
             }
+            if omitted > 0 {
+                eprintln!(
+                    "note: {omitted} more candidate(s) omitted; use --all to see all {total_candidates}"
+                );
+            }
+            if tests_excluded > 0 {
+                eprintln!(
+                    "note: {tests_excluded} test-file match(es) hidden; pass --include-tests to surface them"
+                );
+            }
             Ok(())
         }
         _ => {
             let result = FindResult {
                 found,
                 matches,
+                total_candidates,
+                returned,
+                tests_excluded,
                 status: "success".to_string(),
             };
             emit(
@@ -397,7 +425,7 @@ fn run_batch(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
         println!("=== pattern: {pattern} ===");
 
         let hits = if targets.is_empty() {
-            compute_single(pattern, &args.mode, args.kind.as_deref(), engine, None)?
+            compute_single(pattern, &args.mode, args.kind.as_deref(), engine, None)?.0
         } else if let Some((repo_name, local_engine)) = single_repo_engine.as_ref() {
             compute_single(
                 pattern,
@@ -406,6 +434,7 @@ fn run_batch(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
                 local_engine,
                 Some(repo_name.clone()),
             )?
+            .0
         } else {
             let loaded = multi_repo_engines.as_ref().unwrap();
             let (hits, _summary) =
@@ -465,6 +494,10 @@ pub struct Hit {
     /// Populated from `in_offsets` / `in_edge_idx` / `edges`. Empty when
     /// the node has no callers or all edges have been truncated.
     pub callers: Vec<String>,
+    /// Real callee count from `out_offsets`. Mirrors `caller_count`; the
+    /// `callees` list below is capped at `HOP_EXPANSION_LIMIT`, so an LLM
+    /// must read this to know how many callees actually exist.
+    pub callee_count: usize,
     /// Up to `HOP_EXPANSION_LIMIT` 1-hop outgoing-edge target names.
     /// Populated from `out_offsets` / `edges`.
     pub callees: Vec<String>,
@@ -493,6 +526,7 @@ struct OrderedHit {
     signature: String,
     caller_count: usize,
     callers: Vec<String>,
+    callee_count: usize,
     callees: Vec<String>,
     score_source: ScoreSource,
     category: FileCategory,
@@ -511,6 +545,7 @@ impl OrderedHit {
             signature: h.signature,
             caller_count: h.caller_count,
             callers: h.callers,
+            callee_count: h.callee_count,
             callees: h.callees,
             score_source: h.score_source,
             category: h.category,
@@ -584,20 +619,33 @@ fn run_single(
     engine: &Engine,
     repo_label: Option<String>,
 ) -> Result<(), EcpError> {
-    let hits = compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
+    let (hits, truncated_total) =
+        compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
     let buckets = BucketedResults::partition(hits);
-    emit_bucketed(&buckets, format, None)
+    let summary = if truncated_total > (MULTI_CAP as u64) {
+        eprintln!(
+            "note: substring fallback truncated — {truncated_total} matches scanned, {MULTI_CAP} kept; rebuild Tantivy index via `ecp admin index` to drop this cap"
+        );
+        Some(format!(
+            "substring fallback truncated: {truncated_total} matches scanned, {MULTI_CAP} kept"
+        ))
+    } else {
+        None
+    };
+    emit_bucketed_with_metadata(&buckets, format, summary, truncated_total)
 }
 
 /// Pure compute path for single-repo search: returns owned Hit rows, all
-/// candidates (bucketing + per-bucket TOP_K applied at emit time).
+/// candidates (bucketing + per-bucket TOP_K applied at emit time). The
+/// `u64` carries the pre-truncate total when the substring fallback
+/// dropped rows; equals `hits.len()` when nothing was capped.
 fn compute_single(
     pattern: &str,
     mode: &FindMode,
     kind_filter: Option<&str>,
     engine: &Engine,
     repo_label: Option<String>,
-) -> Result<Vec<Hit>, EcpError> {
+) -> Result<(Vec<Hit>, u64), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let index_dir = engine.index_dir();
 
@@ -605,8 +653,13 @@ fn compute_single(
         kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     let _ = mode;
-    let hits = bm25_hits_from_graph(graph, pattern, &kind_set, &repo_label, index_dir);
-    Ok(hits)
+    Ok(bm25_hits_from_graph(
+        graph,
+        pattern,
+        &kind_set,
+        &repo_label,
+        index_dir,
+    ))
 }
 
 /// Primary BM25 path: queries the persisted Tantivy index when present,
@@ -619,7 +672,7 @@ fn bm25_hits_from_graph(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     index_dir: Option<&std::path::Path>,
-) -> Vec<Hit> {
+) -> (Vec<Hit>, u64) {
     if let Some(dir) = index_dir {
         if dir.join("tantivy").exists() {
             return tantivy_hits(graph, pattern, kind_set, repo_label, dir);
@@ -639,7 +692,7 @@ fn tantivy_hits(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     index_dir: &std::path::Path,
-) -> Vec<Hit> {
+) -> (Vec<Hit>, u64) {
     let scored = match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
         Some(s) => s,
         // Index unavailable / corrupt / parse error — fall through so
@@ -650,7 +703,7 @@ fn tantivy_hits(
     // symbol; we MUST NOT fall back to substring scan, since that would
     // surface 0.4-scored noise the trusted index already rejected.
     if scored.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     // uid → node_idx lookup over the whole graph. Tantivy stores uid as the
@@ -672,7 +725,11 @@ fn tantivy_hits(
             hits.push(hit);
         }
     }
-    hits
+    // Tantivy uses MULTI_CAP as the search limit — the index pre-caps the
+    // result set, so a returned `scored.len()` of MULTI_CAP indicates
+    // potential overflow but we have no signal here. Surface 0 (== no
+    // substring-fallback truncation) and let downstream emit reflect that.
+    (hits, 0)
 }
 
 /// Fallback BM25-shaped scan when no tantivy index is on disk.
@@ -684,7 +741,7 @@ fn substring_hits(
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
-) -> Vec<Hit> {
+) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
     let mut hits = Vec::new();
     for (idx, node) in graph.nodes.iter().enumerate() {
@@ -712,6 +769,7 @@ fn substring_hits(
     // Substring fallback scans every node — on large monorepos a 3-char
     // pattern can return thousands. Cap to MULTI_CAP so partition's sort
     // stays bounded on the pre_tool_use::handle hot path.
+    let total_before_truncate = hits.len() as u64;
     if hits.len() > MULTI_CAP {
         hits.sort_by(|a, b| {
             b.score
@@ -720,7 +778,7 @@ fn substring_hits(
         });
         hits.truncate(MULTI_CAP);
     }
-    hits
+    (hits, total_before_truncate)
 }
 
 /// Shared per-node Hit constructor. Applies kind filter and reads
@@ -771,6 +829,7 @@ fn build_hit(
 
     let out_start = graph.out_offsets[idx].to_native() as usize;
     let out_end = graph.out_offsets[idx + 1].to_native() as usize;
+    let callee_count = out_end.saturating_sub(out_start);
     let callees: Vec<String> = graph.edges[out_start..out_end]
         .iter()
         .take(HOP_EXPANSION_LIMIT)
@@ -794,6 +853,7 @@ fn build_hit(
         signature,
         caller_count,
         callers,
+        callee_count,
         callees,
         category,
     })
@@ -853,13 +913,17 @@ pub fn compute_multi_with_engines(
                     .map_err(|e| format!("{repo_name}: access: {e}"))
                     .map(|graph| {
                         let repo_label = Some(repo_name.clone());
-                        bm25_hits_from_graph(
+                        // Multi-repo path: cross-repo top-K merging handles its
+                        // own truncation, so the substring-fallback truncate
+                        // signal from per-repo bm25 is discarded here.
+                        let (hits, _truncated_total) = bm25_hits_from_graph(
                             graph,
                             pattern,
                             &kind_set,
                             &repo_label,
                             engine.index_dir(),
-                        )
+                        );
+                        hits
                     }),
             };
             (repo_name.clone(), outcome)
@@ -909,6 +973,7 @@ pub fn compute_multi_with_engines(
             signature: o.signature,
             caller_count: o.caller_count,
             callers: o.callers,
+            callee_count: o.callee_count,
             callees: o.callees,
             category: o.category,
         })
@@ -961,6 +1026,7 @@ pub fn run_for_repo(
         engine,
         Some(member.to_string()),
     )
+    .map(|(hits, _truncated)| hits)
 }
 
 /// In-process BM25 entry point for hooks and other internal consumers.
@@ -977,6 +1043,7 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpErro
     let targets = resolve_targets(args.repo.as_deref())?;
     if targets.is_empty() {
         compute_single(pattern, &args.mode, args.kind.as_deref(), engine, None)
+            .map(|(hits, _truncated)| hits)
     } else if targets.len() == 1 {
         let (repo_name, graph_path) = targets.into_iter().next().unwrap();
         let local_engine = Engine::load(std::path::PathBuf::from(&graph_path))
@@ -988,6 +1055,7 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpErro
             &local_engine,
             Some(repo_name),
         )
+        .map(|(hits, _truncated)| hits)
     } else {
         compute_multi(pattern, &args.mode, args.kind.as_deref(), targets)
             .map(|(hits, _summary)| hits)
@@ -1078,6 +1146,7 @@ fn hit_to_json(h: &Hit) -> serde_json::Value {
         "line": h.line,
         "signature": h.signature,
         "caller_count": h.caller_count,
+        "callee_count": h.callee_count,
         "score": h.score,
         "score_source": h.score_source.as_str(),
     })
@@ -1108,6 +1177,20 @@ fn emit_bucketed(
     format: OutputFormat,
     summary: Option<String>,
 ) -> Result<(), EcpError> {
+    emit_bucketed_with_metadata(buckets, format, summary, 0)
+}
+
+/// Same as `emit_bucketed` but threads the substring-fallback pre-truncate
+/// total through the JSON payload so LLM consumers can detect that the
+/// BM25 substring fallback dropped rows. `bm25_pre_truncate_total = 0`
+/// means no truncation; `> MULTI_CAP` means the difference (`total - MULTI_CAP`)
+/// hits were silently dropped from the bucket pool.
+fn emit_bucketed_with_metadata(
+    buckets: &BucketedResults,
+    format: OutputFormat,
+    summary: Option<String>,
+    bm25_pre_truncate_total: u64,
+) -> Result<(), EcpError> {
     let all_empty = buckets.source.is_empty()
         && buckets.examples.is_empty()
         && buckets.tests.is_empty()
@@ -1134,6 +1217,7 @@ fn emit_bucketed(
                         "reference": [],
                         "document": [],
                         "config": [],
+                        "bm25_pre_truncate_total": bm25_pre_truncate_total,
                         "hint": hint,
                     }),
                     format,
@@ -1179,6 +1263,7 @@ fn emit_bucketed(
                 "reference": bucket_json(&buckets.reference),
                 "document": bucket_json(&buckets.document),
                 "config": bucket_json(&buckets.config),
+                "bm25_pre_truncate_total": bm25_pre_truncate_total,
             });
             if let Some(s) = summary {
                 payload["summary"] = serde_json::Value::String(s);
@@ -1211,6 +1296,7 @@ mod tests {
                 signature: "fn n".into(),
                 caller_count: 0,
                 callers: vec![],
+                callee_count: 0,
                 callees: vec![],
                 score_source: ScoreSource::Bm25,
                 category: FileCategory::Source,

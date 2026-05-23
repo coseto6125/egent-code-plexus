@@ -282,3 +282,93 @@ fn shape_check_handles_graph_with_no_fetches_edges() {
         "expected empty-fetch summary, got: {stdout}"
     );
 }
+
+/// PR audit M1/M2 — payload must always surface silent-drop counts
+/// (`unparseable_fetches`, `unknown_target_shapes`) so an LLM that reads
+/// `drift_count: 0` doesn't infer "everything checks out" when in fact
+/// some Fetches edges couldn't be checked at all.
+#[test]
+fn shape_check_surfaces_unknown_target_shapes() {
+    // Fetches edge → Route node with NO RouteShape attached. The old
+    // behaviour was `continue` on `shapes.get().is_none()`; the new
+    // contract drops a record into `unknown_target_shapes` so the LLM
+    // can see "checked? no — shape unknown".
+    let dir = tempdir().unwrap();
+    let reason = format_reason(&["id".to_string()], 1);
+    let bytes = build_graph(&[(0, 1, RelType::Fetches, &reason)], None);
+    let path = write_graph(dir.path(), &bytes);
+
+    let (stdout, stderr, ok) = run_shape_check(&path, "json");
+    assert!(ok, "command failed: stderr={stderr}");
+    let json: Value = {
+        let s = stdout.trim();
+        let start = s
+            .find('{')
+            .unwrap_or_else(|| panic!("non-JSON stdout: {s}"));
+        serde_json::from_str(&s[start..])
+            .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nstdout={s}"))
+    };
+
+    // M1 — always-written counter (safe default 0).
+    let unparseable = json["unparseable_fetches"]
+        .as_u64()
+        .expect("payload must carry `unparseable_fetches`");
+    assert_eq!(
+        unparseable, 0,
+        "reason was well-formed → unparseable should be 0, got {unparseable}"
+    );
+
+    // M2 — always-written list (safe default []). One Fetches edge,
+    // route has no shape ⇒ exactly one entry.
+    let unknown = json["unknown_target_shapes"]
+        .as_array()
+        .expect("payload must carry `unknown_target_shapes`");
+    assert_eq!(
+        unknown.len(),
+        1,
+        "expected one unknown-shape entry, got: {json}"
+    );
+    assert!(
+        unknown[0]["route_uid"].is_string(),
+        "entry must carry route_uid: {}",
+        unknown[0]
+    );
+    assert_eq!(
+        unknown[0]["route_name"].as_str(),
+        Some("GET /users/:id"),
+        "entry must carry route_name from the graph: {}",
+        unknown[0]
+    );
+
+    // Sanity: when target has no shape, the edge is NOT counted as
+    // drift (we couldn't check). drift_count must be 0.
+    assert_eq!(json["drift_count"].as_u64().unwrap(), 0);
+    assert_eq!(json["total_fetches"].as_u64().unwrap(), 1);
+}
+
+/// PR audit M1/M2 — safe-default presence on a graph with no
+/// silent-drop conditions hit. Confirms the fields always appear
+/// regardless of whether they fire.
+#[test]
+fn shape_check_safe_defaults_appear_with_clean_graph() {
+    let dir = tempdir().unwrap();
+    let reason = format_reason(&["id".to_string()], 1);
+    let bytes = build_graph(
+        &[(0, 1, RelType::Fetches, &reason)],
+        Some((vec!["id"], vec!["msg"])),
+    );
+    let path = write_graph(dir.path(), &bytes);
+
+    let (stdout, stderr, ok) = run_shape_check(&path, "json");
+    assert!(ok, "command failed: stderr={stderr}");
+    let json: Value = {
+        let s = stdout.trim();
+        let start = s
+            .find('{')
+            .unwrap_or_else(|| panic!("non-JSON stdout: {s}"));
+        serde_json::from_str(&s[start..]).unwrap()
+    };
+
+    assert_eq!(json["unparseable_fetches"].as_u64().unwrap(), 0);
+    assert_eq!(json["unknown_target_shapes"].as_array().unwrap().len(), 0);
+}
