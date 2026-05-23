@@ -1,0 +1,60 @@
+queue_rules:
+  - name: test-only
+    conditions:
+      - check-success=ecp/cross-pr-conflict
+      - label=ecp:area-test
+    batch_size: 10
+    batch_max_wait_time: 30s
+
+  - name: parser-changes
+    conditions:
+      - check-success=ecp/cross-pr-conflict
+      - label=ecp:area-parser
+    batch_size: 1
+
+  - name: cli-changes
+    conditions:
+      - check-success=ecp/cross-pr-conflict
+      - label=ecp:area-cli
+    batch_size: 3
+    batch_max_wait_time: 2m
+
+  - name: docs-only
+    conditions:
+      - check-success=ecp/cross-pr-conflict
+      - label=ecp:area-docs
+    batch_size: 20
+    batch_max_wait_time: 10s
+
+  - name: default
+    conditions:
+      - check-success=ecp/cross-pr-conflict
+    batch_size: 2
+
+pull_request_rules:
+  - name: queue if labeled merge-queue
+    conditions:
+      - label=merge-queue
+      - check-success=Test (all platforms)
+      - check-success=Code Quality (Linting & Formatting)
+      - check-success=Supply-chain (audit & deny)
+      - check-success=Lint GitHub Actions workflows
+      - check-success=CodeQL
+      - check-success=dependency-review
+    actions:
+      queue:
+        name: default
+
+  - name: high priority for low-risk
+    conditions:
+      - label=ecp:risk-low
+    actions:
+      queue:
+        priority: high
+
+  - name: low priority for high-risk
+    conditions:
+      - label=ecp:risk-high
+    actions:
+      queue:
+        priority: low
