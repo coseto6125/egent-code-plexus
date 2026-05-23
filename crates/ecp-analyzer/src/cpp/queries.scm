@@ -340,3 +340,12 @@
     (function_declarator
       (virtual_specifier) @override_marker))
   (#eq? @override_marker "override")) @method
+
+;; ---- BlindSpot patterns (FU-001 P7b) ----
+;; dlsym(<handle>, <name>) — runtime symbol resolution. Same anchor as
+;; the C parser; CallMeta (indirect_dispatch.rs) already covers calls
+;; through the returned pointer for both C and C++. Virtual / std::function
+;; dispatch also stays on the CallMeta path per Constraint 1.
+((call_expression
+   function: (identifier) @_fn) @blind.dlsym
+  (#eq? @_fn "dlsym"))

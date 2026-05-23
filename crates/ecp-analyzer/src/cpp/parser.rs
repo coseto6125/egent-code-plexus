@@ -1,12 +1,20 @@
 use super::receiver_types::{collect_bindings, extract_cpp_calls};
 use super::spec::CppSpec;
 use crate::framework_confidence;
-use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use crate::framework_helpers::{detect_ast_framework_patterns, node_span, FrameworkPatternSpec};
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+
+/// Blind-spot kind/hint pairs. P7 covers C++ dispatch sites that
+/// `indirect_dispatch.rs` doesn't already flag as CallMeta (virtual /
+/// function-pointer dispatch is already covered there).
+const BLIND_SPEC: &[(&str, &str)] = &[(
+    "cpp-dlsym",
+    "dlsym(<handle>, <name>) — runtime symbol resolution from a dlopen'd library; the returned function pointer's target is not statically determinable",
+)];
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -239,8 +247,10 @@ impl LanguageProvider for CppProvider {
 
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
+        let mut blind_spots: Vec<BlindSpot> = Vec::new();
 
         let idx_heritage = self.query.capture_index_for_name("heritage");
+        let idx_blind_dlsym = self.query.capture_index_for_name("blind.dlsym");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_export = self.query.capture_index_for_name("export");
         let idx_alias = self.query.capture_index_for_name("alias");
@@ -328,6 +338,14 @@ impl LanguageProvider for CppProvider {
                     var_root = Some(cap.node);
                 } else if cap_idx == idx_var_name {
                     var_name = Some(cap.node);
+                } else if cap_idx == idx_blind_dlsym {
+                    let (kind, hint) = BLIND_SPEC[0];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
                 }
             }
 
@@ -566,7 +584,7 @@ impl LanguageProvider for CppProvider {
             documents: vec![],
             framework_refs,
             fanout_refs: vec![],
-            blind_spots: vec![],
+            blind_spots,
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
