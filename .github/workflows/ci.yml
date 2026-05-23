@@ -152,26 +152,38 @@ jobs:
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           echo "::endgroup::"
 
-  # ==================== Cross-Platform Tests (nextest, sharded) ====================
-  # Sharding: ~3177 tests split into 4 partitions per platform via
-  # `cargo nextest --partition count:N/4`. All 4 shards on a given OS
-  # compile the same target/ (only test selection differs at runtime),
-  # so the Swatinem rust-cache `shared-key` is identical across shards
-  # — first finisher saves, others no-op (GHA cache "exists, skip"
-  # semantics). Wall-clock per platform: ~7m → ~2m45s.
+  # ==================== Cross-Platform Tests (nextest) ====================
+  # Sharding strategy is OS-dependent. `cargo nextest --partition count:N/T`
+  # splits ~3177 tests into T partitions; all shards compile the same target/,
+  # so the Swatinem rust-cache `shared-key` is identical across shards —
+  # first finisher saves, others no-op (GHA cache "exists, skip" semantics).
   #
-  # Aggregated status is exposed via the `test-result` job below as a
-  # single required check ("Test (all platforms)") — branch protection
-  # cares about that one name, not the 8 individual shard jobs.
+  # - Linux (T=4): runner pool is abundant → 4 shards truly parallel,
+  #   wall-clock per platform ~7m → ~2m45s.
+  # - macOS / Windows (T=1): GitHub free-tier runner pool is small enough
+  #   (1–2 concurrent macOS, ~5 concurrent windows) that 4-way sharding
+  #   serialises into queue tax. Measured wall on macOS:
+  #     sharded:    queue 600s + exec 250s = ~850s
+  #     unsharded:  queue 370s + exec 430s = ~800s
+  #   So macOS/Windows stay as single jobs until runner availability changes.
+  #
+  # Aggregated status is exposed via the `test-result` job below as a single
+  # required check ("Test (all platforms)") — branch protection cares about
+  # that one name, not the individual shard contexts.
   test:
-    name: Test on ${{ matrix.os }} (shard ${{ matrix.shard }}/4)
+    name: Test on ${{ matrix.os }} (shard ${{ matrix.shard }}/${{ matrix.total }})
     runs-on: ${{ matrix.os }}
     needs: detect-changes
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        shard: [1, 2, 3, 4]
+        include:
+          - { os: ubuntu-latest,  shard: 1, total: 4 }
+          - { os: ubuntu-latest,  shard: 2, total: 4 }
+          - { os: ubuntu-latest,  shard: 3, total: 4 }
+          - { os: ubuntu-latest,  shard: 4, total: 4 }
+          - { os: macos-latest,   shard: 1, total: 1 }
+          - { os: windows-latest, shard: 1, total: 1 }
     # Heavy test matrix only runs on push-to-main / merge_group / workflow_dispatch
     # — PR-time skips entirely to keep iteration latency low. PR-time signal
     # comes from `code-quality` (fmt + clippy) + `audit` + `actionlint`; full
@@ -190,7 +202,7 @@ jobs:
     steps:
       - name: Short-circuit for docs-only PR
         if: needs.detect-changes.outputs.code != 'true'
-        run: echo "✓ Docs-only PR — skipping cargo nextest on ${{ matrix.os }} shard ${{ matrix.shard }}/4"
+        run: echo "✓ Docs-only PR — skipping cargo nextest on ${{ matrix.os }} shard ${{ matrix.shard }}/${{ matrix.total }}"
 
       - name: Harden the runner (Audit all outbound calls)
         if: needs.detect-changes.outputs.code == 'true'
@@ -254,9 +266,9 @@ jobs:
       - name: Run tests (nextest, sharded)
         if: needs.detect-changes.outputs.code == 'true'
         run: |
-          echo "::group::cargo nextest (shard ${{ matrix.shard }}/4)"
+          echo "::group::cargo nextest (shard ${{ matrix.shard }}/${{ matrix.total }})"
           cargo nextest run --workspace --all-features --no-fail-fast \
-            --partition count:${{ matrix.shard }}/4
+            --partition count:${{ matrix.shard }}/${{ matrix.total }}
           echo "::endgroup::"
 
   # ==================== Test aggregator (required-check facade) ====================
