@@ -387,6 +387,12 @@ pub struct BlindSpot {
     pub file_path: PathBuf,
     pub span: (u32, u32, u32, u32),
     pub hint: String,
+    /// True iff the BlindSpot originates from a file classified as test
+    /// scaffolding (`is_test_path(file_path)`). Populated by each
+    /// language parser at emission time; passes through to
+    /// `graph::BlindSpotRecord.is_test`. Verdict layer uses this to
+    /// suppress test-region noise on prod-refactor PRs.
+    pub is_test: bool,
 }
 
 /// Per-call-site dispatch annotation produced by the per-language indirect-

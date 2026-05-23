@@ -511,6 +511,19 @@ pub struct BlindSpotRecord {
     pub end_row: u32,
     pub end_col: u32,
     pub hint: StrRef,
+    /// True iff the BlindSpot was emitted from a file classified as test
+    /// scaffolding by `is_test_path(file_path)`. The verdict layer
+    /// (`INDIRECT_DISPATCH_IN_DIFF_REGION`, `BLINDSPOT_IN_DIFF_REGION`)
+    /// filters these out so prod-refactor warnings don't surface eval/reflection
+    /// noise from test fixtures and mocks.
+    ///
+    /// **Append-only field**: rkyv discriminants are positional. Placed
+    /// at the end of the struct so existing `graph.bin` files remain
+    /// decodable as long as readers tolerate the new trailing field
+    /// (they don't — see `auto_ensure`: reindex triggers automatically on
+    /// schema diff). New parsers SHOULD populate this; older `graph.bin`
+    /// before this field landed will need a one-time reindex.
+    pub is_test: bool,
 }
 
 /// BlindSpot kind emitted by `resolution::builder::classify_collision` for

@@ -6,6 +6,7 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
@@ -215,6 +216,7 @@ impl LanguageProvider for TypeScriptProvider {
         type NestJsDecoratorRoute = (String, String, (u32, u32, u32, u32));
         let mut pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         let idx = &self.indices;
 
@@ -318,6 +320,7 @@ impl LanguageProvider for TypeScriptProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if cap_idx == idx.blind_function_ctor {
                     let (kind, hint) = BLIND_SPEC[1];
@@ -326,6 +329,7 @@ impl LanguageProvider for TypeScriptProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if cap_idx == idx.blind_dynamic_import {
                     if !first_arg_is_literal_string(&cap.node) {
@@ -335,6 +339,7 @@ impl LanguageProvider for TypeScriptProvider {
                             file_path: path.to_path_buf(),
                             span: node_span(&cap.node),
                             hint: hint.to_string(),
+                            is_test: is_test_file,
                         });
                     }
                 } else if cap_idx == idx.blind_dynamic_require {
@@ -345,6 +350,7 @@ impl LanguageProvider for TypeScriptProvider {
                             file_path: path.to_path_buf(),
                             span: node_span(&cap.node),
                             hint: hint.to_string(),
+                            is_test: is_test_file,
                         });
                     }
                 } else if cap_idx == idx.function

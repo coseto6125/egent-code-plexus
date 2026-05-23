@@ -521,6 +521,7 @@ impl LanguageProvider for PythonProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         // Collect (target_name, span) for FastAPI Depends() refs; resolve
         // the enclosing function via span containment after nodes are built.
@@ -721,6 +722,7 @@ impl LanguageProvider for PythonProvider {
                             file_path: path.to_path_buf(),
                             span: node_span(&cap.node),
                             hint: hint.to_string(),
+                            is_test: is_test_file,
                         });
                     }
                 }

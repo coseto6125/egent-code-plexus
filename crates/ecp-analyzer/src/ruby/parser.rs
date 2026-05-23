@@ -3,6 +3,7 @@ use super::spec::RubySpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, node_span, FrameworkPatternSpec};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, RawRoute};
@@ -201,6 +202,7 @@ impl LanguageProvider for RubyProvider {
         let mut imports = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
         // Mixin module additions, applied after primary node emission. Each
         // entry is (module_name, call_line) — we attach to the smallest
         // enclosing class node by span containment. Document-order traversal
@@ -319,6 +321,7 @@ impl LanguageProvider for RubyProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if cap_idx == idx_blind_instance_eval {
                     let (kind, hint) = BLIND_SPEC[1];
@@ -327,6 +330,7 @@ impl LanguageProvider for RubyProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if cap_idx == idx_blind_send
                     && !ruby_first_arg_is_literal_callable(&cap.node)
@@ -337,6 +341,7 @@ impl LanguageProvider for RubyProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 }
             }

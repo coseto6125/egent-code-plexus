@@ -254,6 +254,13 @@ fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
 
     let mut blindspots: FxHashMap<String, Vec<BlindSpotRef>> = FxHashMap::default();
     for bs in graph.blind_spots.iter() {
+        // FU-001 is_test-field: drop test-region BlindSpots from the
+        // diff-region warning surface. Test fixtures legitimately use
+        // eval / reflection / dlsym to exercise prod code; surfacing them
+        // as "blindspot in diff" creates noise on every test-touching PR.
+        if bs.is_test {
+            continue;
+        }
         let path = bs.file_path.resolve(&graph.string_pool).to_string();
         blindspots
             .entry(path.clone())

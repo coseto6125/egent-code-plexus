@@ -517,6 +517,10 @@ impl GraphBuilder {
                         end_row: raw_node.span.2,
                         end_col: raw_node.span.3,
                         hint: string_pool.add(&hint),
+                        // uid-collision is a parser-metric BlindSpot
+                        // (`DEV_METRIC_BS_KINDS`); not LLM-actionable, so the
+                        // is_test flag is irrelevant — fix to false.
+                        is_test: false,
                     });
                     // Push a tombstone Node + tombstone SymbolTable entry to keep
                     // both `nodes.len()` and `node_kinds.len()` ≡ current_node_idx.
@@ -1349,6 +1353,7 @@ impl GraphBuilder {
                     end_row: bs.span.2,
                     end_col: bs.span.3,
                     hint: string_pool.add(&bs.hint),
+                    is_test: bs.is_test,
                 });
             }
         }
@@ -2785,12 +2790,14 @@ mod tests {
                     file_path: "test.py".into(),
                     span: (10, 4, 10, 25),
                     hint: "eval(arg) — runtime code execution".into(),
+                    is_test: false,
                 },
                 BlindSpot {
                     kind: "python-dynamic-import".into(),
                     file_path: "test.py".into(),
                     span: (15, 0, 15, 40),
                     hint: "importlib.import_module(...) — dynamic loading".into(),
+                    is_test: false,
                 },
             ],
             schema_fields: None,

@@ -5,6 +5,7 @@ use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
@@ -298,6 +299,7 @@ impl LanguageProvider for PhpProvider {
         let mut imports = Vec::new();
         let mut routes = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         let idx = &self.indices;
         let idx_type_function = idx.type_function;
@@ -470,6 +472,7 @@ impl LanguageProvider for PhpProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if Some(cap_idx) == idx_blind_call_user_func {
                     if !first_arg_is_literal_string(&cap.node) {
@@ -479,6 +482,7 @@ impl LanguageProvider for PhpProvider {
                             file_path: path.to_path_buf(),
                             span: node_span(&cap.node),
                             hint: hint.to_string(),
+                            is_test: is_test_file,
                         });
                     }
                 } else if Some(cap_idx) == idx_blind_variable_call {
@@ -488,6 +492,7 @@ impl LanguageProvider for PhpProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 }
             }

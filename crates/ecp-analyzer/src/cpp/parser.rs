@@ -4,6 +4,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, node_span, FrameworkPatternSpec};
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
@@ -248,6 +249,7 @@ impl LanguageProvider for CppProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_blind_dlsym = self.query.capture_index_for_name("blind.dlsym");
@@ -345,6 +347,7 @@ impl LanguageProvider for CppProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 }
             }

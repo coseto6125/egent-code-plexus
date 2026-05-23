@@ -3,6 +3,7 @@ use super::spec::SwiftSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, node_span, FrameworkPatternSpec};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
@@ -158,6 +159,7 @@ impl LanguageProvider for SwiftProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         // CI-L #2: capture indices pre-resolved in `new()`.
         let idx = &self.indices;
@@ -281,6 +283,7 @@ impl LanguageProvider for SwiftProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if Some(cap_idx) == idx_blind_perform {
                     let (kind, hint) = BLIND_SPEC[1];
@@ -289,6 +292,7 @@ impl LanguageProvider for SwiftProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 }
             }

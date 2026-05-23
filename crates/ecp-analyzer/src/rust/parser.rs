@@ -7,6 +7,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{has_import_from, node_span, MODULE_LEVEL_SOURCE};
 use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
@@ -143,6 +144,7 @@ impl LanguageProvider for RustProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         let idx = &self.indices;
 
@@ -268,6 +270,7 @@ impl LanguageProvider for RustProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if cap_idx == idx.blind_libloading_get {
                     let (kind, hint) = BLIND_SPEC[1];
@@ -276,6 +279,7 @@ impl LanguageProvider for RustProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 }
             }

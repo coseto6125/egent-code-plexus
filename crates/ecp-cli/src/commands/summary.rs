@@ -469,6 +469,7 @@ mod tests {
             end_row: 1,
             end_col: 10,
             hint,
+            is_test: false,
         };
         let mut g = empty_graph(pool);
         g.blind_spots = vec![bs(kind_dyn), bs(kind_uidc), bs(kind_mo), bs(kind_idef)];
@@ -500,6 +501,7 @@ mod tests {
             end_row: 1,
             end_col: 10,
             hint,
+            is_test: false,
         };
         let bs2 = BlindSpotRecord {
             kind: kind_dyn,
@@ -509,6 +511,7 @@ mod tests {
             end_row: 2,
             end_col: 10,
             hint,
+            is_test: false,
         };
         let bs3 = BlindSpotRecord {
             kind: kind_refl,
@@ -518,6 +521,7 @@ mod tests {
             end_row: 3,
             end_col: 10,
             hint,
+            is_test: false,
         };
         let mut g = empty_graph(pool);
         g.blind_spots = vec![bs1, bs2, bs3];

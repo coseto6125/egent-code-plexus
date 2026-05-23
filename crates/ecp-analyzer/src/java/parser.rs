@@ -3,6 +3,7 @@ use super::spec::JavaSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{collect_jvm_transactional_scopes, has_import_from, node_span};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
@@ -163,6 +164,7 @@ impl LanguageProvider for JavaProvider {
         // Buffer Spring refs and emit only if the file imports org.springframework.
         let mut pending_spring_refs: Vec<RawFrameworkRef> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         let idx = &self.indices;
 
@@ -255,6 +257,7 @@ impl LanguageProvider for JavaProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if cap_idx == idx.blind_method_invoke {
                     let (kind, hint) = BLIND_SPEC[1];
@@ -263,6 +266,7 @@ impl LanguageProvider for JavaProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 }
 

@@ -7,6 +7,7 @@ use crate::framework_helpers::{
     enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
@@ -159,6 +160,7 @@ impl LanguageProvider for GoProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
@@ -356,6 +358,7 @@ impl LanguageProvider for GoProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 } else if cap_idx == idx_blind_plugin_open {
                     let (kind, hint) = BLIND_SPEC[1];
@@ -364,6 +367,7 @@ impl LanguageProvider for GoProvider {
                         file_path: path.to_path_buf(),
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
+                        is_test: is_test_file,
                     });
                 }
             }
