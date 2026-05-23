@@ -81,17 +81,88 @@ fn strip_quotes(raw: &str) -> Option<&str> {
 /// Climb the AST from a string literal to find the enclosing `call_expression`
 /// and resolve its callee name. Returns `None` when the literal is not an
 /// argument of a call (e.g. const initialiser, let binding, format-string).
+///
+/// FU-2026-05-23-023 — when the inner call is the constructor leg of a
+/// method chain (`File::open("x").unwrap().read_to_string(...)`), walk
+/// outward through `field_expression / call_expression` wrappers and
+/// promote to the terminal method name when it's a HIGH-confidence
+/// file-op. `.unwrap()` / `.expect()` / `.ok()` are treated as
+/// transparent adapters: the walk skips through them to reach the real
+/// terminal read / write call.
 fn enclosing_callee(str_node: Node<'_>, source: &[u8]) -> Option<String> {
     let parent = str_node.parent()?;
     if parent.kind() != "arguments" {
         return None;
     }
-    let call = parent.parent()?;
-    if call.kind() != "call_expression" {
+    let inner_call = parent.parent()?;
+    if inner_call.kind() != "call_expression" {
         return None;
     }
-    let function = call.child_by_field_name("function")?;
+
+    if let Some(terminal) = terminal_chained_callee(inner_call, source) {
+        if is_high_confidence_chain_terminal(&terminal) {
+            return Some(terminal);
+        }
+    }
+
+    let function = inner_call.child_by_field_name("function")?;
     callee_name(function, source)
+}
+
+/// Walk outward from `inner_call` through chained `field_expression /
+/// call_expression` pairs. `.unwrap()` / `.expect()` / `.ok()` are
+/// transparent adapters — the walk skips through them. Returns the
+/// first HIGH-confidence file-op method name encountered, or `None`.
+fn terminal_chained_callee(inner_call: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = inner_call;
+    loop {
+        // Each chain step is `field_expression` wrapping `current`,
+        // then `call_expression` wrapping the `field_expression`.
+        let field = current.parent()?;
+        if field.kind() != "field_expression" {
+            return None;
+        }
+        let outer_call = field.parent()?;
+        if outer_call.kind() != "call_expression" {
+            return None;
+        }
+        let field_id = field.child_by_field_name("field")?;
+        let method = std::str::from_utf8(&source[field_id.start_byte()..field_id.end_byte()])
+            .ok()?
+            .to_string();
+        if is_high_confidence_chain_terminal(&method) {
+            return Some(method);
+        }
+        if !is_transparent_adapter(&method) {
+            return None;
+        }
+        current = outer_call;
+    }
+}
+
+/// Method names in the chain that classify_sink resolves to a HIGH
+/// read/write/ext-change. Promotion is only useful when there's a
+/// concrete winner downstream.
+fn is_high_confidence_chain_terminal(name: &str) -> bool {
+    matches!(
+        name,
+        // reads (std::io::Read + fs convenience)
+        "read_to_string" | "read_to_end" | "read_text"
+        // writes
+        | "write_all" | "write_text"
+        // ext-change
+        | "with_extension" | "with_file_name" | "set_extension" | "set_file_name"
+    )
+}
+
+/// Methods that are transparent in a chain — the walk should skip over
+/// them rather than terminating. `Result::unwrap` etc. don't change the
+/// effective sink.
+fn is_transparent_adapter(name: &str) -> bool {
+    matches!(
+        name,
+        "unwrap" | "expect" | "ok" | "unwrap_or" | "unwrap_or_default" | "unwrap_or_else"
+    )
 }
 
 /// Reduce a `call_expression > function` subtree to its trailing identifier.

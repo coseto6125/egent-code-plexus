@@ -181,3 +181,37 @@ fn fetch() {
         "URLs must not surface as PathLiteral: {lits:?}"
     );
 }
+
+#[test]
+fn file_open_chain_with_unwrap_promotes_to_read_high() {
+    // FU-2026-05-23-023: `File::open("x").unwrap().read_to_string(...)`
+    // walks outward through the constructor + `unwrap` adapter to land
+    // on `read_to_string`, lifting the sink from open-read|medium to
+    // read|high.
+    let src = r#"
+use std::fs::File;
+use std::io::Read;
+fn load() -> String {
+    let mut s = String::new();
+    File::open("session_meta.json").unwrap().read_to_string(&mut s).unwrap();
+    s
+}
+"#;
+    let lits = parse_path_literals(src);
+    let lit = find_by_value(&lits, "session_meta.json");
+    assert_eq!(lit.sink_reason, "sink:read|confidence:high");
+}
+
+#[test]
+fn file_create_chain_write_all_promotes_to_write_high() {
+    let src = r#"
+use std::fs::File;
+use std::io::Write;
+fn save(data: &[u8]) {
+    File::create("output.json").unwrap().write_all(data).unwrap();
+}
+"#;
+    let lits = parse_path_literals(src);
+    let lit = find_by_value(&lits, "output.json");
+    assert_eq!(lit.sink_reason, "sink:write|confidence:high");
+}
