@@ -1605,6 +1605,18 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        // T10: promote `RawTxScope`s → `TransactionScope` Nodes + `OpensTxScope`
+        // edges (fn → TransactionScope). Runs after event_topic_mirrors (sibling
+        // post-process) and before File-node loop for idx-contiguity. Nodes are
+        // NOT registered in SymbolTable — queries reach them via OpensTxScope
+        // traversal from function nodes.
+        crate::post_process::tx_scope_edges::emit_edges(
+            &self.local_graphs,
+            &mut string_pool,
+            &mut nodes,
+            &mut edges,
+        );
+
         // Append one `NodeKind::File` node per LocalGraph at the tail of
         // `nodes` (idx >= raw-node count). Doing it here — AFTER all passes
         // that index symbols by SymbolTable + use raw node idx ranges —

@@ -182,6 +182,16 @@ pub enum FrameworkId {
     // ── Fallback for frameworks not yet listed; promote to its own variant
     //    when adding emit support, do not extend silently. ──
     Unknown,
+    // ── Transaction scopes (T10 family — continued) ──
+    /// .NET / EF Core `[Transactional]` or `[TransactionAttribute]`.
+    /// Distinct from `SpringTransactional`: .NET uses attribute_list syntax
+    /// `[Attr]` vs Java/Kotlin `@Attr`; LLM refactor queries must not
+    /// conflate Spring propagation semantics with ADO.NET transaction scope.
+    DotNetTransactional,
+    /// Symfony PHP 8+ `#[Transactional]` attribute.
+    /// Distinct from Spring: PHP 8 attributes use `#[Attr]` syntax; Symfony
+    /// transaction semantics (Doctrine ORM session) differ from Spring JPA.
+    SymfonyTransactional,
 }
 
 pub const FRAMEWORK_NAMES: &[&str] = &[
@@ -206,6 +216,8 @@ pub const FRAMEWORK_NAMES: &[&str] = &[
     "openapi",
     "swagger",
     "unknown",
+    "dotnet-transactional",
+    "symfony-transactional",
 ];
 
 impl FrameworkId {
@@ -249,6 +261,9 @@ impl FrameworkId {
             17 => Self::Redis,
             18 => Self::OpenApi,
             19 => Self::Swagger,
+            20 => Self::Unknown,
+            21 => Self::DotNetTransactional,
+            22 => Self::SymfonyTransactional,
             _ => Self::Unknown,
         }
     }
