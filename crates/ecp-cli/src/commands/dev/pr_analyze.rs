@@ -557,21 +557,30 @@ impl GhClient for RealGhClient {
             .map(str::to_owned)
             .filter(|s| !s.is_empty());
 
+        // .output() captures gh's stdout (e.g. the new-comment URL from
+        // `gh pr comment`) instead of letting it pass through to our parent
+        // stdout — pr_analyze prints its JSON payload to stdout and the
+        // workflow pipes that to /tmp/analysis.json, so any subprocess
+        // output here would corrupt the JSON and break the downstream jq.
         let exec = if let Some(id) = existing_id {
             let patch_endpoint = format!("repos/{{owner}}/{{repo}}/issues/comments/{id}");
             Command::new("gh")
                 .args(["api", "-X", "PATCH", &patch_endpoint, "-f"])
                 .arg(format!("body={body}"))
-                .status()
+                .output()
         } else {
             Command::new("gh")
                 .args(["pr", "comment", &pr.to_string(), "--body", &body])
-                .status()
+                .output()
         };
-        let status = exec.map_err(EcpError::Io)?;
-        if !status.success() {
+        let out = exec.map_err(EcpError::Io)?;
+        if !out.status.success() {
             return Err(EcpError::GitDiff {
-                reason: format!("gh write comment exit {status}"),
+                reason: format!(
+                    "gh write comment exit {}: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
             });
         }
         Ok(())

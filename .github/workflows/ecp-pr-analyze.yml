@@ -25,6 +25,10 @@ env:
   ECP_HOME: ${{ github.workspace }}/.ecp-home
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # GH_REPO pins gh's auto-detection so `gh api repos/{owner}/{repo}/...`
+  # resolves reliably inside the runner — autodetect from git remote was
+  # observed returning 404 on a fresh PR (PR #381 first smoke).
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   analyze:
@@ -37,7 +41,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Fetch base ref
-        run: git fetch origin main:refs/remotes/origin/main
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: git fetch origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -65,10 +71,19 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
+          # Compute merge-base against the PR's actual target branch so the
+          # diff reflects this PR's delta rather than divergence vs. wherever
+          # the target branch happens to be right now. Target branch can be
+          # main / beta / develop / release-* etc. — never hardcode.
+          # (PR #382 first smoke produced 20+ phantom symbols because raw
+          # `origin/main` had moved past the PR's branch point.)
+          BASE=$(git merge-base "origin/$BASE_REF" HEAD)
+          echo "target: $BASE_REF  baseline (merge-base): $BASE"
           ./target/release/ecp \
             dev pr-analyze \
-            --baseline origin/main \
+            --baseline "$BASE" \
             --pr-head HEAD \
             --pr-number ${{ github.event.pull_request.number }} \
             --format json \
