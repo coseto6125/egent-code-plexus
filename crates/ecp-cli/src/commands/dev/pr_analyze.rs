@@ -252,6 +252,152 @@ pub fn classify_risk(impact_size: usize) -> Risk {
     }
 }
 
+// ── gh API wrapper ───────────────────────────────────────────────────────────
+
+/// PR record returned by `gh pr list --json number,headRefOid`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct SiblingPr {
+    pub number: u32,
+    #[serde(rename = "headRefOid")]
+    pub head_ref_oid: String,
+}
+
+/// Abstracted GitHub interactions so the cross-PR conflict logic is testable
+/// without spawning `gh` or hitting the real API.
+pub trait GhClient {
+    /// List open PRs with the given label, excluding the given PR number.
+    fn list_sibling_prs(
+        &self,
+        queue_label: &str,
+        exclude_pr: u32,
+    ) -> Result<Vec<SiblingPr>, EcpError>;
+
+    /// Read the cached ecp impact JSON from a PR's hidden marker comment.
+    /// Returns Ok(None) if no marker comment exists.
+    fn read_cached_impact(&self, pr: u32) -> Result<Option<Vec<String>>, EcpError>;
+
+    /// Write (create or update) the marker comment with this PR's impact set.
+    fn write_cached_impact(&self, pr: u32, impact_set: &[String]) -> Result<(), EcpError>;
+}
+
+pub const CACHE_MARKER: &str = "<!-- ecp-impact-cache:V1 -->";
+
+pub struct RealGhClient;
+
+impl GhClient for RealGhClient {
+    fn list_sibling_prs(
+        &self,
+        queue_label: &str,
+        exclude_pr: u32,
+    ) -> Result<Vec<SiblingPr>, EcpError> {
+        use std::process::Command;
+        let out = Command::new("gh")
+            .args([
+                "pr",
+                "list",
+                "--label",
+                queue_label,
+                "--state",
+                "open",
+                "--json",
+                "number,headRefOid",
+                "--limit",
+                "50",
+            ])
+            .output()
+            .map_err(|e| EcpError::InvalidArgument(format!("gh pr list: {e}")))?;
+        if !out.status.success() {
+            return Err(EcpError::InvalidArgument(format!(
+                "gh pr list failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        let prs: Vec<SiblingPr> = serde_json::from_slice(&out.stdout)
+            .map_err(|e| EcpError::InvalidArgument(format!("parse gh pr list: {e}")))?;
+        Ok(prs.into_iter().filter(|p| p.number != exclude_pr).collect())
+    }
+
+    fn read_cached_impact(&self, pr: u32) -> Result<Option<Vec<String>>, EcpError> {
+        use std::process::Command;
+        let endpoint = format!("repos/{{owner}}/{{repo}}/issues/{pr}/comments");
+        let out = Command::new("gh")
+            .args([
+                "api",
+                &endpoint,
+                "--jq",
+                ".[] | select(.body | startswith(\"<!-- ecp-impact-cache:V1 -->\")) | .body",
+            ])
+            .output()
+            .map_err(|e| EcpError::InvalidArgument(format!("gh api comments: {e}")))?;
+        if !out.status.success() {
+            return Ok(None); // no comments / no access — treat as cache miss
+        }
+        let body = String::from_utf8_lossy(&out.stdout);
+        let body = body.trim();
+        if body.is_empty() {
+            return Ok(None);
+        }
+        // Body shape: "<!-- ecp-impact-cache:V1 -->\n{JSON array}"
+        let json_start = body.find('\n').map(|i| i + 1).unwrap_or(body.len());
+        let json_payload = &body[json_start..];
+        let symbols: Vec<String> = serde_json::from_str(json_payload)
+            .map_err(|e| EcpError::InvalidArgument(format!("parse cached impact: {e}")))?;
+        Ok(Some(symbols))
+    }
+
+    fn write_cached_impact(&self, pr: u32, impact_set: &[String]) -> Result<(), EcpError> {
+        use std::process::Command;
+        // Truncate to 65000 chars worth of JSON to stay under GH's 65535 limit.
+        let mut payload = serde_json::to_string(impact_set)
+            .map_err(|e| EcpError::InvalidArgument(format!("encode impact: {e}")))?;
+        let truncated_marker = if payload.len() > 65_000 {
+            payload.truncate(65_000);
+            payload.push_str("\"]"); // best-effort close
+            ":truncated"
+        } else {
+            ""
+        };
+        let body = format!("<!-- ecp-impact-cache:V1{truncated_marker} -->\n{payload}");
+
+        // Try to find an existing marker comment to PATCH; otherwise POST a new one.
+        let list_endpoint = format!("repos/{{owner}}/{{repo}}/issues/{pr}/comments");
+        let list_out = Command::new("gh")
+            .args([
+                "api",
+                &list_endpoint,
+                "--jq",
+                ".[] | select(.body | startswith(\"<!-- ecp-impact-cache:V1\")) | .id",
+            ])
+            .output()
+            .map_err(|e| EcpError::InvalidArgument(format!("gh api list comments: {e}")))?;
+        let existing_id = String::from_utf8_lossy(&list_out.stdout)
+            .lines()
+            .next()
+            .map(str::to_owned)
+            .filter(|s| !s.is_empty());
+
+        let exec = if let Some(id) = existing_id {
+            let patch_endpoint = format!("repos/{{owner}}/{{repo}}/issues/comments/{id}");
+            Command::new("gh")
+                .args(["api", "-X", "PATCH", &patch_endpoint, "-f"])
+                .arg(format!("body={body}"))
+                .status()
+        } else {
+            Command::new("gh")
+                .args(["pr", "comment", &pr.to_string(), "--body", &body])
+                .status()
+        };
+        let status =
+            exec.map_err(|e| EcpError::InvalidArgument(format!("gh write comment: {e}")))?;
+        if !status.success() {
+            return Err(EcpError::InvalidArgument(format!(
+                "gh write comment exit {status}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
