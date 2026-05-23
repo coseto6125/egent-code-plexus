@@ -98,3 +98,19 @@
 ;; parser can read lhs name + full rhs text (including generics) from the
 ;; @typealias node's byte range.
 (typealias_declaration) @typealias
+
+;; ---- BlindSpot patterns (FU-001 P6a) ----
+;; NSClassFromString(<expr>) — runtime Objective-C class load by name.
+;; Matches `call_expression` where the callable is the bare identifier.
+((call_expression
+   (simple_identifier) @_fn) @blind.nsclass_from_string
+  (#eq? @_fn "NSClassFromString"))
+
+;; <expr>.perform(...) — Objective-C selector dispatch on an NSObject.
+;; The argument is typically `Selector("name")`. Match the method call
+;; with field name `perform`; receiver can be any expression.
+((call_expression
+   (navigation_expression
+     (navigation_suffix
+       (simple_identifier) @_m))) @blind.perform_selector
+  (#eq? @_m "perform"))
