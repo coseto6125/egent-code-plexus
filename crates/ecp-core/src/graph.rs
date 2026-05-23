@@ -54,6 +54,7 @@ impl std::str::FromStr for NodeKind {
             "transactionscope" | "transaction_scope" | "transaction scope" => {
                 Ok(NodeKind::TransactionScope)
             }
+            "enumvariant" | "enum_variant" | "enum variant" => Ok(NodeKind::EnumVariant),
             _ => Err(()),
         }
     }
@@ -216,6 +217,19 @@ pub enum NodeKind {
     /// about atomicity scope and rollback paths resolve at the right
     /// granularity without scanning all function bodies.
     TransactionScope,
+    // ── Enum variant expansion ──────────────────────────────────────────
+    // Appended at the END to keep rkyv discriminants stable.
+    /// Single member of an enum (Rust `enum X { A }`, TS `enum X { A }`,
+    /// Java/Kotlin/Swift `enum X { case A }`, C# `enum X { A = 5 }`). Carries
+    /// the variant's name; payload shape (associated values / data carriers)
+    /// not modeled — query via `(v.content)` for the source if needed.
+    ///
+    /// LLM-utility filter: (B) Node coverage — without this variant, state
+    /// machine queries and exhaustiveness analysis fall back to grep.
+    /// Enables:
+    ///   `MATCH (e:Enum {name:"Status"})-[:Defines]->(v:EnumVariant) RETURN v`
+    ///   `ecp impact Active --upstream` to find all variant consumers
+    EnumVariant,
 }
 
 impl NodeKind {
@@ -256,7 +270,7 @@ impl NodeKind {
     /// CSR array (`length = VARIANT_COUNT + 1`). Append-only schema rule
     /// means this only ever grows; matching the variant total at the bottom
     /// of the enum keeps the CI green when a new kind lands.
-    pub const VARIANT_COUNT: usize = 27;
+    pub const VARIANT_COUNT: usize = 28;
 
     /// Discriminant as a usize, suitable for indexing into the v10
     /// `kind_offsets` array. Matches the `#[repr(u8)]` order so the
@@ -298,6 +312,7 @@ impl NodeKind {
             Self::SchemaField => "SchemaField",
             Self::EventTopic => "EventTopic",
             Self::TransactionScope => "TransactionScope",
+            Self::EnumVariant => "EnumVariant",
         }
     }
 }

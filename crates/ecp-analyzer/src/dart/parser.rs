@@ -77,6 +77,7 @@ struct DartCaptureIndices {
     property: Option<u32>,
     import: Option<u32>,
     enum_: Option<u32>,
+    enum_constant_node: Option<u32>,
     annotation: Option<u32>,
     var: Option<u32>,
     var_name: Option<u32>,
@@ -109,6 +110,7 @@ impl DartProvider {
             property: query.capture_index_for_name("property"),
             import: query.capture_index_for_name("import"),
             enum_: query.capture_index_for_name("enum"),
+            enum_constant_node: query.capture_index_for_name("enum_constant_node"),
             annotation: query.capture_index_for_name("annotation"),
             var: query.capture_index_for_name("var"),
             var_name: query.capture_index_for_name("var.name"),
@@ -155,6 +157,7 @@ impl LanguageProvider for DartProvider {
         let idx_property = idx.property;
         let idx_import = idx.import;
         let idx_enum = idx.enum_;
+        let idx_enum_constant_node = idx.enum_constant_node;
         let idx_annotation = idx.annotation;
         let idx_var = idx.var;
         let idx_var_name = idx.var_name;
@@ -228,6 +231,7 @@ impl LanguageProvider for DartProvider {
                     || Some(cap_idx) == idx_property
                     || Some(cap_idx) == idx_import
                     || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_enum_constant_node
                     || Some(cap_idx) == idx_annotation
                 {
                     root_span_node = Some(cap.node);

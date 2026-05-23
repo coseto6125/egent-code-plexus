@@ -14,16 +14,17 @@ impl LangSpec for TypeScriptSpec {
     const NAME: &'static str = "typescript";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "function.name"     => NodeKind::Function,
-        "class.name"        => NodeKind::Class,
-        "method.name"       => NodeKind::Method,
-        "constructor.name"  => NodeKind::Constructor,
-        "interface.name"    => NodeKind::Interface,
-        "typedef.name"      => NodeKind::Typedef,
-        "property.name"     => NodeKind::Property,
-        "const.name"        => NodeKind::Const,
-        "variable.name"     => NodeKind::Variable,
-        "enum.name"         => NodeKind::Enum,
+        "function.name"      => NodeKind::Function,
+        "class.name"         => NodeKind::Class,
+        "method.name"        => NodeKind::Method,
+        "constructor.name"   => NodeKind::Constructor,
+        "interface.name"     => NodeKind::Interface,
+        "typedef.name"       => NodeKind::Typedef,
+        "property.name"      => NodeKind::Property,
+        "const.name"         => NodeKind::Const,
+        "variable.name"      => NodeKind::Variable,
+        "enum.name"          => NodeKind::Enum,
+        "enum_member.name"   => NodeKind::EnumVariant,
     };
 
     // TypeScript uses query-level scope anchoring for most kinds; no runtime

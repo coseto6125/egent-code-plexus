@@ -26,6 +26,7 @@ impl LangSpec for RustSpec {
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
         "struct_item.name"     => NodeKind::Struct,
         "enum_item.name"       => NodeKind::Enum,
+        "enum_variant.name"    => NodeKind::EnumVariant,
         "trait_item.name"      => NodeKind::Trait,
         "function_item.name"   => NodeKind::Function,
         "module_item.name"     => NodeKind::Module,

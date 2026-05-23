@@ -118,6 +118,27 @@ pub fn enclosing_struct_type(node: Node<'_>, source: &[u8]) -> Option<String> {
     None
 }
 
+/// Walk `node`'s parent chain to find the nearest enclosing `enum_item` and
+/// return its name.  Used to set `owner_class` for `EnumVariant` nodes so that
+/// same-named variants in different enums (e.g. `Color::Red` / `Status::Red`)
+/// produce distinct UIDs.
+pub fn enclosing_enum_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        if n.kind() == "enum_item" {
+            return n
+                .child_by_field_name("name")
+                .and_then(|nn| node_text(nn, source));
+        }
+        // Stop at source-file boundary — variants never escape their enum body.
+        if n.kind() == "source_file" {
+            return None;
+        }
+        current = n.parent();
+    }
+    None
+}
+
 /// Walk `node`'s parent chain to find the nearest enclosing `function_item`
 /// and return its name.  Used to set `owner_class` for items nested inside
 /// functions (e.g. `const`/`fn`/`macro_rules!` defined inside a function

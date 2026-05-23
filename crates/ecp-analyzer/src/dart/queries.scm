@@ -11,6 +11,14 @@
 (enum_declaration
   name: (identifier) @enum.name) @enum
 
+;; Enum constants — `enum Color { red, green, blue }`. Each `enum_constant`
+;; node carries a `name` field (identifier). Dart 2.17+ enhanced enums with
+;; constructor calls also use this node.
+(enum_declaration
+  body: (enum_body
+    (enum_constant
+      name: (identifier) @enum_constant.name) @enum_constant_node))
+
 ;; Mixins — semantically closer to a trait (default-method container) than an
 ;; interface; map to NodeKind::Trait to match Kotlin mixin convention.
 (mixin_declaration

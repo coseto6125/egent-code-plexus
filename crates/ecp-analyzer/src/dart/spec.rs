@@ -16,16 +16,17 @@ impl LangSpec for DartSpec {
     const NAME: &'static str = "dart";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "class.name"       => NodeKind::Class,
-        "function.name"    => NodeKind::Function,
-        "method.name"      => NodeKind::Method,
-        "constructor.name" => NodeKind::Constructor,
-        "typedef.name"     => NodeKind::Typedef,
-        "interface.name"   => NodeKind::Interface,
-        "trait.name"       => NodeKind::Trait,
-        "property.name"    => NodeKind::Property,
-        "enum.name"        => NodeKind::Enum,
-        "annotation.name"  => NodeKind::Annotation,
+        "class.name"          => NodeKind::Class,
+        "function.name"       => NodeKind::Function,
+        "method.name"         => NodeKind::Method,
+        "constructor.name"    => NodeKind::Constructor,
+        "typedef.name"        => NodeKind::Typedef,
+        "interface.name"      => NodeKind::Interface,
+        "trait.name"          => NodeKind::Trait,
+        "property.name"       => NodeKind::Property,
+        "enum.name"           => NodeKind::Enum,
+        "enum_constant.name"  => NodeKind::EnumVariant,
+        "annotation.name"     => NodeKind::Annotation,
     };
 
     // Dart grammar scope-anchors via query patterns; no MODULE_SCOPED_CAPTURES

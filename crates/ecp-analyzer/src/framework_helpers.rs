@@ -139,6 +139,13 @@ pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, S
 /// Enum | Annotation`) so that inner classes with the same name across
 /// different outer classes resolve to distinct UIDs
 /// (uid = kind + path + owner_class + name).
+///
+/// Also stamps `EnumVariant` nodes: each variant gets `owner_class` = the
+/// tightest enclosing `Enum` name. This is the span-containment equivalent of
+/// the Rust parser's explicit `owner_class` assignment; all other languages
+/// (TS / Java / Kotlin / C# / Swift / Dart / C++) rely on this pass because
+/// their parsers emit variants as free `RawNode`s without an enclosing-enum
+/// back-reference.
 pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     let class_spans: Vec<(String, Span)> = nodes
         .iter()
@@ -150,9 +157,18 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
         })
         .map(|n| (n.name.clone(), n.span))
         .collect();
-    if class_spans.is_empty() {
+
+    // Separate enum spans — used to stamp EnumVariant owner_class.
+    let enum_spans: Vec<(String, Span)> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Enum))
+        .map(|n| (n.name.clone(), n.span))
+        .collect();
+
+    if class_spans.is_empty() && enum_spans.is_empty() {
         return;
     }
+
     for node in nodes.iter_mut() {
         let span = node.span;
         let owner = if matches!(
@@ -179,6 +195,13 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
             class_spans
                 .iter()
                 .filter(|(_, s)| *s != span && span_contains(*s, span))
+                .min_by_key(|(_, s)| span_area(*s))
+                .map(|(name, _)| name.clone())
+        } else if matches!(node.kind, NodeKind::EnumVariant) {
+            // Variant → tightest enclosing Enum span.
+            enum_spans
+                .iter()
+                .filter(|(_, s)| span_contains(*s, span))
                 .min_by_key(|(_, s)| span_area(*s))
                 .map(|(name, _)| name.clone())
         } else {

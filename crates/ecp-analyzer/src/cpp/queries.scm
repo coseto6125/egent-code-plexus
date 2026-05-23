@@ -307,6 +307,14 @@
   body: (enumerator_list)
 ) @enum_node
 
+;; Enum enumerators — `enum Color { Red, Green, Blue }` or
+;; `enum class Status { Active = 0, Inactive }`. Each `enumerator` node
+;; carries the identifier as its first unnamed child.
+(enum_specifier
+  body: (enumerator_list
+    (enumerator
+      name: (identifier) @name.enumerator) @enumerator_node))
+
 ;; Type aliases — `using Foo = Bar;`  and  `typedef int MyInt;`
 (alias_declaration
   name: (type_identifier) @name.typedef

@@ -1564,6 +1564,16 @@ impl GraphBuilder {
             self.symbol_skip_set.as_ref(),
         );
 
+        // Enum → EnumVariant containment edges. Runs after class_membership
+        // (same pipeline position) because EnumVariant owner_class is stamped
+        // by stamp_owner_class_by_span at parse time; no dependency on HasMethod.
+        crate::post_process::enum_variant_defines::emit_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut edges,
+        );
+
         // Override resolution — emits `RelType::Overrides` edges (concrete
         // method → overridden supertype method). Runs after class_membership
         // so HasMethod edges are already in place; before CSR construction so

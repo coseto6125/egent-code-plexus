@@ -249,6 +249,19 @@
   ) @enum
 ) @export
 
+;; Enum members — `enum X { A, B = 1, C = "c" }`.
+;; tree-sitter-typescript has no `enum_member` node; bare members are
+;; `property_identifier` children of `enum_body.name`, and valued members
+;; are `enum_assignment` children of `enum_body`.
+(enum_declaration
+  body: (enum_body
+    name: (property_identifier) @enum_member.name @enum_member_node))
+
+(enum_declaration
+  body: (enum_body
+    (enum_assignment
+      name: (property_identifier) @enum_member.name) @enum_member_node))
+
 ;; Routes — `app.METHOD(path, handler)` form.
 ;; `route.handler` captures the named handler argument when present so the
 ;; builder can emit a `HandlesRoute` edge from the handler function back

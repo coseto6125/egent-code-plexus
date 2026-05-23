@@ -75,6 +75,12 @@
   name: (identifier) @enum.name
 ) @enum
 
+;; Enum constants — `enum Status { ACTIVE, INACTIVE, PENDING }`
+(enum_declaration
+  body: (enum_body
+    (enum_constant
+      name: (identifier) @enum_constant.name) @enum_constant_node))
+
 ;; Annotation types (@interface)
 (annotation_type_declaration
   name: (identifier) @annotation.name

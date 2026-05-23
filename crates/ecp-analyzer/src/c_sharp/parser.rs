@@ -75,6 +75,7 @@ struct CSharpCaptureIndices {
     constructor: Option<u32>,
     namespace: Option<u32>,
     enum_: Option<u32>,
+    enum_member_node: Option<u32>,
     struct_: Option<u32>,
 }
 
@@ -126,6 +127,7 @@ impl CSharpProvider {
             constructor: query.capture_index_for_name("constructor"),
             namespace: query.capture_index_for_name("namespace"),
             enum_: query.capture_index_for_name("enum"),
+            enum_member_node: query.capture_index_for_name("enum_member_node"),
             struct_: query.capture_index_for_name("struct"),
         };
 
@@ -176,6 +178,7 @@ impl LanguageProvider for CSharpProvider {
         let idx_constructor = idx.constructor;
         let idx_namespace = idx.namespace;
         let idx_enum = idx.enum_;
+        let idx_enum_member_node = idx.enum_member_node;
         let idx_struct = idx.struct_;
 
         while let Some(m) = matches.next() {
@@ -253,6 +256,7 @@ impl LanguageProvider for CSharpProvider {
                     || Some(cap_idx) == idx_constructor
                     || Some(cap_idx) == idx_namespace
                     || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_enum_member_node
                     || Some(cap_idx) == idx_struct)
                     && root_span_node.is_none()
                 {

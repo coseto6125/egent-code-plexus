@@ -51,6 +51,7 @@ struct JavaCaptureIndices {
     type_ann: Option<u32>,
     decorator: Option<u32>,
     enum_: Option<u32>,
+    enum_constant_node: Option<u32>,
     annotation: Option<u32>,
     // Spring @Autowired field injection.
     spring_autowired_class: Option<u32>,
@@ -85,6 +86,7 @@ impl JavaProvider {
             type_ann: query.capture_index_for_name("type"),
             decorator: query.capture_index_for_name("decorator"),
             enum_: query.capture_index_for_name("enum"),
+            enum_constant_node: query.capture_index_for_name("enum_constant_node"),
             annotation: query.capture_index_for_name("annotation"),
             spring_autowired_class: query.capture_index_for_name("spring.autowired.class"),
             spring_autowired_target: query.capture_index_for_name("spring.autowired.target"),
@@ -196,6 +198,7 @@ impl LanguageProvider for JavaProvider {
                     || cap_idx == idx.property
                     || cap_idx == idx.variable
                     || cap_idx == idx.enum_
+                    || cap_idx == idx.enum_constant_node
                     || cap_idx == idx.annotation
                 {
                     if root_span_node.is_none() {

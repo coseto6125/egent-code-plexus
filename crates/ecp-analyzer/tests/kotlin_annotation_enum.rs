@@ -115,10 +115,10 @@ fn mixed_file_emits_exactly_one_of_each_kind() {
 fn enum_entries_emit_as_enum_nodes() {
     // Pre-fix: only the parent `Color` enum surfaced as Enum; the entries
     // (`RED`, `GREEN`, `BLUE`) were silently dropped, leaving 15 ref_over
-    // rows on `.sample_repo` (`Dart/extensions/intellij/.../*.kt`
-    // `OperatingSystem` / `Architecture` enum families). queries.scm now
-    // captures `(enum_class_body (enum_entry (simple_identifier)))` and
-    // KotlinSpec routes `enum_entry.name` to NodeKind::Enum.
+    // rows on `.sample_repo`. queries.scm captures `(enum_class_body
+    // (enum_entry (simple_identifier)))` and KotlinSpec now routes
+    // `enum_entry.name` to NodeKind::EnumVariant (was Enum before
+    // NodeKind::EnumVariant was introduced).
     let g = parse(
         "enum class OperatingSystem(val value: String) {\n\
          Linux(\"linux\"),\n\
@@ -126,16 +126,22 @@ fn enum_entries_emit_as_enum_nodes() {
          Windows(\"windows\");\n\
          }\n",
     );
-    let enums: Vec<&str> = g
+    let enum_names: Vec<&str> = g
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Enum)
         .map(|n| n.name.as_str())
         .collect();
-    assert!(enums.contains(&"OperatingSystem"), "parent enum missing");
-    assert!(enums.contains(&"Linux"), "Linux entry missing");
-    assert!(enums.contains(&"MacOS"), "MacOS entry missing");
-    assert!(enums.contains(&"Windows"), "Windows entry missing");
+    let variant_names: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::EnumVariant)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert!(enum_names.contains(&"OperatingSystem"), "parent enum missing");
+    assert!(variant_names.contains(&"Linux"), "Linux entry missing");
+    assert!(variant_names.contains(&"MacOS"), "MacOS entry missing");
+    assert!(variant_names.contains(&"Windows"), "Windows entry missing");
 }
 
 #[test]
@@ -145,13 +151,20 @@ fn plain_enum_entries_without_constructor_args_emit() {
     // nodes; verify the capture rule isn't accidentally constructor-arg
     // anchored.
     let g = parse("enum class Color { RED, GREEN, BLUE }\n");
-    let enums: Vec<&str> = g
+    let enum_names: Vec<&str> = g
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Enum)
         .map(|n| n.name.as_str())
         .collect();
-    for name in ["Color", "RED", "GREEN", "BLUE"] {
-        assert!(enums.contains(&name), "{name} missing from {:?}", enums);
+    let variant_names: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::EnumVariant)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert!(enum_names.contains(&"Color"), "Color enum missing from {:?}", enum_names);
+    for name in ["RED", "GREEN", "BLUE"] {
+        assert!(variant_names.contains(&name), "{name} missing from {:?}", variant_names);
     }
 }

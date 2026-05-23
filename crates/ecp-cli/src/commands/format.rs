@@ -32,6 +32,7 @@ pub fn kind_to_str(kind: &ArchivedNodeKind) -> &'static str {
         ArchivedNodeKind::SchemaField => "SchemaField",
         ArchivedNodeKind::EventTopic => "EventTopic",
         ArchivedNodeKind::TransactionScope => "TransactionScope",
+        ArchivedNodeKind::EnumVariant => "EnumVariant",
     }
 }
 

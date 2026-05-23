@@ -1291,6 +1291,7 @@ fn node_kind_to_str(kind: &NodeKind) -> &'static str {
         NodeKind::SchemaField => "SchemaField",
         NodeKind::EventTopic => "EventTopic",
         NodeKind::TransactionScope => "TransactionScope",
+        NodeKind::EnumVariant => "EnumVariant",
     }
 }
 
