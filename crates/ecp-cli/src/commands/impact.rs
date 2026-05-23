@@ -529,6 +529,12 @@ fn impact_by_name(
             if node.name.resolve(&graph.string_pool) != bare_name {
                 return false;
             }
+            // Synthetic nodes (e.g. resolver-miss `Annotation` from
+            // `decorates_edges`) carry SYNTHETIC_FILE_IDX — they aren't
+            // real symbols at any file:line. Drop them from impact targets.
+            if !node.has_owning_file() {
+                return false;
+            }
             if let Some(ref kn) = kind_needle {
                 let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
                 if &node_kind != kn {
@@ -806,6 +812,12 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     let changed_files_set: HashSet<&str> = changed_paths.iter().map(|s| s.as_str()).collect();
     let mut old_graph_idx: HashMap<(&'static str, String, String), usize> = HashMap::new();
     for (idx, node) in graph.nodes.iter().enumerate() {
+        // Synthetic nodes (decorates_edges resolver-miss `Annotation`) carry
+        // `file_idx == SYNTHETIC_FILE_IDX` (u32::MAX). Skip — they don't
+        // belong to any file in `changed_files_set` by construction.
+        if !node.has_owning_file() {
+            continue;
+        }
         let file_node = &graph.files[node.file_idx.to_native() as usize];
         let file_path = file_node.path.resolve(&graph.string_pool);
         if !changed_files_set.contains(file_path) {

@@ -444,6 +444,13 @@ pub struct Node {
     /// lookup in the resolver; eliminates string-pool dereference.
     pub uid: u64,
     pub name: StrRef,
+    /// Index into `ZeroCopyGraph.files`. The sentinel value
+    /// [`SYNTHETIC_FILE_IDX`] (`u32::MAX`) marks a node with no single
+    /// owning file — currently emitted by `post_process::decorates_edges`
+    /// for resolver-miss fallback `Annotation` nodes shared across
+    /// multiple call sites. Consumers that index `graph.files[file_idx]`
+    /// MUST guard against this sentinel before dereferencing; see
+    /// [`Node::has_owning_file`].
     pub file_idx: u32,
     pub kind: NodeKind,
     pub span: (u32, u32, u32, u32), // start_line, start_col, end_line, end_col
@@ -458,6 +465,34 @@ pub struct Node {
     /// (routes, entry-points, delegate stubs) with no source span.
     /// Enables T7-4/5/6 incremental skip: equal hash ↔ body unchanged.
     pub content_hash: u64,
+}
+
+/// Sentinel `Node.file_idx` value marking a synthetic node with no single
+/// owning file. Used by `post_process::decorates_edges` for resolver-miss
+/// fallback `Annotation` nodes that may be referenced by `Decorates` edges
+/// from multiple files. Consumers iterating `graph.nodes` and indexing
+/// `graph.files[node.file_idx]` MUST guard against this value — otherwise
+/// the index `u32::MAX as usize` triggers a slice OOB panic. Use
+/// [`Node::has_owning_file`] / [`ArchivedNode::has_owning_file`] to skip.
+pub const SYNTHETIC_FILE_IDX: u32 = u32::MAX;
+
+impl Node {
+    /// True iff this node owns a real file entry in `ZeroCopyGraph.files`.
+    /// False for synthetic placeholders (currently: resolver-miss
+    /// fallback `Annotation` nodes from `Decorates` edges). Use as a guard
+    /// before `graph.files[node.file_idx as usize]`.
+    #[inline]
+    pub fn has_owning_file(&self) -> bool {
+        self.file_idx != SYNTHETIC_FILE_IDX
+    }
+}
+
+impl ArchivedNode {
+    /// Zero-copy mirror of [`Node::has_owning_file`].
+    #[inline]
+    pub fn has_owning_file(&self) -> bool {
+        self.file_idx.to_native() != SYNTHETIC_FILE_IDX
+    }
 }
 
 /// Sorted entry in `ZeroCopyGraph.name_index`: maps a `xxh3_64(name)` hash

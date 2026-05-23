@@ -138,9 +138,12 @@ pub fn emit_edges(
                                 nodes.push(Node {
                                     uid: node_uid,
                                     name: name_ref,
-                                    // u32::MAX: no single owning file (same sentinel as
-                                    // EventTopic synthetic nodes).
-                                    file_idx: u32::MAX,
+                                    // Synthetic node — `Decorates` edges from
+                                    // multiple files target this single shared
+                                    // node, so no single owning file applies.
+                                    // Consumers that index `graph.files[file_idx]`
+                                    // must guard via `Node::has_owning_file()`.
+                                    file_idx: ecp_core::graph::SYNTHETIC_FILE_IDX,
                                     kind: NodeKind::Annotation,
                                     span: (0, 0, 0, 0),
                                     community_id: 0,
