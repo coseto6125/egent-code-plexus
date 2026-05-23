@@ -55,6 +55,7 @@ fn route_graph(rel_path: &str, method: &str, route_path: &str, handler: &str) ->
         schema_fields: None,
         event_topics: None,
         tx_scopes: None,
+        path_literals: None,
         call_metas: vec![],
         raw_function_metas: vec![],
     }
@@ -77,6 +78,7 @@ fn consumer_graph(rel_path: &str) -> LocalGraph {
         schema_fields: None,
         event_topics: None,
         tx_scopes: None,
+        path_literals: None,
         call_metas: vec![],
         raw_function_metas: vec![],
     }
