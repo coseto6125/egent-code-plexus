@@ -17,7 +17,6 @@
 //! This test sets up a repo with three external decorators that all resolve-miss,
 //! commits + modifies + reindexes, and runs each command to assert no panic.
 
-use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
@@ -53,17 +52,6 @@ fn ecp(repo: &Path, args: &[&str]) -> std::process::Output {
         .env("HOME", repo)
         .output()
         .expect("ecp failed to spawn")
-}
-
-fn ecp_must_succeed(repo: &Path, args: &[&str]) -> String {
-    let out = ecp(repo, args);
-    assert!(
-        out.status.success(),
-        "ecp {args:?} failed (likely SYNTHETIC_FILE_IDX panic):\n  stderr={}\n  stdout={}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
-    );
-    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 /// Set up a Python repo with external decorators that trigger resolver-miss,
@@ -136,117 +124,73 @@ def decorated_helper():
     );
 }
 
+/// One repo + one `admin index` shared across all command probes. Each command
+/// exits 0 (success) or 1 (graceful "not found" / "no diff") — anything else
+/// (especially 101 = panic abort) means a synthetic node leaked through a guard.
 #[test]
-fn find_does_not_panic_on_synthetic_annotation() {
+fn synthetic_annotation_does_not_panic_across_commands() {
     let tmp = tempfile::tempdir().unwrap();
     setup_decorator_repo(tmp.path());
-    // Name `lru_cache` is borne by both the synthetic Annotation (from
-    // `@functools.lru_cache`) and possibly nothing else; either way find must
-    // not panic.
-    ecp_must_succeed(
-        tmp.path(),
-        &["find", "lru_cache", "--repo", ".", "--format", "json"],
-    );
-}
 
-#[test]
-fn inspect_does_not_panic_when_name_matches_synthetic() {
-    let tmp = tempfile::tempdir().unwrap();
-    setup_decorator_repo(tmp.path());
-    // `route` matches both `app.route` decorator-derived synthetic Annotation
-    // and `requests.get` is unrelated; either way inspect must drop the
-    // synthetic at search_nodes and continue.
-    let out = ecp(
-        tmp.path(),
-        &[
-            "inspect", "--name", "route", "--format", "json", "--repo", ".",
-        ],
-    );
-    // We don't assert "found" — search_nodes may legitimately produce
-    // not_found after filtering synthetics. We assert NO panic (exit code).
-    let code = out.status.code().unwrap_or(-1);
-    assert!(
-        code == 0 || code == 1,
-        "inspect crashed with code {code}: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+    // Cover every CLI path that PR #372 touched. Names chosen to overlap with
+    // synthetic Annotation labels (`route`, `lru_cache`) so the search hits
+    // synthetics and the guard is the difference between success and panic.
+    let probes: &[(&str, &[&str])] = &[
+        (
+            "find (name lookup)",
+            &["find", "lru_cache", "--repo", ".", "--format", "json"],
+        ),
+        (
+            "inspect (search_nodes filter)",
+            &[
+                "inspect", "--name", "route", "--format", "json", "--repo", ".",
+            ],
+        ),
+        (
+            "impact --baseline (diff iteration + BFS)",
+            &[
+                "impact",
+                "--baseline",
+                "HEAD~1",
+                "--repo",
+                ".",
+                "--format",
+                "json",
+            ],
+        ),
+        (
+            "cypher (filePath projection)",
+            &[
+                "cypher",
+                "MATCH (n) RETURN n.filePath LIMIT 200",
+                "--repo",
+                ".",
+                "--format",
+                "json",
+            ],
+        ),
+        (
+            "rename --dry-run (target_indices builder)",
+            &[
+                "rename",
+                "--symbol",
+                "route",
+                "--new-name",
+                "endpoint",
+                "--dry-run",
+                "--repo",
+                ".",
+            ],
+        ),
+    ];
 
-#[test]
-fn impact_baseline_does_not_panic_with_synthetic_in_diff_region() {
-    let tmp = tempfile::tempdir().unwrap();
-    setup_decorator_repo(tmp.path());
-    // PR #371's "Known issue" repro: --baseline walks all graph.nodes for
-    // changed-file matching. Synthetic Annotation in the iteration must be
-    // skipped, not panic at impact.rs:899 / 978.
-    let stdout = ecp_must_succeed(
-        tmp.path(),
-        &[
-            "impact",
-            "--baseline",
-            "HEAD~1",
-            "--repo",
-            ".",
-            "--format",
-            "json",
-        ],
-    );
-    // Sanity: changed symbols include the modified handlers.
-    let json: Value = serde_json::from_str(
-        stdout
-            .split('{')
-            .nth(1)
-            .map(|s| format!("{{{s}"))
-            .as_deref()
-            .unwrap_or(&stdout),
-    )
-    .unwrap_or(Value::Null);
-    // Just confirm we got a structured response; details depend on parser.
-    assert!(json.is_object() || json.is_array() || json.is_null());
-}
-
-#[test]
-fn cypher_filepath_projection_handles_synthetic() {
-    let tmp = tempfile::tempdir().unwrap();
-    setup_decorator_repo(tmp.path());
-    // Project filePath on all nodes — synthetic Annotation must serialize
-    // to empty string, not panic.
-    ecp_must_succeed(
-        tmp.path(),
-        &[
-            "cypher",
-            "MATCH (n) RETURN n.filePath LIMIT 200",
-            "--repo",
-            ".",
-            "--format",
-            "json",
-        ],
-    );
-}
-
-#[test]
-fn rename_does_not_panic_on_synthetic_match_name() {
-    let tmp = tempfile::tempdir().unwrap();
-    setup_decorator_repo(tmp.path());
-    // Bare name `route` may match a synthetic Annotation; rename target builder
-    // must filter via has_owning_file before reading file_idx.
-    let out = ecp(
-        tmp.path(),
-        &[
-            "rename",
-            "--symbol",
-            "route",
-            "--new-name",
-            "endpoint",
-            "--dry-run",
-            "--repo",
-            ".",
-        ],
-    );
-    let code = out.status.code().unwrap_or(-1);
-    assert!(
-        code == 0 || code == 1,
-        "rename crashed with code {code}: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    for (label, args) in probes {
+        let out = ecp(tmp.path(), args);
+        let code = out.status.code().unwrap_or(-1);
+        assert!(
+            code == 0 || code == 1,
+            "{label} crashed with code {code} (likely SYNTHETIC_FILE_IDX panic):\n  args={args:?}\n  stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

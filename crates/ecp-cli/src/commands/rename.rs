@@ -322,8 +322,10 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             .filter(|(_, n)| {
                 // Fast-reject by u32 len before string resolve: cheaper than
                 // a pool dereference + strcmp when owner_class lengths differ.
-                n.has_owning_file()
-                    && n.owner_class.len.to_native() == owner_len
+                // `has_owning_file` is also a single u32 compare; placed after
+                // length so the dominant rejection path stays the cheapest one.
+                n.owner_class.len.to_native() == owner_len
+                    && n.has_owning_file()
                     && n.name.resolve(&graph.string_pool) == name
                     && n.owner_class.resolve(&graph.string_pool) == owner
             })
@@ -336,9 +338,9 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             .iter()
             .enumerate()
             .filter(|(_, n)| {
-                n.has_owning_file()
+                n.owner_class.len.to_native() == 0
+                    && n.has_owning_file()
                     && n.name.resolve(&graph.string_pool) == target_symbol
-                    && n.owner_class.len.to_native() == 0
             })
             .map(|(i, _)| i)
             .collect()

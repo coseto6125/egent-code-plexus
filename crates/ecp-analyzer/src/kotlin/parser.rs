@@ -101,32 +101,29 @@ fn is_class_method(func: tree_sitter::Node) -> bool {
         .is_some_and(|p| p.kind() == "class_declaration")
 }
 
-/// True when the `class_declaration` is an `enum class Foo` — detected by the
-/// presence of a direct `enum` keyword child (kind == `"enum"`). The grammar
-/// places the `enum` token as a sibling of `class`, not inside `modifiers`.
-fn is_enum_class(class_decl: tree_sitter::Node) -> bool {
+/// True when `class_decl` has a direct child whose kind matches `keyword`.
+/// fwcd/tree-sitter-kotlin uses `class_declaration` for `class`, `interface`,
+/// and `enum class` forms; the leading keyword appears as a sibling-of-name
+/// child rather than inside `modifiers`. Callers below pin it to a specific
+/// keyword to decide the emitted NodeKind.
+fn class_decl_has_keyword_child(class_decl: tree_sitter::Node, keyword: &str) -> bool {
     let mut cursor = class_decl.walk();
     for child in class_decl.children(&mut cursor) {
-        if child.kind() == "enum" {
+        if child.kind() == keyword {
             return true;
         }
     }
     false
 }
 
-/// True when the `class_declaration` is `interface Foo` — fwcd/tree-sitter-kotlin
-/// parses both `class` and `interface` as `class_declaration` and differentiates
-/// via the leading keyword child (`"class"` vs `"interface"`). Without this,
-/// `class Bar : Foo` where `Foo` is an interface incorrectly emits an `Extends`
-/// edge (PR #358 dispatch) instead of `Implements`.
+fn is_enum_class(class_decl: tree_sitter::Node) -> bool {
+    class_decl_has_keyword_child(class_decl, "enum")
+}
+
+/// `class Bar : Foo` where `Foo` is an interface needs the demotion so PR #358's
+/// kind-based dispatch emits `Implements` instead of `Extends`.
 fn is_interface_class(class_decl: tree_sitter::Node) -> bool {
-    let mut cursor = class_decl.walk();
-    for child in class_decl.children(&mut cursor) {
-        if child.kind() == "interface" {
-            return true;
-        }
-    }
-    false
+    class_decl_has_keyword_child(class_decl, "interface")
 }
 
 /// True when the `class_declaration` carries an `annotation` modifier — i.e.
