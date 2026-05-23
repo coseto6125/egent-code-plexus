@@ -23,6 +23,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
+  # Homebrew tap lives in a separate repo (not auto-derivable from
+  # github.repository). Centralized here so the publish/notes/clone steps
+  # below all reference one source of truth — change the tap location
+  # without grepping the file.
+  HOMEBREW_TAP_REPO: coseto6125/homebrew-tap
   BIN_NAME: ecp
   ECP_BUILD_VERBOSE: 1
 
@@ -376,7 +381,7 @@ jobs:
         with:
           app-id: ${{ vars.HOMEBREW_TAP_APP_ID }}
           private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
-          owner: coseto6125
+          owner: ${{ github.repository_owner }}
           repositories: homebrew-tap
 
       - name: Generate Homebrew formula
@@ -410,7 +415,7 @@ jobs:
           GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
         shell: bash
         run: |
-          git clone "https://x-access-token:${GH_APP_TOKEN}@github.com/coseto6125/homebrew-tap.git" tap
+          git clone "https://x-access-token:${GH_APP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
           mkdir -p tap/Formula
           cp generated/Formula/egent-code-plexus.rb tap/Formula/egent-code-plexus.rb
 

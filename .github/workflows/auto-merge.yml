@@ -1,0 +1,43 @@
+name: Auto-merge ready PRs
+# Enables GitHub native auto-merge on any non-draft PR. GitHub then waits
+# for:
+#   - All required status checks (defined in branch protection) to pass
+#   - The PR branch to be up-to-date with main (handled by
+#     auto-update-pr-branches.yml)
+# …and merges automatically when both are satisfied.
+#
+# Per-area serialization (Mergify's queue_rules equivalent) is not enforced
+# at workflow level — GitHub's auto-merge engine processes PRs first-ready-
+# first-merged. For single-author / low-volume repos this matches Mergify's
+# practical behavior because batch_size never exercised. If parallel same-
+# area PRs become common, add a `concurrency:` group keyed off the area
+# label here.
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch 2>&1; then
+            echo "✓ auto-merge enabled for #$PR"
+          else
+            # Common no-op causes: PR already merged, conflict, branch
+            # protection requires review we don't have. Surface as warning
+            # not failure — the workflow can be re-fired by the next
+            # synchronize event when the underlying issue resolves.
+            echo "::warning::could not enable auto-merge on #$PR (already merged? conflict? unmet protection?)"
+          fi
