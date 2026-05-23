@@ -5,13 +5,16 @@ use super::receiver_types::{
 use super::spec::GoSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    enclosing_function_name, has_import_from, node_span, push_blind_spot, MODULE_LEVEL_SOURCE,
+    enclosing_function_name, has_import_from, node_span, push_blind_spot, span_contains,
+    MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{
+    BlindSpot, FrameworkId, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawTxScope,
+};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -185,6 +188,89 @@ fn enclosing_func_or_method_name(node: tree_sitter::Node<'_>, source: &[u8]) -> 
             _ => {}
         }
         current = current.parent()?;
+    }
+}
+
+/// Walk the full tree for `call_expression` nodes whose callee is a
+/// `selector_expression` with method name `Begin` or `BeginTx`. For each
+/// hit, find the innermost enclosing `Function`/`Method` node in `nodes`
+/// via span containment and record its index. Returns one `RawTxScope` per
+/// unique enclosing function (multiple Begin() calls in the same fn → one
+/// scope). Conservative: matches on method name only, no receiver-type
+/// check (acceptable false positives for non-DB `.Begin()` calls in v1).
+fn collect_go_sql_tx_scopes(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    nodes: &[RawNode],
+) -> Option<Box<[RawTxScope]>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut scopes: Vec<RawTxScope> = Vec::new();
+
+    let mut cursor = root.walk();
+    // Walk entire tree depth-first.
+    loop {
+        let node = cursor.node();
+        if node.kind() == "call_expression" {
+            if let Some(fn_field) = node.child_by_field_name("function") {
+                if fn_field.kind() == "selector_expression" {
+                    if let Some(field_node) = fn_field.child_by_field_name("field") {
+                        if let Ok(method_name) = std::str::from_utf8(
+                            &source[field_node.start_byte()..field_node.end_byte()],
+                        ) {
+                            if matches!(method_name, "Begin" | "BeginTx") {
+                                // Recover the call's span and find the enclosing fn index.
+                                let call_start = node.start_position();
+                                let call_end = node.end_position();
+                                let call_span = (
+                                    crate::calls::safe_row(call_start.row),
+                                    u32::try_from(call_start.column).unwrap_or(u32::MAX),
+                                    crate::calls::safe_row(call_end.row),
+                                    u32::try_from(call_end.column).unwrap_or(u32::MAX),
+                                );
+                                // Find the innermost Function/Method containing this call.
+                                let enclosing_idx = nodes
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, n)| {
+                                        matches!(n.kind, NodeKind::Function | NodeKind::Method)
+                                            && span_contains(n.span, call_span)
+                                    })
+                                    .min_by_key(|(_, n)| {
+                                        let (r1, c1, r2, c2) = n.span;
+                                        let dr = r2.saturating_sub(r1) as u64;
+                                        dr * 10_000
+                                            + c2 as u64
+                                            + 10_000u64.saturating_sub(c1 as u64)
+                                    })
+                                    .map(|(idx, _)| idx);
+
+                                if let Some(idx) = enclosing_idx {
+                                    if seen.insert(idx) {
+                                        scopes.push(RawTxScope::new(
+                                            idx as u32,
+                                            FrameworkId::GoSqlTx,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Depth-first traversal: go to first child, then sibling, then up.
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return (!scopes.is_empty()).then(|| scopes.into_boxed_slice());
+            }
+        }
     }
 }
 
@@ -821,6 +907,13 @@ impl LanguageProvider for GoProvider {
         let raw_function_metas =
             crate::function_meta::go::extract(tree.root_node(), source, &nodes, file_category);
 
+        // Walk the AST for `db.Begin()` / `db.BeginTx(...)` call sites.
+        // Conservative heuristic: method name match only — no receiver-type
+        // resolution (refinement is a follow-up if false positives surface).
+        // Per-function dedup: multiple Begin() calls in the same function
+        // produce ONE RawTxScope.
+        let tx_scopes = collect_go_sql_tx_scopes(tree.root_node(), source, &nodes);
+
         let event_topics = {
             let topics = crate::event_topic::extract_event_topics(
                 &tree,
@@ -849,7 +942,7 @@ impl LanguageProvider for GoProvider {
             blind_spots,
             schema_fields: None,
             event_topics,
-            tx_scopes: None,
+            tx_scopes,
             path_literals: (!raw_path_literals.is_empty())
                 .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],

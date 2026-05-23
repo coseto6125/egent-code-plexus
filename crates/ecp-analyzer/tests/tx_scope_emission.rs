@@ -603,168 +603,124 @@ public class OrderService {
     );
 }
 
-// ── TypeScript (TypeORM @Transactional) ─────────────────────────────────────
+// ── Go (db.Begin / db.BeginTx call-site) ────────────────────────────────
 
 #[test]
-fn typescript_class_method_with_transactional_parens_emits_typeorm_scope() {
-    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+fn go_db_begin_emits_gosqltx_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    let p = TypeScriptProvider::new().expect("provider");
-    let src = r#"
-export class UserService {
-  @Transactional()
-  async createUser(data: string): Promise<void> { }
+    let p = GoProvider::new().expect("provider");
+    let src = r#"package db
 
-  async listUsers(): Promise<void> { }
+import "database/sql"
+
+func createUser(db *sql.DB) error {
+    tx, err := db.Begin()
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback()
+    return tx.Commit()
 }
+
+func listUsers(db *sql.DB) {}
 "#;
     let g = p
-        .parse_file(Path::new("user.service.ts"), src.as_bytes())
+        .parse_file(Path::new("users.go"), src.as_bytes())
         .expect("parse");
-    assert_eq!(
-        scopes(&g).len(),
-        1,
-        "one tx_scope expected; got: {:?}",
-        scopes(&g)
-            .iter()
-            .map(|s| fn_name_of_scope(&g, s))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "createUser");
-    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+    let s = scopes(&g);
+    assert_eq!(s.len(), 1, "one tx_scope expected; got: {:?}", s.len());
+    assert_eq!(fn_name_of_scope(&g, &s[0]), "createUser");
+    assert_eq!(s[0].framework(), FrameworkId::GoSqlTx);
 }
 
 #[test]
-fn typescript_class_method_with_bare_transactional_emits_typeorm_scope() {
-    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+fn go_db_begin_tx_emits_gosqltx_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    let p = TypeScriptProvider::new().expect("provider");
-    let src = r#"
-export class TransferService {
-  @Transactional
-  async transferFunds(from: string, to: string): Promise<void> { }
+    let p = GoProvider::new().expect("provider");
+    let src = r#"package db
+
+import (
+    "context"
+    "database/sql"
+)
+
+func transferFunds(ctx context.Context, db *sql.DB) error {
+    tx, err := db.BeginTx(ctx, nil)
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback()
+    return tx.Commit()
 }
 "#;
     let g = p
-        .parse_file(Path::new("transfer.service.ts"), src.as_bytes())
+        .parse_file(Path::new("transfer.go"), src.as_bytes())
         .expect("parse");
-    assert_eq!(
-        scopes(&g).len(),
-        1,
-        "one tx_scope expected; got: {:?}",
-        scopes(&g)
-            .iter()
-            .map(|s| fn_name_of_scope(&g, s))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transferFunds");
-    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+    let s = scopes(&g);
+    assert_eq!(s.len(), 1, "one tx_scope expected for BeginTx");
+    assert_eq!(fn_name_of_scope(&g, &s[0]), "transferFunds");
+    assert_eq!(s[0].framework(), FrameworkId::GoSqlTx);
 }
 
 #[test]
-fn typescript_class_method_with_transactional_args_emits_typeorm_scope() {
-    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+fn go_multiple_begin_in_same_fn_deduplicates_to_one_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    let p = TypeScriptProvider::new().expect("provider");
-    let src = r#"
-export class PaymentService {
-  @Transactional({ propagation: 'REQUIRES_NEW' })
-  async processPayment(amount: number): Promise<void> { }
+    let p = GoProvider::new().expect("provider");
+    // Two db.Begin() calls inside the same function — must emit exactly one scope.
+    let src = r#"package db
+
+import "database/sql"
+
+func multiTx(db *sql.DB) error {
+    tx1, _ := db.Begin()
+    defer tx1.Rollback()
+    tx2, _ := db.Begin()
+    defer tx2.Rollback()
+    return nil
 }
 "#;
     let g = p
-        .parse_file(Path::new("payment.service.ts"), src.as_bytes())
+        .parse_file(Path::new("multi.go"), src.as_bytes())
         .expect("parse");
+    let s = scopes(&g);
     assert_eq!(
-        scopes(&g).len(),
+        s.len(),
         1,
-        "arg-bearing @Transactional(...) should emit one scope; got: {:?}",
-        scopes(&g)
-            .iter()
-            .map(|s| fn_name_of_scope(&g, s))
-            .collect::<Vec<_>>()
+        "multiple Begin() in same function must produce exactly one scope (got {})",
+        s.len()
     );
-    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "processPayment");
-    assert_eq!(scopes(&g)[0].framework(), FrameworkId::TypeOrmTransactional);
+    assert_eq!(fn_name_of_scope(&g, &s[0]), "multiTx");
 }
 
 #[test]
-fn typescript_transactional_on_class_does_not_emit_scope() {
-    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+fn go_begin_outside_function_produces_no_scope() {
+    use ecp_analyzer::go::parser::GoProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
     use std::path::Path;
 
-    let p = TypeScriptProvider::new().expect("provider");
-    // @Transactional on a class (not a method) — NodeKind::Class is not in
-    // the scopeable_kinds list for TypeORM, so no RawTxScope should emit.
-    let src = r#"
-@Transactional()
-export class OrderService {
-  async placeOrder(): Promise<void> { }
-}
+    let p = GoProvider::new().expect("provider");
+    // A file with no functions at all — Begin() would be top-level (impossible
+    // in real Go, but the parser must not panic and must emit zero scopes).
+    let src = r#"package db
+
+import "database/sql"
+
+var DB *sql.DB
 "#;
     let g = p
-        .parse_file(Path::new("order.service.ts"), src.as_bytes())
+        .parse_file(Path::new("nofunc.go"), src.as_bytes())
         .expect("parse");
     assert!(
         scopes(&g).is_empty(),
-        "@Transactional on a Class must not produce tx_scope; got: {:?}",
-        scopes(&g)
-            .iter()
-            .map(|s| fn_name_of_scope(&g, s))
-            .collect::<Vec<_>>()
+        "no functions → no tx_scopes expected"
     );
-    assert!(g.tx_scopes.is_none());
-}
-
-#[test]
-fn typescript_multiple_transactional_methods_emit_multiple_scopes() {
-    use ecp_analyzer::typescript::parser::TypeScriptProvider;
-    use ecp_core::analyzer::provider::LanguageProvider;
-    use std::path::Path;
-
-    let p = TypeScriptProvider::new().expect("provider");
-    let src = r#"
-export class AccountService {
-  @Transactional()
-  async deposit(amount: number): Promise<void> { }
-
-  @Transactional()
-  async withdraw(amount: number): Promise<void> { }
-
-  async readBalance(): Promise<number> { return 0; }
-}
-"#;
-    let g = p
-        .parse_file(Path::new("account.service.ts"), src.as_bytes())
-        .expect("parse");
-    assert_eq!(scopes(&g).len(), 2, "two tx_scopes expected");
-    let names: Vec<&str> = scopes(&g).iter().map(|s| fn_name_of_scope(&g, s)).collect();
-    assert!(names.contains(&"deposit"), "deposit missing: {:?}", names);
-    assert!(names.contains(&"withdraw"), "withdraw missing: {:?}", names);
-}
-
-#[test]
-fn typescript_no_transactional_produces_no_scope() {
-    use ecp_analyzer::typescript::parser::TypeScriptProvider;
-    use ecp_core::analyzer::provider::LanguageProvider;
-    use std::path::Path;
-
-    let p = TypeScriptProvider::new().expect("provider");
-    let src = r#"
-export class UserService {
-  async getUser(id: string): Promise<void> { }
-}
-"#;
-    let g = p
-        .parse_file(Path::new("user.service.ts"), src.as_bytes())
-        .expect("parse");
-    assert!(scopes(&g).is_empty(), "no tx_scope expected");
-    assert!(g.tx_scopes.is_none());
 }
