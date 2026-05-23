@@ -10,14 +10,14 @@ fn say_to_targeted_peer_writes_to_their_inbox() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
 
-    // Set up peerA with a meta.json (alive_peers needs it)
+    // Set up peerA with a session_meta.json (alive_peers needs it)
     let pa = sessions.join("peerA");
     std::fs::create_dir_all(&pa).unwrap();
     let meta = format!(
         r#"{{"version":1,"session_id":"peerA","pid":{pid},"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
         pid = std::process::id()
     );
-    std::fs::write(pa.join("meta.json"), meta).unwrap();
+    std::fs::write(pa.join("session_meta.json"), meta).unwrap();
 
     let out = Command::new(bin())
         .args([
@@ -67,7 +67,7 @@ fn broadcast_writes_to_all_alive_peer_inboxes() {
             r#"{{"version":1,"session_id":"{sid}","pid":{pid},"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
             pid = std::process::id()
         );
-        std::fs::write(s.join("meta.json"), meta).unwrap();
+        std::fs::write(s.join("session_meta.json"), meta).unwrap();
     }
     let out = Command::new(bin())
         .args([

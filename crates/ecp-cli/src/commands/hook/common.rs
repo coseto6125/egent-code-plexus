@@ -206,7 +206,7 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
         Ok(_) => {}
     }
 
-    let meta_path = session_dir.join("meta.json");
+    let meta_path = session_dir.join("session_meta.json");
     let mut meta = ecp_core::session::SessionMeta::read(&meta_path).ok()?;
 
     let (entries, _new_offset) =

@@ -156,7 +156,7 @@ Two tiers — **agent commands** at top level (query/refactor/verify) and **admi
 | `diff` | Resolver-delta — edge-level binding tier-degradation + route / contract changes. |
 | `tool-map` | Calls to external HTTP / DB / Redis / queue clients via per-file import-binding analysis. |
 | `shape-check` | Drift between HTTP consumer access patterns and Route response shapes. |
-| `peers` | Multi-session peer collaboration (status / diff / log / gc). |
+| `peers` | Multi-session peer collaboration: `status` / `diff` / `say` / `inbox` / `log` / `thread` / `watch` / `gc`. See [Multi-session peer sync](#multi-session-peer-sync). |
 | `review` | Aggregated LLM-workflow audit: runs impact + coverage + tool-map + shape-check + diff in one shot, filtered to high-confidence signals. |
 
 Admin namespace (`ecp admin <cmd>` — hidden from top-level help):
@@ -171,6 +171,41 @@ Admin namespace (`ecp admin <cmd>` — hidden from top-level help):
 
 All commands resolve `.ecp/graph.bin` from CWD unless `--graph <path>` is given. Agent-facing commands are non-interactive by design — every flag surfaces via `--help`, every output stream is parseable.
 Run `ecp admin` with no subcommand to open the interactive admin TUI for index maintenance, host integrations, config, groups, and diagnostics.
+
+### Multi-session peer sync
+
+When two or more LLM sessions edit the same repo in parallel (e.g. one Claude Code session per feature branch), `ecp peers` lets each session see what the others are touching and exchange short messages so they don't trample each other's symbol-level dirty surface.
+
+Each session must register itself by passing a stable session id through one of these env vars (whichever your host populates): `ECP_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, or `CLAUDE_CODE_SESSION_ID`. The host's session-start hook normally does this for you.
+
+```bash
+# 1. Start the inotify watcher daemon (one per session, detached). Required for
+#    peer dirty-event dispatch into your inbox; status / say / inbox / log all
+#    work without it but you won't get auto-notified when a peer edits.
+ecp peers watch --start
+
+# 2. List live peers — who else is editing this repo right now.
+ecp peers status                 # text
+ecp peers status --format json   # array of { session_id, pid, watcher, … }
+                                 #  watcher ∈ alive | dead | not-started
+
+# 3. Inspect a peer's symbol-level dirty surface (optionally filter by symbol).
+ecp peers diff <peer-session-id> [<symbol-name>]
+
+# 4. Send / receive short messages. Broadcast (no --to) writes to every alive
+#    peer's inbox; targeted writes to one inbox.
+ecp peers say "rebasing on main, hold pushes for 5min"
+ecp peers say --to <peer-session-id> "can you take review on auth.rs?"
+ecp peers inbox                  # read own inbox without draining
+ecp peers log --limit 20         # tail this session's msg.log
+ecp peers thread <msg-id>        # all messages threaded by msg_id
+
+# 5. Stop the watcher when done. `gc` rotates log files.
+ecp peers watch --stop
+ecp peers gc
+```
+
+The watcher status field distinguishes `not-started` (you never ran `watch --start`) from `dead` (it was running but the pid is gone — crashed or killed), so failures don't masquerade as "feature not used".
 
 ### Provable verdicts (LLM code review)
 

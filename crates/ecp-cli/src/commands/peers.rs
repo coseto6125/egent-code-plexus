@@ -3,6 +3,7 @@
 use crate::session::resolver::resolve_session_id;
 use clap::{Args, Subcommand};
 use ecp_core::peer::registry::alive_peers;
+use ecp_core::EcpError;
 use std::path::PathBuf;
 
 fn default_repo_root() -> std::io::Result<PathBuf> {
@@ -22,7 +23,10 @@ pub struct PeersArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub enum PeersCmd {
     /// List alive peer sessions
-    Status,
+    Status {
+        #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
+        format: StatusFormat,
+    },
     /// Show a peer's symbol-level dirty surface (optionally filtered by symbol)
     Diff {
         peer: String,
@@ -54,8 +58,16 @@ pub enum PeersCmd {
     },
     /// Ƀ Print message thread by msg_id (current session msg.log)
     Thread { msg_id: String },
+    /// Start, stop, or check the inotify-driven peer-dirty watcher daemon.
+    Watch(super::watch::WatchArgs),
     /// Rotate logs + cleanup
     Gc,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum StatusFormat {
+    Text,
+    Json,
 }
 
 pub fn run(args: PeersArgs) -> std::io::Result<()> {
@@ -64,7 +76,7 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
         None => default_repo_root()?,
     };
     match args.cmd {
-        PeersCmd::Status => cmd_status(&repo_root),
+        PeersCmd::Status { format } => cmd_status(&repo_root, format),
         PeersCmd::Diff { peer, symbol } => cmd_diff(&repo_root, &peer, symbol.as_deref()),
         PeersCmd::Log {
             since,
@@ -83,25 +95,68 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
         }
         PeersCmd::Inbox { limit } => super::peers_msg::cmd_inbox(&repo_root, limit),
         PeersCmd::Thread { msg_id } => super::peers_msg::cmd_thread(&repo_root, &msg_id),
+        PeersCmd::Watch(wargs) => super::watch::run(wargs).map_err(io_from_ecp),
         PeersCmd::Gc => cmd_gc(&repo_root),
     }
 }
 
-fn cmd_status(repo_root: &std::path::Path) -> std::io::Result<()> {
+fn io_from_ecp(e: EcpError) -> std::io::Error {
+    match e {
+        EcpError::Io(io) => io,
+        other => std::io::Error::other(other.to_string()),
+    }
+}
+
+/// Three-state classification of watcher liveness for status output.
+/// `not-started`: session_meta.watcher_pid is None — `ecp peers watch --start`
+/// was never invoked. `dead`: pid recorded but the OS process is gone (crashed
+/// or stale). `alive`: pid recorded and reachable.
+fn watcher_state(p: &ecp_core::peer::registry::PeerSession) -> &'static str {
+    match (p.watcher_pid, p.watcher_alive) {
+        (None, _) => "not-started",
+        (Some(_), false) => "dead",
+        (Some(_), true) => "alive",
+    }
+}
+
+fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Result<()> {
     let me = resolve_session_id(None);
     let peers = alive_peers(repo_root, &me);
-    if peers.is_empty() {
-        println!("no peers");
-        return Ok(());
-    }
-    for p in peers {
-        println!(
-            "session={}\tpid={}\tlast_touched={}\twatcher={}",
-            p.session_id,
-            p.pid,
-            p.last_touched,
-            if p.watcher_alive { "alive" } else { "dead" }
-        );
+    match format {
+        StatusFormat::Text => {
+            if peers.is_empty() {
+                println!("no peers");
+                return Ok(());
+            }
+            for p in &peers {
+                println!(
+                    "session={}\tpid={}\tlast_touched={}\twatcher={}",
+                    p.session_id,
+                    p.pid,
+                    p.last_touched,
+                    watcher_state(p)
+                );
+            }
+        }
+        StatusFormat::Json => {
+            let rows: Vec<_> = peers
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "session_id": p.session_id,
+                        "pid": p.pid,
+                        "last_touched": p.last_touched.to_rfc3339(),
+                        "base_sha": p.base_sha,
+                        "watcher": watcher_state(p),
+                        "watcher_pid": p.watcher_pid,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string(&rows).map_err(std::io::Error::other)?
+            );
+        }
     }
     Ok(())
 }

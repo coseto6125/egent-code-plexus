@@ -40,7 +40,7 @@ use engine::Engine;
 #[derive(Parser)]
 #[command(
     name = "ecp",
-    version = env!("CARGO_PKG_VERSION"),
+    version = concat!(env!("CARGO_PKG_VERSION"), "+", env!("ECP_GIT_SHA")),
     about = "egent-code-plexus stateless query engine (mmap)"
 )]
 struct Cli {

@@ -91,7 +91,7 @@ fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Re
             .spawn()?
     };
     let pid = child.id();
-    let meta_path = session_dir.join("meta.json");
+    let meta_path = session_dir.join("session_meta.json");
     let mut meta = SessionMeta::read(&meta_path).unwrap_or_else(|_| SessionMeta {
         version: 1,
         session_id: sid.clone(),
@@ -118,7 +118,7 @@ fn start_background(_: PathBuf, _: String, _: PathBuf) -> Result<(), EcpError> {
 }
 
 fn stop_watcher(session_dir: &std::path::Path) -> Result<(), EcpError> {
-    let meta_path = session_dir.join("meta.json");
+    let meta_path = session_dir.join("session_meta.json");
     let mut meta = match SessionMeta::read(&meta_path) {
         Ok(m) => m,
         Err(_) => {
@@ -143,7 +143,7 @@ fn stop_watcher(session_dir: &std::path::Path) -> Result<(), EcpError> {
 }
 
 fn print_status(session_dir: &std::path::Path) -> Result<(), EcpError> {
-    let meta_path = session_dir.join("meta.json");
+    let meta_path = session_dir.join("session_meta.json");
     let meta = SessionMeta::read(&meta_path).ok();
     match meta.and_then(|m| m.watcher_pid) {
         Some(pid) if pid_alive(pid) => println!("watcher running pid={pid}"),

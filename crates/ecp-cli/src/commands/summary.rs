@@ -1,3 +1,4 @@
+// TODO(FU-future): surface binary_commit_sha mismatch in summary output
 //! `ecp summary` — unified registry + repo health entry point.
 //! (Was `ecp coverage` pre-rename; the `coverage` alias is kept for one release.)
 //!

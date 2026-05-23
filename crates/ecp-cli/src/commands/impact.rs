@@ -907,6 +907,26 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
         if args.include_heuristic && !heur_results.is_empty() {
             sym_entry["heuristic_edges"] = json!(heur_results);
         }
+        // Orphan-symbol fallback: when upstream-only mode finds no callers,
+        // attach depth-1 downstream callees so the changed symbol still
+        // exposes structural signal (its callees) instead of an empty
+        // `impact: []`. `det_results.len() <= 1` relies on the documented
+        // `run_bfs` start-node-at-depth-0 invariant.
+        if args.direction == Direction::Up && det_results.len() <= 1 {
+            let (downstream_results, _, _, _) = run_bfs(
+                graph,
+                start_idx,
+                &Direction::Down,
+                1, // depth = 1, direct callees only
+                min_conf,
+                effective_include_tests,
+                &rel_filter,
+                args.include_heuristic,
+            );
+            if downstream_results.len() > 1 {
+                sym_entry["downstream_callees"] = json!(downstream_results);
+            }
+        }
         impact_by_symbol.push(sym_entry);
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
@@ -1036,6 +1056,11 @@ fn direction_str(dir: &Direction) -> &'static str {
 ///
 /// `--include-tests` / `--relation-types` / `min_conf` are applied here;
 /// `--kind` / `--file` emission-only filtering is NOT applied here.
+///
+/// **Invariant:** the deterministic result vec always begins with the start
+/// node itself at `depth = 0` (so `len() == 1` means "no neighbours reached").
+/// Callers relying on this for orphan-detection (see `impact_with_baseline`'s
+/// downstream fallback) MUST be updated if this invariant changes.
 #[allow(clippy::too_many_arguments)]
 fn run_bfs(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,

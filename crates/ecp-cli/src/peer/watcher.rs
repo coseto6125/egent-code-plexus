@@ -142,7 +142,7 @@ fn dispatch_peer(
         }
         guard.clone().unwrap_or_default()
     };
-    let peer_meta = SessionMeta::read(&peer_dirty_path.with_file_name("meta.json"))?;
+    let peer_meta = SessionMeta::read(&peer_dirty_path.with_file_name("session_meta.json"))?;
     let peer_pid = peer_meta.pid.unwrap_or(0);
     let ts = Utc::now().to_rfc3339();
     let cache_guard = cache.lock().expect("impact cache lock poisoned");

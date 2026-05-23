@@ -366,6 +366,46 @@ struct PythonCaptureIndices {
     blind_cross_getattr: Option<u32>,
 }
 
+/// True when every entry in `bases` is a Protocol-marker — meaning the class
+/// declares a structural interface contract rather than concrete inheritance.
+///
+/// Spec §4.5b: when ALL bases are Protocol-markers, promote NodeKind::Class →
+/// NodeKind::Interface so the kind-based Implements dispatch treats inheritors
+/// as "implements" rather than "extends". Mixed bases keep NodeKind::Class to
+/// preserve concrete inheritance semantics for the non-marker base(s).
+///
+/// Marker set: `Protocol`, `ABC`, `ABCMeta` (bare or dotted with `typing`,
+/// `typing_extensions`, `abc` prefixes), and their subscript forms like
+/// `Protocol[T]`. `Generic` and `Generic[T]` are NOT markers — they express
+/// parameterization, not interface semantics.
+fn is_protocol_marker_only(bases: &[String]) -> bool {
+    if bases.is_empty() {
+        return false;
+    }
+    bases.iter().all(|base| {
+        // Strip subscript suffix: `Protocol[T]` → `Protocol`, `typing.Protocol[T_co]` → `typing.Protocol`
+        let stripped = base
+            .find('[')
+            .map(|i| &base[..i])
+            .unwrap_or(base.as_str())
+            .trim();
+        matches!(
+            stripped,
+            "Protocol"
+                | "ABC"
+                | "ABCMeta"
+                | "typing.Protocol"
+                | "typing.ABC"
+                | "typing.ABCMeta"
+                | "typing_extensions.Protocol"
+                | "typing_extensions.ABC"
+                | "typing_extensions.ABCMeta"
+                | "abc.ABC"
+                | "abc.ABCMeta"
+        )
+    })
+}
+
 /// True when `func_def` is a `def`/`async def` defined directly inside a
 /// `class` body (vs free-standing or nested inside another function).
 /// Walks: function_definition → [decorated_definition] → block → class_definition.
@@ -1069,6 +1109,16 @@ impl LanguageProvider for PythonProvider {
             crate::function_meta::python::extract(tree.root_node(), source, &nodes, file_category);
 
         let tx_scopes = resolve_tx_scopes(&nodes, &pending_tx_scopes);
+
+        // §4.5b: promote Class → Interface when ALL bases are Protocol-markers.
+        // Runs after the match loop so each node's heritage is fully assembled
+        // (tree-sitter emits one capture per base expression, so per-match
+        // classification would misclassify mixed-base classes on first match).
+        for node in &mut nodes {
+            if node.kind == NodeKind::Class && is_protocol_marker_only(&node.heritage) {
+                node.kind = NodeKind::Interface;
+            }
+        }
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);

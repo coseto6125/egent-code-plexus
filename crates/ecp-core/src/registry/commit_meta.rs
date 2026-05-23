@@ -35,6 +35,10 @@ pub struct CommitBuildMeta {
     /// miss so the next run rewrites with the current fingerprint.
     #[serde(default)]
     pub builder_fingerprint: Option<String>,
+    /// Short SHA of the ecp binary that wrote this entry. `None` on meta
+    /// files written by pre-SHA binaries.
+    #[serde(default)]
+    pub binary_commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,5 +62,60 @@ impl CommitBuildMeta {
     pub fn read(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
         serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_meta() -> CommitBuildMeta {
+        CommitBuildMeta {
+            version: 1,
+            sha: "abc123def4567890abc123def4567890abc123de".into(),
+            source_type: SourceType::Branch,
+            source_id: Some("main".into()),
+            built_from_worktree: "/work/repo".into(),
+            built_at: "2026-05-23T00:00:00Z".into(),
+            parent_sha: None,
+            node_count: 10,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![],
+            refs_seen_since: vec![],
+            builder_fingerprint: None,
+            binary_commit_sha: None,
+        }
+    }
+
+    #[test]
+    fn binary_commit_sha_roundtrip() {
+        let meta = CommitBuildMeta {
+            binary_commit_sha: Some("abc1234".into()),
+            ..base_meta()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: CommitBuildMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, meta);
+        assert_eq!(back.binary_commit_sha.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn binary_commit_sha_backcompat_missing_field() {
+        // JSON written by a pre-SHA binary omits the field entirely.
+        let json = r#"{
+            "version": 1,
+            "sha": "abc123def4567890abc123def4567890abc123de",
+            "source_type": "Branch",
+            "source_id": "main",
+            "built_from_worktree": "/work/repo",
+            "built_at": "2026-05-23T00:00:00Z",
+            "parent_sha": null,
+            "node_count": 10,
+            "embedding_status": "None",
+            "refs_at_build": [],
+            "refs_seen_since": []
+        }"#;
+        let meta: CommitBuildMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.binary_commit_sha, None);
     }
 }

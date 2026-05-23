@@ -494,17 +494,20 @@ impl GraphBuilder {
                     } else {
                         ""
                     };
-                    let hint = format!(
-                        "{}: first={}:{}:{}:{} second={}:{}:{}:{}",
+                    let hint = ecp_core::graph::format_hint(
                         bs_kind,
-                        prev_kind,
-                        prev_path,
-                        prev_owner,
-                        prev_name,
-                        raw_node.kind.as_str(),
-                        path_str,
-                        raw_node.owner_class.as_deref().unwrap_or(""),
-                        raw_node.name,
+                        ecp_core::graph::HintFields {
+                            kind: prev_kind,
+                            path: prev_path,
+                            owner: prev_owner,
+                            name: prev_name,
+                        },
+                        ecp_core::graph::HintFields {
+                            kind: raw_node.kind.as_str(),
+                            path: &path_str,
+                            owner: raw_node.owner_class.as_deref().unwrap_or(""),
+                            name: &raw_node.name,
+                        },
                     );
                     collision_blind_spots.push(BlindSpotRecord {
                         kind: string_pool.add(bs_kind),
@@ -3012,15 +3015,28 @@ mod tests {
             );
         }
 
-        // Emit-zero invariant: Sub-projects 1/5 types must not appear yet.
-        // Update these assertions when those sub-projects ship.
-        for unimplemented in &["Imports", "Defines", "Implements", "Fetches"] {
+        // Emit-zero invariant: Sub-projects 1/5 types not yet emitted by Pass-2.
+        // Note: `Imports` is intentionally post-process only — see
+        // `crates/ecp-analyzer/src/post_process/imports_edges.rs` Tier-1-2-3
+        // resolver for cross-file basename / dir-component indexing that can't
+        // be moved to Pass-2 without breaking its streaming design.
+        // Update this list when remaining types (Defines/Implements/Fetches) ship.
+        for unimplemented in &["Defines", "Implements", "Fetches"] {
             assert!(
                 !parallel_buckets.contains_key(*unimplemented),
                 "RelType {unimplemented} unexpectedly emitted (parallel) — \
                  Sub-projects 1/5 will lift this; update this assertion when they ship",
             );
         }
+
+        // Imports is intentionally post-process only (imports_edges.rs Tier-1-2-3
+        // resolver); Pass-2 must never emit it.
+        assert!(
+            !parallel_buckets.contains_key("Imports"),
+            "RelType Imports unexpectedly emitted by Pass-2 — Imports is intentionally \
+             post-process only; see imports_edges.rs. Did you accidentally add a \
+             Pass-2 emit site?",
+        );
 
         // Node counts identical (both paths build identical SymbolTable + StringPool)
         assert_eq!(parallel_graph.nodes.len(), serial_graph.nodes.len());

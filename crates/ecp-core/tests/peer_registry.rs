@@ -20,7 +20,7 @@ fn write_meta(root: &std::path::Path, id: &str, pid: u32) {
         watcher_pid: None,
         last_drained_offset: 0,
     };
-    atomic_write_json(&dir.join("meta.json"), &meta).unwrap();
+    atomic_write_json(&dir.join("session_meta.json"), &meta).unwrap();
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn alive_peers_skips_session_with_unparseable_timestamp() {
         watcher_pid: None,
         last_drained_offset: 0,
     };
-    atomic_write_json(&s.join("meta.json"), &meta).unwrap();
+    atomic_write_json(&s.join("session_meta.json"), &meta).unwrap();
     let peers = alive_peers(dir.path(), "self");
     assert!(
         peers.iter().all(|p| p.session_id != "broken"),
