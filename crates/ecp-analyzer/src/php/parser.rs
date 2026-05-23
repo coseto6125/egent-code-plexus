@@ -32,6 +32,61 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     ),
 ];
 
+/// Walk the root of a parsed PHP file and emit one `BlindSpot` per
+/// `class_declaration` that looks like a pre-8.1 enum imitation:
+///
+/// - body has ≥ 2 `const_declaration` children
+/// - body has 0 `property_declaration` children (no instance state)
+/// - the class is not itself an `enum_declaration` (those are first-class 8.1+)
+///
+/// Returns each matching class-span so the caller can append to `blind_spots`.
+fn detect_enum_imitation_blind_spots(
+    root: tree_sitter::Node<'_>,
+    path: &Path,
+    is_test_file: bool,
+) -> Vec<ecp_core::analyzer::types::BlindSpot> {
+    const SPEC: (&str, &str) = (
+        "php-enum-imitation",
+        "class with \u{2265}2 const members and no instance properties \
+         \u{2014} may be a pre-8.1 enum imitation; verify before treating as plain Class",
+    );
+
+    let mut out = Vec::new();
+    let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
+
+    while let Some(node) = stack.pop() {
+        if node.kind() == "class_declaration" {
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut const_count: u32 = 0;
+                let mut prop_count: u32 = 0;
+                let mut cursor = body.walk();
+                for child in body.children(&mut cursor) {
+                    match child.kind() {
+                        "const_declaration" => const_count += 1,
+                        "property_declaration" => prop_count += 1,
+                        _ => {}
+                    }
+                }
+                if const_count >= 2 && prop_count == 0 {
+                    push_blind_spot(&mut out, SPEC, &node, path, is_test_file);
+                    // Don't descend into the class body — emit one BlindSpot
+                    // per class, not per nested class (nested class with
+                    // identical shape would produce its own stack iteration).
+                    continue;
+                }
+            }
+        }
+        // Push named children to continue the depth-first walk.
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                stack.push(child);
+            }
+        }
+    }
+    out
+}
+
 /// True iff the first positional argument of `call_node` is a PHP string
 /// literal (the call_user_func("known_function", ...) shape). Tree-sitter
 /// PHP uses `string` for double-quoted and `string_literal` for the legacy
@@ -208,6 +263,7 @@ struct PhpCaptureIndices {
     namespace: Option<u32>,
     trait_: Option<u32>,
     enum_: Option<u32>,
+    enum_case_node: Option<u32>,
     const_: Option<u32>,
     route_call: Option<u32>,
     route_scope: Option<u32>,
@@ -257,6 +313,7 @@ impl PhpProvider {
             namespace: query.capture_index_for_name("namespace"),
             trait_: query.capture_index_for_name("trait"),
             enum_: query.capture_index_for_name("enum"),
+            enum_case_node: query.capture_index_for_name("enum_case_node"),
             const_: query.capture_index_for_name("const"),
             route_call: query.capture_index_for_name("route.call"),
             route_scope: query.capture_index_for_name("route.scope"),
@@ -322,6 +379,7 @@ impl LanguageProvider for PhpProvider {
         let idx_namespace = idx.namespace;
         let idx_trait = idx.trait_;
         let idx_enum = idx.enum_;
+        let idx_enum_case_node = idx.enum_case_node;
         let idx_const = idx.const_;
 
         let idx_route_call = idx.route_call;
@@ -419,6 +477,7 @@ impl LanguageProvider for PhpProvider {
                     || Some(cap_idx) == idx_namespace
                     || Some(cap_idx) == idx_trait
                     || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_enum_case_node
                     || Some(cap_idx) == idx_const
                 {
                     if root_span_node.is_none() {
@@ -732,6 +791,18 @@ impl LanguageProvider for PhpProvider {
         };
         let raw_function_metas =
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);
+
+        // Pre-8.1 enum-imitation detection — emits one BlindSpot per class
+        // that looks like `class Status { const A = 1; const B = 2; }` with
+        // no instance properties. Must run after the main query loop so that
+        // it can still emit for classes whose class_declaration node was
+        // captured by the query (those are in `nodes`; the blind_spot is a
+        // separate signal).
+        blind_spots.extend(detect_enum_imitation_blind_spots(
+            tree.root_node(),
+            path,
+            is_test_file,
+        ));
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         let tx_scopes =

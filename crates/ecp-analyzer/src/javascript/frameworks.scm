@@ -418,3 +418,29 @@
 ((call_expression
    function: (identifier) @_rq) @blind.dynamic_require
   (#eq? @_rq "require"))
+
+;; Object.freeze({...}) enum imitation — JS has no first-class enum syntax.
+;; Captures the enclosing variable_declaration so the parser can apply the
+;; structural heuristic (≥2 scalar-valued pairs) in Rust. The tree-sitter
+;; query provides a candidate filter; Rust validates it.
+(variable_declaration
+  (variable_declarator
+    value: (call_expression
+      function: (member_expression
+        object: (identifier) @_obj
+        property: (property_identifier) @_freeze)
+      (#eq? @_obj "Object")
+      (#eq? @_freeze "freeze")
+      arguments: (arguments
+        (object) @_freeze_arg))) @_freeze_decl) @blind.object_freeze_enum
+
+(lexical_declaration
+  (variable_declarator
+    value: (call_expression
+      function: (member_expression
+        object: (identifier) @_lobj
+        property: (property_identifier) @_lfreeze)
+      (#eq? @_lobj "Object")
+      (#eq? @_lfreeze "freeze")
+      arguments: (arguments
+        (object) @_lfreeze_arg))) @_lfreeze_decl) @blind.object_freeze_enum

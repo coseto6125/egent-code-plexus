@@ -423,6 +423,225 @@ fn is_class_method(func_def: Node) -> bool {
         .is_some_and(|p| p.kind() == "class_definition")
 }
 
+/// Stdlib base classes that mark a class as a Python Enum. Dotted forms
+/// (`enum.Enum`, `enum.IntEnum`, …) also count — matched on trailing identifier.
+const ENUM_BASE_CLASSES: &[&str] = &["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum"];
+
+/// True when any string in `bases` ends with one of `ENUM_BASE_CLASSES`.
+/// Handles bare (`Enum`) and dotted (`enum.Enum`) forms by splitting on `.`
+/// and checking the last segment.
+fn has_enum_base(bases: &[String]) -> bool {
+    bases.iter().any(|base| {
+        // Strip subscript suffix: `Enum[T]` → `Enum`
+        let stripped = base
+            .find('[')
+            .map(|i| &base[..i])
+            .unwrap_or(base.as_str())
+            .trim();
+        // Take only the last dotted segment: `enum.IntEnum` → `IntEnum`
+        let tail = stripped.rsplit('.').next().unwrap_or(stripped);
+        ENUM_BASE_CLASSES.contains(&tail)
+    })
+}
+
+/// True when `node` is a scalar literal eligible as an enum variant value:
+/// integer, float, string, boolean, None, or a unary-negated number.
+fn is_scalar_literal(node: Node) -> bool {
+    match node.kind() {
+        "integer" | "float" | "string" | "true" | "false" | "none" => true,
+        // `-1`, `-0.5` — unary negation of a numeric literal
+        "unary_operator" => {
+            let mut cursor = node.walk();
+            let result = node
+                .children(&mut cursor)
+                .any(|c| matches!(c.kind(), "integer" | "float"));
+            result
+        }
+        "tuple" => {
+            // Allow tuples of scalars: `A = (1, "x")`
+            let mut cursor = node.walk();
+            let children: Vec<_> = node
+                .children(&mut cursor)
+                .filter(|c| c.is_named())
+                .collect();
+            children.into_iter().all(is_scalar_literal)
+        }
+        _ => false,
+    }
+}
+
+/// Walk a `class_definition` node and emit `EnumVariant` nodes or a
+/// `python-class-as-enum` BlindSpot, depending on whether the class inherits
+/// from an Enum base.
+///
+/// - **Track A** (true Enum): for each `name = value` assignment in the class
+///   body where the LHS is a bare identifier, emit one `NodeKind::EnumVariant`
+///   with `owner_class` set to the class name. Methods in an Enum class stay
+///   as Method (already emitted by the main query loop).
+///
+/// - **Track B** (imitation): when the class does NOT have an Enum base, has
+///   ≥2 ALL_UPPERCASE name assignments with scalar RHS, and has no
+///   `function_definition` anywhere in its direct body, push one BlindSpot.
+fn process_class_for_enum(
+    class_node: Node,
+    source: &[u8],
+    heritage: &[String],
+    path: &std::path::Path,
+    is_test_file: bool,
+    nodes: &mut Vec<RawNode>,
+    blind_spots: &mut Vec<BlindSpot>,
+) {
+    let Some(name_node) = class_node.child_by_field_name("name") else {
+        return;
+    };
+    let Ok(class_name) = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+    else {
+        return;
+    };
+    let Some(body) = class_node.child_by_field_name("body") else {
+        return;
+    };
+
+    let is_enum = has_enum_base(heritage);
+
+    if is_enum {
+        // Track A: emit EnumVariant for each bare `NAME = value` assignment.
+        let mut body_cursor = body.walk();
+        for stmt in body.children(&mut body_cursor) {
+            // Assignments appear as `expression_statement` wrapping `assignment`
+            if stmt.kind() != "expression_statement" {
+                continue;
+            }
+            let Some(assign) = stmt.named_child(0) else {
+                continue;
+            };
+            if assign.kind() != "assignment" {
+                continue;
+            }
+            let Some(lhs) = assign.child_by_field_name("left") else {
+                continue;
+            };
+            if lhs.kind() != "identifier" {
+                continue;
+            }
+            let Ok(var_name) = std::str::from_utf8(&source[lhs.start_byte()..lhs.end_byte()])
+            else {
+                continue;
+            };
+            // Skip dunder assignments like `__order__` or `_ignore_`
+            if var_name.starts_with('_') {
+                continue;
+            }
+            // The existing Property node uses the `assignment` node span (mirrors
+            // how `@property` is captured in queries.scm). Match on that span so
+            // we can upgrade Property → EnumVariant in-place.
+            let assign_start = assign.start_position();
+            let assign_end = assign.end_position();
+            let assign_span = (
+                assign_start.row as u32,
+                assign_start.column as u32,
+                assign_end.row as u32,
+                assign_end.column as u32,
+            );
+            let lhs_start = lhs.start_position();
+            let lhs_end = lhs.end_position();
+            let lhs_span = (
+                lhs_start.row as u32,
+                lhs_start.column as u32,
+                lhs_end.row as u32,
+                lhs_end.column as u32,
+            );
+            // Upgrade an existing Property node (emitted by the main query loop) to
+            // EnumVariant, or push a new node if none exists at this span.
+            if let Some(existing) = nodes
+                .iter_mut()
+                .find(|n| n.name == var_name && (n.span == assign_span || n.span == lhs_span))
+            {
+                existing.kind = NodeKind::EnumVariant;
+                existing.owner_class = Some(class_name.to_string());
+            } else {
+                nodes.push(RawNode {
+                    decorators: vec![],
+                    is_exported: true,
+                    heritage: vec![],
+                    type_annotation: None,
+                    name: var_name.to_string(),
+                    kind: NodeKind::EnumVariant,
+                    span: assign_span,
+                    calls: vec![],
+                    owner_class: Some(class_name.to_string()),
+                    content_hash: ecp_core::uid::xxh3_64_bytes(
+                        &source[stmt.start_byte()..stmt.end_byte()],
+                    ),
+                });
+            }
+        }
+    } else {
+        // Track B: imitation detection.
+        // Conditions: ≥2 ALL_UPPERCASE assignments with scalar RHS + no def.
+        let mut uppercase_const_count: u32 = 0;
+        let mut has_def = false;
+        let mut body_cursor = body.walk();
+        for stmt in body.children(&mut body_cursor) {
+            if matches!(stmt.kind(), "function_definition" | "decorated_definition") {
+                // Check if decorated_definition wraps a function_definition
+                if stmt.kind() == "decorated_definition" {
+                    if let Some(def) = stmt.child_by_field_name("definition") {
+                        if def.kind() == "function_definition" {
+                            has_def = true;
+                            break;
+                        }
+                    }
+                } else {
+                    has_def = true;
+                    break;
+                }
+            }
+            if stmt.kind() != "expression_statement" {
+                continue;
+            }
+            let Some(assign) = stmt.named_child(0) else {
+                continue;
+            };
+            if assign.kind() != "assignment" {
+                continue;
+            }
+            let Some(lhs) = assign.child_by_field_name("left") else {
+                continue;
+            };
+            if lhs.kind() != "identifier" {
+                continue;
+            }
+            let Ok(var_name) = std::str::from_utf8(&source[lhs.start_byte()..lhs.end_byte()])
+            else {
+                continue;
+            };
+            // ALL_UPPERCASE heuristic: every character is either uppercase ASCII or `_`,
+            // and at least one char is alphabetic.
+            let all_upper = var_name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                && var_name.chars().any(|c| c.is_ascii_alphabetic());
+            if !all_upper {
+                continue;
+            }
+            let Some(rhs) = assign.child_by_field_name("right") else {
+                continue;
+            };
+            if is_scalar_literal(rhs) {
+                uppercase_const_count += 1;
+            }
+        }
+        if !has_def && uppercase_const_count >= 2 {
+            const IMITATION_SPEC: (&str, &str) = (
+                "python-class-as-enum",
+                "class with \u{2265}2 constant assignments and no methods \u{2014} may be a \
+                 pre-`enum.Enum` imitation that should inherit Enum; verify before treating as \
+                 plain Class",
+            );
+            push_blind_spot(blind_spots, IMITATION_SPEC, &class_node, path, is_test_file);
+        }
+    }
+}
+
 impl PythonProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_python::LANGUAGE.into();
@@ -1119,6 +1338,46 @@ impl LanguageProvider for PythonProvider {
         for node in &mut nodes {
             if node.kind == NodeKind::Class && is_protocol_marker_only(&node.heritage) {
                 node.kind = NodeKind::Interface;
+            }
+        }
+
+        // Track A + Track B: walk every class_definition in the AST.
+        // For Enum subclasses → emit EnumVariant nodes.
+        // For non-Enum classes with ≥2 UPPERCASE const assignments + no defs → push BlindSpot.
+        // Runs after Protocol promotion so `nodes` heritage is fully assembled.
+        {
+            let mut stack = vec![tree.root_node()];
+            while let Some(node) = stack.pop() {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    stack.push(child);
+                }
+                if node.kind() != "class_definition" {
+                    continue;
+                }
+                let start = node.start_position();
+                let end = node.end_position();
+                let class_span = (
+                    start.row as u32,
+                    start.column as u32,
+                    end.row as u32,
+                    end.column as u32,
+                );
+                // Look up heritage from the already-collected Class node (matched by span).
+                let heritage: Vec<String> = nodes
+                    .iter()
+                    .find(|n| n.span == class_span && n.kind == NodeKind::Class)
+                    .map(|n| n.heritage.clone())
+                    .unwrap_or_default();
+                process_class_for_enum(
+                    node,
+                    source,
+                    &heritage,
+                    path,
+                    is_test_file,
+                    &mut nodes,
+                    &mut blind_spots,
+                );
             }
         }
 

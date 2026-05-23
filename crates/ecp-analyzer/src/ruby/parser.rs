@@ -32,6 +32,12 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     ),
 ];
 
+/// BlindSpot spec for the module-as-enum pattern.
+const BLIND_MODULE_AS_ENUM: (&str, &str) = (
+    "ruby-module-as-enum",
+    "module with \u{2265}2 constant assignments and no methods \u{2014} Ruby enum imitation pattern; verify before treating as plain Module",
+);
+
 /// True iff the first positional argument of `call_node` is a Ruby symbol
 /// literal (`:method`) or string literal (`"method"`) — the cases where
 /// `send` is statically resolvable per Constraint 2.
@@ -156,6 +162,89 @@ fn push_alias_binding(imports: &mut Vec<RawImport>, new_name: &str, source: &str
 fn strip_symbol_prefix(s: &str) -> &str {
     let after_colon = s.strip_prefix(':').unwrap_or(s);
     after_colon.strip_prefix('@').unwrap_or(after_colon)
+}
+
+/// Returns `true` if `node` is a scalar literal (integer, float, string,
+/// symbol, boolean, nil). Method calls (e.g. `"a".freeze`) are NOT scalar.
+fn is_scalar_rhs(node: &Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "integer"
+            | "float"
+            | "string"
+            | "simple_symbol"
+            | "bare_symbol"
+            | "delimited_symbol"
+            | "true"
+            | "false"
+            | "nil"
+    )
+}
+
+/// Walk the tree rooted at `root` and emit one BlindSpot per `module`
+/// declaration that matches the enum-imitation heuristic:
+/// - ≥ 2 `CAPS = scalar_literal` constant assignments at module top level
+/// - 0 `method` / `singleton_method` children in the body
+/// - 0 `class` children in the body
+///
+/// Known false-negative: `X = "a".freeze` is skipped because `.freeze` makes
+/// the RHS a `call` node, not a scalar literal. This is conservative by design.
+fn detect_module_as_enum(
+    root: Node<'_>,
+    _source: &[u8],
+    path: &Path,
+    is_test_file: bool,
+    out: &mut Vec<BlindSpot>,
+) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "module" {
+            let body_opt = node.child_by_field_name("body");
+            if let Some(body) = body_opt {
+                let mut caps_count: u32 = 0;
+                let mut has_def = false;
+                let mut has_nested_class = false;
+
+                let mut cursor = body.walk();
+                for child in body.named_children(&mut cursor) {
+                    match child.kind() {
+                        "method" | "singleton_method" => {
+                            has_def = true;
+                        }
+                        "class" => {
+                            has_nested_class = true;
+                        }
+                        "assignment" => {
+                            // lhs must be a constant (uppercase identifier)
+                            let lhs_ok = child
+                                .child_by_field_name("left")
+                                .is_some_and(|l| l.kind() == "constant");
+                            // rhs must be a scalar literal
+                            let rhs_ok = child
+                                .child_by_field_name("right")
+                                .is_some_and(|r| is_scalar_rhs(&r));
+                            if lhs_ok && rhs_ok {
+                                caps_count += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if caps_count >= 2 && !has_def && !has_nested_class {
+                    push_blind_spot(out, BLIND_MODULE_AS_ENUM, &node, path, is_test_file);
+                }
+            }
+            // Do NOT recurse into module children — nested modules are
+            // independent and will be visited via the stack below.
+        }
+
+        // Push all named children for DFS traversal.
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
 }
 
 pub struct RubyProvider {
@@ -607,6 +696,17 @@ impl LanguageProvider for RubyProvider {
                 }
             }
         }
+
+        // Detect module-as-enum imitation: walk AST for qualifying module nodes
+        // and emit BlindSpotRecord. Done after the query loop so it is
+        // independent of tree-sitter query captures.
+        detect_module_as_enum(
+            tree.root_node(),
+            source,
+            path,
+            is_test_file,
+            &mut blind_spots,
+        );
 
         // Helper: locate the smallest-span class RawNode whose body contains
         // `line`. Returns its index in `nodes`. Shared between mixin

@@ -50,6 +50,14 @@
 (enum_declaration
   name: (name) @name.enum) @enum
 
+;; Enum cases (PHP 8.1+) — pure (`case Active;`) and backed (`case Red = 'red';`).
+;; The backing value is metadata; both forms emit NodeKind::EnumVariant.
+;; Methods inside an enum body keep their existing @method capture path.
+(enum_declaration
+  (enum_declaration_list
+    (enum_case
+      name: (name) @name.enum_case) @enum_case_node))
+
 ;; Class / interface / module constants — `const NAME = ...`. The capture
 ;; anchors on the inner `const_element` (one per declared name) so
 ;; `const A = 1, B = 2;` emits two Const nodes rather than one for the

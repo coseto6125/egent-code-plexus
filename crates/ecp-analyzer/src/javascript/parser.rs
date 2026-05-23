@@ -37,7 +37,59 @@ const BLIND_SPEC: &[(&str, &str)] = &[
         "js-dynamic-require",
         "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
     ),
+    (
+        "js-object-freeze-enum",
+        "const X = Object.freeze({...}) with ≥2 scalar entries — JS enum imitation pattern; verify before treating as plain Const",
+    ),
 ];
+
+/// Returns true if `node` is a `variable_declaration` or `lexical_declaration`
+/// whose initializer is `Object.freeze(<obj>)` with ≥2 scalar-valued pairs.
+///
+/// Scalar values: number, string, true, false, null.
+/// Non-scalar (excluded): arrow_function, function_expression, call_expression,
+/// template_string with substitutions, identifier.
+fn is_object_freeze_enum(node: &tree_sitter::Node) -> bool {
+    check_object_freeze_enum(node).unwrap_or(false)
+}
+
+fn check_object_freeze_enum(node: &tree_sitter::Node) -> Option<bool> {
+    // Walk: declaration → variable_declarator → call_expression → arguments → object
+    let declarator = (0..node.child_count())
+        .filter_map(|i| node.child(i as u32))
+        .find(|c| c.kind() == "variable_declarator")?;
+
+    let call = (0..declarator.child_count())
+        .filter_map(|i| declarator.child(i as u32))
+        .find(|c| c.kind() == "call_expression")?;
+
+    let args = (0..call.child_count())
+        .filter_map(|i| call.child(i as u32))
+        .find(|c| c.kind() == "arguments")?;
+
+    // Find the object literal inside arguments (skip `(` and `)`)
+    let obj = (0..args.child_count())
+        .filter_map(|i| args.child(i as u32))
+        .find(|c| c.kind() == "object")?;
+
+    // Count pair nodes with scalar values only
+    let scalar_pairs = (0..obj.child_count())
+        .filter_map(|i| obj.child(i as u32))
+        .filter(|c| c.kind() == "pair")
+        .filter(|pair| {
+            // value is the last named child of the pair
+            let value = (0..pair.child_count())
+                .filter_map(|i| pair.child(i as u32))
+                .next_back();
+            matches!(
+                value.as_ref().map(|v| v.kind()),
+                Some("number" | "string" | "true" | "false" | "null")
+            )
+        })
+        .count();
+
+    Some(scalar_pairs >= 2)
+}
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -146,6 +198,9 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_blind_function_ctor = self.query.capture_index_for_name("blind.function_ctor");
         let idx_blind_dynamic_import = self.query.capture_index_for_name("blind.dynamic_import");
         let idx_blind_dynamic_require = self.query.capture_index_for_name("blind.dynamic_require");
+        let idx_blind_object_freeze_enum = self
+            .query
+            .capture_index_for_name("blind.object_freeze_enum");
 
         // Pending framework-handler captures: (handler_name, capture_span).
         // Enclosing function is resolved after all nodes are collected so the
@@ -285,6 +340,16 @@ impl LanguageProvider for JavaScriptProvider {
                         push_blind_spot(
                             &mut blind_spots,
                             BLIND_SPEC[3],
+                            &cap.node,
+                            path,
+                            is_test_file,
+                        );
+                    }
+                } else if Some(cap_idx) == idx_blind_object_freeze_enum {
+                    if is_object_freeze_enum(&cap.node) {
+                        push_blind_spot(
+                            &mut blind_spots,
+                            BLIND_SPEC[4],
                             &cap.node,
                             path,
                             is_test_file,

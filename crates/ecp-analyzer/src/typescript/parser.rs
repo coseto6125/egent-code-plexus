@@ -40,6 +40,147 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     ),
 ];
 
+/// Scalar literal kinds that qualify an object pair value as a valid
+/// enum-imitation member. Function, call, identifier, and template
+/// expressions with substitutions are excluded: they indicate a plain
+/// options object, not a discriminated-union enum imitation.
+const SCALAR_VALUE_KINDS: &[&str] = &["number", "string", "true", "false", "null"];
+
+/// True iff the `object` node has ≥ `min` `pair` children where every
+/// value is a scalar literal (number / string / bool / null).
+fn object_has_min_scalar_pairs(object_node: &tree_sitter::Node, min: usize) -> bool {
+    let mut scalar_count = 0usize;
+    let mut cursor = object_node.walk();
+    for child in object_node.named_children(&mut cursor) {
+        if child.kind() != "pair" {
+            continue;
+        }
+        let Some(val) = child.named_child(1) else {
+            return false;
+        };
+        if !SCALAR_VALUE_KINDS.contains(&val.kind()) {
+            return false;
+        }
+        scalar_count += 1;
+    }
+    scalar_count >= min
+}
+
+/// Emit `ts-object-freeze-enum` BlindSpots for every `Object.freeze({…})`
+/// call with ≥2 scalar-literal pair entries found anywhere in `root`.
+/// Traversal is depth-first; the `variable_declarator` parent node is used
+/// for span to match the position consumers expect.
+fn collect_freeze_enum_spots(
+    root: tree_sitter::Node,
+    source: &[u8],
+    path: &Path,
+    is_test_file: bool,
+    out: &mut Vec<BlindSpot>,
+) {
+    // Iterative DFS — avoids recursion depth limits on deeply nested sources.
+    let mut stack: Vec<tree_sitter::Node> = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "call_expression" {
+            if let Some(func) = node.child_by_field_name("function") {
+                if func.kind() == "member_expression" {
+                    let obj_ok = func.child_by_field_name("object").is_some_and(|o| {
+                        matches!(
+                            std::str::from_utf8(&source[o.start_byte()..o.end_byte()]),
+                            Ok("Object")
+                        )
+                    });
+                    let prop_ok = func.child_by_field_name("property").is_some_and(|p| {
+                        matches!(
+                            std::str::from_utf8(&source[p.start_byte()..p.end_byte()]),
+                            Ok("freeze")
+                        )
+                    });
+                    if obj_ok && prop_ok {
+                        if let Some(args) = node.child_by_field_name("arguments") {
+                            if let Some(obj_arg) = args.named_child(0) {
+                                if obj_arg.kind() == "object"
+                                    && object_has_min_scalar_pairs(&obj_arg, 2)
+                                {
+                                    // Prefer the enclosing variable_declarator span when available.
+                                    let span_node = if node
+                                        .parent()
+                                        .is_some_and(|p| p.kind() == "variable_declarator")
+                                        || node
+                                            .parent()
+                                            .is_some_and(|p| p.kind() == "lexical_declaration")
+                                        || node
+                                            .parent()
+                                            .is_some_and(|p| p.kind() == "variable_declaration")
+                                    {
+                                        node.parent().unwrap()
+                                    } else {
+                                        node
+                                    };
+                                    push_blind_spot(
+                                        out,
+                                        (
+                                            "ts-object-freeze-enum",
+                                            "const X = Object.freeze({...}) or X as const with ≥2 scalar entries \
+                                             — TS enum imitation; verify before treating as plain Const",
+                                        ),
+                                        &span_node,
+                                        path,
+                                        is_test_file,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if node.kind() == "as_expression" {
+            // `{ ... } as const` — `const` keyword is an unnamed child of
+            // `as_expression`; check it before inspecting the object.
+            let has_const_type = {
+                let mut c = node.walk();
+                let result = node
+                    .children(&mut c)
+                    .any(|ch| !ch.is_named() && ch.kind() == "const");
+                result
+            };
+            if has_const_type {
+                if let Some(obj_node) = node.named_child(0) {
+                    if obj_node.kind() == "object" && object_has_min_scalar_pairs(&obj_node, 2) {
+                        // Use the variable_declarator or declaration for span.
+                        let span_node = node
+                            .parent()
+                            .filter(|p| p.kind() == "variable_declarator")
+                            .and_then(|vd| vd.parent())
+                            .filter(|p| {
+                                matches!(p.kind(), "lexical_declaration" | "variable_declaration")
+                            })
+                            .unwrap_or(node);
+                        push_blind_spot(
+                            out,
+                            (
+                                "ts-object-freeze-enum",
+                                "const X = Object.freeze({...}) or X as const with ≥2 scalar entries \
+                                 — TS enum imitation; verify before treating as plain Const",
+                            ),
+                            &span_node,
+                            path,
+                            is_test_file,
+                        );
+                    }
+                }
+                // Don't recurse into as_expression children — the object literal
+                // nested inside cannot be a separate enum-imitation.
+                continue;
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
 pub struct TypeScriptProvider {
     query: Query,
     indices: TypeScriptCaptureIndices,
@@ -509,6 +650,18 @@ impl LanguageProvider for TypeScriptProvider {
                 }
             }
         }
+
+        // Object.freeze({...}) and `{...} as const` enum-imitation detection.
+        // Runs as a separate AST walk (not query-based) because the heuristic
+        // requires counting pair children and checking value kinds — logic that
+        // can't be expressed as a single tree-sitter predicate.
+        collect_freeze_enum_spots(
+            tree.root_node(),
+            source,
+            path,
+            is_test_file,
+            &mut blind_spots,
+        );
 
         // Extract call sites with receiver-type binding:
         // - `this.method()` → resolved to `ClassName.method` via enclosing class
