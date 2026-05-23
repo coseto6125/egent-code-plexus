@@ -14,9 +14,11 @@
 
 use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 /// Call-count trackers for branch-dispatch assertions.
@@ -161,6 +163,34 @@ pub fn write_head_sha_sidecar_with_sha(graph_path: &Path, sha: &str) {
     });
 }
 
+/// Path of the format-version sidecar next to `graph.bin`. Single ASCII line
+/// holding `GRAPH_FORMAT_VERSION` as decimal. Lets `attach_latest_sibling_sha`
+/// skip the 10-50ms `rkyv::access` validation `header_compatible` pays on a
+/// 50-200 MB graph.bin (rkyv 0.8 lays the root struct at the file tail, so a
+/// fixed-offset magic check is not possible — sidecar is the cheapest route).
+pub fn compatible_version_sidecar_path(graph_path: &Path) -> PathBuf {
+    let mut p = graph_path.as_os_str().to_owned();
+    p.push(".compatible_version");
+    PathBuf::from(p)
+}
+
+/// Write the current `GRAPH_FORMAT_VERSION` next to `graph_path`. Detached so
+/// the build wall-clock isn't bumped; failure is silently dropped because
+/// `attach_latest_sibling_sha` falls back to `header_compatible` when the
+/// sidecar is missing — perf hint, not a correctness requirement.
+pub fn write_compatible_version_sidecar(graph_path: &Path) {
+    let sidecar = compatible_version_sidecar_path(graph_path);
+    let content = format!("{}\n", ecp_core::graph::GRAPH_FORMAT_VERSION);
+    std::thread::spawn(move || {
+        let _ = fs::write(&sidecar, content);
+    });
+}
+
+fn read_compatible_version_sidecar(graph_path: &Path) -> Option<u32> {
+    let content = fs::read_to_string(compatible_version_sidecar_path(graph_path)).ok()?;
+    content.trim().parse::<u32>().ok()
+}
+
 /// Try to decide Ready vs Stale via the cheap git fingerprint.
 /// - Returns `Some(Ready)` when HEAD matches the sidecar AND `git status
 ///   --porcelain -uno` is empty.
@@ -298,6 +328,14 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
     }
 }
 
+/// Process-lifetime cache for `attach_latest_sibling_sha` results, keyed by
+/// `worktree_root`. CLI processes call once per invocation so the cache is a
+/// no-op; long-lived MCP processes repeating ensure_fresh while a rebuild is
+/// in flight see all subsequent calls short-circuit. Once the rebuild lands,
+/// the new SHA's graph short-circuits `ensure_fresh` itself before reaching
+/// this path, so cache staleness across rebuilds is harmless.
+static SIBLING_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> = OnceLock::new();
+
 /// Returns the `graph.bin` path of the most recently built sibling commit dir
 /// for this repo, or `None` if no published sibling exists.
 ///
@@ -307,15 +345,42 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
 /// graph regardless of which branch it came from, so the warm base is as fresh
 /// as possible without needing to parse generation suffixes.
 fn attach_latest_sibling_sha(worktree_root: &Path) -> Option<PathBuf> {
+    let cache = SIBLING_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(cached) = map.get(worktree_root) {
+            return cached.clone();
+        }
+    }
+    let result = attach_latest_sibling_sha_uncached(worktree_root);
+    if let Ok(mut map) = cache.lock() {
+        map.insert(worktree_root.to_path_buf(), result.clone());
+    }
+    result
+}
+
+fn attach_latest_sibling_sha_uncached(worktree_root: &Path) -> Option<PathBuf> {
     let home_ecp = ecp_core::registry::resolve_home_ecp();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree_root).ok()?;
     let commits_dir = home_ecp.join(&repo_dir_name).join("commits");
     let sibling_dir = crate::commit_lookup::find_latest_by_mtime(&commits_dir)?;
     let graph_bin = sibling_dir.join("graph.bin");
-    if graph_bin.is_file() && crate::engine::header_compatible(&graph_bin) {
+    if graph_bin.is_file() && sibling_graph_compatible(&graph_bin) {
         Some(graph_bin)
     } else {
         None
+    }
+}
+
+/// Cheap compatibility predicate for `attach_latest_sibling_sha`: reads the
+/// 4-byte version sidecar written by the build orchestrator. Falls back to
+/// `engine::header_compatible` (mmap + rkyv::access, 10-50ms cold) when the
+/// sidecar is absent, so legacy `~/.ecp/` caches built before this landed
+/// still warm-attach correctly.
+fn sibling_graph_compatible(graph_path: &Path) -> bool {
+    if let Some(v) = read_compatible_version_sidecar(graph_path) {
+        v == ecp_core::graph::GRAPH_FORMAT_VERSION
+    } else {
+        crate::engine::header_compatible(graph_path)
     }
 }
 
@@ -333,7 +398,7 @@ fn spawn_background_rebuild(worktree_root: &Path) {
         .join(&repo_dir_name)
         .join(".warm-attach-rebuild.lock");
     let repo_str = worktree_root.to_string_lossy();
-    let args: Vec<&str> = vec!["admin", "index", "--repo", repo_str.as_ref()];
+    let args = ["admin", "index", "--repo", repo_str.as_ref()];
     let _ = crate::background::spawn_bg(crate::background::BgJob {
         args: &args,
         lock: &lock,

@@ -105,14 +105,6 @@ impl Engine {
         self
     }
 
-    /// Expose the stale-for-sha flag so the MCP layer and test assertions can
-    /// inspect it without accessing the private field directly. Returns `true`
-    /// only for engines created via `load_warm`.
-    #[allow(dead_code)]
-    pub fn is_stale_for_sha(&self) -> bool {
-        self.is_stale_for_sha
-    }
-
     /// Current view discriminator. PureReference sessions yield `L2Only`;
     /// AugmentedReference and back-compat `load` callers yield `L2WithOverlay`.
     ///
