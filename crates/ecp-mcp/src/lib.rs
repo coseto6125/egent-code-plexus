@@ -12,5 +12,6 @@ pub mod argv;
 pub mod group;
 pub mod peers;
 pub mod schema;
+pub mod schema_mcp;
 pub mod server;
 pub mod spawn;

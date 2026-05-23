@@ -108,6 +108,85 @@ Absence of a language-level `main` convention (per `entry_points.rs` coverage ta
 
 Markdown, GitHub Actions, Docker Compose, Dockerfile, and YAML carry keys / literal strings, not re-bindable code identifiers — `ecp rename` would have nothing to rewrite.
 
+## Schema emission coverage
+
+The schema additions landed since 2026-05-22 (`Implements`, `EnumVariant`,
+`Decorates`, `TransactionScope` + `OpensTxScope`, `PathLiteral` +
+`UsesPathLiteral`, `Fetches`) emit on **different language subsets** —
+this table is the ground truth so LLM context-builders know whether an
+empty traversal means "no edges of this kind exist" or "ecp doesn't
+emit this edge for this language yet". The runtime equivalent is
+`ecp schema reltypes` (text or JSON) for the LLM-utility tier per edge,
+plus `ecp schema blindspots` for per-language indirect-dispatch detection.
+
+The 14 mainstream rows below match the ones above. Edge IDs map to
+`RelType` variants in `crates/ecp-core/src/graph.rs`.
+
+| Language | Implements | EnumVariant | Decorates | TransactionScope[^tx] | PathLiteral | Fetches |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| TypeScript | ✓ | ✓ | ✓ | —[^typeorm] | ✓ | ✓ |
+| JavaScript | ✓ | n/a[^js-enum] | partial[^js-dec] | n/a | ✓ | ✓ |
+| Python | ✓ | partial[^py-enum] | ✓ | ✓ (Django) | ✓ | ✓ |
+| Java | ✓ | ✓ | ✓ | ✓ (Spring) | ✓ | ✓ |
+| Kotlin | ✓[^kt-fix] | ✓ | ✓ | ✓ (Spring) | ✓ | ✓ |
+| C# | ✓ | ✓ | ✓ | ✓ (.NET) | ✓ | ✓ |
+| Go | ✓ | n/a[^go-enum] | — | — | ✓ | ✓ |
+| Rust | ✓ | ✓ | ✓ | — | ✓ | ✓ |
+| PHP | ✓ | partial[^php-enum] | ✓ | ✓ (Symfony) | ✓ | ✓ |
+| Ruby | ✓ | n/a[^rb-enum] | — | — | ✓ | ✓ |
+| Swift | ✓ | ✓ | ✓ | — | ✓ | ✓ |
+| C | ✓ | n/a[^c-enum] | — | — | ✓ | ✓ |
+| C++ | ✓ | ✓ | — | — | ✓ | ✓ |
+| Dart | ✓ | ✓ | ✓ | — | ✓ | ✓ |
+
+Tracked extensions:
+
+- **EnumVariant** — Python / PHP base-class detection + `enum X` for PHP 8.1+: FU-2026-05-23-011
+- **Decorates** — JS `@decorator` babel fixture, Go `//go:build`, C/C++ `[[attribute]]` carve-outs: FU-2026-05-23-012
+- **TransactionScope** — TS/TypeORM, Rust `#[transaction]`, Dart/Go/Ruby/Swift annotation or call-site detectors: FU-2026-05-23-009; SQL-block form (Kotlin Exposed `transaction { … }`, Ruby `Model.transaction do … end`, raw `BEGIN; … COMMIT;`): FU-2026-05-23-018
+
+Edges emitted on **every** indexed language (no per-language variance,
+listed here for completeness so the matrix isn't read as exhaustive):
+
+- `Defines` — File / Namespace / Module → contained symbol (Namespace + Module branch wired post-PR #372 / FU-2026-05-23-016)
+- `Imports` — File → imported module/symbol
+- `Calls` — caller → callee (carries `CallMeta` flags for indirect dispatch)
+- `Extends` — subclass / subtrait → base type
+- `HasMethod` / `HasProperty` — class container → member
+- `Accesses` — reader/writer → variable / property
+- `References` — generic reference fallback
+- `Overrides` — method-level override (Java `@Override`, Kotlin `override`, C# `override`, C++ virtual-match)
+- `HandlesRoute` — Function/Method → Route (varies by framework, not language)
+- `Publishes` / `Subscribes` — event-bus producers / consumers (varies by framework)
+- `MirrorsField` / `EventTopicMirror` — heuristic edges (confidence < 0.85; filtered by default)
+- `StepInProcess` — emitted by the parser-agnostic `pass4_processes` post-process
+
+[^tx]: TransactionScope / OpensTxScope cell shows the **framework** wired
+on that language: a ✓ means the annotation-form detector exists, parens
+name the framework. `—` means no annotation-form detector emitted yet;
+the language may still use transactions via SQL-block form, tracked
+under FU-2026-05-23-018.
+
+[^typeorm]: TypeORM's `@Transactional` decorator is the missing piece for
+TS — tracked in FU-2026-05-23-009 (T10 TransactionScope 5-langs entry).
+
+[^js-enum]: JavaScript has no `enum` keyword; the OO-style "frozen
+object literal" idiom isn't first-class enough to model as `EnumVariant`.
+
+[^js-dec]: Decorator capture via `parse_js` helper exists (`tests/decorates_emission.rs:125`) but no JS fixture currently exercises it; TypeScript covers the production decorator path. Tracked in FU-2026-05-23-012.
+
+[^py-enum]: Python uses `class Foo(Enum):` — first-class enum semantics require base-class detection (analogous to PR #356 Protocol detection). Tracked in FU-2026-05-23-011.
+
+[^kt-fix]: Kotlin Implements was raw-fixture-only at PR #358; the parser path was fixed in PR #372 (`9d21a91 feat(kotlin)`) via the `is_interface_class()` demotion arm. FU-2026-05-23-017 done.
+
+[^go-enum]: Go has no real `enum` — `const ( ... iota )` blocks model integer-typed constants but the discriminated-union semantics that make `EnumVariant` distinct from `Const` aren't present.
+
+[^php-enum]: PHP 8.1+ has first-class `enum X { case A; }` syntax. Not yet captured; tracked in FU-2026-05-23-011.
+
+[^rb-enum]: Ruby uses module constants for enum-like patterns; no `EnumVariant` semantics.
+
+[^c-enum]: C `enum` constants are integer aliases — emitted as `Const`, not `EnumVariant`. C++ `enum class` is first-class and IS captured.
+
 ## Call detection design
 
 Call detection is centralised in `crates/ecp-analyzer/src/calls.rs`. The hot helper is `extract_calls(root, source, nodes, call_kinds)`:

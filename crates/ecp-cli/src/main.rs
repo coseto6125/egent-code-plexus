@@ -135,7 +135,18 @@ enum Commands {
     /// Per-language BlindSpot emitter inventory (`schema blindspots`) —
     /// distinguishes "no blind spot in this diff" from "ecp doesn't detect
     /// this dispatch pattern yet" so LLM-context builders can flag gaps.
+    /// Hidden because clap's nested-subcommand surface can't be flattened
+    /// into a single MCP tool — the matching `ecp_schema` tool is
+    /// hand-rolled in `crates/ecp-mcp/src/schema_mcp.rs` with a `subcmd`
+    /// discriminator. CLI users keep full `--help` access via
+    /// `ecp schema --help` (hidden subcommands still respond to help).
+    #[command(hide = true)]
     Schema(commands::schema::SchemaArgs),
+    /// List detected Process (execution-flow) nodes, or `processes trace
+    /// <pattern>` to dump the full Function/Method step sequence for a
+    /// matching process. Surfaces the Leiden-community + BFS detection
+    /// already emitted at index time (`pass4_processes` in builder.rs).
+    Processes(commands::processes::ProcessesArgs),
 }
 
 fn main() {
@@ -217,6 +228,7 @@ fn main() {
         Commands::ToolMap(args) => args.repo.as_deref(),
         Commands::Review(args) => args.repo.as_deref(),
         Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
+        Commands::Processes(args) => args.repo.as_deref(),
         Commands::FindSchemaBindings(_) => None,
         Commands::FindEventMirrors(_) => None,
         Commands::Summary(_)
@@ -265,6 +277,7 @@ fn main() {
         Commands::FindTransactionPatterns(args) => commands::find_tx_patterns::run(args, &engine),
         Commands::FindSchemaBindings(args) => commands::find_schema_bindings::run(args, &engine),
         Commands::FindEventMirrors(args) => commands::find_event_mirrors::run(args, &engine),
+        Commands::Processes(args) => commands::processes::run(args, &engine),
         Commands::Summary(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -310,6 +323,7 @@ fn check_group_atom(cli: &Cli) {
         Commands::Review(a) => (a.repo.as_deref(), None),
         Commands::Diff(a) => (a.repo.as_deref(), None),
         Commands::FindTransactionPatterns(a) => (a.repo.as_deref(), None),
+        Commands::Processes(a) => (a.repo.as_deref(), None),
         Commands::FindSchemaBindings(_) => return,
         Commands::FindEventMirrors(_) => return,
         _ => return,
