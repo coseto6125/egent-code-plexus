@@ -27,10 +27,11 @@ static FETCH_BARE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\bfetch\s*\(\s*['"`]([^'"`$\s]+)['"`]"#).expect("FETCH_BARE"));
 
 /// `fetch(url, { method: 'POST' })` — captures url and explicit method.
-/// `"method"` key with double-quotes also matched.
+/// The `method` key may be bare (JS shorthand) or quoted (`'method'` / `"method"`);
+/// both ES-object and JSON-literal init styles appear in real codebases.
 static FETCH_WITH_METHOD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"\bfetch\s*\(\s*['"`]([^'"`$\s]+)['"`]\s*,\s*\{[^}]*["']method["']\s*:\s*['"]([A-Za-z]+)['"]"#,
+        r#"\bfetch\s*\(\s*['"`]([^'"`$\s]+)['"`]\s*,\s*\{[^}]*["']?method["']?\s*:\s*['"]([A-Za-z]+)['"]"#,
     )
     .expect("FETCH_WITH_METHOD")
 });
@@ -129,6 +130,17 @@ mod tests {
         assert!(
             pairs.contains(&("PUT".to_string(), "/api/items".to_string())),
             "expected PUT /api/items in {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_with_bare_method_key() {
+        // JS object-shorthand: `{ method: 'POST' }` (no quotes around the key).
+        // This is the canonical TS / TSX form found in most React fixtures.
+        let pairs = extract(r#"fetch('/api/gdpr/export', { method: 'POST' })"#);
+        assert!(
+            pairs.contains(&("POST".to_string(), "/api/gdpr/export".to_string())),
+            "expected POST /api/gdpr/export from bare method key in {pairs:?}"
         );
     }
 
