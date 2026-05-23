@@ -1,4 +1,4 @@
-use ecp_core::registry::CommitDirName;
+use ecp_core::registry::{CommitDirName, Generation};
 use rustc_hash::FxHashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,9 +27,30 @@ pub struct CommitIndex {
 /// LRU-evicted today because typical MCP / CLI usage tops out at <20 repos.
 static SCAN_CACHE: OnceLock<CommitIndexCache> = OnceLock::new();
 
+/// Sort key for same-SHA tie-breaking. Primary axis is `generation` (a
+/// deterministic 3-tuple the producer encodes into the dir name), with mtime
+/// retained only as a tertiary fallback. The pre-FU-045 behaviour was
+/// mtime-only, which raced against ext4 / APFS mtime resolution + non-sorted
+/// `read_dir` order — equal mtimes silently picked whichever dir the OS
+/// iterated first.
+///
+/// `Ord` derived on the struct gives lexicographic `(generation, mtime)`:
+/// - `None < Some(_)`, so a base dir always loses to any generation dir.
+/// - Between two `Some(_)` generations, `(timestamp_ms, pid, counter)` wins
+///   in lex order.
+/// - `mtime` only differentiates when generations are equal (which the
+///   producer guarantees never happens for distinct builds — the `counter`
+///   field is monotonic per process, and `pid + timestamp_ms` covers
+///   cross-process collisions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Freshness {
+    generation: Option<Generation>,
+    mtime: SystemTime,
+}
+
 impl CommitIndex {
     pub fn scan(commits_dir: &Path) -> io::Result<Self> {
-        let mut candidates: FxHashMap<[u8; 20], (String, SystemTime)> = FxHashMap::default();
+        let mut candidates: FxHashMap<[u8; 20], (String, Freshness)> = FxHashMap::default();
         let it = match std::fs::read_dir(commits_dir) {
             Ok(d) => d,
             // commits/ dir absent on first build for a new repo — empty index, not error
@@ -51,9 +72,12 @@ impl CommitIndex {
             let Ok(parsed) = CommitDirName::parse(&name) else {
                 continue;
             };
-            let freshness = commit_dir_freshness(&entry.path());
+            let freshness = Freshness {
+                generation: parsed.generation,
+                mtime: commit_dir_mtime(&entry.path()),
+            };
             match candidates.get(&parsed.sha) {
-                Some((_existing, existing_time)) if *existing_time >= freshness => {}
+                Some((_existing, existing)) if *existing >= freshness => {}
                 _ => {
                     candidates.insert(parsed.sha, (name, freshness));
                 }
@@ -113,7 +137,15 @@ impl CommitIndex {
     }
 }
 
-fn commit_dir_freshness(path: &Path) -> SystemTime {
+/// Read the freshest mtime available on a commit dir: prefer `meta.json`,
+/// fall back to `graph.bin`, finally the dir itself. Returns
+/// `SystemTime::UNIX_EPOCH` if every stat fails — that loses every
+/// same-SHA tie under the [`Freshness`] order, which is the safe default
+/// for a half-broken / not-yet-published dir.
+///
+/// Only the *secondary* tie-breaker after the parsed [`Generation`] suffix —
+/// generation tuples are the authoritative freshness signal post-FU-045.
+fn commit_dir_mtime(path: &Path) -> SystemTime {
     path.join("meta.json")
         .metadata()
         .and_then(|m| m.modified())

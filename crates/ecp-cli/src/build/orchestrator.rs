@@ -8,8 +8,8 @@ use crate::commit_lookup::CommitIndex;
 use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use ecp_core::registry::{
-    resolve_home_ecp, CommitBuildMeta, EmbeddingStatus, RefRecord, RegistryFile, RepoAlias,
-    RepoMeta, SourceType, BUILDER_FINGERPRINT,
+    resolve_home_ecp, CommitBuildMeta, EmbeddingStatus, Generation, RefRecord, RegistryFile,
+    RepoAlias, RepoMeta, SourceType, BUILDER_FINGERPRINT,
 };
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
@@ -318,13 +318,17 @@ fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("commit");
-    let generation = format!(
-        "{name}.gen.{}.{}.{}",
-        chrono::Utc::now().timestamp_millis(),
-        std::process::id(),
-        GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    base_commit_dir.with_file_name(generation)
+    // `Generation::format_suffix` is the single source of truth for the
+    // on-disk suffix shape, mirrored by `parse_generation_suffix` in
+    // `ecp-core/src/registry/dirname.rs`. Wrap-around at u32::MAX of the
+    // process-local counter is safe — the (timestamp_ms, pid) prefix still
+    // disambiguates across the wrap window.
+    let gen = Generation {
+        timestamp_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        pid: std::process::id(),
+        counter: GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed) as u32,
+    };
+    base_commit_dir.with_file_name(format!("{name}{}", gen.format_suffix()))
 }
 
 fn sha_bytes(sha_hex: &str) -> Option<[u8; 20]> {
@@ -679,5 +683,82 @@ mod tests {
 
         assert_eq!(result.commit_dir, gen_dir);
         assert_eq!(result.sha_hex, sha_hex);
+    }
+
+    /// FU-2026-05-23-045 regression: the tie-breaker MUST prefer the
+    /// generation dir for the same SHA even when filesystem mtime favours
+    /// the base (e.g. base was just `touch`ed by an `auto_ensure` sidecar
+    /// write while gen_dir's `meta.json` ages in place).
+    ///
+    /// Pre-fix behaviour used raw mtime as the tie-breaker, which would
+    /// pick base here and silently shadow the newer generation. Post-fix
+    /// the generation tuple takes precedence over mtime.
+    #[test]
+    fn wait_for_completion_prefers_generation_dir_even_when_base_mtime_is_newer() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("commits");
+        fs::create_dir_all(&parent).unwrap();
+
+        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
+        let base = parent.join(format!("branch_main__{sha_hex}"));
+        let gen_dir = parent.join(format!("branch_main__{sha_hex}.gen.1730000000000.42.7"));
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&gen_dir).unwrap();
+
+        let meta = CommitBuildMeta {
+            version: 1,
+            sha: sha_hex.to_string(),
+            source_type: SourceType::Branch,
+            source_id: Some("main".to_string()),
+            built_from_worktree: "repo".to_string(),
+            built_at: "2026-05-20T00:00:00Z".to_string(),
+            parent_sha: None,
+            node_count: 1,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![RefRecord {
+                ref_name: "refs/heads/main".to_string(),
+                seen_at: "2026-05-20T00:00:00Z".to_string(),
+            }],
+            refs_seen_since: vec![],
+            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+            binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
+        };
+        CommitBuildMeta::write_atomic(&base.join("meta.json"), &meta).unwrap();
+        CommitBuildMeta::write_atomic(&gen_dir.join("meta.json"), &meta).unwrap();
+
+        // Force the WRONG mtime ordering: base.meta.json is 1 hour AHEAD of
+        // gen_dir.meta.json. Pre-FU-045 the tie-breaker would pick base
+        // (newer mtime wins). Post-fix, generation tuple dominates and
+        // gen_dir still wins despite older mtime.
+        //
+        // Windows requires FILE_WRITE_ATTRIBUTES on the handle for SetFileTime
+        // (rust-lang/rust#95558); a read-only handle from `File::open` returns
+        // os error 5 (Access Denied). Opening with `write(true)` yields a
+        // GENERIC_WRITE handle that grants the attribute right; on Linux the
+        // futimens path is unaffected. No truncate so file content is preserved.
+        let now = SystemTime::now();
+        let open_writable = |p: &std::path::Path| {
+            OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap_or_else(|e| panic!("open writable {}: {e}", p.display()))
+        };
+        open_writable(&gen_dir.join("meta.json"))
+            .set_modified(now - Duration::from_secs(3600))
+            .unwrap();
+        open_writable(&base.join("meta.json"))
+            .set_modified(now)
+            .unwrap();
+
+        let building = parent.join(format!("branch_main__{sha_hex}.building"));
+        let result = wait_for_completion(&building, &base).unwrap();
+
+        assert_eq!(
+            result.commit_dir, gen_dir,
+            "generation tuple must dominate mtime; base.mtime > gen_dir.mtime here \
+             but gen_dir must still win"
+        );
     }
 }
