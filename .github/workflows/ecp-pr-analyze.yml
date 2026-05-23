@@ -48,25 +48,53 @@ jobs:
         run: git fetch origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        id: rust
         with:
           toolchain: stable
           components: ""
 
-      # Two separate caches — Rust artifacts vs ecp's graph index store.
-      # Mixing them in actions/cache@v4 (the old setup) bloated the cache
-      # with target/incremental/ and didn't pass cargo's fingerprint check
-      # on restore → every run did a cold 11-minute build despite cache HIT.
-      # Swatinem/rust-cache filters target/ properly and auto-includes the
-      # rustc version in the key, so restores actually let cargo skip recompile.
-      - name: Cache cargo + target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Layered cache to enable cross-PR dep reuse.
+      #
+      # Swatinem caches everything under one exact-match key (workspace
+      # state + lockfile + rustc) — so any PR with a different Cargo.toml
+      # state misses entirely, even though the deps themselves haven't
+      # changed. Today's measurement: 9-11 min cold build per fresh PR.
+      #
+      # actions/cache supports restore-keys (prefix-match fallback) which
+      # lets us recover deps from main's cache even when the workspace
+      # state differs. cargo's per-crate fingerprint check is the second
+      # line of defense: stale .rlib that doesn't match a current crate
+      # fingerprint is harmlessly recompiled.
+      #
+      # Layers + invalidation triggers:
+      #   L1 registry → Cargo.lock change (deps version bump)
+      #   L2 compiled deps → Cargo.lock change OR rustc bump
+      #   workspace artifacts (target/release/{ecp,libecp_*}) → not cached;
+      #     they change every PR anyway, caching them just wastes the 10 GB
+      #     GHA cache budget that L1+L2 actually benefit from.
+      - name: Cache cargo source crates (L1, registry)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          # Share with ci.yml's ubuntu test + code-quality jobs (same
-          # workspace, same lockfile, same OS) — first pr-analyze after
-          # any ci.yml run finds target/ already warm.
-          shared-key: linux-build
-          cache-on-failure: true
-          cache-workspace-crates: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-reg-${{ runner.os }}-${{ steps.rust.outputs.rustc-version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-reg-${{ runner.os }}-${{ steps.rust.outputs.rustc-version }}-
+            cargo-reg-${{ runner.os }}-
+
+      - name: Cache compiled deps (L2, target/release/{deps,build,fingerprint})
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+          key: cargo-deps-${{ runner.os }}-${{ steps.rust.outputs.rustc-version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ steps.rust.outputs.rustc-version }}-
+            cargo-deps-${{ runner.os }}-
 
       - name: Cache ecp graph index
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
