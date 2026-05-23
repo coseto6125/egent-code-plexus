@@ -6,6 +6,9 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
+/// Tree-sitter Markdown provider. Document-only extractor (no symbols,
+/// no calls) — we just emit `RawDocumentBlock` records so PathLiteral
+/// nodes can be sink-attributed to the right .md file in the graph.
 pub struct MarkdownProvider {
     query: Query,
 }
