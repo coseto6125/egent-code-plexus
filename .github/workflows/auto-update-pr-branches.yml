@@ -23,13 +23,16 @@ name: Auto-update PR branches
 on:
   push:
     branches: [main]
-  # Cron safety net dropped — GitHub push events are reliable enough in
-  # practice, and `*/15 * * * *` was burning ~20% of GHA free-tier
-  # minutes on no-ops (most cron firings have no eligible PR).
+  # No cron safety net: auto-merge.yml uses AUTO_MERGE_PAT so merge-
+  # commit pushes carry user identity and reliably trigger this workflow.
+  # With GITHUB_TOKEN that would silently fail (anti-recursion rule)
+  # and a `*/15 * * * *` cron would be required to compensate — at the
+  # cost of ~20% of GHA free-tier minutes (most firings hit no eligible
+  # PR). PAT removes both the bug and the need for the cron.
 
-# Workflow-level perms are read-only (OpenSSF Scorecard Token-Permissions
-# requires this). Write scopes the `update` job actually needs are
-# declared at job-level below.
+# Workflow-level perms stay read-only — write scopes are carried by the
+# AUTO_MERGE_PAT below, not GITHUB_TOKEN. Scorecard Token-Permissions
+# rewards minimum GITHUB_TOKEN surface.
 permissions:
   contents: read
 
@@ -40,13 +43,14 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write          # updatePullRequestBranch mutation rebases
-      pull-requests: write     # ditto; also for `gh pr comment` on conflict
     steps:
       - name: Update eligible PR branches
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT (not GITHUB_TOKEN): the `gh pr comment` call on conflict
+          # would otherwise post under github-actions[bot] and the rebase
+          # mutation's resulting branch push wouldn't trigger downstream
+          # CI on the PR. Symmetric with auto-merge.yml.
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT }}
           REPO: ${{ github.repository }}
           TRIGGER_SHA: ${{ github.sha }}
         run: |

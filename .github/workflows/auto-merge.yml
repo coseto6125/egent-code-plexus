@@ -16,9 +16,9 @@ on:
   pull_request:
     types: [opened, ready_for_review, synchronize, reopened]
 
-# Workflow-level perms are read-only (OpenSSF Scorecard Token-Permissions
-# requires this). Write scopes the `enable` job actually needs are
-# declared at job-level below.
+# Workflow-level perms stay read-only — write scopes are carried by the
+# AUTO_MERGE_PAT below, not GITHUB_TOKEN. Scorecard Token-Permissions
+# rewards minimum GITHUB_TOKEN surface.
 permissions:
   contents: read
 
@@ -26,13 +26,17 @@ jobs:
   enable:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    permissions:
-      contents: write          # gh pr merge mutates the PR's merge state
-      pull-requests: write     # enablePullRequestAutoMerge mutation
     steps:
       - name: Enable auto-merge
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT (not GITHUB_TOKEN): the eventual merge commit GitHub
+          # produces from `--auto` inherits the actor of whoever armed
+          # it. If that actor is GITHUB_TOKEN, the resulting push to
+          # main is suppressed from triggering other workflows (anti-
+          # recursion rule), which silently breaks auto-update-pr-
+          # branches.yml. PAT-attributed pushes trigger workflows
+          # normally and keep the rebase queue alive.
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
