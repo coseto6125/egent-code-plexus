@@ -245,22 +245,9 @@ impl ImpactJson {
 /// Shells out to `ecp impact --baseline <ref> --format json` and parses.
 /// Returns an error if the impact CLI exits non-zero or produces invalid JSON.
 fn run_impact_subprocess(baseline: &str) -> Result<ImpactJson, EcpError> {
-    use std::process::Command;
-    let exe = std::env::current_exe().map_err(EcpError::Io)?;
-    let out = Command::new(&exe)
-        .args(["impact", "--baseline", baseline, "--format", "json"])
-        .output()
-        .map_err(EcpError::Io)?;
-    if !out.status.success() {
-        return Err(EcpError::GitDiff {
-            reason: format!(
-                "ecp impact failed (exit {}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr)
-            ),
-        });
-    }
-    serde_json::from_slice(&out.stdout)
+    let stdout =
+        crate::subprocess::run_self(&["impact", "--baseline", baseline, "--format", "json"])?;
+    serde_json::from_slice(&stdout)
         .map_err(|e| EcpError::Serialization(format!("parse impact JSON: {e}")))
 }
 

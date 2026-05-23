@@ -51,7 +51,9 @@ pub fn run_install_claude_code(
     };
     let settings_path = resolve_settings_path(settings_path);
     let mut settings = read_or_init(&settings_path)?;
-    let exe = self_exe()?;
+    let exe = crate::subprocess::self_exe()?
+        .to_string_lossy()
+        .into_owned();
     for ev in &events {
         merge_entry(&mut settings, ev, &exe)?;
     }
@@ -161,12 +163,6 @@ fn read_or_init(path: &Path) -> Result<Value, EcpError> {
     }
     serde_json::from_str(&raw)
         .map_err(|e| EcpError::InvalidArgument(format!("settings.json parse: {e}")))
-}
-
-fn self_exe() -> Result<String, EcpError> {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| EcpError::Output(format!("current_exe: {e}")))
 }
 
 fn event_kebab_to_camel(ev: &str) -> &'static str {

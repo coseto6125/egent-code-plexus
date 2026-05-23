@@ -31,6 +31,7 @@ mod repo_identity;
 mod repo_selector;
 pub mod search;
 mod session;
+mod subprocess;
 mod walker_filter;
 
 pub(crate) const ECP_IGNORE_FILE: &str = ".ecpignore";

@@ -5,7 +5,6 @@ use ecp_core::EcpError;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 
 /// One resolver decision as serialized by `write_resolver_dump` in the
 /// analyzer. Mirrors `DumpLine` (JSONL, one record per line).
@@ -43,8 +42,6 @@ pub struct BindingChange {
 
 /// Invoke `ecp admin index --repo <repo_dir> --dump-resolver <out_path>`.
 pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), EcpError> {
-    let self_exe =
-        std::env::current_exe().map_err(|e| EcpError::Output(format!("current_exe: {e}")))?;
     let repo_str = repo_dir.to_str().ok_or_else(|| {
         EcpError::Output(format!(
             "repo path contains non-UTF-8: {}",
@@ -57,23 +54,14 @@ pub fn dump(repo_dir: &Path, out_path: &Path) -> Result<(), EcpError> {
             out_path.display()
         ))
     })?;
-    let out = Command::new(&self_exe)
-        .args([
-            "admin",
-            "index",
-            "--repo",
-            repo_str,
-            "--dump-resolver",
-            out_str,
-        ])
-        .output()
-        .map_err(|e| EcpError::Output(format!("ecp admin index spawn: {e}")))?;
-    if !out.status.success() {
-        return Err(EcpError::Output(format!(
-            "ecp admin index --dump-resolver failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
+    crate::subprocess::run_self(&[
+        "admin",
+        "index",
+        "--repo",
+        repo_str,
+        "--dump-resolver",
+        out_str,
+    ])?;
     Ok(())
 }
 
