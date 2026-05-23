@@ -328,16 +328,16 @@ impl LanguageProvider for RubyProvider {
                         span: node_span(&cap.node),
                         hint: hint.to_string(),
                     });
-                } else if cap_idx == idx_blind_send {
-                    if !ruby_first_arg_is_literal_callable(&cap.node) {
-                        let (kind, hint) = BLIND_SPEC[2];
-                        blind_spots.push(BlindSpot {
-                            kind: kind.to_string(),
-                            file_path: path.to_path_buf(),
-                            span: node_span(&cap.node),
-                            hint: hint.to_string(),
-                        });
-                    }
+                } else if cap_idx == idx_blind_send
+                    && !ruby_first_arg_is_literal_callable(&cap.node)
+                {
+                    let (kind, hint) = BLIND_SPEC[2];
+                    blind_spots.push(BlindSpot {
+                        kind: kind.to_string(),
+                        file_path: path.to_path_buf(),
+                        span: node_span(&cap.node),
+                        hint: hint.to_string(),
+                    });
                 }
             }
 
