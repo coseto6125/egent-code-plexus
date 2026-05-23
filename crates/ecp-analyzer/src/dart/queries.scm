@@ -171,3 +171,24 @@
   (library_import
     (import_specification
       (configurable_uri) @import.name @import.source))) @import
+
+;; ---- BlindSpot patterns (FU-001 P6b) ----
+;; import 'dart:mirrors' — file uses runtime reflection; downstream
+;; reflect/MirrorSystem calls bind names at runtime. Anchored at the
+;; import_or_export node so the span covers the whole statement.
+((import_or_export
+   (library_import
+     (import_specification
+       (configurable_uri) @_uri))) @blind.mirrors_import
+  (#match? @_uri "dart:mirrors"))
+
+;; Function.apply(<fn>, <args>) — reflective function invocation. The
+;; receiver `Function` is the built-in type; matching the bare identifier
+;; rather than any user-defined class named `Function` is enforced by the
+;; `#eq?` predicate. Other `.apply()` methods on user classes don't match.
+((call_expression
+   function: (member_expression
+     object: (identifier) @_obj
+     property: (identifier) @_m)) @blind.function_apply
+  (#eq? @_obj "Function")
+  (#eq? @_m "apply"))
