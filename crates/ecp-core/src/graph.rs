@@ -55,6 +55,7 @@ impl std::str::FromStr for NodeKind {
                 Ok(NodeKind::TransactionScope)
             }
             "enumvariant" | "enum_variant" | "enum variant" => Ok(NodeKind::EnumVariant),
+            "pathliteral" | "path_literal" | "path literal" => Ok(NodeKind::PathLiteral),
             _ => Err(()),
         }
     }
