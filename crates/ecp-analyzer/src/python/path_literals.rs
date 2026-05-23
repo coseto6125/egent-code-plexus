@@ -12,7 +12,7 @@
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
-use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
+use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     // Skip f-strings: they contain `interpolation` children.
@@ -28,11 +28,10 @@ pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Optio
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw)?;
-    if !is_path_shaped(value) {
+    let callee = enclosing_callee(str_node, source);
+    if !is_path_shaped(value) && !is_ext_change_callee(callee.as_deref()) {
         return None;
     }
-
-    let callee = enclosing_callee(str_node, source);
     let (kind, conf) = classify_sink(callee.as_deref());
     let reason = sink_reason(kind, conf);
 
