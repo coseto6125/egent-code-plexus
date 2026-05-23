@@ -732,13 +732,25 @@ mod tests {
         // gen_dir.meta.json. Pre-FU-045 the tie-breaker would pick base
         // (newer mtime wins). Post-fix, generation tuple dominates and
         // gen_dir still wins despite older mtime.
+        //
+        // Windows requires FILE_WRITE_ATTRIBUTES on the handle for SetFileTime
+        // (rust-lang/rust#95558); a read-only handle from `File::open` returns
+        // os error 5 (Access Denied). Opening with `write(true)` yields a
+        // GENERIC_WRITE handle that grants the attribute right; on Linux the
+        // futimens path is unaffected. No truncate so file content is preserved.
         let now = SystemTime::now();
-        let gen_meta_handle = std::fs::File::open(gen_dir.join("meta.json")).unwrap();
-        gen_meta_handle
+        let open_writable = |p: &std::path::Path| {
+            OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap_or_else(|e| panic!("open writable {}: {e}", p.display()))
+        };
+        open_writable(&gen_dir.join("meta.json"))
             .set_modified(now - Duration::from_secs(3600))
             .unwrap();
-        let base_meta_handle = std::fs::File::open(base.join("meta.json")).unwrap();
-        base_meta_handle.set_modified(now).unwrap();
+        open_writable(&base.join("meta.json"))
+            .set_modified(now)
+            .unwrap();
 
         let building = parent.join(format!("branch_main__{sha_hex}.building"));
         let result = wait_for_completion(&building, &base).unwrap();
