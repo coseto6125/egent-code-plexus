@@ -12,6 +12,7 @@
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
+use crate::framework_helpers::strip_python_string_quotes;
 use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
@@ -27,7 +28,7 @@ pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Optio
 
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
-    let value = strip_quotes(raw)?;
+    let value = strip_python_string_quotes(raw)?;
     let callee = enclosing_callee(str_node, source);
     if !is_path_shaped(value) && !is_ext_change_callee(callee.as_deref()) {
         return None;
@@ -51,51 +52,6 @@ pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Optio
         enclosing_owner,
         sink_reason: reason,
     })
-}
-
-/// Triple-quote + prefix combos (r/b/u/rb/br/f/fr/rf) handled; f-strings
-/// are pre-filtered by the caller's `interpolation` child check.
-fn strip_quotes(raw: &str) -> Option<&str> {
-    let bytes = raw.as_bytes();
-    let mut i = 0;
-
-    // Skip known prefix characters: r, b, u, f (and combinations), case-insensitive.
-    while i < bytes.len() {
-        match bytes[i] {
-            b'r' | b'R' | b'b' | b'B' | b'u' | b'U' | b'f' | b'F' => i += 1,
-            _ => break,
-        }
-    }
-
-    // Determine quote char and triple-quote.
-    let quote_char = *bytes.get(i)?;
-    if quote_char != b'"' && quote_char != b'\'' {
-        return None;
-    }
-
-    // Triple-quote check.
-    if bytes.get(i + 1) == Some(&quote_char) && bytes.get(i + 2) == Some(&quote_char) {
-        let body_start = i + 3;
-        let body_end = bytes.len().checked_sub(3)?;
-        if body_end < body_start {
-            return None;
-        }
-        if bytes[body_end] != quote_char
-            || bytes[body_end + 1] != quote_char
-            || bytes[body_end + 2] != quote_char
-        {
-            return None;
-        }
-        return std::str::from_utf8(&bytes[body_start..body_end]).ok();
-    }
-
-    // Single-quote.
-    let body_start = i + 1;
-    let body_end = bytes.len().checked_sub(1)?;
-    if body_end < body_start || bytes[body_end] != quote_char {
-        return None;
-    }
-    std::str::from_utf8(&bytes[body_start..body_end]).ok()
 }
 
 /// Climb from a string literal to find the enclosing `call` and resolve its

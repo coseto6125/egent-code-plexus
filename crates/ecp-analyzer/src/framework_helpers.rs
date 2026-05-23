@@ -324,6 +324,55 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     }
 }
 
+/// Strip Python string-literal delimiters from `raw` source text.
+///
+/// Returns `Some(inner)` when `raw` is a well-formed Python string literal;
+/// `inner` is the content between the outer delimiters. Returns `None`
+/// otherwise (non-string token, malformed unmatched quote, etc.).
+///
+/// Covers:
+/// - All prefix permutations: `r`, `b`, `u`, `f`, `rb`/`br`, `rf`/`fr`,
+///   and their uppercase/mixed-case forms (matches CPython lexer rules).
+/// - Triple-quote forms `"""…"""` and `'''…'''`.
+/// - Plain single/double forms `"…"` and `'…'`.
+///
+/// Case-insensitive prefix matching is intentional: CPython accepts `RB"x"`,
+/// `Rb"x"`, `rB"x"` etc. as valid byte-string prefixes.
+pub fn strip_python_string_quotes(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'r' | b'R' | b'b' | b'B' | b'u' | b'U' | b'f' | b'F' => i += 1,
+            _ => break,
+        }
+    }
+    let quote_char = *bytes.get(i)?;
+    if quote_char != b'"' && quote_char != b'\'' {
+        return None;
+    }
+    if bytes.get(i + 1) == Some(&quote_char) && bytes.get(i + 2) == Some(&quote_char) {
+        let body_start = i + 3;
+        let body_end = bytes.len().checked_sub(3)?;
+        if body_end < body_start {
+            return None;
+        }
+        if bytes[body_end] != quote_char
+            || bytes[body_end + 1] != quote_char
+            || bytes[body_end + 2] != quote_char
+        {
+            return None;
+        }
+        return std::str::from_utf8(&bytes[body_start..body_end]).ok();
+    }
+    let body_start = i + 1;
+    let body_end = bytes.len().checked_sub(1)?;
+    if body_end < body_start || bytes[body_end] != quote_char {
+        return None;
+    }
+    std::str::from_utf8(&bytes[body_start..body_end]).ok()
+}
+
 /// Nested-definition owner stamping for Python / JavaScript / TypeScript.
 ///
 /// After `stamp_owner_class_by_span` has set `owner_class` for class members,

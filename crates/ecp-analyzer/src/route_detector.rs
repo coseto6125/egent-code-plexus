@@ -1,3 +1,4 @@
+use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::RawRoute;
 
 const HTTP_METHODS: &[&str] = &[
@@ -81,43 +82,12 @@ pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
     }
 }
 
-/// Trim matching surrounding single / double quotes from a string literal
-/// captured as raw source text. Returns the inner slice when both ends
-/// match, otherwise the original string.
-///
-/// Also strips Python string-prefix sigils (`r`, `b`, `f`, `u`, `rb`, `br`,
-/// case-insensitive) so paths like `r"/path/to/<ext:file\.(txt)>"`
-/// (raw-string regex routes common in Sanic) and `b"/x"` (byte-string)
-/// reach `looks_like_path` as `/path/to/<ext:file\.(txt)>` and `/x`.
+/// Thin shim over [`strip_python_string_quotes`] that preserves the `&str`
+/// fallback contract expected by `detect_from_call`, `clean_route_path`, and
+/// `clean_route_path_lax`. Now also handles triple-quote forms inherited from
+/// the shared helper (previously this function only handled single/double).
 fn strip_string_quotes(s: &str) -> &str {
-    // Try direct quote-stripping first; fall through to prefix-aware path.
-    for q in ['"', '\''] {
-        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
-            return &s[1..s.len() - 1];
-        }
-    }
-    // Strip up to 2 prefix bytes (e.g. `r`, `rb`, `br`), then re-check.
-    // Prefix bytes must be ASCII for split_at to be UTF-8-safe — paths
-    // starting with multibyte chars (`/啊`) would otherwise panic at the
-    // byte boundary.
-    for prefix_len in [2, 1] {
-        if s.len() < prefix_len + 2 || !s.is_char_boundary(prefix_len) {
-            continue;
-        }
-        let (prefix, rest) = s.split_at(prefix_len);
-        if !prefix
-            .bytes()
-            .all(|b| matches!(b, b'r' | b'R' | b'b' | b'B' | b'f' | b'F' | b'u' | b'U'))
-        {
-            continue;
-        }
-        for q in ['"', '\''] {
-            if rest.starts_with(q) && rest.ends_with(q) && rest.len() >= 2 {
-                return &rest[1..rest.len() - 1];
-            }
-        }
-    }
-    s
+    strip_python_string_quotes(s).unwrap_or(s)
 }
 
 /// Parser-side helper: strip surrounding quotes from a tree-sitter string
@@ -309,5 +279,62 @@ mod tests {
         assert_eq!(clean_route_path_lax("''"), None);
         assert_eq!(clean_route_path_lax("\"   \""), None);
         assert_eq!(clean_route_path_lax(""), None);
+    }
+
+    // -- strip_string_quotes shim: prefix-quote edge cases (FU-2026-05-23-026) --
+
+    #[test]
+    fn strip_quotes_bare_double() {
+        assert_eq!(strip_string_quotes("\"/api\""), "/api");
+    }
+
+    #[test]
+    fn strip_quotes_bare_single() {
+        assert_eq!(strip_string_quotes("'/api'"), "/api");
+    }
+
+    #[test]
+    fn strip_quotes_r_prefix() {
+        assert_eq!(
+            strip_string_quotes("r\"/path/to/<ext:file\\.(txt)>\""),
+            "/path/to/<ext:file\\.(txt)>"
+        );
+    }
+
+    #[test]
+    fn strip_quotes_f_prefix() {
+        assert_eq!(strip_string_quotes("f\"/api/{id}\""), "/api/{id}");
+    }
+
+    #[test]
+    fn strip_quotes_rb_prefix() {
+        assert_eq!(strip_string_quotes("rb\"/api\""), "/api");
+    }
+
+    #[test]
+    fn strip_quotes_uppercase_prefix() {
+        assert_eq!(strip_string_quotes("RB\"/api\""), "/api");
+    }
+
+    #[test]
+    fn strip_quotes_triple_double() {
+        assert_eq!(strip_string_quotes("\"\"\"/api\"\"\""), "/api");
+    }
+
+    #[test]
+    fn strip_quotes_triple_single() {
+        assert_eq!(strip_string_quotes("'''/api'''"), "/api");
+    }
+
+    #[test]
+    fn strip_quotes_malformed_unmatched_returns_original() {
+        // One closing quote missing — shim must fall back to original string.
+        assert_eq!(strip_string_quotes("\"/api"), "\"/api");
+    }
+
+    #[test]
+    fn strip_quotes_unquoted_path_returns_original() {
+        // Already-unquoted path passes through unchanged.
+        assert_eq!(strip_string_quotes("/api/users"), "/api/users");
     }
 }
