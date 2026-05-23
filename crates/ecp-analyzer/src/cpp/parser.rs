@@ -1,4 +1,4 @@
-use super::receiver_types::{collect_bindings, extract_cpp_calls};
+use super::receiver_types::{collect_bindings, extract_cpp_calls_and_path_literals};
 use super::spec::CppSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -545,7 +545,8 @@ impl LanguageProvider for CppProvider {
         // and typed-var `obj.method()` / `obj->method()` → `Type.method`.
         // Feeds the resolver's Tier 2.5 qualifier-scoped lookup.
         let bindings = collect_bindings(tree.root_node(), source);
-        extract_cpp_calls(tree.root_node(), source, &mut nodes, &bindings);
+        let raw_path_literals =
+            extract_cpp_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
 
         // Merge bindings-derived types with declaration-level fn-pointer vars.
         let mut fn_ptr_vars = bindings.flat_bindings();
@@ -594,11 +595,8 @@ impl LanguageProvider for CppProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_cpp_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas,
             raw_function_metas,
         })

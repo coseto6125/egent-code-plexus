@@ -1,7 +1,7 @@
 use super::receiver_types::{
     build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
     enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_struct_type,
-    extract_rust_calls, impl_trait_name,
+    extract_rust_calls_and_path_literals, impl_trait_name,
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
@@ -457,7 +457,12 @@ impl LanguageProvider for RustProvider {
         // for the resolver's qualifier-scoped (Tier 2.5) lookup.
         let impl_map = build_impl_map(tree.root_node(), source);
         let local_types = collect_local_types(tree.root_node(), source, &impl_map);
-        extract_rust_calls(tree.root_node(), source, &mut nodes, &local_types);
+        let raw_path_literals = extract_rust_calls_and_path_literals(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &local_types,
+        );
 
         // Build param type map for indirect-call detection.
         // `collect_rust_indirect_param_types` captures fn(...)  and &dyn Trait
@@ -549,10 +554,8 @@ impl LanguageProvider for RustProvider {
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
 
-        let path_literals = {
-            let lits = super::path_literals::extract_rust_path_literals(tree.root_node(), source);
-            (!lits.is_empty()).then(|| lits.into_boxed_slice())
-        };
+        let path_literals =
+            (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
 
         Ok(LocalGraph {
             content_hash: [0; 8],

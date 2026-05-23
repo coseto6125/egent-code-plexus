@@ -1,42 +1,16 @@
-//! Dart-side extractor for `RawPathLiteral` entries. Walks the file's
-//! string literal nodes, filters interpolated strings, filters via
-//! `path_literal::is_path_shaped`, classifies the call-context sink via
-//! `path_literal::classify_sink`, and resolves the enclosing function / class.
-//!
-//! Dart string literal node kinds in tree-sitter-dart:
-//!   `string_literal` — wraps the actual content. May contain
-//!     `template_substitution` children (`$x` / `${expr}`) — skip those.
-//!   Raw strings (`r'...'` / `r"..."`) do not use template_substitution.
-//!
-//! The string content lives in `string_literal_quote` or direct text children.
+//! Dart-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` handles `string_literal` nodes; interpolated
+//! forms (`$x` / `${expr}` via `template_substitution` child) are
+//! filtered internally. Invoked from
+//! `receiver_types::extract_dart_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the Dart tree-sitter tree and emit one `RawPathLiteral` per
-/// path-shaped string literal. Interpolated strings (`"$x"`) are skipped.
-pub fn extract_dart_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "string_literal" {
-            if let Some(rpl) = build_raw_path_literal(n, source) {
-                out.push(rpl);
-            }
-            // Don't descend — whole string node is consumed.
-            continue;
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let value = extract_string_content(str_node, source)?;
     if !is_path_shaped(value) {
         return None;

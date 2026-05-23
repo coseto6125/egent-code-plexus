@@ -1,4 +1,4 @@
-use super::receiver_types::{collect_local_types, extract_python_calls};
+use super::receiver_types::{collect_local_types, extract_python_calls_and_path_literals};
 use super::spec::PythonSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -1017,7 +1017,12 @@ impl LanguageProvider for PythonProvider {
         // Tier 2.5 qualifier-scoped lookup. Falls back to bare member name
         // when no annotation is in scope.
         let local_types = collect_local_types(tree.root_node(), source);
-        extract_python_calls(tree.root_node(), source, &mut nodes, &local_types);
+        let raw_path_literals = extract_python_calls_and_path_literals(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &local_types,
+        );
 
         let param_names = collect_python_param_names(tree.root_node(), source);
         let call_metas = detect_python_indirect(tree.root_node(), source, &nodes, &param_names);
@@ -1151,10 +1156,8 @@ impl LanguageProvider for PythonProvider {
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
 
-        let path_literals = {
-            let lits = super::path_literals::extract_python_path_literals(tree.root_node(), source);
-            (!lits.is_empty()).then(|| lits.into_boxed_slice())
-        };
+        let path_literals =
+            (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
 
         Ok(LocalGraph {
             content_hash: [0; 8],

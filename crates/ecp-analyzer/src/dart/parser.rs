@@ -1,4 +1,4 @@
-use super::receiver_types::{collect_bindings, extract_dart_calls};
+use super::receiver_types::{collect_bindings, extract_dart_calls_and_path_literals};
 use super::spec::DartSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -422,7 +422,8 @@ impl LanguageProvider for DartProvider {
         // `obj.method()` → `Type.method`. Feeds the resolver's Tier 2.5
         // qualifier-scoped lookup.
         let bindings = collect_bindings(tree.root_node(), source);
-        extract_dart_calls(tree.root_node(), source, &mut nodes, &bindings);
+        let raw_path_literals =
+            extract_dart_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
 
         let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
 
@@ -445,11 +446,8 @@ impl LanguageProvider for DartProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_dart_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

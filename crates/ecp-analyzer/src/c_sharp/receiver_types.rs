@@ -19,8 +19,9 @@
 //!   - First named child: type (`identifier` / `predefined_type`)
 //!   - `variable_declarator` child with `name` field (`identifier`)
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -233,9 +234,17 @@ fn csharp_callee(
     }
 }
 
-/// Walk the AST, extract all C# invocation sites, attach to enclosing nodes.
-pub fn extract_csharp_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+/// Walk the AST once, extracting C# invocation sites (attached to
+/// enclosing nodes) and collecting path-shaped string literals (`string_literal`,
+/// `verbatim_string_literal`, `raw_string_literal`).
+/// Interpolated strings (`$"..."`) are skipped by `build_raw_path_literal`.
+pub fn extract_csharp_calls_and_path_literals(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Vec<RawPathLiteral> {
     let local_types = collect_local_types(root, source);
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -255,6 +264,11 @@ pub fn extract_csharp_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]
                     attach_to_enclosing(line, callee, nodes);
                 }
             }
+            "string_literal" | "verbatim_string_literal" | "raw_string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
             _ => {}
         }
         let mut c = n.walk();
@@ -262,6 +276,7 @@ pub fn extract_csharp_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {

@@ -1,4 +1,4 @@
-use super::receiver_types::extract_csharp_calls;
+use super::receiver_types::extract_csharp_calls_and_path_literals;
 use super::spec::CSharpSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -427,8 +427,10 @@ impl LanguageProvider for CSharpProvider {
         // `nodes` already in source order — Vec + idx-map at parse-loop start.
 
         // Extract call sites with receiver-type binding for `this.Foo()`,
-        // `base.Foo()`, and typed-variable `obj.Foo()` patterns.
-        extract_csharp_calls(tree.root_node(), source, &mut nodes);
+        // `base.Foo()`, and typed-variable `obj.Foo()` patterns; same DFS
+        // also collects path-shaped string literals.
+        let raw_path_literals =
+            extract_csharp_calls_and_path_literals(tree.root_node(), source, &mut nodes);
 
         let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
 
@@ -455,11 +457,8 @@ impl LanguageProvider for CSharpProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_csharp_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

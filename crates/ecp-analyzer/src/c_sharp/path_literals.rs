@@ -1,41 +1,21 @@
-//! C#-side extractor for `RawPathLiteral` entries. Walks `string_literal`,
+//! C#-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` handles `string_literal`,
 //! `verbatim_string_literal` (`@"..."`), and `raw_string_literal` (C# 11
-//! `"""..."""`) nodes, filters via `path_literal::is_path_shaped`, classifies
-//! via `path_literal::classify_sink`, and resolves enclosing method/class via
-//! parent-chain walk.
+//! `"""..."""`). Invoked from
+//! `receiver_types::extract_csharp_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 //!
-//! `interpolated_string_expression` (`$"..."`) is skipped — dynamic value.
+//! `interpolated_string_expression` (`$"..."`) nodes are visited by the
+//! merged walker but don't match here (different node kind), so no
+//! emission for them — calls inside interpolations are still collected
+//! since the walker always descends.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the C# tree and emit one `RawPathLiteral` per path-shaped string.
-pub fn extract_csharp_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            // Skip interpolated strings entirely — dynamic value
-            "interpolated_string_expression" => {}
-            "string_literal" | "verbatim_string_literal" | "raw_string_literal" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
-                    out.push(rpl);
-                }
-            }
-            _ => {
-                let mut c = n.walk();
-                for child in n.children(&mut c) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw)?;

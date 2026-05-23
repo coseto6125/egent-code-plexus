@@ -1,63 +1,31 @@
-//! Kotlin-side extractor for `RawPathLiteral` entries. Walks `string_literal`
-//! nodes (which contain `string_content` children) and `multiline_string_literal`
-//! nodes, filters via `path_literal::is_path_shaped`, classifies via
-//! `path_literal::classify_sink`, and resolves enclosing function/class via
-//! parent-chain walk.
-//!
-//! Interpolated strings — `string_literal` nodes whose children include an
-//! `interpolation` node — are skipped entirely because their runtime value is
-//! dynamic and would produce noise.
+//! Kotlin-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` handles `string_literal` and
+//! `multiline_string_literal` nodes; interpolated strings (`$x` /
+//! `${expr}`) are filtered out via both an AST-child check and a raw-text
+//! fallback. Invoked from
+//! `receiver_types::extract_kotlin_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the Kotlin tree and emit one `RawPathLiteral` per path-shaped string.
-pub fn extract_kotlin_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        if matches!(n.kind(), "string_literal" | "multiline_string_literal") {
-            // Skip strings containing interpolation — dynamic value.
-            if has_interpolation(n) {
-                // Still push children to walk nested expressions
-                let mut c = n.walk();
-                for child in n.children(&mut c) {
-                    stack.push(child);
-                }
-                continue;
-            }
-            if let Some(rpl) = build_raw_path_literal(n, source) {
-                out.push(rpl);
-            }
-        } else {
-            let mut c = n.walk();
-            for child in n.children(&mut c) {
-                stack.push(child);
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+    // AST-child check: tree-sitter-kotlin exposes `$x` / `${expr}` as an
+    // `interpolation` child of the string node.
+    {
+        let mut c = str_node.walk();
+        for child in str_node.children(&mut c) {
+            if child.kind() == "interpolation" {
+                return None;
             }
         }
     }
-    out
-}
-
-/// Returns true when the string_literal / multiline_string_literal contains
-/// an `interpolation` child (e.g. `"$x"`, `"${expr}"`).
-fn has_interpolation(str_node: Node<'_>) -> bool {
-    let mut c = str_node.walk();
-    for child in str_node.children(&mut c) {
-        if child.kind() == "interpolation" {
-            return true;
-        }
-    }
-    false
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw)?;
-    // Fallback interpolation check: tree-sitter-kotlin may not always expose
+    // Raw-text fallback: tree-sitter-kotlin doesn't always expose
     // `interpolation` as a child kind; reject any string containing `${`.
     if value.contains("${") {
         return None;

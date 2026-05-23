@@ -1,4 +1,4 @@
-use super::receiver_types::{collect_bindings, extract_swift_calls};
+use super::receiver_types::{collect_bindings, extract_swift_calls_and_path_literals};
 use super::spec::SwiftSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -561,7 +561,8 @@ impl LanguageProvider for SwiftProvider {
         // `obj.method()` → `Type.method` (P0 of Constructor Inference, mirrors
         // Python's `4e4fb1b` for the resolver's Tier 2.5 qualifier lookup).
         let bindings = collect_bindings(tree.root_node(), source);
-        extract_swift_calls(tree.root_node(), source, &mut nodes, &bindings);
+        let raw_path_literals =
+            extract_swift_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
 
         let framework_refs = detect_ast_framework_patterns(source, SWIFT_FRAMEWORKS);
 
@@ -584,11 +585,8 @@ impl LanguageProvider for SwiftProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_swift_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

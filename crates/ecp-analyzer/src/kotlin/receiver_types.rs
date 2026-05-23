@@ -12,8 +12,9 @@
 //!
 //! Falls back to the bare method name for unresolved receivers.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -216,23 +217,39 @@ fn kotlin_callee(
     }
 }
 
-/// Walk the AST, extract all Kotlin `call_expression` nodes, and attach
-/// them to enclosing function/method nodes with receiver-type binding.
-pub fn extract_kotlin_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+/// Walk the AST once, extracting Kotlin `call_expression` nodes with
+/// receiver-type binding and collecting path-shaped string literals
+/// (`string_literal` / `multiline_string_literal`, interpolated forms
+/// filtered out in `build_raw_path_literal`).
+pub fn extract_kotlin_calls_and_path_literals(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Vec<RawPathLiteral> {
     let local_types = collect_local_types(root, source);
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = kotlin_callee(n, source, &local_types, nodes) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = kotlin_callee(n, source, &local_types, nodes) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string_literal" | "multiline_string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {

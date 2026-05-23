@@ -1,40 +1,21 @@
-//! TypeScript-side extractor for `RawPathLiteral` entries. Walks `string`
-//! nodes (single/double-quoted) and static `template_string` nodes (backtick
-//! literals with NO `template_substitution` children). Dynamic template
-//! literals (`${}`) are skipped — their runtime value is indeterminate.
-//!
-//! Runs as a side pass over the already-parsed `tree` in `typescript/parser.rs`.
+//! TypeScript-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` dispatches on `string` (single/double-quoted)
+//! and static `template_string` nodes; dynamic template literals (`${}`)
+//! return `None`. Invoked from
+//! `receiver_types::extract_ts_calls_and_path_literals` so a single DFS
+//! handles both call attribution and path-literal collection.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the TypeScript tree and emit one `RawPathLiteral` per path-shaped
-/// string or static template literal. Template literals with `${}` are skipped.
-pub fn extract_typescript_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "string" => {
-                if let Some(rpl) = build_from_string(n, source) {
-                    out.push(rpl);
-                }
-            }
-            "template_string" => {
-                if let Some(rpl) = build_from_template(n, source) {
-                    out.push(rpl);
-                }
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
+pub(super) fn build_raw_path_literal(node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+    match node.kind() {
+        "string" => build_from_string(node, source),
+        "template_string" => build_from_template(node, source),
+        _ => None,
     }
-    out
 }
 
 fn build_from_string(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {

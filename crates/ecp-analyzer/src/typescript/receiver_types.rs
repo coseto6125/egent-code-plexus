@@ -16,9 +16,10 @@
 //! type annotation's inner node won't be a plain `type_identifier`, so we fall back to
 //! the bare method name (same as for un-annotated code).
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
 use crate::framework_helpers::{enclosing_class, node_span};
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -171,20 +172,35 @@ fn simple_name_and_type(
 /// - `this.method()` → looks up the innermost enclosing class → emits `ClassName.method`
 /// - `obj.method()` where `obj` is a typed param/var → emits `Type.method`
 /// - anything else falls back to the bare method name (or full expression as before)
-pub fn extract_ts_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], locals: &LocalTypes) {
+pub fn extract_ts_calls_and_path_literals(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+    locals: &LocalTypes,
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = ts_callee_name(n, source, locals, nodes) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = ts_callee_name(n, source, locals, nodes) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string" | "template_string" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn ts_callee_name(

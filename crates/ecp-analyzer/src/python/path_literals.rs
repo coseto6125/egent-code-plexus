@@ -1,36 +1,20 @@
-//! Python-side extractor for `RawPathLiteral` entries. Walks `string` nodes,
-//! strips surrounding quotes (including raw, byte, triple-quote, and prefix
-//! combos), skips f-strings (contain `interpolation` children), filters via
-//! `path_literal::is_path_shaped`, classifies the call-context sink via
-//! `path_literal::classify_sink`, and resolves the enclosing function / class.
+//! Python-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` is invoked from
+//! `receiver_types::extract_python_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 //!
-//! Runs as a side pass over the already-parsed `tree` in `python/parser.rs`.
+//! Strips surrounding quotes (including raw, byte, triple-quote, and
+//! prefix combos), skips f-strings (contain `interpolation` children),
+//! filters via `path_literal::is_path_shaped`, classifies the
+//! call-context sink via `path_literal::classify_sink`, and resolves the
+//! enclosing function / class.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the Python tree and emit one `RawPathLiteral` per path-shaped string
-/// literal. F-strings (containing `interpolation` children) are skipped.
-pub fn extract_python_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "string" {
-            if let Some(rpl) = build_raw_path_literal(n, source) {
-                out.push(rpl);
-            }
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     // Skip f-strings: they contain `interpolation` children.
     {
         let mut c = str_node.walk();

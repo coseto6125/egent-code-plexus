@@ -1,49 +1,19 @@
-//! PHP-side extractor for `RawPathLiteral` entries. Walks the file's
-//! string nodes, filters interpolated strings, filters via
-//! `path_literal::is_path_shaped`, classifies the call-context sink via
-//! `path_literal::classify_sink`, and resolves the enclosing function / class.
+//! PHP-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` handles `string` (single-quoted `'...'`) and
+//! `encapsed_string` (double-quoted `"..."`, interpolated forms filtered
+//! by `variable_name` child check). Invoked from
+//! `receiver_types::extract_php_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 //!
-//! PHP string node kinds in tree-sitter-php:
-//!   `string` — single-quoted `'...'`, no interpolation (safe to emit).
-//!   `encapsed_string` — double-quoted `"..."`, may contain `variable_name`
-//!     or `string_value` children; skip any with `variable_name` children.
-//!   `heredoc_body` / `nowdoc_body` — here-doc forms; `nowdoc_body` has no
-//!     interpolation, `heredoc_body` may. Skip `heredoc_body` entirely (rare
-//!     for path literals), emit `nowdoc_body`.
-//!
-//! The PHP grammar wraps the content in `string_value` children for `string`
-//! and the raw text for `nowdoc_body`.
+//! `heredoc_body` / `nowdoc_body` are not handled here (rare for path
+//! literals, deferred to a later improvement task).
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the PHP tree-sitter tree and emit one `RawPathLiteral` per
-/// path-shaped string literal. Interpolated `encapsed_string` nodes are skipped.
-pub fn extract_php_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "string" | "encapsed_string" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
-                    out.push(rpl);
-                }
-                // Don't descend — the whole string node is consumed.
-                continue;
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let value = extract_string_content(str_node, source)?;
     if !is_path_shaped(value) {
         return None;

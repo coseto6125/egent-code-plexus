@@ -1,4 +1,4 @@
-use super::receiver_types::{collect_receiver_methods, extract_c_calls};
+use super::receiver_types::{collect_receiver_methods, extract_c_calls_and_path_literals};
 use super::spec::CSpec;
 use crate::framework_helpers::push_blind_spot;
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
@@ -718,7 +718,8 @@ impl LanguageProvider for CProvider {
         // resolver's Tier 2.5 qualifier-scoped lookup. Convention-driven,
         // not language-mandated — see `RECEIVER_NAMES` for the gate.
         let methods = collect_receiver_methods(tree.root_node(), source);
-        extract_c_calls(tree.root_node(), source, &mut nodes, &methods);
+        let raw_path_literals =
+            extract_c_calls_and_path_literals(tree.root_node(), source, &mut nodes, &methods);
 
         let fn_ptr_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);
         let call_metas =
@@ -780,10 +781,8 @@ impl LanguageProvider for CProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
-            path_literals: {
-                let lits = super::path_literals::extract_c_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas,
             raw_function_metas,
         })

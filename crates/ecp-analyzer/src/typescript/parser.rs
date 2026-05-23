@@ -1,4 +1,4 @@
-use super::receiver_types::{collect_local_types, extract_ts_calls};
+use super::receiver_types::{collect_local_types, extract_ts_calls_and_path_literals};
 use super::spec::TypeScriptSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -515,7 +515,8 @@ impl LanguageProvider for TypeScriptProvider {
         // - `obj.method()` where `obj` has a type annotation → `Type.method`
         // - everything else falls back to the bare/qualified method name.
         let local_types = collect_local_types(tree.root_node(), source);
-        extract_ts_calls(tree.root_node(), source, &mut nodes, &local_types);
+        let raw_path_literals =
+            extract_ts_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
 
         // Framework-presence gates: only emit Express/NestJS refs when the file
         // actually imports the matching package.
@@ -630,11 +631,8 @@ impl LanguageProvider for TypeScriptProvider {
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
 
-        let path_literals = {
-            let lits =
-                super::path_literals::extract_typescript_path_literals(tree.root_node(), source);
-            (!lits.is_empty()).then(|| lits.into_boxed_slice())
-        };
+        let path_literals =
+            (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
 
         Ok(LocalGraph {
             content_hash: [0; 8],

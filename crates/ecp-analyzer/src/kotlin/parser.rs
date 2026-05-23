@@ -1,4 +1,4 @@
-use super::receiver_types::extract_kotlin_calls;
+use super::receiver_types::extract_kotlin_calls_and_path_literals;
 use super::spec::KotlinSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -464,8 +464,10 @@ impl LanguageProvider for KotlinProvider {
         // `nodes` already in source order — Vec + idx-map at parse-loop start.
 
         // Extract call sites with receiver-type binding for `this.foo()`,
-        // `super.foo()`, and typed-variable `obj.foo()` patterns.
-        extract_kotlin_calls(tree.root_node(), source, &mut nodes);
+        // `super.foo()`, and typed-variable `obj.foo()` patterns; same DFS
+        // also collects path-shaped string literals.
+        let raw_path_literals =
+            extract_kotlin_calls_and_path_literals(tree.root_node(), source, &mut nodes);
 
         // Ktor framework-presence gate: only emit refs when the file
         // imports `io.ktor.*`. The route DSL verbs (`get`/`post`/...) are
@@ -521,11 +523,8 @@ impl LanguageProvider for KotlinProvider {
             schema_fields: None,
             event_topics,
             tx_scopes,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_kotlin_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

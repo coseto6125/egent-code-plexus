@@ -11,8 +11,9 @@
 //! Generic / subscripted / forward-reference types are skipped — the
 //! call falls back to the bare member name as before.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -143,31 +144,46 @@ fn simple_name_and_type(
     Some((name.to_string(), ty.to_string()))
 }
 
-/// Walk the Python AST and attach callees to enclosing functions, with
-/// receiver-type binding applied where annotations are known. Replaces
-/// the shared `extract_calls` for Python: identifiers/attributes are
-/// handled here; other call-target shapes (subscript, lambda, ...) emit
-/// no edge, matching the previous catch-all behavior's "last identifier
-/// segment" rule for those rare cases.
-pub fn extract_python_calls(
+/// Walk the Python AST once, attaching callees to enclosing functions
+/// (with receiver-type binding) and collecting path-shaped string literals
+/// as `RawPathLiteral` side-table entries.
+///
+/// Calls: identifiers/attributes are handled here; other call-target shapes
+/// (subscript, lambda, ...) emit no edge, matching the previous catch-all
+/// behavior's "last identifier segment" rule for those rare cases.
+///
+/// Path literals: every `string` node is fed through
+/// `path_literals::build_raw_path_literal` (which itself filters out
+/// f-strings by checking for `interpolation` children).
+pub fn extract_python_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     locals: &LocalTypes,
-) {
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call" {
-            if let Some(callee) = python_callee_name(n, source, locals) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call" => {
+                if let Some(callee) = python_callee_name(n, source, locals) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {

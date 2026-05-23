@@ -14,8 +14,9 @@
 //! depth, namespace-qualified types, `auto`, and operator-overloaded calls
 //! fall back to the bare member name.
 
+use super::path_literals::{build_concatenated, build_raw_path_literal};
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
 
@@ -213,25 +214,43 @@ fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
     }
 }
 
-pub fn extract_cpp_calls(
+pub fn extract_cpp_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     bindings: &CppBindings,
-) {
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = cpp_callee_name(n, source, bindings) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = cpp_callee_name(n, source, bindings) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string_literal" | "raw_string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            "concatenated_string" => {
+                if let Some(rpl) = build_concatenated(n, source) {
+                    path_literals.push(rpl);
+                }
+                // Skip descent — child `string_literal` pieces would
+                // double-emit. C++ has no calls inside string literals.
+                continue;
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Option<String> {

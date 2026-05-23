@@ -15,8 +15,9 @@
 //! tuple / function types are skipped — the call falls back to the bare
 //! member name as before.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -305,27 +306,39 @@ fn first_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     result
 }
 
-/// Walk the Swift AST attaching call sites to enclosing functions, with
-/// receiver-type binding for `self.` / `super.` / typed var navigation calls.
-pub fn extract_swift_calls(
+/// Walk the Swift AST once, attaching call sites to enclosing functions
+/// (with receiver binding for `self.` / `super.` / typed var navigation)
+/// and collecting path-shaped string literals (`line_string_literal`,
+/// `multi_line_string_literal`, `raw_string_literal`).
+pub fn extract_swift_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     bindings: &SwiftBindings,
-) {
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = swift_callee_name(n, source, bindings) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = swift_callee_name(n, source, bindings) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "line_string_literal" | "multi_line_string_literal" | "raw_string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn swift_callee_name(call: Node<'_>, source: &[u8], bindings: &SwiftBindings) -> Option<String> {

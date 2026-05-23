@@ -23,40 +23,7 @@ use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the C tree-sitter tree and emit one `RawPathLiteral` per
-/// path-shaped string literal. Returns an empty Vec when no candidates
-/// satisfy `is_path_shaped`.
-pub fn extract_c_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "string_literal" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
-                    out.push(rpl);
-                }
-            }
-            "concatenated_string" => {
-                // Adjacent literals `"foo" "bar"` — join pieces, test once.
-                if let Some(rpl) = build_concatenated(n, source) {
-                    out.push(rpl);
-                }
-                // Children (the individual string_literal nodes) are already
-                // handled via the concatenated path above; skip them to avoid
-                // double-emission by NOT pushing them to the stack.
-                continue;
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw)?;
@@ -88,7 +55,7 @@ fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLi
 
 /// Join the individual `string_literal` pieces of a C `concatenated_string`
 /// (`"foo" "bar"` → `foobar`). Test the joined value once with `is_path_shaped`.
-fn build_concatenated(concat_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_concatenated(concat_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let mut joined = String::new();
     let mut cursor = concat_node.walk();
     for child in concat_node.children(&mut cursor) {
