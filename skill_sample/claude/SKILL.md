@@ -21,7 +21,6 @@ description: Use for symbol-level code analysis, blast-radius impact, cross-repo
 | AST-aware multi-file rename | `ecp rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `ecp routes <path?> --repo .` (no path = list all) |
 | Cross-repo API contracts (routes / queue / RPC) | `ecp contracts --repo @all` (needs ≥2 repos in group) |
-| Verify references in a changed file resolve in the graph | `ecp scan <file> --repo .` |
 | HTTP consumer → Route shape drift detection | `ecp shape-check --route <path>? --repo .` (no `--route` = scan all routes; drift = consumer reads key not in Route's response/error keys) |
 | Binding tier / route / contract delta — edge view | `ecp diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required; accepts branch / tag / SHA / `HEAD~N` / `PR/<n>`. Multi-select via `,`. Formats: text / json / toon. Use `--verbose` for full lists.) |
 | Registry health / freshness / frameworks / blind spots | `ecp summary` (registry-wide) or `ecp summary --repo @all --detailed`. (Was `ecp coverage`; the old verb is kept as an alias for one release.) |
@@ -61,7 +60,7 @@ tree on each call and re-indexes if mtime moved).
 |---|---|---|
 | `inspect / coverage / contracts / routes` | toon | json |
 | `cypher` | json | toon, text |
-| `find / scan / rename / impact` | text | json, toon |
+| `find / rename / impact` | text | json, toon |
 
 Rule of thumb: **toon** for agent → agent piping (compact key:value), **json** for parsing in scripts, **text** for human inspection.
 
@@ -99,8 +98,8 @@ ecp impact Foo --direction upstream --repo .
 # After staging a diff: see what changed + downstream/upstream callers
 ecp impact --baseline origin/main --repo .
 
-# After edits: verify changed files' references still resolve
-ecp scan crates/.../changed_file.rs --repo .
+# After edits: catch binding tier / route / contract delta
+ecp diff --section bindings --baseline origin/main --repo .
 
 # Touched HTTP routing / handlers?
 ecp routes /api/foo --repo .

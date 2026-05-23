@@ -52,6 +52,24 @@ pub struct InspectArgs {
     pub include_tests: bool,
 }
 
+/// Synthetic-node sentinel for `file_idx`. Annotation (Decorates),
+/// EventTopic, TransactionScope etc. don't own a single source file and
+/// store `u32::MAX` instead of a real `files[]` index.
+const SYNTHETIC_NODE_PATH: &str = "<synthetic>";
+
+/// Safe lookup of a node's file path. Synthetic nodes (file_idx == u32::MAX)
+/// resolve to a sentinel string instead of out-of-bounds-panicking.
+fn resolve_file_path(graph: &ArchivedZeroCopyGraph, file_idx: u32) -> &str {
+    if file_idx == u32::MAX {
+        return SYNTHETIC_NODE_PATH;
+    }
+    graph
+        .files
+        .get(file_idx as usize)
+        .map(|f| f.path.resolve(&graph.string_pool))
+        .unwrap_or(SYNTHETIC_NODE_PATH)
+}
+
 /// Split a `a,b,c` style value into a lower-cased Vec. Trims whitespace and
 /// drops empty segments. `None` / empty input → no filter.
 fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
@@ -120,8 +138,11 @@ fn build_inspect_block(
     for i in out_start..out_end {
         let edge = &graph.edges[i];
         let target_node = &graph.nodes[edge.target.to_native() as usize];
-        let target_file = &graph.files[target_node.file_idx.to_native() as usize];
-        let target_file_path = target_file.path.resolve(&graph.string_pool);
+        // Synthetic nodes (Annotation from PR #365 Decorates, EventTopic,
+        // TransactionScope) carry `file_idx == u32::MAX` because they don't
+        // own a single source file. Resolve to `<synthetic>` instead of
+        // indexing past the files array.
+        let target_file_path = resolve_file_path(graph, target_node.file_idx.to_native());
         let target_kind = kind_to_str(&target_node.kind);
         let rel_str = rel_to_str(&edge.rel_type).to_string();
 
@@ -155,8 +176,7 @@ fn build_inspect_block(
         let edge_idx = graph.in_edge_idx[i].to_native() as usize;
         let edge = &graph.edges[edge_idx];
         let source_node = &graph.nodes[edge.source.to_native() as usize];
-        let source_file = &graph.files[source_node.file_idx.to_native() as usize];
-        let source_file_path = source_file.path.resolve(&graph.string_pool);
+        let source_file_path = resolve_file_path(graph, source_node.file_idx.to_native());
         let source_kind = kind_to_str(&source_node.kind);
         let rel_str = rel_to_str(&edge.rel_type).to_string();
 
@@ -205,11 +225,12 @@ fn build_inspect_block(
     // each other for any function whose only callers lived under `tests/`.
     let upstream_1hop = bfs_upstream_1hop(graph, node_idx, &edge_keeps);
 
-    // Class-only derived view: flatten outgoing HasMethod / HasProperty edges
-    // into compact member lists. Kept per-entry `kind` so callers can still
-    // distinguish Method (true method) vs Function (Python `def` / Rust assoc
-    // fn) — B.1 emission unifies them but doesn't hide the underlying kind.
-    let (contained_methods, contained_properties) = if matches!(
+    // Class-like derived view: flatten outgoing HasMethod / HasProperty edges
+    // into compact member lists. For Enum, additionally surface variants via
+    // outgoing Defines→EnumVariant edges (PR #364 EnumVariant + PR #359
+    // scope_defines). Variants stay in their own bucket — semantically not
+    // properties.
+    let (contained_methods, contained_properties, contained_variants) = if matches!(
         node.kind,
         ecp_core::graph::ArchivedNodeKind::Class
             | ecp_core::graph::ArchivedNodeKind::Struct
@@ -219,8 +240,14 @@ fn build_inspect_block(
     ) {
         collect_contained_members(graph, node_idx)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
+
+    // Decorators on this symbol — pulled from FunctionMeta (binary-search
+    // on node_idx). `@` prefix stripped to match the cypher `m.decorators`
+    // property whitelist behavior (PR #352). Empty for nodes without a
+    // FunctionMeta entry.
+    let decorators = collect_decorators(graph, node_idx as u32);
 
     let has_heuristic = !heuristic_outgoing.is_empty() || !heuristic_incoming.is_empty();
 
@@ -233,6 +260,7 @@ fn build_inspect_block(
             "filePath": file_path_str,
             "startLine": node.span.0.to_native(),
             "endLine": node.span.2.to_native(),
+            "decorators": decorators,
         },
         "incoming": incoming,
         "outgoing": outgoing,
@@ -240,6 +268,7 @@ fn build_inspect_block(
         "impact_upstream_1hop": upstream_1hop,
         "contained_methods": contained_methods,
         "contained_properties": contained_properties,
+        "contained_variants": contained_variants,
     });
 
     if has_heuristic {
@@ -269,28 +298,66 @@ fn build_inspect_block(
 fn collect_contained_members(
     graph: &ArchivedZeroCopyGraph,
     node_idx: usize,
-) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+) -> (
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+) {
     let mut methods = Vec::new();
     let mut properties = Vec::new();
+    let mut variants = Vec::new();
     let out_start = graph.out_offsets[node_idx].to_native() as usize;
     let out_end = graph.out_offsets[node_idx + 1].to_native() as usize;
     for i in out_start..out_end {
         let edge = &graph.edges[i];
+        let target_node = &graph.nodes[edge.target.to_native() as usize];
+        // Defines edges can target many kinds; only EnumVariant belongs in the
+        // contained-variants bucket. Other Defines targets (File→Function etc.)
+        // are not "contained members" of the source — they're scope edges.
         let bucket = match edge.rel_type {
             ecp_core::graph::ArchivedRelType::HasMethod => &mut methods,
             ecp_core::graph::ArchivedRelType::HasProperty => &mut properties,
+            ecp_core::graph::ArchivedRelType::Defines
+                if matches!(
+                    target_node.kind,
+                    ecp_core::graph::ArchivedNodeKind::EnumVariant
+                ) =>
+            {
+                &mut variants
+            }
             _ => continue,
         };
-        let target_node = &graph.nodes[edge.target.to_native() as usize];
-        let target_file = &graph.files[target_node.file_idx.to_native() as usize];
+        let target_file_path = resolve_file_path(graph, target_node.file_idx.to_native());
         bucket.push(serde_json::json!({
             "name": target_node.name.resolve(&graph.string_pool),
             "kind": kind_to_str(&target_node.kind),
-            "filePath": target_file.path.resolve(&graph.string_pool),
+            "filePath": target_file_path,
             "line": target_node.span.0.to_native(),
         }));
     }
-    (methods, properties)
+    (methods, properties, variants)
+}
+
+/// Resolve a node's decorators via the FunctionMeta binary-search lookup
+/// used by the cypher executor (PR #352). Returns the names with `@` prefix
+/// stripped — matches the cypher `m.decorators` property convention so
+/// LLM consumers see the same shape whether they read inspect JSON or
+/// cypher results.
+fn collect_decorators(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Vec<String> {
+    match graph
+        .function_metas
+        .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
+    {
+        Ok(i) => graph.function_metas[i]
+            .decorators
+            .iter()
+            .map(|d| {
+                let s = d.resolve(&graph.string_pool);
+                s.strip_prefix('@').unwrap_or(s).to_string()
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Collect direct symbol-level callers of `node_idx` (depth=1 upstream).
@@ -498,6 +565,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             "impact_upstream_1hop": block["impact_upstream_1hop"],
             "contained_methods": block["contained_methods"],
             "contained_properties": block["contained_properties"],
+            "contained_variants": block["contained_variants"],
         });
         if block.get("heuristic_note").is_some() {
             let obj = result.as_object_mut().unwrap();
