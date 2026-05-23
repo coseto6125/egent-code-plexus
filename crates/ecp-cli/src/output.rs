@@ -4,7 +4,7 @@
 use ecp_core::EcpError;
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {
     /// Default output: per-command LLM-tuned payload (token compression,
     /// rounded floats, trimmed timestamps, etc.) rendered through the toon

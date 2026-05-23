@@ -9,10 +9,14 @@
 use clap::Subcommand;
 use ecp_core::EcpError;
 
+pub mod pr_analyze;
 pub mod uid_audit;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DevCommands {
+    /// Classify a PR by graph-aware area/risk/cross-PR conflict; emit JSON
+    /// for the ecp-pr-analyze workflow to apply labels + status.
+    PrAnalyze(pr_analyze::PrAnalyzeArgs),
     /// Cluster-collapsed view of `uid-collision` BlindSpot records.
     /// Parser-maintainer audit only — NOT an LLM signal. For LLM-actionable
     /// blind spots use `ecp summary`.
@@ -23,6 +27,7 @@ pub enum DevCommands {
 
 pub fn run(cmd: DevCommands, cli_graph: &std::path::Path) -> Result<(), EcpError> {
     match cmd {
+        DevCommands::PrAnalyze(args) => pr_analyze::run(args, cli_graph),
         DevCommands::UidAudit(args) => uid_audit::run(args, cli_graph),
         DevCommands::VerifyResolver(args) => crate::commands::verify_resolver::run(args),
     }
