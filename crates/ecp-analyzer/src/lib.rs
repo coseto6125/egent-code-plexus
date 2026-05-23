@@ -40,6 +40,7 @@ pub mod move_lang;
 pub mod nim;
 pub mod openapi;
 pub mod parse_budget;
+pub mod path_literal;
 pub mod php;
 pub mod post_process;
 pub mod preproc_fallback;
