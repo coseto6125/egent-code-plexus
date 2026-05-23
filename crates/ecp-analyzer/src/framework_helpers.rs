@@ -46,6 +46,40 @@ pub fn node_span(node: &tree_sitter::Node) -> Span {
     )
 }
 
+/// True iff the first positional argument of `call_node` is a JS/TS string
+/// literal (`"foo"`, `'foo'`, or a template string with no interpolation).
+///
+/// Shared by the TypeScript and JavaScript parsers — both grammars expose
+/// the `arguments` field on `call_expression` with the same node-kind names
+/// (`string` / `template_string` / `template_substitution`). Used to skip
+/// `import("./foo")` / `require("fs")` from BlindSpot emission per
+/// Constraint 2 of the cross-lang spec: literal-arg dynamic loads resolve
+/// statically via the Imports edge and are NOT blind.
+///
+/// Other languages have different grammar (PHP wraps args in an extra
+/// `argument` node; Ruby symbols are a separate node kind) and provide their
+/// own helper.
+#[inline]
+pub fn js_ts_first_arg_is_literal_string(call_node: &tree_sitter::Node) -> bool {
+    let Some(args) = call_node.child_by_field_name("arguments") else {
+        return false;
+    };
+    let Some(first) = args.named_child(0) else {
+        return false;
+    };
+    match first.kind() {
+        "string" => true,
+        "template_string" => {
+            let mut cursor = first.walk();
+            let has_interp = first
+                .children(&mut cursor)
+                .any(|c| c.kind() == "template_substitution");
+            !has_interp
+        }
+        _ => false,
+    }
+}
+
 /// Push a `BlindSpot` record into the parser-local Vec from a (kind, hint)
 /// table entry and a captured tree-sitter node.
 ///

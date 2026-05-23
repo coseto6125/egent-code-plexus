@@ -553,7 +553,9 @@ impl LanguageProvider for PythonProvider {
         // filter. `is_test_path` matches `tests/` / `test_*.py` / `conftest.`
         // / `*_test.py` / `_spec.` and the rest of the FileCategory::Test
         // patterns. Production files keep their permissive emission rules.
-        let file_is_test = is_test_path(&path.to_string_lossy());
+        // Same value drives the BlindSpot record's `is_test` field below
+        // (introduced by FU-001 is_test-field); compute once.
+        let is_test_file = is_test_path(&path.to_string_lossy());
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
@@ -561,7 +563,6 @@ impl LanguageProvider for PythonProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
 
         // Collect (target_name, span) for FastAPI Depends() refs; resolve
         // the enclosing function via span containment after nodes are built.
@@ -935,7 +936,7 @@ impl LanguageProvider for PythonProvider {
                 // route registrations. Production files keep emitting on
                 // these names because there `client = Blueprint(...)`
                 // / `client = APIRouter()` is legitimate.
-                if file_is_test && is_test_file_direct_receiver_call(call_node, source) {
+                if is_test_file && is_test_file_direct_receiver_call(call_node, source) {
                     continue;
                 }
             }
@@ -1092,7 +1093,7 @@ impl LanguageProvider for PythonProvider {
             .file_name()
             .map(|n| n.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        let is_py_test_file = file_is_test
+        let is_py_test_file = is_test_file
             || basename.starts_with("test_")
             || basename.ends_with("_test.py")
             || basename == "conftest.py";

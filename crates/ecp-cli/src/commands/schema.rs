@@ -248,7 +248,7 @@ struct ReltypesReport {
     reltypes: &'static [RelTypeEntry],
 }
 
-/// 18 RelType variants. Order matches the `#[repr(u8)]` discriminant in
+/// 19 RelType variants. Order matches the `#[repr(u8)]` discriminant in
 /// `ecp_core::graph::RelType` — kept aligned so the JSON output's index
 /// matches the rkyv ordinal.
 const RELTYPES: &[RelTypeEntry] = &[

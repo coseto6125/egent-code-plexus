@@ -2,7 +2,8 @@ use super::receiver_types::extract_js_calls;
 use super::spec::JavaScriptSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    enclosing_function_name, has_import_from, node_span, push_blind_spot, MODULE_LEVEL_SOURCE,
+    enclosing_function_name, has_import_from, js_ts_first_arg_is_literal_string, node_span,
+    push_blind_spot, MODULE_LEVEL_SOURCE,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -15,7 +16,7 @@ use ecp_core::analyzer::types::{
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node, Query, QueryCursor};
+use tree_sitter::{Query, QueryCursor};
 
 /// Blind-spot kind/hint pairs. Order matches the capture-index lookup
 /// in `parse_file` so the dispatch reads as a flat table.
@@ -37,30 +38,6 @@ const BLIND_SPEC: &[(&str, &str)] = &[
         "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
     ),
 ];
-
-/// True iff the first positional argument of `call_node` is a string
-/// literal (`"foo"`, `'foo'`, or a template string with no interpolation).
-/// Used to skip BlindSpot emission for `import("./foo")` / `require("fs")`
-/// — those resolve via the Imports edge and are not blind.
-fn first_arg_is_literal_string(call_node: &Node) -> bool {
-    let Some(args) = call_node.child_by_field_name("arguments") else {
-        return false;
-    };
-    let Some(first) = args.named_child(0) else {
-        return false;
-    };
-    match first.kind() {
-        "string" => true,
-        "template_string" => {
-            let mut cursor = first.walk();
-            let has_interp = first
-                .children(&mut cursor)
-                .any(|c| c.kind() == "template_substitution");
-            !has_interp
-        }
-        _ => false,
-    }
-}
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -294,7 +271,7 @@ impl LanguageProvider for JavaScriptProvider {
                         is_test_file,
                     );
                 } else if Some(cap_idx) == idx_blind_dynamic_import {
-                    if !first_arg_is_literal_string(&cap.node) {
+                    if !js_ts_first_arg_is_literal_string(&cap.node) {
                         push_blind_spot(
                             &mut blind_spots,
                             BLIND_SPEC[2],
@@ -304,7 +281,7 @@ impl LanguageProvider for JavaScriptProvider {
                         );
                     }
                 } else if Some(cap_idx) == idx_blind_dynamic_require {
-                    if !first_arg_is_literal_string(&cap.node) {
+                    if !js_ts_first_arg_is_literal_string(&cap.node) {
                         push_blind_spot(
                             &mut blind_spots,
                             BLIND_SPEC[3],
