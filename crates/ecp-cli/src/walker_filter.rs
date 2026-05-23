@@ -74,15 +74,36 @@ pub fn is_skippable_worktree_descendant(entry_path: &Path, root: &Path) -> bool 
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
+
+    // `env_override_disables_all_skips` mutates the process-global
+    // `ECP_INCLUDE_WORKTREES` env var; every other test reads it via
+    // `is_skippable_worktree_descendant`. Cargo runs unit tests in parallel
+    // within a binary, so without serialisation the writer flips the var
+    // mid-flight and the reader tests observe the override unexpectedly →
+    // intermittent `assertion failed` panic on the descendant tests. The
+    // mutex holds for the entire test body so the env-var state is well-
+    // defined throughout each assertion.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // Poison-tolerant lock helper: a panic in a preceding test would poison
+    // the Mutex, propagating spurious failures to every later test. We only
+    // need mutual exclusion, not the consistency contract poisoning
+    // enforces, so unwrap-or-inner is correct here.
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn root_itself_is_allowed() {
+        let _guard = lock();
         let tmp = tempfile::tempdir().unwrap();
         assert!(!is_skippable_worktree_descendant(tmp.path(), tmp.path()));
     }
 
     #[test]
     fn plain_descendant_is_allowed() {
+        let _guard = lock();
         let tmp = tempfile::tempdir().unwrap();
         let child = tmp.path().join("src");
         fs::create_dir(&child).unwrap();
@@ -91,6 +112,7 @@ mod tests {
 
     #[test]
     fn claude_worktrees_segment_is_skipped() {
+        let _guard = lock();
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join(".claude/worktrees/feature-x");
         fs::create_dir_all(&wt).unwrap();
@@ -103,6 +125,7 @@ mod tests {
 
     #[test]
     fn nested_git_file_marks_worktree() {
+        let _guard = lock();
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("sibling-worktree");
         fs::create_dir(&wt).unwrap();
@@ -112,6 +135,7 @@ mod tests {
 
     #[test]
     fn nested_git_directory_is_not_marked() {
+        let _guard = lock();
         // `.git` as a directory = primary worktree's own metadata (already
         // ignored by `WalkBuilder::hidden`/`SKIP_DIRS`). filter_entry should
         // not double-fire on it.
@@ -124,6 +148,7 @@ mod tests {
 
     #[test]
     fn env_override_disables_all_skips() {
+        let _guard = lock();
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join(".claude/worktrees/feature-x");
         fs::create_dir_all(&wt).unwrap();
