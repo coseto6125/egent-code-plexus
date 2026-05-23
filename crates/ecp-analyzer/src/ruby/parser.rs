@@ -1,4 +1,4 @@
-use super::receiver_types::extract_ruby_calls;
+use super::receiver_types::extract_ruby_calls_and_path_literals;
 use super::spec::RubySpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
@@ -616,7 +616,9 @@ impl LanguageProvider for RubyProvider {
 
         // Extract call sites with receiver-type binding.
         // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
-        extract_ruby_calls(tree.root_node(), source, &mut nodes);
+        // Same DFS also collects path-shaped string literals.
+        let raw_path_literals =
+            extract_ruby_calls_and_path_literals(tree.root_node(), source, &mut nodes);
 
         let framework_refs = detect_ast_framework_patterns(source, RUBY_FRAMEWORKS);
 
@@ -664,11 +666,8 @@ impl LanguageProvider for RubyProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_ruby_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

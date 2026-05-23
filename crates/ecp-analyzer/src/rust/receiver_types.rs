@@ -15,8 +15,9 @@
 //!    - `obj.method()` where `obj`'s type is locally known is recorded as
 //!      `"Type.method"` for the resolver's Tier 2.5 qualifier-scoped lookup.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -407,34 +408,52 @@ fn collect_let_binding(node: &Node<'_>, source: &[u8], out: &mut HashMap<String,
 
 // ── call extraction ───────────────────────────────────────────────────────────
 
-/// Walk the Rust AST and attach callee names to enclosing function/method
-/// nodes with receiver-type binding applied where possible.
+/// Walk the Rust AST once, attaching callee names to enclosing function /
+/// method nodes (with receiver-type binding) and collecting path-shaped
+/// string literals as `RawPathLiteral` side-table entries.
 ///
+/// Call resolution:
 /// - `self.method()` inside `impl Dog` → `"Dog.method"`
 /// - `obj.method()` where `obj: Dog` locally → `"Dog.method"`
 /// - `Foo::bar()` (scoped call) → `"Foo::bar"` (unchanged, already qualified)
 /// - bare `func()` → `"func"`
-pub fn extract_rust_calls(
+///
+/// Path literals: every `string_literal` / `raw_string_literal` is fed
+/// through `path_literals::build_raw_path_literal`, which applies the
+/// path-shape predicate + sink classifier. Merging this with the call
+/// walk halves the per-file DFS cost vs the prior two-pass layout
+/// (see PR #367 comparison).
+pub fn extract_rust_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     local_types: &LocalTypes,
-) {
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        // Rust uses `call_expression` for both `foo()` and `obj.method()`.
-        // `field_expression` children of `call_expression` represent `obj.method`.
-        if n.kind() == "call_expression" {
-            if let Some(callee) = rust_callee_name(n, source, local_types) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            // Rust uses `call_expression` for both `foo()` and `obj.method()`.
+            // `field_expression` children of `call_expression` represent `obj.method`.
+            "call_expression" => {
+                if let Some(callee) = rust_callee_name(n, source, local_types) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string_literal" | "raw_string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 /// Derive the callee name for a Rust `call_expression`.

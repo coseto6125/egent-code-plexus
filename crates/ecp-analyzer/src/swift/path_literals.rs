@@ -1,46 +1,17 @@
-//! Swift-side extractor for `RawPathLiteral` entries. Walks the file's
-//! string literal nodes, filters interpolated strings, filters via
-//! `path_literal::is_path_shaped`, classifies the call-context sink via
-//! `path_literal::classify_sink`, and resolves the enclosing function / class.
-//!
-//! Swift string literal node kinds in tree-sitter-swift:
-//!   `line_string_literal` — `"..."`, may contain `interpolated_expression` children.
-//!   `multi_line_string_literal` — `"""..."""`, may contain `interpolated_expression`.
-//!   `raw_string_literal` — `#"..."#`, no interpolation possible.
-//!
-//! Any `line_string_literal` or `multi_line_string_literal` with an
-//! `interpolated_expression` child is skipped entirely.
+//! Swift-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` handles `line_string_literal` (`"..."`),
+//! `multi_line_string_literal` (`"""..."""`), and `raw_string_literal`
+//! (`#"..."#`). Interpolated forms (`interpolated_expression` child) are
+//! filtered internally. Invoked from
+//! `receiver_types::extract_swift_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the Swift tree-sitter tree and emit one `RawPathLiteral` per
-/// path-shaped string literal. Interpolated strings are skipped.
-pub fn extract_swift_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "line_string_literal" | "multi_line_string_literal" | "raw_string_literal" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
-                    out.push(rpl);
-                }
-                // Don't descend — whole string node is consumed.
-                continue;
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let value = extract_string_content(str_node, source)?;
     if !is_path_shaped(value) {
         return None;

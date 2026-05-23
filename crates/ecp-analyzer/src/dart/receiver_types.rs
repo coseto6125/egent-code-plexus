@@ -14,8 +14,9 @@
 //! Scope: P0 simple identifier types only. Generic / function / nullable
 //! types fall back to the bare member name.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -220,25 +221,35 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
     }
 }
 
-pub fn extract_dart_calls(
+pub fn extract_dart_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     bindings: &DartBindings,
-) {
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = dart_callee_name(n, source, bindings) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = dart_callee_name(n, source, bindings) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> Option<String> {

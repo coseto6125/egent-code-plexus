@@ -1,8 +1,8 @@
-//! C++-side extractor for `RawPathLiteral` entries. Walks the file's
-//! `string_literal`, `raw_string_literal`, and `concatenated_string` nodes,
-//! filters via `path_literal::is_path_shaped`, classifies the call-context
-//! sink via `path_literal::classify_sink`, and resolves the enclosing
-//! function or method (with owner class via `class_specifier`).
+//! C++-side helpers for `RawPathLiteral` extraction. Entry points
+//! `build_raw_path_literal` (`string_literal` / `raw_string_literal`)
+//! and `build_concatenated` (`concatenated_string`) are invoked from
+//! `receiver_types::extract_cpp_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 //!
 //! C++ string forms handled:
 //!   `"foo"`              — ordinary string literal
@@ -13,44 +13,13 @@
 //! For method definitions whose declarator is `Foo::method`, the owner
 //! `Foo` is captured into `enclosing_owner`. In-class method bodies (inside
 //! `class_specifier` / `struct_specifier`) use the class name as owner.
-//!
-//! Runs as a side pass after the main `queries.scm` capture loop; reuses
-//! the already-parsed `tree` so cost is one extra DFS walk, no re-parse.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the C++ tree-sitter tree and emit one `RawPathLiteral` per
-/// path-shaped string literal.
-pub fn extract_cpp_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "string_literal" | "raw_string_literal" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
-                    out.push(rpl);
-                }
-            }
-            "concatenated_string" => {
-                if let Some(rpl) = build_concatenated(n, source) {
-                    out.push(rpl);
-                }
-                continue;
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw, str_node.kind() == "raw_string_literal")?;
@@ -80,7 +49,7 @@ fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLi
     })
 }
 
-fn build_concatenated(concat_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_concatenated(concat_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     let mut joined = String::new();
     let mut cursor = concat_node.walk();
     for child in concat_node.children(&mut cursor) {

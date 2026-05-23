@@ -1,4 +1,4 @@
-use super::receiver_types::extract_java_calls;
+use super::receiver_types::extract_java_calls_and_path_literals;
 use super::spec::JavaSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{collect_jvm_transactional_scopes, has_import_from, node_span};
@@ -418,8 +418,10 @@ impl LanguageProvider for JavaProvider {
         // the Vec + idx-map pattern at parse-loop start; no sort needed.
 
         // Extract call sites with receiver-type binding for `this.foo()`,
-        // `super.foo()`, and typed-variable `obj.foo()` patterns.
-        extract_java_calls(tree.root_node(), source, &mut nodes);
+        // `super.foo()`, and typed-variable `obj.foo()` patterns; same DFS
+        // also collects path-shaped string literals.
+        let raw_path_literals =
+            extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
 
         let file_category =
             crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
@@ -459,11 +461,8 @@ impl LanguageProvider for JavaProvider {
             schema_fields: None,
             event_topics,
             tx_scopes,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_java_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

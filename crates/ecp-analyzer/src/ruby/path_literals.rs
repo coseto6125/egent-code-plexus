@@ -1,40 +1,16 @@
-//! Ruby-side extractor for `RawPathLiteral` entries. Walks the file's
-//! `string` nodes, filters interpolated strings, filters via
-//! `path_literal::is_path_shaped`, classifies the call-context sink via
-//! `path_literal::classify_sink`, and resolves the enclosing method / class.
-//!
-//! Ruby string nodes: `(string (string_content))` for double-quoted, and
-//! single-quoted `(string (string_content))` — tree-sitter-ruby uses the
-//! same `string` parent node for both. Interpolated strings contain a
-//! `string_interpolation` child — those are skipped entirely.
+//! Ruby-side helpers for `RawPathLiteral` extraction. Entry point
+//! `build_raw_path_literal` handles `string` nodes (single- and
+//! double-quoted share the same kind). Interpolated strings
+//! (`string_interpolation` child) are filtered internally. Invoked from
+//! `receiver_types::extract_ruby_calls_and_path_literals` so a single
+//! DFS handles both call attribution and path-literal collection.
 
 use ecp_core::analyzer::types::RawPathLiteral;
 use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_path_shaped, sink_reason};
 
-/// Walk the Ruby tree-sitter `tree` and emit one `RawPathLiteral` per
-/// path-shaped string literal. Interpolated strings (`"#{x}"`) are skipped.
-pub fn extract_ruby_path_literals(root: Node<'_>, source: &[u8]) -> Vec<RawPathLiteral> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "string" {
-            if let Some(rpl) = build_raw_path_literal(n, source) {
-                out.push(rpl);
-            }
-            // Don't descend into string children — the whole node is consumed.
-            continue;
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
     // Skip interpolated strings: any `string_interpolation` child means dynamic content.
     let mut c = str_node.walk();
     for child in str_node.children(&mut c) {

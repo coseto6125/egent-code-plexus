@@ -12,8 +12,9 @@
 //! All other `expr.method` calls fall back to the bare method name (existing
 //! behaviour via `extract_calls`).
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
@@ -48,23 +49,39 @@ impl ClassContext {
     }
 }
 
-/// Walk the Ruby AST and attach callees to enclosing nodes with receiver-type
-/// binding for `self.method` and `Constant.method` sites.
-pub fn extract_ruby_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+/// Walk the Ruby AST once, attaching callees to enclosing nodes with
+/// receiver-type binding (`self.method` / `Constant.method`) and
+/// collecting path-shaped `string` literals. Interpolated strings are
+/// filtered inside `build_raw_path_literal`.
+pub fn extract_ruby_calls_and_path_literals(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Vec<RawPathLiteral> {
     let ctx = ClassContext::from_nodes(nodes);
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call" {
-            if let Some(callee) = ruby_callee(n, source, &ctx) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call" => {
+                if let Some(callee) = ruby_callee(n, source, &ctx) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 /// Resolve the callee for a Ruby `call` node.

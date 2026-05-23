@@ -18,8 +18,9 @@
 //!   receiver convention versus a regular parameter.
 //! - Free functions (no receiver-shaped first param) are left as bare names.
 
+use super::path_literals::{build_concatenated, build_raw_path_literal};
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -125,28 +126,47 @@ fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
     }
 }
 
-/// Walk the C AST attaching call sites to enclosing functions. When the
-/// callee is a bare identifier that names a receiver-convention function,
-/// rewrite it to `Type.fn` so the resolver picks up the qualifier.
-pub fn extract_c_calls(
+/// Walk the C AST once, attaching call sites to enclosing functions
+/// (with receiver-convention rewriting to `Type.fn`) and collecting
+/// path-shaped `string_literal` / `concatenated_string` literals.
+pub fn extract_c_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     methods: &CReceiverMap,
-) {
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = c_callee_name(n, source, methods) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = c_callee_name(n, source, methods) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            "concatenated_string" => {
+                if let Some(rpl) = build_concatenated(n, source) {
+                    path_literals.push(rpl);
+                }
+                // Skip descent: child `string_literal` nodes are pieces
+                // of this concatenation; descending would double-emit
+                // them. C has no calls inside string literals.
+                continue;
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn c_callee_name(call: Node<'_>, source: &[u8], methods: &CReceiverMap) -> Option<String> {

@@ -1,5 +1,5 @@
 //! Rust-side `path_literals` extractor regression tests. Validates the
-//! side-table populated by `rust::path_literals::extract_rust_path_literals`
+//! side-table populated by `receiver_types::extract_rust_calls_and_path_literals`
 //! before the post-process pass promotes it into PathLiteral nodes / edges.
 //!
 //! Bar for C3:

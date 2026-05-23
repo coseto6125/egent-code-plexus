@@ -9,31 +9,48 @@
 //! annotations we cannot commit to a type, per the spec's "only commit ✓ for cases
 //! that work without guessing" rule.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
 use crate::framework_helpers::{enclosing_class, node_span};
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use tree_sitter::Node;
 
-/// Walk the JavaScript AST and attach callees to enclosing functions/methods,
-/// with `this`-based receiver-type binding:
+/// Walk the JavaScript AST once, attaching callees to enclosing
+/// functions / methods (with `this`-based receiver-type binding) and
+/// collecting path-shaped string / template literals.
 ///
+/// Calls:
 /// - `this.method()` inside a class body → emits `ClassName.method`
 /// - `obj.method()` (unknown type) → emits `obj.method` (resolver can try later)
 /// - `fn()` → emits `fn`
-pub fn extract_js_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+pub fn extract_js_calls_and_path_literals(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = js_callee_name(n, source, nodes) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = js_callee_name(n, source, nodes) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "string" | "template_string" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {

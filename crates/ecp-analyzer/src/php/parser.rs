@@ -1,4 +1,4 @@
-use super::receiver_types::extract_php_calls;
+use super::receiver_types::extract_php_calls_and_path_literals;
 use super::spec::PhpSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -609,7 +609,8 @@ impl LanguageProvider for PhpProvider {
             &mut nodes,
             &["function_call_expression"],
         );
-        extract_php_calls(tree.root_node(), source, &mut nodes);
+        let raw_path_literals =
+            extract_php_calls_and_path_literals(tree.root_node(), source, &mut nodes);
 
         // Gate Laravel framework_refs by the `Illuminate` import — without
         // that, bare `Route::` is just an unrelated class name.
@@ -671,11 +672,8 @@ impl LanguageProvider for PhpProvider {
             schema_fields: None,
             event_topics: None,
             tx_scopes,
-            path_literals: {
-                let lits =
-                    super::path_literals::extract_php_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

@@ -14,8 +14,9 @@
 //!    `d.Bark()` inside `(*Dog).Fetch` is recorded as `"Dog.Bark"` rather
 //!    than just `"Bark"`, feeding the resolver's Tier 2.5 qualifier lookup.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -296,29 +297,39 @@ fn collect_short_var(node: &Node<'_>, source: &[u8], out: &mut HashMap<String, S
 
 // ── call extraction ───────────────────────────────────────────────────────────
 
-/// Walk the Go AST and attach callee names to enclosing function/method nodes.
-/// When a call site is `obj.Method()` and `obj`'s type is known (from
-/// `local_types`), the callee is recorded as `"Type.Method"` instead of just
-/// `"Method"`, enabling the resolver's qualifier-scoped (Tier 2.5) lookup.
-pub fn extract_go_calls(
+/// Walk the Go AST once, attaching callee names to enclosing
+/// function/method nodes (with receiver-type binding) and collecting
+/// path-shaped string literals (`interpreted_string_literal` /
+/// `raw_string_literal`).
+pub fn extract_go_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     local_types: &LocalTypes,
-) {
+) -> Vec<RawPathLiteral> {
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            if let Some(callee) = go_callee_name(n, source, local_types) {
-                let line = n.start_position().row as u32;
-                attach_to_enclosing(line, callee, nodes);
+        match n.kind() {
+            "call_expression" => {
+                if let Some(callee) = go_callee_name(n, source, local_types) {
+                    let line = n.start_position().row as u32;
+                    attach_to_enclosing(line, callee, nodes);
+                }
             }
+            "interpreted_string_literal" | "raw_string_literal" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 /// Derive the callee name for a `call_expression` node.

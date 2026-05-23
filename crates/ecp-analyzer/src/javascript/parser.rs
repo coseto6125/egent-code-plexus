@@ -1,4 +1,4 @@
-use super::receiver_types::extract_js_calls;
+use super::receiver_types::extract_js_calls_and_path_literals;
 use super::spec::JavaScriptSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -462,7 +462,8 @@ impl LanguageProvider for JavaScriptProvider {
         // - `this.method()` inside a class body → `ClassName.method`
         // - `obj.method()` (no type info in JS) → `obj.method` (qualified for resolver)
         // - `fn()` → `fn`
-        extract_js_calls(tree.root_node(), source, &mut nodes);
+        let raw_path_literals =
+            extract_js_calls_and_path_literals(tree.root_node(), source, &mut nodes);
 
         // Framework-presence gates: only emit Express/Hapi refs when the file
         // actually imports the matching package. Each framework has its own
@@ -549,11 +550,8 @@ impl LanguageProvider for JavaScriptProvider {
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
 
-        let path_literals = {
-            let lits =
-                super::path_literals::extract_javascript_path_literals(tree.root_node(), source);
-            (!lits.is_empty()).then(|| lits.into_boxed_slice())
-        };
+        let path_literals =
+            (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
 
         Ok(LocalGraph {
             content_hash: [0; 8],

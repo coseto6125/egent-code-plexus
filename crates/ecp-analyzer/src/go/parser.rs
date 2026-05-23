@@ -1,5 +1,6 @@
 use super::receiver_types::{
-    build_receiver_map, collect_local_types, extract_go_calls, receiver_type_from_method_decl,
+    build_receiver_map, collect_local_types, extract_go_calls_and_path_literals,
+    receiver_type_from_method_decl,
 };
 use super::spec::GoSpec;
 use crate::framework_confidence;
@@ -661,7 +662,8 @@ impl LanguageProvider for GoProvider {
         // `Type.Method` when `obj`'s type is locally known.
         let recv_map = build_receiver_map(tree.root_node(), source);
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
-        extract_go_calls(tree.root_node(), source, &mut nodes, &local_types);
+        let raw_path_literals =
+            extract_go_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
 
         // owner_class is set at emit time via receiver_type_from_method_decl().
         // No post-loop needed; recv_map is still used for call-site resolution.
@@ -738,10 +740,8 @@ impl LanguageProvider for GoProvider {
             schema_fields: None,
             event_topics,
             tx_scopes: None,
-            path_literals: {
-                let lits = super::path_literals::extract_go_path_literals(tree.root_node(), source);
-                (!lits.is_empty()).then(|| lits.into_boxed_slice())
-            },
+            path_literals: (!raw_path_literals.is_empty())
+                .then(|| raw_path_literals.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
         })

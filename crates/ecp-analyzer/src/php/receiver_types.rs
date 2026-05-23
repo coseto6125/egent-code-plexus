@@ -13,8 +13,9 @@
 //! unbound: PHP 7 property/param type hints require a second pass to propagate
 //! types through the scope and are deferred to a later improvement task.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
@@ -67,10 +68,16 @@ impl ClassContext {
     }
 }
 
-/// Walk the PHP AST and attach callees to enclosing nodes, with receiver-type
-/// binding applied for `$this->`, `parent::`, `self::`, and `static::` call sites.
-pub fn extract_php_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+/// Walk the PHP AST once, attaching callees to enclosing nodes (with
+/// receiver binding for `$this->`, `parent::`, `self::`, `static::`)
+/// and collecting path-shaped `string` / `encapsed_string` literals.
+pub fn extract_php_calls_and_path_literals(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Vec<RawPathLiteral> {
     let ctx = ClassContext::from_nodes(nodes);
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -86,6 +93,11 @@ pub fn extract_php_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
                     attach_to_enclosing(line, callee, nodes);
                 }
             }
+            "string" | "encapsed_string" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
             _ => {}
         }
         let mut c = n.walk();
@@ -93,6 +105,7 @@ pub fn extract_php_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
             stack.push(child);
         }
     }
+    path_literals
 }
 
 /// Resolve the callee for `$obj->method(args)`.

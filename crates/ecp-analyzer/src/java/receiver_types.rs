@@ -10,8 +10,9 @@
 //! Falls back to the bare method name for unresolved receivers, matching
 //! the prior behavior of the generic `extract_calls` helper.
 
+use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{RawNode, RawPathLiteral};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -219,12 +220,18 @@ fn java_callee(
     })
 }
 
-/// Walk the AST, extract all `method_invocation` and `object_creation_expression`
-/// call sites, attach them to enclosing function/method nodes with receiver
-/// binding applied where resolvable.
-pub fn extract_java_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+/// Walk the AST once, extracting `method_invocation` /
+/// `object_creation_expression` call sites (attached to enclosing
+/// function/method nodes with receiver binding) and collecting path-shaped
+/// `string_literal` / `text_block` literals.
+pub fn extract_java_calls_and_path_literals(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Vec<RawPathLiteral> {
     let local_types = collect_local_types(root, source);
 
+    let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -244,6 +251,11 @@ pub fn extract_java_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) 
                     attach_to_enclosing(line, callee, nodes);
                 }
             }
+            "string_literal" | "text_block" => {
+                if let Some(rpl) = build_raw_path_literal(n, source) {
+                    path_literals.push(rpl);
+                }
+            }
             _ => {}
         }
         let mut c = n.walk();
@@ -251,6 +263,7 @@ pub fn extract_java_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) 
             stack.push(child);
         }
     }
+    path_literals
 }
 
 /// Name of the innermost enclosing Class/Interface node at `line`.
