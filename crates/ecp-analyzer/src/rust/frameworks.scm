@@ -1,5 +1,62 @@
 ;; Framework-aware queries for Rust (Tier 1: Axum/Actix routes + Redis pub/sub + RabbitMQ).
 
+;; ---- Attribute-decorated functions / methods (FU-2026-05-23-009) ----
+;; Captures `attribute_item` nodes that appear immediately before a function_item
+;; or method in an impl block. Used to populate RawNode.decorators for
+;; annotation-style proc-macros such as #[transaction], #[route], etc.
+;;
+;; Tree-sitter-rust grammar: attribute_item and function_item are *siblings*
+;; under a common parent (source_file / declaration_list). The adjacent-sibling
+;; anchor (.) ensures we only capture attributes directly preceding the function,
+;; not unrelated attrs elsewhere in the same block.
+;;
+;; These patterns produce @decorator + @function_item.name + @function or
+;; @decorator + @function_item.name + @method captures. The parser dedup merges
+;; decorator lists onto the node already emitted by the base queries.scm patterns.
+
+;; Top-level attributed functions (source_file parent)
+(source_file
+  (attribute_item) @decorator
+  .
+  (function_item
+    (visibility_modifier)? @export
+    name: (identifier) @function_item.name
+    return_type: (_)? @type) @function)
+
+;; Attributed functions inside mod bodies
+(mod_item
+  body: (declaration_list
+    (attribute_item) @decorator
+    .
+    (function_item
+      (visibility_modifier)? @export
+      name: (identifier) @function_item.name
+      return_type: (_)? @type) @function))
+
+;; Attributed methods in trait-impl blocks
+(impl_item
+  trait: [
+    (type_identifier)
+    (generic_type)
+  ] @heritage
+  body: (declaration_list
+    (attribute_item) @decorator
+    .
+    (function_item
+      (visibility_modifier)? @export
+      name: (identifier) @function_item.name
+      return_type: (_)? @type) @method))
+
+;; Attributed methods in inherent-impl blocks
+(impl_item
+  body: (declaration_list
+    (attribute_item) @decorator
+    .
+    (function_item
+      (visibility_modifier)? @export
+      name: (identifier) @function_item.name
+      return_type: (_)? @type) @method))
+
 ;; ---- RabbitMQ Rust (T5-13) ----
 ;; Covers lapin (async) and amiquip (sync-friendly).
 ;; Import gate (`lapin`, `amiquip`) enforced by RABBITMQ_RUST.import_gate.

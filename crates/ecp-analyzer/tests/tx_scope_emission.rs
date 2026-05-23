@@ -338,6 +338,112 @@ class AccountService {
     assert!(names.contains(&"withdraw"), "withdraw missing: {:?}", names);
 }
 
+// ── Rust (#[transaction] proc-macro) ────────────────────────────────────────
+
+#[test]
+fn rust_transaction_attr_on_free_function_emits_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+#[transaction]
+pub async fn create_user(pool: &PgPool, data: UserDto) -> Result<User, Error> {
+    // ...
+}
+
+pub fn list_users() {}
+"#;
+    let g = p
+        .parse_file(Path::new("users.rs"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 1, "one tx_scope expected");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "create_user");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::RustTransaction);
+}
+
+#[test]
+fn rust_transaction_attr_on_impl_method_emits_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+struct UserService;
+
+impl UserService {
+    #[transaction]
+    pub fn create_user(&self) {}
+
+    pub fn list_users(&self) {}
+}
+"#;
+    let g = p
+        .parse_file(Path::new("service.rs"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(scopes(&g).len(), 1, "one tx_scope expected");
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "create_user");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::RustTransaction);
+}
+
+#[test]
+fn rust_transaction_attr_with_args_emits_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+#[transaction(rollback)]
+pub fn transfer_funds() {}
+"#;
+    let g = p
+        .parse_file(Path::new("payment.rs"), src.as_bytes())
+        .expect("parse");
+    assert_eq!(
+        scopes(&g).len(),
+        1,
+        "arg-bearing #[transaction(...)] must emit scope"
+    );
+    assert_eq!(fn_name_of_scope(&g, &scopes(&g)[0]), "transfer_funds");
+    assert_eq!(scopes(&g)[0].framework(), FrameworkId::RustTransaction);
+}
+
+#[test]
+fn rust_test_attr_does_not_emit_scope() {
+    use ecp_analyzer::rust::parser::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let p = RustProvider::new().expect("provider");
+    let src = r#"
+#[test]
+fn test_something() {}
+
+#[tokio::test]
+async fn test_async() {}
+
+#[derive(Transaction)]
+struct Foo;
+
+pub fn plain_fn() {}
+"#;
+    let g = p
+        .parse_file(Path::new("lib.rs"), src.as_bytes())
+        .expect("parse");
+    assert!(
+        scopes(&g).is_empty(),
+        "#[test] / #[tokio::test] / #[derive(Transaction)] must not emit tx_scope; got: {:?}",
+        scopes(&g)
+            .iter()
+            .map(|s| fn_name_of_scope(&g, s))
+            .collect::<Vec<_>>()
+    );
+    assert!(g.tx_scopes.is_none());
+}
+
 // ── Layer 2: post-process integration tests ────────────────────────────────
 
 #[test]
