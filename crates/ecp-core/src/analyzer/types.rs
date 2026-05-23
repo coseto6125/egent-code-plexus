@@ -358,6 +358,17 @@ impl FrameworkId {
     }
 }
 
+// Compile-time guard: FRAMEWORK_NAMES MUST have exactly as many entries as
+// there are FrameworkId variants (highest discriminant + 1). Catches
+// "added an enum variant, forgot the FRAMEWORK_NAMES string" at compile
+// time instead of as a runtime panic in `as_str()`.
+const _: () = {
+    assert!(
+        FRAMEWORK_NAMES.len() == FrameworkId::SwiftTransactional as usize + 1,
+        "FRAMEWORK_NAMES length must equal FrameworkId variant count"
+    );
+};
+
 /// ORM / schema model field detected at static-analysis time.
 ///
 /// Field-name + owner-class are stored as owned `Box<str>` rather than

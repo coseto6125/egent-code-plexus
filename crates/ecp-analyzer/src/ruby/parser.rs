@@ -267,8 +267,9 @@ fn collect_ruby_transaction_scopes(
     source: &[u8],
     nodes: &[RawNode],
 ) -> Option<Box<[RawTxScope]>> {
-    // Collect distinct function node indices that contain a transaction do block.
-    let mut seen_fn_idxs: Vec<u32> = Vec::new();
+    // Distinct enclosing function indices — HashSet matches Go / Dart detectors
+    // (avoid the O(K²) Vec::contains pattern flagged by /simplify review).
+    let mut seen_fn_idxs: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
 
     while let Some(n) = stack.pop() {
@@ -283,9 +284,7 @@ fn collect_ruby_transaction_scopes(
                 .then(|| point_in_span(node.span, row, col).then_some(i as u32))
                 .flatten()
             }) {
-                if !seen_fn_idxs.contains(&fn_idx) {
-                    seen_fn_idxs.push(fn_idx);
-                }
+                seen_fn_idxs.insert(fn_idx);
             }
         }
         let mut c = n.walk();

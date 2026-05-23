@@ -540,9 +540,7 @@ pub fn collect_symfony_transactional_scopes(
 /// The typeorm-transactional npm package is the dominant runtime.
 #[inline]
 pub fn is_typeorm_transactional(decorator: &str) -> bool {
-    decorator == "@Transactional"
-        || decorator == "@Transactional()"
-        || decorator.starts_with("@Transactional(")
+    decorator == "@Transactional" || decorator.starts_with("@Transactional(")
 }
 
 /// Collect `RawTxScope` entries for Method / Function nodes whose decorator
@@ -568,9 +566,7 @@ pub fn collect_typeorm_transactional_scopes(
 /// sea-orm flavours plus argument-bearing forms `#[transaction(rollback)]`.
 #[inline]
 pub fn is_rust_transactional(decorator: &str) -> bool {
-    decorator == "#[transaction]"
-        || decorator == "#[transaction()]"
-        || decorator.starts_with("#[transaction(")
+    decorator == "#[transaction]" || decorator.starts_with("#[transaction(")
 }
 
 /// Collect `RawTxScope` entries for Function / Method nodes whose decorator
