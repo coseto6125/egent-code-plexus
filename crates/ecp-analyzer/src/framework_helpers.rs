@@ -378,6 +378,59 @@ pub fn collect_jvm_transactional_scopes(
     (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
 }
 
+/// Match a .NET `[Transactional]` / `[TransactionAttribute]` C# attribute_list
+/// string as captured by tree-sitter (the entire `[...]` text).
+#[inline]
+pub fn is_dotnet_transactional(decorator: &str) -> bool {
+    decorator == "[Transactional]"
+        || decorator == "[TransactionAttribute]"
+        || decorator.starts_with("[Transactional(")
+        || decorator.starts_with("[TransactionAttribute(")
+}
+
+/// Collect `RawTxScope` entries for Method / Constructor / Function nodes whose
+/// decorator list contains a .NET `[Transactional]` attribute.
+pub fn collect_dotnet_transactional_scopes(
+    nodes: &[RawNode],
+    scopeable_kinds: &[NodeKind],
+) -> Option<Box<[RawTxScope]>> {
+    let scopes: Vec<RawTxScope> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            scopeable_kinds.contains(&n.kind)
+                && n.decorators.iter().any(|d| is_dotnet_transactional(d))
+        })
+        .map(|(idx, _)| RawTxScope::new(idx as u32, FrameworkId::DotNetTransactional))
+        .collect();
+    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
+}
+
+/// Match a Symfony PHP 8+ `#[Transactional]` attribute_list string as
+/// captured by tree-sitter (the entire `#[...]` text).
+#[inline]
+pub fn is_symfony_transactional(decorator: &str) -> bool {
+    decorator == "#[Transactional]" || decorator.starts_with("#[Transactional(")
+}
+
+/// Collect `RawTxScope` entries for Method / Function nodes whose decorator
+/// list contains a Symfony `#[Transactional]` attribute.
+pub fn collect_symfony_transactional_scopes(
+    nodes: &[RawNode],
+    scopeable_kinds: &[NodeKind],
+) -> Option<Box<[RawTxScope]>> {
+    let scopes: Vec<RawTxScope> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            scopeable_kinds.contains(&n.kind)
+                && n.decorators.iter().any(|d| is_symfony_transactional(d))
+        })
+        .map(|(idx, _)| RawTxScope::new(idx as u32, FrameworkId::SymfonyTransactional))
+        .collect();
+    (!scopes.is_empty()).then(|| scopes.into_boxed_slice())
+}
+
 /// Inclusive containment test: `(row, col)` lies within `span`'s
 /// `(start_row, start_col, end_row, end_col)` range. Used to recover a
 /// `RawNode` index from a captured identifier's position when the capture

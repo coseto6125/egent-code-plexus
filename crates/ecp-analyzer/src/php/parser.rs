@@ -2,7 +2,8 @@ use super::receiver_types::extract_php_calls;
 use super::spec::PhpSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    enclosing_function_name, has_import_from, node_span, MODULE_LEVEL_SOURCE,
+    collect_symfony_transactional_scopes, enclosing_function_name, has_import_from, node_span,
+    MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
@@ -655,6 +656,8 @@ impl LanguageProvider for PhpProvider {
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        let tx_scopes =
+            collect_symfony_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
@@ -667,7 +670,7 @@ impl LanguageProvider for PhpProvider {
             blind_spots: vec![],
             schema_fields: None,
             event_topics: None,
-            tx_scopes: None,
+            tx_scopes,
             call_metas: vec![],
             raw_function_metas,
         })

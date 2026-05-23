@@ -1,7 +1,9 @@
 use super::receiver_types::extract_csharp_calls;
 use super::spec::CSharpSpec;
 use crate::framework_confidence;
-use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec};
+use crate::framework_helpers::{
+    collect_dotnet_transactional_scopes, detect_ast_framework_patterns, FrameworkPatternSpec,
+};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -394,6 +396,10 @@ impl LanguageProvider for CSharpProvider {
             crate::function_meta::csharp::extract(tree.root_node(), source, &nodes, file_category);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        let tx_scopes = collect_dotnet_transactional_scopes(
+            &nodes,
+            &[NodeKind::Method, NodeKind::Constructor, NodeKind::Function],
+        );
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -406,7 +412,7 @@ impl LanguageProvider for CSharpProvider {
             blind_spots: vec![],
             schema_fields: None,
             event_topics: None,
-            tx_scopes: None,
+            tx_scopes,
             call_metas: vec![],
             raw_function_metas,
         })

@@ -11,3 +11,4 @@ pub mod event_topic_mirrors;
 pub mod imports_edges;
 pub mod overrides;
 pub mod schema_field_mirrors;
+pub mod tx_scope_edges;
