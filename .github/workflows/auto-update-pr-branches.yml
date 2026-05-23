@@ -53,10 +53,15 @@ jobs:
               *successfully*)
                 echo "✓ updated #$pr ($branch)"
                 ;;
-              *"already up"*|*"up to date"*)
+              *"up to date"*)
+                # Includes "already up to date" and "up-to-date" variants;
+                # earlier explicit *"already up"* pattern was redundant
+                # (shellcheck SC2221).
                 echo "= #$pr ($branch) already current"
                 ;;
-              *conflict*|*"Merge conflict"*)
+              *conflict*)
+                # *"Merge conflict"* was a strict subset of *conflict*
+                # and so could never fire on its own (shellcheck SC2222).
                 echo "✗ #$pr ($branch) conflict — author needed"
                 conflicts+=("$pr")
                 # Post a one-time marker comment so author gets a GitHub
@@ -67,7 +72,11 @@ jobs:
                   --jq ".comments[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
                 if [ -z "$existing" ]; then
                   # printf keeps the multi-line body inside one bash var so
-                  # YAML's block-scalar indentation rules stay happy.
+                  # YAML's block-scalar indentation rules stay happy. The
+                  # backticks in the format string are intentional Markdown
+                  # code formatting — shellcheck SC2016 is a false positive
+                  # because printf treats them as literal characters.
+                  # shellcheck disable=SC2016
                   body=$(printf '%s\n\n🚨 **Auto-update-branch failed** — merge conflict with `main` (trigger commit `%s`). Please rebase / merge manually. This comment posts only once per conflict; delete it to let the bot re-notify on the next event.' "$marker" "$TRIGGER_SHA")
                   gh pr comment "$pr" --repo "$REPO" --body "$body" || true
                 fi
