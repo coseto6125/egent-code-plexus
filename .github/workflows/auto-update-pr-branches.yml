@@ -1,17 +1,25 @@
 name: Auto-update PR branches
-# Whenever main moves, refresh every eligible open PR's branch via
-# GitHub's update-branch API (the programmatic "Update branch" button).
-# Refreshed branches re-trigger CI; once CI is green and auto-merge is
-# enabled (see auto-merge.yml), GitHub merges without manual clicks.
+# Whenever main moves, rebase every eligible open PR's branch onto the
+# new main tip via GitHub's GraphQL updatePullRequestBranch mutation
+# with updateMethod=REBASE. Refreshed branches re-trigger CI; once CI is
+# green and auto-merge is enabled (see auto-merge.yml), GitHub merges
+# without manual clicks.
+#
+# Why GraphQL not REST: the REST `update-branch` endpoint (PUT
+# /repos/{}/pulls/{}/update-branch) is merge-only — it merges main HEAD
+# INTO the PR branch as a merge commit, polluting the PR's history with
+# a merge bubble per main movement. GraphQL's updatePullRequestBranch
+# mutation accepts updateMethod: REBASE which replays PR commits on top
+# of the new base, keeping linear history.
 #
 # Eligibility: non-draft, targeting main, has auto-merge already armed
 # (`.autoMergeRequest != null` from `gh pr list`). Drafts and explicitly
 # un-armed PRs are skipped on purpose — author hasn't opted in.
 #
-# Conflict handling: if update-branch returns a merge-conflict response,
-# the PR gets a one-time marker comment (`<!-- auto-update-conflict -->`)
-# and the workflow exits non-zero so GitHub emails the author its usual
-# CI-failure notification.
+# Conflict handling: if rebase would conflict, the GraphQL mutation
+# returns an error. The PR gets a one-time marker comment
+# (`<!-- auto-update-conflict -->`) and the workflow exits non-zero so
+# GitHub emails the author its usual CI-failure notification.
 on:
   push:
     branches: [main]
@@ -37,9 +45,11 @@ jobs:
           TRIGGER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # `.id` is the GraphQL node ID (base64 string), required by the
+          # updatePullRequestBranch mutation; .number alone isn't usable.
           prs=$(gh pr list --repo "$REPO" --state open --base main \
-            --json number,isDraft,autoMergeRequest,headRefName \
-            --jq '.[] | select(.isDraft == false and .autoMergeRequest != null) | "\(.number)\t\(.headRefName)"')
+            --json number,id,isDraft,autoMergeRequest,headRefName \
+            --jq '.[] | select(.isDraft == false and .autoMergeRequest != null) | "\(.number)\t\(.id)\t\(.headRefName)"')
 
           if [ -z "$prs" ]; then
             echo "no eligible PRs to update"
@@ -47,21 +57,29 @@ jobs:
           fi
 
           conflicts=()
-          while IFS=$'\t' read -r pr branch; do
-            response=$(gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" 2>&1 || true)
+          while IFS=$'\t' read -r pr nodeid branch; do
+            # shellcheck disable=SC2016
+            # $id inside the query string is a GraphQL variable, not a
+            # shell expansion — single quotes are correct, not an oversight.
+            response=$(gh api graphql \
+              -f query='
+                mutation($id: ID!) {
+                  updatePullRequestBranch(input: { pullRequestId: $id, updateMethod: REBASE }) {
+                    pullRequest { number headRefOid }
+                  }
+                }
+              ' \
+              -f id="$nodeid" 2>&1 || true)
             case "$response" in
-              *successfully*)
-                echo "✓ updated #$pr ($branch)"
+              *headRefOid*)
+                # Mutation returned a new head SHA — rebase succeeded
+                echo "✓ rebased #$pr ($branch)"
                 ;;
-              *"up to date"*)
-                # Includes "already up to date" and "up-to-date" variants;
-                # earlier explicit *"already up"* pattern was redundant
-                # (shellcheck SC2221).
+              *"up to date"*|*"upstream branch is equal"*)
+                # GraphQL returns a specific error string when nothing to do
                 echo "= #$pr ($branch) already current"
                 ;;
-              *conflict*)
-                # *"Merge conflict"* was a strict subset of *conflict*
-                # and so could never fire on its own (shellcheck SC2222).
+              *conflict*|*"could not be rebased"*)
                 echo "✗ #$pr ($branch) conflict — author needed"
                 conflicts+=("$pr")
                 # Post a one-time marker comment so author gets a GitHub
@@ -77,7 +95,7 @@ jobs:
                   # code formatting — shellcheck SC2016 is a false positive
                   # because printf treats them as literal characters.
                   # shellcheck disable=SC2016
-                  body=$(printf '%s\n\n🚨 **Auto-update-branch failed** — merge conflict with `main` (trigger commit `%s`). Please rebase / merge manually. This comment posts only once per conflict; delete it to let the bot re-notify on the next event.' "$marker" "$TRIGGER_SHA")
+                  body=$(printf '%s\n\n🚨 **Auto-rebase failed** — conflict with `main` (trigger commit `%s`). Please rebase manually. This comment posts only once per conflict; delete it to let the bot re-notify on the next event.' "$marker" "$TRIGGER_SHA")
                   gh pr comment "$pr" --repo "$REPO" --body "$body" || true
                 fi
                 ;;
