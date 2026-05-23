@@ -143,7 +143,13 @@ pub fn is_ext_change_callee(callee: Option<&str>) -> bool {
     };
     matches!(
         trailing_ident(name),
-        "with_extension" | "with_file_name" | "set_extension" | "set_file_name"
+        "with_extension"
+            | "with_file_name"
+            | "set_extension"
+            | "set_file_name"
+            // C++ std::filesystem::path equivalents
+            | "replace_extension"
+            | "replace_filename"
     )
 }
 
@@ -210,9 +216,9 @@ pub fn classify_sink(callee: Option<&str>) -> (SinkKind, SinkConfidence) {
         // ── Path construction ─────────────────────────────────────────
         // ExtChange: pair with `is_ext_change_callee` (above) to enable the
         // sink-override for short non-path-shaped values like `"json"`.
-        "with_file_name" | "with_extension" | "set_extension" | "set_file_name" => {
-            (ExtChange, High)
-        }
+        "with_file_name" | "with_extension" | "set_extension" | "set_file_name"
+        // C++ std::filesystem::path equivalents
+        | "replace_extension" | "replace_filename" => (ExtChange, High),
         "Path" | "PathBuf" | "Paths" | "URL" => (Join, High),
         "new" => (Join, Medium),
         "from" => (Join, Medium),
