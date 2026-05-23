@@ -198,6 +198,12 @@ pub struct FindMatch {
 pub struct FindResult {
     pub found: bool,
     pub matches: Vec<FindMatch>,
+    /// Total exact/fuzzy candidates considered before default truncation.
+    /// Surfaces silent take(1) so LLM consumers can tell `matches.len() == 1`
+    /// apart from "1 of N picked".
+    pub total_candidates: u32,
+    /// matches.len() — equals total_candidates when `--all` is set.
+    pub returned: u32,
     pub status: String,
 }
 
@@ -294,6 +300,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             .then_with(|| a.3.cmp(&b.3))
     });
 
+    let total_candidates = candidates.len() as u32;
     let selected: Vec<_> = if args.all {
         candidates
     } else {
@@ -317,7 +324,9 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
         })
         .collect();
 
-    let found = !matches.is_empty();
+    let returned = matches.len() as u32;
+    let found = returned > 0;
+    let omitted = total_candidates - returned;
 
     match format {
         OutputFormat::Text => {
@@ -332,12 +341,19 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                     m.kind, m.file, m.line, test_tag, m.name, m.caller_count
                 );
             }
+            if omitted > 0 {
+                eprintln!(
+                    "note: {omitted} more candidate(s) omitted; use --all to see all {total_candidates}"
+                );
+            }
             Ok(())
         }
         _ => {
             let result = FindResult {
                 found,
                 matches,
+                total_candidates,
+                returned,
                 status: "success".to_string(),
             };
             emit(

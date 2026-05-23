@@ -545,11 +545,24 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
                 | ecp_core::graph::ArchivedNodeKind::Interface
         )
     });
+    let mut omitted_kinds: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     let matching_nodes: Vec<(usize, _)> = if has_primary_type {
-        matching_nodes
+        let mut impl_count: u64 = 0;
+        let kept = matching_nodes
             .into_iter()
-            .filter(|(_, n)| !matches!(n.kind, ecp_core::graph::ArchivedNodeKind::Impl))
-            .collect()
+            .filter(|(_, n)| {
+                if matches!(n.kind, ecp_core::graph::ArchivedNodeKind::Impl) {
+                    impl_count += 1;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if impl_count > 0 {
+            omitted_kinds.insert("Impl".to_string(), serde_json::json!(impl_count));
+        }
+        kept
     } else {
         matching_nodes
     };
@@ -580,6 +593,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             "contained_methods": block["contained_methods"],
             "contained_properties": block["contained_properties"],
             "contained_variants": block["contained_variants"],
+            "omitted_kinds": omitted_kinds,
         });
         if block.get("heuristic_note").is_some() {
             let obj = result.as_object_mut().unwrap();
@@ -594,6 +608,12 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             obj.insert(
                 "heuristic_note".to_string(),
                 block["heuristic_note"].clone(),
+            );
+        }
+        if !result["omitted_kinds"].as_object().unwrap().is_empty() {
+            let impl_n = result["omitted_kinds"]["Impl"].as_u64().unwrap_or(0);
+            eprintln!(
+                "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
             );
         }
         return emit(&result, format);
@@ -614,6 +634,15 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         })
         .collect();
 
+    if !omitted_kinds.is_empty() {
+        let impl_n = omitted_kinds
+            .get("Impl")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        eprintln!(
+            "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
+        );
+    }
     let result = serde_json::json!({
         "status": "ambiguous",
         "message": format!(
@@ -622,6 +651,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             name
         ),
         "matches": blocks,
+        "omitted_kinds": omitted_kinds,
     });
     emit(&result, format)
 }
