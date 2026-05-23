@@ -1,0 +1,107 @@
+name: ecp PR analyze
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+# Each PR's analysis runs independently; multiple PRs can run in parallel.
+# Re-runs on the same PR cancel in-flight (only the latest analysis matters).
+concurrency:
+  group: ecp-pr-analyze-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+  issues: write  # for PR comment cache writes
+
+# Pin ECP_HOME to a stable workspace-local path so ecp index + ecp dev pr-analyze
+# resolve the same graph.bin without glob-search. ecp reads $ECP_HOME via
+# resolve_home_ecp() (ecp-core/src/registry/path.rs:78) and graph_path.rs
+# resolves the per-commit subdir from HEAD sha automatically — no --graph flag needed.
+env:
+  ECP_HOME: ${{ github.workspace }}/.ecp-home
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base ref
+        run: git fetch origin main:refs/remotes/origin/main
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: ""
+
+      - name: Cache ecp graph + cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ECP_HOME }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ecp-pr-analyze-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build ecp (release)
+        run: cargo build -p egent-code-plexus --bin ecp --release
+
+      - name: Index repo
+        run: ./target/release/ecp index
+
+      - name: Run pr-analyze
+        id: analyze
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./target/release/ecp \
+            dev pr-analyze \
+            --baseline origin/main \
+            --pr-head HEAD \
+            --pr-number ${{ github.event.pull_request.number }} \
+            --format json \
+            > /tmp/analysis.json
+          cat /tmp/analysis.json
+
+      - name: Apply labels + commit status
+        if: steps.analyze.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 1) Remove stale ecp:* labels, then add suggested ones
+          for stale in $(gh pr view "$PR" --json labels --jq '.labels[].name' | grep '^ecp:' || true); do
+            gh pr edit "$PR" --remove-label "$stale"
+          done
+          for label in $(jq -r '.suggested_labels[]' /tmp/analysis.json); do
+            gh label create "$label" --color "ededed" --description "ecp signal" 2>/dev/null || true
+            gh pr edit "$PR" --add-label "$label"
+          done
+
+          # 2) Push commit status
+          CONTEXT=$(jq -r '.suggested_status.context' /tmp/analysis.json)
+          STATE=$(jq -r '.suggested_status.state' /tmp/analysis.json)
+          DESC=$(jq -r '.suggested_status.description' /tmp/analysis.json)
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f context="$CONTEXT" -f state="$STATE" -f description="$DESC"
+
+      - name: Log analysis failure (non-blocking)
+        if: steps.analyze.outcome != 'success'
+        run: |
+          echo "::warning::ecp pr-analyze failed — PR falls to default Mergify queue"
