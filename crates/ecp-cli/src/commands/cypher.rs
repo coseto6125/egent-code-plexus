@@ -182,6 +182,18 @@ fn value_to_json_value(v: &cypher::Value) -> serde_json::Value {
         } => {
             serde_json::json!({"rel_type": format!("{rel_type:?}"), "confidence": confidence, "reason": reason})
         }
+        // ArchivedStrList only reaches here if it escapes the executor boundary,
+        // which should not happen in practice (into_owned() is called first).
+        // Handled defensively to keep the match exhaustive.
+        cypher::Value::ArchivedStrList { items, pool } => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|d| {
+                    let s = d.resolve(pool);
+                    serde_json::json!(s.strip_prefix('@').unwrap_or(s))
+                })
+                .collect(),
+        ),
     }
 }
 

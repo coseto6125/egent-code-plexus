@@ -14,7 +14,7 @@ struct Binding {
     edge_vars: HashMap<String, u32>,
     /// Values computed by a prior WITH clause. Checked before node_vars/edge_vars
     /// in prop_value and project_item.
-    computed: HashMap<String, Value>,
+    computed: HashMap<String, Value<'static>>,
 }
 
 /// Reading file content for `.content` projection, plus hot-path caches.
@@ -100,7 +100,7 @@ fn execute_inner(
         .any(|(_, e)| matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)));
 
     let mut columns: Vec<String> = Vec::new();
-    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut rows: Vec<Vec<Value<'static>>> = Vec::new();
 
     if has_agg {
         // Partition expanded items into group-key items and aggregate items.
@@ -116,11 +116,11 @@ fn execute_inner(
         }
 
         // Group bindings by key values.
-        let mut groups: Vec<(Vec<Value>, Vec<Binding>)> = Vec::new();
+        let mut groups: Vec<(Vec<Value<'static>>, Vec<Binding>)> = Vec::new();
         let mut key_index: HashMap<String, usize> = HashMap::new();
 
         for b in &bindings {
-            let key_vals: Result<Vec<Value>, CypherError> = group_items
+            let key_vals: Result<Vec<Value<'static>>, CypherError> = group_items
                 .iter()
                 .map(|(_, e)| eval_return_expr(e, b, graph, cache))
                 .collect();
@@ -250,13 +250,13 @@ fn execute_inner(
     Ok(QueryResult { columns, rows })
 }
 
-fn dedup_rows(rows: &mut Vec<Vec<Value>>) {
+fn dedup_rows(rows: &mut Vec<Vec<Value<'static>>>) {
     let mut seen = HashSet::new();
     rows.retain(|row| seen.insert(format!("{row:?}")));
 }
 
 /// Compare two optional row cell values for ORDER BY sorting.
-fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
+fn cmp_values(a: Option<&Value<'static>>, b: Option<&Value<'static>>) -> std::cmp::Ordering {
     match (a, b) {
         (None, None) => std::cmp::Ordering::Equal,
         (None, Some(_)) => std::cmp::Ordering::Less,
@@ -265,7 +265,7 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     }
 }
 
-fn cmp_value_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
+fn cmp_value_pair(a: &Value<'static>, b: &Value<'static>) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
         // Null sorts before everything.
@@ -372,9 +372,9 @@ fn eval_return_expr(
     b: &Binding,
     graph: &ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
-) -> Result<Value, CypherError> {
+) -> Result<Value<'static>, CypherError> {
     match expr {
-        ReturnExpr::Prop(var, prop) => Ok(prop_value(var, prop, b, graph, cache)),
+        ReturnExpr::Prop(var, prop) => Ok(prop_value(var, prop, b, graph, cache).into_owned()),
         ReturnExpr::Var(var) => {
             if let Some(v) = b.computed.get(var) {
                 Ok(v.clone())
@@ -400,7 +400,7 @@ fn eval_return_expr(
 }
 
 /// Stable string key for a Value (used as group-by key; avoids Hash on Value).
-fn value_key(v: &Value) -> String {
+fn value_key(v: &Value<'static>) -> String {
     format!("{v:?}")
 }
 
@@ -412,7 +412,7 @@ fn eval_return_item_rich(
     b: &Binding,
     graph: &ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
-) -> Value {
+) -> Value<'static> {
     match &item.expr {
         ReturnExpr::Var(var) => {
             // Check computed first.
@@ -449,7 +449,7 @@ fn eval_return_item_rich(
             }
             Value::Null
         }
-        ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph, cache),
+        ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph, cache).into_owned(),
         ReturnExpr::Star => Value::Null,
         ReturnExpr::FunCall { name, args, .. } => eval_scalar_funcall(name, args, b, graph),
     }
@@ -486,13 +486,13 @@ fn exec_with(
             )
             .collect();
 
-        type GroupEntry = (Vec<(String, Value)>, Vec<Binding>);
+        type GroupEntry = (Vec<(String, Value<'static>)>, Vec<Binding>);
         // Group bindings by key values.
         let mut groups: Vec<GroupEntry> = Vec::new();
         let mut key_index: HashMap<String, usize> = HashMap::new();
 
         for b in &bindings {
-            let key_pairs: Vec<(String, Value)> = group_items
+            let key_pairs: Vec<(String, Value<'static>)> = group_items
                 .iter()
                 .map(|gi| {
                     let col = gi
@@ -518,7 +518,7 @@ fn exec_with(
         // Produce one output Binding per group.
         let mut result = Vec::with_capacity(groups.len());
         for (key_pairs, group) in &groups {
-            let mut computed: HashMap<String, Value> = HashMap::new();
+            let mut computed: HashMap<String, Value<'static>> = HashMap::new();
             for (col, val) in key_pairs {
                 computed.insert(col.clone(), val.clone());
             }
@@ -549,7 +549,7 @@ fn exec_with(
         // subsequent MATCH clauses can still traverse them.
         let mut result = Vec::with_capacity(bindings.len());
         for b in &bindings {
-            let mut computed: HashMap<String, Value> = HashMap::new();
+            let mut computed: HashMap<String, Value<'static>> = HashMap::new();
             for item in &wc.items {
                 let col = item
                     .alias
@@ -599,7 +599,7 @@ fn eval_scalar_funcall(
     args: &[Expr],
     b: &Binding,
     graph: &ArchivedZeroCopyGraph,
-) -> Value {
+) -> Value<'static> {
     match name {
         "TYPE" => {
             // type(r) — args[0] must be a Var bound to an edge.
@@ -646,7 +646,7 @@ fn apply_aggregate(
     group: &[Binding],
     graph: &ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
-) -> Result<Value, CypherError> {
+) -> Result<Value<'static>, CypherError> {
     // COUNT(*) sentinel: args = [Lit(Null)]
     let is_count_star = matches!(args, [Expr::Lit(Literal::Null)]);
 
@@ -660,7 +660,7 @@ fn apply_aggregate(
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let mut cnt = 0i64;
                 for b in group {
-                    let v = eval_expr(arg, b, graph, cache)?;
+                    let v = eval_expr(arg, b, graph, cache)?.into_owned();
                     if !matches!(v, Value::Null) {
                         let k = value_key(&v);
                         if seen.insert(k) {
@@ -703,9 +703,9 @@ fn apply_aggregate(
         }
         "MIN" => {
             let arg = &args[0];
-            let mut min: Option<Value> = None;
+            let mut min: Option<Value<'static>> = None;
             for b in group {
-                let v = eval_expr(arg, b, graph, cache)?;
+                let v = eval_expr(arg, b, graph, cache)?.into_owned();
                 if matches!(v, Value::Null) {
                     continue;
                 }
@@ -724,9 +724,9 @@ fn apply_aggregate(
         }
         "MAX" => {
             let arg = &args[0];
-            let mut max: Option<Value> = None;
+            let mut max: Option<Value<'static>> = None;
             for b in group {
-                let v = eval_expr(arg, b, graph, cache)?;
+                let v = eval_expr(arg, b, graph, cache)?.into_owned();
                 if matches!(v, Value::Null) {
                     continue;
                 }
@@ -768,14 +768,14 @@ fn apply_aggregate(
         }
         "COLLECT" => {
             let arg = &args[0];
-            let mut items: Vec<Value> = Vec::new();
+            let mut items: Vec<Value<'static>> = Vec::new();
             let mut seen: Option<std::collections::HashSet<String>> = if distinct {
                 Some(std::collections::HashSet::new())
             } else {
                 None
             };
             for b in group {
-                let v = eval_expr(arg, b, graph, cache)?;
+                let v = eval_expr(arg, b, graph, cache)?.into_owned();
                 if matches!(v, Value::Null) {
                     continue;
                 }
@@ -1022,12 +1022,12 @@ fn walk_rel(from: u32, rel: &RelPat, graph: &ArchivedZeroCopyGraph) -> Vec<(u32,
     out
 }
 
-fn eval_expr(
-    e: &Expr,
-    b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
+fn eval_expr<'arch>(
+    e: &'arch Expr,
+    b: &'arch Binding,
+    graph: &'arch ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
-) -> Result<Value, CypherError> {
+) -> Result<Value<'arch>, CypherError> {
     use Expr::*;
     match e {
         Lit(l) => Ok(lit_to_value(l)),
@@ -1090,6 +1090,17 @@ fn eval_expr(
             let haystack = eval_expr(collection, b, graph, cache)?;
             Ok(Value::Bool(match &haystack {
                 Value::List(items) => items.iter().any(|item| values_eq(&needle, item)),
+                // Zero-alloc fast path for archived decorator slices. FU-2026-05-23-006.
+                Value::ArchivedStrList { items, pool } => {
+                    if let Value::Str(ref needle_str) = needle {
+                        items.iter().any(|d| {
+                            let s = d.resolve(pool);
+                            s.strip_prefix('@').unwrap_or(s) == needle_str.as_str()
+                        })
+                    } else {
+                        false
+                    }
+                }
                 _ => false,
             }))
         }
@@ -1140,7 +1151,7 @@ fn eval_expr(
     }
 }
 
-fn lit_to_value(l: &Literal) -> Value {
+fn lit_to_value(l: &Literal) -> Value<'static> {
     match l {
         Literal::Null => Value::Null,
         Literal::Bool(b) => Value::Bool(*b),
@@ -1186,13 +1197,13 @@ fn slice_by_span(source: &str, span: (u32, u32, u32, u32)) -> String {
     out
 }
 
-fn prop_value(
+fn prop_value<'arch>(
     var: &str,
     prop: &str,
-    b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
+    b: &'arch Binding,
+    graph: &'arch ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
-) -> Value {
+) -> Value<'arch> {
     // Check computed values first (set by WITH clause).
     if let Some(computed_val) = b.computed.get(var) {
         return match computed_val {
@@ -1252,13 +1263,13 @@ fn archived_kind_str(node: &crate::graph::ArchivedNode) -> &'static str {
 /// `node_idx` is the position of `n` in `graph.nodes` — needed for the sparse
 /// `function_metas` binary-search lookup.
 /// `cache` is used for the `content` property (C12).
-fn node_prop_value(
-    n: &crate::graph::ArchivedNode,
+fn node_prop_value<'arch>(
+    n: &'arch crate::graph::ArchivedNode,
     node_idx: u32,
     prop: &str,
-    graph: &ArchivedZeroCopyGraph,
+    graph: &'arch ArchivedZeroCopyGraph,
     cache: &mut ContentCache,
-) -> Value {
+) -> Value<'arch> {
     match prop {
         "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
         // u64 uid stored as i64 bits — no allocation per row.
@@ -1357,32 +1368,24 @@ fn archived_fm_visibility(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> u8 {
     }
 }
 
-/// Return the decorators list for the node's FunctionMeta.
-/// Decorator names are normalized: leading `@` stripped so Python `app.get`
-/// and Java `@Override` are both queryable as `Override` / `app.get`.
-/// Nodes with no FunctionMeta record return an empty list.
-/// TODO: the per-row Vec allocation here is unavoidable with the current
-/// Value::List representation; profile if decorators filtering becomes a hotspot.
-fn archived_fm_decorators(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Value {
-    let items = match graph
+/// Return the decorators list for the node's FunctionMeta as a zero-alloc
+/// borrowed slice. Avoids per-row Vec allocation for the hot
+/// `WHERE 'X' IN m.decorators` path. FU-2026-05-23-006.
+/// Nodes with no FunctionMeta record return an empty List.
+fn archived_fm_decorators(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Value<'_> {
+    match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
     {
-        Ok(i) => graph.function_metas[i]
-            .decorators
-            .iter()
-            .map(|d| {
-                let s = d.resolve(&graph.string_pool);
-                let normalized = s.strip_prefix('@').unwrap_or(s);
-                Value::Str(normalized.to_string())
-            })
-            .collect(),
-        Err(_) => vec![],
-    };
-    Value::List(items)
+        Ok(i) => Value::ArchivedStrList {
+            items: &graph.function_metas[i].decorators,
+            pool: &graph.string_pool,
+        },
+        Err(_) => Value::List(vec![]),
+    }
 }
 
-fn eval_binop(op: Op, l: &Value, r: &Value) -> bool {
+fn eval_binop(op: Op, l: &Value<'_>, r: &Value<'_>) -> bool {
     use Op::*;
     match op {
         Eq => values_eq(l, r),
@@ -1436,7 +1439,7 @@ fn eval_binop(op: Op, l: &Value, r: &Value) -> bool {
     }
 }
 
-fn values_eq(a: &Value, b: &Value) -> bool {
+fn values_eq(a: &Value<'_>, b: &Value<'_>) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -1448,7 +1451,7 @@ fn values_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn value_truthy(v: &Value) -> bool {
+fn value_truthy(v: &Value<'_>) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -2961,6 +2964,26 @@ mod tests {
                 r.rows[0][1],
                 Value::List(vec![]),
                 "decorators must be empty list, not Null"
+            );
+        });
+    }
+
+    // g) RETURN m.decorators materializes ArchivedStrList → List via into_owned().
+    //    Pins that the zero-alloc borrowed variant escapes correctly at the row boundary.
+    #[test]
+    fn fm_decorator_return_materializes_archived_str_list() {
+        with_fm(|g| {
+            let q = parse(
+                "MATCH (m:Function|Method) WHERE m.name = 'override_method' RETURN m.decorators",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            // ArchivedStrList is materialized into List(["Override"]) at row boundary.
+            assert_eq!(
+                r.rows[0][0],
+                Value::List(vec![Value::Str("Override".to_string())]),
+                "decorators must materialize as List of normalized strings"
             );
         });
     }
