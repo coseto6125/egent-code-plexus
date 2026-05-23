@@ -1305,6 +1305,7 @@ fn node_kind_to_str(kind: &NodeKind) -> &'static str {
         NodeKind::EventTopic => "EventTopic",
         NodeKind::TransactionScope => "TransactionScope",
         NodeKind::EnumVariant => "EnumVariant",
+        NodeKind::PathLiteral => "PathLiteral",
     }
 }
 

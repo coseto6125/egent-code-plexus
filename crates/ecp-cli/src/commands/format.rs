@@ -33,6 +33,7 @@ pub fn kind_to_str(kind: &ArchivedNodeKind) -> &'static str {
         ArchivedNodeKind::EventTopic => "EventTopic",
         ArchivedNodeKind::TransactionScope => "TransactionScope",
         ArchivedNodeKind::EnumVariant => "EnumVariant",
+        ArchivedNodeKind::PathLiteral => "PathLiteral",
     }
 }
 
@@ -57,5 +58,6 @@ pub fn rel_to_str(rel: &ArchivedRelType) -> &'static str {
         ArchivedRelType::OpensTxScope => "opens_tx_scope",
         ArchivedRelType::Overrides => "overrides",
         ArchivedRelType::Decorates => "decorates",
+        ArchivedRelType::UsesPathLiteral => "uses_path_literal",
     }
 }
