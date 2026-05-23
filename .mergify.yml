@@ -18,34 +18,34 @@
 
 queue_rules:
   - name: main-test-only
-    conditions:
+    merge_conditions:
       - base=main
       - check-success=ecp/cross-pr-conflict
     batch_size: 10
     batch_max_wait_time: 30s
 
   - name: main-parser-changes
-    conditions:
+    merge_conditions:
       - base=main
       - check-success=ecp/cross-pr-conflict
     batch_size: 1
 
   - name: main-cli-changes
-    conditions:
+    merge_conditions:
       - base=main
       - check-success=ecp/cross-pr-conflict
     batch_size: 3
     batch_max_wait_time: 2m
 
   - name: main-docs-only
-    conditions:
+    merge_conditions:
       - base=main
       - check-success=ecp/cross-pr-conflict
     batch_size: 20
     batch_max_wait_time: 10s
 
   - name: main-default
-    conditions:
+    merge_conditions:
       - base=main
       - check-success=ecp/cross-pr-conflict
     batch_size: 2
