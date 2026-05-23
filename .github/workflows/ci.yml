@@ -21,10 +21,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `labeled` / `unlabeled` listed so adding the `ci:run` label fires a
-    # workflow run. Defaults [opened, synchronize, reopened] must be re-
-    # declared because specifying `types:` drops the implicit defaults.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
     branches: [main]
   # Merge queue: GitHub builds a temporary `gh-readonly-queue/main/...` branch
   # combining PRs + main, and runs CI on that combined state. Without this
@@ -199,25 +195,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    # PR-time test gating: the author opts in by adding the `ci:run` label.
-    # Pattern is the GitHub-personal-repo substitute for merge queue / self-
-    # approve (PR authors can't approve their own PRs). Once labeled,
-    # subsequent `synchronize` events keep firing test as long as the label
-    # is present; remove the label to pause test on further pushes.
-    #
-    # Non-PR events (push:main / merge_group / workflow_dispatch) always run
-    # test — they're the post-merge / pre-merge-queue / manual paths and have
-    # no opt-in semantic.
-    #
-    # test-result aggregator below distinguishes PR-skipped (blocking — author
-    # forgot the label) from non-PR-skipped (allowed — docs-only short-circuit
-    # on push:main is legitimate).
+    # Test fires unconditionally on every PR + push + merge_group. Author
+    # opt-in via `ci:run` label was removed once Mergify queue_conditions
+    # took over the merge gate — the label dance conflicted with auto-
+    # routing (queue needs Test green; label toggle to fire Test caused
+    # cancellation races) and was redundant with `detect-changes` already
+    # skipping the test job for docs-only changes.
     if: |
       !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]'))
-      && (
-        github.event_name != 'pull_request'
-        || contains(github.event.pull_request.labels.*.name, 'ci:run')
-      )
     env:
       # 14 tree-sitter parsers × 30+ test binaries × debug-info defaulted to
       # `true` produced ~30 GB in target/debug/deps/ and filled the ubuntu
@@ -306,11 +291,8 @@ jobs:
   #
   # Skip-handling rules:
   #   - `success` → pass (real green)
-  #   - `skipped` on non-PR event → pass (docs-only short-circuit on push:main
-  #     is legitimate; nothing to validate)
-  #   - `skipped` on PR event → FAIL (author opted out by not adding `ci:run`
-  #     label, but branch protection requires test green before merge — this
-  #     forces the label to come on before merge can happen)
+  #   - `skipped` → pass (only possible via [skip ci] in title/message; legit
+  #     opt-out, gate is title-prefix not label)
   #   - anything else (failure / cancelled) → FAIL
   test-result:
     name: Test (all platforms)
@@ -327,13 +309,9 @@ jobs:
           if [ "$TEST_RESULT" = "success" ]; then
             exit 0
           fi
-          if [ "$TEST_RESULT" = "skipped" ] && [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "✓ Skipped on $EVENT_NAME — docs-only short-circuit OK"
-            exit 0
-          fi
           if [ "$TEST_RESULT" = "skipped" ]; then
-            echo "::error::Test was skipped on PR — add 'ci:run' label to fire it before merge"
-            exit 1
+            echo "✓ Skipped — [skip ci] in commit/title"
+            exit 0
           fi
           echo "::error::At least one test shard failed or was cancelled"
           exit 1

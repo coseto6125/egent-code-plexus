@@ -1,58 +1,35 @@
 # Mergify config.
 #
-# Per Mergify best practice:
-# - queue_rules pin `base=` so cross-target-branch PRs can't batch together
-#   (Mergify speculative-trial would re-base each onto the wrong tip).
-# - One pull_request_rule per (area, base) pair selects the target queue
-#   explicitly; without an explicit routing rule, Mergify can't know which
-#   area-specific queue a PR belongs in.
-# - Priority is set declaratively per rule via `queue.priority`, so the
-#   risk-low PRs land at the front of their area queue.
+# Routing pattern (modern Mergify, post-2024):
+# - Each queue_rule carries its own `queue_conditions` — labels, base, and
+#   required-check list a PR must satisfy to auto-enter THIS queue.
+# - `merge_conditions` is what gates the actual merge once embarked.
+# - No `pull_request_rules` needed for routing: Mergify checks each PR
+#   against every queue's `queue_conditions` and embarks it into the first
+#   match. Order queue_rules from most-specific to least-specific.
 #
-# The required-check list is duplicated across routing rules — YAML anchors
-# splice nested lists which Mergify rejects, so DRY isn't available here.
+# Why not pull_request_rules.queue?
+# - That action exists for EXPLICIT enqueuing (commands, advanced filters),
+#   not auto-routing. With only pull_request_rules, the Mergify Merge Queue
+#   check stays at "Merge queue is ready" without ever embarking — confirmed
+#   on PR #386 (manual `@Mergifyio queue` worked, auto did not).
+#
+# The required-check list is duplicated across queue_conditions — YAML
+# anchors splice nested lists which Mergify rejects, so DRY isn't available.
 # Keep the list synced with `gh api repos/.../branches/main/protection`.
 #
-# Adding a new target branch (e.g. `develop`): replicate the 5 queue_rules
-# under `develop-*` names + 5 routing pull_request_rules with `base=develop`.
+# Where does `ecp/cross-pr-conflict` belong?
+# queue_conditions, NOT merge_conditions. Mergify's speculative trial
+# creates a fresh commit (PR diff + main tip) — ecp-pr-analyze.yml
+# triggers on `pull_request` events only, so the trial commit has no
+# cross-pr-conflict status reported against it. Anything required in
+# merge_conditions would thus block the trial indefinitely → dequeue
+# (PR #386 was the live repro). Keeping the check in queue_conditions
+# evaluates it on the PR HEAD where the status actually exists.
 
 queue_rules:
   - name: main-test-only
-    merge_conditions:
-      - base=main
-      - check-success=ecp/cross-pr-conflict
-    batch_size: 10
-    batch_max_wait_time: 30s
-
-  - name: main-parser-changes
-    merge_conditions:
-      - base=main
-      - check-success=ecp/cross-pr-conflict
-    batch_size: 1
-
-  - name: main-cli-changes
-    merge_conditions:
-      - base=main
-      - check-success=ecp/cross-pr-conflict
-    batch_size: 3
-    batch_max_wait_time: 2m
-
-  - name: main-docs-only
-    merge_conditions:
-      - base=main
-      - check-success=ecp/cross-pr-conflict
-    batch_size: 20
-    batch_max_wait_time: 10s
-
-  - name: main-default
-    merge_conditions:
-      - base=main
-      - check-success=ecp/cross-pr-conflict
-    batch_size: 2
-
-pull_request_rules:
-  - name: route area-test to main-test-only
-    conditions:
+    queue_conditions:
       - base=main
       - label=merge-queue
       - label=ecp:area-test
@@ -62,12 +39,14 @@ pull_request_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-    actions:
-      queue:
-        name: main-test-only
+      - check-success=ecp/cross-pr-conflict
+    merge_conditions:
+      - base=main
+    batch_size: 10
+    batch_max_wait_time: 30s
 
-  - name: route area-parser to main-parser-changes
-    conditions:
+  - name: main-parser-changes
+    queue_conditions:
       - base=main
       - label=merge-queue
       - label=ecp:area-parser
@@ -77,12 +56,13 @@ pull_request_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-    actions:
-      queue:
-        name: main-parser-changes
+      - check-success=ecp/cross-pr-conflict
+    merge_conditions:
+      - base=main
+    batch_size: 1
 
-  - name: route area-cli to main-cli-changes
-    conditions:
+  - name: main-cli-changes
+    queue_conditions:
       - base=main
       - label=merge-queue
       - label=ecp:area-cli
@@ -92,12 +72,14 @@ pull_request_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-    actions:
-      queue:
-        name: main-cli-changes
+      - check-success=ecp/cross-pr-conflict
+    merge_conditions:
+      - base=main
+    batch_size: 3
+    batch_max_wait_time: 2m
 
-  - name: route area-docs to main-docs-only
-    conditions:
+  - name: main-docs-only
+    queue_conditions:
       - base=main
       - label=merge-queue
       - label=ecp:area-docs
@@ -107,12 +89,16 @@ pull_request_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-    actions:
-      queue:
-        name: main-docs-only
+      - check-success=ecp/cross-pr-conflict
+    merge_conditions:
+      - base=main
+    batch_size: 20
+    batch_max_wait_time: 10s
 
-  - name: route default to main-default
-    conditions:
+  # Fallback queue — catches PRs with `merge-queue` label but no area label.
+  # Must come last; queue_conditions match via negation on the area-label set.
+  - name: main-default
+    queue_conditions:
       - base=main
       - label=merge-queue
       - -label~=^ecp:area-
@@ -122,14 +108,12 @@ pull_request_rules:
       - check-success=Lint GitHub Actions workflows
       - check-success=CodeQL
       - check-success=dependency-review
-    actions:
-      queue:
-        name: main-default
+      - check-success=ecp/cross-pr-conflict
+    merge_conditions:
+      - base=main
+    batch_size: 2
 
-  # Priority overrides removed in this PR.
-  # Modern Mergify exposes priority via `queue_rules.priority_rules` (per-queue
-  # nested rule list), not via `actions.queue.priority` on pull_request_rules.
-  # Implementing it cleanly requires duplicating priority_rules across all 5
-  # queue_rules (no shared anchor since Mergify YAML rejects nested-list
-  # splice). Tracked in FU-2026-05-23-037 — to be added when priority gets
-  # observed value (i.e. when same-area queue actually backs up).
+# Priority overrides: deferred to FU-2026-05-23-037.
+# Modern Mergify exposes priority via `queue_rules.priority_rules` (per-queue
+# nested rule list). Adding it cleanly requires duplicating priority_rules
+# across all 5 queue_rules. Implement when same-area queue actually backs up.
