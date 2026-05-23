@@ -18,6 +18,7 @@ pub mod inspect;
 pub mod mcp;
 pub mod peers;
 pub mod peers_msg;
+pub mod processes;
 pub mod rename;
 pub mod review;
 pub mod routes;

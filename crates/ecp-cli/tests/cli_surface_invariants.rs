@@ -73,6 +73,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "find-schema-bindings",
     "find-event-mirrors",
     "schema",
+    "processes",
     // Hidden
     "admin",
     "group",
@@ -90,6 +91,11 @@ const GROUP_SUBCMDS: &[&str] = &["sync", "status", "contracts", "impact", "find"
 const PEERS_SUBCMDS: &[&str] = &[
     "status", "diff", "log", "say", "inbox", "thread", "watch", "gc",
 ];
+
+/// `ecp processes <subcmd>` — keep in sync with `ProcessesCommands` enum
+/// in `crates/ecp-cli/src/commands/processes.rs`. Bare `ecp processes` is
+/// the default (list view) and is already covered by TOP_LEVEL_COMMANDS.
+const PROCESSES_SUBCMDS: &[&str] = &["trace"];
 
 /// `ecp admin <subcmd>` — top-level admin operations.
 const ADMIN_SUBCMDS: &[&str] = &[
@@ -168,6 +174,14 @@ fn every_group_subcommand_has_help() {
 fn every_peers_subcommand_has_help() {
     for sub in PEERS_SUBCMDS {
         assert_help_ok(&["peers", sub]);
+    }
+}
+
+#[test]
+fn every_processes_subcommand_has_help() {
+    for sub in PROCESSES_SUBCMDS {
+        // `trace` requires a positional <pattern>; --help must still exit 0.
+        assert_help_ok(&["processes", sub]);
     }
 }
 
