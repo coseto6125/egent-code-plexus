@@ -46,7 +46,7 @@ fn top_level_help_contains_diff() {
 }
 
 #[test]
-fn admin_help_contains_mcp_and_verify_resolver() {
+fn admin_help_contains_mcp() {
     let output = Command::new(ecp_bin())
         .args(["admin", "--help"])
         .output()
@@ -58,7 +58,7 @@ fn admin_help_contains_mcp_and_verify_resolver() {
         "admin --help missing codex: {stdout}"
     );
     assert!(
-        stdout.contains("verify-resolver"),
-        "admin --help missing verify-resolver: {stdout}"
+        !stdout.contains("verify-resolver"),
+        "admin --help should NOT mention verify-resolver (moved to `ecp dev`): {stdout}"
     );
 }

@@ -2,9 +2,6 @@
 //!
 //! Delegates to `commands::summary::build_repo_health` per member; results
 //! are concatenated in parallel and emitted as a flat array.
-//!
-//! Was `ecp group coverage` pre-rename; the `coverage` alias is kept for one
-//! release for back-compat (see clap `#[command(alias = "coverage")]`).
 
 use clap::Args;
 use ecp_core::registry::{resolve_home_ecp, RegistryFile};

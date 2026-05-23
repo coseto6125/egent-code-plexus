@@ -90,21 +90,6 @@ fn group_summary_unknown_group_exits_nonzero() {
     );
 }
 
-/// Back-compat: `ecp group coverage` must still route to the same handler
-/// while the alias lives. Drop this when the alias is retired.
-#[test]
-fn group_coverage_alias_help_exits_zero() {
-    let out = Command::new(ecp_bin())
-        .args(["group", "coverage", "--help"])
-        .output()
-        .expect("ecp spawn failed");
-    assert!(
-        out.status.success(),
-        "expected exit 0 for `group coverage --help` (alias); stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 // ── Wiring / JSON-shape test ──────────────────────────────────────────────────
 
 /// 2-repo fixture: JSON output must have `summary.per_repo` with 2 entries,

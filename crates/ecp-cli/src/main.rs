@@ -68,7 +68,6 @@ enum Commands {
     /// `blind_spots` lists only LLM-actionable opacity (dynamic-import / reflection / eval);
     /// parser-metric buckets (uid-collision / overload / ifdef-redef) live under `ecp dev uid-audit`.
     /// External-client (HTTP/DB/Redis/queue) usage detail: see `ecp tool-map`.
-    #[command(alias = "coverage")]
     Summary(commands::summary::SummaryArgs),
     /// List HTTP routes; with path, show handler + caller chain
     Routes(commands::routes::RoutesArgs),

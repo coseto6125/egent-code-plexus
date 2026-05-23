@@ -58,10 +58,6 @@ pub enum AdminCommands {
     },
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
-    /// Diff resolver dump against language oracle (ecp-dev QA).
-    /// Deprecated: moved to `ecp dev verify-resolver`. Kept here as an
-    /// alias for one release.
-    VerifyResolver(crate::commands::verify_resolver::VerifyResolverArgs),
 }
 
 pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), ecp_core::EcpError> {
@@ -81,6 +77,5 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), ecp_core::
         AdminCommands::Codex { command } => codex::run(command),
         AdminCommands::Gemini { command } => gemini::run(command),
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),
-        AdminCommands::VerifyResolver(args) => crate::commands::verify_resolver::run(args),
     }
 }

@@ -34,7 +34,6 @@ pub enum GroupCommands {
     /// from stdin and re-applies the merge mode per pattern.
     Find(find::FindArgs),
     /// Health report for all group members (per-repo concat)
-    #[command(alias = "coverage")]
     Summary(summary::SummaryArgs),
 }
 

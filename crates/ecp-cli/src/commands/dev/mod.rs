@@ -18,8 +18,6 @@ pub enum DevCommands {
     /// blind spots use `ecp summary`.
     UidAudit(uid_audit::UidAuditArgs),
     /// Diff resolver dump against a language oracle (TP / FP / FN report).
-    /// Moved from `ecp admin verify-resolver`; the admin path stays as an
-    /// alias for one release.
     VerifyResolver(crate::commands::verify_resolver::VerifyResolverArgs),
 }
 

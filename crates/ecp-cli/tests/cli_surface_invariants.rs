@@ -106,7 +106,6 @@ const ADMIN_SUBCMDS: &[&str] = &[
     "codex",
     "gemini",
     "mcp",
-    "verify-resolver",
 ];
 
 /// `ecp admin group <subcmd>` — management-only (no query verbs here).

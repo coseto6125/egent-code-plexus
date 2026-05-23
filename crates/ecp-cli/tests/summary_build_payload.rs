@@ -73,34 +73,3 @@ fn summary_build_payload_with_repo_returns_per_repo_key() {
     // Non-zero exit (selector error) is also acceptable — the important
     // thing is no panic / no process crash.
 }
-
-/// Back-compat alias: the legacy `coverage` verb still routes to the same
-/// command for one release. Drop this test (and the `#[command(alias)]` on
-/// the `Summary` variant) when the alias is retired.
-#[test]
-fn coverage_alias_still_routes_to_summary() {
-    let tmp = tempfile::tempdir().unwrap();
-
-    let out = Command::new(ecp_bin())
-        .args(["coverage", "--format", "json"])
-        .current_dir(tmp.path())
-        .env("HOME", tmp.path())
-        .output()
-        .expect("ecp coverage (alias) failed to spawn");
-
-    assert!(
-        out.status.success(),
-        "ecp coverage (alias) failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout.find('{').expect("expected JSON on stdout");
-    let val: serde_json::Value = serde_json::from_str(&stdout[json_start..]).expect("JSON parse");
-    // Alias must reach the same `summary` payload — not a separate legacy
-    // shape, since the alias is just a clap-level redirection.
-    assert!(
-        val.get("summary").is_some(),
-        "expected `summary` key when invoked via `coverage` alias, got: {val}"
-    );
-}

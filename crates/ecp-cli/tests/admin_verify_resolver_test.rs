@@ -5,11 +5,11 @@ fn ecp_bin() -> &'static str {
 }
 
 #[test]
-fn admin_verify_resolver_help_lists_required_args() {
+fn dev_verify_resolver_help_lists_required_args() {
     let output = Command::new(ecp_bin())
-        .args(["admin", "verify-resolver", "--help"])
+        .args(["dev", "verify-resolver", "--help"])
         .output()
-        .expect("run ecp admin verify-resolver --help");
+        .expect("run ecp dev verify-resolver --help");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -23,6 +23,19 @@ fn admin_verify_resolver_help_lists_required_args() {
     assert!(
         stdout.contains("--ecp"),
         "expected --ecp arg in help: {stdout}"
+    );
+}
+
+#[test]
+fn admin_verify_resolver_alias_removed() {
+    let output = Command::new(ecp_bin())
+        .args(["admin", "verify-resolver", "--help"])
+        .output()
+        .expect("run ecp admin verify-resolver --help");
+    // After alias removal, this subcommand no longer exists under `admin`.
+    assert!(
+        !output.status.success(),
+        "admin verify-resolver should no longer be a recognized subcommand"
     );
 }
 
