@@ -168,6 +168,7 @@ impl ImpactJson {
     /// can ask "which files actually had code changes?" without re-deriving
     /// from `changed_symbols` themselves. Mirrors `impact_set_names` /
     /// `changed_symbol_names` for derived-view symmetry on ImpactJson.
+    #[allow(dead_code)]
     pub fn changed_files(&self) -> Vec<String> {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         self.changed_symbols
