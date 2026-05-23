@@ -102,6 +102,7 @@ fn run_impact(
         confidence_threshold: crate::commands::impact::DEFAULT_CONFIDENCE_THRESHOLD,
         explain_confidence: false,
         format: None,
+        literal: None,
     };
     let v = match impact::build_payload(&args, engine) {
         Ok(v) => v,

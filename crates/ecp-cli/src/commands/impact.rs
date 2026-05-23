@@ -116,6 +116,16 @@ pub struct ImpactArgs {
     /// Output format (mostly internal — agent doesn't set this).
     #[arg(long)]
     pub format: Option<String>,
+
+    /// List sites of a path-shaped string literal by exact value.
+    /// Mutually exclusive with --target/--baseline/<name>. Returns JSON
+    /// with each site's file, line, enclosing fn, and sink classification
+    /// (`sink:read` / `sink:write` / `sink:open-read` / `sink:join` / etc).
+    /// Designed for LLM split-brain queries: `ecp impact --literal
+    /// session_meta.json` answers "where is this file read or written?"
+    /// without writing cypher.
+    #[arg(long = "literal", value_name = "VALUE", conflicts_with_all = ["name", "target", "baseline"])]
+    pub literal: Option<String>,
 }
 
 // ── Test-coverage gap analysis ────────────────────────────────────────────────
@@ -371,6 +381,10 @@ struct ImpactStderrHints {
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     let format = OutputFormat::parse(args.format.as_deref());
+    if let Some(literal_value) = args.literal.clone() {
+        let payload = build_literal_payload(&literal_value, engine)?;
+        return emit(&payload, format);
+    }
     let (payload, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(name) = &hints.empty_hint_name {
         eprintln!(
@@ -396,6 +410,62 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
 #[allow(dead_code)]
 pub fn build_payload(args: &ImpactArgs, engine: &Engine) -> Result<Value, EcpError> {
     build_payload_with_hints(args, engine).map(|(v, _)| v)
+}
+
+/// Build the payload for `ecp impact --literal <VALUE>`. Returns a JSON
+/// object with the literal value and an array of sites: each site carries
+/// file path, line, enclosing function name (if resolved), and the sink
+/// classification (`sink:read|confidence:high`, `sink:write|confidence:medium`,
+/// `sink:free|confidence:high`, etc.).
+fn build_literal_payload(value: &str, engine: &Engine) -> Result<Value, EcpError> {
+    use ecp_core::graph::{ArchivedNodeKind, ArchivedRelType};
+
+    let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
+
+    let mut sites: Vec<Value> = Vec::new();
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        if !matches!(node.kind, ArchivedNodeKind::PathLiteral) {
+            continue;
+        }
+        if node.name.resolve(&graph.string_pool) != value {
+            continue;
+        }
+        let file_node = &graph.files[node.file_idx.to_native() as usize];
+        let file_path = file_node.path.resolve(&graph.string_pool);
+
+        let lit_idx_u32 = idx as u32;
+        let (enclosing_name, sink_reason) = graph
+            .edges
+            .iter()
+            .find(|e| {
+                e.target.to_native() == lit_idx_u32
+                    && matches!(e.rel_type, ArchivedRelType::UsesPathLiteral)
+            })
+            .map(|e| {
+                let src_idx = e.source.to_native() as usize;
+                let src_name = graph.nodes[src_idx]
+                    .name
+                    .resolve(&graph.string_pool)
+                    .to_string();
+                let reason = e.reason.resolve(&graph.string_pool).to_string();
+                (Some(src_name), reason)
+            })
+            .unwrap_or((None, String::new()));
+
+        sites.push(serde_json::json!({
+            "file": file_path,
+            "line": node.span.0.to_native(),
+            "col": node.span.1.to_native(),
+            "enclosing": enclosing_name,
+            "sink_reason": sink_reason,
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "literal": value,
+        "site_count": sites.len(),
+        "sites": sites,
+    }))
 }
 
 // ── Per-symbol library API (used by `ecp group impact`) ─────────────────────
@@ -478,6 +548,7 @@ pub fn run_for_symbol(
         include_heuristic: false,
         confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
         explain_confidence: false,
+        literal: None,
     };
     let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
     let (payload, _hints) = build_payload_with_hints(&args, engine)?;
