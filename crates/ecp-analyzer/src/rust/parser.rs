@@ -1,6 +1,7 @@
 use super::receiver_types::{
-    build_impl_map, collect_local_types, enclosing_function_name, enclosing_impl_or_trait_context,
-    enclosing_impl_type, enclosing_struct_type, extract_rust_calls, impl_trait_name,
+    build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
+    enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_struct_type,
+    extract_rust_calls, impl_trait_name,
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
@@ -55,6 +56,7 @@ struct RustCaptureIndices {
     function: Option<u32>,
     struct_root: Option<u32>,
     enum_root: Option<u32>,
+    enum_variant_root: Option<u32>,
     trait_root: Option<u32>,
     method: Option<u32>,
     module_root: Option<u32>,
@@ -91,6 +93,7 @@ impl RustProvider {
             function: query.capture_index_for_name("function"),
             struct_root: query.capture_index_for_name("struct"),
             enum_root: query.capture_index_for_name("enum"),
+            enum_variant_root: query.capture_index_for_name("enum_variant_node"),
             trait_root: query.capture_index_for_name("trait"),
             method: query.capture_index_for_name("method"),
             module_root: query.capture_index_for_name("module"),
@@ -204,6 +207,9 @@ impl LanguageProvider for RustProvider {
                 } else if cap_idx == idx.enum_root {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Enum);
+                } else if cap_idx == idx.enum_variant_root {
+                    root_span_node = Some(cap.node);
+                    kind = Some(NodeKind::EnumVariant);
                 } else if cap_idx == idx.trait_root {
                     root_span_node = Some(cap.node);
                     kind = Some(NodeKind::Trait);
@@ -370,6 +376,11 @@ impl LanguageProvider for RustProvider {
                         NodeKind::Const | NodeKind::Macro => {
                             // Const/macro inside a function → use function name.
                             enclosing_function_name(root, source)
+                        }
+                        NodeKind::EnumVariant => {
+                            // Variant → enclosing enum name. Walk parent chain
+                            // to find enum_item, then extract its name.
+                            enclosing_enum_name(root, source)
                         }
                         _ => None,
                     };

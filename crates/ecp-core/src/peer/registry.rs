@@ -12,6 +12,10 @@ pub struct PeerSession {
     pub last_touched: DateTime<Utc>,
     pub base_sha: String,
     pub watcher_alive: bool,
+    /// Raw watcher pid from session_meta. `None` = watcher never started;
+    /// `Some(_)` with `!watcher_alive` = watcher pid recorded but process died.
+    /// Lets callers distinguish "not-started" from "dead" without re-reading meta.
+    pub watcher_pid: Option<u32>,
 }
 
 pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
@@ -26,10 +30,10 @@ pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
             continue;
         }
         let id = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if id.is_empty() || id == exclude_self || id.starts_with('.') {
+        if id.is_empty() || id == exclude_self || id.starts_with('.') || id.contains(".stale-") {
             continue;
         }
-        let meta_path = path.join("meta.json");
+        let meta_path = path.join("session_meta.json");
         let Ok(meta) = SessionMeta::read(&meta_path) else {
             continue;
         };
@@ -47,6 +51,7 @@ pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
             last_touched,
             base_sha: meta.base_sha,
             watcher_alive,
+            watcher_pid: meta.watcher_pid,
         });
     }
     out

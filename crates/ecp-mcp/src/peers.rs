@@ -4,8 +4,8 @@
 //! no usable args (the sub-subcommand sits one clap level below the visible
 //! root). We replace that with a hand-rolled `ecp_peers` tool that carries
 //! a `subcmd` discriminator (`status` / `diff` / `log` / `say` / `inbox` /
-//! `thread`); `ecp peers gc` is intentionally omitted — it's a maintenance
-//! op, not an agent action.
+//! `thread`); `ecp peers gc` and `ecp peers watch` are intentionally omitted
+//! — both are lifecycle / maintenance ops, not agent actions.
 //!
 //! Dispatch path: `spawn::peel_subcmd` lifts the JSON `subcmd` field out and
 //! prepends it as the first arg, yielding `ecp peers <subcmd> [flags...]`.
@@ -75,6 +75,11 @@ fn tool_peers() -> DerivedTool {
                 "msg_id": {
                     "type": "string",
                     "description": "[thread] msg_id returned by say or seen in log."
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["text", "json"],
+                    "description": "[status] Output format. `json` returns an array with session_id, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid."
                 },
                 "repo": {
                     "type": "string",

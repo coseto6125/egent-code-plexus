@@ -1144,6 +1144,13 @@ fn run_bfs(
                         hidden_conf_edges += 1;
                         continue;
                     }
+                    // Structural containment edges (Defines, HasMethod, HasProperty,
+                    // Imports) describe where a symbol lives, not who calls it.
+                    // Exclude from upstream BFS so File→Function Defines does not
+                    // register as a caller.
+                    if edge.rel_type.is_scope_containment() {
+                        continue;
+                    }
                     let is_heur = edge.rel_type.is_heuristic();
                     if is_heur && !include_heuristic {
                         hidden_heuristic_edges += 1;
@@ -1180,6 +1187,9 @@ fn run_bfs(
                         hidden_conf_edges += 1;
                         continue;
                     }
+                    if edge.rel_type.is_scope_containment() {
+                        continue;
+                    }
                     let is_heur = edge.rel_type.is_heuristic();
                     if is_heur && !include_heuristic {
                         hidden_heuristic_edges += 1;
@@ -1212,6 +1222,9 @@ fn run_bfs(
                     let edge_conf = edge.confidence.to_native();
                     if edge_conf < min_conf {
                         hidden_conf_edges += 1;
+                        continue;
+                    }
+                    if edge.rel_type.is_scope_containment() {
                         continue;
                     }
                     let is_heur = edge.rel_type.is_heuristic();
@@ -1291,6 +1304,7 @@ fn node_kind_to_str(kind: &NodeKind) -> &'static str {
         NodeKind::SchemaField => "SchemaField",
         NodeKind::EventTopic => "EventTopic",
         NodeKind::TransactionScope => "TransactionScope",
+        NodeKind::EnumVariant => "EnumVariant",
     }
 }
 

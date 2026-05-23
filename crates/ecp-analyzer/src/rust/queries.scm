@@ -8,6 +8,15 @@
   (visibility_modifier)? @export
   name: (type_identifier) @enum_item.name) @enum
 
+;; Enum variants — one capture per variant inside the enum body.
+;; Struct-form `V { f }` and tuple-form `V(T)` both use `enum_variant`;
+;; only the name is captured — payload shape stays in the source bytes.
+;; `enum_variant.name` is an `identifier`, not `type_identifier`.
+(enum_item
+  body: (enum_variant_list
+    (enum_variant
+      name: (identifier) @enum_variant.name) @enum_variant_node))
+
 ;; Traits
 (trait_item
   (visibility_modifier)? @export

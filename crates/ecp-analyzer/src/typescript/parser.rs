@@ -86,6 +86,7 @@ struct TypeScriptCaptureIndices {
     variable: Option<u32>,
     typedef: Option<u32>,
     enum_kind: Option<u32>,
+    enum_member_node: Option<u32>,
     // Metadata-only captures.
     export: Option<u32>,
     heritage: Option<u32>,
@@ -144,6 +145,7 @@ impl TypeScriptProvider {
             variable: query.capture_index_for_name("variable"),
             typedef: query.capture_index_for_name("typedef"),
             enum_kind: query.capture_index_for_name("enum"),
+            enum_member_node: query.capture_index_for_name("enum_member_node"),
             export: query.capture_index_for_name("export"),
             heritage: query.capture_index_for_name("heritage"),
             type_ann: query.capture_index_for_name("type"),
@@ -359,6 +361,7 @@ impl LanguageProvider for TypeScriptProvider {
                     || cap_idx == idx.variable
                     || cap_idx == idx.typedef
                     || cap_idx == idx.enum_kind
+                    || cap_idx == idx.enum_member_node
                 {
                     root_span_node = Some(cap.node);
                 }

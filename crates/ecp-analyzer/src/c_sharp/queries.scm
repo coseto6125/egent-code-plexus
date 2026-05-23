@@ -31,6 +31,12 @@
   (base_list (_)* @heritage)?
 ) @enum
 
+;; Enum members — `enum Status { Active = 0, Inactive = 1 }`
+(enum_declaration
+  body: (enum_member_declaration_list
+    (enum_member_declaration
+      name: (identifier) @enum_member.name) @enum_member_node))
+
 ;; Records
 (record_declaration
   (attribute_list)* @decorator

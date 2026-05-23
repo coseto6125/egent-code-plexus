@@ -270,6 +270,7 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { name: "EventTopicMirror", utility: "B", heuristic: true, note: "Heuristic: EventTopic → SchemaField when payload shape inferable. Confidence < 0.85." },
     RelTypeEntry { name: "OpensTxScope", utility: "A", heuristic: false, note: "Reverse edge from TransactionScope back to opener Function/Method. Direction reads as 'scope's opener is X'." },
     RelTypeEntry { name: "Overrides", utility: "A", heuristic: false, note: "Method-level override (Java @Override, Kotlin override fun, C# override, C++ virtual-match). Distinct from class-level Extends." },
+    RelTypeEntry { name: "Decorates", utility: "A", heuristic: false, note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
 ];
 
 fn reltypes(args: FormatArgs) -> Result<(), EcpError> {
@@ -342,6 +343,7 @@ const NODE_KINDS: &[NodeKindEntry] = &[
     NodeKindEntry { name: "SchemaField", category: "data", distinction: "DB column / ORM model field. Distinct from Property so migration-drift queries don't false-hit in-memory fields." },
     NodeKindEntry { name: "EventTopic", category: "framework", distinction: "Kafka topic / SNS topic / EventBridge rule. Carries routing semantics — distinct from Const." },
     NodeKindEntry { name: "TransactionScope", category: "framework", distinction: "Transaction boundary (@Transactional, BEGIN…COMMIT). Distinct from Function so atomicity queries resolve at the right granularity." },
+    NodeKindEntry { name: "EnumVariant", category: "type", distinction: "Individual case/member of an Enum (TS enum member, Rust enum variant, Java/Kotlin enum constant, Swift case). 8-language emission. Distinct from Property because it belongs to the Enum's discriminant set, not the in-memory field set." },
 ];
 
 fn node_kinds(args: FormatArgs) -> Result<(), EcpError> {
@@ -467,12 +469,13 @@ mod tests {
 
     #[test]
     fn reltypes_inventory_count_matches_repr_u8_enum() {
-        // RelType currently has 18 variants. If a new variant lands, this
-        // inventory must be updated in lockstep to keep the JSON ordinal
-        // matching the rkyv discriminant.
+        // RelType currently has 19 variants (post-merge with origin/main:
+        // `Decorates` added in #365). If a new variant lands, bump this
+        // number AND append the entry to RELTYPES. RelType has no
+        // VARIANT_COUNT constant like NodeKind does — manual sync.
         assert_eq!(
             RELTYPES.len(),
-            18,
+            19,
             "reltypes inventory drifted from RelType enum"
         );
     }

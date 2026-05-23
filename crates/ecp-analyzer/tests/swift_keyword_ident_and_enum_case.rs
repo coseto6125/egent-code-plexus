@@ -80,41 +80,53 @@ fn tuple_let_destructure_still_works() {
 
 #[test]
 fn enum_case_simple_emits_property() {
+    // Emits as EnumVariant (was Property before NodeKind::EnumVariant was added).
     let g = parse("enum E {\n    case foo\n    case bar\n}\n");
-    let props = names_of(&g, NodeKind::Property);
-    assert!(props.contains(&"foo"), "expected foo in {props:?}");
-    assert!(props.contains(&"bar"), "expected bar in {props:?}");
+    let variants = names_of(&g, NodeKind::EnumVariant);
+    assert!(variants.contains(&"foo"), "expected foo in {variants:?}");
+    assert!(variants.contains(&"bar"), "expected bar in {variants:?}");
 }
 
 #[test]
 fn enum_case_with_associated_values_emits_property() {
-    // Alamofire AFError-style associated-value cases.
+    // Alamofire AFError-style associated-value cases emit as EnumVariant.
     let g = parse(
         "enum AFError {\n    case bodyPartFileIsDirectory(at: URL)\n    case bodyPartFileNotReachable(at: URL)\n}\n",
     );
-    let props = names_of(&g, NodeKind::Property);
-    assert!(props.contains(&"bodyPartFileIsDirectory"), "{props:?}");
-    assert!(props.contains(&"bodyPartFileNotReachable"), "{props:?}");
+    let variants = names_of(&g, NodeKind::EnumVariant);
+    assert!(
+        variants.contains(&"bodyPartFileIsDirectory"),
+        "{variants:?}"
+    );
+    assert!(
+        variants.contains(&"bodyPartFileNotReachable"),
+        "{variants:?}"
+    );
 }
 
 #[test]
 fn enum_case_multi_name_emits_one_property_per_name() {
     // `case a, b, c` packs three simple_identifier children into one
-    // enum_entry; emit three Property nodes.
+    // enum_entry; emit three EnumVariant nodes.
     let g = parse("enum E { case a, b, c }\n");
-    let props = names_of(&g, NodeKind::Property);
-    assert!(props.contains(&"a"));
-    assert!(props.contains(&"b"));
-    assert!(props.contains(&"c"));
+    let variants = names_of(&g, NodeKind::EnumVariant);
+    assert!(variants.contains(&"a"));
+    assert!(variants.contains(&"b"));
+    assert!(variants.contains(&"c"));
 }
 
 #[test]
 fn enum_without_cases_emits_no_property() {
-    // Regression guard.
+    // Regression guard: enum methods must not surface as Property or EnumVariant.
     let g = parse("enum E {\n    func foo() {}\n}\n");
     let props = names_of(&g, NodeKind::Property);
+    let variants = names_of(&g, NodeKind::EnumVariant);
     assert!(
         props.is_empty(),
         "enum methods must not leak as Property; got {props:?}"
+    );
+    assert!(
+        variants.is_empty(),
+        "enum methods must not leak as EnumVariant; got {variants:?}"
     );
 }

@@ -16,14 +16,15 @@ impl LangSpec for CppSpec {
     const NAME: &'static str = "cpp";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
-        "name.function"  => NodeKind::Function,
-        "name.class"     => NodeKind::Class,
-        "name.struct"    => NodeKind::Struct,
-        "name.method"    => NodeKind::Method,
-        "name.macro"     => NodeKind::Macro,
-        "name.namespace" => NodeKind::Namespace,
-        "name.enum"      => NodeKind::Enum,
-        "name.typedef"   => NodeKind::Typedef,
+        "name.function"   => NodeKind::Function,
+        "name.class"      => NodeKind::Class,
+        "name.struct"     => NodeKind::Struct,
+        "name.method"     => NodeKind::Method,
+        "name.macro"      => NodeKind::Macro,
+        "name.namespace"  => NodeKind::Namespace,
+        "name.enum"       => NodeKind::Enum,
+        "name.enumerator" => NodeKind::EnumVariant,
+        "name.typedef"    => NodeKind::Typedef,
     };
 
     // C++ uses flat translation-unit / namespace scope; no runtime

@@ -274,6 +274,7 @@ impl LanguageProvider for CppProvider {
         let idx_macro = self.query.capture_index_for_name("macro");
         let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_enum_node = self.query.capture_index_for_name("enum_node");
+        let idx_enumerator_node = self.query.capture_index_for_name("enumerator_node");
         let idx_typedef_node = self.query.capture_index_for_name("typedef_node");
         let _idx_override_marker = self.query.capture_index_for_name("override_marker");
 
@@ -329,6 +330,7 @@ impl LanguageProvider for CppProvider {
                     || cap_idx == idx_macro
                     || cap_idx == idx_namespace
                     || cap_idx == idx_enum_node
+                    || cap_idx == idx_enumerator_node
                     || cap_idx == idx_typedef_node
                 {
                     root_span_node = Some(cap.node);

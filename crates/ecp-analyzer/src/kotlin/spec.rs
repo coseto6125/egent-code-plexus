@@ -31,10 +31,10 @@ impl LangSpec for KotlinSpec {
         // an `enum_entry` per identifier inside `enum_class_body`. The
         // parent enum class is already captured as `class.name` (promoted
         // to `Enum` by `is_enum_class` at parser.rs:282); the entries
-        // themselves were silently dropped pre-fix, leaving 15 ref_over
-        // rows on `.sample_repo` (OperatingSystem.{Linux,MacOS,Windows,...}
-        // family in `Dart/extensions/intellij/.../*.kt`).
-        "enum_entry.name"  => NodeKind::Enum,
+        // emit as `EnumVariant` so state-machine / exhaustiveness queries
+        // resolve to the correct level (was `Enum` before NodeKind::EnumVariant
+        // was introduced).
+        "enum_entry.name"  => NodeKind::EnumVariant,
     };
 
     // Kotlin uses query-level scope anchoring; no runtime scope gate needed.

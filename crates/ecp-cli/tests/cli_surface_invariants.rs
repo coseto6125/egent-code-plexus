@@ -87,7 +87,9 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
 const GROUP_SUBCMDS: &[&str] = &["sync", "status", "contracts", "impact", "find", "summary"];
 
 /// `ecp peers <subcmd>` — keep in sync with `PeersCmd` enum.
-const PEERS_SUBCMDS: &[&str] = &["status", "diff", "log", "say", "inbox", "thread", "gc"];
+const PEERS_SUBCMDS: &[&str] = &[
+    "status", "diff", "log", "say", "inbox", "thread", "watch", "gc",
+];
 
 /// `ecp admin <subcmd>` — top-level admin operations.
 const ADMIN_SUBCMDS: &[&str] = &[

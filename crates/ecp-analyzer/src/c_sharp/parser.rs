@@ -2,7 +2,8 @@ use super::receiver_types::extract_csharp_calls;
 use super::spec::CSharpSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, push_blind_spot, FrameworkPatternSpec,
+    collect_dotnet_transactional_scopes, detect_ast_framework_patterns, push_blind_spot,
+    FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -91,6 +92,7 @@ struct CSharpCaptureIndices {
     constructor: Option<u32>,
     namespace: Option<u32>,
     enum_: Option<u32>,
+    enum_member_node: Option<u32>,
     struct_: Option<u32>,
     // BlindSpot captures (FU-001 P2c).
     blind_activator_create: Option<u32>,
@@ -145,6 +147,7 @@ impl CSharpProvider {
             constructor: query.capture_index_for_name("constructor"),
             namespace: query.capture_index_for_name("namespace"),
             enum_: query.capture_index_for_name("enum"),
+            enum_member_node: query.capture_index_for_name("enum_member_node"),
             struct_: query.capture_index_for_name("struct"),
             blind_activator_create: query.capture_index_for_name("blind.activator_create"),
             blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
@@ -199,6 +202,7 @@ impl LanguageProvider for CSharpProvider {
         let idx_constructor = idx.constructor;
         let idx_namespace = idx.namespace;
         let idx_enum = idx.enum_;
+        let idx_enum_member_node = idx.enum_member_node;
         let idx_struct = idx.struct_;
 
         while let Some(m) = matches.next() {
@@ -292,6 +296,7 @@ impl LanguageProvider for CSharpProvider {
                     || Some(cap_idx) == idx_constructor
                     || Some(cap_idx) == idx_namespace
                     || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_enum_member_node
                     || Some(cap_idx) == idx_struct)
                     && root_span_node.is_none()
                 {
@@ -433,6 +438,10 @@ impl LanguageProvider for CSharpProvider {
             crate::function_meta::csharp::extract(tree.root_node(), source, &nodes, file_category);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        let tx_scopes = collect_dotnet_transactional_scopes(
+            &nodes,
+            &[NodeKind::Method, NodeKind::Constructor, NodeKind::Function],
+        );
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -445,7 +454,7 @@ impl LanguageProvider for CSharpProvider {
             blind_spots,
             schema_fields: None,
             event_topics: None,
-            tx_scopes: None,
+            tx_scopes,
             call_metas: vec![],
             raw_function_metas,
         })

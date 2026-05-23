@@ -343,7 +343,8 @@ impl LanguageProvider for SwiftProvider {
             // into a single `enum_entry`, each as a separate `simple_identifier`
             // child, so the query produces N name captures per match. Always
             // type-level (enum_entry only ever sits inside enum_class_body),
-            // so no scope walker is needed — emit Property directly.
+            // so no scope walker is needed. Emits EnumVariant (changed from
+            // Property — owner_class stamped by stamp_owner_class_by_span).
             if let (Some(ec_root), false) = (enum_case_root, enum_case_names.is_empty()) {
                 let start = ec_root.start_position();
                 let end = ec_root.end_position();
@@ -363,10 +364,10 @@ impl LanguageProvider for SwiftProvider {
                             heritage: vec![],
                             type_annotation: None,
                             name: name_str.to_string(),
-                            kind: NodeKind::Property,
+                            kind: NodeKind::EnumVariant,
                             span,
                             calls: Vec::new(),
-                            owner_class: None,
+                            owner_class: None, // stamped by stamp_owner_class_by_span
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[ec_root.start_byte()..ec_root.end_byte()],
                             ),

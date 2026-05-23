@@ -99,7 +99,11 @@
   (class_heritage (implements_clause (type_identifier) @heritage))?
 ) @class
 
+;; Exported class: TS grammar attaches decorators to export_statement, not
+;; class_declaration, when the pattern is `@Dec export class Foo {}`.
+;; Capture from both positions so both decorator styles resolve.
 (export_statement
+  (decorator)* @decorator
   (class_declaration
     (decorator)* @decorator
     name: (type_identifier) @class.name
@@ -119,7 +123,9 @@
   (class_heritage (implements_clause (type_identifier) @heritage))?
 ) @class
 
+;; Exported abstract class — same decorator-position quirk as regular exported class.
 (export_statement
+  (decorator)* @decorator
   (abstract_class_declaration
     (decorator)* @decorator
     name: (type_identifier) @class.name
@@ -248,6 +254,19 @@
     name: (identifier) @enum.name
   ) @enum
 ) @export
+
+;; Enum members — `enum X { A, B = 1, C = "c" }`.
+;; tree-sitter-typescript has no `enum_member` node; bare members are
+;; `property_identifier` children of `enum_body.name`, and valued members
+;; are `enum_assignment` children of `enum_body`.
+(enum_declaration
+  body: (enum_body
+    name: (property_identifier) @enum_member.name @enum_member_node))
+
+(enum_declaration
+  body: (enum_body
+    (enum_assignment
+      name: (property_identifier) @enum_member.name) @enum_member_node))
 
 ;; Routes — `app.METHOD(path, handler)` form.
 ;; `route.handler` captures the named handler argument when present so the

@@ -54,6 +54,7 @@ impl std::str::FromStr for NodeKind {
             "transactionscope" | "transaction_scope" | "transaction scope" => {
                 Ok(NodeKind::TransactionScope)
             }
+            "enumvariant" | "enum_variant" | "enum variant" => Ok(NodeKind::EnumVariant),
             _ => Err(()),
         }
     }
@@ -82,6 +83,7 @@ impl std::str::FromStr for RelType {
             "EVENTTOPICMIRROR" | "EVENT_TOPIC_MIRROR" => Ok(RelType::EventTopicMirror),
             "OPENSTXSCOPE" | "OPENS_TX_SCOPE" => Ok(RelType::OpensTxScope),
             "OVERRIDES" => Ok(RelType::Overrides),
+            "DECORATES" => Ok(RelType::Decorates),
             _ => Err(()),
         }
     }
@@ -114,6 +116,7 @@ impl RelType {
             Self::EventTopicMirror => "EventTopicMirror",
             Self::OpensTxScope => "OpensTxScope",
             Self::Overrides => "Overrides",
+            Self::Decorates => "Decorates",
         }
     }
 }
@@ -216,6 +219,19 @@ pub enum NodeKind {
     /// about atomicity scope and rollback paths resolve at the right
     /// granularity without scanning all function bodies.
     TransactionScope,
+    // ── Enum variant expansion ──────────────────────────────────────────
+    // Appended at the END to keep rkyv discriminants stable.
+    /// Single member of an enum (Rust `enum X { A }`, TS `enum X { A }`,
+    /// Java/Kotlin/Swift `enum X { case A }`, C# `enum X { A = 5 }`). Carries
+    /// the variant's name; payload shape (associated values / data carriers)
+    /// not modeled — query via `(v.content)` for the source if needed.
+    ///
+    /// LLM-utility filter: (B) Node coverage — without this variant, state
+    /// machine queries and exhaustiveness analysis fall back to grep.
+    /// Enables:
+    ///   `MATCH (e:Enum {name:"Status"})-[:Defines]->(v:EnumVariant) RETURN v`
+    ///   `ecp impact Active --upstream` to find all variant consumers
+    EnumVariant,
 }
 
 impl NodeKind {
@@ -256,7 +272,7 @@ impl NodeKind {
     /// CSR array (`length = VARIANT_COUNT + 1`). Append-only schema rule
     /// means this only ever grows; matching the variant total at the bottom
     /// of the enum keeps the CI green when a new kind lands.
-    pub const VARIANT_COUNT: usize = 27;
+    pub const VARIANT_COUNT: usize = 28;
 
     /// Discriminant as a usize, suitable for indexing into the v10
     /// `kind_offsets` array. Matches the `#[repr(u8)]` order so the
@@ -298,6 +314,7 @@ impl NodeKind {
             Self::SchemaField => "SchemaField",
             Self::EventTopic => "EventTopic",
             Self::TransactionScope => "TransactionScope",
+            Self::EnumVariant => "EnumVariant",
         }
     }
 }
@@ -381,12 +398,40 @@ pub enum RelType {
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     Overrides,
+    /// Edge from a decorated symbol (Class / Function / Method / Property /
+    /// Constructor) to an `Annotation` node OR a resolved annotation class.
+    ///
+    /// LLM-utility filter (C) Edge semantics: decorator-driven dispatch
+    /// (Spring `@Injectable`, Hilt DI, Django `@receiver`, Rust `#[derive]`,
+    /// C# `[Authorize]`) is invisible to graph queries without this edge;
+    /// refactors must use grep + manual cross-reference. With this edge:
+    ///   `MATCH (c:Class)-[:Decorates]->(a:Annotation {name:"Injectable"}) RETURN c`
+    ///   `ecp impact <annotation>` traverses all use sites directly.
+    ///
+    /// Resolution: decorator names are resolved via the same `Resolver` used
+    /// by Calls/Implements. On resolver hit the edge targets the resolved
+    /// class. On miss a synthetic `NodeKind::Annotation` node (deduped per
+    /// name across the whole graph) is emitted as the target.
+    ///
+    /// Appended at the END to preserve rkyv discriminants for existing
+    /// `graph.bin` files.
+    Decorates,
 }
 
 impl ArchivedRelType {
     /// Mirror of `RelType::is_heuristic` for zero-copy graph traversal.
     pub const fn is_heuristic(&self) -> bool {
         matches!(self, Self::MirrorsField | Self::EventTopicMirror)
+    }
+
+    /// Structural containment edges describe "where a symbol lives", not
+    /// "who calls or reaches it". Upstream / downstream impact BFS must
+    /// exclude these so File→Function Defines edges don't register as callers.
+    pub const fn is_scope_containment(&self) -> bool {
+        matches!(
+            self,
+            Self::Defines | Self::HasMethod | Self::HasProperty | Self::Imports
+        )
     }
 }
 

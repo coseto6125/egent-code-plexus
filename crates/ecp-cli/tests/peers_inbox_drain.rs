@@ -11,7 +11,7 @@ fn write_meta(session_dir: &std::path::Path, sid: &str) {
         r#"{{"version":1,"session_id":"{sid}","pid":{pid},"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
         pid = std::process::id()
     );
-    std::fs::write(session_dir.join("meta.json"), meta).unwrap();
+    std::fs::write(session_dir.join("session_meta.json"), meta).unwrap();
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn user_prompt_submit_also_drains_inbox() {
         r#"{{"version":1,"session_id":"{me}","pid":{pid},"started_at":"t","last_touched":"t","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
         pid = std::process::id()
     );
-    std::fs::write(session_dir.join("meta.json"), meta).unwrap();
+    std::fs::write(session_dir.join("session_meta.json"), meta).unwrap();
     let entry = r#"{"type":"message","ts":"t","msg_id":"m_u","from":"bob","to":null,"reply_to":null,"body":"prompt-time-peek"}"#;
     std::fs::write(session_dir.join("inbox.jsonl"), format!("{entry}\n")).unwrap();
 

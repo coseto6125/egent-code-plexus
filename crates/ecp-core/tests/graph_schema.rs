@@ -10,6 +10,8 @@ fn test_from_str_roundtrip_all_new_variants() {
         ("event_topic", NodeKind::EventTopic),
         ("transactionscope", NodeKind::TransactionScope),
         ("transaction_scope", NodeKind::TransactionScope),
+        ("enumvariant", NodeKind::EnumVariant),
+        ("enum_variant", NodeKind::EnumVariant),
     ];
     for (s, expected) in node_cases {
         let got = NodeKind::from_str(s).unwrap_or_else(|_| panic!("from_str({s:?}) failed"));
@@ -46,6 +48,7 @@ fn test_node_kind_discriminants_locked() {
         26,
         "TransactionScope discriminant"
     );
+    assert_eq!(NodeKind::EnumVariant as u8, 27, "EnumVariant discriminant");
 }
 
 #[test]

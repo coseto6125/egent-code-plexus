@@ -1,4 +1,6 @@
-use crate::fetch_shape::{consumer_keys, fetch_urls, format_reason, response_shapes};
+use crate::fetch_shape::{
+    consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
+};
 use crate::framework_helpers::Span;
 use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
@@ -608,8 +610,8 @@ impl GraphBuilder {
         // Pass 1.5: Extract Routes
         let mut route_edges = Vec::new();
         let mut current_handler_idx = 0;
-        // (route_node_idx, file_idx, route_path) — drives Pass 1.6 below.
-        let mut emitted_routes: Vec<(u32, u32, String)> = Vec::new();
+        // (route_node_idx, file_idx, route_method, route_path) — drives Pass 1.6 below.
+        let mut emitted_routes: Vec<(u32, u32, String, String)> = Vec::new();
         for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
             let file_idx = file_idx as u32;
             let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -666,7 +668,12 @@ impl GraphBuilder {
                             reason: string_pool.add("decorator"),
                         });
 
-                        emitted_routes.push((route_idx, file_idx, detected.path.clone()));
+                        emitted_routes.push((
+                            route_idx,
+                            file_idx,
+                            detected.method.clone(),
+                            detected.path.clone(),
+                        ));
                     }
                 }
                 current_handler_idx += 1;
@@ -706,7 +713,12 @@ impl GraphBuilder {
                         }
                     }
 
-                    emitted_routes.push((route_idx, file_idx, detected.path.clone()));
+                    emitted_routes.push((
+                        route_idx,
+                        file_idx,
+                        detected.method.clone(),
+                        detected.path.clone(),
+                    ));
                 }
             }
         }
@@ -762,7 +774,7 @@ impl GraphBuilder {
             };
 
             // 1.6a — RouteShape per Route.
-            for (route_idx, file_idx, _route_path) in &emitted_routes {
+            for (route_idx, file_idx, _route_method, _route_path) in &emitted_routes {
                 let lg = &self.local_graphs[*file_idx as usize];
                 let Some(lang) = lang_for_path(&lg.file_path.to_string_lossy()) else {
                     continue;
@@ -792,14 +804,18 @@ impl GraphBuilder {
                 });
             }
 
-            // 1.6b — Fetches edges. Build path→Vec<route_idx> first
-            // (multiple routes can share a path under different methods —
-            // we link to all of them; downstream tooling already filters
-            // by method when needed).
-            let mut route_by_path: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-            for (route_idx, _file_idx, route_path) in &emitted_routes {
-                route_by_path
-                    .entry(route_path.clone())
+            // 1.6b — Fetches edges.
+            //
+            // RouteIndex: (UPPERCASED_METHOD, normalized_path) → Vec<route_idx>.
+            // `normalize_route_path` coalesces `:param` / `{param}` / `<param>`
+            // to `:*` so `app.get('/api/users/:id')` and
+            // `fetch('/api/users/42')` both resolve to `("GET", "api/users/:*")`
+            // and produce a Fetches edge.
+            let mut route_index: FxHashMap<(String, String), Vec<u32>> = FxHashMap::default();
+            for (route_idx, _file_idx, route_method, route_path) in &emitted_routes {
+                let (norm_path, _) = normalize_route_path(route_path);
+                route_index
+                    .entry((route_method.to_uppercase(), norm_path))
                     .or_default()
                     .push(*route_idx);
             }
@@ -829,7 +845,7 @@ impl GraphBuilder {
             // consumers — skip them on the consumer pass to avoid
             // self-loops where a file `fetch()`es its own route.
             let handler_files: rustc_hash::FxHashSet<u32> =
-                emitted_routes.iter().map(|(_, fi, _)| *fi).collect();
+                emitted_routes.iter().map(|(_, fi, _, _)| *fi).collect();
 
             for (file_idx, lg) in self.local_graphs.iter().enumerate() {
                 let file_idx = file_idx as u32;
@@ -840,51 +856,55 @@ impl GraphBuilder {
                     continue;
                 };
                 let path_str = lg.file_path.to_string_lossy();
-                // URL extraction is JS/TS-only (upstream parity) — skip
-                // other extensions cheaply by not loading them.
-                if lang_for_path(&path_str)
-                    .map(|l| matches!(l, response_shapes::Lang::Php))
-                    .unwrap_or(true)
-                {
-                    // None or Php — neither yields a useful consumer scan.
+                // Allowlist: extensions where `fetch_urls::extract` produces
+                // useful hits. PHP is a route-server language, not a consumer
+                // here; all other unknown extensions are skipped cheaply.
+                if !is_consumer_extension(&path_str) {
                     continue;
                 }
                 let Some(content) = read_content(file_idx, &mut content_cache, &self.local_graphs)
                 else {
                     continue;
                 };
-                let urls = fetch_urls::extract(&content);
-                if urls.is_empty() {
+                let client_calls = fetch_urls::extract(&content);
+                if client_calls.is_empty() {
                     continue;
                 }
                 let keys = consumer_keys::extract(&content);
 
-                // fetch_count = how many distinct route paths this consumer
-                // matches (upstream definition). Compute by intersecting
-                // `urls` with `route_by_path` keys.
-                let matched_paths: Vec<&String> = urls
-                    .iter()
-                    .filter(|u| route_by_path.contains_key(*u))
-                    .collect();
-                if matched_paths.is_empty() {
+                // Resolve each (method, url) pair against the RouteIndex.
+                // Cross-repo misses (no matching Route node) are silently
+                // skipped — ecp contracts handles those separately.
+                let mut matched: Vec<(u32, bool)> = Vec::new(); // (route_idx, is_templated)
+                for (client_method, client_url) in &client_calls {
+                    let (norm_url, client_templated) = normalize_route_path(client_url);
+                    // Route side also normalized via `:*`; the index key carries
+                    // `:*` segments whenever the route had a param placeholder.
+                    let route_templated = norm_url.contains(":*");
+                    if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
+                        for &route_idx in targets {
+                            matched.push((route_idx, client_templated || route_templated));
+                        }
+                    }
+                }
+                if matched.is_empty() {
                     continue;
                 }
-                let fetch_count = matched_paths.len() as u32;
+                let fetch_count = matched.len() as u32;
                 let reason_str = format_reason(&keys, fetch_count);
                 let reason_ref = string_pool.add(&reason_str);
 
-                for url in &matched_paths {
-                    if let Some(targets) = route_by_path.get(*url) {
-                        for &route_idx in targets {
-                            fetches_edges.push(Edge {
-                                source: source_node,
-                                target: route_idx,
-                                rel_type: RelType::Fetches,
-                                confidence: 0.9,
-                                reason: reason_ref,
-                            });
-                        }
-                    }
+                for (route_idx, is_templated) in matched {
+                    // Confidence: 0.8 for exact-path matches, 0.6 for any
+                    // templated segment — caller or callee side.
+                    let confidence = if is_templated { 0.6 } else { 0.8 };
+                    fetches_edges.push(Edge {
+                        source: source_node,
+                        target: route_idx,
+                        rel_type: RelType::Fetches,
+                        confidence,
+                        reason: reason_ref,
+                    });
                 }
             }
         }
@@ -1074,6 +1094,7 @@ impl GraphBuilder {
         }
 
         let reason_heritage = string_pool.add("heritage");
+        let reason_implements = string_pool.add("pass2:implements");
         let reason_type = string_pool.add("type_annotation");
         let reason_call = string_pool.add("call");
 
@@ -1189,8 +1210,10 @@ impl GraphBuilder {
                         raw_node,
                         current_node_idx,
                         reason_heritage,
+                        reason_implements,
                         reason_type,
                         reason_call,
+                        &symbol_table,
                         &mut edges,
                         lookup,
                         &mut pending_call_metas_global,
@@ -1279,8 +1302,10 @@ impl GraphBuilder {
                             raw_node,
                             current_node_idx,
                             reason_heritage,
+                            reason_implements,
                             reason_type,
                             reason_call,
+                            symbol_table_ref,
                             &mut local_edges,
                             lookup,
                             &mut local_pending,
@@ -1569,6 +1594,16 @@ impl GraphBuilder {
             self.symbol_skip_set.as_ref(),
         );
 
+        // Enum → EnumVariant containment edges. Runs after class_membership
+        // (same pipeline position) because EnumVariant owner_class is stamped
+        // by stamp_owner_class_by_span at parse time; no dependency on HasMethod.
+        crate::post_process::enum_variant_defines::emit_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut edges,
+        );
+
         // Override resolution — emits `RelType::Overrides` edges (concrete
         // method → overridden supertype method). Runs after class_membership
         // so HasMethod edges are already in place; before CSR construction so
@@ -1605,6 +1640,32 @@ impl GraphBuilder {
         crate::post_process::event_topic_mirrors::emit_edges(
             &self.local_graphs,
             &symbol_table,
+            &mut string_pool,
+            &mut nodes,
+            &mut edges,
+        );
+
+        // T10: promote `RawTxScope`s → `TransactionScope` Nodes + `OpensTxScope`
+        // edges (fn → TransactionScope). Runs after event_topic_mirrors (sibling
+        // post-process) and before File-node loop for idx-contiguity. Nodes are
+        // NOT registered in SymbolTable — queries reach them via OpensTxScope
+        // traversal from function nodes.
+        crate::post_process::tx_scope_edges::emit_edges(
+            &self.local_graphs,
+            &mut string_pool,
+            &mut nodes,
+            &mut edges,
+        );
+
+        // Decorates edge emission — promotes `RawNode.decorators` to first-class
+        // `Decorates` edges from decorated symbols to `Annotation` nodes (resolved
+        // or synthetic). Runs before File-node loop so synthetic Annotation nodes
+        // land in the raw-symbol index range, consistent with EventTopic / SchemaField.
+        let decorates_resolver =
+            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        crate::post_process::decorates_edges::emit_edges(
+            &self.local_graphs,
+            &decorates_resolver,
             &mut string_pool,
             &mut nodes,
             &mut edges,
@@ -1684,6 +1745,22 @@ impl GraphBuilder {
                 _t_imports_edges.elapsed().as_secs_f32()
             );
         }
+
+        // Scope-containment Defines post-process. Emits:
+        //   (File)-[:Defines]->(top-level symbol)
+        //   (Namespace|Module)-[:Defines]->(child symbol)
+        // Runs after file_node_idx is populated and after class_membership so
+        // HasMethod/HasProperty edges are in place — the no-duplication invariant
+        // (Defines never overlaps HasMethod/HasProperty) is verified by the
+        // regression test `defines_emission::no_duplication_class_method`.
+        crate::post_process::scope_defines::emit_edges(
+            &self.local_graphs,
+            &file_node_idx,
+            &symbol_table,
+            &mut string_pool,
+            &mut edges,
+        );
+
         let _t_csr = std::time::Instant::now();
         // Final pass: Construct CSR (out_offsets and in_offsets)
         // Sort edges by source to build out_offsets easily.
@@ -1845,6 +1922,20 @@ fn lang_for_path(path: &str) -> Option<response_shapes::Lang> {
     }
 }
 
+/// True for file extensions where `fetch_urls::extract` can find HTTP
+/// client call sites. PHP is a server-side language; Python is included
+/// because `requests` / `httpx` are common HTTP client libraries.
+fn is_consumer_extension(path: &str) -> bool {
+    let dot = match path.rfind('.') {
+        Some(d) => d,
+        None => return false,
+    };
+    matches!(
+        &path[dot + 1..],
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py"
+    )
+}
+
 /// Serialize captured resolver decisions to a JSONL file. Schema matches
 /// the oracle harness contract: one decision per line, fields ordered for
 /// readable diffs. Each line is a flattened `ResolverDecision` plus the
@@ -1905,8 +1996,10 @@ fn pass2_emit_node_edges(
     raw_node: &RawNode,
     current_node_idx: u32,
     reason_heritage: StrRef,
+    reason_implements: StrRef,
     reason_type: StrRef,
     reason_call: StrRef,
+    symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
@@ -1919,12 +2012,21 @@ fn pass2_emit_node_edges(
             ResolveTarget::Type,
         );
         for (target_id, confidence) in targets {
+            // Kind-based dispatch: Interface/Trait targets → Implements,
+            // concrete class targets → Extends. The resolved target's NodeKind
+            // IS the relationship definition — no per-language parser change
+            // needed (Java `implements`, Kotlin `:`, Go structural, Rust
+            // `impl For` all converge on the same heritage list).
+            let (rel_type, reason) = match symbol_table.node_kind(target_id) {
+                NodeKind::Interface | NodeKind::Trait => (RelType::Implements, reason_implements),
+                _ => (RelType::Extends, reason_heritage),
+            };
             edges.push(Edge {
                 source: current_node_idx,
                 target: target_id,
-                rel_type: RelType::Extends,
+                rel_type,
                 confidence,
-                reason: reason_heritage,
+                reason,
             });
         }
     }
@@ -2851,10 +2953,11 @@ mod tests {
     ///   (b) include the resolved `reason` string in the equality predicate;
     ///   (c) add a `HandlesRoute` fixture to fire that emit branch;
     ///   (d) pin emit-zero invariant for Sub-projects 1/5 types
-    ///       (Imports, Defines, Implements, Fetches).
+    ///       (Imports, Defines, Fetches); Implements lifted here (§8.2).
     ///
     /// The fixtures cover these edge-emission categories:
-    ///   * heritage (`Extends`) — Class with base
+    ///   * heritage (`Extends`) — Class Foo extends concrete Class Bar
+    ///   * heritage (`Implements`) — Class Implementor implements Interface IThing
     ///   * calls (`Calls`) — Function with callee
     ///   * type_annotation (`Accesses`)
     ///   * framework_refs (`References` via Spring fixture)
@@ -2870,18 +2973,34 @@ mod tests {
                 LocalGraph {
                     file_path: "src/foo.rs".into(),
                     content_hash: [0; 8],
-                    nodes: vec![RawNode {
-                        name: "Foo".into(),
-                        kind: NodeKind::Class,
-                        span: (0, 0, 10, 0),
-                        is_exported: true,
-                        heritage: vec!["Bar".into()],
-                        type_annotation: Some("Other".into()),
-                        decorators: vec![],
-                        calls: vec!["other_fn".into()],
-                        owner_class: None,
-                        content_hash: 0,
-                    }],
+                    nodes: vec![
+                        RawNode {
+                            name: "Foo".into(),
+                            kind: NodeKind::Class,
+                            span: (0, 0, 10, 0),
+                            is_exported: true,
+                            heritage: vec!["Bar".into()],
+                            type_annotation: Some("Other".into()),
+                            decorators: vec![],
+                            calls: vec!["other_fn".into()],
+                            owner_class: None,
+                            content_hash: 0,
+                        },
+                        // Implementor → IThing exercises the Implements branch
+                        // of the kind-based heritage dispatch (§8.2).
+                        RawNode {
+                            name: "Implementor".into(),
+                            kind: NodeKind::Class,
+                            span: (12, 0, 20, 0),
+                            is_exported: true,
+                            heritage: vec!["IThing".into()],
+                            type_annotation: None,
+                            decorators: vec![],
+                            calls: vec![],
+                            owner_class: None,
+                            content_hash: 0,
+                        },
+                    ],
                     documents: vec![],
                     imports: vec![],
                     routes: vec![],
@@ -2917,7 +3036,10 @@ mod tests {
                             is_exported: true,
                             heritage: vec![],
                             type_annotation: None,
-                            decorators: vec![],
+                            // Fixture: provides a Decorates-emit data point so
+                            // the coverage assertion below can guard against
+                            // regression when decorates_edges.rs is modified.
+                            decorators: vec!["@MyAnnotation".into()],
                             calls: vec![],
                             owner_class: None,
                             content_hash: 0,
@@ -2964,23 +3086,66 @@ mod tests {
                     call_metas: vec![],
                     raw_function_metas: vec![],
                 },
+                // iface.rs: defines Interface IThing so the Implementor →
+                // IThing heritage edge dispatches to Implements (not Extends).
+                LocalGraph {
+                    file_path: "src/iface.rs".into(),
+                    content_hash: [0; 8],
+                    nodes: vec![RawNode {
+                        name: "IThing".into(),
+                        kind: NodeKind::Interface,
+                        span: (0, 0, 3, 0),
+                        is_exported: true,
+                        heritage: vec![],
+                        type_annotation: None,
+                        decorators: vec![],
+                        calls: vec![],
+                        owner_class: None,
+                        content_hash: 0,
+                    }],
+                    documents: vec![],
+                    imports: vec![],
+                    routes: vec![],
+                    framework_refs: vec![],
+                    fanout_refs: vec![],
+                    blind_spots: vec![],
+                    schema_fields: None,
+                    event_topics: None,
+                    tx_scopes: None,
+                    call_metas: vec![],
+                    raw_function_metas: vec![],
+                },
             ]
         }
 
+        // Shared tmp dir: Pass 1.6b needs consumer file content on disk
+        // to emit Fetches edges (route data comes from LocalGraph, not disk).
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Consumer file fetches GET /users → matches the RawRoute in bar.rs fixture.
+        std::fs::write(
+            tmp.path().join("consumer.ts"),
+            "async function load() { const { id } = await fetch('/users').json(); }",
+        )
+        .unwrap();
+
         // Parallel path (production): no dump enabled
-        let mut parallel_builder = GraphBuilder::new();
+        let mut parallel_builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
         for lg in build_fixtures() {
             parallel_builder.add_graph(lg);
         }
+        // Consumer LocalGraph for the consumer.ts file written above.
+        parallel_builder.add_graph(consumer_local_graph("consumer.ts"));
         let parallel_graph = parallel_builder.build();
 
         // Serial path: dump enabled forces the serial branch
-        let tmp = tempfile::TempDir::new().unwrap();
         let dump_path = tmp.path().join("dump.jsonl");
-        let mut serial_builder = GraphBuilder::new().with_resolver_dump(Some(dump_path.clone()));
+        let mut serial_builder = GraphBuilder::new()
+            .with_repo_root(tmp.path().to_path_buf())
+            .with_resolver_dump(Some(dump_path.clone()));
         for lg in build_fixtures() {
             serial_builder.add_graph(lg);
         }
+        serial_builder.add_graph(consumer_local_graph("consumer.ts"));
         let serial_graph = serial_builder.build();
 
         // Bucketize edges per RelType; include resolved reason in the key so a
@@ -3022,15 +3187,20 @@ mod tests {
             );
         }
 
-        // Emit-zero invariant: Sub-projects 1/5 types must not appear yet.
-        // Update these assertions when those sub-projects ship.
-        for unimplemented in &["Imports", "Defines", "Implements", "Fetches"] {
-            assert!(
-                !parallel_buckets.contains_key(*unimplemented),
-                "RelType {unimplemented} unexpectedly emitted (parallel) — \
-                 Sub-projects 1/5 will lift this; update this assertion when they ship",
-            );
-        }
+        // Emit-zero invariant: only `Imports` remains intentionally post-process
+        // only — see `crates/ecp-analyzer/src/post_process/imports_edges.rs`
+        // Tier-1-2-3 resolver for cross-file basename / dir-component indexing
+        // that can't be moved to Pass-2 without breaking its streaming design.
+        // `Implements` lifted §8.2, `Defines` §8.4, `Fetches` (this PR) §8.5.
+
+        // Imports is intentionally post-process only (imports_edges.rs Tier-1-2-3
+        // resolver); Pass-2 must never emit it.
+        assert!(
+            !parallel_buckets.contains_key("Imports"),
+            "RelType Imports unexpectedly emitted by Pass-2 — Imports is intentionally \
+             post-process only; see imports_edges.rs. Did you accidentally add a \
+             Pass-2 emit site?",
+        );
 
         // Node counts identical (both paths build identical SymbolTable + StringPool)
         assert_eq!(parallel_graph.nodes.len(), serial_graph.nodes.len());
@@ -3040,7 +3210,20 @@ mod tests {
         assert!(dump_path.exists(), "serial dump path was not taken");
 
         // Fixture coverage: assert each expected category fired at least once.
-        for required in &["Calls", "Extends", "Accesses", "References", "HandlesRoute"] {
+        // Implements + Defines + Fetches + Decorates all required — covers
+        // IThing Interface fixture, scope_defines post-process, RouteIndex
+        // post-Pass-2 join, and Decorates post-process.
+        for required in &[
+            "Calls",
+            "Extends",
+            "Implements",
+            "Accesses",
+            "References",
+            "HandlesRoute",
+            "Defines",
+            "Fetches",
+            "Decorates",
+        ] {
             assert!(
                 parallel_buckets.contains_key(*required),
                 "fixture failed to trigger {required} emit",
@@ -3218,8 +3401,8 @@ mod tests {
         );
         let edge = fetches[0];
         assert!(
-            (edge.confidence - 0.9).abs() < 1e-6,
-            "Fetches confidence must be 0.9 for exact-path matches; got {}",
+            (edge.confidence - 0.8).abs() < 1e-6,
+            "Fetches confidence must be 0.8 for exact-path matches; got {}",
             edge.confidence
         );
         // Target must be the Route node.
