@@ -85,11 +85,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1) Remove stale ecp:* labels, then add suggested ones
-          for stale in $(gh pr view "$PR" --json labels --jq '.labels[].name' | grep '^ecp:' || true); do
-            gh pr edit "$PR" --remove-label "$stale"
+          # 1) Diff existing ecp:* labels against suggested set; only remove the dropped
+          #    and add the new — re-runs with stable classification become no-ops.
+          OLD=$(gh pr view "$PR" --json labels --jq '.labels[].name' | grep '^ecp:' | sort || true)
+          NEW=$(jq -r '.suggested_labels[]' /tmp/analysis.json | sort)
+
+          # comm -23 = lines only in OLD (to remove); comm -13 = lines only in NEW (to add)
+          REMOVE=$(comm -23 <(echo "$OLD") <(echo "$NEW") || true)
+          ADD=$(comm -13 <(echo "$OLD") <(echo "$NEW") || true)
+
+          for label in $REMOVE; do
+            [ -n "$label" ] && gh pr edit "$PR" --remove-label "$label"
           done
-          for label in $(jq -r '.suggested_labels[]' /tmp/analysis.json); do
+          for label in $ADD; do
+            [ -n "$label" ] || continue
             gh label create "$label" --color "ededed" --description "ecp signal" 2>/dev/null || true
             gh pr edit "$PR" --add-label "$label"
           done
