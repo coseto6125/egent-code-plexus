@@ -151,6 +151,7 @@ fn build_graph_bytes(spec: &GraphSpec) -> Vec<u8> {
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     };
 
     rkyv::to_bytes::<Error>(&graph)

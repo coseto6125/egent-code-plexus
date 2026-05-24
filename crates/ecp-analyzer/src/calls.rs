@@ -1,5 +1,7 @@
 use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use tree_sitter::Node;
 
 /// Saturating conversion of a tree-sitter row (`usize`) to `u32`.
@@ -20,13 +22,15 @@ pub fn safe_row(row: usize) -> u32 {
 /// represent a function-call expression (e.g. "call_expression" in JS/TS,
 /// "method_invocation" in Java, "function_call_expression" in PHP).
 pub fn extract_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], call_kinds: &[&str]) {
+    let containers = enclosing_containers(nodes);
+    let mut calls: Vec<PendingCall> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if call_kinds.contains(&n.kind()) {
             let callee_name = callee_name_from(n, source);
             if let Some(name) = callee_name {
                 let line = safe_row(n.start_position().row);
-                attach_to_enclosing(line, name, nodes);
+                calls.push(PendingCall { line, name });
             }
         }
         let mut c = n.walk();
@@ -34,6 +38,7 @@ pub fn extract_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], call_
             stack.push(child);
         }
     }
+    attach_pending_calls(&containers, calls, nodes);
 }
 
 pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -122,5 +127,147 @@ pub fn attach_to_enclosing(line: u32, callee: String, nodes: &mut [RawNode]) {
     }
     if let Some(i) = best {
         nodes[i].calls.push(callee);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EnclosingContainer {
+    start: u32,
+    end: u32,
+    width: u32,
+    node_idx: usize,
+}
+
+struct PendingCall {
+    line: u32,
+    name: String,
+}
+
+fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
+    let mut containers: Vec<EnclosingContainer> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(node_idx, node)| {
+            if !matches!(
+                node.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            ) {
+                return None;
+            }
+            let start = node.span.0;
+            let end = node.span.2;
+            Some(EnclosingContainer {
+                start,
+                end,
+                width: end.saturating_sub(start),
+                node_idx,
+            })
+        })
+        .collect();
+    containers.sort_unstable_by_key(|c| (c.start, c.width, c.node_idx));
+    containers
+}
+
+fn attach_pending_calls(
+    containers: &[EnclosingContainer],
+    calls: Vec<PendingCall>,
+    nodes: &mut [RawNode],
+) {
+    if containers.is_empty() || calls.is_empty() {
+        return;
+    }
+
+    let mut call_order: Vec<usize> = (0..calls.len()).collect();
+    call_order.sort_unstable_by_key(|&idx| calls[idx].line);
+
+    let mut active: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
+    let mut next_container = 0usize;
+    let mut targets: Vec<Option<usize>> = vec![None; calls.len()];
+
+    for &call_idx in &call_order {
+        let line = calls[call_idx].line;
+        while next_container < containers.len() && containers[next_container].start <= line {
+            let container = containers[next_container];
+            active.push(Reverse((container.width, next_container)));
+            next_container += 1;
+        }
+        while let Some(Reverse((_, container_idx))) = active.peek().copied() {
+            if containers[container_idx].end >= line {
+                targets[call_idx] = Some(containers[container_idx].node_idx);
+                break;
+            }
+            active.pop();
+        }
+    }
+
+    for (call, target) in calls.into_iter().zip(targets) {
+        if let Some(node_idx) = target {
+            nodes[node_idx].calls.push(call.name);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw_node(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {
+        RawNode {
+            name: name.to_string(),
+            kind,
+            span,
+            is_exported: false,
+            heritage: vec![],
+            type_annotation: None,
+            decorators: vec![],
+            calls: vec![],
+            owner_class: None,
+            content_hash: 0,
+        }
+    }
+
+    #[test]
+    fn attach_pending_calls_uses_smallest_enclosing_container() {
+        let mut nodes = vec![
+            raw_node("outer", NodeKind::Function, (1, 0, 20, 0)),
+            raw_node("inner", NodeKind::Function, (5, 0, 10, 0)),
+            raw_node("not_container", NodeKind::Variable, (6, 0, 6, 8)),
+        ];
+        let containers = enclosing_containers(&nodes);
+
+        attach_pending_calls(
+            &containers,
+            vec![PendingCall {
+                line: 6,
+                name: "callee".to_string(),
+            }],
+            &mut nodes,
+        );
+
+        assert!(nodes[0].calls.is_empty());
+        assert_eq!(nodes[1].calls, ["callee"]);
+    }
+
+    #[test]
+    fn attach_pending_calls_preserves_original_call_order() {
+        let mut nodes = vec![raw_node("f", NodeKind::Function, (1, 0, 20, 0))];
+        let containers = enclosing_containers(&nodes);
+
+        attach_pending_calls(
+            &containers,
+            vec![
+                PendingCall {
+                    line: 12,
+                    name: "later".to_string(),
+                },
+                PendingCall {
+                    line: 3,
+                    name: "earlier".to_string(),
+                },
+            ],
+            &mut nodes,
+        );
+
+        assert_eq!(nodes[0].calls, ["later", "earlier"]);
     }
 }

@@ -162,6 +162,7 @@ fn make_graph() -> ZeroCopyGraph {
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     }
 }
 

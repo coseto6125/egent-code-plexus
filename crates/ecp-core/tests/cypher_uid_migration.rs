@@ -56,6 +56,7 @@ fn build_single() -> (Vec<u8>, u64) {
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     };
 
     (
@@ -128,6 +129,7 @@ fn build_two() -> (Vec<u8>, u64, u64) {
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     };
 
     (

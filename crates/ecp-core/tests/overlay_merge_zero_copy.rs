@@ -58,6 +58,7 @@ fn build_graph(pool_bytes: Vec<u8>, nodes: Vec<Node>) -> Vec<u8> {
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     };
     rkyv::to_bytes::<RkyvError>(&g)
         .expect("serialize graph")
