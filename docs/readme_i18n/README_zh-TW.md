@@ -218,7 +218,6 @@ ecp admin
 給 AI agent 與自動化流程使用的指令化路徑：
 
 ```bash
-ecp admin codex install native-tools
 ecp admin codex install skills all
 ecp admin codex install skills ecp
 ecp admin codex install skills simplify
@@ -231,20 +230,9 @@ ecp admin codex install skills simplify
 | `ecp` | agent 需要判斷何時用圖譜感知的 symbol、impact、route、contract、rename 流程，而不是 grep / 讀檔。 |
 | `simplify` | agent 在 review changed code 時，應先看 ecp impact、盲區、egress、shape drift、resolver delta，再讀 raw diff。 |
 
-`native-tools` 元件會寫出：
+TODO：`native-tools` 正等待 Codex tool-registry wiring。安裝命令目前刻意停用，直到它能針對具體 Codex checkout 產生 dependency 與 registry hunks，而不是只有 adapter patch。
 
-```text
-~/.config/ecp/host-integration/codex-cli.patch
-```
-
-在 Codex CLI fork 內套用 patch，接著把產生的 module 接進 Codex 的 tool registry：
-
-```bash
-cd /path/to/openai-codex-fork
-git apply ~/.config/ecp/host-integration/codex-cli.patch
-```
-
-若要檢查已套用 native marker 的 fork，先設定 `ECP_CODEX_CLI_CHECKOUT`，再於 TUI 內查看狀態：
+等 TODO 完成後，已套用 native marker 的 fork 可透過 `ECP_CODEX_CLI_CHECKOUT` 檢查：
 
 ```bash
 ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin
