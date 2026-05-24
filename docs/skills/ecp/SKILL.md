@@ -85,8 +85,8 @@ Use grep / Read for: string literals, error messages, config keys (toml / yaml /
 | Command | Output |
 |---|---|
 | `ecp schema blindspots` | Per-lang BlindSpot coverage; disambiguates "no dispatch in diff" vs "parser doesn't detect it" |
-| `ecp schema reltypes` | All 19 RelType edges + LLM-utility category + heuristic flag |
-| `ecp schema node-kinds` | All 28 NodeKind variants + same-name distinctions (Struct vs Class, Trait vs Interface) |
+| `ecp schema reltypes` | All 20 RelType edges + LLM-utility category + heuristic flag |
+| `ecp schema node-kinds` | All 29 NodeKind variants + same-name distinctions (Struct vs Class, Trait vs Interface) |
 | `ecp schema graph-version` | rkyv `graph.bin` format version + bump history |
 
 All `schema` commands default to `--format json` (agent-consumable); pass `--format text` for a human table.

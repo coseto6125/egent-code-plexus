@@ -46,12 +46,12 @@ fn init_repo_and_analyze(repo: &Path) {
 }
 
 #[test]
-fn impact_build_payload_unknown_symbol_returns_error_field() {
+fn impact_unknown_symbol_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    // Graph is indexed but symbol doesn't exist → build_payload returns
-    // {"error": "No symbol named … found in graph"}, not a process failure.
+    // Graph is indexed but symbol doesn't exist. This must be a process
+    // failure so MCP wraps it as isError=true instead of a successful payload.
     let out = Command::new(ecp_bin())
         .args(["impact", "__nonexistent_symbol_xyzzy__", "--format", "json"])
         .current_dir(tmp.path())
@@ -59,25 +59,14 @@ fn impact_build_payload_unknown_symbol_returns_error_field() {
         .output()
         .expect("ecp impact failed to spawn");
 
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.status.success(),
-        "ecp impact should exit 0 even for unknown symbol: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        !out.status.success(),
+        "unknown symbol must exit non-zero so MCP marks isError=true"
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout.find('{').unwrap_or_else(|| {
-        panic!(
-            "expected JSON on stdout, got:\nstdout={stdout}\nstderr={}",
-            String::from_utf8_lossy(&out.stderr)
-        )
-    });
-    let val: serde_json::Value = serde_json::from_str(&stdout[json_start..])
-        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nstdout={stdout}"));
-
-    // build_payload returns {"error": "..."} — not a panic, not empty.
     assert!(
-        val.get("error").is_some(),
-        "expected `error` field in payload for unknown symbol, got: {val}"
+        stderr.contains("No symbol named") && stderr.contains("ecp find"),
+        "expected actionable unknown-symbol error, got:\n{stderr}"
     );
 }
 

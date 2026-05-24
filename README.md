@@ -168,14 +168,14 @@ Two tiers — **agent commands** at top level (query/refactor/verify) and **admi
 | `impact <name> --direction <up\|down>` | Blast-radius traversal with confidence filtering. `--since <ref>` for change-set impact. |
 | `rename --symbol <old> --new-name <new>` | AST-aware multi-file rename across 14 languages. Always `--dry-run` first. |
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body. |
-| `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness. (Was `coverage`; the old verb still works as an alias.) |
+| `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness. |
 | `routes [<path>]` | Enumerate HTTP routes (declarative + imperative); with `<path>` show handler + callers. |
 | `contracts` | Cross-repo API contract inventory (routes / queue / RPC). |
 | `diff` | Resolver-delta — edge-level binding tier-degradation + route / contract changes. |
 | `tool-map` | Calls to external HTTP / DB / Redis / queue clients via per-file import-binding analysis. |
 | `shape-check` | Drift between HTTP consumer access patterns and Route response shapes. |
 | `peers` | Multi-session peer collaboration: `status` / `diff` / `say` / `inbox` / `log` / `thread` / `watch` / `gc`. See [Multi-session peer sync](#multi-session-peer-sync). |
-| `review` | Aggregated LLM-workflow audit: runs impact + coverage + tool-map + shape-check + diff in one shot, filtered to high-confidence signals. |
+| `review` | Aggregated LLM-workflow audit: runs impact + summary + tool-map + shape-check + diff in one shot, filtered to high-confidence signals. |
 
 Admin namespace (`ecp admin <cmd>` — hidden from top-level help):
 

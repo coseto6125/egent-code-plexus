@@ -16,6 +16,7 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
     }
     for key in [
         "ECP_SESSION_ID",
+        "GEMINI_CLI_SESSION_ID",
         "CODEX_SESSION_ID",
         "CODEX_THREAD_ID",
         "CLAUDE_CODE_SESSION_ID",

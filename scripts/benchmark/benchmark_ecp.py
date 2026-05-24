@@ -121,9 +121,8 @@ def _bench(name: str, cmd: list[str], cwd: Path, runs: int) -> Sample:
 def _probe_symbols(binary: Path, repo: Path) -> dict[str, str]:
     """Pick one Class + one Method from the graph for inspect/impact/query tests.
 
-    Strategy: cypher `Class-[:HasMethod]->Method` first row supplies the names;
-    `inspect --name <class>` resolves the canonical `kind:filePath:name` uid
-    (same shape as the method_uid built directly from the cypher row).
+    Strategy: cypher `Class-[:HasMethod]->Method` first row supplies names plus
+    file/kind disambiguators for later `impact --target` calls.
     """
     out: dict[str, str] = {}
     elapsed, rc, stdout, stderr = _run(
@@ -151,26 +150,11 @@ def _probe_symbols(binary: Path, repo: Path) -> dict[str, str]:
     # columns: ["a.name", "a.kind", "a.filePath", "b.name", "b.kind", "b.filePath"]
     first = rows[0]
     out["class_name"] = first[0]
+    out["class_kind"] = first[1]
+    out["class_file"] = first[2]
     out["method_name"] = first[3]
-    out["method_uid"] = f"{first[4]}:{first[5]}:{first[3]}"
-
-    if name := out.get("class_name"):
-        _, rc2, stdout2, _ = _run(
-            [str(binary), "inspect", "--name", name, "--format", "json", "--repo", str(repo)],
-            cwd=repo,
-        )
-        if rc2 == 0:
-            try:
-                matches = json.loads(stdout2).get("matches", [])
-                if matches:
-                    sym = matches[0].get("symbol", {})
-                    kind = sym.get("kind", "")
-                    path = sym.get("filePath", "")
-                    nm = sym.get("name", "")
-                    if kind and path and nm:
-                        out["class_uid"] = f"{kind}:{path}:{nm}"
-            except json.JSONDecodeError:
-                pass
+    out["method_kind"] = first[4]
+    out["method_file"] = first[5]
     return out
 
 
@@ -302,6 +286,9 @@ def main() -> int:
         help="Skip the auto `cargo build --release` step (use the existing binary as-is)",
     )
     args = ap.parse_args()
+    args.repo = args.repo.resolve()
+    args.git_repo = args.git_repo.resolve()
+    args.binary = args.binary.resolve()
 
     _ensure_binary_fresh(args.binary, skip=args.no_build)
     if not args.binary.exists():
@@ -449,7 +436,7 @@ def main() -> int:
                 args.repo,
             )
         )
-    if uid := sym.get("class_uid"):
+    if name := sym.get("class_name"):
         queries.append(
             (
                 "impact upstream",
@@ -457,7 +444,11 @@ def main() -> int:
                     str(args.binary),
                     "impact",
                     "--target",
-                    uid,
+                    name,
+                    "--kind",
+                    sym.get("class_kind", "Class").lower(),
+                    "--file_path",
+                    sym.get("class_file", ""),
                     "--direction",
                     "upstream",
                     "--repo",
@@ -466,7 +457,7 @@ def main() -> int:
                 args.repo,
             )
         )
-    if uid := sym.get("method_uid"):
+    if name := sym.get("method_name"):
         queries.append(
             (
                 "impact downstream",
@@ -474,7 +465,11 @@ def main() -> int:
                     str(args.binary),
                     "impact",
                     "--target",
-                    uid,
+                    name,
+                    "--kind",
+                    sym.get("method_kind", "Method").lower(),
+                    "--file_path",
+                    sym.get("method_file", ""),
                     "--direction",
                     "downstream",
                     "--repo",

@@ -1,8 +1,6 @@
 # ecp summary
 
 Show registry health, indexed repos, and LLM-actionable blind spots.
-(Renamed from `ecp coverage`; the `coverage` verb still works as an alias
-for one release.)
 
 ## Usage
 ```bash

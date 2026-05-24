@@ -2,7 +2,7 @@
 
 > **EgentCodePlexus is not a drop-in replacement for [GitNexus](https://github.com/abhigyanpatwari/GitNexus).** Same conceptual model — a structural knowledge graph of a repo — different audience, different runtime, different output discipline. This document explains where the two projects diverge and why.
 
-`ecp` exists because we wanted to use GitNexus's idea inside autonomous LLM coding workflows, and the original product was built for a different shape of consumer: humans in IDEs and long-running agent platforms with MCP wiring. The differences below are not "Rust is faster" — they are decisions about who the consumer is and what an honest answer to that consumer looks like.
+`ecp` exists because we wanted to use GitNexus's idea inside autonomous LLM coding workflows, and the original product was built for a different shape of consumer: humans in IDEs and long-running agent platforms with MCP wiring. The differences below are not "Rust is faster" — they are decisions about who the consumer is and what an honest answer to that consumer looks like. Where this file uses numbers, they are current `ecp` measurements from the repo's own benchmark/docs, not aspirational targets.
 
 ---
 
@@ -25,7 +25,7 @@ The audience choice cascades into every other row of this comparison. GitNexus o
 The tradeoff is real and goes both directions:
 
 - *GitNexus wins* on rich session-aware features (cross-call memoisation, server-held caches, generated repo skills, MCP resources).
-- *`ecp` wins* on cost-per-call predictability. A `cypher` query takes 9 ms cold including process startup. An agent can fire 30+ queries per task without amortising a warm-up phase. There is no "server died, please restart" failure mode, no port allocation, no state synchronisation.
+- *`ecp` wins* on cost-per-call predictability. On the current `.sample_repo` benchmark, read queries sit in the ~140-170 ms cold band including process startup; `summary` can be sub-2 ms because it is mostly registry mmap, while heavier traversals like `cypher` land around ~160 ms. An agent can fire 30+ queries per task without amortising a warm-up phase. There is no "server died, please restart" failure mode, no port allocation, no state synchronisation.
 
 `ecp` ships an MCP server too (`ecp admin mcp serve`), but it is a thin shim over the same one-shot binary, not a fundamentally different runtime.
 
@@ -51,7 +51,7 @@ The reason is consumer-specific: an LLM agent acts on what the graph says. If `e
 | Optional formats | MCP-rich responses, generated skills | `--format text\|json\|toon` per command |
 | Format goal | Human readability | Bytes-per-fact ratio |
 
-A symbol-context dump in MCP-rich form might be 800 tokens. The same dump in TOON is closer to 200, with no information loss for an agent that knows the schema. Multiplied across the 20–50 queries an agent fires per task, this saves multi-kilobyte chunks of context window per task — which an agent will spend on thinking instead of layout.
+A symbol-context dump in MCP-rich form might be 800 tokens. The same dump in TOON is closer to 200, with no information loss for an agent that knows the schema. Multiplied across the 20–50 queries an agent fires per task, this saves multi-kilobyte chunks of context window per task — which an agent will spend on thinking instead of layout. This is a format choice, not a claim that TOON is universally better for humans.
 
 `ecp` picks the cheapest format per command as the default: most read commands default to `toon`; `find` defaults to plain `text` (already minimal); `cypher` and `summary` default to `json` (structurally rich, expected to be parsed). Override anywhere with `--format`.
 
@@ -87,9 +87,9 @@ GitNexus uses LadybugDB — a Node.js graph database — which gives it indexed 
 
 The tradeoffs:
 
-- `ecp` cannot do mid-graph mutations — every rebuild is a full or incremental re-serialisation. It compensates with an aggressive xxh3_64 content cache so incremental rebuilds on a 22k-file repo take < 0.25 s.
+- `ecp` cannot do mid-graph mutations — every rebuild is a full or incremental re-serialisation. It compensates with an aggressive xxh3_64 content cache so the current `.sample_repo` benchmark shows a zero-dirty incremental pass at ~4.9 ms, while a cold full index is ~2.60 s.
 - `ecp` has no concurrency control beyond an OS-level flock. Two `ecp admin index` processes will serialise.
-- `ecp` reads are zero-copy. Opening a graph and answering a `cypher` query takes 9 ms cold, dominated by process startup, not graph access. This is the property that makes the one-shot-CLI model viable.
+- `ecp` reads are zero-copy. Opening a graph and answering a read query is dominated by process startup, not graph access. On the current benchmark corpus, `summary` is ~1.4 ms and heavier reads such as `cypher` are still in the ~160 ms range cold. This is the property that makes the one-shot-CLI model viable.
 
 LadybugDB is the right pick if you want a persistent, mutable, multi-writer graph backend with rich query planning. `rkyv + mmap` is the right pick if you want zero-latency reads from a stateless CLI and can accept "regenerate the file" as the write model.
 

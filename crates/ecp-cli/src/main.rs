@@ -94,8 +94,8 @@ fn main() {
         Commands::Review(args) => args.repo.as_deref(),
         Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
         Commands::Processes(args) => args.repo.as_deref(),
-        Commands::FindSchemaBindings(_) => None,
-        Commands::FindEventMirrors(_) => None,
+        Commands::FindSchemaBindings(args) => args.repo.as_deref(),
+        Commands::FindEventMirrors(args) => args.repo.as_deref(),
         Commands::Summary(_)
         | Commands::Contracts(_)
         | Commands::Diff(_)
@@ -211,8 +211,8 @@ fn check_group_atom(cli: &Cli) {
         Commands::Diff(a) => (a.repo.as_deref(), None),
         Commands::FindTransactionPatterns(a) => (a.repo.as_deref(), None),
         Commands::Processes(a) => (a.repo.as_deref(), None),
-        Commands::FindSchemaBindings(_) => return,
-        Commands::FindEventMirrors(_) => return,
+        Commands::FindSchemaBindings(a) => (a.repo.as_deref(), None),
+        Commands::FindEventMirrors(a) => (a.repo.as_deref(), None),
         _ => return,
     };
     // The vast majority of invocations don't pass `--repo` at all, so the

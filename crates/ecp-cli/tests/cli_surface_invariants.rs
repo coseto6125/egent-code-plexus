@@ -23,6 +23,7 @@
 //! AND the matching MCP schema together. The test failing is the
 //! expected behaviour — that's the whole point.
 
+use clap::CommandFactory;
 use std::process::{Command, Output};
 
 fn ecp_bin() -> &'static str {
@@ -547,6 +548,39 @@ fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
                 "ecp peers {subcmd}: CLI flag `--{flag_kebab}` (schema key `{prop_key}`) missing from ecp_peers MCP schema.\n--- help ---\n{help}"
             );
         }
+    }
+}
+
+#[test]
+fn repo_aware_heuristic_commands_expose_repo_in_cli_and_mcp() {
+    let tools = ecp_mcp::schema::ecp_tools(&ecp_cli::cli::Cli::command());
+    let cases = [
+        ("find-schema-bindings", "ecp_find-schema-bindings"),
+        ("find-event-mirrors", "ecp_find-event-mirrors"),
+    ];
+
+    for (cmd, tool_name) in cases {
+        let out = run(&[cmd, "--help"]);
+        assert!(out.status.success(), "ecp {cmd} --help failed");
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            help.contains("--repo"),
+            "ecp {cmd}: --help missing `--repo`\n--- help ---\n{help}"
+        );
+
+        let tool = tools
+            .iter()
+            .find(|t| t.name == tool_name)
+            .unwrap_or_else(|| panic!("MCP tool `{tool_name}` missing"));
+        let props = tool
+            .schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("properties object");
+        assert!(
+            props.contains_key("repo"),
+            "MCP tool `{tool_name}` missing `repo` schema property"
+        );
     }
 }
 

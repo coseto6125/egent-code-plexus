@@ -2,8 +2,6 @@ Registry + repo health (indexed repos, freshness, frameworks, blind spots). `bli
 
 Usage: ecp summary [OPTIONS]
 
-Note: `ecp coverage` is kept as an alias for one release; new code should use `ecp summary`.
-
 Options:
       --repo <REPO>      Repository selector (path | name | @group | @all | csv mix). If omitted: registry-level overview only
       --detailed         Verbose per-section breakdown (include branch rows, etc.)

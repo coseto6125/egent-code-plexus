@@ -54,6 +54,10 @@ pub struct FindSchemaBindingsArgs {
     /// (returns all SchemaField nodes with that name across all classes).
     pub field: String,
 
+    /// Repository selector
+    #[arg(long)]
+    pub repo: Option<String>,
+
     /// Output format: toon (default) | json | text
     #[arg(long)]
     pub format: Option<String>,

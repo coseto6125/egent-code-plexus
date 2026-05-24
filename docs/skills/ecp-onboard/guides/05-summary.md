@@ -133,7 +133,7 @@ Try next:
 - {recommendation 2}
 - {recommendation 3}
 
-Re-run `ecp admin coverage` anytime to see graph health.
+Re-run `ecp summary --repo @all --detailed` anytime to see graph health.
 ```
 
 The wizard's job ends here.

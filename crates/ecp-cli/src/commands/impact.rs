@@ -641,13 +641,10 @@ fn impact_by_name(
         .collect();
 
     if matches.is_empty() {
-        return Ok((
-            json!({
-                "error": format!("No symbol named '{}' found in graph", format_fqn(owner_filter, bare_name)),
-                "hint": "Try `ecp find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
-            }),
-            ImpactStderrHints::default(),
-        ));
+        return Err(EcpError::InvalidArgument(format!(
+            "No symbol named '{}' found in graph. Try `ecp find <name> --mode fuzzy` to find candidates, or check --file / --kind filters",
+            format_fqn(owner_filter, bare_name)
+        )));
     }
 
     // Multiple matches without disambiguation → report candidates then fail.
@@ -669,13 +666,22 @@ fn impact_by_name(
                 })
             })
             .collect();
-        return Ok((
-            json!({
-                "error": format!("'{fqn_label}' is ambiguous ({} candidates) — add --file or --kind to disambiguate", matches.len()),
-                "candidates": candidates,
-            }),
-            ImpactStderrHints::default(),
-        ));
+        let candidate_lines = candidates
+            .iter()
+            .map(|candidate| {
+                format!(
+                    "  {},{},{}",
+                    candidate["filePath"].as_str().unwrap_or(""),
+                    candidate["kind"].as_str().unwrap_or(""),
+                    candidate["line"].as_u64().unwrap_or(0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(EcpError::InvalidArgument(format!(
+            "'{fqn_label}' is ambiguous ({} candidates) — add --file or --kind to disambiguate\ncandidates[filePath,kind,line]:\n{candidate_lines}",
+            matches.len()
+        )));
     }
 
     let min_conf = resolve_min_conf(args);

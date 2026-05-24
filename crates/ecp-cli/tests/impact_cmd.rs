@@ -42,11 +42,19 @@ export function caller(): number {
     const g = new Greeter();
     return helper();
 }
+
+export function duplicateTarget(): number {
+    return 1;
+}
 "#;
 
 const SOURCE_EXTRA: &str = r#"
 export function extraHelper(): number {
     return 42;
+}
+
+export function duplicateTarget(): number {
+    return 2;
 }
 "#;
 
@@ -360,6 +368,38 @@ fn impact_name_and_baseline_mutually_exclusive() {
             || stderr.contains("cannot be used")
             || stderr.contains("error"),
         "expected conflict error:\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn impact_ambiguous_symbol_exits_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "impact",
+            "duplicateTarget",
+            "--repo",
+            ".",
+            "--format",
+            "json",
+        ])
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("impact failed to spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "ambiguous symbol must exit non-zero so MCP marks isError=true"
+    );
+    assert!(
+        stderr.contains("ambiguous")
+            && stderr.contains("--file")
+            && stderr.contains("--kind")
+            && stderr.contains("candidates"),
+        "expected actionable ambiguous-symbol error:\n{stderr}"
     );
 }
 

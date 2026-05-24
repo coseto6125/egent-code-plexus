@@ -43,9 +43,9 @@ and delivery semantics. An LLM querying `ecp impact` must interpret the
   No broker queue; if no subscriber is online when `publish` fires, the message
   is silently discarded. An `ecp impact` query showing a Redis publish site with
   no active subscriber in the graph means the message is lost — not deferred.
-  `psubscribe` glob patterns are stored as-is in `topic_literal`; the `kind`
-  field to distinguish them from plain channel names is deferred (see **Schema
-  gaps** below).
+  `psubscribe` glob patterns are canonicalized into slash-separated topic
+  strings just like plain channel names; the `kind` field to distinguish the
+  original source shape is deferred (see **Schema gaps** below).
 
 ---
 
@@ -162,10 +162,11 @@ Two cases where this causes ambiguity:
    `"queue"`, `"exchange"` — append-only.
 
 2. **Redis psubscribe** (T5-26 followup): a `psubscribe("orders.*")` glob
-   pattern and a plain `publish("orders.created", ...)` channel name both appear
-   as bare strings. T5-33 canonicalization receives them identically and cannot
-   know whether `"orders.*"` is a literal channel or a glob to expand. The fix
-   adds `kind: "channel"` vs `"pattern"` — append-only.
+   pattern and a plain `publish("orders.created", ...)` channel name both
+   canonicalize to slash-separated topic strings. Without a `kind` field the
+   graph still cannot tell whether the original source was a literal channel or
+   a glob to expand. The fix adds `kind: "channel"` vs `"pattern"` —
+   append-only.
 
 ### Single-arg subscribe capture (multi-arg deferred)
 

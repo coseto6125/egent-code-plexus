@@ -46,6 +46,10 @@ use serde_json::{json, Value};
 /// Args for `ecp find-event-mirrors`.
 #[derive(Args, Debug, Clone)]
 pub struct FindEventMirrorsArgs {
+    /// Repository selector
+    #[arg(long)]
+    pub repo: Option<String>,
+
     /// Filter by framework/transport lib (kafka, redis, rabbitmq, sqs, celery).
     /// Accepted for forward-compatibility; currently no-op because FrameworkId
     /// is not persisted in the archived graph (see module doc).

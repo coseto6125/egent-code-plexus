@@ -148,14 +148,14 @@ ecp routes /api/users --method POST     # 路由 → 處理器 → 呼叫鏈
 | `impact <name> --direction <up\|down>` | 帶信心度過濾的爆炸半徑 traversal。`--since <ref>` 用於變更集影響分析。 |
 | `rename --symbol <old> --new-name <new>` | AST 感知的跨檔重命名 (14 種語言)。務必先執行 `--dry-run`。 |
 | `cypher '<query>'` | openCypher 逃生艙；`m.content` 返回原始碼。 |
-| `summary` | Registry 總覽、框架覆蓋率、LLM 可行動的盲區目錄、圖譜新鮮度。（原 `coverage`；舊名稱保留為別名一個版本。）|
+| `summary` | Registry 總覽、框架覆蓋率、LLM 可行動的盲區目錄、圖譜新鮮度。|
 | `routes [<path>]` | 列出 HTTP 路由；帶 `<path>` 時顯示處理器 + 呼叫者。 |
 | `contracts` | 跨 repo 的 API 合約清單 (routes / queue / RPC)。 |
 | `diff` | 解析器 Delta — 邊界綁定層級降級 + 路由 / 合約變更。 |
 | `tool-map` | 透過分析導入綁定，列出對外部 HTTP / DB / Redis / queue client 的呼叫。 |
 | `shape-check` | HTTP 消費者訪問模式與路由響應形狀之間的偏移。 |
 | `peers` | 多會話協作 (status / diff / log / gc)。 |
-| `review` | 聚合式稽核：一次執行 impact + coverage + tool-map + shape-check + diff。 |
+| `review` | 聚合式稽核：一次執行 impact + summary + tool-map + shape-check + diff。 |
 
 Admin 命名空間 (`ecp admin <cmd>` — 隱藏於頂層說明)：
 
