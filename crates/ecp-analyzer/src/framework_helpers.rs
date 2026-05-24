@@ -164,6 +164,30 @@ pub fn source_before_node_ends_with(source: &[u8], node: tree_sitter::Node, suff
         .is_some_and(|s| s.trim_ascii_end().ends_with(suffix))
 }
 
+/// Collect C / C++ attribute syntax attached to a declaration node — the C23
+/// standard `[[nodiscard]]` / `[[deprecated]]` form (`attribute_declaration`)
+/// and the GNU `__attribute__((...))` form (`attribute_specifier`).
+///
+/// Both forms appear as direct children of `function_definition` / `declaration`
+/// in tree-sitter-c and tree-sitter-cpp (verified via probe). Raw text is
+/// preserved verbatim so `normalize_decorator` can route on the bracket shape.
+pub fn collect_cpp_attributes(decl_node: tree_sitter::Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor = decl_node.walk();
+    for child in decl_node.children(&mut cursor) {
+        match child.kind() {
+            "attribute_declaration" | "attribute_specifier" => {
+                if let Ok(text) = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                {
+                    out.push(text.trim().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Find the innermost `Function`/`Method` `RawNode` that contains `inner_span`.
 /// Returns the node's `name` clone, or `None` if no enclosing fn (module-level).
 pub fn enclosing_function_name(nodes: &[RawNode], inner_span: Span) -> Option<String> {
@@ -888,6 +912,20 @@ mod tests {
 pub fn normalize_decorator(raw: &str) -> Vec<(String, String)> {
     let s = raw.trim();
 
+    // ── Go: `//go:noinline`, `//go:linkname X Y`, `//go:embed pattern` ──
+    // Lookup uses the bare directive name (noinline / linkname / embed);
+    // full_name keeps the `go:` namespace so it does not collide with
+    // user-space annotations of the same bare name. Arguments after the
+    // directive (linkname target, embed glob) are dropped — the LLM signal
+    // is "this symbol carries directive X", not the directive payload.
+    if let Some(rest) = s.strip_prefix("//go:") {
+        let directive = rest.split_whitespace().next().unwrap_or("");
+        if directive.is_empty() {
+            return vec![];
+        }
+        return vec![(directive.to_string(), format!("go:{}", directive))];
+    }
+
     // ── Rust / PHP: `#[...]` ─────────────────────────────────────────────
     // `#[derive(A, B, C)]` → multiple pairs.  Other attrs → single pair.
     if let Some(inner) = s
@@ -910,6 +948,43 @@ pub fn normalize_decorator(raw: &str) -> Vec<(String, String)> {
                 .collect();
         }
         // Other Rust/PHP attrs: `#[test]`, `#[Route('/')]`.
+        let name = bare_ident(inner);
+        if name.is_empty() {
+            return vec![];
+        }
+        return vec![(name.to_string(), name.to_string())];
+    }
+
+    // ── C / C++ standard attribute: `[[nodiscard]]`, `[[deprecated("msg")]]`,
+    // `[[gnu::pure]]`. Strip the double brackets and pick the bare ident
+    // (after any namespace prefix). Must come before the single-bracket
+    // branch because `[[X]]` also matches `[X]` after one strip.
+    if let Some(inner) = s
+        .strip_prefix("[[")
+        .and_then(|t| t.strip_suffix("]]"))
+        .map(str::trim)
+    {
+        if inner.is_empty() {
+            return vec![];
+        }
+        let raw = bare_ident(inner);
+        // `gnu::pure` / `clang::nonnull` → keep last segment for lookup,
+        // preserve the namespaced form as full_name so the Annotation node
+        // distinguishes `gnu::pure` from a plain `pure`.
+        let lookup = raw.rsplit("::").next().unwrap_or(raw);
+        return vec![(lookup.to_string(), raw.to_string())];
+    }
+
+    // ── C / C++ GNU attribute: `__attribute__((nodiscard))` / `((pure))` ─
+    // Take the first identifier inside the inner parens.
+    if let Some(inner) = s
+        .strip_prefix("__attribute__((")
+        .and_then(|t| t.strip_suffix("))"))
+        .map(str::trim)
+    {
+        if inner.is_empty() {
+            return vec![];
+        }
         let name = bare_ident(inner);
         if name.is_empty() {
             return vec![];
@@ -1059,6 +1134,69 @@ mod normalize_tests {
                 ("Serialize".into(), "Serialize".into()),
                 ("Deserialize".into(), "Deserialize".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn go_pragma_noinline() {
+        assert_eq!(
+            normalize_decorator("//go:noinline"),
+            vec![("noinline".into(), "go:noinline".into())]
+        );
+    }
+
+    #[test]
+    fn go_pragma_linkname_with_args() {
+        // Arguments after directive name are dropped — LLM signal is the
+        // directive, not the linkname target.
+        assert_eq!(
+            normalize_decorator("//go:linkname localname pkg.Symbol"),
+            vec![("linkname".into(), "go:linkname".into())]
+        );
+    }
+
+    #[test]
+    fn go_pragma_build_skipped_at_emit_site() {
+        // `//go:build` IS accepted by normalize but the Go parser never emits
+        // it (file-level constraint, not symbol decorator). This test pins the
+        // normalize contract for any unexpected caller.
+        assert_eq!(
+            normalize_decorator("//go:build linux"),
+            vec![("build".into(), "go:build".into())]
+        );
+    }
+
+    #[test]
+    fn cpp_attribute_nodiscard() {
+        assert_eq!(
+            normalize_decorator("[[nodiscard]]"),
+            vec![("nodiscard".into(), "nodiscard".into())]
+        );
+    }
+
+    #[test]
+    fn cpp_attribute_deprecated_with_args() {
+        assert_eq!(
+            normalize_decorator("[[deprecated(\"use NewFn\")]]"),
+            vec![("deprecated".into(), "deprecated".into())]
+        );
+    }
+
+    #[test]
+    fn cpp_attribute_namespaced() {
+        // `[[gnu::pure]]` → lookup "pure" (last segment), full keeps "gnu::pure"
+        // so synthetic Annotation nodes do not collide with a plain `pure`.
+        assert_eq!(
+            normalize_decorator("[[gnu::pure]]"),
+            vec![("pure".into(), "gnu::pure".into())]
+        );
+    }
+
+    #[test]
+    fn c_gnu_attribute() {
+        assert_eq!(
+            normalize_decorator("__attribute__((deprecated))"),
+            vec![("deprecated".into(), "deprecated".into())]
         );
     }
 }

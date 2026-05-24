@@ -383,11 +383,16 @@ impl LanguageProvider for CppProvider {
                         })
                         .collect();
 
-                    let decorators = if override_func_ids.contains(&root.id()) {
+                    let mut decorators = if override_func_ids.contains(&root.id()) {
                         vec!["__override__".to_string()]
                     } else {
                         vec![]
                     };
+                    if matches!(k, NodeKind::Function | NodeKind::Method) {
+                        decorators.extend(crate::framework_helpers::collect_cpp_attributes(
+                            root, source,
+                        ));
+                    }
                     nodes.push(RawNode {
                         decorators,
                         is_exported: is_header || is_exported_by_query,

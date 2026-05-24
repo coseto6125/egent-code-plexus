@@ -125,24 +125,24 @@ The 14 mainstream rows below match the ones above. Edge IDs map to
 | Language | Implements | EnumVariant | Decorates | TransactionScope[^tx] | PathLiteral | Fetches |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | TypeScript | ✓ | ✓ | ✓ | —[^typeorm] | ✓ | ✓ |
-| JavaScript | ✓ | n/a[^js-enum] | partial[^js-dec] | n/a | ✓ | ✓ |
+| JavaScript | ✓ | n/a[^js-enum] | ✓ | n/a | ✓ | ✓ |
 | Python | ✓ | partial[^py-enum] | ✓ | ✓ (Django) | ✓ | ✓ |
 | Java | ✓ | ✓ | ✓ | ✓ (Spring) | ✓ | ✓ |
 | Kotlin | ✓[^kt-fix] | ✓ | ✓ | ✓ (Spring) | ✓ | ✓ |
 | C# | ✓ | ✓ | ✓ | ✓ (.NET) | ✓ | ✓ |
-| Go | ✓ | n/a[^go-enum] | — | — | ✓ | ✓ |
+| Go | ✓ | n/a[^go-enum] | ✓[^go-dec] | — | ✓ | ✓ |
 | Rust | ✓ | ✓ | ✓ | — | ✓ | ✓ |
 | PHP | ✓ | partial[^php-enum] | ✓ | ✓ (Symfony) | ✓ | ✓ |
-| Ruby | ✓ | n/a[^rb-enum] | — | — | ✓ | ✓ |
+| Ruby | ✓ | n/a[^rb-enum] | —[^rb-dec] | — | ✓ | ✓ |
 | Swift | ✓ | ✓ | ✓ | —[^sw-tx] | ✓ | ✓ |
-| C | ✓ | n/a[^c-enum] | — | — | ✓ | ✓ |
-| C++ | ✓ | ✓ | — | — | ✓ | ✓ |
+| C | ✓ | n/a[^c-enum] | ✓[^c-dec] | — | ✓ | ✓ |
+| C++ | ✓ | ✓ | ✓[^cpp-dec] | — | ✓ | ✓ |
 | Dart | ✓ | ✓ | ✓ | — | ✓ | ✓ |
 
 Tracked extensions:
 
 - **EnumVariant** — Python / PHP base-class detection + `enum X` for PHP 8.1+: FU-2026-05-23-011
-- **Decorates** — JS `@decorator` babel fixture, Go `//go:build`, C/C++ `[[attribute]]` carve-outs: FU-2026-05-23-012
+- **Decorates** — full coverage across the 14 mainstream rows except Ruby (no annotation system); see per-language footnotes. FU-2026-05-23-012 closed.
 - **TransactionScope** — TS/TypeORM, Rust `#[transaction]`, Dart/Go/Ruby/Swift annotation or call-site detectors: FU-2026-05-23-009; SQL-block form (Kotlin Exposed `transaction { … }`, Ruby `Model.transaction do … end`, raw `BEGIN; … COMMIT;`): FU-2026-05-23-018
 
 Edges emitted on **every** indexed language (no per-language variance,
@@ -173,7 +173,31 @@ TS — tracked in FU-2026-05-23-009 (T10 TransactionScope 5-langs entry).
 [^js-enum]: JavaScript has no `enum` keyword; the OO-style "frozen
 object literal" idiom isn't first-class enough to model as `EnumVariant`.
 
-[^js-dec]: Decorator capture via `parse_js` helper exists (`tests/decorates_emission.rs:125`) but no JS fixture currently exercises it; TypeScript covers the production decorator path. Tracked in FU-2026-05-23-012.
+[^go-dec]: Go has no annotation syntax; `Decorates` is emitted from an
+**allowlist** of symbol-level compiler pragmas — currently `noinline`,
+`nosplit`, `noescape`, `linkname`, `norace`, `notinheap`, `nointerface`,
+`nowritebarrier`, `nowritebarrierrec`, `yeswritebarrierrec`,
+`registerparams`, `wasmimport`, `wasmexport`, `embed`. Excluded by design:
+`//go:build` / `//go:binary-only-package` / `//go:debug` (file or package
+scope) and `//go:generate` (build-pipeline directive, not symbol property).
+Allowlist beats denylist so new package-scope directives don't silently
+bleed into `Decorates`; see `crates/ecp-analyzer/src/go/parser.rs::GO_SYMBOL_PRAGMAS`.
+
+[^rb-dec]: Ruby has no annotation system. The closest idioms (block-pass
+`do …; end`, `prepend`/`include` mixins) carry different semantics and are
+modelled by `Calls` / `Implements` respectively. No FU planned.
+
+[^c-dec]: C `Decorates` covers C23 standard `[[attr]]` (`attribute_declaration`
+node) and GNU `__attribute__((attr))` (`attribute_specifier` node). Both forms
+attach as direct children of the declaration node; the parser walks them at
+emit time. Useful subset: `[[nodiscard]]`, `[[deprecated]]`, `[[maybe_unused]]`,
+`__attribute__((deprecated|pure|noreturn))`.
+
+[^cpp-dec]: C++ `Decorates` shares the C path (`[[attr]]` /
+`__attribute__((attr))`) and additionally preserves the `__override__`
+sentinel that the existing `Overrides` post-process consumes — both flow
+through the same `decorators` field, the `__override__` is filtered in
+`decorates_edges` before edge emission.
 
 [^py-enum]: Python uses `class Foo(Enum):` — first-class enum semantics require base-class detection (analogous to PR #356 Protocol detection). Tracked in FU-2026-05-23-011.
 

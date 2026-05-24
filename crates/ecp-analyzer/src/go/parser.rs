@@ -54,6 +54,61 @@ const BLIND_IOTA_CONST_BLOCK: (&str, &str) = (
 /// `const_spec`, so the ≥2 guard excludes it. Function-body const blocks are
 /// legal Go but rare; we limit to `source_file` direct children to match the
 /// existing const/var design (see `function_body_const_is_dropped` test).
+/// Symbol-level Go compiler pragmas — directives that genuinely decorate a
+/// single function / method / variable. Allowlisted explicitly rather than
+/// denylisting `//go:build` so future additions like `//go:debug` (package
+/// scope) or third-party generators don't silently bleed into `Decorates`.
+///
+/// Excluded by design:
+/// - `//go:build` / `//go:binary-only-package` / `//go:debug` — file or
+///   package scope; not symbol decoration.
+/// - `//go:generate` — invokes external tooling at `go generate` time;
+///   not a property of the symbol itself.
+const GO_SYMBOL_PRAGMAS: &[&str] = &[
+    "noinline",
+    "nosplit",
+    "noescape",
+    "linkname",
+    "norace",
+    "notinheap",
+    "nointerface",
+    "nowritebarrier",
+    "nowritebarrierrec",
+    "yeswritebarrierrec",
+    "registerparams",
+    "wasmimport",
+    "wasmexport",
+    "embed",
+];
+
+/// Walk preceding sibling `comment` nodes and collect known symbol-level
+/// `//go:` directives. See `GO_SYMBOL_PRAGMAS` for the allowlist and
+/// rationale for what is excluded.
+///
+/// Returns pragmas in source order. Pass the outer declaration node
+/// (`function_declaration` / `method_declaration` / `var_declaration`);
+/// pragmas attached to inner `var_spec` are not recognised by `go vet`.
+fn collect_go_pragmas(decl_node: tree_sitter::Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = decl_node.prev_sibling();
+    while let Some(sib) = cur {
+        if sib.kind() != "comment" {
+            break;
+        }
+        if let Ok(text) = std::str::from_utf8(&source[sib.start_byte()..sib.end_byte()]) {
+            if let Some(rest) = text.strip_prefix("//go:") {
+                let directive = rest.split_whitespace().next().unwrap_or("");
+                if GO_SYMBOL_PRAGMAS.contains(&directive) {
+                    out.push(format!("//go:{}", rest.trim()));
+                }
+            }
+        }
+        cur = sib.prev_sibling();
+    }
+    out.reverse();
+    out
+}
+
 fn detect_iota_const_blocks(
     root: tree_sitter::Node<'_>,
     path: &Path,
@@ -538,6 +593,13 @@ impl LanguageProvider for GoProvider {
             // Multi-name `var x, y int` emits one Variable per name.
             if is_var {
                 if let Some(root) = var_root_node {
+                    // `@var` captures `var_spec`; pragmas like //go:embed
+                    // attach to the enclosing `var_declaration`.
+                    let var_pragmas = root
+                        .parent()
+                        .filter(|p| p.kind() == "var_declaration")
+                        .map(|d| collect_go_pragmas(d, source))
+                        .unwrap_or_default();
                     for n in &var_name_nodes {
                         if let Ok(name_str) =
                             std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
@@ -550,7 +612,7 @@ impl LanguageProvider for GoProvider {
                             let start = n.start_position();
                             let end = root.end_position();
                             nodes.push(RawNode {
-                                decorators: vec![],
+                                decorators: var_pragmas.clone(),
                                 name,
                                 kind: NodeKind::Variable,
                                 is_exported,
@@ -607,12 +669,28 @@ impl LanguageProvider for GoProvider {
                         let Some(var_spec) = var_spec_root else {
                             continue;
                         };
+                        // Pragmas attach to `var_declaration`, not `var_spec`.
+                        // Walk up through optional `var_spec_list`.
+                        let pragmas = {
+                            let mut p = var_spec.parent();
+                            while let Some(cur) = p {
+                                match cur.kind() {
+                                    "var_declaration" => break,
+                                    "var_spec_list" => p = cur.parent(),
+                                    _ => {
+                                        p = None;
+                                        break;
+                                    }
+                                }
+                            }
+                            p.map(|d| collect_go_pragmas(d, source)).unwrap_or_default()
+                        };
                         let name = name_str.to_string();
                         let is_exported = name.chars().next().is_some_and(|c| c.is_uppercase());
                         let start = n.start_position();
                         let end = var_spec.end_position();
                         file_var_pending.push(RawNode {
-                            decorators: vec![],
+                            decorators: pragmas,
                             name,
                             kind: NodeKind::Variable,
                             is_exported,
@@ -698,8 +776,18 @@ impl LanguageProvider for GoProvider {
                         None
                     };
 
+                    // //go:noinline / //go:nosplit / //go:linkname / //go:noescape
+                    // attach to the function or method declaration as preceding
+                    // line_comments. Captured here so Decorates post-process emits
+                    // edges from the symbol to a synthetic Annotation.
+                    let decorators = if matches!(k, NodeKind::Function | NodeKind::Method) {
+                        collect_go_pragmas(root, source)
+                    } else {
+                        vec![]
+                    };
+
                     nodes.push(RawNode {
-                        decorators: vec![],
+                        decorators,
                         name,
                         kind: k,
                         is_exported,

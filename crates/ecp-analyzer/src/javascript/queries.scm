@@ -24,13 +24,18 @@
       name: (identifier) @name.function
       value: (arrow_function)) @function)) @export
 
-;; Classes
+;; Classes — decorators captured from both class_declaration and the wrapping
+;; export_statement, mirroring the TypeScript queries.scm decorator-position
+;; quirk (`@Dec export class Foo {}` attaches the decorator to the export node).
 (class_declaration
+  (decorator)* @decorator
   name: (identifier) @name.class
   (class_heritage (expression) @heritage)?) @class
 
 (export_statement
-  declaration: (class_declaration
+  (decorator)* @decorator
+  (class_declaration
+    (decorator)* @decorator
     name: (identifier) @name.class
     (class_heritage (expression) @heritage)?) @class) @export
 

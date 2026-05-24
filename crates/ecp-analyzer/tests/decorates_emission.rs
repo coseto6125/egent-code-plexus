@@ -10,7 +10,10 @@
 //! capture (Dart, Rust — no query in queries.scm), the Layer-1 test is replaced
 //! by a direct `LocalGraph` construction, which still exercises the post-process.
 //!
-//! Deferred: Go / Ruby / C / C++ (documented in FOLLOWUPS.md).
+//! Niche-language coverage: Go (//go: pragmas excluding //go:build, file-level
+//! constraint) / C (C23 [[attr]] + GNU __attribute__) / C++ (same shapes plus
+//! the existing __override__ sentinel). Ruby has no annotation system and
+//! remains deferred.
 
 mod decorates_support;
 
@@ -138,7 +141,6 @@ fn typescript_decorator_emits_decorates_edge() {
 // JAVASCRIPT
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 fn parse_js(path: &str, src: &str) -> ecp_core::analyzer::types::LocalGraph {
     use ecp_analyzer::javascript::parser::JavaScriptProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
@@ -149,9 +151,30 @@ fn parse_js(path: &str, src: &str) -> ecp_core::analyzer::types::LocalGraph {
 }
 
 #[test]
+fn javascript_decorator_captured_in_raw_node() {
+    // TC39 stage-3 decorators — tree-sitter-javascript exposes `decorator` as a
+    // direct child of `class_declaration` (mirrors the TypeScript grammar). The
+    // queries.scm capture wires the raw text into RawNode.decorators.
+    let src = r#"
+@Controller
+class MyController {}
+"#;
+    let g = parse_js("svc.js", src);
+    let cls = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "MyController")
+        .expect("MyController");
+    assert!(
+        has_decorator(cls, "Controller"),
+        "@Controller must appear in decorators; got {:?}",
+        cls.decorators
+    );
+}
+
+#[test]
 fn javascript_decorator_emits_decorates_edge() {
-    // TC39 stage-3 decorators; inject directly since JS parser may not
-    // wire the decorator capture yet (same as TypeScript path).
+    // Synthetic-injection variant kept as Layer-2 post-process coverage.
     let lg = single_node_graph(
         "svc.js",
         NodeKind::Class,
@@ -588,6 +611,243 @@ fn dart_deprecated_annotation_emits_decorates_edge() {
     assert!(
         !edges.is_empty(),
         "expected Decorates edge from @deprecated"
+    );
+    assert!(
+        has_synthetic_edge(&edges, 0, &synthetic, initial_count, "deprecated", &sp),
+        "synthetic Annotation 'deprecated' expected; got {:?}",
+        synthetic
+            .iter()
+            .map(|n| sp.resolve(&n.name))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GO — symbol-level pragmas (//go:noinline, //go:linkname, //go:embed).
+// //go:build is intentionally excluded: it is a file-level build constraint,
+// not a symbol decorator (semantic mismatch with Decorates edge).
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn parse_go(path: &str, src: &str) -> ecp_core::analyzer::types::LocalGraph {
+    use ecp_analyzer::go::parser::GoProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    GoProvider::new()
+        .expect("GoProvider")
+        .parse_file(Path::new(path), src.as_bytes())
+        .expect("parse")
+}
+
+#[test]
+fn go_noinline_pragma_captured_in_raw_node() {
+    let src = "package foo\n\n//go:noinline\nfunc Compute() int { return 0 }\n";
+    let g = parse_go("foo.go", src);
+    let f = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "Compute")
+        .expect("Compute");
+    assert!(
+        f.decorators.iter().any(|d| d == "//go:noinline"),
+        "//go:noinline must appear in decorators; got {:?}",
+        f.decorators
+    );
+}
+
+#[test]
+fn go_build_tag_is_not_emitted_as_decorator() {
+    // //go:build is file-level constraint — must NOT pollute symbol decorators.
+    let src = "//go:build linux\n\npackage foo\n\nfunc Run() {}\n";
+    let g = parse_go("foo.go", src);
+    let f = g.nodes.iter().find(|n| n.name == "Run").expect("Run");
+    assert!(
+        f.decorators.is_empty(),
+        "//go:build must not attach to symbol; got {:?}",
+        f.decorators
+    );
+}
+
+#[test]
+fn go_generate_directive_is_not_emitted_as_decorator() {
+    // //go:generate triggers external tooling at `go generate` time — it is
+    // a build-pipeline directive, not a symbol property. Allowlist guards
+    // against this and any future package-scope directives like //go:debug.
+    let src = concat!(
+        "package foo\n\n",
+        "//go:generate stringer -type=Pill\n",
+        "func MakePill() int { return 0 }\n",
+    );
+    let g = parse_go("foo.go", src);
+    let f = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "MakePill")
+        .expect("MakePill");
+    assert!(
+        f.decorators.is_empty(),
+        "//go:generate must not attach to symbol; got {:?}",
+        f.decorators
+    );
+}
+
+#[test]
+fn go_unknown_directive_is_not_emitted_as_decorator() {
+    // Third-party `//go:foo` directives (or typos like //go:noinlin) MUST be
+    // dropped — Decorates is not a free-form annotation bucket.
+    let src = "package foo\n\n//go:somethirdparty arg\nfunc Z() {}\n";
+    let g = parse_go("foo.go", src);
+    let f = g.nodes.iter().find(|n| n.name == "Z").expect("Z");
+    assert!(
+        f.decorators.is_empty(),
+        "Unknown //go: directive must not attach to symbol; got {:?}",
+        f.decorators
+    );
+}
+
+#[test]
+fn go_embed_pragma_on_var() {
+    let src = "package foo\n\nimport \"embed\"\n\n//go:embed templates/*\nvar Templates embed.FS\n";
+    let g = parse_go("foo.go", src);
+    let v = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "Templates")
+        .expect("Templates");
+    assert!(
+        v.decorators.iter().any(|d| d.starts_with("//go:embed")),
+        "//go:embed must appear in decorators; got {:?}",
+        v.decorators
+    );
+}
+
+#[test]
+fn go_pragma_emits_decorates_edge() {
+    let lg = single_node_graph(
+        "lib.go",
+        NodeKind::Function,
+        "Fast",
+        vec!["//go:noinline".into()],
+    );
+    let (edges, synthetic, sp, initial_count) = run_decorates(&[lg]);
+    assert!(
+        !edges.is_empty(),
+        "expected Decorates edge for //go:noinline"
+    );
+    assert!(
+        has_synthetic_edge(&edges, 0, &synthetic, initial_count, "go:noinline", &sp),
+        "synthetic Annotation 'go:noinline' expected; got {:?}",
+        synthetic
+            .iter()
+            .map(|n| sp.resolve(&n.name))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C — C23 [[nodiscard]] / [[deprecated]] + GNU __attribute__((...))
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn parse_c(path: &str, src: &str) -> ecp_core::analyzer::types::LocalGraph {
+    use ecp_analyzer::c::parser::CProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    CProvider::new()
+        .expect("CProvider")
+        .parse_file(Path::new(path), src.as_bytes())
+        .expect("parse")
+}
+
+#[test]
+fn c_nodiscard_attribute_captured() {
+    let src = "[[nodiscard]] int compute(void) { return 0; }\n";
+    let g = parse_c("lib.c", src);
+    let f = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "compute")
+        .expect("compute");
+    assert!(
+        f.decorators.iter().any(|d| d.contains("nodiscard")),
+        "[[nodiscard]] must appear in decorators; got {:?}",
+        f.decorators
+    );
+}
+
+#[test]
+fn c_gnu_deprecated_attribute_captured() {
+    let src = "__attribute__((deprecated)) int old_api(void) { return 0; }\n";
+    let g = parse_c("lib.c", src);
+    let f = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "old_api")
+        .expect("old_api");
+    assert!(
+        f.decorators.iter().any(|d| d.contains("deprecated")),
+        "__attribute__((deprecated)) must appear in decorators; got {:?}",
+        f.decorators
+    );
+}
+
+#[test]
+fn c_attribute_emits_decorates_edge() {
+    let lg = single_node_graph(
+        "lib.c",
+        NodeKind::Function,
+        "compute",
+        vec!["[[nodiscard]]".into()],
+    );
+    let (edges, synthetic, sp, initial_count) = run_decorates(&[lg]);
+    assert!(
+        !edges.is_empty(),
+        "expected Decorates edge for [[nodiscard]]"
+    );
+    assert!(
+        has_synthetic_edge(&edges, 0, &synthetic, initial_count, "nodiscard", &sp),
+        "synthetic Annotation 'nodiscard' expected; got {:?}",
+        synthetic
+            .iter()
+            .map(|n| sp.resolve(&n.name))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C++ — C23-style [[attr]] coexists with the existing __override__ sentinel
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn parse_cpp(path: &str, src: &str) -> ecp_core::analyzer::types::LocalGraph {
+    use ecp_analyzer::cpp::parser::CppProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    CppProvider::new()
+        .expect("CppProvider")
+        .parse_file(Path::new(path), src.as_bytes())
+        .expect("parse")
+}
+
+#[test]
+fn cpp_deprecated_attribute_captured() {
+    let src = r#"[[deprecated("use NewFn")]] void oldFn() {}
+"#;
+    let g = parse_cpp("lib.cpp", src);
+    let f = g.nodes.iter().find(|n| n.name == "oldFn").expect("oldFn");
+    assert!(
+        f.decorators.iter().any(|d| d.contains("deprecated")),
+        "[[deprecated]] must appear in decorators; got {:?}",
+        f.decorators
+    );
+}
+
+#[test]
+fn cpp_attribute_emits_decorates_edge() {
+    let lg = single_node_graph(
+        "lib.cpp",
+        NodeKind::Function,
+        "oldFn",
+        vec!["[[deprecated]]".into()],
+    );
+    let (edges, synthetic, sp, initial_count) = run_decorates(&[lg]);
+    assert!(
+        !edges.is_empty(),
+        "expected Decorates edge for [[deprecated]]"
     );
     assert!(
         has_synthetic_edge(&edges, 0, &synthetic, initial_count, "deprecated", &sp),

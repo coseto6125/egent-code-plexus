@@ -600,8 +600,14 @@ impl LanguageProvider for CProvider {
                     // A function with `static` storage class is translation-unit private.
                     let is_exported = !has_static_specifier(root, source);
 
+                    let decorators = if matches!(k, NodeKind::Function | NodeKind::Method) {
+                        crate::framework_helpers::collect_cpp_attributes(root, source)
+                    } else {
+                        vec![]
+                    };
+
                     nodes.push(RawNode {
-                        decorators: vec![],
+                        decorators,
                         is_exported,
                         heritage: vec![],
                         type_annotation,
