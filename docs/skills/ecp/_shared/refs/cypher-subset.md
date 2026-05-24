@@ -76,6 +76,6 @@ Run `ecp schema reltypes` for each edge's LLM-utility category and heuristic fla
 
 If a call site cannot be statically resolved, `ecp` emits a `BlindSpot` record instead of guessing an edge. This prevents hallucinations in the graph.
 
-`BlindSpotRecord` fields: `kind`, `file_path`, `start_row` / `start_col` / `end_row` / `end_col`, `hint`, **`is_test: bool`** (true when the record originates from a test file — verdict layer filters these out of prod-refactor warnings).
+`BlindSpotRecord` fields: `kind`, `file_path`, `start_row` / `start_col` / `end_row` / `end_col`, `hint`, **`is_test: bool`** (true when the record originates from a test file — verdict layer filters these out of prod-refactor warnings, so legitimate test fixtures using `eval` / reflection / `dlsym` to exercise prod code don't surface as noise).
 
 Run `ecp schema blindspots` for per-language emitter coverage + the full list of kinds (~31 across 14 languages).
