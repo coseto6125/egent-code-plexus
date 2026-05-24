@@ -71,6 +71,7 @@ fn seed_repo(home_ecp: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     };
     let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
     let commit_dir = home_ecp.join(dir_name).join("commits").join(sha_dir);

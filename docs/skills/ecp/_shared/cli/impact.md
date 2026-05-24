@@ -3,7 +3,7 @@
 Two modes:
 
 1. **Symbol blast radius** — given a function / method / class, list callers and risk level.
-2. **Path-literal site lookup** — given a path string (`--literal VALUE`), list every place that string appears in the graph, with sink classification (`sink:read` / `sink:write` / `sink:join` / `sink:free`).
+2. **Path-literal site lookup** — given an exact path string (`--literal VALUE`), list every place that string appears in the graph, with sink classification (`sink:read` / `sink:write` / `sink:join` / `sink:free`).
 
 ## Usage
 
@@ -25,7 +25,9 @@ ecp impact <SYMBOL> [--direction up] [--repo <PATH>]
 ecp impact --literal session_meta.json
 ```
 
-Returns every file:line that embeds the exact string, with the enclosing function and the sink kind. Designed for "filename split-brain" detection: when one part of the codebase writes `session_meta.json` and another part still reads `meta.json` (the PR #357 bug class), this query surfaces both groups in one shot without composing cypher.
+Returns every file:line that embeds the exact string, with the enclosing function and the sink kind. Designed for "filename split-brain" detection: when one part of the codebase writes `session_meta.json` and another part still reads `meta.json` (the PR #357 bug class), query each suspected literal separately and compare the two result sets.
+
+`--literal` does not do Levenshtein or other fuzzy clustering; use exact values.
 
 - `sink:read|confidence:high` — direct read (`fs::read_to_string`, `File.readText`, …)
 - `sink:write|confidence:high` — direct write
@@ -35,6 +37,14 @@ Returns every file:line that embeds the exact string, with the enclosing functio
 - `sink:free|confidence:high` — literal not embedded in a call (let binding, const initialiser, raw-string fixture inside macros)
 
 `--literal` is mutually exclusive with `<NAME>` / `--target` / `--baseline`.
+
+### Path-literal split-brain scan
+
+```bash
+ecp impact --literal-coherence --format json
+```
+
+Scans all PathLiteral nodes and emits likely filename split-brain candidate pairs. A pair is reported only when the literals have the same extension, similar basenames, nearby source directories, and separated access patterns (one read-only, one write-only). Use this before guessing candidate pairs manually.
 
 ## Risk Levels (blast-radius mode)
 - **LOW**: Few callers, strictly localized.

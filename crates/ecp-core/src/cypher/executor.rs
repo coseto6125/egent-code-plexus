@@ -1521,6 +1521,10 @@ fn node_prop_value(
 /// Return true when the node's FunctionMeta has the given flag set.
 /// Nodes with no FunctionMeta record return false (sparse-record default).
 fn archived_fm_flag(graph: &ArchivedZeroCopyGraph, node_idx: u32, flag: u16) -> bool {
+    if flag <= u8::MAX as u16 && graph.node_flags.len() > node_idx as usize {
+        return graph.node_flags[node_idx as usize] & flag as u8 != 0;
+    }
+
     match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
@@ -1762,6 +1766,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }
@@ -1856,6 +1861,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }
@@ -1938,6 +1944,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }
@@ -2261,6 +2268,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }
@@ -2379,6 +2387,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }
@@ -2737,6 +2746,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }
@@ -2863,6 +2873,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec();
         let archived =
@@ -3037,6 +3048,14 @@ mod tests {
             ],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![
+                0,
+                FunctionMeta::FLAG_ASYNC as u8,
+                FunctionMeta::FLAG_TEST as u8,
+                (FunctionMeta::FLAG_TEST | FunctionMeta::FLAG_ASYNC) as u8,
+                0,
+                0,
+            ],
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }

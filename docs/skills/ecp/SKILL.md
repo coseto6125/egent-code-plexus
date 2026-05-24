@@ -56,7 +56,8 @@ Use grep / Read for: string literals, error messages, config keys (toml / yaml /
 **Literal mode** (path-string sink lookup):
 | Command | Use for |
 |---|---|
-| `ecp impact --literal session_meta.json` | Every read/write site of a path string, classified (`sink:read` / `sink:write` / `sink:join` / `sink:free` / …). For split-brain bugs (one part writes `meta.json`, another reads `session_meta.json`) |
+| `ecp impact --literal session_meta.json` | Exact read/write sites for that path string, classified (`sink:read` / `sink:write` / `sink:join` / `sink:free` / …). For split-brain bugs, query each suspected literal separately (`meta.json`, `session_meta.json`) |
+| `ecp impact --literal-coherence` | Auto-detect likely filename split-brain pairs across all PathLiteral nodes (similar names, same extension, nearby dirs, read-only vs write-only) |
 
 **Related (edge-level, not symbol-level)**:
 | Command | Use for |

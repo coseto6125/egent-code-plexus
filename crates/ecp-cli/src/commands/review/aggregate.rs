@@ -103,6 +103,7 @@ fn run_impact(
         explain_confidence: false,
         format: None,
         literal: None,
+        literal_coherence: false,
     };
     let v = match impact::build_payload(&args, engine) {
         Ok(v) => v,

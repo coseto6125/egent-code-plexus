@@ -77,6 +77,7 @@ fn fixture_archived(bytes: &mut Vec<u8>) -> &ArchivedZeroCopyGraph {
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     };
 
     *bytes = rkyv::to_bytes::<Error>(&graph).unwrap().into_vec();

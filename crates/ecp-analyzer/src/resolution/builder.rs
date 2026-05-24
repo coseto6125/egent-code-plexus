@@ -1043,6 +1043,12 @@ impl GraphBuilder {
         }
         // Sort by node_idx so binary search in function_meta() is valid.
         function_metas.sort_unstable_by_key(|m| m.node_idx);
+        let mut node_flags: Vec<u8> = vec![0u8; nodes.len()];
+        for meta in &function_metas {
+            if let Some(slot) = node_flags.get_mut(meta.node_idx as usize) {
+                *slot = (meta.flags & 0x00ff) as u8;
+            }
+        }
         if prof {
             eprintln!(
                 "prof build.pass18_function_meta: {:.3}s  count={}",
@@ -1915,6 +1921,7 @@ impl GraphBuilder {
             function_metas,
             kind_offsets,
             kind_node_idx,
+            node_flags,
         }
     }
 }

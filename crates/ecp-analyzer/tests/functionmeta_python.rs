@@ -54,8 +54,14 @@ fn meta<'a>(g: &'a ZeroCopyGraph, name: &str) -> &'a FunctionMeta {
 fn python_async_function_has_async_flag() {
     let src = "async def fetch_user(id: int) -> dict:\n    return {}\n";
     let g = analyze(src);
+    let idx = find_fn(&g, "fetch_user") as usize;
     let m = meta(&g, "fetch_user");
     assert!(m.is_async(), "expected is_async");
+    assert_eq!(
+        g.node_flags[idx] & FunctionMeta::FLAG_ASYNC as u8,
+        FunctionMeta::FLAG_ASYNC as u8,
+        "dense node_flags must mirror FunctionMeta async flag"
+    );
     assert!(!m.is_static());
     assert!(!m.is_generator());
     let pool = g.string_pool.as_slice();

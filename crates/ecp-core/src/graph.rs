@@ -18,7 +18,10 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     1-cycle `FxHashMap` lookup; eliminates string-pool dereference on hot paths.
 /// v8: `Node.content_hash: u64` added — per-symbol xxh3_64 of raw source bytes
 ///     for T7-4/5/6 incremental skip (equal hash ↔ body unchanged).
-pub const GRAPH_FORMAT_VERSION: u32 = 10;
+/// v9: `name_index: Vec<NameIndexEntry>` populated for name lookup.
+/// v10: `kind_offsets` / `kind_node_idx` CSR added for NodeKind lookup.
+/// v11: `node_flags: Vec<u8>` added for dense per-node FunctionMeta flags.
+pub const GRAPH_FORMAT_VERSION: u32 = 11;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -893,6 +896,13 @@ pub struct ZeroCopyGraph {
     /// Flat node-index array sorted by kind, partitioned by `kind_offsets`.
     /// Same node may NOT appear twice (each node has exactly one kind).
     pub kind_node_idx: Vec<u32>,
+
+    // ── Schema v11 additions ─────────────────────────────────────────
+    /// Dense low-byte FunctionMeta flags by node index. Length matches
+    /// `nodes.len()` for v11 graphs. Non-function nodes and function nodes
+    /// without FunctionMeta use 0. This keeps hot boolean flag filters out of
+    /// the sparse `function_metas` binary-search side table.
+    pub node_flags: Vec<u8>,
 }
 
 impl ZeroCopyGraph {
@@ -996,6 +1006,7 @@ impl Default for ZeroCopyGraph {
             function_metas: Vec::new(),
             kind_offsets: Vec::new(),
             kind_node_idx: Vec::new(),
+            node_flags: Vec::new(),
         }
     }
 }
@@ -1048,6 +1059,7 @@ mod tests {
             function_metas: vec![],
             kind_offsets: vec![],
             kind_node_idx: vec![],
+            node_flags: vec![],
         }
     }
 

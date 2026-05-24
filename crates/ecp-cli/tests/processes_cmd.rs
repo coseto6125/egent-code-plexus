@@ -119,6 +119,7 @@ fn build_process_graph(
         function_metas: vec![],
         kind_offsets: vec![],
         kind_node_idx: vec![],
+        node_flags: vec![],
     };
 
     let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
