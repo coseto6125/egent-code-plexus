@@ -900,12 +900,42 @@ fn exec_pattern(
     let mut frontier: Vec<(Binding, u32)> = Vec::new();
     let first_np = &pat.nodes[0];
 
+    // Hotspot 1: when the first node carries a kind filter, iterate via the
+    // v10 `kind_offsets` CSR slice directly — `MATCH (m:Method)` against a
+    // 303k-node graph then visits only the ~110k Method indices. The CSR
+    // path uses a concrete slice iterator (no `Box<dyn Iterator>` vcall in
+    // the inner loop). Empty-kinds and legacy-v9 (no CSR) fall through to
+    // the full linear scan that mirrors the previous behaviour.
+    let csr_ready = !graph.kind_offsets.is_empty();
+    let use_kind_csr = csr_ready
+        && !first_np.kinds.is_empty()
+        && first_np.kinds.iter().all(|k| {
+            let kidx = k.as_index();
+            graph.kind_offsets.len() > kidx + 1
+        });
+
     // If the first node var is already bound, pin to that node only.
     if let Some(var) = &first_np.var {
         if let Some(&already) = base.node_vars.get(var) {
             let node = &graph.nodes[already as usize];
             if node_matches(node, first_np, graph) {
                 frontier.push((base.clone(), already));
+            }
+        } else if use_kind_csr {
+            for &kind in &first_np.kinds {
+                let kidx = kind.as_index();
+                let start = graph.kind_offsets[kidx].to_native() as usize;
+                let end = graph.kind_offsets[kidx + 1].to_native() as usize;
+                for &raw in &graph.kind_node_idx[start..end] {
+                    let idx = raw.to_native();
+                    let node = &graph.nodes[idx as usize];
+                    if !node_matches(node, first_np, graph) {
+                        continue;
+                    }
+                    let mut b = base.clone();
+                    b.node_vars.insert(var.clone(), idx);
+                    frontier.push((b, idx));
+                }
             }
         } else {
             for (idx, node) in graph.nodes.iter().enumerate() {
@@ -915,6 +945,20 @@ fn exec_pattern(
                 let mut b = base.clone();
                 b.node_vars.insert(var.clone(), idx as u32);
                 frontier.push((b, idx as u32));
+            }
+        }
+    } else if use_kind_csr {
+        for &kind in &first_np.kinds {
+            let kidx = kind.as_index();
+            let start = graph.kind_offsets[kidx].to_native() as usize;
+            let end = graph.kind_offsets[kidx + 1].to_native() as usize;
+            for &raw in &graph.kind_node_idx[start..end] {
+                let idx = raw.to_native();
+                let node = &graph.nodes[idx as usize];
+                if !node_matches(node, first_np, graph) {
+                    continue;
+                }
+                frontier.push((base.clone(), idx));
             }
         }
     } else {
@@ -955,10 +999,10 @@ fn exec_pattern(
                 }
                 // Single-hop
                 None => {
-                    for (tgt_idx, edge_idx) in walk_rel(*cur_idx, rel, graph) {
+                    walk_rel(*cur_idx, rel, graph, |tgt_idx, edge_idx| {
                         let tgt_node = &graph.nodes[tgt_idx as usize];
                         if !node_matches(tgt_node, next_np, graph) {
-                            continue;
+                            return;
                         }
                         let mut nb = b.clone();
                         if let Some(var) = &next_np.var {
@@ -968,7 +1012,7 @@ fn exec_pattern(
                             nb.edge_vars.insert(var.clone(), edge_idx);
                         }
                         next_frontier.push((nb, tgt_idx));
-                    }
+                    });
                 }
             }
         }
@@ -1003,11 +1047,11 @@ fn bfs_var_len(
         if depth >= max {
             continue;
         }
-        for (tgt, edge_idx) in walk_rel(idx, rel, graph) {
+        walk_rel(idx, rel, graph, |tgt, edge_idx| {
             if visited.insert(tgt) {
                 queue.push_back((tgt, depth + 1, Some(edge_idx)));
             }
-        }
+        });
     }
     out
 }
@@ -1058,9 +1102,16 @@ fn node_matches(
     true
 }
 
-/// Walk one hop from `from` in the given direction, returning `(target_node_idx, edge_idx)`.
-fn walk_rel(from: u32, rel: &RelPat, graph: &ArchivedZeroCopyGraph) -> Vec<(u32, u32)> {
-    let mut out = Vec::new();
+/// Walk one hop from `from` in the given direction, invoking `emit(target_idx, edge_idx)`
+/// per matching edge. Closure-based instead of returning `Vec` so the frontier-expansion
+/// loop in `exec_pattern` doesn't pay a per-source-node allocation — at 110k+ source nodes
+/// the cumulative `Vec::new()` cost was ~6 ms of edge-traversal query time.
+fn walk_rel<F: FnMut(u32, u32)>(
+    from: u32,
+    rel: &RelPat,
+    graph: &ArchivedZeroCopyGraph,
+    mut emit: F,
+) {
     let dir = rel.dir;
 
     let check_type = |edge: &crate::graph::ArchivedEdge| -> bool {
@@ -1075,7 +1126,7 @@ fn walk_rel(from: u32, rel: &RelPat, graph: &ArchivedZeroCopyGraph) -> Vec<(u32,
         let e = graph.out_offsets[from as usize + 1].to_native() as usize;
         for (i, edge) in graph.edges[s..e].iter().enumerate() {
             if check_type(edge) {
-                out.push((edge.target.to_native(), (s + i) as u32));
+                emit(edge.target.to_native(), (s + i) as u32);
             }
         }
     }
@@ -1086,11 +1137,10 @@ fn walk_rel(from: u32, rel: &RelPat, graph: &ArchivedZeroCopyGraph) -> Vec<(u32,
             let edge_idx = graph.in_edge_idx[i].to_native();
             let edge = &graph.edges[edge_idx as usize];
             if check_type(edge) {
-                out.push((edge.source.to_native(), edge_idx));
+                emit(edge.source.to_native(), edge_idx);
             }
         }
     }
-    out
 }
 
 fn eval_expr(
