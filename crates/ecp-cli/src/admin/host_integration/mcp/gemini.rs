@@ -48,8 +48,10 @@ pub fn status() -> HostStatus {
     if !output.status.success() {
         return HostStatus::Missing;
     }
-    let list = String::from_utf8_lossy(&output.stdout);
-    if list.contains(SERVER_NAME) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let pattern = format!("{}:", SERVER_NAME);
+    if stdout.contains(&pattern) || stderr.contains(&pattern) {
         HostStatus::Installed {
             detail: "managed via gemini mcp".into(),
         }

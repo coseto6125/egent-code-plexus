@@ -10,6 +10,8 @@ ecp inspect --name <SYMBOL_NAME> [--repo <PATH>]
 ## Options
 - `--name X`: The name of the symbol to inspect.
 - `--repo PATH`: Path to the repository (default: `.`).
+- `--kind KIND`: Filter target side of edges by kind.
+- `--file_path SUBSTR`: Filter target side of edges by file path substring.
 - `--format`: `toon` (default), `json`.
 
 ## Output fields (JSON)

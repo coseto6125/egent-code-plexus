@@ -16,7 +16,7 @@ pub(crate) fn install_scripted() -> Result<(), EcpError> {
     })?;
 
     println!("Installing Gemini CLI native skill from {}...", skill_path);
-    let output = gemini_cli::run(&["skills", "link", &skill_path])?;
+    let output = gemini_cli::run(&["skills", "link", "--consent", &skill_path])?;
 
     if output.status.success() {
         println!("✓ Gemini CLI native skill 'ecp' linked successfully.");
@@ -47,8 +47,10 @@ pub fn status() -> HostStatus {
     if !output.status.success() {
         return HostStatus::Missing;
     }
-    let list = String::from_utf8_lossy(&output.stdout);
-    if list.contains(SKILL_NAME) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let pattern = format!("{} [", SKILL_NAME);
+    if stdout.contains(&pattern) || stderr.contains(&pattern) {
         HostStatus::Installed {
             detail: "linked via gemini skills link".into(),
         }

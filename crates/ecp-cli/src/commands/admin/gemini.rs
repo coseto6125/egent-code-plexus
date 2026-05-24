@@ -38,8 +38,14 @@ pub fn run(command: GeminiCommands) -> Result<(), ecp_core::EcpError> {
 
 pub(crate) fn install(component: GeminiComponent) -> Result<(), ecp_core::EcpError> {
     match component {
-        GeminiComponent::NativeSkill => native_gemini::install_scripted(),
-        GeminiComponent::McpServer => mcp_gemini::install_scripted(),
+        GeminiComponent::NativeSkill => {
+            let _ = mcp_gemini::uninstall_scripted();
+            native_gemini::install_scripted()
+        }
+        GeminiComponent::McpServer => {
+            let _ = native_gemini::uninstall_scripted();
+            mcp_gemini::install_scripted()
+        }
     }
 }
 
