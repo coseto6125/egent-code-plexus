@@ -66,6 +66,20 @@ pub fn enumerate_tools(root: &Command) -> Vec<DerivedTool> {
         .collect()
 }
 
+/// Enumerate the full LLM-facing ecp tool surface, including hand-rolled
+/// routers for command groups that clap keeps hidden or too opaque for direct
+/// derivation. This is the shared source of truth for MCP spawn-mode and native
+/// host adapters.
+pub fn ecp_tools(root: &Command) -> Vec<DerivedTool> {
+    let mut tools = enumerate_tools(root);
+    tools.retain(|t| t.name != "ecp_peers");
+    tools.extend(crate::peers::peer_tools());
+    tools.extend(crate::group::group_tools());
+    tools.retain(|t| t.name != "ecp_schema");
+    tools.extend(crate::schema_mcp::schema_tools());
+    tools
+}
+
 fn derive_tool(cmd: &Command) -> DerivedTool {
     let subcommand = cmd.get_name().to_string();
     let name = format!("ecp_{subcommand}");

@@ -71,17 +71,11 @@ pub fn run(command: CodexCommands) -> Result<(), ecp_core::EcpError> {
 fn install(component: CodexComponent) -> Result<(), ecp_core::EcpError> {
     match component {
         CodexComponent::NativeTools(args) => {
-            let path = codex::run_install()?;
-            println!("Codex CLI native patch written to {}", path.display());
             if args.auto_fork {
-                let fork_dir = resolve_fork_dir(args.fork_dir.as_deref());
-                auto_fork_and_apply(&path, &fork_dir)?;
-            } else {
-                println!(
-                    "Apply it in your openai/codex fork, then wire the generated tool into Codex's tool registry."
-                );
-                println!("  (re-run with --auto-fork to fork+clone+apply automatically via `gh`)");
+                println!("Codex CLI native-tools: --auto-fork ignored");
             }
+            println!("Codex CLI native-tools: {}", codex::pending_message());
+            return Ok(());
         }
         CodexComponent::Skills { target } => install_skills(target)?,
     }
@@ -101,6 +95,9 @@ fn uninstall(component: CodexComponent) -> Result<(), ecp_core::EcpError> {
 
 /// `~/.config/ecp/host-integration/codex-fork/` unless `$ECP_CODEX_FORK_DIR`
 /// or an explicit `--fork-dir` overrides.
+// TODO(native-tools): re-enable when native-tools writes a full Codex registry
+// patch instead of an adapter-only scaffold.
+#[allow(dead_code)]
 fn resolve_fork_dir(explicit: Option<&Path>) -> PathBuf {
     if let Some(p) = explicit {
         return p.to_path_buf();
@@ -117,6 +114,9 @@ fn resolve_fork_dir(explicit: Option<&Path>) -> PathBuf {
 
 /// `gh repo fork openai/codex --clone` to `fork_dir` (skips fork if the dir
 /// already holds a git checkout), then `git -C <fork_dir> apply <patch>`.
+// TODO(native-tools): re-enable when `install native-tools --auto-fork` can
+// apply dependency + registry hunks for a concrete Codex checkout.
+#[allow(dead_code)]
 fn auto_fork_and_apply(patch: &Path, fork_dir: &Path) -> Result<(), ecp_core::EcpError> {
     let auth = Command::new("gh")
         .args(["auth", "status"])

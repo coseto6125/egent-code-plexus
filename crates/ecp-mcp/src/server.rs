@@ -1,7 +1,7 @@
 //! Stdio JSON-RPC MCP server. Spawn-mode only; tools are derived at
 //! startup from the ecp CLI's `clap::Command` tree (see `schema.rs`).
 
-use crate::schema::{enumerate_tools, DerivedTool};
+use crate::schema::{ecp_tools, DerivedTool};
 use anyhow::{Context, Result};
 use clap::Command;
 use std::path::PathBuf;
@@ -24,22 +24,7 @@ impl EcpMcpServer {
     pub fn new(root: &Command) -> Result<Self> {
         let self_exe =
             std::env::current_exe().context("locating current_exe for spawn dispatch")?;
-        let mut tools = enumerate_tools(root);
-        // Replace the opaque `ecp_peers` entry (which exposes no useful args)
-        // with the three explicit peer sub-subcommand tools.
-        tools.retain(|t| t.name != "ecp_peers");
-        tools.extend(crate::peers::peer_tools());
-        // `ecp group` is `#[command(hide = true)]` so enumerate_tools skips
-        // it — without this manual injection, LLM clients cannot reach the
-        // sub-subcommands at all. Discriminator: `subcmd`.
-        tools.extend(crate::group::group_tools());
-        // `ecp schema` is `#[command(hide = true)]` for the same reason as
-        // `ecp group` — its nested sub-subcommands (`blindspots` /
-        // `reltypes` / `node-kinds` / `graph-version`) need a hand-rolled
-        // tool with a `subcmd` discriminator so MCP clients can reach
-        // them. Retain guards against a future visibility flip.
-        tools.retain(|t| t.name != "ecp_schema");
-        tools.extend(crate::schema_mcp::schema_tools());
+        let tools = ecp_tools(root);
         let rmcp_tools = build_rmcp_tools(&tools);
         Ok(Self {
             self_exe,

@@ -344,7 +344,6 @@ ecp admin
 Scripted path for AI agents and automation:
 
 ```bash
-ecp admin codex install native-tools
 ecp admin codex install skills all
 ecp admin codex install skills ecp
 ecp admin codex install skills simplify
@@ -357,28 +356,9 @@ The bundled skills teach workflow selection that command help cannot infer by it
 | `ecp` | The agent needs to decide whether graph-aware symbol, impact, route, contract, or rename workflows are better than grep / file reads. |
 | `simplify` | The agent is reviewing changed code and should start from ecp impact, blind spots, egress, shape drift, and resolver deltas before reading raw diffs. |
 
-The `native-tools` component writes:
+TODO: `native-tools` is pending Codex tool-registry wiring. The install command is intentionally disabled until it can generate dependency + registry hunks for a concrete Codex checkout instead of an adapter-only patch.
 
-```text
-~/.config/ecp/host-integration/codex-cli.patch
-```
-
-Apply the patch in your Codex CLI fork, then wire the generated module into Codex's tool registry:
-
-```bash
-cd /path/to/openai-codex-fork
-git apply ~/.config/ecp/host-integration/codex-cli.patch
-```
-
-Or let `ecp` fork + clone + apply via the `gh` CLI in one shot (requires `gh auth status` to be green):
-
-```bash
-ecp admin codex install native-tools --auto-fork
-# default fork checkout: ~/.config/ecp/host-integration/codex-fork/
-# override with --fork-dir <path> or $ECP_CODEX_FORK_DIR
-```
-
-To verify a fork that already has the native marker, set `ECP_CODEX_CLI_CHECKOUT` before checking status in the TUI:
+Once that TODO is implemented, a fork that has the native marker can be verified with `ECP_CODEX_CLI_CHECKOUT`:
 
 ```bash
 ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin

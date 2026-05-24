@@ -8,15 +8,11 @@ use std::path::{Path, PathBuf};
 
 const MARKER: &str = "ecp-codex-native-integration-v1";
 const PATCH_NAME: &str = "codex-cli.patch";
+const PENDING_NATIVE_TOOLS: &str =
+    "TODO: pending Codex tool-registry wiring; native-tools install is not enabled yet";
 
 pub fn install(_theme: &ColorfulTheme) {
-    match run_install() {
-        Ok(path) => {
-            println!("Codex CLI native patch written to {}", path.display());
-            println!("Apply it in your openai/codex fork, then wire the generated tool into Codex's tool registry.");
-        }
-        Err(e) => eprintln!("Codex CLI native install failed: {e}"),
-    }
+    println!("Codex CLI native-tools: {PENDING_NATIVE_TOOLS}");
 }
 
 pub fn uninstall(_theme: &ColorfulTheme) {
@@ -34,7 +30,7 @@ pub fn status() -> HostStatus {
     if patch.exists() {
         HostStatus::Outdated {
             reason: format!(
-                "patch prepared at {}; set ECP_CODEX_CLI_CHECKOUT to verify the fork",
+                "stale experimental patch at {}; {PENDING_NATIVE_TOOLS}",
                 patch.display()
             ),
         }
@@ -43,12 +39,17 @@ pub fn status() -> HostStatus {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_install() -> Result<PathBuf, EcpError> {
-    let path = patch_path();
-    let ecp_root =
-        std::env::current_dir().map_err(|e| EcpError::Output(format!("current_dir: {e}")))?;
-    write_patch(&path, &ecp_root)?;
-    Ok(path)
+    // TODO(native-tools): generate a checkout-aware patch that includes Codex's
+    // dependency and tool-registry hunks. The adapter-only patch looked
+    // installable but could not actually register tools in Codex, so keep this
+    // command disabled until registry wiring is implemented.
+    Err(EcpError::InvalidArgument(PENDING_NATIVE_TOOLS.into()))
+}
+
+pub(crate) fn pending_message() -> &'static str {
+    PENDING_NATIVE_TOOLS
 }
 
 pub(crate) fn run_uninstall() -> Result<PathBuf, EcpError> {
@@ -81,6 +82,9 @@ fn config_root() -> PathBuf {
     home.join(".config")
 }
 
+// TODO(native-tools): revive this once `run_install` can also write the Codex
+// Cargo.toml and tool-registry hunks for a concrete checkout.
+#[allow(dead_code)]
 fn write_patch(path: &Path, ecp_root: &Path) -> Result<(), EcpError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -92,24 +96,40 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/codex-rs/core/src/tools/ecp.rs
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,44 @@
 +// {MARKER}
 +//
-+// Native egent-code-plexus integration scaffold.
++// Native egent-code-plexus integration adapter.
 +//
 +// Add these dependencies to codex-rs/core/Cargo.toml:
 +//
 +// egent-code-plexus = {{ path = "{root}/crates/ecp-cli" }}
 +// ecp-core = {{ path = "{root}/crates/ecp-core" }}
++// serde_json = "1"
 +//
-+// Then register the tool(s) from this module in Codex's tool registry.
-+// The exact registry file changes across Codex releases, so this patch
-+// intentionally adds the stable integration module and leaves the final
-+// registration hunk to the fork maintainer.
++// Register these helpers in Codex's tool registry. The registry file changes
++// across Codex releases, so this patch intentionally adds the stable adapter
++// module and leaves the final registry hunk to the fork maintainer.
 +
++use std::path::Path;
++
++use ecp_cli::native::{{self, NativeTool, ToolResult}};
 +use ecp_core::EcpError;
++use serde_json::Value;
 +
 +pub const ECP_NATIVE_MARKER: &str = "{MARKER}";
++
++pub fn ecp_tools() -> Vec<NativeTool> {{
++    native::tools()
++}}
++
++pub fn ecp_tool_argv(name: &str, args: Value) -> Result<Vec<String>, EcpError> {{
++    native::tool_argv(name, args)
++}}
++
++pub fn ecp_call_spawn(binary: &Path, name: &str, args: Value) -> Result<ToolResult, EcpError> {{
++    native::call_spawn(binary, name, args)
++}}
 +
 +pub fn ecp_command_args(tool: &str, raw_args: &[String]) -> Result<Vec<String>, EcpError> {{
 +    let mut argv = Vec::with_capacity(raw_args.len() + 1);
