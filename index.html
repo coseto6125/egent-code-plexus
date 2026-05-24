@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="meta.title">Egent Code Plexus</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
+</head>
+<body class="theme-dark">
+    <!-- Top Navigation -->
+    <header class="navbar">
+        <div class="nav-container">
+            <div class="nav-logo">
+                <span class="logo-icon"></span>
+                <span class="logo-text">Egent Code Plexus</span>
+            </div>
+            <div class="nav-actions">
+                <a href="https://github.com/coseto6125/egent-code-plexus" target="_blank" rel="noopener noreferrer" class="github-link">
+                    <svg height="24" width="24" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                    GitHub
+                </a>
+                <div id="lang-selector-container"></div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-bg-glow"></div>
+        <div class="container hero-content">
+            <h1 class="hero-title">
+                Egent Code Plexus
+                <span class="hero-version">v0.4.1</span>
+            </h1>
+            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs.</p>
+            <p class="hero-subtitle" data-i18n="hero.subtitle">專為 AI Agent 設計的程式碼結構感知與架構雷達</p>
+
+            <!-- Install Box -->
+            <div class="install-box">
+                <div class="install-tabs">
+                    <button class="install-tab active" data-os="mac-linux" data-i18n="install.mac_linux">macOS / Linux</button>
+                    <button class="install-tab" data-os="windows" data-i18n="install.windows">Windows (PowerShell)</button>
+                    <button class="install-tab" data-os="cargo" data-i18n="install.cargo">Cargo (從原始碼編譯)</button>
+                </div>
+                <div class="install-content">
+                    <div class="install-pane active" id="pane-mac-linux">
+                        <code class="mono">curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh</code>
+                        <button class="copy-btn" data-clipboard="curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                    <div class="install-pane" id="pane-windows">
+                        <code class="mono">iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.ps1 -UseBasicParsing | iex</code>
+                        <button class="copy-btn" data-clipboard="iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.ps1 -UseBasicParsing | iex">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                    <div class="install-pane" id="pane-cargo">
+                        <code class="mono">cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked</code>
+                        <button class="copy-btn" data-clipboard="cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Main Content Navigation -->
+    <div class="content-nav-wrapper sticky">
+        <nav class="content-nav container">
+            <button class="section-btn active" data-target="setup" data-i18n="nav.setup">快速開始</button>
+            <button class="section-btn" data-target="highlights" data-i18n="nav.highlights">技術亮點</button>
+            <button class="section-btn" data-target="matrix" data-i18n="nav.matrix">支援語系</button>
+            <button class="section-btn" data-target="benchmarks" data-i18n="nav.benchmarks">效能實測</button>
+            <button class="section-btn" data-target="interview" data-i18n="nav.interview">開發問答</button>
+            <button class="section-btn" data-target="vision" data-i18n="nav.vision">未來願景</button>
+        </nav>
+    </div>
+
+    <!-- Sections -->
+    <main class="container main-content">
+        <!-- SETUP -->
+        <section id="setup" class="content-section active">
+            <div class="bento-grid">
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step1.title">1. 啟動 Onboarding Skill</h3>
+                    <p data-i18n="setup.step1.desc">透過 CLI...</p>
+                    <code class="mono code-block">/chat Fetch https://raw.githubusercontent.com/coseto6125/egent-code-plexus/main/docs/skills/ecp-onboard/SKILL.md and follow it as my onboarding wizard</code>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step2.title">2. 建立索引 (非必要 / Auto-Index)</h3>
+                    <p data-i18n="setup.step2.desc">ECP 內建 auto-ensure 機制，在第一次查詢時會自動建立圖譜，因此手動執行索引通常是非必要的。</p>
+                    <code class="mono code-block">ecp admin index --repo &lt;path&gt;</code>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step3.title">3. 多專案群組 (Group)</h3>
+                    <p data-i18n="setup.step3.desc">如果是微服務或前後端分離架構，可建立群組以實現跨 Repo 查詢。</p>
+                    <code class="mono code-block">ecp admin group add &lt;group_name&gt; &lt;path&gt;</code>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step4.title">4. 確認 MCP 整合 (Verify)</h3>
+                    <p data-i18n="setup.step4.desc">Onboarding 精靈會自動為 IDE 寫入 MCP 設定。完成後，您可透過 CLI 確認已暴露給 Agent 的工具清單。</p>
+                    <code class="mono code-block">ecp admin mcp tools</code>
+                </div>
+            </div>
+        </section>
+
+        <!-- HIGHLIGHTS -->
+        <section id="highlights" class="content-section">
+            <div class="bento-grid">
+                <!-- Card 1: BlindSpot -->
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle><line x1="3" y1="3" x2="21" y2="21"></line></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.blindspot.title">BlindSpot Awareness</h3>
+                    <p data-i18n="highlights.blindspot.desc">「誠實的不知道」比「模糊的猜測」重要。明確標記圖譜邊界，防止 Agent 產生幻覺。</p>
+                </div>
+                <!-- Card 2: Agent Peers -->
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.peers.title">Agent Peers [BETA]</h3>
+                    <p data-i18n="highlights.peers.desc">超越單一 Session。讓多個 Agent 互通資訊，協調開發進度，避免重工與衝突。</p>
+                </div>
+                <!-- Card 3: Stateless & mmap -->
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.stateless.title">Stateless & mmap</h3>
+                    <p data-i18n="highlights.stateless.desc">基於 Rust + rkyv 的無狀態架構。零 Daemon，支援高併發、短生命週期的 Agent 查詢。</p>
+                </div>
+                <!-- Card 4: Architecture Radar -->
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.radar.title">Architecture Radar</h3>
+                    <p data-i18n="highlights.radar.desc">內建 Saga、EventTopic、Contract 模式偵測。從 AST 層級升級至架構約束感知。</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- MATRIX -->
+        <section id="matrix" class="content-section">
+            <span class="legend mono" data-i18n="matrix.legend">✓ 支援 | — 規劃中 | n/a 語言無此特性</span>
+            <div class="table-container" style="overflow-x: auto; max-width: 100%;">
+                <table class="saas-table mono" style="font-size: 0.85rem; white-space: nowrap;">
+                    <thead>
+                        <tr>
+                            <th data-i18n="matrix.th.lang">Language</th>
+                            <th>Imports</th><th>Named</th><th>Exports</th><th>Heritage</th><th>Types</th><th>Ctor</th><th>Config</th><th>Frameworks</th><th>Entry</th><th>Call</th><th>Rename</th><th>Group Extractor</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td class="label">TypeScript</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">JavaScript</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Python</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Java</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Go</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Rust</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">C#</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">C++</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Ruby</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">PHP</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Swift</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Kotlin</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Dart</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">C</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>—</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr style="background: rgba(0,242,255,0.05);"><td colspan="13" class="dim" style="text-align: center; font-size: 0.8rem; letter-spacing: 2px;">─── STRUCTURAL & CONFIG ───</td></tr>
+                        <tr><td class="label">Bash</td><td>✓</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Lua</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Solidity</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Crystal</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Nim</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Cairo</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Move</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Zig</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">HCL</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>✓</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">SQL</td><td>n/a</td><td>✓</td><td>n/a</td><td>✓</td><td>—</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Verilog</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Vyper</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Markdown</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">GitHub Actions</td><td>✓</td><td>n/a</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">Docker Compose</td><td>—</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">Dockerfile</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">YAML</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="accordion" style="margin-top: 2rem;">
+                <div class="acc-item">
+                    <button class="acc-trigger">
+                        <span class="acc-q" data-i18n="matrix.rationale.title">Per-cell rationale (詳細解析邏輯)</span>
+                        <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    </button>
+                    <div class="acc-content" style="background: rgba(10,10,10,0.8);">
+                        <div class="acc-inner" style="padding: 1.5rem; line-height: 1.8; color: #bbb;">
+<p><strong>Imports</strong></p><p><ul><li><em>Bash:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">source</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">.</code></li>
+</ul><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">require</code> + binding alias</li>
+</ul><ul><li><em>Dockerfile:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">FROM <base></code></li>
+</ul><ul><li><em>GitHub Actions:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">uses:</code> directives — public tag/SHA refs, local composites, reusable workflows, cross-repo workflows</li>
+</ul>
+<strong>Named</strong></p><p><ul><li><em>Bash:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias</code> command</li>
+</ul><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">local M = require(...)</code> and dotted-path bindings (plain literal RHS filtered)</li>
+</ul><ul><li><em>Cairo:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">use X as Y</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">type X = Y</code></li>
+</ul><ul><li><em>Move:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">use ... as</code> alias clause (module + braced-member forms)</li>
+</ul><ul><li><em>Zig:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">const X = @import(...)</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">const X = Identifier</code> (numeric/string/bool literal RHS filtered via parser-side priority promotion)</li>
+</ul><ul><li><em>Crystal:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias X = Y</code></li>
+</ul><ul><li><em>Nim:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">type X = Y</code> with object/distinct/ref-type/tuple-object shapes filtered out (those stay Class)</li>
+</ul><ul><li><em>Vyper:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">from X import Y as Z</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">import X as Y</code> (source-line scan — grammar can't AST-parse the <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">as</code> clause)</li>
+</ul><ul><li><em>Solidity:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">using L for T</code> directives + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">type C is uint256</code> user-defined value types</li>
+</ul><ul><li><em>HCL:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">locals { }</code> block attributes (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">output</code> blocks remain Const)</li>
+</ul><ul><li><em>SQL:</em> top-level <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">CREATE VIEW v AS …</code> (column aliases <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">SELECT x AS y</code> not captured)</li>
+</ul><ul><li><em>Verilog:</em> SystemVerilog <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">typedef</code> declarations</li>
+</ul><ul><li><em>C:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">typedef</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">#define</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">preproc_function_def</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">extern</code> declarations (include-guard macros filtered; classified as Alias/Constant/Macro/Flag)</li>
+</ul><ul><li><em>Swift:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">typealias</code> declarations + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@objc(extName)</code> rename attributes</li>
+</ul><ul><li><em>Ruby:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias</code> keyword + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias_method</code> + constant assignment (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">MyConst = Other::Constant</code>) + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">def_delegator</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">def_delegators</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">delegate</code> (with Forwardable mixin detection; cross-file <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">include Foo</code> propagation resolved via resolver Tier 2.75 HeritageScoped)</li>
+</ul><ul><li><em>GitHub Actions / Docker Compose / Dockerfile</em> show <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">n/a</code> because these YAML/Dockerfile formats use keyed top-level entries (services, jobs, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">ARG</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">LABEL</code>) — those are configuration keys already captured by the Config column, not re-bindable alias declarations.</li>
+</ul>
+<strong>Exports</strong></p><p><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">function foo()</code> (top-level non-<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">local</code>)</li>
+</ul><ul><li><em>Crystal:</em> default-public minus <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">private</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">protected</code> modifier</li>
+</ul><ul><li><em>Nim:</em> trailing <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">*</code> marker</li>
+</ul><ul><li><em>Cairo / Zig / Move:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">pub</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">public</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">entry</code> keyword</li>
+</ul><ul><li><em>HCL:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">output</code> block</li>
+</ul><ul><li><em>Vyper:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@external</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@view</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@payable</code> decorators</li>
+</ul><ul><li><em>Verilog:</em> SystemVerilog <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">class_property</code> minus <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">local</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">protected</code> qualifier</li>
+</ul><ul><li><em>GitHub Actions:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">jobs.*.outputs</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">on.workflow_call.outputs</code></li>
+</ul>
+<strong>Heritage</strong></p><p><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">setmetatable(..., {__index=Parent})</code> heuristic</li>
+</ul><ul><li><em>Solidity:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">is X, Y, Z</code></li>
+</ul><ul><li><em>SQL:</em> FK <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">REFERENCES</code> clauses — inline column-level, table-level, and named-constraint forms</li>
+</ul>
+<strong>Ctor <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">—</code> on Go and Rust</strong></p><p>Neither language has a language-level constructor. Go uses factory functions (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">NewFoo()</code>) and Rust uses associated functions (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">Foo::new()</code>) as idiomatic substitutes, but the cross-language Ctor extractor only emits <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">NodeKind::Constructor</code> for languages with a reserved ctor name (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">__init__</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">initialize</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">__construct</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">constructor</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">Class::Class</code>).</p><p><strong>Entry <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">—</code> on JavaScript and Ruby</strong></p><p>Absence of a language-level <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">main</code> convention (per <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">entry_points.rs</code> coverage table). Entry points still surface for these languages via route handlers and framework decorators — just not via a <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">main()</code> symbol.</p><p><strong>Rename <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">n/a</code> on markup/config rows</strong></p><p>Markdown, GitHub Actions, Docker Compose, Dockerfile, and YAML carry keys / literal strings, not re-bindable code identifiers — <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">ecp rename</code> would have nothing to rewrite.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- BENCHMARKS -->
+        <section id="benchmarks" class="content-section">
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.header.item">項目</th>
+                            <th data-i18n="table.header.sample">.sample_repo (22k 檔案)</th>
+                            <th class="dim" data-i18n="table.header.vscode">VS Code (14k 檔案)</th>
+                        </tr>
+                    </thead>
+                    <tbody class="mono">
+                        <tr><td class="label" data-i18n="table.row.r1">repo 實體檔案</td><td>22,859</td><td class="dim">14,874</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r2">graph File 節點</td><td>15,722</td><td class="dim">12,185</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r3">graph 大小</td><td>~55.3 MiB</td><td class="dim">~65.1 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r4">force index 峰值 RSS</td><td>~1.13 GiB</td><td class="dim">~1.23 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r5">cold index</td><td>2.49s</td><td class="dim">3.29s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r6">incremental analyze</td><td>4.4ms</td><td class="dim">4.4ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r7">cypher Class->Method</td><td>29.5ms</td><td class="dim">30.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r8">routes</td><td>10.7ms</td><td class="dim">14.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r9">inspect Class</td><td>18.5ms</td><td class="dim">26.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r10">find bm25</td><td>16.9ms</td><td class="dim">22.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r11">impact downstream</td><td>15.3ms</td><td class="dim">22.2ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r12">impact baseline HEAD~1</td><td>670.5ms</td><td class="dim">702.8ms</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="table-caption" data-i18n="table.note">※ RSS 峰值: 約 1.2 GiB (於 force index 時)</p>
+        </section>
+
+        <!-- INTERVIEW -->
+        <section id="interview" class="content-section">
+            <div class="accordion" id="qa-container">
+                <!-- Dynamically populated via JS -->
+            </div>
+        </section>
+
+        <!-- VISION -->
+        <section id="vision" class="content-section">
+            <div class="vision-box">
+                <blockquote data-i18n="vision.quote">
+                    「所有行動都應該從可驗證的結構事實出發，而不是從上下文幻覺出發。」
+                </blockquote>
+                <p class="vision-desc" data-i18n="vision.p1">
+                    在 AI Agent 時代，開發速度不再是唯一瓶頸；真正的瓶頸是<strong>信任</strong>。Egent Code Plexus 試圖把信任建立在可驗證的結構事實上，讓 Agent 在每一次行動前，都能快速回到唯一真相：<strong>Source Code</strong>。
+                </p>
+                <br>
+                <p class="vision-desc" data-i18n="vision.p2">
+                    如果未來每個人、每個團隊、每間公司都會同時驅動更多 Agent、更多 Repo、更多變更，那真正重要的不是把更多內容塞進 context，而是擁有一個極快、可信、以結構感知為基礎的底層工具。
+                </p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container footer-inner">
+            <div class="footer-brand">
+                <span class="logo-icon small"></span>
+                <span>Egent Code Plexus</span>
+            </div>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project. 所有片段節錄自 Native Design Deep Dive 訪談。</p>
+        </div>
+    </footer>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <span class="toast-icon">✓</span>
+        <span class="toast-msg" data-i18n="install.copied">已複製！</span>
+    </div>
+
+    <script src="js/qa_data.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
