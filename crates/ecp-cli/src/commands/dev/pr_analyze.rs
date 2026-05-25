@@ -487,6 +487,17 @@ use std::collections::BTreeSet;
 /// N PRs push together: each sees N-1 uncached siblings and blocks itself.
 /// Mergify's speculative trial catches any actual conflict at test time,
 /// so a missed cache here is a graph-aware-skip not a real safety hole.
+/// A symbol whose name is stable enough to compare ACROSS PRs. Anonymous
+/// nodes are named `<anonymous:line:col>`, so any edit that shifts line numbers
+/// (e.g. inserting a block earlier in the same file) renames every later
+/// anonymous node. Two PRs that both edit one file (e.g. builder.rs) then share
+/// a large set of identical `<anonymous:NNNN>` names purely by line-number
+/// coincidence, producing a spurious cross-PR conflict. Their real overlap is
+/// undetectable by name anyway, so dropping them removes only noise.
+fn is_stable_cross_pr_symbol(name: &str) -> bool {
+    !name.starts_with("<anonymous:")
+}
+
 pub fn detect_cross_pr_conflicts<G: GhClient>(
     gh: &G,
     queue_label: &str,
@@ -494,7 +505,10 @@ pub fn detect_cross_pr_conflicts<G: GhClient>(
     self_pr: u32,
     self_changed_symbols: &[String],
 ) -> Result<Vec<CrossPrConflict>, EcpError> {
-    let self_set: BTreeSet<&String> = self_changed_symbols.iter().collect();
+    let self_set: BTreeSet<&String> = self_changed_symbols
+        .iter()
+        .filter(|s| is_stable_cross_pr_symbol(s))
+        .collect();
     let siblings = gh.list_sibling_prs(queue_label, base_branch, self_pr)?;
     let mut out = Vec::new();
     for sibling in siblings {
@@ -505,7 +519,10 @@ pub fn detect_cross_pr_conflicts<G: GhClient>(
                 continue;
             }
             Some(other_impact) => {
-                let other_set: BTreeSet<&String> = other_impact.iter().collect();
+                let other_set: BTreeSet<&String> = other_impact
+                    .iter()
+                    .filter(|s| is_stable_cross_pr_symbol(s))
+                    .collect();
                 let overlap: Vec<String> = self_set
                     .intersection(&other_set)
                     .map(|s| (*s).clone())
@@ -864,6 +881,41 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].pr, 101);
         assert_eq!(conflicts[0].overlap_symbols, vec!["FnA"]);
+    }
+
+    /// Anonymous nodes share names by line-number coincidence when two PRs edit
+    /// the same file; they must not register as a cross-PR conflict. A real
+    /// named overlap alongside them still fires (only the anonymous noise drops).
+    #[test]
+    fn cross_pr_conflict_ignores_anonymous_line_noise() {
+        let mut cached = HashMap::new();
+        cached.insert(
+            101,
+            vec!["<anonymous:1977:17>".into(), "<anonymous:2003:17>".into()],
+        );
+        let gh = MockGh::new(
+            vec![SiblingPr {
+                number: 101,
+                head_ref_oid: "abc".into(),
+            }],
+            cached,
+        );
+        let conflicts = detect_cross_pr_conflicts(
+            &gh,
+            "merge-queue",
+            "main",
+            100,
+            &[
+                "<anonymous:1977:17>".to_string(),
+                "<anonymous:2003:17>".to_string(),
+                "FnReal".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            conflicts.is_empty(),
+            "anonymous-only overlap must not be a conflict: {conflicts:?}"
+        );
     }
 
     #[test]

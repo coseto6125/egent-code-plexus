@@ -37,6 +37,7 @@ fn rn(name: &str, kind: NodeKind, content_hash: u64) -> RawNode {
         type_annotation: None,
         decorators: vec![],
         calls: vec![],
+        field_reads: Vec::new(),
         owner_class: None,
         content_hash,
     }

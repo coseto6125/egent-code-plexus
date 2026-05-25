@@ -59,5 +59,6 @@ pub fn rel_to_str(rel: &ArchivedRelType) -> &'static str {
         ArchivedRelType::Overrides => "overrides",
         ArchivedRelType::Decorates => "decorates",
         ArchivedRelType::UsesPathLiteral => "uses_path_literal",
+        ArchivedRelType::ReadsField => "reads_field",
     }
 }

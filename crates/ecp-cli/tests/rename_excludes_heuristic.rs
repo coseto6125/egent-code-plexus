@@ -411,7 +411,8 @@ fn test_rename_output_surfaces_count_default() {
 }
 
 /// With `--show-heuristic-mirrors`, the output must include the candidate list
-/// with the UNKNOWN_TIER placeholder shape (tier/checks land in T4-7).
+/// with the unresolved-tier marker (`tier: unresolved`; real tier/checks
+/// land in T4-7).
 #[test]
 fn test_rename_show_flag_embeds_candidate_list() {
     let repo = setup_mirrors_repo(
@@ -445,8 +446,8 @@ fn test_rename_show_flag_embeds_candidate_list() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        stdout.contains("UNKNOWN_TIER"),
-        "expected UNKNOWN_TIER placeholder in mirror list;\nstdout={stdout}",
+        stdout.contains("tier: unresolved"),
+        "expected unresolved-tier marker in mirror list;\nstdout={stdout}",
     );
     assert!(
         stdout.contains("requires_verification: true"),

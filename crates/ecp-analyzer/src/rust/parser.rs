@@ -328,6 +328,7 @@ impl LanguageProvider for RustProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -478,6 +479,7 @@ impl LanguageProvider for RustProvider {
                             kind: k,
                             span,
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: owner,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],
@@ -521,6 +523,12 @@ impl LanguageProvider for RustProvider {
             source,
             &mut nodes,
             &local_types,
+        );
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["field_expression"],
         );
 
         // Build param type map for indirect-call detection.

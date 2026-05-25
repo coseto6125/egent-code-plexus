@@ -379,6 +379,9 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
 #[derive(Default)]
 struct ImpactStderrHints {
     empty_hint_name: Option<String>,
+    /// The empty-hint target is a field (Property); the hint adds the
+    /// field-read-coverage caveat.
+    empty_hint_is_field: bool,
     /// If > 0, emit the hidden-edges footer.
     hidden_edges: u64,
     /// Heuristic edges hidden by the is_heuristic() filter (T-H1).
@@ -400,6 +403,11 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         eprintln!(
             "→ \"{name}\" exists but has 0 incoming references. Possible: entry point, dead code, or recent rename. Try --direction both / --include-tests"
         );
+        if hints.empty_hint_is_field {
+            eprintln!(
+                "→ \"{name}\" is a field: some languages don't capture field reads yet (JS class fields, Ruby attrs), so empty may mean uncaptured, not unread — grep to confirm"
+            );
+        }
     }
     emit_hidden_edges_footer(hints.hidden_edges);
     if hints.hidden_heuristic_edges > 0 {
@@ -987,6 +995,12 @@ fn impact_by_name(
         .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
         .collect();
     let emit_empty_hint = impact_without_start.is_empty() && args.direction == Direction::Up;
+    // A field target with no readers: the hint must flag that some languages
+    // don't model field reads yet, so empty != provably unread.
+    let empty_hint_is_field = emit_empty_hint
+        && all_results
+            .iter()
+            .any(|e| e["depth"].as_u64() == Some(0) && e["kind"].as_str() == Some("property"));
 
     // Collect unique file paths across ALL matches so the blind-spot warning
     // is accurate when --file / --kind still leaves >1 match.
@@ -1061,6 +1075,7 @@ fn impact_by_name(
         result_obj,
         ImpactStderrHints {
             empty_hint_name: emit_empty_hint.then(|| format_fqn(owner_filter, bare_name)),
+            empty_hint_is_field,
             hidden_edges: hidden_edges_total,
             hidden_heuristic_edges: hidden_heuristic_total,
         },

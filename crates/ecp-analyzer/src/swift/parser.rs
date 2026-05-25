@@ -308,6 +308,7 @@ impl LanguageProvider for SwiftProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -361,6 +362,7 @@ impl LanguageProvider for SwiftProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: None,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[ta_node.start_byte()..ta_node.end_byte()],
@@ -404,6 +406,7 @@ impl LanguageProvider for SwiftProvider {
                             kind: NodeKind::EnumVariant,
                             span,
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None, // stamped by stamp_owner_class_by_span
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[ec_root.start_byte()..ec_root.end_byte()],
@@ -432,6 +435,7 @@ impl LanguageProvider for SwiftProvider {
                         end.column as u32,
                     ),
                     calls: Vec::new(),
+                    field_reads: Vec::new(),
                     owner_class: None,
                     content_hash: ecp_core::uid::xxh3_64_bytes(
                         &source[ctor_node.start_byte()..ctor_node.end_byte()],
@@ -509,6 +513,7 @@ impl LanguageProvider for SwiftProvider {
                         kind: node_kind,
                         span,
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: None,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[pr_root.start_byte()..pr_root.end_byte()],
@@ -570,6 +575,7 @@ impl LanguageProvider for SwiftProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: None,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[root.start_byte()..root.end_byte()],
@@ -600,6 +606,12 @@ impl LanguageProvider for SwiftProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         let raw_path_literals =
             extract_swift_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["navigation_expression"],
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, SWIFT_FRAMEWORKS);
 

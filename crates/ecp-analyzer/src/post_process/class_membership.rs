@@ -287,6 +287,7 @@ mod tests {
             type_annotation: None,
             decorators: Vec::new(),
             calls: Vec::new(),
+            field_reads: Vec::new(),
             owner_class: None,
             content_hash: 0,
         }
@@ -307,6 +308,7 @@ mod tests {
             type_annotation: None,
             decorators: Vec::new(),
             calls: Vec::new(),
+            field_reads: Vec::new(),
             owner_class: Some(owner_class.to_string()),
             content_hash: 0,
         }

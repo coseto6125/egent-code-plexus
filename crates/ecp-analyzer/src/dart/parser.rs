@@ -305,6 +305,7 @@ impl LanguageProvider for DartProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -380,6 +381,7 @@ impl LanguageProvider for DartProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: None,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[v_root.start_byte()..v_root.end_byte()],
@@ -430,6 +432,7 @@ impl LanguageProvider for DartProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: None,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[root.start_byte()..root.end_byte()],
@@ -476,6 +479,12 @@ impl LanguageProvider for DartProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         let raw_path_literals =
             extract_dart_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_expression"],
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
 
@@ -608,6 +617,7 @@ fn synth_typedef_from_misparse(
             end.column as u32,
         ),
         calls: Vec::new(),
+        field_reads: Vec::new(),
         owner_class: None,
         content_hash: ecp_core::uid::xxh3_64_bytes(&source[v_root.start_byte()..v_root.end_byte()]),
     })

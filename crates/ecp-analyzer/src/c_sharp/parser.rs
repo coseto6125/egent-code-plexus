@@ -321,6 +321,7 @@ impl LanguageProvider for CSharpProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -422,6 +423,7 @@ impl LanguageProvider for CSharpProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],
@@ -472,6 +474,12 @@ impl LanguageProvider for CSharpProvider {
         // also collects path-shaped string literals.
         let raw_path_literals =
             extract_csharp_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_access_expression"],
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
 

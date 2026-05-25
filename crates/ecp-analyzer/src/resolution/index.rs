@@ -19,6 +19,9 @@ pub enum ResolveTarget {
     Callable,
     Type,
     Qualifier,
+    /// A struct/class field, for `ReadsField` edge resolution. Filters to
+    /// `NodeKind::is_property`.
+    Field,
 }
 
 /// Per-parser-provider language tag. One variant per registered analyzer
@@ -457,6 +460,7 @@ impl SymbolTable {
             ResolveTarget::Callable => NodeKind::is_callable,
             ResolveTarget::Type => NodeKind::is_type,
             ResolveTarget::Qualifier => NodeKind::is_qualifier,
+            ResolveTarget::Field => NodeKind::is_property,
         };
         ids.iter()
             .copied()
@@ -487,6 +491,7 @@ impl SymbolTable {
             ResolveTarget::Callable => NodeKind::is_callable,
             ResolveTarget::Type => NodeKind::is_type,
             ResolveTarget::Qualifier => NodeKind::is_qualifier,
+            ResolveTarget::Field => NodeKind::is_property,
         };
         let mut found = None;
         for &id in raw {
@@ -535,6 +540,7 @@ impl SymbolTable {
             ResolveTarget::Callable => NodeKind::is_callable,
             ResolveTarget::Type => NodeKind::is_type,
             ResolveTarget::Qualifier => NodeKind::is_qualifier,
+            ResolveTarget::Field => NodeKind::is_property,
         };
         let mut count = 0u32;
         for &id in raw {

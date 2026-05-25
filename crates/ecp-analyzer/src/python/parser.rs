@@ -587,6 +587,7 @@ fn process_class_for_enum(
                     kind: NodeKind::EnumVariant,
                     span: assign_span,
                     calls: vec![],
+                    field_reads: Vec::new(),
                     owner_class: Some(class_name.to_string()),
                     content_hash: ecp_core::uid::xxh3_64_bytes(
                         &source[stmt.start_byte()..stmt.end_byte()],
@@ -995,6 +996,7 @@ impl LanguageProvider for PythonProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -1134,6 +1136,7 @@ impl LanguageProvider for PythonProvider {
                             kind: final_kind,
                             span,
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],
@@ -1285,6 +1288,7 @@ impl LanguageProvider for PythonProvider {
             &mut nodes,
             &local_types,
         );
+        crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["attribute"]);
 
         let param_names = collect_python_param_names(tree.root_node(), source);
         let call_metas = detect_python_indirect(tree.root_node(), source, &nodes, &param_names);

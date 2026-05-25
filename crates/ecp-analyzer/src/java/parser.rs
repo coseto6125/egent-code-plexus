@@ -319,6 +319,7 @@ impl LanguageProvider for JavaProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -369,6 +370,7 @@ impl LanguageProvider for JavaProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],
@@ -515,6 +517,7 @@ impl LanguageProvider for JavaProvider {
         // also collects path-shaped string literals.
         let raw_path_literals =
             extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["field_access"]);
 
         let file_category =
             crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));

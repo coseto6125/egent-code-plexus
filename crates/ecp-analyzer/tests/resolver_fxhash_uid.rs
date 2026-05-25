@@ -28,6 +28,7 @@ fn raw_node(
     calls: Vec<String>,
 ) -> RawNode {
     RawNode {
+        field_reads: Vec::new(),
         name: name.to_string(),
         kind,
         span,

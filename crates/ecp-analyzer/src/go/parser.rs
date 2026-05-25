@@ -560,6 +560,7 @@ impl LanguageProvider for GoProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -614,6 +615,7 @@ impl LanguageProvider for GoProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: owner,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[name_node.start_byte()..name_node.end_byte()],
@@ -658,6 +660,7 @@ impl LanguageProvider for GoProvider {
                                     end.column as u32,
                                 ),
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[root.start_byte()..root.end_byte()],
@@ -736,6 +739,7 @@ impl LanguageProvider for GoProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[var_spec.start_byte()..var_spec.end_byte()],
@@ -782,6 +786,7 @@ impl LanguageProvider for GoProvider {
                                     end.column as u32,
                                 ),
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: enclosing.clone(),
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[root.start_byte()..root.end_byte()],
@@ -833,6 +838,7 @@ impl LanguageProvider for GoProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: owner,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[root.start_byte()..root.end_byte()],
@@ -949,6 +955,12 @@ impl LanguageProvider for GoProvider {
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
         let raw_path_literals =
             extract_go_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["selector_expression"],
+        );
 
         // owner_class is set at emit time via receiver_type_from_method_decl().
         // No post-loop needed; recv_map is still used for call-site resolution.

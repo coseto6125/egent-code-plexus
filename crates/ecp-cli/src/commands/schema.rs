@@ -386,6 +386,7 @@ struct GraphVersionReport {
 const VERSION_HISTORY: &[VersionBumpEntry] = &[
     VersionBumpEntry { version: 10, reason: "v10 baseline: kind_offsets CSR + StringPool layout for fast NodeKind/RelType slice access." },
     VersionBumpEntry { version: 11, reason: "Dense node_flags side table for O(1) FunctionMeta boolean flag filters." },
+    VersionBumpEntry { version: 12, reason: "RawNode.field_reads + ReadsField RelType: function/method → field-read edges for impact across 14 languages." },
     // Future bumps append here. The is_test field on BlindSpotRecord
     // (FU-001) was added without a discriminant bump — rkyv tolerates the
     // trailing-field addition as long as nothing earlier shifts.

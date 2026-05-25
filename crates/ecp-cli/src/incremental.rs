@@ -312,6 +312,7 @@ mod tests {
             type_annotation: None,
             decorators: vec![],
             calls: vec![],
+            field_reads: Vec::new(),
             owner_class: None,
             content_hash,
         }

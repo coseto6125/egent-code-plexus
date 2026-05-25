@@ -385,6 +385,7 @@ impl LanguageProvider for KotlinProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -458,6 +459,7 @@ impl LanguageProvider for KotlinProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],
@@ -528,6 +530,12 @@ impl LanguageProvider for KotlinProvider {
         // also collects path-shaped string literals.
         let raw_path_literals =
             extract_kotlin_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["navigation_expression"],
+        );
 
         // Ktor framework-presence gate: only emit refs when the file
         // imports `io.ktor.*`. The route DSL verbs (`get`/`post`/...) are

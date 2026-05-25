@@ -32,6 +32,7 @@ fn raw_node(name: &str, kind: NodeKind, idx: u32) -> RawNode {
         type_annotation: None,
         decorators: vec![],
         calls: vec![],
+        field_reads: vec![],
         owner_class: None,
         content_hash: 0,
     }

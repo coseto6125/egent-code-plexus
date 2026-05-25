@@ -506,6 +506,7 @@ impl LanguageProvider for TypeScriptProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -582,6 +583,7 @@ impl LanguageProvider for TypeScriptProvider {
                             heritage: heritage.clone(),
                             type_annotation: type_annotation.clone(),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],
@@ -714,6 +716,12 @@ impl LanguageProvider for TypeScriptProvider {
         let local_types = collect_local_types(tree.root_node(), source);
         let raw_path_literals =
             extract_ts_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_expression"],
+        );
 
         // Framework-presence gates: only emit Express/NestJS refs when the file
         // actually imports the matching package.

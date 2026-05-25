@@ -393,6 +393,7 @@ impl LanguageProvider for CppProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -455,6 +456,7 @@ impl LanguageProvider for CppProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: None,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[root.start_byte()..root.end_byte()],
@@ -484,6 +486,7 @@ impl LanguageProvider for CppProvider {
                             end.column as u32,
                         ),
                         calls: Vec::new(),
+                        field_reads: Vec::new(),
                         owner_class: None,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[f_root.start_byte()..f_root.end_byte()],
@@ -520,6 +523,7 @@ impl LanguageProvider for CppProvider {
                                 end.column as u32,
                             ),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[v_root.start_byte()..v_root.end_byte()],
@@ -600,6 +604,12 @@ impl LanguageProvider for CppProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         let raw_path_literals =
             extract_cpp_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["field_expression"],
+        );
 
         // Merge bindings-derived types with declaration-level fn-pointer vars.
         let mut fn_ptr_vars = bindings.flat_bindings();
@@ -678,6 +688,7 @@ fn emit_macro_fallback(source: &[u8], nodes: &mut Vec<RawNode>) {
             kind: NodeKind::Macro,
             span: (hit.line, hit.col_start, hit.line, hit.col_end),
             calls: Vec::new(),
+            field_reads: Vec::new(),
             owner_class: None,
             content_hash: 0,
         });

@@ -256,6 +256,7 @@ impl LanguageProvider for GitHubActionsProvider {
                     type_annotation: None,
                     decorators: vec!["workflow".to_string()],
                     calls: vec![],
+                    field_reads: Vec::new(),
                     owner_class: None,
                     content_hash: 0,
                 });
@@ -278,6 +279,7 @@ impl LanguageProvider for GitHubActionsProvider {
                     type_annotation: None,
                     decorators: vec![decorator.to_string()],
                     calls: vec![],
+                    field_reads: Vec::new(),
                     owner_class: None,
                     content_hash: 0,
                 });
@@ -376,6 +378,7 @@ impl LanguageProvider for GitHubActionsProvider {
                     type_annotation: None,
                     decorators: vec!["job".to_string()],
                     calls: job_calls,
+                    field_reads: Vec::new(),
                     owner_class: None,
                     content_hash: 0,
                 });
@@ -497,6 +500,7 @@ fn walk_steps(
                     type_annotation: None,
                     decorators: vec![format!("run:{}", cmd_name)],
                     calls: vec![],
+                    field_reads: Vec::new(),
                     owner_class: None,
                     content_hash: 0,
                 });
