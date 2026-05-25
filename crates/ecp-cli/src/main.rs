@@ -116,6 +116,17 @@ fn main() {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let mut graph_path = graph_path::resolve(&cli.graph, &cwd);
 
+    // An explicit `--graph <path>` is taken literally. If it does not exist,
+    // error rather than warm-attaching to cwd's graph — answering a directed
+    // query against the wrong graph is worse than an honest failure.
+    if graph_path::is_custom(&cli.graph) && !graph_path.exists() {
+        eprintln!(
+            "Error: --graph path does not exist: {}",
+            graph_path.display()
+        );
+        std::process::exit(1);
+    }
+
     let engine = match auto_ensure::ensure_fresh(&graph_path, &cwd) {
         Err(err) => {
             eprintln!("Error preparing index for {}: {err}", cwd.display());

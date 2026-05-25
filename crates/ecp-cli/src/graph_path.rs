@@ -14,10 +14,17 @@ use std::path::{Path, PathBuf};
 const LEGACY_DEFAULT: &str = ".ecp/graph.bin";
 
 pub fn resolve(graph: &Path, cwd: &Path) -> PathBuf {
-    if graph.as_os_str() != LEGACY_DEFAULT {
+    if is_custom(graph) {
         return graph.to_path_buf();
     }
     resolve_v2(cwd).unwrap_or_else(|| graph.to_path_buf())
+}
+
+/// True when `--graph` names an explicit path rather than the legacy default.
+/// A custom path is taken literally: it must exist or the command errors —
+/// it is never routed through v2 resolution or cwd warm-attach.
+pub fn is_custom(graph: &Path) -> bool {
+    graph.as_os_str() != LEGACY_DEFAULT
 }
 
 fn resolve_v2(cwd: &Path) -> Option<PathBuf> {
