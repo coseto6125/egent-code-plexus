@@ -253,125 +253,78 @@ Every verdict cites the exact diff section and graph fact that triggered it; see
 
 ---
 
-## MCP server (for LLM hosts)
+## Agent integration
 
-`ecp` ships an MCP server exposing core commands as MCP tools. Hosts that speak MCP (Claude Code, Cursor, Windsurf, Cline, Codex CLI, Gemini CLI) can register `ecp` and call the tools autonomously.
+`ecp` plugs into AI code agents two ways. **Prefer the native path** where your agent has one — it wires richer signals than tool access alone: auto-reindex + graph-context hooks, plus a workflow skill that teaches the agent *when* graph queries beat grep. **MCP is the cross-agent fallback** — any host that speaks the protocol can register `ecp` even without a native path.
 
-```bash
-ecp admin mcp tools          # inspect what tools will be exposed
-ecp admin mcp serve          # run the server (default: spawn mode, fresh subprocess per call)
-```
+| Agent | Recommended path | Wires |
+|---|---|---|
+| Claude Code | native | hooks + skills + MCP server |
+| Codex CLI | native | skills (native-tools pending) |
+| Gemini CLI | native | native skill **or** MCP server |
+| Cursor · Windsurf · Cline · Copilot · any MCP host | MCP | MCP server |
 
-Manual host config snippets — all four hosts share the same Anthropic MCP server shape, only the file path differs:
+Guided path for humans — `ecp admin → Agent Integrations → <host>`. Scriptable path for agents and automation — the `ecp admin <host> install <component>` commands below. Inspect any host with `ecp admin <host> status`.
 
-**Claude Code** — `~/.config/claude-code/mcp-servers.json`:
-
-```json
-{
-  "mcpServers": {
-    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
-  }
-}
-```
-
-**Cursor** — `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
-  }
-}
-```
-
-**Windsurf** — `~/.codeium/windsurf/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
-  }
-}
-```
-
-**Cline** (VS Code extension) — `cline_mcp_settings.json` (right-click the MCP icon in the extension panel → "Edit MCP Settings"):
-
-```json
-{
-  "mcpServers": {
-    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
-  }
-}
-```
-
-After saving the config, the host will spawn `ecp admin mcp serve` per call (stateless one-shot mode — no warm-up cost). Verify the registration with `ecp admin mcp tools` and the host's own tool inspector.
-
-Progressive path for human operators:
-
-```text
-ecp admin
-→ Agent Integrations
-→ MCP
-→ <host>
-→ install
-```
-
-## Codex CLI native integration
-
-The Codex native path is separate from MCP. It prepares a patch for an `openai/codex` fork instead of editing the running Codex installation directly:
-
-Progressive path for human operators:
-
-```text
-ecp admin
-→ Agent Integrations
-→ Codex CLI
-→ install
-→ native-tools
-```
-
-Bundled skills use the same progressive path:
-
-```text
-ecp admin
-→ Agent Integrations
-→ Codex CLI
-→ install
-→ skills
-→ all | ecp | simplify
-```
-
-Scripted path for AI agents and automation:
+### Native — Claude Code
 
 ```bash
-ecp admin codex install skills all
-ecp admin codex install skills ecp
-ecp admin codex install skills simplify
+ecp admin claude install hooks         # settings.json: auto-reindex + context enrichment
+ecp admin claude install skills all    # ecp + simplify skill packs (or: ecp | simplify)
+ecp admin claude install mcp-server    # registers via `claude mcp add-json` (optional)
 ```
 
-The bundled skills teach workflow selection that command help cannot infer by itself:
+Hooks feed Claude graph context on every Grep/Glob/Bash without an explicit tool call; the `ecp` skill teaches the symbol / impact / route / contract / rename workflows; `simplify` drives graph-first code review. The MCP server is **optional** here — with hooks + skills + the `ecp` CLI on PATH, Claude already drives ecp natively through the shell.
+
+### Native — Gemini CLI
+
+```bash
+ecp admin gemini install native-skill  # links docs/skills/ecp via `gemini skills link`
+ecp admin gemini install mcp-server    # registers via `gemini mcp add`
+```
+
+`native-skill` and `mcp-server` are **mutually exclusive** — installing one removes the other.
+
+### Native — Codex CLI
+
+```bash
+ecp admin codex install skills all     # ecp + simplify (or: ecp | simplify)
+```
+
+`native-tools` is pending Codex tool-registry wiring — the install is intentionally disabled until it can generate dependency + registry hunks for a concrete Codex checkout instead of an adapter-only patch. Until then Codex uses skills (above) or the MCP fallback. Once wired, a fork carrying the native marker is verified with `ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin codex status`.
+
+The bundled skills teach workflow selection that command help cannot infer:
 
 | Skill | Use when |
 |---|---|
-| `ecp` | The agent needs to decide whether graph-aware symbol, impact, route, contract, or rename workflows are better than grep / file reads. |
-| `simplify` | The agent is reviewing changed code and should start from ecp impact, blind spots, egress, shape drift, and resolver deltas before reading raw diffs. |
+| `ecp` | The agent must decide whether graph-aware symbol / impact / route / contract / rename workflows beat grep / file reads. |
+| `simplify` | The agent is reviewing changed code and should start from ecp impact, blind spots, egress, shape drift, and resolver deltas before raw diffs. |
 
-TODO: `native-tools` is pending Codex tool-registry wiring. The install command is intentionally disabled until it can generate dependency + registry hunks for a concrete Codex checkout instead of an adapter-only patch.
+### MCP fallback — Cursor, Windsurf, Cline, and any MCP host
 
-Once that TODO is implemented, a fork that has the native marker can be verified with `ECP_CODEX_CLI_CHECKOUT`:
+For hosts without a native path, register the MCP server. They share the same Anthropic MCP server shape — only the config file differs:
 
-```bash
-ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin
-# Agent Integrations → Codex CLI → status
+| Host | Config file |
+|---|---|
+| Cursor | `~/.cursor/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| Cline (VS Code) | `cline_mcp_settings.json` (MCP panel → "Edit MCP Settings") |
+| Generic MCP host | host-specific |
+
+```json
+{
+  "mcpServers": {
+    "ecp": { "command": "ecp", "args": ["admin", "mcp", "serve"] }
+  }
+}
 ```
 
-The equivalent scripted checks are:
-
 ```bash
-ECP_CODEX_CLI_CHECKOUT=/path/to/openai-codex-fork ecp admin codex status
-ecp admin codex uninstall native-tools
-ecp admin codex uninstall skills all
+ecp admin mcp tools          # inspect the tools that will be exposed
+ecp admin mcp serve          # run the server (spawn mode: fresh subprocess per call, no warm-up)
 ```
+
+The host spawns `ecp admin mcp serve` per call (stateless one-shot — no warm-up cost). Verify with `ecp admin mcp tools` and the host's own tool inspector. The guided path `ecp admin → Agent Integrations → Other Code Agents` covers these hosts too.
 
 ---
 

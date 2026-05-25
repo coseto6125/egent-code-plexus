@@ -48,10 +48,31 @@ ecp admin group add --repo <repo_path> <group_name>
 (See `_shared/cli/admin-group.md` for the exact subcommand
 shape — `add` vs `create` etc.)
 
-## Step 4: Write MCP configs
+## Step 4: Apply agent integration
 
-For each target in `config_inventory.mcp_targets` (user already
-consented in Phase 04 Step 5):
+User consented in Phase 04 Step 5. Apply native targets first, then MCP
+targets.
+
+### 4a — Native targets (`config_inventory.native_targets`)
+
+For each native host, run its recorded `ecp admin <host> install`
+commands verbatim (ecp owns these writes — hooks land in the host's
+settings, skills copy into the host's skills dir):
+
+```bash
+# Example: Claude Code
+ecp admin claude install hooks
+ecp admin claude install skills all
+ecp admin claude status        # confirm INSTALLED
+```
+
+On failure, show stderr → common-cause table → retry / skip. These are
+`ecp admin` calls, not raw file writes — never hand-edit the host's
+settings to emulate them.
+
+### 4b — MCP targets (`config_inventory.mcp_targets`)
+
+For each MCP target:
 
 - **Idempotency:** if the config file already exists, **merge** the
   `ecp` entry into the existing `mcpServers` object rather than
@@ -103,9 +124,9 @@ generated_at: {ISO 8601 timestamp}
 (or)
 - [ ] skipped — single-repo workflow
 
-## Phase 04 mcp
-- [x] wrote ~/.claude/.mcp.json (Claude Code)
-- [x] wrote ~/.cursor/mcp.json (Cursor)
+## Phase 04 agent integration
+- [x] native: Claude Code — hooks + skills (`ecp admin claude install`)
+- [x] mcp: wrote ~/.cursor/mcp.json (Cursor)
 
 ## Phase 05 summary
 - [x] this file
@@ -125,7 +146,7 @@ Format as a final chat message:
 
 Indexed: {list}
 Groups: {list or "none"}
-MCP wired into: {list}
+Agent integration: {native hosts: hooks+skill} · {mcp hosts: MCP server}
 Summary saved to: ~/.ecp/onboarding-summary.md
 
 Try next:
@@ -150,6 +171,4 @@ Last session got to Phase {N}. What would you like to do?
 - Resume from Phase {N+1}
 - Redo a specific phase (which?)
 - Start over (this will overwrite the summary)
-```
-rwrite the summary)
 ```
