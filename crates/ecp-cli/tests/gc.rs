@@ -287,3 +287,44 @@ fn sweep_stale_generations_keeps_newest_per_sha() {
         .join(format!("branch_main__{sha_b}.gen.1500.15.0"))
         .exists());
 }
+
+#[test]
+fn sweep_stale_generations_skips_building() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "c".repeat(40);
+    make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.1000.10.0"));
+    let older = format!("branch_main__{sha}.gen.500.5.0");
+    make_named_commit_dir(&commits, &older);
+    // Build the `.building` sibling at EXACTLY the path the impl checks.
+    let building = commits.join(&older).with_extension("building");
+    std::fs::create_dir_all(&building).unwrap();
+
+    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path()).unwrap();
+    assert_eq!(
+        stats.removed, 0,
+        "older dir guarded by .building sibling must stay"
+    );
+    assert!(commits.join(&older).exists());
+}
+
+#[test]
+fn sweep_stale_generations_skips_fresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "d".repeat(40);
+    // Create two same-SHA gens, then RESET their mtime to now (fresh <10s) so the guard skips.
+    let g1 = format!("branch_main__{sha}.gen.1000.10.0");
+    let g2 = format!("branch_main__{sha}.gen.2000.20.0");
+    make_named_commit_dir(&commits, &g1);
+    make_named_commit_dir(&commits, &g2);
+    // make_named_commit_dir backdates mtime; override back to NOW so they're fresh.
+    let now = filetime::FileTime::now();
+    filetime::set_file_mtime(commits.join(&g1), now).unwrap();
+    filetime::set_file_mtime(commits.join(&g2), now).unwrap();
+
+    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0, "freshly-written dirs (<10s) are skipped");
+}
