@@ -1288,6 +1288,7 @@ impl LanguageProvider for PythonProvider {
             &mut nodes,
             &local_types,
         );
+        crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["attribute"]);
 
         let param_names = collect_python_param_names(tree.root_node(), source);
         let call_metas = detect_python_indirect(tree.root_node(), source, &nodes, &param_names);

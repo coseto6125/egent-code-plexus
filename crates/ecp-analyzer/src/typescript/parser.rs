@@ -716,6 +716,12 @@ impl LanguageProvider for TypeScriptProvider {
         let local_types = collect_local_types(tree.root_node(), source);
         let raw_path_literals =
             extract_ts_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_expression"],
+        );
 
         // Framework-presence gates: only emit Express/NestJS refs when the file
         // actually imports the matching package.

@@ -34,6 +34,7 @@ fn raw_node(name: &str, kind: NodeKind, heritage: Vec<&str>) -> RawNode {
         type_annotation: None,
         decorators: vec![],
         calls: vec![],
+        field_reads: Vec::new(),
         owner_class: None,
         content_hash: 0,
     }

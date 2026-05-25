@@ -955,6 +955,12 @@ impl LanguageProvider for GoProvider {
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
         let raw_path_literals =
             extract_go_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["selector_expression"],
+        );
 
         // owner_class is set at emit time via receiver_type_from_method_decl().
         // No post-loop needed; recv_map is still used for call-site resolution.

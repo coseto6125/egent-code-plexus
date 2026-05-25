@@ -517,6 +517,7 @@ impl LanguageProvider for JavaProvider {
         // also collects path-shaped string literals.
         let raw_path_literals =
             extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["field_access"]);
 
         let file_category =
             crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));

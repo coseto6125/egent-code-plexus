@@ -130,6 +130,141 @@ pub fn attach_to_enclosing(line: u32, callee: String, nodes: &mut [RawNode]) {
     }
 }
 
+/// Walk the AST and attach the **field name** of each member-access read
+/// (`obj.field`, `self.count`, `cfg->timeout`) to the smallest enclosing
+/// function/method/constructor `RawNode`'s `field_reads`. Mirrors
+/// `extract_calls`; `field_kinds` lists this language's member-access AST node
+/// kinds (e.g. `member_expression` in JS/TS, `field_expression` in C/C++/Rust,
+/// `selector_expression` in Go).
+///
+/// A member access that is the callee of a call (`obj.method()`) is skipped —
+/// `extract_calls` already records that as a `Calls` edge, and the field name
+/// there is a method, not a data field. The check is structural: if the access
+/// node is the `function` child of its parent call, it is a callee.
+pub fn extract_field_reads(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+    field_kinds: &[&str],
+) {
+    let containers = enclosing_containers(nodes);
+    if containers.is_empty() {
+        return;
+    }
+    let mut reads: Vec<PendingCall> = Vec::new();
+    let mut stack: Vec<Node<'_>> = vec![root];
+    while let Some(n) = stack.pop() {
+        if field_kinds.contains(&n.kind()) && !is_call_callee(n) {
+            if let Some(name) = field_name_from(n, source) {
+                let line = safe_row(n.start_position().row);
+                reads.push(PendingCall { line, name });
+            }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    attach_pending_field_reads(&containers, reads, nodes);
+}
+
+/// True when `access` is the callee of an enclosing call expression — i.e. its
+/// parent is a call/invocation whose `function` field is `access`. Such nodes
+/// are method calls handled by `extract_calls`, not data-field reads.
+fn is_call_callee(access: Node<'_>) -> bool {
+    let Some(parent) = access.parent() else {
+        return false;
+    };
+    matches!(
+        parent.kind(),
+        "call_expression"
+            | "method_invocation"
+            | "function_call_expression"
+            | "invocation_expression"
+            | "call"
+    ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(access.id())
+}
+
+/// The accessed field's short name from a member-access node. Tries the
+/// grammar's named field child (`field` / `property` / `name`), else falls
+/// back to the last identifier-like child (the token after `.` / `->`).
+fn field_name_from(access: Node<'_>, source: &[u8]) -> Option<String> {
+    // Kotlin / Swift wrap the field name in a `navigation_suffix` child rather
+    // than exposing it as a direct field — descend into it first.
+    let suffix = access.child_by_field_name("suffix").or_else(|| {
+        let mut c = access.walk();
+        let found = access
+            .children(&mut c)
+            .find(|ch| ch.kind() == "navigation_suffix");
+        found
+    });
+    let suffix = suffix.unwrap_or(access);
+    let field_node = suffix
+        .child_by_field_name("field")
+        .or_else(|| suffix.child_by_field_name("property"))
+        .or_else(|| suffix.child_by_field_name("name"))
+        .or_else(|| suffix.child_by_field_name("suffix"))
+        .or_else(|| {
+            let mut c = suffix.walk();
+            suffix
+                .children(&mut c)
+                .filter(|ch| {
+                    matches!(
+                        ch.kind(),
+                        "identifier"
+                            | "property_identifier"
+                            | "field_identifier"
+                            | "simple_identifier"
+                            | "shorthand_field_identifier"
+                    )
+                })
+                .last()
+        })?;
+    let text = field_node.utf8_text(source).ok()?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn attach_pending_field_reads(
+    containers: &[EnclosingContainer],
+    reads: Vec<PendingCall>,
+    nodes: &mut [RawNode],
+) {
+    if reads.is_empty() {
+        return;
+    }
+    let mut order: Vec<usize> = (0..reads.len()).collect();
+    order.sort_unstable_by_key(|&idx| reads[idx].line);
+
+    let mut active: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
+    let mut next_container = 0usize;
+    let mut targets: Vec<Option<usize>> = vec![None; reads.len()];
+
+    for &idx in &order {
+        let line = reads[idx].line;
+        while next_container < containers.len() && containers[next_container].start <= line {
+            active.push(Reverse((containers[next_container].width, next_container)));
+            next_container += 1;
+        }
+        while let Some(Reverse((_, container_idx))) = active.peek().copied() {
+            if containers[container_idx].end >= line {
+                targets[idx] = Some(containers[container_idx].node_idx);
+                break;
+            }
+            active.pop();
+        }
+    }
+
+    for (read, target) in reads.into_iter().zip(targets) {
+        if let Some(node_idx) = target {
+            nodes[node_idx].field_reads.push(read.name);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct EnclosingContainer {
     start: u32,
@@ -221,6 +356,7 @@ mod tests {
             type_annotation: None,
             decorators: vec![],
             calls: vec![],
+            field_reads: Vec::new(),
             owner_class: None,
             content_hash: 0,
         }

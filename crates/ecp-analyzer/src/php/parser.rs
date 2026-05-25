@@ -800,6 +800,12 @@ impl LanguageProvider for PhpProvider {
         );
         let raw_path_literals =
             extract_php_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_access_expression"],
+        );
 
         // Gate Laravel framework_refs by the `Illuminate` import — without
         // that, bare `Route::` is just an unrelated class name.

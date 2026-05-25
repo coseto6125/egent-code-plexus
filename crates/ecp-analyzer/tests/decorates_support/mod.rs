@@ -100,6 +100,7 @@ pub fn single_node_graph(
             type_annotation: None,
             decorators,
             calls: vec![],
+            field_reads: Vec::new(),
             owner_class: None,
             content_hash: 0,
         }],

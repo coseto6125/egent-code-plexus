@@ -479,6 +479,12 @@ impl LanguageProvider for DartProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         let raw_path_literals =
             extract_dart_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_expression"],
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
 

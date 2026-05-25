@@ -604,6 +604,12 @@ impl LanguageProvider for CppProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         let raw_path_literals =
             extract_cpp_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["field_expression"],
+        );
 
         // Merge bindings-derived types with declaration-level fn-pointer vars.
         let mut fn_ptr_vars = bindings.flat_bindings();

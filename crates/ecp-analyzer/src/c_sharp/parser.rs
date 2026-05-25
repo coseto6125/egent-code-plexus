@@ -474,6 +474,12 @@ impl LanguageProvider for CSharpProvider {
         // also collects path-shaped string literals.
         let raw_path_literals =
             extract_csharp_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_access_expression"],
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
 

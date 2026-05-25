@@ -524,6 +524,12 @@ impl LanguageProvider for RustProvider {
             &mut nodes,
             &local_types,
         );
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["field_expression"],
+        );
 
         // Build param type map for indirect-call detection.
         // `collect_rust_indirect_param_types` captures fn(...)  and &dyn Trait

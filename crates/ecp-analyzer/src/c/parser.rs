@@ -729,6 +729,12 @@ impl LanguageProvider for CProvider {
         let methods = collect_receiver_methods(tree.root_node(), source);
         let raw_path_literals =
             extract_c_calls_and_path_literals(tree.root_node(), source, &mut nodes, &methods);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["field_expression"],
+        );
 
         let fn_ptr_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);
         let call_metas =

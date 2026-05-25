@@ -28,6 +28,7 @@ fn raw_node(name: &str, kind: NodeKind, owner_class: Option<&str>) -> RawNode {
         type_annotation: None,
         decorators: vec![],
         calls: vec![],
+        field_reads: Vec::new(),
         owner_class: owner_class.map(str::to_string),
         content_hash: 0,
     }

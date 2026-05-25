@@ -606,6 +606,12 @@ impl LanguageProvider for SwiftProvider {
         let bindings = collect_bindings(tree.root_node(), source);
         let raw_path_literals =
             extract_swift_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["navigation_expression"],
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, SWIFT_FRAMEWORKS);
 

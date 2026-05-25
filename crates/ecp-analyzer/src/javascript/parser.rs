@@ -643,6 +643,12 @@ impl LanguageProvider for JavaScriptProvider {
         // - `fn()` → `fn`
         let raw_path_literals =
             extract_js_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["member_expression"],
+        );
 
         // Framework-presence gates: only emit Express/Hapi refs when the file
         // actually imports the matching package. Each framework has its own
