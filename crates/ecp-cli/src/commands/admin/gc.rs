@@ -4,7 +4,7 @@ use clap::Args;
 /// dirs across all repos under `~/.ecp`. Idempotent; safe to run repeatedly.
 #[derive(Args, Debug, Clone)]
 pub struct GcArgs {
-    /// Print what would be removed without deleting.
+    /// Skip all deletions (no-op run). Does not yet enumerate candidates.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -29,7 +29,10 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name.contains(".dead") || name == "telemetry" {
+            if name.starts_with('.')
+                || crate::admin::gc::is_repo_retired(&name)
+                || name == "telemetry"
+            {
                 continue;
             }
             if args.dry_run {
