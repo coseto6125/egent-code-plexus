@@ -38,7 +38,7 @@ pub fn status() -> HostStatus {
     }
 }
 
-fn run_install() -> Result<PathBuf, EcpError> {
+pub(crate) fn run_install() -> Result<PathBuf, EcpError> {
     let path = config_path();
     upsert_server(&path, &current_command())?;
     Ok(path)

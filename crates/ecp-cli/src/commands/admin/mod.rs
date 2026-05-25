@@ -7,6 +7,7 @@ pub mod claude;
 pub mod claude_code;
 pub mod codex;
 pub mod config;
+pub mod doctor;
 pub mod drop;
 pub mod gc;
 pub mod gemini;
@@ -61,6 +62,8 @@ pub enum AdminCommands {
     },
     /// Run MCP server (serve) or list exposed tools (tools).
     Mcp(crate::commands::mcp::McpArgs),
+    /// Environment health check: skills / index / host / config / registry / version. `--fix` repairs fixable items.
+    Doctor(doctor::DoctorArgs),
 }
 
 pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), ecp_core::EcpError> {
@@ -81,5 +84,6 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), ecp_core::
         AdminCommands::Codex { command } => codex::run(command),
         AdminCommands::Gemini { command } => gemini::run(command),
         AdminCommands::Mcp(args) => crate::commands::mcp::run(args, root_cmd),
+        AdminCommands::Doctor(args) => doctor::run(args),
     }
 }

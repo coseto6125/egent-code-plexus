@@ -2,7 +2,7 @@
 
 use crate::admin::host_integration::mcp::claude_code as mcp_claude;
 use crate::commands::admin::claude_code as hooks;
-use crate::commands::admin::skill_fs::copy_dir_replace;
+use crate::commands::admin::skill_fs::{copy_dir_replace, skill_diff};
 use clap::Subcommand;
 use ecp_core::EcpError;
 use std::fs;
@@ -37,12 +37,16 @@ pub enum ClaudeComponent {
     McpServer,
     /// Skill packs that teach Claude when to use ecp beyond command help.
     Skills {
-        #[command(subcommand)]
+        /// Which skill(s) to install. Defaults to all.
+        #[arg(value_enum, default_value_t = ClaudeSkillTarget::All)]
         target: ClaudeSkillTarget,
+        /// Print the diff against the installed copy without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
-#[derive(Subcommand, Debug, Clone, Copy)]
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
 pub enum ClaudeSkillTarget {
     /// Install every bundled Claude skill.
     All,
@@ -68,7 +72,7 @@ pub(crate) fn install(component: ClaudeComponent) -> Result<(), EcpError> {
             hooks::run_install_claude_code(events.as_deref(), None)
         }
         ClaudeComponent::McpServer => mcp_claude::install_scripted(),
-        ClaudeComponent::Skills { target } => install_skills(target),
+        ClaudeComponent::Skills { target, dry_run } => install_skills(target, dry_run),
     }
 }
 
@@ -80,7 +84,7 @@ pub(crate) fn uninstall(component: ClaudeComponent) -> Result<(), EcpError> {
             settings_path: None,
         }),
         ClaudeComponent::McpServer => mcp_claude::uninstall_scripted(),
-        ClaudeComponent::Skills { target } => uninstall_skills(target),
+        ClaudeComponent::Skills { target, .. } => uninstall_skills(target),
     }
 }
 
@@ -102,16 +106,42 @@ pub(crate) fn print_status() -> Result<(), EcpError> {
     Ok(())
 }
 
-fn install_skills(target: ClaudeSkillTarget) -> Result<(), EcpError> {
+pub(crate) fn install_skills(target: ClaudeSkillTarget, dry_run: bool) -> Result<(), EcpError> {
+    let cwd = std::env::current_dir().map_err(|e| EcpError::Output(format!("current_dir: {e}")))?;
+    install_skills_at(target, dry_run, &cwd, &claude_home())
+}
+
+/// `install_skills` with explicit source-root (`cwd`) and install-root
+/// (`claude_home`) so E2E tests drive the whole diff+copy flow against
+/// tempdirs without mutating process-global cwd / HOME (which race parallel
+/// tests).
+pub(crate) fn install_skills_at(
+    target: ClaudeSkillTarget,
+    dry_run: bool,
+    cwd: &std::path::Path,
+    claude_home: &std::path::Path,
+) -> Result<(), EcpError> {
     for &skill in target.expand() {
-        let src = source_skill_dir(skill)?;
-        let dst = claude_skill_dir(skill);
+        let src = source_skill_dir_at(skill, cwd);
+        if !src.join("SKILL.md").exists() {
+            return Err(EcpError::Output(format!(
+                "missing bundled Claude skill `{}` at {}",
+                skill.name(),
+                src.display()
+            )));
+        }
+        let dst = claude_home.join("skills").join(skill.name());
+
+        let dst_was_installed = dst.join("SKILL.md").exists();
+        println!("Claude Code skill `{}`:", skill.name());
+        skill_diff(&src, &dst, dst_was_installed)?.print();
+
+        if dry_run {
+            println!("  [dry-run] not written");
+            continue;
+        }
         copy_dir_replace(&src, &dst)?;
-        println!(
-            "Claude Code skill `{}` installed in {}",
-            skill.name(),
-            dst.display()
-        );
+        println!("  installed in {}", dst.display());
     }
     Ok(())
 }
@@ -131,20 +161,6 @@ fn uninstall_skills(target: ClaudeSkillTarget) -> Result<(), EcpError> {
     Ok(())
 }
 
-fn source_skill_dir(skill: ClaudeSkillTarget) -> Result<PathBuf, EcpError> {
-    let cwd = std::env::current_dir().map_err(|e| EcpError::Output(format!("current_dir: {e}")))?;
-    let path = source_skill_dir_at(skill, &cwd);
-    if path.join("SKILL.md").exists() {
-        Ok(path)
-    } else {
-        Err(EcpError::Output(format!(
-            "missing bundled Claude skill `{}` at {}",
-            skill.name(),
-            path.display()
-        )))
-    }
-}
-
 /// Path-resolution split out from `source_skill_dir` so unit tests can pin
 /// the skill → repo-subdir mapping without touching process-global cwd
 /// (`std::env::set_current_dir` races with parallel tests).
@@ -152,14 +168,14 @@ fn source_skill_dir(skill: ClaudeSkillTarget) -> Result<PathBuf, EcpError> {
 /// `ecp` skill: canonical source is `docs/skills/ecp/` per
 /// `docs/skills/README.md` (single source-of-truth for runtime
 /// `~/.claude/skills/ecp/`). Others ship from `skill_sample/claude/`.
-fn source_skill_dir_at(skill: ClaudeSkillTarget, cwd: &std::path::Path) -> PathBuf {
+pub(crate) fn source_skill_dir_at(skill: ClaudeSkillTarget, cwd: &std::path::Path) -> PathBuf {
     match skill {
         ClaudeSkillTarget::Ecp => cwd.join("docs").join("skills").join("ecp"),
         _ => cwd.join("skill_sample").join("claude").join(skill.name()),
     }
 }
 
-fn claude_skill_dir(skill: ClaudeSkillTarget) -> PathBuf {
+pub(crate) fn claude_skill_dir(skill: ClaudeSkillTarget) -> PathBuf {
     claude_home().join("skills").join(skill.name())
 }
 
@@ -171,7 +187,7 @@ fn claude_home() -> PathBuf {
 }
 
 impl ClaudeSkillTarget {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             ClaudeSkillTarget::All => "all",
             ClaudeSkillTarget::Ecp => "ecp",
@@ -179,7 +195,7 @@ impl ClaudeSkillTarget {
         }
     }
 
-    fn expand(self) -> &'static [ClaudeSkillTarget] {
+    pub(crate) fn expand(self) -> &'static [ClaudeSkillTarget] {
         match self {
             ClaudeSkillTarget::All => &[ClaudeSkillTarget::Ecp, ClaudeSkillTarget::Simplify],
             ClaudeSkillTarget::Ecp => &[ClaudeSkillTarget::Ecp],
@@ -223,6 +239,55 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/fake/repo/skill_sample/claude/simplify")
+        );
+    }
+
+    /// Build a fake repo cwd with a source `ecp` skill so install can read it.
+    fn fake_repo_with_ecp_skill(body: &str) -> tempfile::TempDir {
+        let cwd = tempfile::tempdir().unwrap();
+        let src = cwd.path().join("docs").join("skills").join("ecp");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), body).unwrap();
+        cwd
+    }
+
+    #[test]
+    fn e2e_install_skills_writes_into_claude_home() {
+        let cwd = fake_repo_with_ecp_skill("v1\n");
+        let home = tempfile::tempdir().unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, false, cwd.path(), home.path()).unwrap();
+
+        let installed = home.path().join("skills").join("ecp").join("SKILL.md");
+        assert!(installed.exists(), "skill must be copied into claude_home");
+        assert_eq!(std::fs::read_to_string(installed).unwrap(), "v1\n");
+    }
+
+    #[test]
+    fn e2e_install_dry_run_writes_nothing() {
+        let cwd = fake_repo_with_ecp_skill("v1\n");
+        let home = tempfile::tempdir().unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, true, cwd.path(), home.path()).unwrap();
+        assert!(
+            !home.path().join("skills").join("ecp").exists(),
+            "dry-run must not write the skill"
+        );
+    }
+
+    #[test]
+    fn e2e_install_overwrites_stale_installed_copy() {
+        let home = tempfile::tempdir().unwrap();
+        // Pre-existing (stale) installed copy.
+        let dst = home.path().join("skills").join("ecp");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("SKILL.md"), "OLD\n").unwrap();
+        // Fresh repo source differs.
+        let cwd = fake_repo_with_ecp_skill("NEW\n");
+
+        install_skills_at(ClaudeSkillTarget::Ecp, false, cwd.path(), home.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("SKILL.md")).unwrap(),
+            "NEW\n",
+            "install must overwrite the stale copy with repo source"
         );
     }
 }

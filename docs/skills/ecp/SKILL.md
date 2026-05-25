@@ -76,6 +76,7 @@ Use grep / Read for: string literals, error messages, config keys (toml / yaml /
 | `ecp processes trace <pat>` | Dump full Function / Method step sequence for a matching Process — cleaner than `impact --direction down` when you want the actual execution order |
 | `ecp review` | Full audit (impact + summary + tool-map + shape-check + diff) |
 | `ecp rename <old> <new>` | AST-aware multi-file rename |
+| `ecp admin doctor [check] [--fix]` | Environment health check (skills / index / host / config / registry / version); `--fix` repairs fixable items |
 
 ### Cypher escape hatch
 | Command | Use for |

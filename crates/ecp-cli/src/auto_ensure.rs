@@ -482,6 +482,12 @@ fn sibling_graph_compatible(graph_path: &Path) -> bool {
 /// `spawn_background_reindex`. Concurrent triggers no-op because `flock -n`
 /// exits immediately if another builder holds the lock.
 fn spawn_background_rebuild(worktree_root: &Path) {
+    // Integration tests exercise the warm-attach outcome + counter but have no
+    // use for the detached rebuild; skipping it avoids a leaked `sh` subprocess
+    // that nextest flags as LEAK on Windows (the rebuild outlives the test).
+    if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
+        return;
+    }
     let home_ecp = ecp_core::registry::resolve_home_ecp();
     let Ok(repo_dir_name) = crate::repo_identity::repo_dir_name_for_cwd(worktree_root) else {
         return;

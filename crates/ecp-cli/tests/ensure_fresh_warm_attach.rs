@@ -33,6 +33,7 @@ fn lock_env() -> MutexGuard<'static, ()> {
 struct EnvSnapshot {
     home: Option<std::ffi::OsString>,
     ecp_home: Option<std::ffi::OsString>,
+    skip_bg: Option<std::ffi::OsString>,
 }
 
 impl EnvSnapshot {
@@ -40,6 +41,7 @@ impl EnvSnapshot {
         Self {
             home: std::env::var_os("HOME"),
             ecp_home: std::env::var_os("ECP_HOME"),
+            skip_bg: std::env::var_os("ECP_SKIP_BG_REBUILD"),
         }
     }
 }
@@ -53,6 +55,10 @@ impl Drop for EnvSnapshot {
         match &self.ecp_home {
             Some(v) => std::env::set_var("ECP_HOME", v),
             None => std::env::remove_var("ECP_HOME"),
+        }
+        match &self.skip_bg {
+            Some(v) => std::env::set_var("ECP_SKIP_BG_REBUILD", v),
+            None => std::env::remove_var("ECP_SKIP_BG_REBUILD"),
         }
     }
 }
@@ -138,6 +144,9 @@ fn warm_attach_picks_up_sibling_sha_when_missing() {
 
     std::env::set_var("HOME", cache);
     std::env::remove_var("ECP_HOME");
+    // Suppress the detached rebuild: we assert the WarmAttach outcome + counter,
+    // not the rebuild itself, and a leaked `sh` child fails nextest on Windows.
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
     test_counters::reset();
 
     // Resolve via the same logic as main.rs (cli.graph default is the relative
@@ -278,6 +287,9 @@ fn no_sibling_lookup_does_not_poison_later_warm_attach() {
 
     std::env::set_var("HOME", cache);
     std::env::remove_var("ECP_HOME");
+    // The later warm-attach spawns a detached rebuild; suppress it so nextest
+    // does not flag a leaked `sh` child on Windows.
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
     test_counters::reset();
 
     let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");

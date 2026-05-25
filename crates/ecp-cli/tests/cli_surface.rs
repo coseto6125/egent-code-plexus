@@ -104,6 +104,7 @@ fn no_old_top_level_commands() {
         "analyze",
         "context",
         "query",
+        // `doctor` lives under `ecp admin doctor`, never at top level.
         "doctor",
         "status",
         "list",
