@@ -5,7 +5,7 @@
 //!   - deterministic edges stay in `outgoing` / `incoming`
 //!   - heuristic edges land in `heuristic_outgoing` / `heuristic_incoming`
 //!   - `heuristic_note` appears iff at least one heuristic edge is present
-//!   - per-candidate `checks` placeholder is present for every heuristic entry
+//!   - per-candidate `tier`/`checks` shape is present for every heuristic entry
 
 use ecp_core::graph::{
     Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
@@ -353,8 +353,9 @@ fn test_heuristic_note_absent_when_empty() {
     );
 }
 
-/// Every entry under a heuristic edge bucket must carry the T-H3 stub
-/// placeholder `[UNKNOWN_TIER] checks: <none recorded yet>`.
+/// Every entry under a heuristic edge bucket must carry the type-stable
+/// `tier`/`checks` shape that mirrors find-schema-bindings: a top-level `tier`
+/// (the `unresolved` sentinel pre-T4-7) and a `checks` object.
 #[test]
 fn test_check_breakdown_visible_per_candidate() {
     let tmp = tempfile::tempdir().unwrap();
@@ -372,12 +373,14 @@ fn test_check_breakdown_visible_per_candidate() {
         .unwrap_or_else(|| panic!("heuristic_outgoing.mirrors_field not an array: {out}"));
 
     for candidate in candidates {
-        let checks = candidate["checks"]
-            .as_str()
-            .unwrap_or_else(|| panic!("candidate missing 'checks' field: {candidate}"));
         assert!(
-            checks.contains("[UNKNOWN_TIER]"),
-            "checks placeholder must contain [UNKNOWN_TIER]: {checks}"
+            candidate["checks"].is_object(),
+            "candidate 'checks' must be an object: {candidate}"
+        );
+        assert_eq!(
+            candidate["tier"].as_str(),
+            Some("unresolved"),
+            "candidate 'tier' must be the unresolved sentinel pre-T4-7: {candidate}"
         );
     }
 }

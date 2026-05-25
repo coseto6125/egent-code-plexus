@@ -72,8 +72,8 @@ pub struct RenameArgs {
     pub markdown: bool,
 
     /// Expand the heuristic mirror list in the output. When unset, only the
-    /// count is shown. Tier/check data is a T-H2 placeholder; T4-7 populates
-    /// real values.
+    /// count is shown. Tier shows the `unresolved` sentinel until T4-7
+    /// populates real tier/check values.
     #[arg(long, default_value_t = false)]
     pub show_heuristic_mirrors: bool,
 }
@@ -550,7 +550,7 @@ fn emit_verification_payload(
 
 /// Emit `heuristic_mirrors_not_touched: <N>` and, when count > 0, the hint
 /// line. When `show_mirrors` is set, embed the candidate list with the
-/// UNKNOWN_TIER placeholder shape (T4-7 will populate real tier/check values).
+/// `unresolved` tier sentinel (T4-7 will populate real tier/check values).
 fn emit_mirror_summary(symbol: &str, count: usize, mirror_names: &[String], show_mirrors: bool) {
     println!("heuristic_mirrors_not_touched: {count}");
     // Zero count: omit hint — it adds noise when no mirrors exist
@@ -563,10 +563,10 @@ fn emit_mirror_summary(symbol: &str, count: usize, mirror_names: &[String], show
     if show_mirrors && !mirror_names.is_empty() {
         println!("heuristic_mirrors:");
         for name in mirror_names {
-            // T-H2 stub: tier/check data lands in T4-7; placeholder shape
-            // exercises the format/wiring so T4-7 only needs to fill values.
-            println!("  - {name:<30} [UNKNOWN_TIER]   checks: <none recorded yet>");
-            println!("                                          requires_verification: true");
+            // tier/check data lands in T4-7; until then emit the `unresolved`
+            // tier sentinel (mirrors the JSON `tier` field) instead of a
+            // placeholder that reads like a real tier named UNKNOWN_TIER.
+            println!("  - {name:<30} tier: unresolved   requires_verification: true");
         }
     }
 }

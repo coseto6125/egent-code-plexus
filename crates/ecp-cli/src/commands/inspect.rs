@@ -159,8 +159,13 @@ fn build_inspect_block(
             "filePath": target_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
             "confidence": edge.confidence.to_native(),
-            // T4-7 replaces this placeholder with real tier + checks data.
-            "checks": "[UNKNOWN_TIER] checks: <none recorded yet>",
+            // Mirror `find-schema-bindings`' shape so one agent consuming both
+            // commands sees a consistent schema: `tier` is a top-level label,
+            // `checks` an object of per-check results. Until T4-7 computes them,
+            // tier is the explicit `unresolved` sentinel and checks is empty —
+            // both type-stable (T4-7 only fills values, never restructures).
+            "tier": "unresolved",
+            "checks": {},
         });
         if edge.rel_type.is_heuristic() {
             heuristic_outgoing.entry(rel_str).or_default().push(entry);
@@ -195,8 +200,10 @@ fn build_inspect_block(
             "filePath": source_file_path,
             "reason": edge.reason.resolve(&graph.string_pool),
             "confidence": edge.confidence.to_native(),
-            // T4-7 replaces this placeholder with real tier + checks data.
-            "checks": "[UNKNOWN_TIER] checks: <none recorded yet>",
+            // See the outgoing-edge note above: `tier`/`checks` mirror
+            // find-schema-bindings; unresolved sentinel + empty object pre-T4-7.
+            "tier": "unresolved",
+            "checks": {},
         });
         if edge.rel_type.is_heuristic() {
             heuristic_incoming.entry(rel_str).or_default().push(entry);
