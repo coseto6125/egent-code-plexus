@@ -16,6 +16,7 @@ pub enum Source {
     ShapeCheck,
     BlindSpot,
     Resolver,
+    LiteralCoherence,
 }
 
 #[derive(Debug, Clone, Serialize)]

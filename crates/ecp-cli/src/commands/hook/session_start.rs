@@ -202,5 +202,6 @@ fn spawn_orphan_prune() {
             complete: &complete,
             failed: &failed,
         }),
+        then_args: Some(&["admin", "gc"]),
     });
 }

@@ -245,7 +245,7 @@ fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
         // Overload collision: keep the first occurrence. (See module doc.)
         symbols.entry(key).or_insert(SymbolInfo {
             content_hash: node.content_hash.to_native(),
-            line: node.span.0.to_native(),
+            line: node.start_line(),
             node_idx: idx as u32,
         });
     }
@@ -321,7 +321,7 @@ fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
         };
         let entry = IndirectDispatchRef {
             path: path.clone(),
-            line: caller_node.span.0.to_native(),
+            line: caller_node.start_line(),
             kind: kind.into(),
             dispatch_type: cm.dispatch_type.resolve(&graph.string_pool).to_string(),
             caller: caller_node.name.resolve(&graph.string_pool).to_string(),
@@ -383,7 +383,7 @@ fn collect_callers_for_changed(
                 .to_string();
             let src_name = src_node.name.resolve(&graph.string_pool).to_string();
             let src_kind = kind_str(&src_node.kind).to_string();
-            let src_line = src_node.span.0.to_native();
+            let src_line = src_node.start_line();
             let edge = &graph.edges[edge_idx as usize];
             let conf = edge.confidence.to_native();
             let reason = edge.reason.resolve(&graph.string_pool).to_string();

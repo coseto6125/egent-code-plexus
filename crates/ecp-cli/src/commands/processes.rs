@@ -126,7 +126,7 @@ fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<
             "process_type": process_type,
             "step_count": step_count,
             "filePath": file_path,
-            "line": node.span.0.to_native(),
+            "line": node.start_line(),
         }));
         if results.len() >= args.limit {
             break;
@@ -187,7 +187,7 @@ fn trace_processes(graph: &ArchivedZeroCopyGraph, args: TraceArgs) -> Result<(),
                 "name": member.name.resolve(&graph.string_pool),
                 "kind": kind_to_str(&member.kind),
                 "filePath": file_path,
-                "line": member.span.0.to_native(),
+                "line": member.start_line(),
                 "community": member.community_id.to_native(),
             }));
         }

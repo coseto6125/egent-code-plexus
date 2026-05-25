@@ -149,7 +149,7 @@ fn detect_saga_pairs(graph: &ArchivedZeroCopyGraph, class_filter: Option<&str>) 
         let file = graph.files[node.file_idx.to_native() as usize]
             .path
             .resolve(&graph.string_pool);
-        let line = node.span.0.to_native();
+        let line = node.start_line();
         class_methods
             .entry(owner)
             .or_default()
@@ -298,7 +298,7 @@ fn detect_outbox_patterns(graph: &ArchivedZeroCopyGraph) -> Vec<OutboxPattern> {
         let file = graph.files[node.file_idx.to_native() as usize]
             .path
             .resolve(&graph.string_pool);
-        let line = node.span.0.to_native();
+        let line = node.start_line();
         outbox_tables.push((idx, name, file, line));
     }
 
@@ -414,13 +414,13 @@ fn detect_outbox_patterns(graph: &ArchivedZeroCopyGraph) -> Vec<OutboxPattern> {
                 let writer_file = graph.files[writer_node.file_idx.to_native() as usize]
                     .path
                     .resolve(&graph.string_pool);
-                let writer_line = writer_node.span.0.to_native();
+                let writer_line = writer_node.start_line();
                 let pub_node = &graph.nodes[curr_idx];
                 let pub_name = pub_node.name.resolve(&graph.string_pool);
                 let pub_file = graph.files[pub_node.file_idx.to_native() as usize]
                     .path
                     .resolve(&graph.string_pool);
-                let pub_line = pub_node.span.0.to_native();
+                let pub_line = pub_node.start_line();
                 let lib = publisher_lib.get(&curr_idx).cloned().unwrap_or_default();
                 let confidence = if *is_method_on_table {
                     0.80_f32

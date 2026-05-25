@@ -106,7 +106,7 @@ pub fn extract(graph_path: &Path) -> Result<Vec<RouteEntry>, EcpError> {
             method: method.to_string(),
             path: path.to_string(),
             handler_file: file_node.path.resolve(&graph.string_pool).to_string(),
-            handler_line: node.span.0.to_native(),
+            handler_line: node.start_line(),
             consumers,
         });
     }

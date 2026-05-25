@@ -76,7 +76,7 @@ Review the same changes for efficiency:
 Wait for all three agents to complete. Aggregate findings and fix each issue directly. If a finding is a false positive or not worth addressing, note it and move on — do not argue, just skip.
 
 After fixes:
-- If the repo is gnx-indexed, run `gnx scan <changed-file> --repo .` to confirm fixed files' references still resolve in the graph.
+- If the repo is ecp-indexed, run `ecp find <changed-symbol> --repo .` (or `ecp inspect --name <symbol> --repo .`) to confirm fixed symbols still resolve in the graph.
 - Briefly summarise what was fixed (or confirm the code was already clean).
 
 ## Notes on cost

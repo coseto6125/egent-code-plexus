@@ -1,14 +1,11 @@
 //! Garbage collection: reachability-based LRU eviction + session orphan sweep.
 //!
-//! Covered by `tests/gc.rs` integration tests; bin compilation sees zero
-//! callers because the `admin gc` subcommand isn't wired yet — lift the
-//! module allow when it lands.
-#![allow(dead_code)]
+//! Covered by `tests/gc.rs` integration tests.
 
 use crate::git::safe_exec;
 use ecp_core::registry::{CommitBuildMeta, CommitDirName};
 use ecp_core::session::SessionMeta;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -28,6 +25,31 @@ pub struct SweepStats {
 }
 
 /// SHAs that must be retained: branch/tag/ref objects from the worktree
+/// A session dir marked dead: `<sid>.dead` or `<sid>.dead.<unix_ts>` (single
+/// trailing epoch segment — the shape `sweep_sessions` writes via
+/// `path.with_extension(format!("dead.{ts}"))`).
+fn is_session_dead(name: &str) -> bool {
+    name.ends_with(".dead")
+        || name
+            .rsplit_once(".dead.")
+            .map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false)
+}
+
+/// A retired repo dir: `<repo>__<hash>.dead.<pid>.<n>.<ts>` — three numeric
+/// segments, the shape `fs_safe::retire_dir_async` emits (distinct from the
+/// single-epoch session form, hence a separate predicate).
+pub(crate) fn is_repo_retired(name: &str) -> bool {
+    name.ends_with(".dead")
+        || name
+            .rsplit_once(".dead.")
+            .map(|(_, rest)| {
+                rest.split('.')
+                    .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
+            })
+            .unwrap_or(false)
+}
+
 /// plus pinned `base_sha` of active sessions (last_touched within 24h).
 pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<FxHashSet<String>> {
     let mut set = FxHashSet::default();
@@ -54,11 +76,7 @@ pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<FxHashSet<S
         for entry in it.flatten() {
             let name = entry.file_name();
             let s = name.to_string_lossy();
-            let is_dead = s.ends_with(".dead")
-                || s.rsplit_once(".dead.")
-                    .map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit()))
-                    .unwrap_or(false);
-            if is_dead || s.contains(".stale-") {
+            if is_session_dead(&s) || s.contains(".stale-") {
                 continue;
             }
             let sm_path = entry.path().join("session_meta.json");
@@ -159,12 +177,7 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
     for entry in it.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        let is_dead = name.ends_with(".dead")
-            || name
-                .rsplit_once(".dead.")
-                .map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit()))
-                .unwrap_or(false);
-        if is_dead || name.contains(".stale-") {
+        if is_session_dead(&name) || name.contains(".stale-") {
             fs::remove_dir_all(&path)?;
             removed += 1;
             continue;
@@ -210,6 +223,118 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
         }
     }
     Ok(SweepStats { marked, removed })
+}
+
+/// Converge same-SHA generation dirs under `<repo_root>/commits/`: for each SHA,
+/// keep only the dir with the greatest `Generation` (a base dir with no `.gen`
+/// suffix has `generation == None`, ordering below any `Some(_)`), remove the
+/// rest. Same SHA → identical graph (ingest is idempotent), so older generations
+/// are pure waste. Skips dirs whose mtime is < 10s old or that have a sibling
+/// `.building` marker (another session may be mid-ingest). Reuses
+/// `CommitDirName::parse` rather than hand-rolling the name grammar.
+pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
+    let commits = repo_root.join("commits");
+    let mut removed = 0usize;
+    let Ok(it) = fs::read_dir(&commits) else {
+        return Ok(SweepStats { marked: 0, removed });
+    };
+
+    // First pass: collect SHAs with an active build.
+    // Real markers are `<base_dirname>.building` (append-style, per orchestrator.rs:71/682/756),
+    // keyed on the commit SHA — never on a specific generation dir.
+    let mut building_shas: FxHashSet<[u8; 20]> = FxHashSet::default();
+    let mut by_sha: FxHashMap<[u8; 20], Vec<(CommitDirName, std::path::PathBuf)>> =
+        FxHashMap::default();
+    let now = std::time::SystemTime::now();
+    for entry in it.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if name.contains(".building") {
+            // Strip the `.building` suffix and parse the remainder to get the SHA.
+            if let Some(base) = name.strip_suffix(".building") {
+                if let Ok(parsed) = CommitDirName::parse(base) {
+                    building_shas.insert(parsed.sha);
+                }
+            }
+            continue;
+        }
+        let Ok(parsed) = CommitDirName::parse(&name) else {
+            continue;
+        };
+        if let Ok(modified) = meta.modified() {
+            if now
+                .duration_since(modified)
+                .map(|d| d.as_secs() < 10)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+        }
+        by_sha
+            .entry(parsed.sha)
+            .or_default()
+            .push((parsed, entry.path()));
+    }
+
+    for (sha, mut group) in by_sha {
+        if group.len() < 2 {
+            continue;
+        }
+        if building_shas.contains(&sha) {
+            continue;
+        }
+        group.sort_by_key(|(parsed, _)| parsed.generation);
+        let keep_idx = group.len() - 1;
+        for (i, (_, path)) in group.iter().enumerate() {
+            if i == keep_idx {
+                continue;
+            }
+            match fs::remove_dir_all(path) {
+                Ok(()) => removed += 1,
+                Err(e) => eprintln!(
+                    "gc: failed to remove stale generation {}: {e}",
+                    path.display()
+                ),
+            }
+        }
+    }
+
+    Ok(SweepStats { marked: 0, removed })
+}
+
+/// Remove top-level retired repo dirs (`<repo>__<hash>.dead.<pid>.<n>.<ts>`)
+/// left behind when `fs_safe::retire_dir_async`'s background delete thread died
+/// with the process before finishing. Already marked dead → removal is
+/// unconditional. The `.dead.` infix with a trailing all-digit timestamp segment
+/// is the marker (mirrors `sweep_sessions`' dead-detection).
+pub fn sweep_retired_repos(home_ecp: &Path) -> io::Result<SweepStats> {
+    let mut removed = 0usize;
+    let Ok(it) = fs::read_dir(home_ecp) else {
+        return Ok(SweepStats { marked: 0, removed });
+    };
+    for entry in it.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_repo_retired(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!("gc: failed to remove retired repo {}: {e}", path.display()),
+        }
+    }
+    Ok(SweepStats { marked: 0, removed })
 }
 
 fn dir_size(dir: &Path) -> io::Result<u64> {

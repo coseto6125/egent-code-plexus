@@ -70,6 +70,7 @@ nix = { version = "0.31", features = ["process", "signal"] }
 
 [dev-dependencies]
 proptest = "1"
+filetime = "0.2"
 
 [lints]
 workspace = true

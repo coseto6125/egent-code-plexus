@@ -28,6 +28,11 @@ pub struct BgJob<'a> {
     pub retry: (u32, u32),
     /// Optional marker files. `None` = fire-and-forget, no result file.
     pub markers: Option<BgMarkers<'a>>,
+    /// Optional second command run under the SAME flock after `args` succeeds,
+    /// before the success marker is written. Used to chain `prune` → `gc` so
+    /// they serialize on one lock. Its failure is best-effort (does NOT flip the
+    /// job to `.failed`).
+    pub then_args: Option<&'a [&'a str]>,
 }
 
 /// The two-line shell preamble used to guard `spawn_bg`'s inner job
@@ -61,6 +66,18 @@ pub fn spawn_bg(job: BgJob) -> bool {
     let args_joined = args_quoted.join(" ");
 
     let shell = if let Some(markers) = &job.markers {
+        let then_line = match job.then_args {
+            Some(then_args) => {
+                let then_quoted: Vec<String> = then_args.iter().map(shell_quote).collect();
+                format!(
+                    "{} {} >> {} 2>&1 || true",
+                    shell_quote(&self_exe),
+                    then_quoted.join(" "),
+                    shell_quote(markers.log)
+                )
+            }
+            None => String::new(),
+        };
         format!(
             r#"{preamble}: > {log}
 MAX={max}; ATTEMPT=0
@@ -68,6 +85,7 @@ while [ $ATTEMPT -lt $MAX ]; do
   ATTEMPT=$((ATTEMPT+1))
   echo "=== attempt $ATTEMPT/$MAX ===" >> {log}
   if {ecp} {args} >> {log} 2>&1; then
+    {then_line}
     rm -f {failed}
     : > {complete}
     exit 0
@@ -85,6 +103,7 @@ rm -f {complete}
             sleep_secs = job.retry.1,
             complete = shell_quote(markers.complete),
             failed = shell_quote(markers.failed),
+            then_line = then_line,
         )
     } else {
         format!(

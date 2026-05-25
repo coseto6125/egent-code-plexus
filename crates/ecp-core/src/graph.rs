@@ -563,6 +563,22 @@ impl ArchivedNode {
     pub fn has_owning_file(&self) -> bool {
         self.file_idx.to_native() != SYNTHETIC_FILE_IDX
     }
+
+    /// 1-based start line for display. `span.0` is the tree-sitter row
+    /// (0-based), kept raw internally for range/hash/containment; every
+    /// user-facing `line` is +1 so it matches editors, `grep -n`, compiler
+    /// diagnostics, and the LLM's 1-based prior — the single conversion
+    /// boundary between tree-sitter's convention and the consumer's.
+    #[inline]
+    pub fn start_line(&self) -> u32 {
+        self.span.0.to_native().saturating_add(1)
+    }
+
+    /// 1-based end line (`span.2` + 1). Same convention as [`start_line`].
+    #[inline]
+    pub fn end_line(&self) -> u32 {
+        self.span.2.to_native().saturating_add(1)
+    }
 }
 
 /// Sorted entry in `ZeroCopyGraph.name_index`: maps a `xxh3_64(name)` hash

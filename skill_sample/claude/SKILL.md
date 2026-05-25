@@ -86,8 +86,7 @@ Supports the openCypher read subset commonly used for graph queries: boolean WHE
 2. **`cypher --repo @group` errors** — single-repo only.
 3. **Default `--graph .ecp-rs/graph.bin`** is a cwd-relative legacy path. If you don't have a checked-in graph file, pass `--repo` (preferred) or absolute `--graph`.
 4. **Auto-ensure on every agent command** — first query after a source change pays a brief re-index cost. The stderr `✓ Index refreshed` line is informational, not an error.
-5. **`scan --strict`** flags identifiers that match language keywords / builtins. Off by default; turn on for high-noise files.
-6. **`rename --markdown`** is OFF by default — code-only rename. Add the flag to sweep `.md / .rst / .txt`.
+5. **`rename --markdown`** is OFF by default — code-only rename. Add the flag to sweep `.md / .rst / .txt`.
 
 ## PR-touching workflow
 

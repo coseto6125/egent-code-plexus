@@ -101,7 +101,16 @@ pub fn retire_dir_async(path: &Path) -> io::Result<Option<PathBuf>> {
     let retired = retire_dir(path)?;
     if let Some(retired_path) = retired.clone() {
         std::thread::spawn(move || {
-            let _ = fs::remove_dir_all(retired_path);
+            // WHY log, not swallow: a short-lived CLI process can exit before
+            // this detached thread finishes, leaving a `.dead.*` dir behind.
+            // `admin gc` sweeps such leftovers; recording the failure on stderr
+            // makes the leak diagnosable instead of silent (FU-2026-05-26-001).
+            if let Err(e) = fs::remove_dir_all(&retired_path) {
+                eprintln!(
+                    "retire_dir_async: background remove of {} failed: {e}",
+                    retired_path.display()
+                );
+            }
         });
     }
     Ok(retired)

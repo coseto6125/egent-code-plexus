@@ -407,6 +407,7 @@ fn spawn_background_rebuild(worktree_root: &Path) {
         cwd: worktree_root,
         retry: (1, 0),
         markers: None,
+        then_args: None,
     });
 }
 
