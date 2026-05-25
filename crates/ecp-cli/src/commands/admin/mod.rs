@@ -8,6 +8,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod config;
 pub mod drop;
+pub mod gc;
 pub mod gemini;
 pub mod group;
 pub mod index;
@@ -27,6 +28,8 @@ pub enum AdminCommands {
     Drop(drop::DropArgs),
     /// Remove orphan index dirs not in registry
     Prune(prune::PruneArgs),
+    /// Garbage-collect stale graph generations + retired repo/session dirs
+    Gc(gc::GcArgs),
     /// Interactive TOML config editor
     Config(config::ConfigArgs),
     /// Manage repo group membership
@@ -67,6 +70,7 @@ pub fn run(cmd: AdminCommands, root_cmd: clap::Command) -> Result<(), ecp_core::
         AdminCommands::Status(args) => claude_code::run_status(args),
         AdminCommands::Drop(args) => drop::run(args),
         AdminCommands::Prune(args) => prune::run(args),
+        AdminCommands::Gc(args) => gc::run(args),
         AdminCommands::Config(args) => config::run(args),
         AdminCommands::Group { command } => group::run(command),
         AdminCommands::Index(args) => index::run(args).map_err(ecp_core::EcpError::Output),

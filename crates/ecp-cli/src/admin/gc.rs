@@ -1,9 +1,6 @@
 //! Garbage collection: reachability-based LRU eviction + session orphan sweep.
 //!
-//! Covered by `tests/gc.rs` integration tests; bin compilation sees zero
-//! callers because the `admin gc` subcommand isn't wired yet — lift the
-//! module allow when it lands.
-#![allow(dead_code)]
+//! Covered by `tests/gc.rs` integration tests.
 
 use crate::git::safe_exec;
 use ecp_core::registry::{CommitBuildMeta, CommitDirName};
