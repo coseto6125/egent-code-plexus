@@ -204,7 +204,7 @@ In `scripts/benchmark/benchmark_ecp.py`, inside the `queries: list[...] = [ ... 
             [
                 str(args.binary),
                 "cypher",
-                "MATCH (c:Class)-[:Contains]->(m:Method) RETURN c.name, collect(m.name)",
+                "MATCH (c:Class)-[:HasMethod]->(m:Method) RETURN c.name, collect(m.name)",
                 "--repo",
                 str(args.repo),
             ],

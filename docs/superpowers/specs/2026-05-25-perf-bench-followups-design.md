@@ -66,7 +66,7 @@ not reallocated); only the inserted copy allocates.
 
 Append 4 query rows to `queries[]` in `benchmark_ecp.py`, each with a WHY
 comment matching the existing `count(*)` / `decorator IN` style:
-1. `COLLECT()` projection — e.g. `MATCH (c:Class)-[:Contains]->(m:Method) RETURN c.name, collect(m.name)`.
+1. `COLLECT()` projection — e.g. `MATCH (c:Class)-[:HasMethod]->(m:Method) RETURN c.name, collect(m.name)`.
 2. `IN [literal,...]` literal-list filter — e.g. `MATCH (m:Method) WHERE m.name IN ['main','run','init'] RETURN count(*)`.
 3. Multi-hop edge — `MATCH (a:Method)-[:Calls*1..3]->(b:Method) RETURN count(*)`.
 4. Multi-aggregate GROUP BY — `MATCH (n) RETURN n.kind, count(*) ORDER BY count(*) DESC`.
