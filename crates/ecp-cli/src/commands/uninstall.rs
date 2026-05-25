@@ -115,6 +115,7 @@ fn remove_claude_skills() -> Result<(), EcpError> {
     claude::uninstall(claude::ClaudeComponent::Skills {
         target: claude::ClaudeSkillTarget::All,
         dry_run: false,
+        no_claude_md: false,
     })
 }
 

@@ -17,6 +17,26 @@ pub struct Config {
     pub confidence: ConfidenceConfig,
     #[serde(default)]
     pub group: GroupConfig,
+    #[serde(default)]
+    pub index: IndexConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IndexConfig {
+    /// **effective** — files larger than this byte cap are skipped during
+    /// indexing. Overridden by the `ECP_MAX_FILE_BYTES` env var when set.
+    /// Default 1 MiB: covers hand-written source while excluding minified
+    /// bundles, vendored blobs, and generated dumps.
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: default_max_file_bytes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -107,6 +127,30 @@ fn default_group_timeout_ms() -> u64 {
     5000
 }
 
+/// Single source of truth for the indexing file cap. Shared between the
+/// `IndexConfig` serde default and the env/config resolver below.
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+fn default_max_file_bytes() -> u64 {
+    DEFAULT_MAX_FILE_BYTES
+}
+
+/// Resolve the indexing file cap with precedence: `ECP_MAX_FILE_BYTES` env
+/// var > `[index] max_file_bytes` in `<repo>/.ecp/config.toml` > the 1 MiB
+/// default. A malformed env value or an unreadable config falls through to
+/// the next source.
+pub fn resolve_max_file_bytes(repo_root: &Path) -> u64 {
+    if let Some(bytes) = std::env::var("ECP_MAX_FILE_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        return bytes;
+    }
+    load(repo_root)
+        .map(|cfg| cfg.index.max_file_bytes)
+        .unwrap_or(DEFAULT_MAX_FILE_BYTES)
+}
+
 /// Repo-relative config path. `.ecp/config.toml` is hook-local state
 /// scoped to the worktree (not shared with `~/.ecp/<repo>/<branch>/`,
 /// which holds the resolved index artifacts).
@@ -176,5 +220,42 @@ mod tests {
         let cfg = load(dir.path()).unwrap();
         assert_eq!(cfg.output.default_format, "json");
         assert_eq!(cfg.confidence, ConfidenceConfig::default());
+    }
+
+    // The three `resolve_max_file_bytes` tests mutate the shared
+    // `ECP_MAX_FILE_BYTES` env var, so they must not run concurrently.
+    // Serialize them through one mutex rather than pulling in `serial_test`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn max_file_bytes_defaults_to_one_mib() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
+        assert_eq!(resolve_max_file_bytes(dir.path()), 1024 * 1024);
+    }
+
+    #[test]
+    fn max_file_bytes_reads_config_when_no_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let cfg_path = config_path(dir.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, "[index]\nmax_file_bytes = 2097152\n").unwrap();
+        unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
+        assert_eq!(resolve_max_file_bytes(dir.path()), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn max_file_bytes_env_overrides_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let cfg_path = config_path(dir.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, "[index]\nmax_file_bytes = 2097152\n").unwrap();
+        unsafe { std::env::set_var("ECP_MAX_FILE_BYTES", "4096") };
+        let resolved = resolve_max_file_bytes(dir.path());
+        unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
+        assert_eq!(resolved, 4096);
     }
 }

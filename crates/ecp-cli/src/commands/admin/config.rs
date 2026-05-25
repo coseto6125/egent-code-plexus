@@ -91,15 +91,17 @@ fn leave_tui(terminal: &mut Tui) -> io::Result<()> {
 enum FieldId {
     OutputFormat,
     ConfidenceHighTrust,
+    IndexMaxFileBytes,
     GroupBm25Threshold,
     GroupMaxCandidates,
     GroupCrossDepth,
     GroupTimeoutMs,
 }
 
-const FIELDS: [FieldId; 6] = [
+const FIELDS: [FieldId; 7] = [
     FieldId::OutputFormat,
     FieldId::ConfidenceHighTrust,
+    FieldId::IndexMaxFileBytes,
     FieldId::GroupBm25Threshold,
     FieldId::GroupMaxCandidates,
     FieldId::GroupCrossDepth,
@@ -146,6 +148,7 @@ impl App {
             FieldId::ConfidenceHighTrust => {
                 format!("{:.2}", self.cfg.confidence.high_trust_threshold)
             }
+            FieldId::IndexMaxFileBytes => (self.cfg.index.max_file_bytes / 1024).to_string(),
             FieldId::GroupBm25Threshold => format!("{:.2}", self.cfg.group.bm25_threshold),
             FieldId::GroupMaxCandidates => self.cfg.group.max_candidates_per_step.to_string(),
             FieldId::GroupCrossDepth => self.cfg.group.cross_depth.to_string(),
@@ -165,6 +168,12 @@ impl App {
             FieldId::ConfidenceHighTrust => {
                 if let Ok(f) = v.parse::<f32>() {
                     self.cfg.confidence.high_trust_threshold = f.clamp(0.0, 1.0);
+                }
+            }
+            FieldId::IndexMaxFileBytes => {
+                // Entered + displayed in KiB; 0 would skip everything, floor at 1.
+                if let Ok(kb) = v.parse::<u64>() {
+                    self.cfg.index.max_file_bytes = kb.max(1) * 1024;
                 }
             }
             FieldId::GroupBm25Threshold => {
@@ -429,6 +438,9 @@ fn render_form(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Line::from(""),
         group_header("Confidence"),
         field_line(app, FieldId::ConfidenceHighTrust, "High-trust thr."),
+        Line::from(""),
+        group_header("Index"),
+        field_line(app, FieldId::IndexMaxFileBytes, "Max file KiB"),
         Line::from(""),
         // TODO: expose exclude_links_paths (Vec<String>) and exclude_links_param_only_paths (bool) when TUI gains list/toggle widgets
         group_header("Group"),

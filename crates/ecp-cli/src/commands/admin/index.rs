@@ -79,10 +79,13 @@ pub fn run_analyzer_for_paths(
     // an MPSC channel; the main thread drains into the analysis list.
     // Sequential `.build()` was ~100ms on .sample_repo's 22.7k entries —
     // parallel cuts the syscall-bound stat/readdir tax.
-    const MAX_FILE_SIZE: u64 = 512 * 1024; // 512 KB
+    // Per-file byte cap: `ECP_MAX_FILE_BYTES` env > `[index] max_file_bytes`
+    // in `.ecp/config.toml` > 1 MiB default. See `ecp_core::config`.
+    let max_file_size = ecp_core::config::resolve_max_file_bytes(src_root);
     let (file_tx, file_rx) = std::sync::mpsc::channel::<(std::path::PathBuf, std::path::PathBuf)>();
     let skipped_large = std::sync::atomic::AtomicU64::new(0);
     let skipped_large_ref = &skipped_large;
+    let max_file_size_ref = &max_file_size;
     let src_root_ref = src_root;
     let mut walk_builder = WalkBuilder::new(src_root);
     walk_builder
@@ -102,7 +105,7 @@ pub fn run_analyzer_for_paths(
                 let path = entry.path();
                 if path.is_file() && should_analyze_path(path) {
                     if let Ok(metadata) = entry.metadata() {
-                        if metadata.len() > MAX_FILE_SIZE {
+                        if metadata.len() > *max_file_size_ref {
                             skipped_large_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return ignore::WalkState::Continue;
                         }
@@ -121,8 +124,9 @@ pub fn run_analyzer_for_paths(
 
     if skipped_large_files > 0 {
         tracing::warn!(
-            "Skipped {} files > 512 KB during analysis of {:?}",
+            "Skipped {} files > {} KB during analysis of {:?}",
             skipped_large_files,
+            max_file_size / 1024,
             src_root
         );
     }
