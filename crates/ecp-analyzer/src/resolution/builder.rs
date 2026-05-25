@@ -847,53 +847,67 @@ impl GraphBuilder {
             let handler_files: rustc_hash::FxHashSet<u32> =
                 emitted_routes.iter().map(|(_, fi, _, _)| *fi).collect();
 
-            for (file_idx, lg) in self.local_graphs.iter().enumerate() {
-                let file_idx = file_idx as u32;
-                if handler_files.contains(&file_idx) {
-                    continue;
-                }
-                let Some(source_node) = file_first_node[file_idx as usize] else {
-                    continue;
-                };
-                let path_str = lg.file_path.to_string_lossy();
-                // Allowlist: extensions where `fetch_urls::extract` produces
-                // useful hits. PHP is a route-server language, not a consumer
-                // here; all other unknown extensions are skipped cheaply.
-                if !is_consumer_extension(&path_str) {
-                    continue;
-                }
-                let Some(content) = read_content(file_idx, &mut content_cache, &self.local_graphs)
-                else {
-                    continue;
-                };
-                let client_calls = fetch_urls::extract(&content);
-                if client_calls.is_empty() {
-                    continue;
-                }
-                let keys = consumer_keys::extract(&content);
+            // Parallel phase: pure read-only work per file.
+            // Each worker reads the file directly (no shared cache) and
+            // returns (file_idx, source_node, matched, reason_str).
+            // string_pool.add and Edge construction happen serially below.
+            #[allow(clippy::type_complexity)]
+            let parallel_results: Vec<(u32, u32, Vec<(u32, bool)>, String)> = self
+                .local_graphs
+                .par_iter()
+                .enumerate()
+                .filter_map(|(file_idx_usize, lg)| {
+                    let file_idx = file_idx_usize as u32;
+                    if handler_files.contains(&file_idx) {
+                        return None;
+                    }
+                    let source_node = file_first_node[file_idx_usize]?;
+                    let path_str = lg.file_path.to_string_lossy();
+                    // Allowlist: extensions where `fetch_urls::extract` produces
+                    // useful hits. PHP is a route-server language, not a consumer
+                    // here; all other unknown extensions are skipped cheaply.
+                    if !is_consumer_extension(&path_str) {
+                        return None;
+                    }
+                    // Read directly — the cache is serial-only (1.6a) and each
+                    // consumer file is visited at most once in this subpass.
+                    let abs = repo_root.join(&lg.file_path);
+                    let content = std::fs::read_to_string(&abs).ok()?;
+                    let client_calls = fetch_urls::extract(&content);
+                    if client_calls.is_empty() {
+                        return None;
+                    }
+                    let keys = consumer_keys::extract(&content);
 
-                // Resolve each (method, url) pair against the RouteIndex.
-                // Cross-repo misses (no matching Route node) are silently
-                // skipped — ecp contracts handles those separately.
-                let mut matched: Vec<(u32, bool)> = Vec::new(); // (route_idx, is_templated)
-                for (client_method, client_url) in &client_calls {
-                    let (norm_url, client_templated) = normalize_route_path(client_url);
-                    // Route side also normalized via `:*`; the index key carries
-                    // `:*` segments whenever the route had a param placeholder.
-                    let route_templated = norm_url.contains(":*");
-                    if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
-                        for &route_idx in targets {
-                            matched.push((route_idx, client_templated || route_templated));
+                    // Resolve each (method, url) pair against the RouteIndex.
+                    // Cross-repo misses (no matching Route node) are silently
+                    // skipped — ecp contracts handles those separately.
+                    let mut matched: Vec<(u32, bool)> = Vec::new(); // (route_idx, is_templated)
+                    for (client_method, client_url) in &client_calls {
+                        let (norm_url, client_templated) = normalize_route_path(client_url);
+                        // Route side also normalized via `:*`; the index key carries
+                        // `:*` segments whenever the route had a param placeholder.
+                        let route_templated = norm_url.contains(":*");
+                        if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
+                            for &route_idx in targets {
+                                matched.push((route_idx, client_templated || route_templated));
+                            }
                         }
                     }
-                }
-                if matched.is_empty() {
-                    continue;
-                }
-                let fetch_count = matched.len() as u32;
-                let reason_str = format_reason(&keys, fetch_count);
-                let reason_ref = string_pool.add(&reason_str);
+                    if matched.is_empty() {
+                        return None;
+                    }
+                    let fetch_count = matched.len() as u32;
+                    let reason_str = format_reason(&keys, fetch_count);
+                    Some((file_idx, source_node, matched, reason_str))
+                })
+                .collect();
 
+            // Serial phase: intern strings and push edges in file_idx order.
+            // rayon's indexed par_iter collect preserves enumeration order, so
+            // parallel_results is already sorted by file_idx — no extra sort needed.
+            for (_file_idx, source_node, matched, reason_str) in parallel_results {
+                let reason_ref = string_pool.add(&reason_str);
                 for (route_idx, is_templated) in matched {
                     // Confidence: 0.8 for exact-path matches, 0.6 for any
                     // templated segment — caller or callee side.
