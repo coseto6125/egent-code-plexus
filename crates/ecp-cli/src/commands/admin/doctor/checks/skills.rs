@@ -52,7 +52,7 @@ pub(crate) fn check(fix: bool) -> Vec<CheckResult> {
 
         if fix {
             let last = out.last_mut().unwrap();
-            match install_skills(skill, false) {
+            match install_skills(skill, false, false) {
                 Ok(()) => last.fix_applied = Some(true),
                 Err(_) => last.fix_applied = Some(false),
             }

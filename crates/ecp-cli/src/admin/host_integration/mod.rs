@@ -117,10 +117,12 @@ fn claude_install_skills_menu(theme: &ColorfulTheme) -> Result<(), EcpError> {
             Some(0) => claude::install(ClaudeComponent::Skills {
                 target: ClaudeSkillTarget::All,
                 dry_run: false,
+                no_claude_md: false,
             })?,
             Some(1) => claude::install(ClaudeComponent::Skills {
                 target: ClaudeSkillTarget::Simplify,
                 dry_run: false,
+                no_claude_md: false,
             })?,
             Some(2) | None => return Ok(()),
             _ => unreachable!(),
@@ -135,10 +137,12 @@ fn claude_uninstall_skills_menu(theme: &ColorfulTheme) -> Result<(), EcpError> {
             Some(0) => claude::uninstall(ClaudeComponent::Skills {
                 target: ClaudeSkillTarget::All,
                 dry_run: false,
+                no_claude_md: false,
             })?,
             Some(1) => claude::uninstall(ClaudeComponent::Skills {
                 target: ClaudeSkillTarget::Simplify,
                 dry_run: false,
+                no_claude_md: false,
             })?,
             Some(2) | None => return Ok(()),
             _ => unreachable!(),

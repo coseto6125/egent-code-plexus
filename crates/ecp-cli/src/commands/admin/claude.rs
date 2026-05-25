@@ -6,7 +6,7 @@ use crate::commands::admin::skill_fs::{copy_dir_replace, skill_diff};
 use clap::Subcommand;
 use ecp_core::EcpError;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Subcommand, Debug)]
 pub enum ClaudeCommands {
@@ -43,6 +43,9 @@ pub enum ClaudeComponent {
         /// Print the diff against the installed copy without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Skip injecting @ECP.md guidance import into ~/.claude/CLAUDE.md.
+        #[arg(long)]
+        no_claude_md: bool,
     },
 }
 
@@ -72,7 +75,11 @@ pub(crate) fn install(component: ClaudeComponent) -> Result<(), EcpError> {
             hooks::run_install_claude_code(events.as_deref(), None)
         }
         ClaudeComponent::McpServer => mcp_claude::install_scripted(),
-        ClaudeComponent::Skills { target, dry_run } => install_skills(target, dry_run),
+        ClaudeComponent::Skills {
+            target,
+            dry_run,
+            no_claude_md,
+        } => install_skills(target, dry_run, no_claude_md),
     }
 }
 
@@ -84,7 +91,10 @@ pub(crate) fn uninstall(component: ClaudeComponent) -> Result<(), EcpError> {
             settings_path: None,
         }),
         ClaudeComponent::McpServer => mcp_claude::uninstall_scripted(),
-        ClaudeComponent::Skills { target, .. } => uninstall_skills(target),
+        ClaudeComponent::Skills { target, .. } => {
+            uninstall_skills(target)?;
+            uninstall_ecp_import_at(&claude_home())
+        }
     }
 }
 
@@ -106,9 +116,19 @@ pub(crate) fn print_status() -> Result<(), EcpError> {
     Ok(())
 }
 
-pub(crate) fn install_skills(target: ClaudeSkillTarget, dry_run: bool) -> Result<(), EcpError> {
+pub(crate) fn install_skills(
+    target: ClaudeSkillTarget,
+    dry_run: bool,
+    no_claude_md: bool,
+) -> Result<(), EcpError> {
     let cwd = std::env::current_dir().map_err(|e| EcpError::Output(format!("current_dir: {e}")))?;
-    install_skills_at(target, dry_run, &cwd, &claude_home())
+    let claude_home = claude_home();
+    install_skills_at(target, dry_run, &cwd, &claude_home)?;
+    if !no_claude_md {
+        let ecp_md_src = cwd.join("docs").join("skills").join("ecp").join("ECP.md");
+        inject_ecp_import_at(&claude_home, &ecp_md_src, dry_run)?;
+    }
+    Ok(())
 }
 
 /// `install_skills` with explicit source-root (`cwd`) and install-root
@@ -157,6 +177,95 @@ fn uninstall_skills(target: ClaudeSkillTarget) -> Result<(), EcpError> {
             skill.name(),
             dst.display()
         );
+    }
+    Ok(())
+}
+
+/// Copy `ecp_md_src` to `<claude_home>/ECP.md` and append `@ECP.md` to
+/// `<claude_home>/CLAUDE.md` if the line is not already present.
+///
+/// Explicit `claude_home` parameter makes this testable without mutating
+/// process-global HOME (matches the `install_skills_at` pattern).
+pub(crate) fn inject_ecp_import_at(
+    claude_home: &Path,
+    ecp_md_src: &Path,
+    dry_run: bool,
+) -> Result<(), EcpError> {
+    let dest_ecp_md = claude_home.join("ECP.md");
+    let dest_claude_md = claude_home.join("CLAUDE.md");
+
+    if dry_run {
+        println!(
+            "  [dry-run] would copy {} → {}",
+            ecp_md_src.display(),
+            dest_ecp_md.display()
+        );
+        println!(
+            "  [dry-run] would add @ECP.md import to {}",
+            dest_claude_md.display()
+        );
+        return Ok(());
+    }
+
+    // Managed file — always overwrite so it tracks the bundled source.
+    fs::create_dir_all(claude_home)?;
+    fs::copy(ecp_md_src, &dest_ecp_md).map_err(|e| {
+        EcpError::Output(format!(
+            "cannot copy ECP.md source {}: {e}",
+            ecp_md_src.display()
+        ))
+    })?;
+
+    // Idempotent: only append when the import line is absent.
+    let existing = if dest_claude_md.exists() {
+        fs::read_to_string(&dest_claude_md)?
+    } else {
+        String::new()
+    };
+    let already_present = existing.lines().any(|l| l.trim() == "@ECP.md");
+    if !already_present {
+        let separator = if existing.ends_with('\n') || existing.is_empty() {
+            ""
+        } else {
+            "\n"
+        };
+        let updated = format!("{existing}{separator}@ECP.md\n");
+        fs::write(&dest_claude_md, updated)?;
+        println!("  added @ECP.md import to {}", dest_claude_md.display());
+    } else {
+        println!(
+            "  @ECP.md already present in {} — skipped",
+            dest_claude_md.display()
+        );
+    }
+    Ok(())
+}
+
+/// Remove the `@ECP.md` line from `<claude_home>/CLAUDE.md` and delete
+/// `<claude_home>/ECP.md`. Both steps are idempotent.
+pub(crate) fn uninstall_ecp_import_at(claude_home: &Path) -> Result<(), EcpError> {
+    let dest_ecp_md = claude_home.join("ECP.md");
+    let dest_claude_md = claude_home.join("CLAUDE.md");
+
+    if dest_ecp_md.exists() {
+        fs::remove_file(&dest_ecp_md)?;
+        println!("  removed {}", dest_ecp_md.display());
+    }
+
+    if dest_claude_md.exists() {
+        let existing = fs::read_to_string(&dest_claude_md)?;
+        // Match install's exact insertion (`@ECP.md\n`, optionally preceded by a
+        // separator newline) and splice it out byte-for-byte. Rebuilding via
+        // `.lines()` would normalize CRLF→LF and add a trailing newline, mutating
+        // the user's file even when no import line is present.
+        let stripped = existing
+            .replace("\n@ECP.md\n", "\n")
+            .replace("@ECP.md\n", "")
+            .replace("\n@ECP.md", "");
+        if stripped != existing {
+            fs::write(&dest_claude_md, &stripped)?;
+            println!("  removed @ECP.md import from {}", dest_claude_md.display());
+        }
     }
     Ok(())
 }
@@ -289,5 +398,173 @@ mod tests {
             "NEW\n",
             "install must overwrite the stale copy with repo source"
         );
+    }
+
+    /// Build a fake repo with both SKILL.md and ECP.md under docs/skills/ecp/.
+    fn fake_repo_with_ecp_guidance(guidance: &str) -> tempfile::TempDir {
+        let cwd = tempfile::tempdir().unwrap();
+        let src = cwd.path().join("docs").join("skills").join("ecp");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "skill\n").unwrap();
+        std::fs::write(src.join("ECP.md"), guidance).unwrap();
+        cwd
+    }
+
+    #[test]
+    fn e2e_inject_creates_claude_md_with_import() {
+        // No pre-existing CLAUDE.md → inject must create it with @ECP.md.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = fake_repo_with_ecp_guidance("guidance\n");
+        let src = cwd
+            .path()
+            .join("docs")
+            .join("skills")
+            .join("ecp")
+            .join("ECP.md");
+
+        inject_ecp_import_at(home.path(), &src, false).unwrap();
+
+        let claude_md = home.path().join("CLAUDE.md");
+        assert!(claude_md.exists(), "CLAUDE.md must be created");
+        let content = std::fs::read_to_string(&claude_md).unwrap();
+        assert!(
+            content.lines().any(|l| l.trim() == "@ECP.md"),
+            "CLAUDE.md must contain @ECP.md"
+        );
+        assert!(home.path().join("ECP.md").exists(), "ECP.md must be copied");
+    }
+
+    #[test]
+    fn e2e_inject_is_idempotent() {
+        // Running inject twice must not duplicate the @ECP.md line.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = fake_repo_with_ecp_guidance("guidance\n");
+        let src = cwd
+            .path()
+            .join("docs")
+            .join("skills")
+            .join("ecp")
+            .join("ECP.md");
+
+        inject_ecp_import_at(home.path(), &src, false).unwrap();
+        inject_ecp_import_at(home.path(), &src, false).unwrap();
+
+        let content = std::fs::read_to_string(home.path().join("CLAUDE.md")).unwrap();
+        let count = content.lines().filter(|l| l.trim() == "@ECP.md").count();
+        assert_eq!(count, 1, "@ECP.md must appear exactly once");
+    }
+
+    #[test]
+    fn e2e_inject_appends_to_existing_claude_md() {
+        // Existing CLAUDE.md content must be preserved; @ECP.md appended at EOF.
+        let home = tempfile::tempdir().unwrap();
+        let prior = "# My rules\ndo stuff\n";
+        std::fs::write(home.path().join("CLAUDE.md"), prior).unwrap();
+
+        let cwd = fake_repo_with_ecp_guidance("guidance\n");
+        let src = cwd
+            .path()
+            .join("docs")
+            .join("skills")
+            .join("ecp")
+            .join("ECP.md");
+        inject_ecp_import_at(home.path(), &src, false).unwrap();
+
+        let content = std::fs::read_to_string(home.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            content.starts_with("# My rules"),
+            "prior content must be preserved"
+        );
+        assert!(content.contains("@ECP.md"), "@ECP.md must be appended");
+    }
+
+    #[test]
+    fn e2e_inject_dry_run_writes_nothing() {
+        // dry_run=true must leave the claude_home completely untouched.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = fake_repo_with_ecp_guidance("guidance\n");
+        let src = cwd
+            .path()
+            .join("docs")
+            .join("skills")
+            .join("ecp")
+            .join("ECP.md");
+
+        inject_ecp_import_at(home.path(), &src, true).unwrap();
+
+        assert!(
+            !home.path().join("ECP.md").exists(),
+            "dry-run must not write ECP.md"
+        );
+        assert!(
+            !home.path().join("CLAUDE.md").exists(),
+            "dry-run must not write CLAUDE.md"
+        );
+    }
+
+    #[test]
+    fn e2e_uninstall_removes_import_and_file() {
+        // After inject, uninstall must strip @ECP.md and delete ECP.md; other
+        // CLAUDE.md content must survive.
+        let home = tempfile::tempdir().unwrap();
+        let prior = "# My rules\ndo stuff\n";
+        std::fs::write(home.path().join("CLAUDE.md"), prior).unwrap();
+
+        let cwd = fake_repo_with_ecp_guidance("guidance\n");
+        let src = cwd
+            .path()
+            .join("docs")
+            .join("skills")
+            .join("ecp")
+            .join("ECP.md");
+        inject_ecp_import_at(home.path(), &src, false).unwrap();
+
+        uninstall_ecp_import_at(home.path()).unwrap();
+
+        assert!(
+            !home.path().join("ECP.md").exists(),
+            "uninstall must remove ECP.md"
+        );
+        let content = std::fs::read_to_string(home.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            !content.lines().any(|l| l.trim() == "@ECP.md"),
+            "@ECP.md must be removed from CLAUDE.md"
+        );
+        assert!(
+            content.contains("# My rules"),
+            "prior CLAUDE.md content must survive"
+        );
+    }
+
+    #[test]
+    fn e2e_uninstall_leaves_unrelated_claude_md_byte_identical() {
+        // Regression: uninstall must not touch a CLAUDE.md that has no @ECP.md
+        // import — even one without a trailing newline (lines()+rejoin would add
+        // one and rewrite the file unconditionally).
+        let home = tempfile::tempdir().unwrap();
+        let prior = "# My rules\r\nno trailing newline";
+        std::fs::write(home.path().join("CLAUDE.md"), prior).unwrap();
+
+        uninstall_ecp_import_at(home.path()).unwrap();
+
+        let content = std::fs::read_to_string(home.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(content, prior, "unrelated CLAUDE.md must be byte-identical");
+    }
+
+    #[test]
+    fn e2e_uninstall_preserves_no_trailing_newline_when_stripping_import() {
+        // Regression: stripping @ECP.md must splice only that line, preserving the
+        // surrounding bytes (no CRLF→LF, no added trailing newline).
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("CLAUDE.md"),
+            "# rules\n@ECP.md\nlast no nl",
+        )
+        .unwrap();
+
+        uninstall_ecp_import_at(home.path()).unwrap();
+
+        let content = std::fs::read_to_string(home.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(content, "# rules\nlast no nl");
     }
 }
