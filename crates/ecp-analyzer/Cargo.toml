@@ -1,7 +1,7 @@
 [package]
 name = "ecp-analyzer"
 description = "EgentCodePlexus — multi-language tree-sitter parser and route detector (Rust, TypeScript, Python, Go, Java, Swift, etc.)"
-version = "0.4.1"
+version = "0.4.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
