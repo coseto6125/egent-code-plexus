@@ -1,4 +1,6 @@
-use ecp_cli::admin::gc::{enforce_quota, reachability, sweep_sessions, sweep_stale_generations};
+use ecp_cli::admin::gc::{
+    enforce_quota, reachability, sweep_retired_repos, sweep_sessions, sweep_stale_generations,
+};
 use ecp_core::registry::{CommitBuildMeta, EmbeddingStatus, SourceType};
 use ecp_core::session::SessionMeta;
 use std::process::Command;
@@ -346,4 +348,27 @@ fn sweep_stale_generations_skips_fresh() {
 
     let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path()).unwrap();
     assert_eq!(stats.removed, 0, "freshly-written dirs (<10s) are skipped");
+}
+
+#[test]
+fn sweep_retired_repos_removes_dead() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_ecp = tmp.path();
+    std::fs::create_dir_all(home_ecp.join("myrepo__abc123")).unwrap();
+    std::fs::create_dir_all(home_ecp.join("myrepo__abc123.dead.111.0.1700000000000")).unwrap();
+    std::fs::create_dir_all(home_ecp.join("other__def456.dead.222.1.1700000000001")).unwrap();
+
+    let stats = sweep_retired_repos(home_ecp).unwrap();
+
+    assert_eq!(stats.removed, 2, "both .dead.* repo dirs removed");
+    assert!(
+        home_ecp.join("myrepo__abc123").exists(),
+        "live repo untouched"
+    );
+    assert!(!home_ecp
+        .join("myrepo__abc123.dead.111.0.1700000000000")
+        .exists());
+    assert!(!home_ecp
+        .join("other__def456.dead.222.1.1700000000001")
+        .exists());
 }

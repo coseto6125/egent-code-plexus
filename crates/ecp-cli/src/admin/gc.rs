@@ -297,6 +297,41 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
     Ok(SweepStats { marked: 0, removed })
 }
 
+/// Remove top-level retired repo dirs (`<repo>__<hash>.dead.<pid>.<n>.<ts>`)
+/// left behind when `fs_safe::retire_dir_async`'s background delete thread died
+/// with the process before finishing. Already marked dead → removal is
+/// unconditional. The `.dead.` infix with a trailing all-digit timestamp segment
+/// is the marker (mirrors `sweep_sessions`' dead-detection).
+pub fn sweep_retired_repos(home_ecp: &Path) -> io::Result<SweepStats> {
+    let mut removed = 0usize;
+    let Ok(it) = fs::read_dir(home_ecp) else {
+        return Ok(SweepStats { marked: 0, removed });
+    };
+    for entry in it.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dead = name.ends_with(".dead")
+            || name
+                .rsplit_once(".dead.")
+                .map(|(_, rest)| {
+                    rest.split('.')
+                        .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
+                })
+                .unwrap_or(false);
+        if !is_dead {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!("gc: failed to remove retired repo {}: {e}", path.display()),
+        }
+    }
+    Ok(SweepStats { marked: 0, removed })
+}
+
 fn dir_size(dir: &Path) -> io::Result<u64> {
     let mut total = 0u64;
     for e in walkdir::WalkDir::new(dir)
