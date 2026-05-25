@@ -55,6 +55,7 @@ pub fn run(
         since,
         &mut deferred,
     ));
+    findings.extend(run_literal_coherence(&scope_strs, engine));
 
     Ok(Report {
         findings,
@@ -475,6 +476,72 @@ pub fn resolver_diff_findings(b: &BindingsDiff, file_scope: &HashSet<String>) ->
         .collect()
 }
 
+// ── literal_coherence constituent ────────────────────────────────────────────
+
+/// Graph-wide PathLiteral split-brain scan. Unlike the diff-driven
+/// constituents this reads the whole graph snapshot (no `--since`), so a
+/// reader/writer literal pair surfaces even when only one side changed in
+/// this PR — which is exactly the PR #357-class drift we want to catch.
+fn run_literal_coherence(file_scope: &HashSet<String>, engine: &Engine) -> Vec<Finding> {
+    let v = match impact::build_literal_coherence_payload(engine) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    literal_coherence_findings(&v, file_scope)
+}
+
+/// One Warn finding per candidate pair whose reader OR writer site touches the
+/// review scope. Attribution goes to the writer site (the literal that emits
+/// the file) since that's the side most likely needing the rename; line/file
+/// come from the first writer site. `candidate.confidence` is always "high"
+/// from the primitive, so every surviving pair is a Warn (no Info tier).
+pub fn literal_coherence_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> {
+    let candidates = match v
+        .get("literal_coherence")
+        .and_then(|lc| lc.get("candidates"))
+        .and_then(|c| c.as_array())
+    {
+        Some(arr) => arr,
+        None => return vec![],
+    };
+    candidates
+        .iter()
+        .filter_map(|c| {
+            let reader = c["reader_literal"].as_str()?;
+            let writer = c["writer_literal"].as_str()?;
+            let writer_sites = c["writer_sites"].as_array()?;
+            let reader_sites = c["reader_sites"].as_array()?;
+
+            let in_scope = |sites: &[Value]| {
+                sites
+                    .iter()
+                    .filter_map(|s| s["file"].as_str())
+                    .any(|f| path_in_scope(f, file_scope))
+            };
+            if !in_scope(writer_sites) && !in_scope(reader_sites) {
+                return None;
+            }
+
+            // Attribute to the first writer site (the literal that writes the file).
+            let site = writer_sites.first()?;
+            let file = site["file"].as_str()?.to_string();
+            let line = site["line"].as_u64().unwrap_or(0) as u32;
+            let similarity = c["similarity"].as_f64().unwrap_or(0.0);
+            Some(Finding {
+                file,
+                line,
+                kind: "literal_coherence",
+                severity: Severity::Warn,
+                message: format!(
+                    "path-literal split-brain: writer '{writer}' vs reader '{reader}' \
+                     (similarity {similarity:.2}) — likely the same file under two names"
+                ),
+                source: Source::LiteralCoherence,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,6 +848,76 @@ mod tests {
             ..Default::default()
         };
         let findings = resolver_diff_findings(&b, &scope_one("src/in_scope.rs"));
+        assert!(findings.is_empty());
+    }
+
+    /// The session_meta.json split-brain that FU-2026-05-25-001 targets: a
+    /// writer emits `session_meta.json` while a reader opens `meta.json`. The
+    /// fixture supplies only the primitive's candidate payload — the pair is
+    /// not hand-asserted, it is what `build_literal_coherence_payload` would
+    /// produce — and the review layer must turn it into one Warn finding
+    /// attributed to the writer site.
+    fn split_brain_payload() -> Value {
+        json!({
+            "literal_coherence": {
+                "candidate_count": 1,
+                "candidates": [{
+                    "reader_literal": "meta.json",
+                    "writer_literal": "session_meta.json",
+                    "similarity": 0.9,
+                    "confidence": "high",
+                    "reader_sites": [
+                        {"file": "src/session/read.rs", "line": 20, "col": 8,
+                         "enclosing": "load", "sink_reason": "sink:open-read|confidence:high"}
+                    ],
+                    "writer_sites": [
+                        {"file": "src/session/write.rs", "line": 42, "col": 8,
+                         "enclosing": "save", "sink_reason": "sink:open-write|confidence:high"}
+                    ]
+                }],
+                "rules": {}
+            }
+        })
+    }
+
+    #[test]
+    fn literal_coherence_emits_warn_attributed_to_writer_site() {
+        let v = split_brain_payload();
+        let findings = literal_coherence_findings(&v, &scope_one("src/session/write.rs"));
+        assert_eq!(findings.len(), 1);
+        let f = &findings[0];
+        assert_eq!(f.file, "src/session/write.rs");
+        assert_eq!(f.line, 42);
+        assert_eq!(f.severity, Severity::Warn);
+        assert_eq!(f.source, Source::LiteralCoherence);
+        assert!(f.message.contains("session_meta.json"));
+        assert!(f.message.contains("meta.json"));
+    }
+
+    #[test]
+    fn literal_coherence_reader_side_in_scope_still_emits() {
+        // Only the reader file is in scope; the pair must still surface
+        // (split-brain often changes only one side).
+        let v = split_brain_payload();
+        let findings = literal_coherence_findings(&v, &scope_one("src/session/read.rs"));
+        assert_eq!(findings.len(), 1);
+        // Attribution stays on the writer site regardless of which side matched.
+        assert_eq!(findings[0].file, "src/session/write.rs");
+    }
+
+    #[test]
+    fn literal_coherence_out_of_scope_pair_skipped() {
+        let v = split_brain_payload();
+        let findings = literal_coherence_findings(&v, &scope_one("src/unrelated.rs"));
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn literal_coherence_empty_candidates_emits_nothing() {
+        let v = json!({
+            "literal_coherence": {"candidate_count": 0, "candidates": [], "rules": {}}
+        });
+        let findings = literal_coherence_findings(&v, &scope_one("src/foo.rs"));
         assert!(findings.is_empty());
     }
 }

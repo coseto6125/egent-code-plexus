@@ -13,6 +13,9 @@ ecp review --baseline origin/main
 - `tool-map`: Egress changes (new external calls).
 - `shape-check`: Route response drift.
 - `diff`: Resolver binding tier degradation.
+- `literal-coherence`: Path-literal split-brain — a writer emitting one filename
+  while a reader opens a near-identical name (e.g. `session_meta.json` vs
+  `meta.json`). Graph-wide scan, so it fires even when only one side changed.
 
 ## Best For
 - PR pre-check.

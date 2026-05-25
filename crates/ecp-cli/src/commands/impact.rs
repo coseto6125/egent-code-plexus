@@ -528,7 +528,7 @@ impl LiteralGroup {
     }
 }
 
-fn build_literal_coherence_payload(engine: &Engine) -> Result<Value, EcpError> {
+pub fn build_literal_coherence_payload(engine: &Engine) -> Result<Value, EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let groups = collect_literal_groups(graph);
     let candidates = literal_coherence_candidates(&groups);
