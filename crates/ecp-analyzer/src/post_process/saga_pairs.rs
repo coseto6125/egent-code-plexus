@@ -22,7 +22,7 @@
 //! The recovered operation name preserves the suffix's **original case** so
 //! that it matches the operation node's name verbatim in the graph.
 
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -83,14 +83,6 @@ pub fn strip_compensator_root(name: &str) -> Option<CompensatorMatch> {
     None
 }
 
-/// True for callable node kinds that can participate in a Saga pair.
-fn is_callable(kind: NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-    )
-}
-
 /// Emit `CompensatedBy` edges for same-owner-class Saga name-pairs in the node
 /// buffer. Returns the count emitted. Adds NO nodes.
 ///
@@ -115,7 +107,7 @@ pub fn emit_edges(nodes: &[Node], string_pool: &mut StringPool, edges: &mut Vec<
     // borrow of `string_pool` across emission.
     let mut by_class: FxHashMap<String, Vec<(u32, String)>> = FxHashMap::default();
     for (idx, node) in nodes.iter().enumerate() {
-        if !is_callable(node.kind) {
+        if !node.kind.is_callable() {
             continue;
         }
         let owner = string_pool.resolve(&node.owner_class).to_string();
