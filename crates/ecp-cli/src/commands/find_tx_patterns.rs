@@ -2,13 +2,14 @@
 //!
 //! ## Saga detection
 //!
-//! Scans the indexed graph for method name-pairs that follow the Saga
-//! compensating-transaction pattern:
-//!
-//!   `<verb>_<noun>`  ↔  `compensate_<verb>_<noun>` | `undo_<verb>_<noun>` | `rollback_<verb>_<noun>`
-//!
-//! Both methods must share the same owner class.  An optional `--class <Name>`
-//! flag restricts scanning to a single class.
+//! Reads heuristic `RelType::CompensatedBy` edges from the graph (emitted at
+//! index time by `ecp_analyzer::post_process::saga_pairs`). Each edge is a
+//! `compensator → operation` pair following the Saga compensating-transaction
+//! naming convention (`compensate`/`undo`/`rollback` + `<verb_noun>`, across
+//! snake/camel/Pascal case), both on the same owner class. An optional
+//! `--class <Name>` flag restricts output to a single class. Per-edge
+//! confidence + the `saga:calls-back`/`saga:name-only` evidence tier come from
+//! the edge itself (no re-scan at query time).
 //!
 //! ## Outbox detection
 //!
@@ -38,7 +39,11 @@
 //! | < 0.75       | `BLIND_SPOT`       |
 //! | 0.75–0.85    | `POSSIBLY_RELATED` |
 //!
-//! All findings carry `requires_verification: true` and **never enter the graph**.
+//! All findings carry `requires_verification: true`. Saga pairs are backed by
+//! the in-graph `CompensatedBy` edge (queryable via
+//! `ecp cypher 'MATCH ()-[r:CompensatedBy]->() ...'` and traversed by
+//! `ecp impact` when heuristics are shown); Outbox findings remain a
+//! query-time name-scan and do not enter the graph.
 
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
@@ -92,104 +97,42 @@ struct SagaPair {
     calls_back: bool,
 }
 
-/// Compensator prefixes that form a valid Saga name-pair.
-const COMPENSATOR_PREFIXES: &[&str] = &["compensate_", "undo_", "rollback_"];
-
-/// Strip a compensator prefix from `name` and return the bare verb_noun suffix.
-/// Returns `None` if `name` does not start with any known prefix.
-fn strip_compensator_prefix(name: &str) -> Option<&str> {
-    COMPENSATOR_PREFIXES
-        .iter()
-        .find_map(|&pfx| name.strip_prefix(pfx))
-}
-
-/// Check whether `compensator_idx` has a Calls edge pointing at `operation_idx`.
-fn compensator_calls_operation(
-    graph: &ArchivedZeroCopyGraph,
-    compensator_idx: usize,
-    operation_idx: usize,
-) -> bool {
-    let out_start = graph.out_offsets[compensator_idx].to_native() as usize;
-    let out_end = graph.out_offsets[compensator_idx + 1].to_native() as usize;
-    for i in out_start..out_end {
-        let edge = &graph.edges[i];
-        if matches!(edge.rel_type, ArchivedRelType::Calls)
-            && edge.target.to_native() as usize == operation_idx
-        {
-            return true;
-        }
-    }
-    false
-}
-
 fn detect_saga_pairs(graph: &ArchivedZeroCopyGraph, class_filter: Option<&str>) -> Vec<SagaPair> {
-    // Build a lookup: owner_class → Vec<(node_idx, name, file, line)>
-    // for nodes that are Method or Function kind.
-    let method_kinds =
-        |k: &ArchivedNodeKind| matches!(k, ArchivedNodeKind::Method | ArchivedNodeKind::Function);
-
-    // Collect per-class method lists.
-    let mut class_methods: std::collections::HashMap<&str, Vec<(usize, &str, &str, u32)>> =
-        std::collections::HashMap::new();
-
-    for (idx, node) in graph.nodes.iter().enumerate() {
-        if !method_kinds(&node.kind) {
+    let mut pairs: Vec<SagaPair> = Vec::new();
+    for edge in graph.edges.iter() {
+        if !matches!(edge.rel_type, ArchivedRelType::CompensatedBy) {
             continue;
         }
-        let owner = node.owner_class.resolve(&graph.string_pool);
-        if owner.is_empty() {
-            continue;
-        }
+        let comp_idx = edge.source.to_native() as usize;
+        let op_idx = edge.target.to_native() as usize;
+        let comp_node = &graph.nodes[comp_idx];
+        let op_node = &graph.nodes[op_idx];
+
+        let owner = comp_node.owner_class.resolve(&graph.string_pool);
         if let Some(cf) = class_filter {
             if owner != cf {
                 continue;
             }
         }
-        let name = node.name.resolve(&graph.string_pool);
-        let file = graph.files[node.file_idx.to_native() as usize]
+
+        let comp_name = comp_node.name.resolve(&graph.string_pool);
+        let op_name = op_node.name.resolve(&graph.string_pool);
+        let op_file = graph.files[op_node.file_idx.to_native() as usize]
             .path
             .resolve(&graph.string_pool);
-        let line = node.start_line();
-        class_methods
-            .entry(owner)
-            .or_default()
-            .push((idx, name, file, line));
+        let op_line = op_node.span.0.to_native();
+        let reason = edge.reason.resolve(&graph.string_pool);
+        let calls_back = reason == "saga:calls-back";
+
+        pairs.push(SagaPair {
+            operation: format!("{owner}.{op_name}"),
+            compensator: format!("{owner}.{comp_name}"),
+            file: op_file.to_owned(),
+            line: op_line,
+            confidence: edge.confidence.to_native(),
+            calls_back,
+        });
     }
-
-    let mut pairs: Vec<SagaPair> = Vec::new();
-
-    for (class_name, methods) in &class_methods {
-        // Build a name → (idx, file, line) map for O(1) lookup of operations.
-        let name_map: std::collections::HashMap<&str, (usize, &str, u32)> = methods
-            .iter()
-            .map(|&(idx, name, file, line)| (name, (idx, file, line)))
-            .collect();
-
-        for &(comp_idx, comp_name, _comp_file, _comp_line) in methods {
-            let Some(suffix) = strip_compensator_prefix(comp_name) else {
-                continue;
-            };
-            // The suffix is the bare verb_noun; look for an operation with that exact name.
-            let Some(&(op_idx, op_file, op_line)) = name_map.get(suffix) else {
-                continue;
-            };
-
-            let calls_back = compensator_calls_operation(graph, comp_idx, op_idx);
-            let confidence = if calls_back { 0.8_f32 } else { 0.6_f32 };
-            // Cap enforced here even though current logic can't exceed 0.8.
-            let confidence = confidence.min(0.85);
-
-            pairs.push(SagaPair {
-                operation: format!("{class_name}.{suffix}"),
-                compensator: format!("{class_name}.{comp_name}"),
-                file: op_file.to_owned(),
-                line: op_line,
-                confidence,
-                calls_back,
-            });
-        }
-    }
-
     pairs
 }
 

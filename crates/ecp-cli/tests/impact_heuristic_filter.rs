@@ -217,10 +217,11 @@ fn run_ecp_impact(repo: &Path, extra_args: &[&str]) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nstdout={stdout}"))
 }
 
-/// Default `ecp impact` must NOT traverse a `MirrorsField` heuristic edge.
-/// `hidden_heuristic_edges: 1` must appear in the output.
+/// Default `ecp impact` MUST traverse a `MirrorsField` heuristic edge and
+/// expose it in `heuristic_callers`. `hidden_heuristic_edges` must be 0.
+/// Each entry in `heuristic_callers` must carry `requires_verification: true`.
 #[test]
-fn test_default_excludes_heuristic_edges() {
+fn test_default_includes_heuristic_edges() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path());
     let graph_bin = find_graph_bin(tmp.path());
@@ -233,28 +234,39 @@ fn test_default_excludes_heuristic_edges() {
     // direction=down so we traverse from source outward.
     let val = run_ecp_impact(tmp.path(), &["--direction", "down"]);
 
-    // impact array must not contain `target` (heuristic edge not traversed).
-    if let Some(arr) = val["impact"].as_array() {
-        for entry in arr {
-            let name = entry["name"].as_str().unwrap_or("");
-            assert_ne!(
-                name, "target",
-                "heuristic target leaked into default impact: {val}"
-            );
-        }
+    // `target` must appear in `heuristic_callers` (traversed by default).
+    let callers = val["heuristic_callers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`heuristic_callers` key missing from output:\n{val}"));
+    let in_heuristic = callers.iter().any(|e| e["name"].as_str() == Some("target"));
+    assert!(
+        in_heuristic,
+        "`target` must appear in `heuristic_callers` by default: {val}"
+    );
+
+    // Each entry must be tagged requires_verification: true.
+    for entry in callers {
+        assert_eq!(
+            entry["requires_verification"].as_bool(),
+            Some(true),
+            "heuristic_callers entry missing requires_verification: {entry}"
+        );
     }
 
-    // hidden_heuristic_edges must be 1.
+    // hidden_heuristic_edges must be 0 (edge was traversed, not hidden).
     let hidden = val["hidden_heuristic_edges"]
         .as_u64()
         .unwrap_or_else(|| panic!("hidden_heuristic_edges missing from output:\n{val}"));
-    assert_eq!(hidden, 1, "expected 1 hidden heuristic edge, got {hidden}");
+    assert_eq!(
+        hidden, 0,
+        "expected 0 hidden heuristic edges by default, got {hidden}"
+    );
 }
 
-/// With `--include-heuristic`, the BFS traverses the heuristic edge and the
-/// reached node appears in `heuristic_edges`, NOT in `impact`.
+/// With `--no-heuristic`, the BFS skips the heuristic edge and counts it as
+/// hidden. `hidden_heuristic_edges: 1` must appear in the output.
 #[test]
-fn test_include_heuristic_flag_traverses() {
+fn test_no_heuristic_flag_suppresses() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path());
     let graph_bin = find_graph_bin(tmp.path());
@@ -264,25 +276,25 @@ fn test_include_heuristic_flag_traverses() {
     )
     .unwrap();
 
-    let val = run_ecp_impact(tmp.path(), &["--direction", "down", "--include-heuristic"]);
+    let val = run_ecp_impact(tmp.path(), &["--direction", "down", "--no-heuristic"]);
 
-    // `target` must appear in `heuristic_edges`, not in `impact`.
+    // `target` must NOT appear in `impact` or `heuristic_callers` (edge suppressed).
     let in_impact = val["impact"]
         .as_array()
         .map(|arr| arr.iter().any(|e| e["name"].as_str() == Some("target")))
         .unwrap_or(false);
     assert!(
         !in_impact,
-        "`target` must not appear in `impact` section: {val}"
+        "`target` must not appear in `impact` with --no-heuristic: {val}"
     );
 
-    let in_heuristic = val["heuristic_edges"]
-        .as_array()
-        .map(|arr| arr.iter().any(|e| e["name"].as_str() == Some("target")))
-        .unwrap_or(false);
-    assert!(
-        in_heuristic,
-        "`target` must appear in `heuristic_edges` section: {val}"
+    // hidden_heuristic_edges must be 1.
+    let hidden = val["hidden_heuristic_edges"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("hidden_heuristic_edges missing from output:\n{val}"));
+    assert_eq!(
+        hidden, 1,
+        "expected 1 hidden heuristic edge with --no-heuristic, got {hidden}"
     );
 }
 

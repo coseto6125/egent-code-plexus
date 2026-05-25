@@ -90,6 +90,7 @@ impl std::str::FromStr for RelType {
             "DECORATES" => Ok(RelType::Decorates),
             "USESPATHLITERAL" | "USES_PATH_LITERAL" => Ok(RelType::UsesPathLiteral),
             "READSFIELD" | "READS_FIELD" => Ok(RelType::ReadsField),
+            "COMPENSATEDBY" | "COMPENSATED_BY" => Ok(RelType::CompensatedBy),
             _ => Err(()),
         }
     }
@@ -97,7 +98,10 @@ impl std::str::FromStr for RelType {
 
 impl RelType {
     pub const fn is_heuristic(self) -> bool {
-        matches!(self, Self::MirrorsField | Self::EventTopicMirror)
+        matches!(
+            self,
+            Self::MirrorsField | Self::EventTopicMirror | Self::CompensatedBy
+        )
     }
 
     /// Static variant name. Mirrors `NodeKind::as_str` so cypher's
@@ -125,6 +129,7 @@ impl RelType {
             Self::Decorates => "Decorates",
             Self::UsesPathLiteral => "UsesPathLiteral",
             Self::ReadsField => "ReadsField",
+            Self::CompensatedBy => "CompensatedBy",
         }
     }
 }
@@ -486,12 +491,32 @@ pub enum RelType {
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     ReadsField,
+    /// Heuristic Saga compensation edge: `compensator → operation`. Source is a
+    /// `compensate_/undo_/rollback_<verb_noun>` callable; target is the same-class
+    /// `<verb_noun>` operation it rolls back. `Edge.reason` encodes evidence tier:
+    /// `saga:calls-back` (confidence 0.8, compensator has a `Calls` edge to the
+    /// operation) or `saga:name-only` (0.6, name-pair only — real Sagas often
+    /// trigger compensation via an orchestrator, so name-only pairs are still
+    /// emitted). Low-confidence — `is_heuristic()` returns `true`, so default
+    /// `ecp impact` hides it.
+    ///
+    /// LLM-utility (A) Graph completeness: refactoring a Saga operation, `ecp
+    /// impact <operation>` BFS surfaces its compensator directly — no grepping
+    /// `undo_*`/`rollback_*` name conventions. (C) Edge semantics: `Calls` only
+    /// says "A calls B"; it cannot express "B is A's failure compensation" — the
+    /// directional rollback semantic that this edge carries.
+    /// Appended at the END to preserve rkyv discriminants for existing
+    /// `graph.bin` files.
+    CompensatedBy,
 }
 
 impl ArchivedRelType {
     /// Mirror of `RelType::is_heuristic` for zero-copy graph traversal.
     pub const fn is_heuristic(&self) -> bool {
-        matches!(self, Self::MirrorsField | Self::EventTopicMirror)
+        matches!(
+            self,
+            Self::MirrorsField | Self::EventTopicMirror | Self::CompensatedBy
+        )
     }
 
     /// Structural containment edges describe "where a symbol lives", not

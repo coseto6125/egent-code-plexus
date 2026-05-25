@@ -1708,6 +1708,13 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        // Saga compensation pairing — emits heuristic `CompensatedBy` edges
+        // (compensator → operation) over the node/edge buffer. Runs AFTER all
+        // Calls edges exist (so calls-back evidence is checkable) and AFTER
+        // owner_class is resolved on nodes. Adds no nodes, so ordering vs the
+        // File-node loop is unconstrained.
+        crate::post_process::saga_pairs::emit_edges(&nodes, &mut string_pool, &mut edges);
+
         // Append one `NodeKind::File` node per LocalGraph at the tail of
         // `nodes` (idx >= raw-node count). Doing it here — AFTER all passes
         // that index symbols by SymbolTable + use raw node idx ranges —
