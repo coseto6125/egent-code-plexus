@@ -10,7 +10,7 @@ use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
@@ -78,6 +78,10 @@ struct JavaCaptureIndices {
     // BlindSpot captures (FU-001 P2a).
     blind_class_forname: Option<u32>,
     blind_method_invoke: Option<u32>,
+    /// `@function.anonymous` — lambda passed as a call argument. Emits an
+    /// `<anonymous>` Function node only when the body contains a call so
+    /// attach_to_enclosing can host those calls instead of dropping them.
+    function_anonymous: Option<u32>,
 }
 
 impl JavaProvider {
@@ -113,6 +117,7 @@ impl JavaProvider {
             spring_route_handler: query.capture_index_for_name("spring.route.handler"),
             blind_class_forname: query.capture_index_for_name("blind.class_forname"),
             blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
         };
 
         // Pre-resolve capture-name → NodeKind from the spec table so the
@@ -145,6 +150,24 @@ fn import_decl_is_static(source: &[u8], node: tree_sitter::Node) -> bool {
     window.windows(6).any(|w| w == b"static")
 }
 
+/// Whether `node`'s subtree contains a Java call (`method_invocation` or
+/// `object_creation_expression`). Gates emission of `<anonymous>` callback
+/// nodes so pure-transform lambdas (e.g. `x -> x + 1`) stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "method_invocation" | "object_creation_expression" => return true,
+            _ => {}
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
+}
+
 impl LanguageProvider for JavaProvider {
     fn name(&self) -> &'static str {
         "java"
@@ -164,6 +187,9 @@ impl LanguageProvider for JavaProvider {
         // map, so no downstream sort is needed.
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut node_id_to_idx: FxHashMap<usize, usize> = FxHashMap::default();
+        // Dedup for `<anonymous>` nodes — same lambda node can appear in multiple
+        // query matches; key by tree-sitter node id (stable within one parse).
+        let mut emitted_anonymous_ids: FxHashSet<usize> = FxHashSet::default();
         let mut imports = Vec::new();
         // Buffer Spring refs and emit only if the file imports org.springframework.
         let mut pending_spring_refs: Vec<RawFrameworkRef> = Vec::new();
@@ -271,6 +297,34 @@ impl LanguageProvider for JavaProvider {
                         path,
                         is_test_file,
                     );
+                } else if cap_idx == idx.function_anonymous {
+                    // Anonymous lambda in an argument list. Emit an `<anonymous>`
+                    // Function node only when the body holds a call so that
+                    // attach_to_enclosing can host those calls instead of dropping
+                    // them. Empty / pure-transform lambdas stay out of the graph.
+                    if body_has_call(cap.node) && emitted_anonymous_ids.insert(cap.node.id()) {
+                        let start = cap.node.start_position();
+                        let end = cap.node.end_position();
+                        nodes.push(RawNode {
+                            decorators: Vec::new(),
+                            is_exported: false,
+                            heritage: Vec::new(),
+                            type_annotation: None,
+                            name: format!("<anonymous:{}:{}>", start.row + 1, start.column),
+                            kind: NodeKind::Function,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                            owner_class: None,
+                            content_hash: ecp_core::uid::xxh3_64_bytes(
+                                &source[cap.node.start_byte()..cap.node.end_byte()],
+                            ),
+                        });
+                    }
                 }
 
                 // Track the `@import` pattern node (the import_declaration itself).

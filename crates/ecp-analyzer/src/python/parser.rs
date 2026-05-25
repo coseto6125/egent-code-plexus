@@ -358,6 +358,7 @@ struct PythonCaptureIndices {
     tx_atomic_handler: Option<u32>,
     tx_db_session_handler: Option<u32>,
     reflection_getattr_site: Option<u32>,
+    function_anonymous: Option<u32>,
     blind_eval: Option<u32>,
     blind_exec: Option<u32>,
     blind_compile: Option<u32>,
@@ -468,6 +469,23 @@ fn is_scalar_literal(node: Node) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether `node`'s subtree contains a Python `call` node. Gates emission of
+/// `<anonymous>` lambda nodes so empty lambdas (e.g. `sorted(xs, key=lambda i: i)`)
+/// stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call" {
+            return true;
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
 }
 
 /// Walk a `class_definition` node and emit `EnumVariant` nodes or a
@@ -688,6 +706,7 @@ impl PythonProvider {
             tx_atomic_handler: query.capture_index_for_name("tx.atomic.handler"),
             tx_db_session_handler: query.capture_index_for_name("tx.db_session.handler"),
             reflection_getattr_site: query.capture_index_for_name("reflection.getattr.site"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
             blind_eval: query.capture_index_for_name("blind.eval"),
             blind_exec: query.capture_index_for_name("blind.exec"),
             blind_compile: query.capture_index_for_name("blind.compile"),
@@ -959,6 +978,30 @@ impl LanguageProvider for PythonProvider {
                     pending_tx_scopes.push((pos.row as u32, pos.column as u32, framework));
                 } else if cap_idx == idx.reflection_getattr_site {
                     pending_getattr_sites.push(node_span(&cap.node));
+                } else if cap_idx == idx.function_anonymous {
+                    // Lambda in arg position. Emit an `<anonymous>` Function node only
+                    // when the body contains a call, so attach_to_enclosing can host
+                    // those calls instead of dropping them; empty lambdas stay out of
+                    // the graph.
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if !nodes.iter().any(|n| n.span == span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 } else {
                     // Blind-spot dispatch: one row per kind, no per-arm boilerplate.
                     let blind_match: Option<(&str, &str)> = if cap_idx == idx.blind_eval {

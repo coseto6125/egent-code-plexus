@@ -308,6 +308,8 @@ impl LanguageProvider for GoProvider {
         let idx_route_path = self.query.capture_index_for_name("route.path");
         let idx_route_handler = self.query.capture_index_for_name("route.handler");
 
+        let idx_function_anonymous = self.query.capture_index_for_name("function.anonymous");
+
         let idx_blind_method_by_name = self
             .query
             .capture_index_for_name("blind.reflect_method_by_name");
@@ -334,6 +336,12 @@ impl LanguageProvider for GoProvider {
         // Short var declarations: `x := expr`, `x, y := a, b`.
         let idx_local = self.query.capture_index_for_name("local");
         let idx_local_name = self.query.capture_index_for_name("local.name");
+
+        // Dedup: argument_list may appear more than once in a match if the query
+        // fires for a func_literal at a position already emitted. Span set guards
+        // against double-push of the same <anonymous> node.
+        let mut anon_emitted_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
 
         let mut routes = Vec::new();
         // Buffer for file-scope `@variable` path emissions. Merged into `nodes`
@@ -478,6 +486,31 @@ impl LanguageProvider for GoProvider {
                         .is_some_and(|p| p.kind() == "expression_list")
                     {
                         local_name_nodes.push(cap.node);
+                    }
+                } else if cap_idx == idx_function_anonymous {
+                    // Anonymous callback (func_literal inside argument_list).
+                    // Emit an `<anonymous>` Function node only when the body holds
+                    // a call — attach_to_enclosing can then host those calls instead
+                    // of dropping them when no named enclosing scope exists.
+                    // Empty func literals (no call inside) stay out of the graph.
+                    if subtree_contains_kind(cap.node, "call_expression") {
+                        let span = node_span(&cap.node);
+                        if anon_emitted_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
                     }
                 } else if cap_idx == idx_blind_method_by_name {
                     push_blind_spot(

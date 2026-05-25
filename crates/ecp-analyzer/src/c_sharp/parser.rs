@@ -2,9 +2,10 @@ use super::receiver_types::extract_csharp_calls_and_path_literals;
 use super::spec::CSharpSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_dotnet_transactional_scopes, detect_ast_framework_patterns, push_blind_spot,
+    collect_dotnet_transactional_scopes, detect_ast_framework_patterns, node_span, push_blind_spot,
     FrameworkPatternSpec,
 };
+use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
@@ -66,6 +67,13 @@ const CSHARP_FRAMEWORKS: &[FrameworkPatternSpec] = &[
     },
 ];
 
+/// Whether `node`'s subtree contains a C# `invocation_expression`. Gates
+/// emission of `<anonymous>` callback nodes so empty closures (e.g.
+/// `list.Select(x => x.Name)`) stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    subtree_contains_kind(node, "invocation_expression")
+}
+
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
@@ -97,6 +105,7 @@ struct CSharpCaptureIndices {
     // BlindSpot captures (FU-001 P2c).
     blind_activator_create: Option<u32>,
     blind_method_invoke: Option<u32>,
+    function_anonymous: Option<u32>,
 }
 
 pub struct CSharpProvider {
@@ -151,6 +160,7 @@ impl CSharpProvider {
             struct_: query.capture_index_for_name("struct"),
             blind_activator_create: query.capture_index_for_name("blind.activator_create"),
             blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
         };
 
         Ok(Self {
@@ -181,6 +191,11 @@ impl LanguageProvider for CSharpProvider {
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+
+        // Dedup: the same lambda/closure can be captured by multiple matches.
+        // Span set guards against pushing the same `<anonymous>` node twice.
+        let mut anon_emitted_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
 
         let idx = &self.indices;
         let idx_import_name = idx.import_name;
@@ -287,6 +302,32 @@ impl LanguageProvider for CSharpProvider {
                         path,
                         is_test_file,
                     );
+                } else if Some(cap_idx) == idx.function_anonymous {
+                    // Anonymous callback (lambda / delegate in argument position).
+                    // Emit an `<anonymous>` Function node only when the body holds
+                    // a call — attach_to_enclosing can then host those calls instead
+                    // of dropping them when no named enclosing scope exists.
+                    // Empty closures (e.g. `list.Select(x => x.Name)`) stay out of
+                    // the graph.
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if anon_emitted_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 } else if (Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method

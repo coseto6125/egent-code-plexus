@@ -145,6 +145,14 @@
     (generic_type type: (type_identifier) @impl_item.name)
   ]) @impl_block
 
+;; Anonymous closures passed as call arguments (thread::spawn, iterator adapters,
+;; callback registration). Without a node here their body's calls are dropped by
+;; attach_to_enclosing when no named enclosing scope exists — filter (A) callback
+;; registration. parser.rs only emits a node when the body contains a call, so
+;; empty closures add no bloat.
+(arguments
+  (closure_expression) @function.anonymous)
+
 ;; Imports (use std::collections::HashMap)
 (use_declaration
   argument: (scoped_identifier

@@ -337,7 +337,11 @@ impl LanguageProvider for JavaScriptProvider {
                                 is_exported: false,
                                 heritage: Vec::new(),
                                 type_annotation: None,
-                                name: "<anonymous>".to_string(),
+                                // Position-suffixed so each anonymous callback gets a
+                                // distinct uid (uid = kind+path+owner+name, no span) —
+                                // bare "<anonymous>" collides → all but the first are
+                                // dropped as tombstones at GraphBuilder::build.
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),

@@ -114,6 +114,15 @@
     (#match? @laravel.route.method "^(get|post|put|patch|delete|options|any)$")
   arguments: (arguments) @laravel.route.args) @laravel.route.call
 
+;; Anonymous callbacks passed as call arguments (array_map, usort, array_filter,
+;; custom higher-order fns). Without a node here their body's calls are dropped
+;; by attach_to_enclosing when no named enclosing scope exists — filter
+;; (A) callback registration. parser.rs only emits a node when the body
+;; contains a call, so empty callbacks add no bloat.
+(arguments
+  (argument
+    [(anonymous_function) (arrow_function)] @function.anonymous))
+
 ;; ---- BlindSpot patterns (FU-001 P5a) ----
 ;; eval(<expr>) — runtime PHP code execution. PHP `eval` is a language
 ;; construct, not a function — tree-sitter-php emits `(include_expression)`

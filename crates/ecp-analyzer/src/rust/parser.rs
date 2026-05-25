@@ -41,6 +41,23 @@ thread_local! {
         parser
     });
 }
+/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
+/// `<anonymous>` callback nodes so empty closures (e.g. `v.iter().map(|x| x * 2)`)
+/// stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" {
+            return true;
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
+}
+
 pub struct RustProvider {
     query: Query,
     indices: RustCaptureIndices,
@@ -78,6 +95,7 @@ struct RustCaptureIndices {
     // BlindSpot captures (FU-001 P4).
     blind_transmute_fn: Option<u32>,
     blind_libloading_get: Option<u32>,
+    function_anonymous: Option<u32>,
 }
 
 impl RustProvider {
@@ -114,6 +132,7 @@ impl RustProvider {
             actix_handler: query.capture_index_for_name("actix.route.handler"),
             blind_transmute_fn: query.capture_index_for_name("blind.transmute_fn"),
             blind_libloading_get: query.capture_index_for_name("blind.libloading_get"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
         };
 
         // Pre-resolve capture-name → NodeKind from the spec table so the
@@ -148,6 +167,10 @@ impl LanguageProvider for RustProvider {
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
         let mut nodes: Vec<RawNode> = Vec::new();
+        // Span dedup for `<anonymous>` callback nodes — a closure appearing in
+        // multiple query matches (e.g. nested patterns) must only emit once.
+        let mut anonymous_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let is_test_file = is_test_path(path.to_str().unwrap_or(""));
@@ -288,6 +311,30 @@ impl LanguageProvider for RustProvider {
                         path,
                         is_test_file,
                     );
+                } else if cap_idx == idx.function_anonymous {
+                    // Anonymous closure (arg-position `|params| body`).
+                    // Emit an `<anonymous>` Function node only when the body holds a
+                    // call, so attach_to_enclosing can host those calls instead of
+                    // dropping them; empty closures stay out of the graph.
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if anonymous_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 }
             }
 

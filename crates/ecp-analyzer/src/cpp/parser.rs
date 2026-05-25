@@ -2,7 +2,7 @@ use super::receiver_types::{collect_bindings, extract_cpp_calls_and_path_literal
 use super::spec::CppSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, push_blind_spot, FrameworkPatternSpec,
+    detect_ast_framework_patterns, node_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -22,6 +22,23 @@ use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
+
+/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
+/// `<anonymous>` callback nodes so empty lambdas (e.g. `std::sort(v.begin(), v.end(), [](int a, int b){ return a < b; })`)
+/// with no further calls stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" {
+            return true;
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
+}
 
 /// True if `node` (a `function_definition`) is defined inside a
 /// `field_declaration_list`, which means it is an inline class/struct member
@@ -277,6 +294,13 @@ impl LanguageProvider for CppProvider {
         let idx_enumerator_node = self.query.capture_index_for_name("enumerator_node");
         let idx_typedef_node = self.query.capture_index_for_name("typedef_node");
         let _idx_override_marker = self.query.capture_index_for_name("override_marker");
+        let idx_function_anonymous = self.query.capture_index_for_name("function.anonymous");
+
+        // Dedup guard: a lambda that matches the query twice (e.g. nested
+        // argument_list patterns) must not produce two <anonymous> nodes for
+        // the same byte range.
+        let mut anon_emitted_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
+            rustc_hash::FxHashSet::default();
 
         let is_header = path
             .extension()
@@ -352,6 +376,30 @@ impl LanguageProvider for CppProvider {
                         path,
                         is_test_file,
                     );
+                } else if cap_idx == idx_function_anonymous {
+                    // Anonymous lambda passed as a call argument. Emit an
+                    // `<anonymous>` Function node only when the body contains a
+                    // call, so attach_to_enclosing can host those calls instead
+                    // of dropping them; empty lambdas stay out of the graph.
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if anon_emitted_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 }
             }
 

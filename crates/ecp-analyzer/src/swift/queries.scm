@@ -99,6 +99,25 @@
 ;; @typealias node's byte range.
 (typealias_declaration) @typealias
 
+;; Anonymous closures passed as call arguments — trailing and arg-position.
+;; Without a node here, calls inside such closures are dropped by
+;; attach_to_enclosing when no named enclosing scope exists (filter (A) callback
+;; registration). parser.rs only emits a node when the closure body contains a
+;; call, so empty closures add no graph bloat.
+;;
+;; Trailing closure: `fetchData { r in handle(r) }` — lambda_literal is a
+;; direct child of call_suffix (the hidden _fn_call_lambda_arguments rule is
+;; inlined by tree-sitter-swift, so call_suffix directly parents lambda_literal).
+(call_suffix
+  (lambda_literal) @function.anonymous)
+
+;; Arg-position closure: `items.map({ x in f(x) })` — lambda_literal sits
+;; inside value_argument inside value_arguments inside call_suffix.
+(call_suffix
+  (value_arguments
+    (value_argument
+      (lambda_literal) @function.anonymous)))
+
 ;; ---- BlindSpot patterns (FU-001 P6a) ----
 ;; NSClassFromString(<expr>) — runtime Objective-C class load by name.
 ;; Matches `call_expression` where the callable is the bare identifier.

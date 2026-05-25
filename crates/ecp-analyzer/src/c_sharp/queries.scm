@@ -137,6 +137,15 @@
   name: (_) @namespace.name
 ) @namespace
 
+;; Anonymous callbacks passed as call arguments (`list.ForEach(x => ...)`,
+;; `Task.Run(() => ...)`, `delegate { ... }`). Without a node here their
+;; body's calls are dropped by attach_to_enclosing when no named enclosing
+;; scope exists — filter (A) callback registration. parser.rs only emits a
+;; node when the body contains a call, so empty closures add no bloat.
+(argument_list
+  (argument
+    [(lambda_expression) (anonymous_method_expression)] @function.anonymous))
+
 ;; ---- BlindSpot patterns (FU-001 P2c) ----
 ;; Activator.CreateInstance(<expr>) — runtime type instantiation. Receiver
 ;; constrained to direct identifier "Activator" to exclude `a.b.CreateInstance`.

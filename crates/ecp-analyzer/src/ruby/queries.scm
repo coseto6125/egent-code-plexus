@@ -113,6 +113,16 @@
   (#match? @delegator_method "^(def_delegator|def_delegators|delegate)$")
   arguments: (argument_list) @delegator_args)
 
+;; Anonymous blocks attached to a method call (brace `{ |x| … }` or do/end).
+;; Without a named enclosing scope their body's calls are dropped by
+;; attach_to_enclosing — filter (A) callback registration. parser.rs emits an
+;; <anonymous> Function node only when the body contains a call, so empty blocks
+;; add no bloat. Lambda literals (`->(x) { f(x) }`) are included because their
+;; body's call edges face the same drop risk when the lambda is not immediately
+;; assigned to a named variable.
+(call block: [(block) (do_block)] @function.anonymous)
+(lambda) @function.anonymous
+
 ;; ---- BlindSpot patterns (FU-001 P5b) ----
 ;; eval(<expr>) — runtime Ruby code execution.
 ((call

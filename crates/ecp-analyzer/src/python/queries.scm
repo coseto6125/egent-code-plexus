@@ -106,6 +106,17 @@
   definition: (class_definition
     name: (identifier) @class.name) @class)
 
+;; Anonymous lambdas in call-argument position. Without a node here, any call
+;; inside the lambda body is dropped by attach_to_enclosing when no named
+;; enclosing scope exists — filter (A) callback registration. parser.rs only
+;; emits a node when the body contains a call, so empty lambdas add no bloat.
+(argument_list
+  (lambda) @function.anonymous)
+
+(argument_list
+  (keyword_argument
+    value: (lambda) @function.anonymous))
+
 ;; Routes
 (call
   function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|route|add_route|add_url_rule|add_api_route|GET|POST|PUT|DELETE|PATCH|ROUTE)$"))

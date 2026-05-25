@@ -81,6 +81,12 @@
     (enum_constant
       name: (identifier) @enum_constant.name) @enum_constant_node))
 
+;; Anonymous lambdas passed as call arguments — emit an `<anonymous>` Function
+;; node (only when the body contains a call) so attach_to_enclosing can host
+;; those calls instead of dropping them. Filter (A): callback registration.
+;; lambda_expression is a subtype of expression, which argument_list accepts.
+(argument_list (lambda_expression) @function.anonymous)
+
 ;; Annotation types (@interface)
 (annotation_type_declaration
   name: (identifier) @annotation.name

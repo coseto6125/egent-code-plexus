@@ -5,15 +5,15 @@
 //! Repro: `el.addEventListener('click', () => guardedClose(...))` at module
 //! top level produced 0 callers for `guardedClose` before this change.
 
-use ecp_analyzer::javascript::parser::JavaScriptProvider;
+use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> LocalGraph {
-    let p = JavaScriptProvider::new().expect("provider");
-    p.parse_file(Path::new("test.js"), src.as_bytes())
+    let p = TypeScriptProvider::new().expect("provider");
+    p.parse_file(Path::new("test.ts"), src.as_bytes())
         .expect("parse")
 }
 

@@ -127,6 +127,14 @@
     (identifier) @local.name)
 ) @local
 
+;; Anonymous callbacks passed as call arguments (`runtime.SetFinalizer`,
+;; `sort.Slice`, `http.HandleFunc`, etc.). Without a node here their body's
+;; calls are dropped by attach_to_enclosing when no named enclosing scope
+;; exists — filter (A) callback registration. parser.rs only emits a node
+;; when the body contains a call, so empty func literals add no bloat.
+(argument_list
+  (func_literal) @function.anonymous)
+
 ;; Routes — `r.GET("/path", handler)`-style HTTP router method invocations.
 ;; Matches gin / echo / chi / fiber etc. (they all share this shape).
 ;; Ported from upstream gitnexus

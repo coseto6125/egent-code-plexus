@@ -2,7 +2,7 @@ use super::receiver_types::{collect_bindings, extract_swift_calls_and_path_liter
 use super::spec::SwiftSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, push_blind_spot, FrameworkPatternSpec,
+    detect_ast_framework_patterns, node_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -105,6 +105,7 @@ struct SwiftCaptureIndices {
     property: Option<u32>,
     property_name_pat: Option<u32>,
     constructor: Option<u32>,
+    function_anonymous: Option<u32>,
     // BlindSpot captures (FU-001 P6a).
     blind_nsclass_from_string: Option<u32>,
     blind_perform_selector: Option<u32>,
@@ -138,6 +139,7 @@ impl SwiftProvider {
             property: query.capture_index_for_name("property"),
             property_name_pat: query.capture_index_for_name("property.name.pat"),
             constructor: query.capture_index_for_name("constructor"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
             blind_nsclass_from_string: query.capture_index_for_name("blind.nsclass_from_string"),
             blind_perform_selector: query.capture_index_for_name("blind.perform_selector"),
         };
@@ -186,8 +188,15 @@ impl LanguageProvider for SwiftProvider {
         let idx_property = idx.property;
         let idx_property_name_pat = idx.property_name_pat;
         let idx_constructor = idx.constructor;
+        let idx_function_anonymous = idx.function_anonymous;
         let idx_blind_nsclass = idx.blind_nsclass_from_string;
         let idx_blind_perform = idx.blind_perform_selector;
+
+        // Spans of already-emitted anonymous nodes — prevents duplicate
+        // <anonymous> nodes when both trailing and arg-position queries match
+        // the same lambda_literal.
+        let mut emitted_anon_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
 
         // Per (root, name-byte-offset) dedup. tree-sitter-swift fires the
         // same property_declaration match ~3-4× per declared name when the
@@ -282,6 +291,30 @@ impl LanguageProvider for SwiftProvider {
                     enum_case_root = Some(cap.node);
                 } else if Some(cap_idx) == idx_enum_case_name {
                     enum_case_names.push(cap.node);
+                } else if Some(cap_idx) == idx_function_anonymous {
+                    // Trailing or arg-position closure whose body contains a call.
+                    // Emit an <anonymous> Function node so attach_to_enclosing can
+                    // host the inner calls instead of dropping them (filter (A)
+                    // callback registration — no named enclosing scope).
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if emitted_anon_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 } else if Some(cap_idx) == idx_blind_nsclass {
                     push_blind_spot(
                         &mut blind_spots,
@@ -595,6 +628,23 @@ impl LanguageProvider for SwiftProvider {
             raw_function_metas,
         })
     }
+}
+
+/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
+/// `<anonymous>` callback nodes so closures without calls (e.g. `arr.map { $0 + 1 }`)
+/// stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" {
+            return true;
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
 }
 
 /// Return the leading keyword of a `class_declaration` node: "class", "struct", "enum",

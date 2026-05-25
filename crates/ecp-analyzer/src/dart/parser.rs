@@ -2,7 +2,8 @@ use super::receiver_types::{collect_bindings, extract_dart_calls_and_path_litera
 use super::spec::DartSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, enclosing_fn_idx_by_span, push_blind_spot, FrameworkPatternSpec,
+    detect_ast_framework_patterns, enclosing_fn_idx_by_span, node_span, push_blind_spot,
+    FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -103,6 +104,7 @@ struct DartCaptureIndices {
     // BlindSpot captures (FU-001 P6b).
     blind_function_apply: Option<u32>,
     blind_mirrors_import: Option<u32>,
+    function_anonymous: Option<u32>,
 }
 
 impl DartProvider {
@@ -138,6 +140,7 @@ impl DartProvider {
             var_type: query.capture_index_for_name("var.type"),
             blind_function_apply: query.capture_index_for_name("blind.function_apply"),
             blind_mirrors_import: query.capture_index_for_name("blind.mirrors_import"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
         };
         Ok(Self {
             query,
@@ -145,6 +148,23 @@ impl DartProvider {
             indices,
         })
     }
+}
+
+/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
+/// `<anonymous>` callback nodes so empty closures (e.g. `list.map((x) => x)`)
+/// stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" {
+            return true;
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
 }
 
 impl LanguageProvider for DartProvider {
@@ -189,6 +209,12 @@ impl LanguageProvider for DartProvider {
         let idx_var_type = idx.var_type;
         let idx_blind_function_apply = idx.blind_function_apply;
         let idx_blind_mirrors_import = idx.blind_mirrors_import;
+        let idx_function_anonymous = idx.function_anonymous;
+
+        // Track spans of anonymous nodes already emitted to avoid duplicates
+        // when the same closure node fires multiple query matches.
+        let mut emitted_anon_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
+            std::collections::HashSet::new();
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -262,6 +288,30 @@ impl LanguageProvider for DartProvider {
                         path,
                         is_test_file,
                     );
+                } else if Some(cap_idx) == idx_function_anonymous {
+                    // Anonymous closure (arg-position `function_expression`).
+                    // Emit an `<anonymous>` Function node only when the body
+                    // holds a call_expression so attach_to_enclosing can host
+                    // those calls; empty closures stay out of the graph.
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if emitted_anon_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 }
 
                 if Some(cap_idx) == idx_function

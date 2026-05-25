@@ -89,3 +89,15 @@
     (member_modifier) @override_marker
     (#eq? @override_marker "override"))
   (simple_identifier) @function.name) @function
+
+; Anonymous callbacks: trailing lambda (`list.forEach { process(it) }`) and
+; paren-position lambda (`list.map({ x -> f(x) })`). Without a node here their
+; body's calls are dropped by attach_to_enclosing when no named enclosing scope
+; exists — filter (A) callback registration. parser.rs only emits a node when
+; the body contains a call, so empty lambdas add no bloat.
+(call_suffix
+  (annotated_lambda
+    (lambda_literal) @function.anonymous))
+
+(value_argument
+  (lambda_literal) @function.anonymous)

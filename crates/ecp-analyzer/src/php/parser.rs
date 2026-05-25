@@ -105,6 +105,26 @@ fn first_arg_is_literal_string(call_node: &Node) -> bool {
     )
 }
 
+/// Whether `node`'s subtree contains a PHP call expression. Gates emission of
+/// `<anonymous>` callback nodes so empty callbacks (e.g. `array_map(fn($x) => $x * 2, $a)`)
+/// stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "function_call_expression" | "member_call_expression" | "scoped_call_expression" => {
+                return true;
+            }
+            _ => {}
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
+}
+
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
@@ -275,6 +295,8 @@ struct PhpCaptureIndices {
     blind_eval: Option<u32>,
     blind_call_user_func: Option<u32>,
     blind_variable_call: Option<u32>,
+    // Anonymous callback capture.
+    function_anonymous: Option<u32>,
 }
 
 impl PhpProvider {
@@ -324,6 +346,7 @@ impl PhpProvider {
             blind_eval: query.capture_index_for_name("blind.eval"),
             blind_call_user_func: query.capture_index_for_name("blind.call_user_func"),
             blind_variable_call: query.capture_index_for_name("blind.variable_call"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
         };
 
         Ok(Self {
@@ -393,6 +416,12 @@ impl LanguageProvider for PhpProvider {
         let idx_blind_eval = idx.blind_eval;
         let idx_blind_call_user_func = idx.blind_call_user_func;
         let idx_blind_variable_call = idx.blind_variable_call;
+        let idx_function_anonymous = idx.function_anonymous;
+
+        // Dedup spans for <anonymous> nodes — a callback may be captured once
+        // per query match but must emit only one RawNode.
+        let mut emitted_anon_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
+            rustc_hash::FxHashSet::default();
 
         // Pending Laravel framework refs; emitted after the loop if the
         // `Illuminate` import gate matches.
@@ -523,6 +552,30 @@ impl LanguageProvider for PhpProvider {
                     laravel_call_span = Some(node_span(&cap.node));
                 } else if Some(cap_idx) == idx_laravel_args {
                     laravel_args_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_function_anonymous {
+                    // Anonymous callback (arg-position anonymous function or arrow function).
+                    // Emit an `<anonymous>` Function node only when the body holds a
+                    // call, so attach_to_enclosing can host those calls instead of
+                    // dropping them; empty callbacks stay out of the graph.
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if emitted_anon_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 } else if Some(cap_idx) == idx_blind_eval {
                     push_blind_spot(
                         &mut blind_spots,

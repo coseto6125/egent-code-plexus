@@ -295,6 +295,14 @@
     (enum_assignment
       name: (property_identifier) @enum_member.name) @enum_member_node))
 
+;; Anonymous callbacks passed as call arguments (DOM listeners, setTimeout,
+;; array methods, promise chains). Without a node here their body's calls are
+;; dropped by attach_to_enclosing when no named enclosing scope exists — filter
+;; (A) callback registration. parser.rs only emits a node when the body
+;; contains a call, so empty callbacks add no bloat.
+(arguments
+  [(arrow_function) (function_expression)] @function.anonymous)
+
 ;; Routes — `app.METHOD(path, handler)` form.
 ;; `route.handler` captures the named handler argument when present so the
 ;; builder can emit a `HandlesRoute` edge from the handler function back

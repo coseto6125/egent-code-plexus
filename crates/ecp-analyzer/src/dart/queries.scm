@@ -180,6 +180,16 @@
     (import_specification
       (configurable_uri) @import.name @import.source))) @import
 
+;; Anonymous callbacks passed as call arguments (forEach, map, addListener,
+;; transaction closures, …). Without a synthetic node here, calls inside the
+;; closure body are dropped by attach_to_enclosing when no named enclosing
+;; scope exists. parser.rs emits an <anonymous> Function node only when the
+;; body contains a call_expression, so empty closures add no graph bloat.
+;; Dart uses `function_expression` for both block (`(x) { … }`) and arrow
+;; (`(x) => expr`) closures; both can appear as positional arguments.
+(arguments
+  (function_expression) @function.anonymous)
+
 ;; ---- BlindSpot patterns (FU-001 P6b) ----
 ;; import 'dart:mirrors' — file uses runtime reflection; downstream
 ;; reflect/MirrorSystem calls bind names at runtime. Anchored at the

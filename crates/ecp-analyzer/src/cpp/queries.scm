@@ -349,6 +349,14 @@
       (virtual_specifier) @override_marker))
   (#eq? @override_marker "override")) @method
 
+;; Anonymous lambda callbacks passed as call arguments (std::for_each, std::sort,
+;; connect(), etc.). Without a node here their body's calls are dropped by
+;; attach_to_enclosing when no named enclosing scope exists — filter (A) callback
+;; registration. parser.rs only emits a node when the body contains a call, so
+;; empty lambdas add no bloat.
+(argument_list
+  (lambda_expression) @function.anonymous)
+
 ;; ---- BlindSpot patterns (FU-001 P7b) ----
 ;; dlsym(<handle>, <name>) — runtime symbol resolution. Same anchor as
 ;; the C parser; CallMeta (indirect_dispatch.rs) already covers calls

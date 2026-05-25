@@ -59,6 +59,7 @@ struct KotlinCaptureIndices {
     // BlindSpot captures (FU-001 P2b).
     blind_class_forname: Option<u32>,
     blind_method_invoke: Option<u32>,
+    function_anonymous: Option<u32>,
 }
 
 thread_local! {
@@ -89,6 +90,23 @@ pub struct KotlinProvider {
 /// True when `func` is a Kotlin `fun` declared directly inside a class body
 /// (so its kind should be `Method`, not `Function`). Walks the tree-sitter
 /// parent chain `function_declaration → class_body → class_declaration`.
+/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
+/// `<anonymous>` lambda nodes so empty lambdas (e.g. `list.map { it + 1 }`)
+/// stay out of the graph.
+fn body_has_call(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" {
+            return true;
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    false
+}
+
 fn is_class_method(func: tree_sitter::Node) -> bool {
     let Some(parent) = func.parent() else {
         return false;
@@ -194,6 +212,7 @@ impl KotlinProvider {
             enum_entry: query.capture_index_for_name("enum_entry"),
             blind_class_forname: query.capture_index_for_name("blind.class_forname"),
             blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
+            function_anonymous: query.capture_index_for_name("function.anonymous"),
         };
 
         Ok(Self {
@@ -226,6 +245,10 @@ impl LanguageProvider for KotlinProvider {
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut node_id_to_idx: rustc_hash::FxHashMap<usize, usize> =
             rustc_hash::FxHashMap::default();
+        // Span dedup for `<anonymous>` lambda nodes — the trailing and
+        // paren-position queries can both match the same lambda_literal.
+        let mut anonymous_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
+            rustc_hash::FxHashSet::default();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let is_test_file = is_test_path(path.to_str().unwrap_or(""));
@@ -345,6 +368,30 @@ impl LanguageProvider for KotlinProvider {
                         path,
                         is_test_file,
                     );
+                } else if Some(cap_idx) == idx.function_anonymous {
+                    // Trailing / paren-position lambda. Emit an `<anonymous>`
+                    // Function node only when the body holds a call, so
+                    // attach_to_enclosing hosts those calls instead of dropping
+                    // them; position-suffixed name keeps the uid distinct.
+                    if body_has_call(cap.node) {
+                        let span = node_span(&cap.node);
+                        if anonymous_spans.insert(span) {
+                            nodes.push(RawNode {
+                                decorators: Vec::new(),
+                                is_exported: false,
+                                heritage: Vec::new(),
+                                type_annotation: None,
+                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+                                kind: NodeKind::Function,
+                                span,
+                                calls: Vec::new(),
+                                owner_class: None,
+                                content_hash: ecp_core::uid::xxh3_64_bytes(
+                                    &source[cap.node.start_byte()..cap.node.end_byte()],
+                                ),
+                            });
+                        }
+                    }
                 } else if (Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_function
                     || Some(cap_idx) == self.idx_constructor
