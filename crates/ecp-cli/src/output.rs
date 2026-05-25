@@ -43,6 +43,7 @@ pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, Ecp
             // as possible. Caller's `value` is left untouched.
             let mut v = value.clone();
             compress_for_llm(&mut v);
+            factor_base_path(&mut v);
             let bytes = serde_json::to_vec(&v)
                 .map_err(|e| EcpError::Output(format!("json serialize: {e}")))?;
             _etoon::toon::encode(&bytes).map_err(|e| EcpError::Output(format!("toon encode: {e}")))
@@ -115,6 +116,10 @@ pub fn compress_for_llm(v: &mut Value) {
             }
         }
         Value::String(s) => {
+            if is_anonymous_with_position(s) {
+                *s = "<anonymous>".to_string();
+                return;
+            }
             // Cheap shape gate: only touch strings that look like RFC3339
             // (`YYYY-MM-DDT...`). Avoids walking unrelated string fields.
             let bytes = s.as_bytes();
@@ -126,6 +131,119 @@ pub fn compress_for_llm(v: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Net saving must clear this many bytes before hoisting is worth the extra
+/// `base_path` line. `prefix_len * (n_paths - 1)` is the bytes removed from
+/// rows; below this a short shared prefix (or a 2-row payload) isn't worth the
+/// indirection.
+const PATH_PREFIX_MIN_SAVING: usize = 48;
+
+/// Hoist the directory prefix shared by every `filePath` in the payload into a
+/// single top-level `base_path` field and rewrite each `filePath` to a relative
+/// `relPath`, when the saving is worthwhile. Llm-only: keeps toon's flat
+/// `[N]{cols}` table
+/// intact (a nested dir-trie repeats the column names per row → measured
+/// larger) while removing the dominant per-row path redundancy.
+pub fn factor_base_path(v: &mut Value) {
+    if !v.is_object() {
+        return;
+    }
+    let mut paths: Vec<&str> = Vec::new();
+    collect_file_paths(v, &mut paths);
+    if paths.len() < 2 {
+        return;
+    }
+    let prefix = common_dir_prefix(&paths);
+    if prefix.is_empty() || prefix.len() * (paths.len() - 1) < PATH_PREFIX_MIN_SAVING {
+        return;
+    }
+    drop(paths);
+    relativise_file_paths(v, &prefix);
+    if let Value::Object(map) = v {
+        map.insert("base_path".to_string(), Value::String(prefix));
+    }
+}
+
+fn collect_file_paths<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map {
+                match (k.as_str(), child) {
+                    ("filePath", Value::String(s)) => out.push(s),
+                    _ => collect_file_paths(child, out),
+                }
+            }
+        }
+        Value::Array(arr) => arr.iter().for_each(|c| collect_file_paths(c, out)),
+        _ => {}
+    }
+}
+
+/// Longest prefix shared by all paths, trimmed back to the last `/` so the
+/// result is a whole directory boundary (`/` is ASCII → always a char
+/// boundary, no mid-component cut).
+fn common_dir_prefix(paths: &[&str]) -> String {
+    let first = paths[0].as_bytes();
+    let mut end = first.len();
+    for p in &paths[1..] {
+        let pb = p.as_bytes();
+        let mut i = 0;
+        while i < end && i < pb.len() && first[i] == pb[i] {
+            i += 1;
+        }
+        end = i;
+    }
+    match first[..end].iter().rposition(|&b| b == b'/') {
+        Some(slash) => String::from_utf8_lossy(&first[..=slash]).into_owned(),
+        None => String::new(),
+    }
+}
+
+/// Strip `prefix` from each `filePath` and rename the key to `relPath`, so the
+/// field name itself signals the value is now a fragment to prepend `base_path`
+/// to (rather than a full path the consumer can use verbatim).
+fn relativise_file_paths(v: &mut Value, prefix: &str) {
+    match v {
+        Value::Object(map) => {
+            let relative = match map.get("filePath") {
+                Some(Value::String(s)) => s.strip_prefix(prefix).map(str::to_owned),
+                _ => None,
+            };
+            if let Some(rel) = relative {
+                map.remove("filePath");
+                map.insert("relPath".to_string(), Value::String(rel));
+            }
+            for child in map.values_mut() {
+                relativise_file_paths(child, prefix);
+            }
+        }
+        Value::Array(arr) => arr
+            .iter_mut()
+            .for_each(|c| relativise_file_paths(c, prefix)),
+        _ => {}
+    }
+}
+
+/// `<anonymous:line:col>` carries a position only to keep the node's uid
+/// distinct (uid hashes name without span). The position duplicates the row's
+/// own `line` column, so the Llm rendering drops it back to bare `<anonymous>`.
+fn is_anonymous_with_position(s: &str) -> bool {
+    let Some(inner) = s
+        .strip_prefix("<anonymous:")
+        .and_then(|rest| rest.strip_suffix('>'))
+    else {
+        return false;
+    };
+    match inner.split_once(':') {
+        Some((line, col)) => {
+            !line.is_empty()
+                && !col.is_empty()
+                && line.bytes().all(|b| b.is_ascii_digit())
+                && col.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
     }
 }
 
@@ -220,6 +338,79 @@ mod tests {
         assert_eq!(v["freshness"]["current_head_short"], json!("b6343a7"));
         assert_eq!(v["integer_kept"], json!(4922));
         assert_eq!(v["non_iso_string"], json!("egent-code-plexus"));
+    }
+
+    #[test]
+    fn factor_base_path_hoists_common_dir_and_relativises() {
+        let mut v = json!({
+            "impact": [
+                { "filePath": "crates/ecp-analyzer/src/go/parser.rs", "line": 1 },
+                { "filePath": "crates/ecp-analyzer/src/rust/parser.rs", "line": 2 },
+                { "filePath": "crates/ecp-analyzer/src/php/parser.rs", "line": 3 }
+            ]
+        });
+        factor_base_path(&mut v);
+        assert_eq!(v["base_path"], json!("crates/ecp-analyzer/src/"));
+        assert_eq!(v["impact"][0]["relPath"], json!("go/parser.rs"));
+        assert_eq!(v["impact"][2]["relPath"], json!("php/parser.rs"));
+        assert!(
+            v["impact"][0].get("filePath").is_none(),
+            "filePath renamed to relPath once relativised"
+        );
+    }
+
+    #[test]
+    fn factor_base_path_spans_nested_arrays_with_one_global_prefix() {
+        let mut v = json!({
+            "incoming": {
+                "calls": [
+                    { "filePath": "crates/ecp-analyzer/src/go/parser.rs" },
+                    { "filePath": "crates/ecp-analyzer/src/rust/parser.rs" }
+                ],
+                "imports": [
+                    { "filePath": "crates/ecp-analyzer/src/php/parser.rs" },
+                    { "filePath": "crates/ecp-analyzer/src/java/parser.rs" }
+                ]
+            }
+        });
+        factor_base_path(&mut v);
+        assert_eq!(v["base_path"], json!("crates/ecp-analyzer/src/"));
+        assert_eq!(v["incoming"]["calls"][0]["relPath"], json!("go/parser.rs"));
+        assert_eq!(
+            v["incoming"]["imports"][1]["relPath"],
+            json!("java/parser.rs")
+        );
+    }
+
+    #[test]
+    fn factor_base_path_skips_when_saving_below_threshold() {
+        // Two short paths: prefix "a/" (2) * (2-1) = 2 bytes saved < threshold.
+        let mut v = json!({ "results": [{ "filePath": "a/b.rs" }, { "filePath": "a/c.rs" }] });
+        factor_base_path(&mut v);
+        assert!(
+            v.get("base_path").is_none(),
+            "trivial prefix must not be hoisted"
+        );
+        assert_eq!(
+            v["results"][0]["filePath"],
+            json!("a/b.rs"),
+            "filePath untouched"
+        );
+    }
+
+    #[test]
+    fn compress_for_llm_truncates_anonymous_position_suffix() {
+        let mut v = json!({
+            "impact": [
+                { "name": "<anonymous:52:18>" },
+                { "name": "real_fn" },
+                { "name": "<anonymous:3:0>" }
+            ]
+        });
+        compress_for_llm(&mut v);
+        assert_eq!(v["impact"][0]["name"], json!("<anonymous>"));
+        assert_eq!(v["impact"][1]["name"], json!("real_fn"));
+        assert_eq!(v["impact"][2]["name"], json!("<anonymous>"));
     }
 
     #[test]
