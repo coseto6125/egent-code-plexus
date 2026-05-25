@@ -904,8 +904,10 @@ impl GraphBuilder {
                 .collect();
 
             // Serial phase: intern strings and push edges in file_idx order.
-            // rayon's indexed par_iter collect preserves enumeration order, so
-            // parallel_results is already sorted by file_idx — no extra sort needed.
+            // rayon's `collect::<Vec<_>>()` preserves source order even though
+            // `filter_map` drops the IndexedParallelIterator bound — so
+            // parallel_results stays in file_idx order, identical to the old
+            // serial loop's edge order; no extra sort needed.
             for (_file_idx, source_node, matched, reason_str) in parallel_results {
                 let reason_ref = string_pool.add(&reason_str);
                 for (route_idx, is_templated) in matched {
