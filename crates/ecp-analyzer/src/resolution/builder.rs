@@ -1119,6 +1119,7 @@ impl GraphBuilder {
         let reason_implements = string_pool.add("pass2:implements");
         let reason_type = string_pool.add("type_annotation");
         let reason_call = string_pool.add("call");
+        let reason_reads_field = string_pool.add("field_read");
 
         let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
         for lg in &self.local_graphs {
@@ -1235,6 +1236,7 @@ impl GraphBuilder {
                         reason_implements,
                         reason_type,
                         reason_call,
+                        reason_reads_field,
                         &symbol_table,
                         &mut edges,
                         lookup,
@@ -1327,6 +1329,7 @@ impl GraphBuilder {
                             reason_implements,
                             reason_type,
                             reason_call,
+                            reason_reads_field,
                             symbol_table_ref,
                             &mut local_edges,
                             lookup,
@@ -2034,6 +2037,7 @@ fn pass2_emit_node_edges(
     reason_implements: StrRef,
     reason_type: StrRef,
     reason_call: StrRef,
+    reason_reads_field: StrRef,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
@@ -2109,6 +2113,31 @@ fn pass2_emit_node_edges(
                 rel_type: RelType::Accesses,
                 confidence,
                 reason: reason_type,
+            });
+        }
+    }
+
+    // ReadsField: each field-read site resolves to a Property target. The
+    // `ResolveTarget::Field` predicate (is_property) admits only Property
+    // nodes, so locals / Variables never match — the read edge stays on the
+    // cross-function field contract without reintroducing local fan-out.
+    for field_name in &raw_node.field_reads {
+        let targets = resolver.resolve_symbol(
+            &local_graph.file_path,
+            field_name,
+            &local_graph.imports,
+            ResolveTarget::Field,
+        );
+        for (target_id, confidence) in targets {
+            if target_id == current_node_idx {
+                continue;
+            }
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type: RelType::ReadsField,
+                confidence,
+                reason: reason_reads_field,
             });
         }
     }

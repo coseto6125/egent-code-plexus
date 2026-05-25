@@ -464,23 +464,24 @@ pub enum RelType {
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     UsesPathLiteral,
-    /// `Function` / `Method` → a **public** struct/class field (`Property`)
-    /// it reads, e.g. `obj.rel_path`, `self.count`, `cfg->timeout`.
+    /// `Function` / `Method` → a struct/class field (`Property`) it reads,
+    /// e.g. `obj.rel_path`, `self.count`, `cfg->timeout`.
     ///
     /// LLM-utility filter (A) Graph completeness: changing the meaning or type
-    /// of a public field (rename, repr change, semantic shift) has a blast
-    /// radius spanning every reader across files. Without this edge `ecp impact
+    /// of a field (rename, repr change, semantic shift) has a blast radius
+    /// spanning every reader across files. Without this edge `ecp impact
     /// <field>` returns empty — indistinguishable from "no impact" — so an LLM
     /// refactor silently misses readers. With it, the readers are one CSR hop
     /// away, the same guarantee `Calls` gives for functions.
     ///
-    /// Scope is deliberately narrow to stay consistent with the panel decision
-    /// to drop function-body locals from the index (see `drop_locals`): only
-    /// reads whose **target field is exported** (`pub` / language-public) emit
-    /// an edge. Private-field reads stay out — they never cross the API surface
-    /// an external refactor reasons about, and indexing them would reintroduce
-    /// the local-variable fan-out the panel rejected. Public fields ARE the
-    /// cross-function contract, so they clear the (A) bar that locals do not.
+    /// Does NOT contradict the panel decision to drop function-body locals
+    /// (see `drop_locals`): the edge only resolves to `NodeKind::Property`
+    /// targets (the `ResolveTarget::Field` / `is_property` filter), and locals
+    /// are `NodeKind::Variable`, never `Property`. So the local fan-out the
+    /// panel rejected can never appear here. Both public and private fields
+    /// emit edges — a private field's readers are just as load-bearing for an
+    /// in-module refactor as a public one's, and omitting them would put the
+    /// "empty == no impact" ambiguity right back.
     ///
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
