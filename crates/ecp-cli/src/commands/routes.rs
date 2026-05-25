@@ -178,6 +178,17 @@ fn find_enclosing_scope(
         if !is_scope_kind {
             continue;
         }
+        // Anonymous callback nodes (`<anonymous:line:col>`) are smaller-span
+        // Function nodes that share the route's line — they are the route's own
+        // inline handler, never its enclosing scope. Skip so the route resolves
+        // to the named function/class it lives in.
+        if node
+            .name
+            .resolve(&graph.string_pool)
+            .starts_with("<anonymous")
+        {
+            continue;
+        }
         let start_line = node.span.0.to_native();
         let end_line = node.span.2.to_native();
         // Strict containment: a route registered at the same line as the
