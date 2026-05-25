@@ -237,8 +237,8 @@ struct RelTypeEntry {
     /// `B` = node coverage (LLM falls back to grep);
     /// `C` = edge semantics (ambiguous without distinct kind).
     utility: &'static str,
-    /// Heuristic edges carry < 0.7 confidence and are filtered out of
-    /// graph-completeness queries unless `--include-heuristic` is set.
+    /// Heuristic edges are shown by default in a separate `heuristic_callers`
+    /// bucket tagged `requires_verification`; pass `--no-heuristic` to suppress.
     heuristic: bool,
     note: &'static str,
 }
@@ -264,7 +264,7 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { name: "StepInProcess", utility: "B", heuristic: false, note: "Workflow / Saga step linkage. Process node ↔ step function." },
     RelTypeEntry { name: "References", utility: "C", heuristic: false, note: "Generic reference fallback (entry-point scoring, type-annotation linkage). Reason field carries provenance." },
     RelTypeEntry { name: "Fetches", utility: "A", heuristic: false, note: "HTTP-client call site → Route. URL-match across files; reason encodes accessed keys + per-file count." },
-    RelTypeEntry { name: "MirrorsField", utility: "A", heuristic: true, note: "Heuristic ORM-field linkage from in-memory struct to SchemaField. Filtered unless --include-heuristic." },
+    RelTypeEntry { name: "MirrorsField", utility: "A", heuristic: true, note: "Heuristic ORM-field linkage from in-memory struct to SchemaField. Shown by default in heuristic_callers; --no-heuristic suppresses." },
     RelTypeEntry { name: "Publishes", utility: "A", heuristic: false, note: "Producer (kafka.send / SNS publish / RabbitMQ basicPublish) → EventTopic." },
     RelTypeEntry { name: "Subscribes", utility: "A", heuristic: false, note: "Consumer (@KafkaListener / SQS receive) → EventTopic. Pair with Publishes for cross-service event flow." },
     RelTypeEntry { name: "EventTopicMirror", utility: "B", heuristic: true, note: "Heuristic: EventTopic → SchemaField when payload shape inferable. Confidence < 0.85." },
