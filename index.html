@@ -274,6 +274,60 @@
                 </table>
             </div>
             <p class="table-caption" data-i18n="table.note">※ RSS 峰值: 約 1.2 GiB (於 force index 時)</p>
+
+            <!-- Table A: microsoft/vscode 3-way comparison -->
+            <h3 class="table-heading" data-i18n="table.vscode3w.heading">microsoft/vscode — 14,874 個檔案</h3>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.3way.metric">指標</th>
+                            <th>ecp</th>
+                            <th>codegraph</th>
+                            <th>gitnexus</th>
+                        </tr>
+                    </thead>
+                    <tbody class="mono">
+                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>4.6 s</td><td>166.9 s</td><td>DNF (killed at 27 min)</td></tr>
+                        <tr><td class="label" data-i18n="table.row.peak_rss">Peak RSS</td><td>~1.0 GiB</td><td>1.7 GiB</td><td>4.6 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>34.6 ms</td><td>169.5 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>27.2 ms</td><td>172.4 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>35.0 ms</td><td>415.9 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.impact_baseline">Impact baseline (git-diff)</td><td>725.9 ms</td><td>N/A</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph nodes</td><td>507,257</td><td>315,498</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph edges</td><td>916,380</td><td>986,709</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.index_size">Index size</td><td>87 MiB</td><td>671 MiB</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.files_indexed">Files indexed</td><td>14,874</td><td>10,814</td><td>—</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Table B: abhigyanpatwari/GitNexus 3-way comparison -->
+            <h3 class="table-heading" style="margin-top:2rem;" data-i18n="table.gitnexus3w.heading">abhigyanpatwari/GitNexus — 3,232 個檔案（多語言）</h3>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.3way.metric">指標</th>
+                            <th>ecp</th>
+                            <th>codegraph</th>
+                            <th>gitnexus</th>
+                        </tr>
+                    </thead>
+                    <tbody class="mono">
+                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>0.74 s</td><td>11.2 s</td><td>77.6 s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.peak_rss">Peak RSS</td><td>264 MiB</td><td>501 MiB</td><td>2.5 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>9.4 ms</td><td>103.5 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>9.2 ms</td><td>104.2 ms</td><td>297.6 ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>9.4 ms</td><td>—</td><td>295.5 ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph nodes</td><td>49,122</td><td>19,604</td><td>30,223</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph edges</td><td>48,271</td><td>39,155</td><td>47,218</td></tr>
+                        <tr><td class="label" data-i18n="table.row.index_size">Index size</td><td>7.7 MiB</td><td>37 MiB</td><td>306 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.files_indexed">Files indexed</td><td>3,232</td><td>2,968</td><td>3,232</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="table-caption" data-i18n="table.3way.caption">※ ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5；所有工具於可設定時限制 max-file-size 為 1 MiB（gitnexus 固定為 512 KB）；ecp = 無狀態 CLI，每次延遲含完整行程啟動；ecp 為 5–7 次運行的中位數。</p>
         </section>
 
         <!-- INTERVIEW -->

@@ -285,6 +285,7 @@ body {
 .saas-table td.label { color: var(--text-primary); }
 .saas-table td.dim { color: var(--text-secondary); }
 .table-caption { text-align: center; color: var(--text-secondary); font-size: 0.85rem; }
+.table-heading { font-family: var(--font-mono); font-size: 0.95rem; font-weight: 500; color: var(--text-primary); max-width: 900px; margin: 2rem auto 0.75rem; padding: 0 0.25rem; }
 
 /* Vision */
 .vision-box { max-width: 800px; margin: 0 auto; text-align: center; padding: 2rem 0; }
