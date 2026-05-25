@@ -6,8 +6,14 @@ use crate::commands::admin::doctor::CheckResult;
 use ecp_core::registry::resolve_home_ecp;
 
 pub(crate) fn check(fix: bool) -> Vec<CheckResult> {
-    let home = resolve_home_ecp();
-    let health = match registry_health(&home) {
+    check_in(&resolve_home_ecp(), fix)
+}
+
+/// `check` with an explicit ECP_HOME root so E2E tests can point at a tempdir
+/// without mutating the process-global `ECP_HOME` env (which races parallel
+/// tests).
+fn check_in(home: &std::path::Path, fix: bool) -> Vec<CheckResult> {
+    let health = match registry_health(home) {
         Ok(h) => h,
         Err(e) => return vec![CheckResult::fail("registry", format!("scan failed: {e}"))],
     };
@@ -140,5 +146,49 @@ mod tests {
             None
         );
         assert!(find(&out, "registry").is_none()); // not "all clean"
+    }
+
+    /// Build an ECP_HOME tempdir holding one unregistered repo dir with a
+    /// commit index (graph.bin) — i.e. an orphan, since the empty registry
+    /// references no dirs. Returns (home, the orphan commit dir).
+    fn home_with_orphan() -> (tempfile::TempDir, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        // No registry.json → empty registry → every repo dir is unregistered.
+        let commit_dir = home.path().join("Orphan__abcd").join("commits").join("c1");
+        std::fs::create_dir_all(&commit_dir).unwrap();
+        std::fs::write(commit_dir.join("graph.bin"), b"stub").unwrap();
+        (home, commit_dir)
+    }
+
+    #[test]
+    fn e2e_check_detects_orphan_without_fix_leaves_it_on_disk() {
+        let (home, orphan) = home_with_orphan();
+        let out = check_in(home.path(), false);
+        let r = find(&out, "registry:orphans").expect("orphan detected");
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert_eq!(r.fix_applied, None, "no fix requested");
+        assert!(orphan.exists(), "orphan must remain on disk without --fix");
+    }
+
+    #[test]
+    fn e2e_check_fix_retires_orphan_from_disk() {
+        let (home, orphan) = home_with_orphan();
+        let out = check_in(home.path(), true);
+        let r = find(&out, "registry:orphans").expect("orphan detected");
+        assert_eq!(r.fix_applied, Some(true), "fix reported success");
+        // retire_dir_async renames the orphan out of the way synchronously
+        // (background thread only does the final delete), so its original
+        // path must be gone immediately.
+        assert!(
+            !orphan.exists(),
+            "orphan commit dir must be retired from its original path"
+        );
+    }
+
+    #[test]
+    fn e2e_clean_home_reports_ok() {
+        let home = tempfile::tempdir().unwrap();
+        let out = check_in(home.path(), false);
+        assert_eq!(find(&out, "registry").unwrap().status, CheckStatus::Ok);
     }
 }
