@@ -382,3 +382,55 @@ fn impact_deterministic_only_symbol_has_empty_heuristic_bucket() {
         "heuristic_callers must be an empty array for a symbol with no heuristic edges; got: {payload}"
     );
 }
+
+/// Regression guard: heuristic visibility must NOT affect the deterministic
+/// `impact` array or any other core field.
+///
+/// The only permitted difference between the two runs is the presence/absence
+/// of `heuristic_callers` and the value of `hidden_heuristic_edges` — i.e.
+/// heuristics live in their own bucket and never bleed into the deterministic
+/// core. No top-level `risk_level` / `coverage` field exists in the default
+/// payload shape (those only appear with `--test-coverage`), so this test
+/// pins the invariant via the `impact` array and the heuristic-bucket delta.
+#[test]
+fn heuristic_callers_do_not_affect_risk_or_coverage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+
+    init_repo_with_fixtures(repo);
+    let graph_bin = find_graph_bin(repo);
+    std::fs::write(&graph_bin, synthetic_event_mirror_graph()).unwrap();
+
+    // Same symbol, two runs: heuristics shown (default) vs suppressed.
+    let shown = run_impact_default(repo, "consume_order");
+    let hidden = run_impact_no_heuristic(repo, "consume_order");
+
+    // The deterministic impact array must be byte-identical regardless of
+    // heuristic visibility — heuristics live in a separate bucket, not here.
+    assert_eq!(
+        shown["impact"], hidden["impact"],
+        "deterministic impact array must not change with heuristic visibility;\
+         \nshown={shown}\nhidden={hidden}"
+    );
+
+    // The status / target / direction core fields must also be identical.
+    assert_eq!(shown["status"], hidden["status"]);
+    assert_eq!(shown["target"], hidden["target"]);
+    assert_eq!(shown["direction"], hidden["direction"]);
+
+    // The ONLY permitted delta is the heuristic bucket itself:
+    //   shown  → heuristic_callers present (non-empty), hidden_heuristic_edges = 0
+    //   hidden → heuristic_callers absent,              hidden_heuristic_edges >= 1
+    assert!(
+        shown.get("heuristic_callers").is_some(),
+        "default run must expose heuristic_callers; got: {shown}"
+    );
+    assert!(
+        hidden.get("heuristic_callers").is_none(),
+        "--no-heuristic run must suppress heuristic_callers; got: {hidden}"
+    );
+    assert!(
+        hidden["hidden_heuristic_edges"].as_u64().unwrap_or(0) >= 1,
+        "--no-heuristic run must report hidden_heuristic_edges >= 1; got: {hidden}"
+    );
+}
