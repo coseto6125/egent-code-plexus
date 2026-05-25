@@ -345,6 +345,7 @@ impl LanguageProvider for JavaScriptProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -462,6 +463,7 @@ impl LanguageProvider for JavaScriptProvider {
                             kind: k,
                             span: node_span,
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],
@@ -559,6 +561,7 @@ impl LanguageProvider for JavaScriptProvider {
                                     kind: var_kind,
                                     span: var_span,
                                     calls: Vec::new(),
+                                    field_reads: Vec::new(),
                                     owner_class: None,
                                     content_hash: ecp_core::uid::xxh3_64_bytes(
                                         &source[decl_node.start_byte()..decl_node.end_byte()],

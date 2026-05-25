@@ -506,6 +506,7 @@ impl LanguageProvider for TypeScriptProvider {
                                 kind: NodeKind::Function,
                                 span,
                                 calls: Vec::new(),
+                                field_reads: Vec::new(),
                                 owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
@@ -582,6 +583,7 @@ impl LanguageProvider for TypeScriptProvider {
                             heritage: heritage.clone(),
                             type_annotation: type_annotation.clone(),
                             calls: Vec::new(),
+                            field_reads: Vec::new(),
                             owner_class: None,
                             content_hash: ecp_core::uid::xxh3_64_bytes(
                                 &source[root.start_byte()..root.end_byte()],

@@ -290,6 +290,7 @@ impl LanguageProvider for DockerComposeProvider {
                                         env_end.column as u32,
                                     ),
                                     calls: vec![],
+                                    field_reads: Vec::new(),
                                     owner_class: None,
                                     content_hash: 0,
                                 });
@@ -301,6 +302,7 @@ impl LanguageProvider for DockerComposeProvider {
 
                 // Emit the service as a Class node.
                 nodes.push(RawNode {
+                    field_reads: Vec::new(),
                     decorators: vec![],
                     is_exported: true,
                     heritage: vec![],

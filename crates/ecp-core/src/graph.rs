@@ -21,7 +21,7 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// v9: `name_index: Vec<NameIndexEntry>` populated for name lookup.
 /// v10: `kind_offsets` / `kind_node_idx` CSR added for NodeKind lookup.
 /// v11: `node_flags: Vec<u8>` added for dense per-node FunctionMeta flags.
-pub const GRAPH_FORMAT_VERSION: u32 = 11;
+pub const GRAPH_FORMAT_VERSION: u32 = 12;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -89,6 +89,7 @@ impl std::str::FromStr for RelType {
             "OVERRIDES" => Ok(RelType::Overrides),
             "DECORATES" => Ok(RelType::Decorates),
             "USESPATHLITERAL" | "USES_PATH_LITERAL" => Ok(RelType::UsesPathLiteral),
+            "READSFIELD" | "READS_FIELD" => Ok(RelType::ReadsField),
             _ => Err(()),
         }
     }
@@ -123,6 +124,7 @@ impl RelType {
             Self::Overrides => "Overrides",
             Self::Decorates => "Decorates",
             Self::UsesPathLiteral => "UsesPathLiteral",
+            Self::ReadsField => "ReadsField",
         }
     }
 }
@@ -287,6 +289,13 @@ impl NodeKind {
     /// previously had no path at all — `Module` here closes that gap.
     pub const fn is_qualifier(self) -> bool {
         self.is_type() || matches!(self, Self::Namespace | Self::Module)
+    }
+
+    /// Resolution target for `ReadsField`: a struct/class field. `SchemaField`
+    /// is excluded — it is a heuristic ORM-mirror node, not a source-level
+    /// field a reader expression resolves to.
+    pub const fn is_property(self) -> bool {
+        matches!(self, Self::Property)
     }
 
     /// Number of `NodeKind` variants. Used to size the v10 `kind_offsets`
@@ -455,6 +464,27 @@ pub enum RelType {
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     UsesPathLiteral,
+    /// `Function` / `Method` → a **public** struct/class field (`Property`)
+    /// it reads, e.g. `obj.rel_path`, `self.count`, `cfg->timeout`.
+    ///
+    /// LLM-utility filter (A) Graph completeness: changing the meaning or type
+    /// of a public field (rename, repr change, semantic shift) has a blast
+    /// radius spanning every reader across files. Without this edge `ecp impact
+    /// <field>` returns empty — indistinguishable from "no impact" — so an LLM
+    /// refactor silently misses readers. With it, the readers are one CSR hop
+    /// away, the same guarantee `Calls` gives for functions.
+    ///
+    /// Scope is deliberately narrow to stay consistent with the panel decision
+    /// to drop function-body locals from the index (see `drop_locals`): only
+    /// reads whose **target field is exported** (`pub` / language-public) emit
+    /// an edge. Private-field reads stay out — they never cross the API surface
+    /// an external refactor reasons about, and indexing them would reintroduce
+    /// the local-variable fan-out the panel rejected. Public fields ARE the
+    /// cross-function contract, so they clear the (A) bar that locals do not.
+    ///
+    /// Appended at the END to preserve rkyv discriminants for existing
+    /// `graph.bin` files.
+    ReadsField,
 }
 
 impl ArchivedRelType {

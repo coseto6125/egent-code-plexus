@@ -49,6 +49,13 @@ pub struct RawNode {
     /// Each entry is the callee's *short* name (e.g. `method` for `obj.method()`).
     /// Resolved against imports + same-file symbols in Pass 2 → `RelType::Calls`.
     pub calls: Vec<String>,
+    /// Short names of **public** struct/class fields read inside this node's
+    /// body (e.g. `rel_path` for `obj.rel_path`). Resolved against imports +
+    /// same-file symbols in Pass 2 → `RelType::ReadsField`, then filtered to
+    /// edges whose target field is exported. Private-only reads may appear here
+    /// from parsers that can't cheaply check target visibility at parse time;
+    /// the export filter lives at edge-emission in the builder.
+    pub field_reads: Vec<String>,
     /// Owning class/struct/trait for methods and properties.
     /// Set by each language parser at parse time; `None` for module-level
     /// functions. Eliminates the need for post-process span containment to
