@@ -142,7 +142,7 @@ fn endpoint_json(graph: &ArchivedZeroCopyGraph, fn_idx_opt: Option<usize>) -> Va
             let name = node.name.resolve(&graph.string_pool);
             let file_node = &graph.files[node.file_idx.to_native() as usize];
             let file = file_node.path.resolve(&graph.string_pool);
-            let line = node.span.0.to_native();
+            let line = node.start_line();
             json!({ "name": name, "file": file, "line": line })
         }
     }

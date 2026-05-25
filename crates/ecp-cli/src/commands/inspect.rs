@@ -258,7 +258,7 @@ fn build_inspect_block(
             "ownerClass": owner_class,
             "kind": kind_to_str(&node.kind),
             "filePath": file_path_str,
-            "startLine": node.span.0.to_native(),
+            "startLine": node.start_line(),
             "endLine": node.span.2.to_native(),
             "decorators": decorators,
         },
@@ -332,7 +332,7 @@ fn collect_contained_members(
             "name": target_node.name.resolve(&graph.string_pool),
             "kind": kind_to_str(&target_node.kind),
             "filePath": target_file_path,
-            "line": target_node.span.0.to_native(),
+            "line": target_node.start_line(),
         }));
     }
     (methods, properties, variants)

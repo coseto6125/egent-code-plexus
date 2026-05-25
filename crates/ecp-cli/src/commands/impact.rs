@@ -202,7 +202,7 @@ fn classify_symbol(
         .path
         .resolve(&graph.string_pool)
         .to_string();
-    let line = node.span.0.to_native();
+    let line = node.start_line();
     let kind = kind_to_str(&node.kind).to_string();
 
     let mut test_callers: Vec<String> = Vec::new();
@@ -471,7 +471,7 @@ fn build_literal_payload(value: &str, engine: &Engine) -> Result<Value, EcpError
 
         sites.push(serde_json::json!({
             "file": file_path,
-            "line": node.span.0.to_native(),
+            "line": node.start_line(),
             "col": node.span.1.to_native(),
             "enclosing": enclosing_name,
             "sink_reason": sink_reason,
@@ -582,7 +582,7 @@ fn collect_literal_groups(graph: &ecp_core::graph::ArchivedZeroCopyGraph) -> Vec
         });
         group.sites.push(LiteralSite {
             file,
-            line: node.span.0.to_native(),
+            line: node.start_line(),
             col: node.span.1.to_native(),
             enclosing,
             sink_reason,
@@ -931,7 +931,7 @@ fn impact_by_name(
                 json!({
                     "kind": kind_to_str(&node.kind),
                     "filePath": file_path,
-                    "line": node.span.0.to_native(),
+                    "line": node.start_line(),
                 })
             })
             .collect();
@@ -1500,7 +1500,7 @@ fn run_bfs(
             "ownerClass": owner_class,
             "kind": kind_to_str(&curr_node.kind),
             "filePath": file_path,
-            "line": curr_node.span.0.to_native(),
+            "line": curr_node.start_line(),
             "depth": curr_depth,
             "viaReason": via_reason,
             "viaConfidence": via_confidence,

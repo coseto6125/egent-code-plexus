@@ -147,7 +147,7 @@ fn build_mirror_entry(
         "owner": owner,
         "framework": null, // FrameworkId not persisted on archived Node — see module doc
         "filePath": file_path,
-        "line": node.span.0.to_native(),
+        "line": node.start_line(),
         "tier": tier_label(confidence),
         "checks": {
             "name": check_name,
@@ -173,7 +173,7 @@ fn build_blind_spot_entry(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> ser
         "owner": owner,
         "framework": null,
         "filePath": file_path,
-        "line": node.span.0.to_native(),
+        "line": node.start_line(),
         "tier": "BLIND_SPOT",
         "checks": {
             "name": true,

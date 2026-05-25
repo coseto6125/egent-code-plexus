@@ -320,7 +320,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             let file = &graph.files[node.file_idx.to_native() as usize];
             FindMatch {
                 file: file.path.resolve(&graph.string_pool).to_string(),
-                line: node.span.0.to_native(),
+                line: node.start_line(),
                 name: node.name.resolve(&graph.string_pool).to_string(),
                 kind: kind_to_str(&node.kind).to_string(),
                 category: category_to_str(&file.category).to_string(),
@@ -803,7 +803,7 @@ fn build_hit(
     let file = file_entry.path.resolve(&graph.string_pool).to_string();
     let language = Language::from_path(&file).as_str().to_string();
     let category = FileCategory::from(&file_entry.category);
-    let line = node.span.0.to_native() + 1;
+    let line = node.start_line();
     let kind_str = kind_to_str(&node.kind).to_string();
     let signature = format!("{kind_str} {name}");
 
