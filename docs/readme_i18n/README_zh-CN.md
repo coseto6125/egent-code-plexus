@@ -57,18 +57,42 @@
 
 ## ⚡ 实测数据
 
-### 冷启动索引比上游 GitNexus 快 60×
+三方实测对决：[`codegraph`](https://github.com/colbymchenry/codegraph)（Node + SQLite）与上游 [`gitnexus`](https://github.com/abhigyanpatwari/GitNexus)（Node）——相同 checkout、相同机器。`ecp` 是无状态一次性 CLI：以下所有延迟**皆含完整进程启动**，无守护进程、无预热。
 
-在 [gitnexus](https://github.com/abhigyanpatwari/GitNexus) 的 TypeScript 代码库上测量 · `scripts/parity/benchmark_vs_gitnexus.py`：
+*版本：`ecp` 0.4.2 · `codegraph` 0.9.4 · `gitnexus` 1.6.5。所有工具在可配置时均以 1 MiB 最大文件大小为上限（`gitnexus` 硬编码 512 KB）。`ecp` 取 5–7 次执行中位数。硬件：AMD Ryzen 9 9950X（16 逻辑核心）、Linux。*
 
-| 阶段 | ecp (Rust) | gitnexus (Node) | 加速倍率 |
+### `microsoft/vscode` — 14,874 个文件、密集单语言 TypeScript
+
+| 指标 | **`ecp`** | `codegraph` | `gitnexus` |
 |---|---|---|---|
-| **冷启动索引** | **~970 ms** | ~58 s | **60×** |
-| **符号上下文** | **~70 ms** | ~430 ms | **6×** |
-| **影响范围** | **~70 ms** | ~460 ms | **6×** |
-| **Cypher 查询** | **~70 ms** | ~400 ms | **5×** |
+| **冷启动索引** | **4.6 s** | 166.9 s | **DNF** — 27 分钟后强制终止 |
+| 内存峰值 RSS | **~1.0 GiB** | 1.7 GiB | 4.6 GiB（仍在攀升） |
+| 符号查找 / 查询 | **34.6 ms** | 169.5 ms | — |
+| 调用者 / 影响范围 | **27.2 ms** | 172.4 ms | — |
+| 检视 / 上下文 | **35.0 ms** | 415.9 ms | — |
+| 影响基准（git-diff） | **725.9 ms** | N/A — 无此模式 | — |
+| 图节点数 | **507,257** | 315,498 | — |
+| 图边数 | 916,380 | **986,709** | — |
+| 磁盘索引大小 | **87 MiB** | 671 MiB | — |
+| 已索引文件数 | **14,874** | 10,814 | — |
 
-*`ecp` 的延迟已含完整进程启动（无守护进程）。GitNexus (v1.6.5) 是在已预热、已索引的 repo 上测量。*
+*`gitnexus` 未完成——在内存内图解析阶段卡住 27 分钟后强制终止（RSS 4.6 GiB，无输出写入）。*
+
+### `abhigyanpatwari/GitNexus` — 3,232 个文件、多语言（三者均能完成的语料）
+
+| 指标 | **`ecp`** | `codegraph` | `gitnexus` |
+|---|---|---|---|
+| **冷启动索引** | **0.74 s** | 11.2 s | 77.6 s |
+| 内存峰值 RSS | **264 MiB** | 501 MiB | 2.5 GiB |
+| 查找 / 查询 | **9.4 ms** | 103.5 ms | — |
+| 调用者 / 影响范围 | **9.2 ms** | 104.2 ms | 297.6 ms |
+| 检视 / 上下文 | **9.4 ms** | — | 295.5 ms |
+| 图节点数 | **49,122** | 19,604 | 30,223 |
+| 图边数 | **48,271** | 39,155 | 47,218 |
+| 磁盘索引大小 | **7.7 MiB** | 37 MiB | 306 MiB |
+| 已索引文件数 | **3,232** | 2,968 | 3,232 |
+
+**冷启动索引：比 `codegraph` 快 15–37×；`gitnexus` 在真实大型 repo 上无法完成。内存最低、磁盘索引最小、图最密——在各种规模下皆如此。**
 
 ### 规模：`.sample_repo` — 22,645 个文件、25 种语言、2.1 GB 多语言语料
 
