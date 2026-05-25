@@ -226,6 +226,10 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
         return Ok(SweepStats { marked: 0, removed });
     };
 
+    // First pass: collect SHAs with an active build.
+    // Real markers are `<base_dirname>.building` (append-style, per orchestrator.rs:71/682/756),
+    // keyed on the commit SHA — never on a specific generation dir.
+    let mut building_shas: FxHashSet<[u8; 20]> = FxHashSet::default();
     let mut by_sha: FxHashMap<[u8; 20], Vec<(CommitDirName, std::path::PathBuf)>> =
         FxHashMap::default();
     let now = std::time::SystemTime::now();
@@ -235,7 +239,16 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name.contains(".building") {
+        if name.starts_with('.') {
+            continue;
+        }
+        if name.contains(".building") {
+            // Strip the `.building` suffix and parse the remainder to get the SHA.
+            if let Some(base) = name.strip_suffix(".building") {
+                if let Ok(parsed) = CommitDirName::parse(base) {
+                    building_shas.insert(parsed.sha);
+                }
+            }
             continue;
         }
         let Ok(parsed) = CommitDirName::parse(&name) else {
@@ -255,18 +268,20 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
         by_sha.entry(parsed.sha).or_default().push((parsed, path));
     }
 
-    for (_sha, mut group) in by_sha {
+    for (sha, mut group) in by_sha {
         if group.len() < 2 {
+            continue;
+        }
+        // A build in progress for this SHA (real markers are `<dirname>.building`,
+        // append-style, keyed on the SHA per orchestrator.rs). Never GC a generation
+        // while its SHA is being rebuilt.
+        if building_shas.contains(&sha) {
             continue;
         }
         group.sort_by_key(|(parsed, _)| parsed.generation);
         let keep_idx = group.len() - 1;
         for (i, (_, path)) in group.iter().enumerate() {
             if i == keep_idx {
-                continue;
-            }
-            let building = path.with_extension("building");
-            if building.exists() {
                 continue;
             }
             match fs::remove_dir_all(path) {

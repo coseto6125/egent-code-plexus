@@ -310,6 +310,25 @@ fn sweep_stale_generations_skips_building() {
 }
 
 #[test]
+fn sweep_stale_generations_skips_when_sha_has_active_building() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "e".repeat(40);
+    make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.1000.10.0"));
+    make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.500.5.0"));
+    // REAL append-style building marker for this SHA's base dir (no .gen suffix),
+    // matching orchestrator.rs:682 `branch_main__{sha}.building`.
+    std::fs::create_dir_all(commits.join(format!("branch_main__{sha}.building"))).unwrap();
+
+    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path()).unwrap();
+    assert_eq!(
+        stats.removed, 0,
+        "no gen deleted while a build for this SHA is active"
+    );
+}
+
+#[test]
 fn sweep_stale_generations_skips_fresh() {
     let tmp = tempfile::tempdir().unwrap();
     let commits = tmp.path().join("commits");
