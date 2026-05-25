@@ -21,9 +21,10 @@
 //!
 //! The recovered operation name preserves the suffix's **original case** so
 //! that it matches the operation node's name verbatim in the graph.
-//!
-//! # Task 3 note
-//! Task 3 will add `emit_edges` + the graph/pool imports to this file.
+
+use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::pool::StringPool;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Compensator roots, lower-cased. Matched as a prefix on the lower-cased name.
 const COMPENSATOR_ROOTS: &[&str] = &["compensate", "undo", "rollback"];
@@ -80,4 +81,78 @@ pub fn strip_compensator_root(name: &str) -> Option<CompensatorMatch> {
         }
     }
     None
+}
+
+/// True for callable node kinds that can participate in a Saga pair.
+fn is_callable(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+    )
+}
+
+/// Emit `CompensatedBy` edges for same-owner-class Saga name-pairs in the node
+/// buffer. Returns the count emitted. Adds NO nodes.
+///
+/// 1. Build a `(src,tgt)` set from existing `Calls` edges (linear scan — CSR
+///    offsets don't exist at buffer time).
+/// 2. Group callable nodes by `owner_class` (skip empty owner).
+/// 3. Within each class build `name -> idx` for O(1) operation lookup.
+/// 4. For each compensator, look up the bare operation; emit the edge, conf by
+///    calls-back evidence (0.8) else name-only (0.6).
+pub fn emit_edges(nodes: &[Node], string_pool: &mut StringPool, edges: &mut Vec<Edge>) -> usize {
+    let reason_calls_back = string_pool.add("saga:calls-back");
+    let reason_name_only = string_pool.add("saga:name-only");
+
+    let mut calls: FxHashSet<(u32, u32)> = FxHashSet::default();
+    for e in edges.iter() {
+        if e.rel_type == RelType::Calls {
+            calls.insert((e.source, e.target));
+        }
+    }
+
+    // Group callable nodes by owner_class. Use owned Strings to avoid holding a
+    // borrow of `string_pool` across emission.
+    let mut by_class: FxHashMap<String, Vec<(u32, String)>> = FxHashMap::default();
+    for (idx, node) in nodes.iter().enumerate() {
+        if !is_callable(node.kind) {
+            continue;
+        }
+        let owner = string_pool.resolve(&node.owner_class).to_string();
+        if owner.is_empty() {
+            continue;
+        }
+        let name = string_pool.resolve(&node.name).to_string();
+        by_class.entry(owner).or_default().push((idx as u32, name));
+    }
+
+    let mut count = 0usize;
+    for members in by_class.values() {
+        let name_map: FxHashMap<&str, u32> = members
+            .iter()
+            .map(|(idx, name)| (name.as_str(), *idx))
+            .collect();
+        for (comp_idx, comp_name) in members {
+            let Some(m) = strip_compensator_root(comp_name) else {
+                continue;
+            };
+            let Some(&op_idx) = name_map.get(m.operation_name.as_str()) else {
+                continue;
+            };
+            let (confidence, reason) = if calls.contains(&(*comp_idx, op_idx)) {
+                (0.8_f32, reason_calls_back)
+            } else {
+                (0.6_f32, reason_name_only)
+            };
+            edges.push(Edge {
+                source: *comp_idx,
+                target: op_idx,
+                rel_type: RelType::CompensatedBy,
+                confidence,
+                reason,
+            });
+            count += 1;
+        }
+    }
+    count
 }
