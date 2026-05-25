@@ -102,7 +102,7 @@ fn list_routes(
             "path": path,
             "kind": "Route",
             "filePath": file_node.path.resolve(&graph.string_pool),
-            "line": node.span.0.to_native(),
+            "line": node.start_line(),
         });
         match (is_test, include_tests) {
             (false, _) => results.push(row),
@@ -189,7 +189,7 @@ fn find_enclosing_scope(
         {
             continue;
         }
-        let start_line = node.span.0.to_native();
+        let start_line = node.start_line();
         let end_line = node.span.2.to_native();
         // Strict containment: a route registered at the same line as the
         // function's signature shouldn't be claimed by an unrelated sibling.
@@ -227,7 +227,7 @@ fn enclosing_scope_json(
                 "uid": n.uid.to_native().to_string(),
                 "name": n.name.resolve(&graph.string_pool),
                 "kind": kind_to_str(&n.kind),
-                "line": n.span.0.to_native(),
+                "line": n.start_line(),
             })
         }
         None => serde_json::Value::Null,
@@ -334,7 +334,7 @@ fn inspect_route(
         let (route_method, route_path) = split_route_name(route_name);
         let route_file_idx = route_node.file_idx.to_native();
         let route_file = &graph.files[route_file_idx as usize];
-        let route_line = route_node.span.0.to_native();
+        let route_line = route_node.start_line();
         let route_file_path = route_file.path.resolve(&graph.string_pool);
 
         // Smallest containing scope of the route registration call. Used
@@ -408,7 +408,7 @@ fn inspect_route(
                 "kind": kind_to_str(&handler_node.kind),
                 "handlerKind": "named",
                 "filePath": handler_file.path.resolve(&graph.string_pool),
-                "line": handler_node.span.0.to_native(),
+                "line": handler_node.start_line(),
                 "route": route_name,
                 "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
             }));
@@ -469,7 +469,7 @@ fn bfs_upstream(
                 "name": curr_node.name.resolve(&graph.string_pool),
                 "kind": kind_to_str(&curr_node.kind),
                 "filePath": file_node.path.resolve(&graph.string_pool),
-                "line": curr_node.span.0.to_native(),
+                "line": curr_node.start_line(),
                 "depth": curr_depth,
                 "viaReason": via_reason,
                 "viaConfidence": via_confidence,

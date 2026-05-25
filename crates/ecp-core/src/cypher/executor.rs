@@ -1457,6 +1457,10 @@ fn node_prop_value(
             }
         }
         "kind" => Value::Str(archived_kind_str(n).to_string()),
+        // 1-based, matching impact/find/inspect output (see Node::start_line).
+        // `span.0` is the raw 0-based tree-sitter row; never expose it as `line`.
+        "line" | "startLine" => Value::Int(n.start_line() as i64),
+        "endLine" => Value::Int(n.end_line() as i64),
         "filePath" => Value::Str(if n.has_owning_file() {
             let fi = n.file_idx.to_native() as usize;
             graph.files[fi].path.resolve(&graph.string_pool).to_string()
@@ -2279,6 +2283,21 @@ mod tests {
             rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
                 .unwrap();
         f(archived);
+    }
+
+    #[test]
+    fn cypher_exposes_line_props_one_based() {
+        // Lone node has span (0,0,1,0): tree-sitter row 0..1 (0-based). Cypher
+        // must surface 1-based line/startLine=1 and endLine=2, matching
+        // impact/find output — never the raw 0-based span.
+        with_lone(|g| {
+            let q = parse("MATCH (n:Function) RETURN n.line, n.startLine, n.endLine").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Int(1), "n.line = span.0 + 1");
+            assert_eq!(r.rows[0][1], Value::Int(1), "n.startLine = span.0 + 1");
+            assert_eq!(r.rows[0][2], Value::Int(2), "n.endLine = span.2 + 1");
+        });
     }
 
     #[test]

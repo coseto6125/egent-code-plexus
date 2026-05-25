@@ -168,7 +168,7 @@ fn detect_collisions(
             } else {
                 "<unknown>".to_owned()
             };
-            let start_line = node.span.0.to_native();
+            let start_line = node.start_line();
             locs.push(format!("{file_path}:{start_line}"));
         }
         return locs;
@@ -183,7 +183,7 @@ fn detect_collisions(
             } else {
                 "<unknown>".to_owned()
             };
-            let start_line = node.span.0.to_native();
+            let start_line = node.start_line();
             locs.push(format!("{file_path}:{start_line}"));
         }
     }
