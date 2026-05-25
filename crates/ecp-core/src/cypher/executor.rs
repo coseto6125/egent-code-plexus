@@ -336,7 +336,14 @@ fn execute_inner(
 
 fn dedup_rows(rows: &mut Vec<Vec<Value>>) {
     let mut seen = HashSet::new();
-    rows.retain(|row| seen.insert(format!("{row:?}")));
+    let mut key = Vec::new();
+    rows.retain(|row| {
+        key.clear();
+        for v in row {
+            v.write_dedup_key(&mut key);
+        }
+        seen.insert(key.clone())
+    });
 }
 
 /// Compare two optional row cell values for ORDER BY sorting.
@@ -3411,5 +3418,50 @@ mod tests {
                 r.rows[0][2]
             );
         });
+    }
+
+    #[test]
+    fn dedup_rows_collapses_identical() {
+        let mut rows = vec![
+            vec![Value::Int(1), Value::Str("a".into())],
+            vec![Value::Int(1), Value::Str("a".into())],
+            vec![Value::Int(2), Value::Str("a".into())],
+        ];
+        dedup_rows(&mut rows);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn dedup_rows_distinguishes_floats() {
+        let mut rows = vec![
+            vec![Value::Float(1.0)],
+            vec![Value::Float(1.5)],
+            vec![Value::Float(1.0)],
+        ];
+        dedup_rows(&mut rows);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn dedup_rows_list_length_prefix_guard() {
+        // ["a","b"] must not collide with ["ab"] — length-prefixing the
+        // Str bytes is what prevents the boundary ambiguity.
+        let mut rows = vec![
+            vec![Value::List(vec![
+                Value::Str("a".into()),
+                Value::Str("b".into()),
+            ])],
+            vec![Value::List(vec![Value::Str("ab".into())])],
+        ];
+        dedup_rows(&mut rows);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn dedup_rows_distinguishes_int_float_same_value() {
+        // Int(1) and Float(1.0) carry different tags → distinct rows.
+        let mut rows = vec![vec![Value::Int(1)], vec![Value::Float(1.0)]];
+        dedup_rows(&mut rows);
+        assert_eq!(rows.len(), 2);
     }
 }
