@@ -113,6 +113,7 @@ const ADMIN_SUBCMDS: &[&str] = &[
     "status",
     "drop",
     "prune",
+    "gc",
     "config",
     "group",
     "index",
