@@ -404,9 +404,9 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         );
     }
     emit_hidden_edges_footer(hints.hidden_edges);
-    if hints.hidden_heuristic_edges > 0 {
+    if args.no_heuristic && hints.hidden_heuristic_edges > 0 {
         eprintln!(
-            "note: {} heuristic edges hidden (pass --include-heuristic to see them)",
+            "note: {} heuristic callers suppressed (--no-heuristic); drop the flag to see them",
             hints.hidden_heuristic_edges
         );
     }
@@ -1283,8 +1283,8 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
             "filePath": sym_file,
             "impact": det_results.clone(),
         });
-        if !args.no_heuristic && !heur_results.is_empty() {
-            sym_entry["heuristic_edges"] = json!(heur_results);
+        if !args.no_heuristic {
+            sym_entry["heuristic_callers"] = json!(tag_heuristic(heur_results));
         }
         // Orphan-symbol fallback: when upstream-only mode finds no callers,
         // attach depth-1 downstream callees so the changed symbol still
@@ -1357,8 +1357,10 @@ fn attach_hidden_edges(result: &mut Value, hidden_edges: u64) {
 /// Attach heuristic-filter fields to the JSON result object.
 ///
 /// `hidden_heuristic_edges` is always written (0 is safe — callers can branch
-/// on the field existing). `heuristic_edges` section is appended only when
-/// `include_heuristic` is true and the vec is non-empty.
+/// on the field existing). `heuristic_callers` section is always present when
+/// `include_heuristic` is true (empty array allowed), with each entry tagged
+/// `requires_verification: true` so consumers never mistake a heuristic lead
+/// for a deterministic caller.
 /// `explain_confidence` block is appended when the flag is set.
 fn attach_heuristic_fields(
     result: &mut Value,
@@ -1370,8 +1372,8 @@ fn attach_heuristic_fields(
 ) {
     result["hidden_heuristic_edges"] = json!(hidden_heuristic_edges);
     let heuristic_reached = heuristic_results.len() as u64;
-    if include_heuristic && !heuristic_results.is_empty() {
-        result["heuristic_edges"] = json!(heuristic_results);
+    if include_heuristic {
+        result["heuristic_callers"] = json!(tag_heuristic(heuristic_results));
     }
     if explain_confidence {
         result["explain_confidence"] = json!({
@@ -1381,6 +1383,20 @@ fn attach_heuristic_fields(
             },
         });
     }
+}
+
+/// Tag each heuristic caller `requires_verification: true` so a consumer never
+/// mistakes a ~0.85 heuristic lead for a 1.0 deterministic caller.
+fn tag_heuristic(entries: Vec<Value>) -> Vec<Value> {
+    entries
+        .into_iter()
+        .map(|mut e| {
+            if let Some(obj) = e.as_object_mut() {
+                obj.insert("requires_verification".to_string(), json!(true));
+            }
+            e
+        })
+        .collect()
 }
 
 /// Stderr footer mirroring `attach_hidden_edges` — emitted only when the

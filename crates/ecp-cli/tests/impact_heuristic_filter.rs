@@ -218,7 +218,8 @@ fn run_ecp_impact(repo: &Path, extra_args: &[&str]) -> serde_json::Value {
 }
 
 /// Default `ecp impact` MUST traverse a `MirrorsField` heuristic edge and
-/// expose it in `heuristic_edges`. `hidden_heuristic_edges` must be 0.
+/// expose it in `heuristic_callers`. `hidden_heuristic_edges` must be 0.
+/// Each entry in `heuristic_callers` must carry `requires_verification: true`.
 #[test]
 fn test_default_includes_heuristic_edges() {
     let tmp = tempfile::tempdir().unwrap();
@@ -233,15 +234,24 @@ fn test_default_includes_heuristic_edges() {
     // direction=down so we traverse from source outward.
     let val = run_ecp_impact(tmp.path(), &["--direction", "down"]);
 
-    // `target` must appear in `heuristic_edges` (traversed by default).
-    let in_heuristic = val["heuristic_edges"]
+    // `target` must appear in `heuristic_callers` (traversed by default).
+    let callers = val["heuristic_callers"]
         .as_array()
-        .map(|arr| arr.iter().any(|e| e["name"].as_str() == Some("target")))
-        .unwrap_or(false);
+        .unwrap_or_else(|| panic!("`heuristic_callers` key missing from output:\n{val}"));
+    let in_heuristic = callers.iter().any(|e| e["name"].as_str() == Some("target"));
     assert!(
         in_heuristic,
-        "`target` must appear in `heuristic_edges` by default: {val}"
+        "`target` must appear in `heuristic_callers` by default: {val}"
     );
+
+    // Each entry must be tagged requires_verification: true.
+    for entry in callers {
+        assert_eq!(
+            entry["requires_verification"].as_bool(),
+            Some(true),
+            "heuristic_callers entry missing requires_verification: {entry}"
+        );
+    }
 
     // hidden_heuristic_edges must be 0 (edge was traversed, not hidden).
     let hidden = val["hidden_heuristic_edges"]
@@ -268,7 +278,7 @@ fn test_no_heuristic_flag_suppresses() {
 
     let val = run_ecp_impact(tmp.path(), &["--direction", "down", "--no-heuristic"]);
 
-    // `target` must NOT appear in `impact` or `heuristic_edges` (edge suppressed).
+    // `target` must NOT appear in `impact` or `heuristic_callers` (edge suppressed).
     let in_impact = val["impact"]
         .as_array()
         .map(|arr| arr.iter().any(|e| e["name"].as_str() == Some("target")))
