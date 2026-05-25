@@ -51,7 +51,8 @@ const K = Object.freeze({
     TBL_VSCODE: 'table.header.vscode',
     
     TBL_R1: 'table.row.r1', // 實體檔案
-    TBL_R2: 'table.row.r2', // File 節點
+    TBL_R2: 'table.row.r2', // graph 節點 (total)
+    TBL_R2B: 'table.row.r2b', // graph File 節點
     TBL_R3: 'table.row.r3', // graph 大小
     TBL_R4: 'table.row.r4', // force index 峰值 RSS
     TBL_R5: 'table.row.r5', // cold analyze
@@ -133,7 +134,8 @@ const TRANSLATIONS = {
         [K.TBL_SAMPLE]: '.sample_repo (22k 檔案)',
         [K.TBL_VSCODE]: 'VS Code (14k 檔案)',
         [K.TBL_R1]: 'repo 實體檔案',
-        [K.TBL_R2]: 'graph File 節點',
+        [K.TBL_R2]: 'graph 節點 (total)',
+        [K.TBL_R2B]: 'graph File 節點',
         [K.TBL_R3]: 'graph 大小',
         [K.TBL_R4]: 'force index 峰值 RSS',
         [K.TBL_R5]: 'cold index',
@@ -201,7 +203,8 @@ const TRANSLATIONS = {
         [K.TBL_SAMPLE]: '.sample_repo (22k 文件)',
         [K.TBL_VSCODE]: 'VS Code (14k 文件)',
         [K.TBL_R1]: 'repo 实体文件',
-        [K.TBL_R2]: 'graph File 节点',
+        [K.TBL_R2]: 'graph 节点 (total)',
+        [K.TBL_R2B]: 'graph File 节点',
         [K.TBL_R3]: 'graph 大小',
         [K.TBL_R4]: 'force index 峰值 RSS',
         [K.TBL_R5]: 'cold index',
@@ -269,7 +272,8 @@ const TRANSLATIONS = {
         [K.TBL_SAMPLE]: '.sample_repo (22k files)',
         [K.TBL_VSCODE]: 'VS Code (14k files)',
         [K.TBL_R1]: 'Repo files',
-        [K.TBL_R2]: 'Graph File nodes',
+        [K.TBL_R2]: 'Graph nodes (total)',
+        [K.TBL_R2B]: 'Graph File nodes',
         [K.TBL_R3]: 'Graph size',
         [K.TBL_R4]: 'Force index peak RSS',
         [K.TBL_R5]: 'Cold index',
@@ -337,7 +341,8 @@ const TRANSLATIONS = {
         [K.TBL_SAMPLE]: '.sample_repo (22k ファイル)',
         [K.TBL_VSCODE]: 'VS Code (14k ファイル)',
         [K.TBL_R1]: 'リポジトリ実ファイル',
-        [K.TBL_R2]: 'Graph File ノード',
+        [K.TBL_R2]: 'Graph ノード (total)',
+        [K.TBL_R2B]: 'Graph File ノード',
         [K.TBL_R3]: 'Graph サイズ',
         [K.TBL_R4]: 'Force index ピーク RSS',
         [K.TBL_R5]: 'Cold index',
@@ -405,7 +410,8 @@ const TRANSLATIONS = {
         [K.TBL_SAMPLE]: '.sample_repo (22k 파일)',
         [K.TBL_VSCODE]: 'VS Code (14k 파일)',
         [K.TBL_R1]: '리포지토리 실제 파일',
-        [K.TBL_R2]: 'Graph File 노드',
+        [K.TBL_R2]: 'Graph 노드 (total)',
+        [K.TBL_R2B]: 'Graph File 노드',
         [K.TBL_R3]: 'Graph 크기',
         [K.TBL_R4]: 'Force index 피크 RSS',
         [K.TBL_R5]: 'Cold index',
@@ -473,7 +479,8 @@ const TRANSLATIONS = {
         [K.TBL_SAMPLE]: '.sample_repo (22k archivos)',
         [K.TBL_VSCODE]: 'VS Code (14k archivos)',
         [K.TBL_R1]: 'Archivos del repositorio',
-        [K.TBL_R2]: 'Nodos Graph File',
+        [K.TBL_R2]: 'Nodos Graph (total)',
+        [K.TBL_R2B]: 'Nodos Graph File',
         [K.TBL_R3]: 'Tamaño del Grafo',
         [K.TBL_R4]: 'Pico RSS (force index)',
         [K.TBL_R5]: 'Cold index',
