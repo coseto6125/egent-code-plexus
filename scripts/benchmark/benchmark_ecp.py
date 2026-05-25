@@ -419,6 +419,59 @@ def main() -> int:
             ],
             args.repo,
         ),
+        # COLLECT() projection: aggregates child names into a list per parent.
+        # Exercises the grouping accumulator's list-collection path, distinct
+        # from scalar count(*). Without it, COLLECT regressions go undetected.
+        (
+            "cypher COLLECT",
+            [
+                str(args.binary),
+                "cypher",
+                "MATCH (c:Class)-[:HasMethod]->(m:Method) RETURN c.name, collect(m.name)",
+                "--repo",
+                str(args.repo),
+            ],
+            args.repo,
+        ),
+        # IN [literal,...] literal-list filter: distinct from `<lit> IN prop`
+        # (decorator IN row). Exercises the literal-list membership predicate.
+        (
+            "cypher IN literal-list",
+            [
+                str(args.binary),
+                "cypher",
+                "MATCH (m:Method) WHERE m.name IN ['main','run','init'] RETURN count(*)",
+                "--repo",
+                str(args.repo),
+            ],
+            args.repo,
+        ),
+        # Multi-hop variable-length edge: exercises the frontier-expansion path
+        # over 1..3 Calls hops, the most allocation-heavy traversal shape.
+        (
+            "cypher multi-hop Calls*1..3",
+            [
+                str(args.binary),
+                "cypher",
+                "MATCH (a:Method)-[:Calls*1..3]->(b:Method) RETURN count(*)",
+                "--repo",
+                str(args.repo),
+            ],
+            args.repo,
+        ),
+        # Multi-aggregate GROUP BY: groups all nodes by kind with a count,
+        # exercising the grouped-accumulator + ORDER BY on an aggregate.
+        (
+            "cypher GROUP BY kind",
+            [
+                str(args.binary),
+                "cypher",
+                "MATCH (n) RETURN n.kind, count(*) ORDER BY count(*) DESC",
+                "--repo",
+                str(args.repo),
+            ],
+            args.repo,
+        ),
     ]
     if name := sym.get("class_name"):
         queries.append(
