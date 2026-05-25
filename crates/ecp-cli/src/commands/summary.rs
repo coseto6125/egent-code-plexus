@@ -142,7 +142,7 @@ pub fn build_repo_health(r: &crate::repo_selector::ResolvedRepo, detailed: bool)
         "dir_name": r.dir_name,
         "frameworks": fetch_frameworks(graph, status),
         "freshness": fetch_freshness(r, detailed),
-        "metrics": fetch_metrics(graph, status),
+        "metrics": fetch_metrics(graph, latest_graph_path(r).as_deref(), status),
         "blind_spots": fetch_blind_spots(graph, status),
     })
 }
@@ -227,37 +227,53 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
     out
 }
 
-/// Four post-index metrics surfaced inline so an LLM doesn't have to run a
+/// Post-index metrics surfaced inline so an LLM doesn't have to run a
 /// follow-up Cypher to learn "how big is this graph". Matches the gitnexus
 /// precedent of shipping a quantitative summary right after indexing.
 ///
-/// - `nodes`: total node count (includes Process / synthetic nodes)
-/// - `edges`: total edge count
-/// - `files`: distinct source files indexed
+/// - `nodes` / `edges` / `files`: totals (nodes includes Process / synthetic)
 /// - `symbols`: callable / type-bearing nodes (Function, Method, Class,
 ///   Interface) — the things the LLM is most likely to ask about
-fn fetch_metrics(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'static str>) -> Value {
+/// - `by_kind`: per-NodeKind counts (only non-zero kinds), so "how many
+///   functions / classes / routes" needs no follow-up query
+/// - `graph_version`: rkyv `graph.bin` format version
+/// - `graph_bytes`: on-disk size of the graph.bin backing this repo
+fn fetch_metrics(
+    graph: Option<&ArchivedZeroCopyGraph>,
+    graph_path: Option<&std::path::Path>,
+    status: Option<&'static str>,
+) -> Value {
     match graph {
         Some(g) => {
             let nodes = g.nodes.len();
             let edges = g.edges.len();
             let files = g.files.len();
-            // NodeKind derives `#[rkyv(compare(PartialEq))]`, so the archived
-            // value can be compared against the owned enum directly — no
-            // per-node deserialize. Skipping the deserialize avoids a heap
-            // alloc per node for large graphs (`--repo @all` × ~10k nodes).
+            // Single walk: total symbols + per-kind tally. NodeKind derives
+            // `#[rkyv(compare(PartialEq))]`, so the archived value compares
+            // against the owned enum without a per-node deserialize.
             use ecp_core::graph::NodeKind;
             let mut symbols: u32 = 0;
+            let mut by_kind: std::collections::BTreeMap<&'static str, u32> =
+                std::collections::BTreeMap::new();
             for node in g.nodes.iter() {
-                if node.kind == NodeKind::Function
-                    || node.kind == NodeKind::Method
-                    || node.kind == NodeKind::Class
-                    || node.kind == NodeKind::Interface
-                {
+                let kind = NodeKind::from(&node.kind);
+                *by_kind.entry(kind.as_str()).or_insert(0) += 1;
+                if matches!(
+                    kind,
+                    NodeKind::Function | NodeKind::Method | NodeKind::Class | NodeKind::Interface
+                ) {
                     symbols += 1;
                 }
             }
-            json!({ "nodes": nodes, "edges": edges, "files": files, "symbols": symbols })
+            json!({
+                "nodes": nodes,
+                "edges": edges,
+                "files": files,
+                "symbols": symbols,
+                "by_kind": by_kind,
+                "graph_version": g.version.to_native(),
+                "graph_bytes": graph_path.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()),
+            })
         }
         None => json!({
             "nodes": 0,
@@ -797,18 +813,25 @@ mod tests {
         g.process_start = 3;
 
         with_archived(g, |archived| {
-            let v = fetch_metrics(Some(archived), None);
+            let v = fetch_metrics(Some(archived), None, None);
             assert_eq!(v["nodes"], json!(3));
             assert_eq!(v["edges"], json!(1));
             assert_eq!(v["files"], json!(1));
             assert_eq!(v["symbols"], json!(2));
+            // by_kind tallies every node kind present (Function + Class + Variable).
+            assert_eq!(v["by_kind"]["Function"], json!(1));
+            assert_eq!(v["by_kind"]["Class"], json!(1));
+            assert_eq!(v["by_kind"]["Variable"], json!(1));
+            // graph_bytes is null when no path supplied; version is surfaced.
+            assert!(v["graph_bytes"].is_null());
+            assert!(v["graph_version"].is_number());
             assert!(v.get("status").is_none());
         });
     }
 
     #[test]
     fn fetch_metrics_no_graph_returns_zeros_with_status_note() {
-        let v = fetch_metrics(None, Some("graph_unavailable"));
+        let v = fetch_metrics(None, None, Some("graph_unavailable"));
         assert_eq!(v["nodes"], json!(0));
         assert_eq!(v["edges"], json!(0));
         assert_eq!(v["files"], json!(0));
