@@ -44,7 +44,7 @@ pub(crate) fn run_install() -> Result<PathBuf, EcpError> {
     Ok(path)
 }
 
-fn run_uninstall() -> Result<PathBuf, EcpError> {
+pub(crate) fn run_uninstall() -> Result<PathBuf, EcpError> {
     let path = config_path();
     remove_server(&path)?;
     Ok(path)

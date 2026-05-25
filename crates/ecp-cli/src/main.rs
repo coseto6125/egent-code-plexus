@@ -78,6 +78,9 @@ fn main() {
         Commands::Group { cmd } => run_no_graph!(commands::group::run(cmd.clone())),
         Commands::Schema(args) => run_no_graph!(commands::schema::run(args.clone())),
         Commands::Insight(args) => run_no_graph!(commands::insight::run(args.clone())),
+        Commands::Uninstall(args) => {
+            run_no_graph!(commands::uninstall::run(args.clone()))
+        }
         _ => {} // fall through to graph-loading path
     }
 
@@ -108,7 +111,8 @@ fn main() {
         | Commands::Peers(_)
         | Commands::Group { .. }
         | Commands::Schema(_)
-        | Commands::Insight(_) => None,
+        | Commands::Insight(_)
+        | Commands::Uninstall(_) => None,
     };
     let cwd = repo_opt
         .map(std::path::PathBuf::from)
@@ -187,7 +191,8 @@ fn main() {
         | Commands::Peers(_)
         | Commands::Group { .. }
         | Commands::Schema(_)
-        | Commands::Insight(_) => unreachable!("handled before graph load"),
+        | Commands::Insight(_)
+        | Commands::Uninstall(_) => unreachable!("handled before graph load"),
     };
     if let Err(e) = result {
         eprintln!("Command failed: {e}");

@@ -76,6 +76,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "schema",
     "processes",
     "insight",
+    "uninstall",
     // Hidden
     "admin",
     "group",

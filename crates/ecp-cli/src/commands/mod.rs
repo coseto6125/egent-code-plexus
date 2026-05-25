@@ -28,5 +28,6 @@ pub mod shape_check;
 pub mod summary;
 pub mod symbol_id;
 pub mod tool_map;
+pub mod uninstall;
 pub mod verify_resolver;
 pub mod watch;

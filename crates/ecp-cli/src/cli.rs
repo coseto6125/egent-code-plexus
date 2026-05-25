@@ -41,6 +41,11 @@ pub enum Commands {
     /// Edge-level resolver delta — binding tier-degradation (silent break), route / contract changes. For symbol blast-radius, use `ecp impact`.
     Diff(commands::diff::DiffArgs),
 
+    /// Remove all ecp host integrations and optionally wipe the index cache.
+    /// Reverses hooks, MCP registration, and skills for Claude Code, Codex,
+    /// and Gemini. Use --host to limit to one host; --dry-run to preview.
+    Uninstall(commands::uninstall::UninstallArgs),
+
     /// Administrative operations. With no subcommand: launches the interactive
     /// TUI for host-integration management. With a subcommand: runs that
     /// admin operation (registry / hooks / destructive ops — hidden namespace).
