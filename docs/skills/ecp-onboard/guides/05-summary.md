@@ -66,6 +66,12 @@ ecp admin claude install skills all
 ecp admin claude status        # confirm INSTALLED
 ```
 
+> **Guidance import**: `ecp admin claude install skills` also copies an
+> `ECP.md` guidance file into `~/.claude/` and appends `@ECP.md` to the
+> global `~/.claude/CLAUDE.md`. This loads every session so the agent
+> defaults to `ecp` for structural queries instead of falling back to
+> grep. Pass `--no-claude-md` to skip the import.
+
 On failure, show stderr → common-cause table → retry / skip. These are
 `ecp admin` calls, not raw file writes — never hand-edit the host's
 settings to emulate them.
@@ -126,6 +132,7 @@ generated_at: {ISO 8601 timestamp}
 
 ## Phase 04 agent integration
 - [x] native: Claude Code — hooks + skills (`ecp admin claude install`)
+- [x] guidance: @ECP.md import added to ~/.claude/CLAUDE.md
 - [x] mcp: wrote ~/.cursor/mcp.json (Cursor)
 
 ## Phase 05 summary
