@@ -2,13 +2,14 @@
 //!
 //! ## Saga detection
 //!
-//! Scans the indexed graph for method name-pairs that follow the Saga
-//! compensating-transaction pattern:
-//!
-//!   `<verb>_<noun>`  ↔  `compensate_<verb>_<noun>` | `undo_<verb>_<noun>` | `rollback_<verb>_<noun>`
-//!
-//! Both methods must share the same owner class.  An optional `--class <Name>`
-//! flag restricts scanning to a single class.
+//! Reads heuristic `RelType::CompensatedBy` edges from the graph (emitted at
+//! index time by `ecp_analyzer::post_process::saga_pairs`). Each edge is a
+//! `compensator → operation` pair following the Saga compensating-transaction
+//! naming convention (`compensate`/`undo`/`rollback` + `<verb_noun>`, across
+//! snake/camel/Pascal case), both on the same owner class. An optional
+//! `--class <Name>` flag restricts output to a single class. Per-edge
+//! confidence + the `saga:calls-back`/`saga:name-only` evidence tier come from
+//! the edge itself (no re-scan at query time).
 //!
 //! ## Outbox detection
 //!
@@ -38,7 +39,11 @@
 //! | < 0.75       | `BLIND_SPOT`       |
 //! | 0.75–0.85    | `POSSIBLY_RELATED` |
 //!
-//! All findings carry `requires_verification: true` and **never enter the graph**.
+//! All findings carry `requires_verification: true`. Saga pairs are backed by
+//! the in-graph `CompensatedBy` edge (queryable via
+//! `ecp cypher 'MATCH ()-[r:CompensatedBy]->() ...'` and traversed by
+//! `ecp impact` when heuristics are shown); Outbox findings remain a
+//! query-time name-scan and do not enter the graph.
 
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
