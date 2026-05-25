@@ -6,6 +6,8 @@ Typical use:
     python scripts/benchmark/benchmark_ecp.py                              # full sweep
     python scripts/benchmark/benchmark_ecp.py --runs 5 --json out.json     # CI mode
     python scripts/benchmark/benchmark_ecp.py --skip-cold                  # don't wipe index
+    # analyze phases default to 1 sample (~±20% wall noise); --runs N>1 or
+    # --analyze-runs N raises analyze repeats for CI regression detection.
 """
 
 from __future__ import annotations
@@ -274,6 +276,15 @@ def main() -> int:
     ap.add_argument(
         "--runs", type=int, default=3, help="Repeats per query command (analyze runs once)"
     )
+    ap.add_argument(
+        "--analyze-runs",
+        type=int,
+        default=0,
+        help="Repeats for the analyze (cold/baseline + incremental) phases. "
+        "Default 0 means: imply --runs when --runs>1, else 1. Single-sample "
+        "analyze has ~±20%% wall-time noise; use --analyze-runs 10 for CI "
+        "regression detection.",
+    )
     ap.add_argument("--json", type=Path, help="Write JSON result to this path")
     ap.add_argument(
         "--skip-cold",
@@ -286,6 +297,7 @@ def main() -> int:
         help="Skip the auto `cargo build --release` step (use the existing binary as-is)",
     )
     args = ap.parse_args()
+    analyze_runs = args.analyze_runs or (args.runs if args.runs > 1 else 1)
     args.repo = args.repo.resolve()
     args.git_repo = args.git_repo.resolve()
     args.binary = args.binary.resolve()
@@ -325,7 +337,7 @@ def main() -> int:
     label = "analyze (cold)" if not args.skip_cold else "analyze (baseline)"
     print(f"→ {label}")
     s = _bench(
-        label, [str(args.binary), "admin", "index", "--repo", str(args.repo)], cwd=args.repo, runs=1
+        label, [str(args.binary), "admin", "index", "--repo", str(args.repo)], cwd=args.repo, runs=analyze_runs
     )
     samples.append(s)
     if s.err:
@@ -340,7 +352,7 @@ def main() -> int:
         "analyze (incremental)",
         [str(args.binary), "admin", "index", "--repo", str(args.repo)],
         cwd=args.repo,
-        runs=1,
+        runs=analyze_runs,
     )
     samples.append(s)
     print(f"  {s.median_s:.3f}s" if s.runs else f"  FAIL: {s.err}")
