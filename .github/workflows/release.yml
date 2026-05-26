@@ -570,8 +570,14 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
+          # Stage OUTSIDE the repo checkout: when npm publish --provenance runs
+          # from a directory inside a git repo, it treats the staging dir as a
+          # monorepo package and tries `git ls-remote` on a path-derived slug
+          # (npm-staging/<pkg>) over ssh, which fails (no deploy key). Outside
+          # the checkout there is no enclosing .git, so provenance is sourced
+          # purely from the GitHub Actions OIDC env (GITHUB_REPOSITORY etc.).
           node packaging/npm/build-platform-packages.mjs \
-            --version "$version" --artifacts artifacts --out npm-staging
+            --version "$version" --artifacts artifacts --out "$RUNNER_TEMP/npm-staging"
 
       - name: Publish platform packages, then main package
         shell: bash
@@ -581,11 +587,11 @@ jobs:
           # Platform packages first — the main package's optionalDependencies
           # pin these exact versions, so they must already exist on the registry
           # when the main package is published. Main goes last.
-          for d in npm-staging/*/; do
+          for d in "$RUNNER_TEMP"/npm-staging/*/; do
             [ "$(basename "$d")" = "egent-code-plexus" ] && continue
             npm publish "$d" --access public --provenance
           done
-          npm publish npm-staging/egent-code-plexus --access public --provenance
+          npm publish "$RUNNER_TEMP/npm-staging/egent-code-plexus" --access public --provenance
 
   # ==================== Publish to PyPI (uvx egent-code-plexus) ====================
   # Per-platform wheels built from the same prebuilt binaries (no Rust rebuild).
