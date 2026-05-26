@@ -25,7 +25,8 @@
   "main": "index.js",
   "files": [
     "bin/ecp.js",
-    "index.js"
+    "index.js",
+    "README.md"
   ],
   "engines": {
     "node": ">=16"

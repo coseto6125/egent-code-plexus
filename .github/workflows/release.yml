@@ -550,6 +550,11 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Upgrade npm for trusted publishing (OIDC)
+        # Trusted publishing (token-free OIDC) needs npm >= 11.5.1; Node 22 ships
+        # npm 10. Without this, publish falls back to NODE_AUTH_TOKEN.
+        run: npm install -g npm@latest
+
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -581,17 +586,35 @@ jobs:
 
       - name: Publish platform packages, then main package
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # No NODE_AUTH_TOKEN: authentication is via trusted publishing (OIDC),
+        # configured per-package on npmjs.com against this repo + release.yml.
+        # id-token: write (above) lets npm mint the OIDC token.
         run: |
+          # Publish one package, tolerating "already published this version" so a
+          # re-run after a partial failure is idempotent (npm has no
+          # --skip-existing). Any other failure still aborts the release.
+          publish() {
+            local dir="$1" out
+            if out=$(npm publish "$dir" --access public --provenance 2>&1); then
+              echo "$out"
+              return 0
+            fi
+            echo "$out"
+            if echo "$out" | grep -qiE "cannot publish over|previously published|already exists|EPUBLISHCONFLICT|403.*forbidden.*you cannot publish over"; then
+              echo "::notice::$(basename "$dir") already published at this version — skipping"
+              return 0
+            fi
+            return 1
+          }
+
           # Platform packages first — the main package's optionalDependencies
           # pin these exact versions, so they must already exist on the registry
           # when the main package is published. Main goes last.
           for d in "$RUNNER_TEMP"/npm-staging/*/; do
             [ "$(basename "$d")" = "egent-code-plexus" ] && continue
-            npm publish "$d" --access public --provenance
+            publish "$d"
           done
-          npm publish "$RUNNER_TEMP/npm-staging/egent-code-plexus" --access public --provenance
+          publish "$RUNNER_TEMP/npm-staging/egent-code-plexus"
 
   # ==================== Publish to PyPI (uvx egent-code-plexus) ====================
   # Per-platform wheels built from the same prebuilt binaries (no Rust rebuild).
