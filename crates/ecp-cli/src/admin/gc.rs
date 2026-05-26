@@ -13,6 +13,20 @@ use std::path::Path;
 pub const DEFAULT_QUOTA_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const TARGET_LOAD_FACTOR: f64 = 0.8;
 const SESSION_IDLE_HOURS: i64 = 24;
+/// A dir/file younger than this may belong to an in-flight build or a writer
+/// still mid-`rename`; skip it so gc never races a live producer.
+const IN_FLIGHT_SECS: u64 = 10;
+
+/// True when `meta`'s mtime is within [`IN_FLIGHT_SECS`] of `now` — i.e. a
+/// producer may still be writing it. Unstatable mtime → treat as settled
+/// (returns false) so a stat quirk never wedges gc.
+fn is_in_flight(meta: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|m| now.duration_since(m).ok())
+        .map(|age| age.as_secs() < IN_FLIGHT_SECS)
+        .unwrap_or(false)
+}
 
 pub struct EvictStats {
     pub evicted: usize,
@@ -269,14 +283,8 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
         let Ok(parsed) = CommitDirName::parse(&name) else {
             continue;
         };
-        if let Ok(modified) = meta.modified() {
-            if now
-                .duration_since(modified)
-                .map(|d| d.as_secs() < 10)
-                .unwrap_or(false)
-            {
-                continue;
-            }
+        if is_in_flight(&meta, now) {
+            continue;
         }
         by_sha
             .entry(parsed.sha)
@@ -340,9 +348,8 @@ pub fn sweep_retired_repos(home_ecp: &Path) -> io::Result<SweepStats> {
 /// Remove orphaned atomic-write temp siblings (`<name>.<pid>.<n>.tmp`) left in
 /// `home_ecp` when a writer's `tmp → fsync → rename` (registry/io.rs) was
 /// interrupted before the rename. The io.rs doc comment promises these "can be
-/// swept by cleanup tools" — this is that tool. Only files whose mtime is ≥10s
-/// old are removed, so a live writer mid-`rename` is never touched (same guard
-/// `sweep_stale_generations` uses against in-flight builds).
+/// swept by cleanup tools" — this is that tool. Settled files only (see
+/// [`is_in_flight`]), so a live writer mid-`rename` is never touched.
 pub fn sweep_orphan_tmp(home_ecp: &Path) -> io::Result<SweepStats> {
     let mut removed = 0usize;
     let Ok(it) = fs::read_dir(home_ecp) else {
@@ -357,17 +364,8 @@ pub fn sweep_orphan_tmp(home_ecp: &Path) -> io::Result<SweepStats> {
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        if !meta.is_file() {
+        if !meta.is_file() || is_in_flight(&meta, now) {
             continue;
-        }
-        if let Ok(modified) = meta.modified() {
-            if now
-                .duration_since(modified)
-                .map(|d| d.as_secs() < 10)
-                .unwrap_or(false)
-            {
-                continue;
-            }
         }
         match fs::remove_file(entry.path()) {
             Ok(()) => removed += 1,
