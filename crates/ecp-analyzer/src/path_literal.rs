@@ -22,14 +22,28 @@
 
 /// Decide whether a string literal value (already stripped of surrounding
 /// quotes / raw-string sigils) is shaped like a filesystem path or a known
-/// config / data file. Returns `false` for empty, whitespace-only, URL-like
-/// strings, and format strings whose only "separator" is a standard escape
-/// sequence (`\n` etc.).
+/// config / data file. Returns `false` for empty, whitespace-only, strings
+/// containing an interior space (prose / CLI-usage / lint messages), strings
+/// with an embedded `scheme://` (URLs anywhere in the value), and format
+/// strings whose only "separator" is a standard escape sequence (`\n` etc.).
 pub fn is_path_shaped(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
     if s.chars().all(|c| c.is_ascii_whitespace()) {
+        return false;
+    }
+    // An interior space marks prose: error messages, CLI usage strings, and
+    // lint diagnostics that happen to embed a `/`-bearing path or URL. Real
+    // filesystem paths used as a read/write argument carry no unescaped space,
+    // so this rejects the dominant misclassification source (vscode: 8.8k of
+    // 146k PathLiteral nodes) without dropping a true path.
+    if s.contains(' ') {
+        return false;
+    }
+    // A scheme can appear mid-string ("See https://…"), not just at the start;
+    // `contains("://")` catches embedded URLs the prefix check below misses.
+    if s.contains("://") {
         return false;
     }
     if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("ws://") {
@@ -279,6 +293,40 @@ mod tests {
             "line1\nline2",
         ] {
             assert!(!is_path_shaped(s), "expected non-path: {s:?}");
+        }
+    }
+
+    /// Misclassifications observed in the wild: lint diagnostics, CLI usage
+    /// strings, and bare URLs that carry a `/` or embedded scheme. These are
+    /// string literals any of the 14 mainstream languages can hold, so the
+    /// language-neutral predicate must reject them regardless of source lang.
+    #[test]
+    fn predicate_rejects_prose_with_embedded_path_or_url() {
+        for s in [
+            // lint diagnostic with trailing URL (vscode eslint-plugin-local)
+            "Imports violates '{{restrictions}}' restrictions. See https://github.com/microsoft/vscode/wiki",
+            "declare const enum is not supported. See https://github.com/evanw/esbuild/issues/4394",
+            // CLI usage strings embedding a real-looking path
+            "node build/npm/fast-install.ts --force",
+            "Usage: node build/copilot-migrate-pr.ts <PR_NUMBER> [--dry-run]",
+            // bare URL not at the start of the string
+            "redirect to https://example.com/login",
+        ] {
+            assert!(!is_path_shaped(s), "expected non-path (prose/url): {s:?}");
+        }
+    }
+
+    /// Guard the precision fix against over-rejection: spaceless paths and
+    /// the URL-prefix forms must still pass.
+    #[test]
+    fn predicate_still_accepts_spaceless_paths() {
+        for s in [
+            "src/index.ts",
+            "../package.json",
+            "C:\\Users\\me\\config.toml",
+            "vs/nls.js",
+        ] {
+            assert!(is_path_shaped(s), "expected path-shaped: {s:?}");
         }
     }
 
