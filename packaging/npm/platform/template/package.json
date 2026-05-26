@@ -1,0 +1,17 @@
+{
+  "name": "@egent-code-plexus/__PLATFORM__",
+  "version": "__VERSION__",
+  "description": "Prebuilt ecp binary for __PLATFORM__ — installed automatically by the egent-code-plexus package.",
+  "homepage": "https://github.com/coseto6125/egent-code-plexus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coseto6125/egent-code-plexus.git"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": "coseto6125",
+  "os": ["__OS__"],
+  "cpu": ["__CPU__"],
+  "files": [
+    "bin/__BIN__"
+  ]
+}

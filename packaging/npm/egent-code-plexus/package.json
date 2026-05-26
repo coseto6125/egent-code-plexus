@@ -1,0 +1,40 @@
+{
+  "name": "egent-code-plexus",
+  "version": "__VERSION__",
+  "description": "EgentCodePlexus (ecp) — symbol-level code intelligence graph for AI agents and LLMs",
+  "keywords": [
+    "code-intelligence",
+    "ast",
+    "tree-sitter",
+    "llm",
+    "ai-agents",
+    "code-graph",
+    "static-analysis"
+  ],
+  "homepage": "https://github.com/coseto6125/egent-code-plexus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coseto6125/egent-code-plexus.git"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": "coseto6125",
+  "type": "commonjs",
+  "bin": {
+    "ecp": "bin/ecp.js"
+  },
+  "main": "index.js",
+  "files": [
+    "bin/ecp.js",
+    "index.js"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "@egent-code-plexus/linux-x64": "__VERSION__",
+    "@egent-code-plexus/linux-arm64": "__VERSION__",
+    "@egent-code-plexus/darwin-x64": "__VERSION__",
+    "@egent-code-plexus/darwin-arm64": "__VERSION__",
+    "@egent-code-plexus/win32-x64": "__VERSION__"
+  }
+}

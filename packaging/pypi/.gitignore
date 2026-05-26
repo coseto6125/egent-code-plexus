@@ -1,0 +1,5 @@
+# Transient build artifacts — build_wheels.py injects the native binary here
+# before building each wheel and removes it after.
+src/ecp/_bin/
+# uv treats this dir as an editable project during `uv run`; the lock is noise.
+uv.lock

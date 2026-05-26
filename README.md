@@ -165,6 +165,22 @@ iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/ins
 cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked
 ```
 
+Prefer a package manager? The npm and PyPI packages ship the same prebuilt
+binary (no compile, no toolchain) and pick the right platform automatically:
+
+```bash
+# npm — run without installing, or install globally
+npx egent-code-plexus --help
+npm install -g egent-code-plexus
+
+# PyPI — via uv or pipx
+uvx egent-code-plexus --help
+uv tool install egent-code-plexus     # or: pipx install egent-code-plexus
+
+# cargo-binstall (prebuilt, no source build)
+cargo binstall egent-code-plexus
+```
+
 CPU-tuned source build:
 
 ```bash

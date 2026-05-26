@@ -1,0 +1,40 @@
+# PyPI distribution for ecp. This packages the prebuilt native binary (built by
+# the GitHub Release job) into per-platform wheels — it does NOT compile Rust.
+# build_wheels.py drives the actual platform-tagged wheel assembly; this file
+# defines the package metadata and the `ecp` console entry point.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "egent-code-plexus"
+# Stamped from the git tag by build_wheels.py at release time; the committed
+# placeholder can't drift out of sync with the release version.
+version = "0.0.0"
+description = "EgentCodePlexus (ecp) — symbol-level code intelligence graph for AI agents and LLMs"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "SEE LICENSE IN LICENSE.md" }
+authors = [{ name = "coseto6125" }]
+keywords = ["code-intelligence", "ast", "tree-sitter", "llm", "ai-agents", "code-graph"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Libraries",
+  "Programming Language :: Rust",
+]
+
+[project.urls]
+Homepage = "https://github.com/coseto6125/egent-code-plexus"
+Repository = "https://github.com/coseto6125/egent-code-plexus"
+
+[project.scripts]
+ecp = "ecp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ecp"]
+# The native binary is injected into src/ecp/_bin/ by build_wheels.py before the
+# wheel is built. _bin holds no .py, so it is not auto-collected as a package —
+# list it as an artifact so hatchling ships it as package data exactly once.
+# (Do NOT also force-include it: that duplicates the entry inside the wheel.)
+artifacts = ["src/ecp/_bin/*"]
