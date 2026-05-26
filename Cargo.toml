@@ -31,6 +31,14 @@ homepage = "https://github.com/coseto6125/egent-code-plexus"
 keywords = ["git", "code-intelligence", "graph"]
 categories = ["development-tools"]
 
+# Internal crate deps declared once here so the version constraint tracks the
+# single workspace version. release-plz bumps [workspace.package].version and
+# these inherit it — no per-crate version string to keep in sync.
+[workspace.dependencies]
+ecp-core = { path = "crates/ecp-core", version = "0.5.0" }
+ecp-analyzer = { path = "crates/ecp-analyzer", version = "0.5.0" }
+ecp-mcp = { path = "crates/ecp-mcp", version = "0.5.0" }
+
 # 工作區層級 lints 設定。目前無 override；後續可在此精準 allow/warn/deny
 # 特定 lint 規則，所有 crate 透過 [lints] workspace = true opt-in。
 [workspace.lints.clippy]

@@ -641,3 +641,52 @@ jobs:
 
       - name: Publish to PyPI (Trusted Publishing)
         run: uv publish wheelhouse/*.whl
+
+  # ==================== Update landing-page version badge ====================
+  # The landing page lives on the orphan gh-pages branch (GitHub Pages serves it
+  # directly). Its hero-version <span> used to be bumped by a manual push on
+  # every release. This job replaces that manual step: after the release exists,
+  # rewrite the badge to the tag version and push back to gh-pages.
+  #
+  # PAT (not GITHUB_TOKEN) so the gh-pages push is attributed to a real actor —
+  # GITHUB_TOKEN pushes here would be fine functionally, but the repo already
+  # standardizes on AUTO_MERGE_PAT for write pushes (keeps GITHUB_TOKEN minimal).
+  update-pages-version:
+    name: Update gh-pages version badge
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: gh-pages
+          token: ${{ secrets.AUTO_MERGE_PAT }}
+
+      - name: Bump hero-version badge to ${{ github.ref_name }}
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # Match only the hero-version span so the benchmark caption versions
+          # (ecp 0.4.2 · codegraph … — those are fixed test-run records) are left
+          # untouched. The vN.N.N is replaced wholesale, not pattern-stripped.
+          sed -i -E "s#(<span class=\"hero-version\">)v[0-9]+\.[0-9]+\.[0-9]+(</span>)#\1${tag}\2#" index.html
+
+          if git diff --quiet -- index.html; then
+            echo "hero-version already at ${tag}; nothing to push."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "docs(gh-pages): bump hero-version to ${tag}"
+          git push

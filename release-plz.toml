@@ -1,0 +1,37 @@
+# release-plz drives version bumping only — it does NOT publish or build.
+# Division of labour:
+#   release-plz : compute version from conventional commits, bump the single
+#                 [workspace.package].version + internal dep constraints, write
+#                 CHANGELOG, open the Release PR, and (on merge) push ONE git tag.
+#   release.yml : the existing v* tag-triggered workflow does all the heavy
+#                 lifting — 5-platform binary builds, GitHub Release, npm / PyPI
+#                 / crates.io publish. release-plz must not duplicate any of it.
+
+[workspace]
+# Don't run `cargo update` on external deps during the release — keep the Release
+# PR diff to version bumps + changelog, not an incidental lockfile churn. The
+# internal ecp-* crate version constraints (in [workspace.dependencies]) are
+# bumped automatically by release-plz regardless of this setting.
+dependencies_update = false
+# Don't auto-release on every push to main; release happens when the Release PR
+# is merged (the human's one decision point).
+release_always = false
+pr_labels = ["release"]
+# No cargo publish here — release.yml's publish-crates job owns crates.io.
+publish = false
+# No GitHub Release here — release.yml's github-release job builds + uploads the
+# 5-platform assets and writes the release notes.
+git_release_enable = false
+# Disable tags for all packages; enable exactly one below so the workspace gets
+# a single v{version} tag instead of one per crate.
+git_tag_enable = false
+
+# The CLI crate is the product. Its tag (v{version}) is what release.yml keys
+# off, so it is the only package that emits a tag.
+[[package]]
+name = "egent-code-plexus"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+
+[changelog]
+protect_breaking_commits = true
