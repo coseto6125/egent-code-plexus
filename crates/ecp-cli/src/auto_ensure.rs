@@ -235,15 +235,19 @@ pub fn builder_fingerprint_sidecar_path(graph_path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Write the current `BUILDER_FINGERPRINT` next to `graph_path`. Detached like
-/// the other sidecars; a write failure just means the next `ensure_index`
-/// falls back to the meta.json read in `fingerprint_drifted`.
+/// Write the current `BUILDER_FINGERPRINT` next to `graph_path`. Unlike the
+/// head-SHA and compatible-version sidecars — pure read-side perf hints whose
+/// miss merely falls back to an mtime walk / `header_compatible` — a stale or
+/// missing fingerprint sidecar makes `fingerprint_drifted` report drift and
+/// triggers a full `build_l2` (the most expensive fallback, not a cheap one).
+/// So this write is synchronous: detaching a ~20-byte write to a spawned thread
+/// (whose creation costs more than the write) let a process exit before the
+/// flush landed, leaving the next invocation to rebuild a graph that was
+/// already current. On return the sidecar reflects the running binary.
 pub fn write_builder_fingerprint_sidecar(graph_path: &Path) {
     let sidecar = builder_fingerprint_sidecar_path(graph_path);
     let content = format!("{}\n", ecp_core::registry::BUILDER_FINGERPRINT);
-    std::thread::spawn(move || {
-        let _ = fs::write(&sidecar, content);
-    });
+    let _ = fs::write(&sidecar, content);
 }
 
 /// True when the cached graph's builder fingerprint differs from the running
