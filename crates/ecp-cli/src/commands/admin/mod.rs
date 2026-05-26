@@ -17,6 +17,7 @@ pub mod install_hook;
 pub mod prune;
 pub mod sessions;
 pub(crate) mod skill_fs;
+pub(crate) mod skill_source;
 #[derive(Subcommand, Debug)]
 pub enum AdminCommands {
     /// Install git ref-transaction hook for branch tracking (or Claude Code hooks with --claude-code)

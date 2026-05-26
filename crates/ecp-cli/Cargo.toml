@@ -65,6 +65,7 @@ tree-sitter-java = "*"
 tree-sitter-rust = "*"
 streaming-iterator = "0.1.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+include_dir = "0.7"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }

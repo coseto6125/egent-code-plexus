@@ -2,6 +2,7 @@
 
 use crate::admin::host_integration::gemini_cli;
 use crate::admin::status::HostStatus;
+use crate::commands::admin::skill_source;
 use ecp_core::EcpError;
 use std::env;
 
@@ -59,6 +60,11 @@ pub fn status() -> HostStatus {
     }
 }
 
+/// Locate the `ecp` skill dir to link. Explicit override wins; otherwise the
+/// shared resolver returns the repo checkout under cwd, or materializes the
+/// copy embedded in the binary to a persistent dir (so a package-manager
+/// install with no checkout still links — `gemini skills link` needs the path
+/// to outlive this call).
 fn find_skill_path() -> Option<String> {
     if let Some(override_path) = env::var_os("ECP_GEMINI_SKILL_PATH") {
         let p = std::path::PathBuf::from(override_path);
@@ -66,15 +72,8 @@ fn find_skill_path() -> Option<String> {
             return Some(p.to_string_lossy().into_owned());
         }
     }
-    let mut dir = env::current_dir().ok()?;
-    loop {
-        let path = dir.join("docs/skills/ecp");
-        if path.exists() {
-            return Some(path.to_string_lossy().into_owned());
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    None
+    let cwd = env::current_dir().ok()?;
+    let path =
+        skill_source::resolve_persistent(skill_source::EmbeddedTree::EcpSkill, "ecp", &cwd).ok()?;
+    Some(path.to_string_lossy().into_owned())
 }
