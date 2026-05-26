@@ -324,7 +324,23 @@ body {
     .copy-btn { width: 100%; padding: 0.75rem; }
     .bento-grid { grid-template-columns: 1fr; }
     .saas-table th, .saas-table td { padding: 1rem; }
+
+    .container, .nav-container { padding: 0 1.25rem; }
+    .hero { padding: 110px 0 56px; }
+    .hero-subtitle { margin-bottom: 2rem; }
+    .main-content { padding: 2.5rem 1.25rem; }
+    .bento-card { padding: 1.5rem; }
+    .bento-grid { gap: 1rem; }
+    .acc-trigger { padding: 1.25rem; font-size: 1rem; }
+    .acc-inner { padding: 0 1.25rem 1.25rem; }
+    .vision-box { padding: 1rem 0; }
 }
+
+/* Allow flex/grid children to shrink so their inner overflow-x:auto engages
+   instead of stretching the page width (long pre code blocks) */
+.bento-card, .install-pane, .install-pane code { min-width: 0; }
+.code-block { max-width: 100%; }
+.hero-bg-glow { max-width: 100%; }
 
 /* Code Blocks */
 .code-block {
