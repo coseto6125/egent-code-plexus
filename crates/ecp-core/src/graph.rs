@@ -104,6 +104,18 @@ impl RelType {
         )
     }
 
+    /// Mirror of [`ArchivedRelType::is_scope_containment`] for the owned enum.
+    /// Scope-containment edges describe "where a symbol lives", not "who
+    /// calls or reaches it" — impact BFS skips them. Kept in sync with the
+    /// archived variant; `schema reltypes` reads this to publish the
+    /// `impact_traversal` column.
+    pub const fn is_scope_containment(self) -> bool {
+        matches!(
+            self,
+            Self::Defines | Self::HasMethod | Self::HasProperty | Self::Imports
+        )
+    }
+
     /// Static variant name. Mirrors `NodeKind::as_str` so cypher's
     /// `type(r)` scalar and `graph_query`'s rel-filter share one rendering.
     pub const fn as_str(self) -> &'static str {
