@@ -21,7 +21,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.2"
 edition = "2021"
 authors = ["E-NoR"]
 license = "MIT OR Apache-2.0"
@@ -35,9 +35,9 @@ categories = ["development-tools"]
 # single workspace version. release-plz bumps [workspace.package].version and
 # these inherit it — no per-crate version string to keep in sync.
 [workspace.dependencies]
-ecp-core = { path = "crates/ecp-core", version = "0.5.0" }
-ecp-analyzer = { path = "crates/ecp-analyzer", version = "0.5.0" }
-ecp-mcp = { path = "crates/ecp-mcp", version = "0.5.0" }
+ecp-core = { path = "crates/ecp-core", version = "0.5.2" }
+ecp-analyzer = { path = "crates/ecp-analyzer", version = "0.5.2" }
+ecp-mcp = { path = "crates/ecp-mcp", version = "0.5.2" }
 
 # 工作區層級 lints 設定。目前無 override；後續可在此精準 allow/warn/deny
 # 特定 lint 規則，所有 crate 透過 [lints] workspace = true opt-in。
