@@ -878,7 +878,7 @@ fn run_multi(
 /// captured as a per-repo `Result<Engine, String>` so individual
 /// failures don't kill the whole multi-repo query — the failing repo
 /// contributes 0 hits and is counted in the summary.
-pub fn load_engines_lossy(targets: &[RepoTarget]) -> Vec<(String, Result<Engine, String>)> {
+pub(crate) fn load_engines_lossy(targets: &[RepoTarget]) -> Vec<(String, Result<Engine, String>)> {
     targets
         .iter()
         .map(|target| {
@@ -1076,7 +1076,7 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpErro
 /// passed to `ensure_fresh` so the per-repo load gets the same version
 /// (ecp-fingerprint → full rebuild) + freshness (git → incremental) checks
 /// the cwd graph gets in main.rs.
-struct RepoTarget {
+pub(crate) struct RepoTarget {
     display_name: String,
     graph_path: String,
     worktree_root: String,
