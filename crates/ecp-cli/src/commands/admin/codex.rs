@@ -2,6 +2,7 @@
 
 use crate::admin::host_integration::native::codex;
 use crate::commands::admin::skill_fs::copy_dir_replace;
+use crate::commands::admin::skill_source::{resolve, EmbeddedTree};
 use clap::{Args, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -204,10 +205,12 @@ pub(crate) fn print_status() -> Result<(), ecp_core::EcpError> {
 }
 
 pub(crate) fn install_skills(target: SkillTarget) -> Result<(), ecp_core::EcpError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| ecp_core::EcpError::Output(format!("current_dir: {e}")))?;
     for &skill in target.expand() {
-        let src = source_skill_dir(skill)?;
+        let src = resolve(EmbeddedTree::CodexSample(skill.name()), &cwd)?;
         let dst = codex_skill_dir(skill);
-        copy_dir_replace(&src, &dst)?;
+        copy_dir_replace(src.path(), &dst)?;
         println!(
             "Codex CLI skill `{}` installed in {}",
             skill.name(),
@@ -230,23 +233,6 @@ pub(crate) fn uninstall_skills(target: SkillTarget) -> Result<(), ecp_core::EcpE
         );
     }
     Ok(())
-}
-
-fn source_skill_dir(skill: SkillTarget) -> Result<PathBuf, ecp_core::EcpError> {
-    let path = std::env::current_dir()
-        .map_err(|e| ecp_core::EcpError::Output(format!("current_dir: {e}")))?
-        .join("skill_sample")
-        .join("codex")
-        .join(skill.name());
-    if path.join("SKILL.md").exists() {
-        Ok(path)
-    } else {
-        Err(ecp_core::EcpError::Output(format!(
-            "missing bundled Codex skill `{}` at {}",
-            skill.name(),
-            path.display()
-        )))
-    }
 }
 
 fn codex_skill_dir(skill: SkillTarget) -> PathBuf {

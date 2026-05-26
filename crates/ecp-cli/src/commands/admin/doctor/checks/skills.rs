@@ -1,4 +1,5 @@
-//! Skill freshness: compare each installed Claude skill against its repo source.
+//! Skill freshness: compare each installed Claude skill against its source
+//! (repo tree if present, else the copy embedded in the binary).
 
 use crate::commands::admin::claude::{
     claude_skill_dir, install_skills, source_skill_dir_at, ClaudeSkillTarget,
@@ -15,19 +16,23 @@ pub(crate) fn check(fix: bool) -> Vec<CheckResult> {
     let mut out = Vec::new();
     for &skill in ClaudeSkillTarget::All.expand() {
         let name = format!("skill:{}", skill.name());
-        let src = source_skill_dir_at(skill, &cwd);
+        // Source is the repo tree if present, else the embedded copy — so this
+        // never requires running from a repo checkout.
+        let src = match source_skill_dir_at(skill, &cwd) {
+            Ok(s) => s,
+            Err(e) => {
+                out.push(CheckResult::fail(
+                    name,
+                    format!("cannot resolve source: {e}"),
+                ));
+                continue;
+            }
+        };
+        let src = src.path();
         let dst = claude_skill_dir(skill);
 
-        if !src.join("SKILL.md").exists() {
-            out.push(
-                CheckResult::warn(name, "repo source not found (run from repo root)")
-                    .with_remediation("cd <repo> && ecp admin claude install skills all"),
-            );
-            continue;
-        }
-
         let installed = dst.join("SKILL.md").exists();
-        let diff = match skill_diff(&src, &dst, installed) {
+        let diff = match skill_diff(src, &dst, installed) {
             Ok(d) => d,
             Err(e) => {
                 out.push(CheckResult::fail(name, format!("diff failed: {e}")));
