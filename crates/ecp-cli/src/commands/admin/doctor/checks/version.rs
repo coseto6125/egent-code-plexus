@@ -1,18 +1,31 @@
-//! Version freshness. Report-only: queries the latest published tag via
-//! `git ls-remote --tags` (no network-client dependency, reuses the hardened
-//! git wrapper) and compares against the compiled-in version. Network failure
-//! — including a restricted-network sandbox where the connect blocks instead of
+//! Version freshness. Report-only: compares the compiled-in version against the
+//! latest *published GitHub Release* and, if newer, suggests an upgrade command
+//! matching the install channel.
+//!
+//! Why a Release, not a git tag: the release pipeline pushes the `v*` tag first,
+//! then builds binaries and publishes npm/PyPI packages minutes later. Querying
+//! `git ls-remote --tags` would announce a version whose packages aren't on the
+//! registries yet — a `cargo install --tag` can race ahead, but `npx`/`uvx`
+//! users would be told to upgrade to something they can't install. The
+//! `releases/latest` API only returns a non-draft, non-prerelease release, which
+//! the pipeline creates after the build — so by the time it reports, the
+//! download assets exist (packages still trail by a couple minutes; close
+//! enough, and far better than the tag).
+//!
+//! Falls back to the git-tag query when `curl` is unavailable. Network failure —
+//! including a restricted-network sandbox where the connect blocks instead of
 //! failing fast — degrades to a Warn rather than hanging or failing the run;
 //! never prompts or updates.
 
 use std::time::Duration;
 
+use crate::commands::admin::doctor::checks::install_source::InstallSource;
 use crate::commands::admin::doctor::CheckResult;
 use crate::git::safe_exec;
 
 const REPO_URL: &str = "https://github.com/coseto6125/egent-code-plexus";
-const INSTALL_CMD: &str =
-    "cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked";
+const RELEASES_LATEST_API: &str =
+    "https://api.github.com/repos/coseto6125/egent-code-plexus/releases/latest";
 
 /// Hard ceiling on the remote query. A sandboxed network can leave `git
 /// ls-remote` blocked in poll() well past any HTTP-layer timeout, so the
@@ -34,21 +47,7 @@ pub(crate) fn check() -> CheckResult {
         return CheckResult::ok("version", format!("local v{local} (offline: sandbox)"));
     }
 
-    let mut cmd = safe_exec::git();
-    // GIT_HTTP_LOW_SPEED_* makes git itself abort a stalled transfer; the
-    // output_with_timeout kill is the backstop for a connect that never even
-    // reaches the transfer phase (sandbox drops the SYN).
-    cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
-        .env("GIT_HTTP_LOW_SPEED_TIME", "5")
-        .args(["ls-remote", "--tags", "--refs", REPO_URL]);
-    let stdout = match safe_exec::output_with_timeout(cmd, REMOTE_TIMEOUT) {
-        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => {
-            return CheckResult::warn("version", format!("local v{local}; could not reach remote"))
-        }
-    };
-
-    match parse_latest_tag(&stdout) {
+    match latest_published_version() {
         Some(latest) if latest > local_parsed => CheckResult::warn(
             "version",
             format!(
@@ -56,10 +55,71 @@ pub(crate) fn check() -> CheckResult {
                 latest.0, latest.1, latest.2
             ),
         )
-        .with_remediation(INSTALL_CMD),
+        .with_remediation(InstallSource::detect().upgrade_hint()),
         Some(_) => CheckResult::ok("version", format!("up to date (v{local})")),
-        None => CheckResult::warn("version", format!("local v{local}; no remote tags found")),
+        None => CheckResult::warn("version", format!("local v{local}; could not reach remote")),
     }
+}
+
+/// Latest installable version: the `tag_name` of the newest published GitHub
+/// Release (`curl` → `releases/latest`), falling back to the highest `git
+/// ls-remote` tag when curl is missing. Both run under the kill-timeout so a
+/// blocked connect can't hang the check. `None` on any failure.
+fn latest_published_version() -> Option<(u32, u32, u32)> {
+    if let Some(v) = latest_release_via_curl() {
+        return Some(v);
+    }
+    latest_tag_via_git()
+}
+
+/// `releases/latest` returns only a non-draft, non-prerelease release, so its
+/// `tag_name` won't appear until the pipeline has built and published assets.
+fn latest_release_via_curl() -> Option<(u32, u32, u32)> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-sS",
+        "--max-time",
+        "5",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "User-Agent: ecp-doctor",
+        RELEASES_LATEST_API,
+    ]);
+    let out = safe_exec::output_with_timeout(cmd, REMOTE_TIMEOUT)?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_release_tag(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract and parse `tag_name` from a `releases/latest` JSON body. Pure, so the
+/// parse is unit-tested without a network call.
+fn parse_release_tag(body: &str) -> Option<(u32, u32, u32)> {
+    let tag = serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("tag_name")?
+        .as_str()?
+        .to_string();
+    parse_semver(&tag)
+}
+
+/// Backstop for when `curl` isn't installed. Reads tags directly; note this can
+/// see a tag whose Release/packages aren't published yet (the race this module
+/// otherwise avoids), but a stale-by-minutes hint beats no hint.
+fn latest_tag_via_git() -> Option<(u32, u32, u32)> {
+    let mut cmd = safe_exec::git();
+    // GIT_HTTP_LOW_SPEED_* makes git itself abort a stalled transfer; the
+    // output_with_timeout kill is the backstop for a connect that never even
+    // reaches the transfer phase (sandbox drops the SYN).
+    cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "5")
+        .args(["ls-remote", "--tags", "--refs", REPO_URL]);
+    let out = safe_exec::output_with_timeout(cmd, REMOTE_TIMEOUT)?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_latest_tag(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Parse `X.Y.Z` (leading `v` tolerated) into a comparable tuple.
@@ -115,5 +175,19 @@ def456\trefs/tags/v0.4.2
     #[test]
     fn parse_latest_tag_empty_is_none() {
         assert_eq!(parse_latest_tag(""), None);
+    }
+
+    #[test]
+    fn parse_release_tag_reads_tag_name() {
+        // Trimmed shape of the releases/latest payload.
+        let body = r#"{"tag_name":"v0.5.1","draft":false,"prerelease":false}"#;
+        assert_eq!(parse_release_tag(body), Some((0, 5, 1)));
+    }
+
+    #[test]
+    fn parse_release_tag_handles_missing_or_malformed() {
+        assert_eq!(parse_release_tag(r#"{"message":"Not Found"}"#), None);
+        assert_eq!(parse_release_tag("not json"), None);
+        assert_eq!(parse_release_tag(r#"{"tag_name":"nightly"}"#), None);
     }
 }
