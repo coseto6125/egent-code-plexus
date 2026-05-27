@@ -67,11 +67,9 @@ fn run_verdicts(args: &ReviewArgs) -> Result<(), EcpError> {
         .since
         .as_deref()
         .ok_or_else(|| EcpError::Output("--verdicts requires --since <ref> (baseline)".into()))?;
-    // Skip bindings: --dump-resolver path is deferred in v2 (see ignored
-    // test diff_bindings_two_commit_resolution_change). Verdicts derive
-    // sufficient provable signal from symbols + routes + contracts.
     let diff_args = DiffArgs {
         section: vec![
+            DiffSection::Bindings,
             DiffSection::Routes,
             DiffSection::Contracts,
             DiffSection::Symbols,
