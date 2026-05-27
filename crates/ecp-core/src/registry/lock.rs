@@ -3,7 +3,7 @@
 
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -44,7 +44,7 @@ impl FileLock {
         let mut checked_dead_holder = false;
         loop {
             if file.try_lock_exclusive().is_ok() {
-                record_owner_pid(&file);
+                record_owner_pid(path);
                 return Ok(Self { _file: file });
             }
             // One-shot dead-holder probe: if the recorded owner PID is gone,
@@ -82,26 +82,38 @@ impl FileLock {
             .truncate(false)
             .open(path)?;
         file.try_lock_exclusive()?;
-        record_owner_pid(&file);
+        record_owner_pid(path);
         Ok(Self { _file: file })
     }
 }
 
-/// Write the current PID into the (locked) lockfile body. Best-effort: a
-/// failure here only loses diagnostics, never correctness — the flock is what
-/// guards the registry, not the file content.
-fn record_owner_pid(file: &File) {
-    use std::io::Seek;
-    let mut f = file;
-    let _ = f.rewind();
-    let _ = f.set_len(0);
-    let _ = write!(f, "{}", std::process::id());
-    let _ = f.flush();
+/// Path of the PID sidecar written next to the lockfile.
+///
+/// The owner PID lives in a SEPARATE file, not the lockfile body, because on
+/// Windows `LockFileEx` (which `fs2` uses) locks the byte range: while the lock
+/// is held, any other handle reading the lockfile content fails. Writing the
+/// PID into the locked file would make it unreadable by exactly the path that
+/// needs it — the dead-holder probe (a different process) and the diagnostic
+/// read. The sidecar is never flocked, so it stays readable on every platform.
+fn owner_pid_sidecar(path: &Path) -> std::path::PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".owner");
+    std::path::PathBuf::from(p)
+}
+
+/// Record the current PID in the lock's PID sidecar. Best-effort: a failure here
+/// only loses diagnostics, never correctness — the flock is what guards the
+/// registry, not this file.
+fn record_owner_pid(path: &Path) {
+    let _ = std::fs::write(owner_pid_sidecar(path), std::process::id().to_string());
 }
 
 fn read_owner_pid(path: &Path) -> Option<u32> {
     let mut s = String::new();
-    File::open(path).ok()?.read_to_string(&mut s).ok()?;
+    File::open(owner_pid_sidecar(path))
+        .ok()?
+        .read_to_string(&mut s)
+        .ok()?;
     s.trim().parse().ok()
 }
 

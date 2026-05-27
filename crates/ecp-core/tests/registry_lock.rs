@@ -69,15 +69,24 @@ fn acquire_times_out_instead_of_hanging_when_holder_never_releases() {
     );
 }
 
-/// `acquire_exclusive` records the caller's PID in the lockfile body so a
-/// stuck holder is diagnosable and the dead-holder probe has something to read.
+/// `acquire_exclusive` records the caller's PID in the lock's `.owner` sidecar
+/// so a stuck holder is diagnosable and the dead-holder probe has something to
+/// read. The PID lives in a sidecar, not the lockfile body, because Windows
+/// `LockFileEx` blocks reads of the locked file while the lock is held — so we
+/// read the sidecar here WHILE the lock is held to pin that it stays readable
+/// on every platform.
 #[test]
 fn lockfile_records_owner_pid() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
+    let sidecar = {
+        let mut p = path.clone().into_os_string();
+        p.push(".owner");
+        std::path::PathBuf::from(p)
+    };
 
     let _guard = FileLock::acquire_exclusive(&path).unwrap();
-    let body = std::fs::read_to_string(&path).unwrap();
-    let recorded: u32 = body.trim().parse().expect("pid written to lockfile");
+    let body = std::fs::read_to_string(&sidecar).expect("owner sidecar readable while locked");
+    let recorded: u32 = body.trim().parse().expect("pid written to owner sidecar");
     assert_eq!(recorded, std::process::id());
 }
