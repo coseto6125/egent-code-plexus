@@ -91,11 +91,54 @@ fn scan_dirs(args: &GainArgs) -> Result<Vec<PathBuf>, EcpError> {
 fn collect_records(args: &GainArgs) -> Result<Vec<Rec>, EcpError> {
     let mut recs = Vec::new();
     for dir in scan_dirs(args)? {
+        prune_retention(&dir);
         for name in ["cli-calls.jsonl", "calls.jsonl"] {
             read_file(&dir.join(name), &mut recs);
         }
     }
     Ok(recs)
+}
+
+/// Rewrite `cli-calls.jsonl` dropping lines older than `retention_days`.
+/// Off the hot path: only `ecp gain` and `ecp admin gc` call this. Best-effort.
+/// MCP `calls.jsonl` is intentionally NOT touched.
+pub(crate) fn prune_retention(dir: &Path) {
+    let days = retention_days();
+    let cutoff = now_unix_secs().saturating_sub(days * 86_400);
+    let path = dir.join("cli-calls.jsonl");
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let line_count = body.lines().count();
+    let kept: Vec<&str> = body
+        .lines()
+        .filter(|l| {
+            serde_json::from_str::<Value>(l)
+                .ok()
+                .and_then(|v| v.get("ts").and_then(Value::as_str).map(str::to_string))
+                .and_then(|ts| parse_rfc3339_secs(&ts))
+                .map(|secs| secs >= cutoff)
+                .unwrap_or(true) // keep unparseable lines
+        })
+        .collect();
+    if kept.len() != line_count {
+        let _ = std::fs::write(&path, kept.join("\n") + "\n");
+    }
+}
+
+fn retention_days() -> u64 {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    ecp_core::config::load(&cwd)
+        .map(|c| c.telemetry.retention_days)
+        .unwrap_or(7)
+}
+
+fn now_unix_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn read_file(path: &Path, out: &mut Vec<Rec>) {

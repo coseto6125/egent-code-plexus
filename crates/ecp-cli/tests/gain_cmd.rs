@@ -111,3 +111,30 @@ fn gain_failures_lists_only_errors() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn gain_prunes_lines_older_than_retention() {
+    let tmp = std::env::temp_dir().join(format!("ecp-gain-prune-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__3");
+    std::fs::create_dir_all(&tel).unwrap();
+    let lines = [
+        r#"{"ts":"2020-01-01T00:00:00Z","tool":"find","duration_ms":4,"ok":true,"source":"cli","error_kind":null}"#,
+        r#"{"ts":"2099-01-01T00:00:00Z","tool":"find","duration_ms":4,"ok":true,"source":"cli","error_kind":null}"#,
+    ].join("\n");
+    let f = tel.join("cli-calls.jsonl");
+    std::fs::write(&f, lines).unwrap();
+    let _ = Command::new(ecp_bin())
+        .args([
+            "gain",
+            "--format",
+            "json",
+            "--telemetry-dir",
+            tel.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let body = std::fs::read_to_string(&f).unwrap();
+    assert!(!body.contains("2020-01-01"), "ancient line must be pruned");
+    assert!(body.contains("2099-01-01"), "fresh line must survive");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

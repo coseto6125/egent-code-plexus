@@ -39,10 +39,21 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.')
-                || crate::admin::gc::is_repo_retired(&name)
-                || name == "telemetry"
-            {
+            if name.starts_with('.') || crate::admin::gc::is_repo_retired(&name) {
+                continue;
+            }
+            if name == "telemetry" {
+                // Prune cli-calls.jsonl per retention window in each repo subdir.
+                // calls.jsonl (MCP) is intentionally left untouched by prune_retention.
+                if !args.dry_run {
+                    if let Ok(subs) = std::fs::read_dir(&repo_root) {
+                        for sub in subs.flatten() {
+                            if sub.path().is_dir() {
+                                crate::commands::gain::prune_retention(&sub.path());
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             if args.dry_run {
