@@ -8,8 +8,11 @@
 //!   5. Codex skills (~/.codex/skills/)
 //!   6. Gemini native skill (`gemini skills uninstall`)
 //!   7. Gemini MCP server (`gemini mcp remove`)
-//!   8. Git reference-transaction hook (current repo only, no --host filter)
-//!   9. ~/.ecp full wipe (unless --keep-cache or --host is set)
+//!   8. Git reference-transaction hook (current repo only, no --agent filter)
+//!   9. ~/.ecp full wipe (unless --keep-cache or --agent is set)
+//!  10. The running binary itself (unless --agent is set) — Unix unlinks it
+//!      synchronously; Windows schedules a delayed delete that fires after this
+//!      process exits and releases the file lock.
 //!
 //! Each step is resilient: a missing/uninstalled component is skipped with a
 //! "skip" status entry. Errors are recorded and reported in the final summary
@@ -22,10 +25,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug, Clone)]
 pub struct UninstallArgs {
-    /// Only uninstall integration for one host (claude, codex, gemini).
-    /// Omit to uninstall all detected hosts.
+    /// Only uninstall integration for one coding agent (claude, codex, gemini).
+    /// Omit to uninstall all detected agents (and remove the binary itself).
     #[arg(long)]
-    pub host: Option<String>,
+    pub agent: Option<String>,
 
     /// List what would be removed without actually deleting anything.
     #[arg(long, default_value_t = false)]
@@ -37,13 +40,13 @@ pub struct UninstallArgs {
 }
 
 pub fn run(args: UninstallArgs) -> Result<(), EcpError> {
-    let host_filter = args.host.as_deref();
-    validate_host_filter(host_filter)?;
+    let agent_filter = args.agent.as_deref();
+    validate_agent_filter(agent_filter)?;
 
     let mut summary: Vec<(&'static str, StepStatus)> = Vec::new();
 
     // ── Claude Code ──────────────────────────────────────────────────────────
-    if matches_host(host_filter, "claude") {
+    if matches_agent(agent_filter, "claude") {
         run_step(
             "claude-hooks",
             args.dry_run,
@@ -60,7 +63,7 @@ pub fn run(args: UninstallArgs) -> Result<(), EcpError> {
     }
 
     // ── Codex ────────────────────────────────────────────────────────────────
-    if matches_host(host_filter, "codex") {
+    if matches_agent(agent_filter, "codex") {
         run_step(
             "codex-native",
             args.dry_run,
@@ -77,7 +80,7 @@ pub fn run(args: UninstallArgs) -> Result<(), EcpError> {
     }
 
     // ── Gemini ───────────────────────────────────────────────────────────────
-    if matches_host(host_filter, "gemini") {
+    if matches_agent(agent_filter, "gemini") {
         run_step(
             "gemini-native-skill",
             args.dry_run,
@@ -87,14 +90,20 @@ pub fn run(args: UninstallArgs) -> Result<(), EcpError> {
         run_step("gemini-mcp", args.dry_run, remove_gemini_mcp, &mut summary);
     }
 
-    // ── Git hook (per-repo, only when no --host filter) ──────────────────────
-    if host_filter.is_none() {
+    // ── Git hook (per-repo, only when no --agent filter) ─────────────────────
+    if agent_filter.is_none() {
         run_step("git-hook", args.dry_run, remove_git_hook, &mut summary);
     }
 
-    // ── ~/.ecp wipe (only when no --host filter and not --keep-cache) ────────
-    if host_filter.is_none() && !args.keep_cache {
+    // ── ~/.ecp wipe (only when no --agent filter and not --keep-cache) ───────
+    if agent_filter.is_none() && !args.keep_cache {
         run_step("ecp-cache", args.dry_run, wipe_ecp_home, &mut summary);
+    }
+
+    // ── self binary (last; only on a full uninstall) ─────────────────────────
+    // Gated like the cache wipe: a scoped `--agent` uninstall keeps `ecp` usable.
+    if agent_filter.is_none() {
+        run_self_binary_step(args.dry_run, &mut summary);
     }
 
     print_summary(&summary, args.dry_run);
@@ -217,20 +226,106 @@ fn list_top_level_entries(dir: &Path) -> Result<Vec<PathBuf>, EcpError> {
     Ok(entries)
 }
 
-// ─── host filter ─────────────────────────────────────────────────────────────
+// ─── agent filter ────────────────────────────────────────────────────────────
 
-fn validate_host_filter(host: Option<&str>) -> Result<(), EcpError> {
-    let Some(h) = host else { return Ok(()) };
-    match h {
+fn validate_agent_filter(agent: Option<&str>) -> Result<(), EcpError> {
+    let Some(a) = agent else { return Ok(()) };
+    match a {
         "claude" | "codex" | "gemini" => Ok(()),
         other => Err(EcpError::InvalidArgument(format!(
-            "unknown host '{other}' — expected claude, codex, or gemini"
+            "unknown agent '{other}' — expected claude, codex, or gemini"
         ))),
     }
 }
 
-fn matches_host(filter: Option<&str>, host: &str) -> bool {
-    filter.is_none_or(|f| f == host)
+fn matches_agent(filter: Option<&str>, agent: &str) -> bool {
+    filter.is_none_or(|f| f == agent)
+}
+
+// ─── self binary removal (gap C) ─────────────────────────────────────────────
+
+/// Result of attempting to remove the running binary. Distinguishes the
+/// platforms because Windows cannot delete a running executable in-process: it
+/// schedules a delayed delete whose success is not observable from here.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelfDeleteOutcome {
+    /// File unlinked synchronously (Unix).
+    Deleted,
+    /// A delayed delete was spawned; fires after this process exits (Windows).
+    Scheduled,
+    /// Nothing to remove — the path did not exist.
+    Skipped,
+}
+
+/// Remove `exe` — the path of the running binary. Unix unlinks it directly
+/// (the inode survives until the process exits). Windows spawns a detached
+/// `cmd` that waits a few seconds, by which point this process has exited and
+/// released the file lock, then deletes the file. Split to take a path so a
+/// test can drive it against a tmpdir, mirroring [`remove_git_hook_at`].
+pub fn remove_self_binary_at(exe: &Path) -> Result<SelfDeleteOutcome, EcpError> {
+    if !exe.exists() {
+        return Ok(SelfDeleteOutcome::Skipped);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NO_WINDOW: survive parent exit, no console.
+        const FLAGS: u32 = 0x0000_0008 | 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args([
+                "/c",
+                &format!(
+                    "timeout /t 3 /nobreak >nul 2>&1 & del /f /q \"{}\"",
+                    exe.display()
+                ),
+            ])
+            .creation_flags(FLAGS)
+            .spawn()
+            .map_err(|e| EcpError::Output(format!("schedule self-delete: {e}")))?;
+        Ok(SelfDeleteOutcome::Scheduled)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(exe)
+            .map_err(|e| EcpError::Output(format!("remove {}: {e}", exe.display())))?;
+        Ok(SelfDeleteOutcome::Deleted)
+    }
+}
+
+fn run_self_binary_step(dry_run: bool, summary: &mut Vec<(&'static str, StepStatus)>) {
+    const LABEL: &str = "self-binary";
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = format!("current_exe: {e}");
+            eprintln!("  {LABEL}: error — {msg}");
+            summary.push((LABEL, StepStatus::Failed(msg)));
+            return;
+        }
+    };
+    if dry_run {
+        println!("[dry-run] would remove binary: {}", exe.display());
+        summary.push((LABEL, StepStatus::Skipped("dry-run".into())));
+        return;
+    }
+    match remove_self_binary_at(&exe) {
+        Ok(SelfDeleteOutcome::Deleted) => {
+            println!("self-binary: removed {}", exe.display());
+            summary.push((LABEL, StepStatus::Done));
+        }
+        Ok(SelfDeleteOutcome::Scheduled) => {
+            println!("self-binary: scheduled delete of {}", exe.display());
+            summary.push((LABEL, StepStatus::Scheduled));
+        }
+        Ok(SelfDeleteOutcome::Skipped) => {
+            summary.push((LABEL, StepStatus::Skipped("binary not found".into())));
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            eprintln!("  {LABEL}: error — {msg}");
+            summary.push((LABEL, StepStatus::Failed(msg)));
+        }
+    }
 }
 
 // ─── step runner ─────────────────────────────────────────────────────────────
@@ -238,6 +333,8 @@ fn matches_host(filter: Option<&str>, host: &str) -> bool {
 #[derive(Debug)]
 enum StepStatus {
     Done,
+    /// Action spawned but not yet completed (Windows delayed self-delete).
+    Scheduled,
     Skipped(String),
     Failed(String),
 }
@@ -290,6 +387,9 @@ fn print_summary(summary: &[(&'static str, StepStatus)], dry_run: bool) {
     for (label, status) in summary {
         match status {
             StepStatus::Done => println!("  {label:<24} done"),
+            StepStatus::Scheduled => {
+                println!("  {label:<24} scheduled (deletes after exit)")
+            }
             StepStatus::Skipped(reason) => println!("  {label:<24} skip  ({reason})"),
             StepStatus::Failed(reason) => println!("  {label:<24} ERROR ({reason})"),
         }

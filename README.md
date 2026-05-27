@@ -16,6 +16,13 @@
 
 **English** · [繁體中文](./docs/readme_i18n/README_zh-TW.md) · [简体中文](./docs/readme_i18n/README_zh-CN.md) · [日本語](./docs/readme_i18n/README_ja.md) · [한국어](./docs/readme_i18n/README_ko.md) · [Español](./docs/readme_i18n/README_es.md) · [Português](./docs/readme_i18n/README_pt-BR.md) · [Русский](./docs/readme_i18n/README_ru.md) · [हिन्दी](./docs/readme_i18n/README_hi.md)
 
+```bash
+# Linux / macOS
+curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh
+```
+
+[All install options](#-install) · [Uninstall](#uninstall)
+
 </div>
 
 ---
@@ -186,6 +193,28 @@ CPU-tuned source build:
 ```bash
 repo=https://github.com/coseto6125/egent-code-plexus
 RUSTFLAGS="-C target-cpu=native" cargo install --git "$repo" egent-code-plexus --bin ecp --locked --profile release-dist
+```
+
+### Uninstall
+
+```bash
+ecp uninstall            # remove agent integrations + ~/.ecp cache + the binary
+ecp uninstall --dry-run  # preview what would be removed, change nothing
+```
+
+One command reverses every setup side-effect: Claude Code / Codex / Gemini
+hooks, MCP servers, and skills; the per-repo git hook; the `~/.ecp` index cache;
+and the `ecp` binary itself. On Windows the binary is deleted by a short delayed
+step after the process exits (a running `.exe` can't delete itself in place).
+
+Scope it to one agent with `--agent claude` (leaves the binary and cache in
+place), or keep the index cache across a reinstall with `--keep-cache`. If you
+installed via a package manager, use its own remover instead:
+
+```bash
+npm uninstall -g egent-code-plexus
+uv tool uninstall egent-code-plexus   # or: pipx uninstall egent-code-plexus
+cargo uninstall egent-code-plexus
 ```
 
 ---
