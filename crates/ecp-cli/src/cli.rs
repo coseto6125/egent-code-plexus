@@ -121,4 +121,9 @@ pub enum Commands {
     /// bucket counts. Reads ~/.ecp/telemetry/<repo>/calls.jsonl written by
     /// the MCP server. Schema is unstable (v1).
     Insight(commands::insight::InsightArgs),
+    /// Usage dashboard over CLI + MCP telemetry — invocation counts, p50/p99
+    /// latency, error rate, and per-kind error tallies. Reads
+    /// `~/.ecp/telemetry/<repo>/{cli-calls,calls}.jsonl`. Default output is a
+    /// terminal ASCII dashboard; `--format json` emits machine-readable stats.
+    Gain(commands::gain::GainArgs),
 }

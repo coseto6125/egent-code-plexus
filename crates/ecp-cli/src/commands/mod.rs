@@ -8,6 +8,8 @@ pub mod find_event_mirrors;
 pub mod find_schema_bindings;
 pub mod find_tx_patterns;
 pub mod format;
+pub mod gain;
+pub mod gain_render;
 pub mod graph_csr;
 pub mod group;
 pub mod hook;

@@ -75,6 +75,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::Group { .. } => "group",
         Commands::Schema(_) => "schema",
         Commands::Insight(_) => "insight",
+        Commands::Gain(_) => "gain",
         Commands::Uninstall(_) => "uninstall",
     }
 }
@@ -123,6 +124,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         Commands::Group { cmd } => run_no_graph!(commands::group::run(cmd.clone())),
         Commands::Schema(args) => run_no_graph!(commands::schema::run(args.clone())),
         Commands::Insight(args) => run_no_graph!(commands::insight::run(args.clone())),
+        Commands::Gain(args) => run_no_graph!(commands::gain::run(args.clone())),
         Commands::Uninstall(args) => {
             run_no_graph!(commands::uninstall::run(args.clone()))
         }
@@ -157,6 +159,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         | Commands::Group { .. }
         | Commands::Schema(_)
         | Commands::Insight(_)
+        | Commands::Gain(_)
         | Commands::Uninstall(_) => None,
     };
     let cwd = repo_opt
@@ -240,6 +243,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         | Commands::Group { .. }
         | Commands::Schema(_)
         | Commands::Insight(_)
+        | Commands::Gain(_)
         | Commands::Uninstall(_) => unreachable!("handled before graph load"),
     };
     result

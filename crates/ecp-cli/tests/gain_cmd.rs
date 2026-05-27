@@ -33,3 +33,33 @@ fn invocation_appends_one_cli_telemetry_line() {
     assert!(found, "no cli-calls.jsonl written under {tel_root:?}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn gain_json_aggregates_a_fixture() {
+    let tmp = std::env::temp_dir().join(format!("ecp-gain-json-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/myrepo__deadbeef");
+    std::fs::create_dir_all(&tel).unwrap();
+    let lines = [
+        r#"{"ts":"2026-05-27T07:00:00Z","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}"#,
+        r#"{"ts":"2026-05-27T07:01:00Z","tool":"inspect","duration_ms":48,"ok":true,"source":"cli","error_kind":null}"#,
+        r#"{"ts":"2026-05-27T07:02:00Z","tool":"cypher","duration_ms":9,"ok":false,"source":"cli","error_kind":"cypher-parse"}"#,
+    ].join("\n");
+    std::fs::write(tel.join("cli-calls.jsonl"), lines).unwrap();
+    let out = Command::new(ecp_bin())
+        .args([
+            "gain",
+            "--format",
+            "json",
+            "--telemetry-dir",
+            tel.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 3);
+    let by = v["by_command"].as_array().unwrap();
+    let inspect = by.iter().find(|c| c["cmd"] == "inspect").unwrap();
+    assert_eq!(inspect["count"], 2);
+    assert_eq!(v["errors_by_kind"]["cypher-parse"], 1);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
