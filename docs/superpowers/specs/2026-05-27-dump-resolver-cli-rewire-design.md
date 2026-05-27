@@ -89,6 +89,33 @@ side-output that does not mutate resident state. `run_analyzer_for_paths` alread
 takes `src_root: &Path`, so it natively handles diff's GitGuard-checked-out
 baseline tree.
 
+### Implementation note: A exposed a latent diff bug (the real fix)
+
+Approach A as first written (bypass build_l2, write only the JSONL, never publish
+`graph.bin`) **broke all of `ecp diff` for never-before-indexed baselines** —
+including `--section routes` alone. Root cause was NOT in approach A's wiring but
+a latent defect in `diff/mod.rs` that A's removal of a side effect uncovered:
+
+- The original code relied on `bindings::dump`'s subprocess (`admin index`,
+  pre-A) **synchronously publishing `graph.bin`** as a side effect, so the later
+  `ensure_fresh` always saw a `Ready` graph.
+- `diff/mod.rs` called `ensure_fresh(...)` but **ignored its `EnsureFreshOutcome`
+  return value**. When a SHA has no published graph, `ensure_fresh` returns
+  `WarmAttach` — it borrows a *sibling* SHA's graph and spawns a *detached
+  background* rebuild (`auto_ensure.rs:386–396`). Diff then `copy`/`extract`-ed a
+  graph that was the wrong SHA and/or not yet written → "No such file" /
+  background-writer race. A removed the synchronous publish, so this path now
+  fired.
+
+**The fix** (commit on this branch) keeps A's clean bypass and repairs the diff
+defect at its source: a shared helper `ensure_graph_synchronously(repo, sha,
+label)` used by **both** the current and baseline sides. On `WarmAttach` it forces
+a foreground `build_l2(repo, sha)` for the exact SHA, then resolves the path
+*after* the build so the fresh commit dir is used (not the legacy fallback). This
+also subsumes an earlier per-site "resolve-after-ensure" workaround. Net effect:
+diff no longer depends on the dump's graph-publish side effect at all — the two
+concerns (resolver JSONL vs. baseline graph readiness) are now properly separated.
+
 ## Data flow (after fix)
 
 ```
