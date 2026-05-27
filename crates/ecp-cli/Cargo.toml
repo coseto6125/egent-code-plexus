@@ -7,8 +7,8 @@ default-run = "ecp"
 license.workspace = true
 repository.workspace = true
 # Not published to crates.io — distribution is GitHub Release binaries + npm + PyPI.
-# (Also lets release-plz skip `cargo package` verification, which would fail on the
-#  path-only vendored tree-sitter deps that have no crates.io version.)
+# (The vendored tree-sitter deps are path/git with no crates.io version, so this
+#  crate could not be `cargo publish`ed anyway.)
 publish = false
 
 # cargo-binstall 元資料：使 `cargo binstall egent-code-plexus` 直接抓 GitHub Release 預編 binary，

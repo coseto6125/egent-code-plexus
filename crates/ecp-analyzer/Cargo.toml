@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 # Not published to crates.io — distribution is GitHub Release binaries + npm + PyPI.
+# (The vendored tree-sitter deps are path/git with no crates.io version, so this
+#  crate could not be `cargo publish`ed anyway.)
 publish = false
 build = "build.rs"
 
