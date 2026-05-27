@@ -179,7 +179,7 @@ fn read_file(path: &Path, out: &mut Vec<Rec>) {
     }
 }
 
-fn percentile(sorted: &[u64], pct: usize) -> u64 {
+pub(crate) fn percentile(sorted: &[u64], pct: usize) -> u64 {
     if sorted.is_empty() {
         return 0;
     }

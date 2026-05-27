@@ -1,8 +1,9 @@
 //! ASCII rendering for `ecp gain`. Sections: Usage → Performance → Errors.
 //! Color is opt-in and auto-disabled off a TTY / under NO_COLOR / for json.
 
-use super::gain::{by_command, errors_by_kind, GainArgs, Rec};
+use super::gain::{by_command, errors_by_kind, percentile, GainArgs, Rec};
 use crate::output::OutputFormat;
+use ecp_core::time::unix_secs_to_rfc3339;
 use std::fmt::Write as _;
 use std::io::IsTerminal;
 
@@ -38,13 +39,6 @@ fn bar(frac: f64, width: usize) -> String {
     format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
-fn pctl(sorted: &[u64], pct: usize) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted[((sorted.len() - 1) * pct) / 100]
-}
-
 pub fn render_dashboard(recs: &[Rec], color: bool, show_all: bool) -> String {
     let mut o = String::new();
     let total = recs.len();
@@ -58,8 +52,8 @@ pub fn render_dashboard(recs: &[Rec], color: bool, show_all: bool) -> String {
     let mcp_n = total - cli_n;
     let mut all_durs: Vec<u64> = recs.iter().map(|r| r.duration_ms).collect();
     all_durs.sort_unstable();
-    let p50 = pctl(&all_durs, 50);
-    let p99 = pctl(&all_durs, 99);
+    let p50 = percentile(&all_durs, 50);
+    let p99 = percentile(&all_durs, 99);
     let err_pct = errors as f64 / total as f64 * 100.0;
 
     let _ = writeln!(o, "ecp Usage Dashboard");
@@ -185,7 +179,13 @@ pub fn render_failures(recs: &[Rec], _color: bool) -> String {
     let _ = writeln!(o, "{}", "═".repeat(76));
     for r in fails.iter().rev().take(20) {
         let kind = r.error_kind.as_deref().unwrap_or("other");
-        let _ = writeln!(o, "  {}  {:<14} {}", r.ts_secs, r.tool, kind);
+        let _ = writeln!(
+            o,
+            "  {}  {:<14} {}",
+            unix_secs_to_rfc3339(r.ts_secs),
+            r.tool,
+            kind
+        );
         let _ = writeln!(
             o,
             "       └ {}",

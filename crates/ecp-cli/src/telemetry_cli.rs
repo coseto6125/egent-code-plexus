@@ -76,18 +76,6 @@ pub fn record(label: &str, duration_ms: u64, err: Option<&EcpError>) {
     append_record(&dir, CLI_TELEMETRY_FILE, &rec);
 }
 
-/// Short, redacted one-line summary of the invoked argv for `--failures`.
-/// Joins argv (skipping arg0), capped at 80 chars.
-pub fn arg_summary() -> String {
-    std::env::args()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(80)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
