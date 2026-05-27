@@ -53,6 +53,12 @@ impl AnalyzerPipeline {
         self.providers.push(provider);
     }
 
+    /// Number of registered providers. Lets callers assert a subset pipeline
+    /// holds the expected language count without exposing the provider list.
+    pub fn provider_count(&self) -> usize {
+        self.providers.len()
+    }
+
     /// Parse a single file from in-memory bytes without touching disk.
     /// The `rel_path` is used only for provider selection (extension lookup)
     /// and is stored verbatim in the returned `LocalGraph.file_path`.
@@ -68,27 +74,33 @@ impl AnalyzerPipeline {
     }
 
     fn find_provider(&self, path: &std::path::Path) -> Option<&dyn LanguageProvider> {
-        // Check basename for extension-less files like `Dockerfile` before extension lookup.
+        let name = Self::provider_name_for_path(path)?;
+        self.providers
+            .iter()
+            .find(|p| p.name() == name)
+            .map(|p| p.as_ref())
+    }
+
+    /// The single source of truth mapping a file path to the provider `name`
+    /// that should parse it. `find_provider` resolves this name against the
+    /// registered providers; the incremental path (`reanalyze`) uses it to
+    /// build a pipeline holding ONLY the providers a dirty set needs, instead
+    /// of paying the full 20-provider tree-sitter `Query` compile (~0.65s) to
+    /// reparse one changed file (~8ms). Path-based special cases (Dockerfile,
+    /// docker-compose, GitHub Actions workflows) are resolved before the
+    /// extension table. `.h` routes to C++ (near-superset of C); see the
+    /// indexing-pipeline note that made this the load-bearing dispatch.
+    pub fn provider_name_for_path(path: &std::path::Path) -> Option<&'static str> {
         let file_name = path.file_name()?.to_str()?;
         if matches!(file_name, "Dockerfile" | "dockerfile") {
-            return self
-                .providers
-                .iter()
-                .find(|p| p.name() == "dockerfile")
-                .map(|p| p.as_ref());
+            return Some("dockerfile");
         }
         if matches!(
             file_name,
             "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
         ) {
-            return self
-                .providers
-                .iter()
-                .find(|p| p.name() == "docker-compose")
-                .map(|p| p.as_ref());
+            return Some("docker-compose");
         }
-
-        // GitHub Actions: path-based routing — .github/workflows/*.yml|yaml
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if matches!(ext, "yml" | "yaml") {
                 let is_gha = path
@@ -97,189 +109,49 @@ impl AnalyzerPipeline {
                     .windows(2)
                     .any(|w| w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows");
                 if is_gha {
-                    return self
-                        .providers
-                        .iter()
-                        .find(|p| p.name() == "github-actions")
-                        .map(|p| p.as_ref());
+                    return Some("github-actions");
                 }
             }
         }
 
         let ext = path.extension()?.to_str()?;
-        match ext {
-            "ts" | "tsx" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "typescript")
-                .map(|p| p.as_ref()),
-            "py" | "pyi" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "python")
-                .map(|p| p.as_ref()),
-            "go" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "go")
-                .map(|p| p.as_ref()),
-            "rs" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "rust")
-                .map(|p| p.as_ref()),
-            "java" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "java")
-                .map(|p| p.as_ref()),
-            "js" | "jsx" | "mjs" | "cjs" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "javascript")
-                .map(|p| p.as_ref()),
-            "php" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "php")
-                .map(|p| p.as_ref()),
-            "rb" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "ruby")
-                .map(|p| p.as_ref()),
-            "kt" | "kts" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "kotlin")
-                .map(|p| p.as_ref()),
-            "cs" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "c_sharp")
-                .map(|p| p.as_ref()),
-            "c" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "c")
-                .map(|p| p.as_ref()),
-            // `.h` is genuinely ambiguous between C and C++ headers; route to
-            // C++ (mirrors `Language::from_normalized_path`, identifier_finder
-            // dispatch, and admin index provider detection). C++ parsing is a
-            // near-superset of C, while C parsing produces ERROR nodes on any
-            // C++ construct in shared `.h` files (nlohmann/json, doctest, LLVM
-            // Fuzzer, Catch2). This is the load-bearing dispatch — find_provider
-            // is what the indexing pipeline actually calls per file.
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "cpp")
-                .map(|p| p.as_ref()),
-            "swift" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "swift")
-                .map(|p| p.as_ref()),
-            "dart" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "dart")
-                .map(|p| p.as_ref()),
-            "sh" | "bash" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "bash")
-                .map(|p| p.as_ref()),
-            "lua" | "luau" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "lua")
-                .map(|p| p.as_ref()),
-            "dockerfile" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "dockerfile")
-                .map(|p| p.as_ref()),
-            "cr" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "crystal")
-                .map(|p| p.as_ref()),
-            "move" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "move")
-                .map(|p| p.as_ref()),
-            "sol" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "solidity")
-                .map(|p| p.as_ref()),
-            "tf" | "tfvars" | "hcl" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "hcl")
-                .map(|p| p.as_ref()),
-            "nim" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "nim")
-                .map(|p| p.as_ref()),
-            "sql" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "sql")
-                .map(|p| p.as_ref()),
-            "vy" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "vyper")
-                .map(|p| p.as_ref()),
-            "cairo" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "cairo")
-                .map(|p| p.as_ref()),
-            "v" | "sv" | "vh" | "svh" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "verilog")
-                .map(|p| p.as_ref()),
-            "zig" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "zig")
-                .map(|p| p.as_ref()),
-            "vue" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "vue")
-                .map(|p| p.as_ref()),
-            "astro" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "astro")
-                .map(|p| p.as_ref()),
-            "svelte" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "svelte")
-                .map(|p| p.as_ref()),
-            "proto" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "protobuf")
-                .map(|p| p.as_ref()),
-            // `.json` files are routed to the OpenAPI provider; the provider
-            // itself applies a cheap 200-byte prefix gate so non-OpenAPI JSON
-            // is returned as an empty `LocalGraph` at near-zero cost.
-            "json" => self
-                .providers
-                .iter()
-                .find(|p| p.name() == "openapi")
-                .map(|p| p.as_ref()),
-            _ => None,
-        }
+        Some(match ext {
+            "ts" | "tsx" => "typescript",
+            "py" | "pyi" => "python",
+            "go" => "go",
+            "rs" => "rust",
+            "java" => "java",
+            "js" | "jsx" | "mjs" | "cjs" => "javascript",
+            "php" => "php",
+            "rb" => "ruby",
+            "kt" | "kts" => "kotlin",
+            "cs" => "c_sharp",
+            "c" => "c",
+            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => "cpp",
+            "swift" => "swift",
+            "dart" => "dart",
+            "sh" | "bash" => "bash",
+            "lua" | "luau" => "lua",
+            "dockerfile" => "dockerfile",
+            "cr" => "crystal",
+            "move" => "move",
+            "sol" => "solidity",
+            "tf" | "tfvars" | "hcl" => "hcl",
+            "nim" => "nim",
+            "sql" => "sql",
+            "vy" => "vyper",
+            "cairo" => "cairo",
+            "v" | "sv" | "vh" | "svh" => "verilog",
+            "zig" => "zig",
+            "vue" => "vue",
+            "astro" => "astro",
+            "svelte" => "svelte",
+            "proto" => "protobuf",
+            // `.json` routes to the OpenAPI provider; it applies a cheap
+            // 200-byte prefix gate so non-OpenAPI JSON costs near-zero.
+            "json" => "openapi",
+            _ => return None,
+        })
     }
 
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture

@@ -84,9 +84,16 @@ pub enum EnsureResult {
     /// drift, not just dirty files — `ensure_fresh` must do a full `build_l2`
     /// (which drops the old graph.bin) rather than an incremental L1 overlay,
     /// because the overlay path leaves stale-convention nodes in place.
+    /// `dirty_files`: when the staleness was decided by the git porcelain
+    /// shortcut, the exact changed paths it already parsed (absolute) — lets
+    /// `ensure_fresh` skip the whole-tree mtime walk in `collect_dirty_files`
+    /// (O(changed) vs O(tree): ~0.86s → ~0.02s on a 14k-file repo). `None` when
+    /// the decision came from the mtime walk (no path list available) or a
+    /// full-rebuild drift (dirty set is irrelevant).
     Stale {
         age_seconds: u64,
         needs_full_rebuild: bool,
+        dirty_files: Option<Vec<PathBuf>>,
     },
 }
 
@@ -119,6 +126,7 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
         return Ok(EnsureResult::Stale {
             age_seconds: 0,
             needs_full_rebuild: true,
+            dirty_files: None,
         });
     }
 
@@ -135,6 +143,7 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
         return Ok(EnsureResult::Stale {
             age_seconds: 0,
             needs_full_rebuild: true,
+            dirty_files: None,
         });
     }
 
@@ -154,6 +163,9 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
         return Ok(EnsureResult::Stale {
             age_seconds: age,
             needs_full_rebuild: false,
+            // mtime walk only answers "is anything newer", not "which files";
+            // ensure_fresh falls back to collect_dirty_files for the path list.
+            dirty_files: None,
         });
     }
     Ok(EnsureResult::Ready)
@@ -305,7 +317,11 @@ fn git_fingerprint_shortcut(
     }
 
     let porcelain = crate::git::safe_exec::git()
-        .args(["status", "--porcelain", "--untracked-files=no"])
+        // `-z` (NUL-terminated) avoids git's C-quoting of paths with spaces or
+        // non-ASCII bytes, which the human-readable format would otherwise wrap
+        // in double quotes and escape — producing a path that doesn't exist on
+        // disk and silently dropping that file from the incremental refresh.
+        .args(["status", "--porcelain", "-z", "--untracked-files=no"])
         .current_dir(worktree_root)
         .output()
         .ok()?;
@@ -319,10 +335,37 @@ fn git_fingerprint_shortcut(
         .duration_since(graph_mtime)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // git already listed the exact changed paths here — carry them so
+    // ensure_fresh skips the whole-tree mtime walk in collect_dirty_files.
+    let dirty_files = parse_porcelain_paths(&porcelain.stdout, worktree_root);
     Some(EnsureResult::Stale {
         age_seconds: age,
         needs_full_rebuild: false,
+        dirty_files: Some(dirty_files),
     })
+}
+
+/// Parse `git status --porcelain -z` stdout into absolute paths under `root`.
+///
+/// In `-z` mode entries are NUL-terminated and paths are NOT quoted, so a
+/// filename with spaces or non-ASCII bytes round-trips intact. A status entry
+/// is `XY <path>` (2-char code + space); a rename emits the new path in that
+/// entry and the old path as a separate trailing NUL segment with no status
+/// prefix. We keep every segment that carries the `XY ` prefix (the new path
+/// for renames — the one that now exists on disk) and skip prefix-less old-path
+/// segments. Any spurious path still degrades to "not reanalyzed" because
+/// `reanalyze_files` skips paths that don't exist on disk.
+fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> {
+    stdout
+        .split(|&b| b == 0)
+        // Keep only segments shaped like `XY <path>`: ≥4 bytes with a space in
+        // the status separator slot. Prefix-less rename old-paths fail this and
+        // are dropped.
+        .filter(|seg| seg.len() >= 4 && seg[2] == b' ')
+        .map(|seg| String::from_utf8_lossy(&seg[3..]).into_owned())
+        .filter(|p| !p.is_empty())
+        .map(|p| root.join(p))
+        .collect()
 }
 
 /// Ensure the graph exists and is fresher than the working tree.
@@ -362,7 +405,9 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
             Ok(EnsureFreshOutcome::Ready)
         }
         EnsureResult::Stale {
-            needs_full_rebuild, ..
+            needs_full_rebuild,
+            dirty_files,
+            ..
         } => {
             if needs_full_rebuild || !crate::engine::header_compatible(graph_path) {
                 // Full-rebuild staleness: either a version-incompatible base
@@ -380,24 +425,32 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
                 drain_tantivy_if_inside_worktree(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
             } else {
-                // Header-compatible + dirty files: incremental refresh path (T7-4).
+                // Header-compatible + dirty files: incremental refresh path.
                 //
-                // Step 1 — reanalyze the dirty file set.
-                // `reanalyze_files` returns fresh `LocalGraph` views for each
-                // changed file. T7-5 will consume these to do a zero-copy
-                // in-place merge; for now the results are intentionally unused
-                // here — the wiring into auto_ensure is the T7-4 deliverable.
-                let graph_mtime = fs::metadata(graph_path)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH);
-                let dirty_abs =
-                    collect_dirty_files(graph_path, worktree_root, graph_mtime).unwrap_or_default();
+                // Prefer the dirty set git already produced in the porcelain
+                // shortcut (O(changed)); only fall back to the whole-tree mtime
+                // walk when the staleness came from the mtime path itself.
+                let dirty_abs = match dirty_files {
+                    Some(paths) => paths,
+                    None => {
+                        let graph_mtime = fs::metadata(graph_path)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::UNIX_EPOCH);
+                        collect_dirty_files(graph_path, worktree_root, graph_mtime)
+                            .unwrap_or_default()
+                    }
+                };
                 let rel_paths: Vec<String> = dirty_abs
                     .iter()
                     .filter_map(|p| p.strip_prefix(worktree_root).ok())
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect();
-                let _fresh_graphs = crate::reanalyze::reanalyze_files(
+                // Parse the dirty set ONCE here; the resulting `LocalGraph`s are
+                // handed straight to the overlay writer, which no longer
+                // re-parses them. This removes the second full tree-sitter pass
+                // (the dominant incremental cost on a large repo: ~0.6s for the
+                // 20-provider pipeline init alone).
+                let fresh_graphs = crate::reanalyze::reanalyze_files(
                     worktree_root,
                     &crate::git::DiffScope::Unstaged,
                     &rel_paths,
@@ -405,12 +458,7 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
                 test_counters::REANALYZE_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                // Step 2 — write L1 overlay fragments for the dirty set.
-                // Reuse the `dirty_abs` already collected above instead of
-                // re-walking the tree (~10k extra stat syscalls on a mid-size
-                // repo). T7-5 will replace the overlay write with a zero-copy
-                // merge of `_fresh_graphs` directly into graph.bin.
-                apply_l1_overlay_updates(worktree_root, dirty_abs)
+                apply_l1_overlay_updates(worktree_root, &fresh_graphs)
                     .map_err(|e| format!("L1 overlay refresh: {e}"))?;
                 // L1 overlay only touches dirty fragments under
                 // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
@@ -566,7 +614,10 @@ fn drain_tantivy_if_inside_worktree(
     }
 }
 
-fn apply_l1_overlay_updates(worktree_root: &Path, dirty_files: Vec<PathBuf>) -> io::Result<()> {
+fn apply_l1_overlay_updates(
+    worktree_root: &Path,
+    fresh_graphs: &[ecp_core::analyzer::types::LocalGraph],
+) -> io::Result<()> {
     use crate::session::{overlay_writer, promotion, resolver};
 
     let session_id = resolver::resolve_session_id(None);
@@ -597,48 +648,36 @@ fn apply_l1_overlay_updates(worktree_root: &Path, dirty_files: Vec<PathBuf>) -> 
     }
     // ─────────────────────────────────────────────────────────────────────
 
-    // `dirty_files` was collected once by `ensure_fresh` and threaded through
-    // — see comment at the call site for the rationale.
+    // `fresh_graphs` were already parsed by `reanalyze_files`; the overlay
+    // writer consumes them directly (no second tree-sitter pass). We only need
+    // each file's mtime — a cheap stat the graph doesn't carry. `file_path` is
+    // relative to the worktree root.
+    let mtimes: Vec<u64> = fresh_graphs
+        .iter()
+        .map(|g| {
+            fs::metadata(worktree_root.join(&g.file_path))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        })
+        .collect();
 
-    // Build inputs first so per-file read errors get individually surfaced
-    // (matches the old per-file warning), then commit fragment writes +
-    // manifest + version in one batched call. Coalesces 2N atomic_write_json
-    // calls (dirty_files.json + session_meta.json per file) down to 2.
-    let mut inputs: Vec<overlay_writer::FragmentInput> = Vec::with_capacity(dirty_files.len());
-    for dirty_path in &dirty_files {
-        let rel = dirty_path
-            .strip_prefix(worktree_root)
-            .unwrap_or(dirty_path.as_path());
-        let content = match fs::read(dirty_path) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("warning: overlay read for {}: {e}", rel.display());
-                continue;
-            }
-        };
-        let mtime_ns = fs::metadata(dirty_path)?
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        inputs.push(overlay_writer::FragmentInput {
-            rel_path: rel.to_string_lossy().into(),
-            content,
-            mtime_ns,
-        });
-    }
-
-    let (n_written, n_failed) =
-        match overlay_writer::write_dirty_fragments_batch(&session_dir, &inputs) {
-            Ok(outs) => {
-                let n_failed = outs.iter().filter(|o| o.parse_failed).count();
-                (outs.len() - n_failed, n_failed)
-            }
-            Err(e) => {
-                eprintln!("warning: overlay batch write: {e}");
-                (0, 0)
-            }
-        };
+    let (n_written, n_failed) = match overlay_writer::write_dirty_fragments_from_graphs(
+        &session_dir,
+        fresh_graphs,
+        &mtimes,
+    ) {
+        Ok(outs) => {
+            let n_failed = outs.iter().filter(|o| o.parse_failed).count();
+            (outs.len() - n_failed, n_failed)
+        }
+        Err(e) => {
+            eprintln!("warning: overlay batch write: {e}");
+            (0, 0)
+        }
+    };
     if n_written > 0 || n_failed > 0 {
         eprintln!("l1.refreshed written={n_written} failed={n_failed}");
     }
@@ -685,7 +724,7 @@ fn git_head_sha(worktree: &Path) -> io::Result<String> {
 /// belt-and-suspenders guard: `WalkBuilder` already filters it, but
 /// `filter_entry` runs before that, and a project with no `.gitignore` at
 /// all would otherwise walk `.git/` mtimes (noisy as hell).
-const SKIP_DIRS: &[&str] = &[".git", ".ecp", ".ecp"];
+const SKIP_DIRS: &[&str] = &[".git", ".ecp"];
 
 /// Short-circuits on the first source file newer than `graph_mtime`.
 /// Walking the full tree only happens when the graph is genuinely
@@ -783,6 +822,28 @@ fn collect_dirty_files(
 mod fingerprint_drift_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn parse_porcelain_z_handles_spaces_and_renames() {
+        let root = Path::new("/repo");
+        // modified file with a space in its name + a rename (new\0old).
+        let stdout = b" M src/a b.ts\0R  src/new.ts\0src/old.ts\0 M src/c.ts\0";
+        let got = parse_porcelain_paths(stdout, root);
+        // new path of the rename is kept; the prefix-less old path is dropped.
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("/repo/src/a b.ts"),
+                PathBuf::from("/repo/src/new.ts"),
+                PathBuf::from("/repo/src/c.ts"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_porcelain_z_empty_is_empty() {
+        assert!(parse_porcelain_paths(b"", Path::new("/repo")).is_empty());
+    }
 
     fn write_sidecar(graph_path: &Path, fp: &str) {
         fs::write(

@@ -1,5 +1,6 @@
 use ecp_cli::session::overlay_writer::{
-    write_dirty_fragment, write_dirty_fragments_batch, FragmentInput,
+    write_dirty_fragment, write_dirty_fragments_batch, write_dirty_fragments_from_graphs,
+    FragmentInput,
 };
 use ecp_core::session::{DirtyFiles, SessionMeta};
 
@@ -151,4 +152,85 @@ fn batch_write_same_content_inputs_do_not_collide_on_tmp_files() {
         .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("bin"))
         .count();
     assert_eq!(frag_count, 1);
+}
+
+/// Root-fix regression: feeding `write_dirty_fragments_from_graphs` a
+/// pre-parsed `LocalGraph` must produce a fragment byte-identical to the
+/// re-parse route (`write_dirty_fragments_batch`) for the same source — the
+/// content hash and node set are derived the same way, so the only difference
+/// the optimisation introduces is *who parsed*, never *what was written*.
+#[test]
+fn from_graphs_matches_reparse_route_fragment_id() {
+    let src = b"export function hello() { return 1; }\n";
+    let rel = "src/x.ts";
+
+    // Parse the source the way `reanalyze_files` does: write to a tempdir and
+    // run the pipeline's `analyze`, which sets `content_hash`.
+    let work = tempfile::tempdir().unwrap();
+    let abs = work.path().join(rel);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, src).unwrap();
+    let graphs =
+        ecp_cli::reanalyze::pipeline().analyze(vec![(abs.clone(), std::path::PathBuf::from(rel))]);
+    assert_eq!(graphs.len(), 1, "ts source must produce exactly one graph");
+
+    // Re-parse route.
+    let tmp_a = tempfile::tempdir().unwrap();
+    let sd_a = make_session_dir(tmp_a.path(), "sid-a");
+    let reparse = write_dirty_fragments_batch(
+        &sd_a,
+        &[FragmentInput {
+            rel_path: rel.into(),
+            content: src.to_vec(),
+            mtime_ns: 42,
+        }],
+    )
+    .unwrap();
+
+    // Pre-parsed route.
+    let tmp_b = tempfile::tempdir().unwrap();
+    let sd_b = make_session_dir(tmp_b.path(), "sid-b");
+    let preparsed = write_dirty_fragments_from_graphs(&sd_b, &graphs, &[42]).unwrap();
+
+    assert_eq!(reparse.len(), 1);
+    assert_eq!(preparsed.len(), 1);
+    assert!(!reparse[0].parse_failed && !preparsed[0].parse_failed);
+    assert_eq!(
+        reparse[0].fragment_id, preparsed[0].fragment_id,
+        "pre-parsed route must reproduce the re-parse route's content-hash fragment id"
+    );
+
+    // The on-disk fragment archives must be byte-identical.
+    let frag = |sd: &std::path::Path, id: &str| {
+        std::fs::read(sd.join("graph_overlay").join(format!("{id}.bin"))).unwrap()
+    };
+    assert_eq!(
+        frag(&sd_a, &reparse[0].fragment_id),
+        frag(&sd_b, &preparsed[0].fragment_id),
+        "fragment archive bytes must match between the two routes"
+    );
+}
+
+/// The dispatch table extracted from `find_provider` must keep resolving the
+/// extensions the reanalyze subset relies on.
+#[test]
+fn provider_name_dispatch_covers_common_extensions() {
+    use ecp_core::analyzer::pipeline::AnalyzerPipeline as P;
+    use std::path::Path;
+    assert_eq!(
+        P::provider_name_for_path(Path::new("a.ts")),
+        Some("typescript")
+    );
+    assert_eq!(P::provider_name_for_path(Path::new("a.rs")), Some("rust"));
+    assert_eq!(P::provider_name_for_path(Path::new("a.py")), Some("python"));
+    assert_eq!(P::provider_name_for_path(Path::new("a.h")), Some("cpp"));
+    assert_eq!(
+        P::provider_name_for_path(Path::new("Dockerfile")),
+        Some("dockerfile")
+    );
+    assert_eq!(
+        P::provider_name_for_path(Path::new(".github/workflows/ci.yml")),
+        Some("github-actions")
+    );
+    assert_eq!(P::provider_name_for_path(Path::new("a.unknownext")), None);
 }

@@ -133,8 +133,61 @@ pub fn write_dirty_fragments_batch(
         .map(|(idx, input)| write_fragment_file(&overlay_dir, batch_seq, idx as u64, input))
         .collect();
 
-    let mut outcomes = Vec::with_capacity(inputs.len());
-    let mut pending = Vec::with_capacity(inputs.len());
+    commit_fragment_results(session_dir, results, inputs.len())
+}
+
+/// Write fragments from already-parsed `LocalGraph`s — the incremental path's
+/// root optimisation: `reanalyze_files` parsed these files once already, so
+/// reparsing them here (the old `FragmentInput` route) would pay the tree-sitter
+/// cost twice. Each graph carries its own `content_hash` (same `xxh3_64` the
+/// re-parse route hashes), so `fragment_id` stays byte-identical; `mtimes` is
+/// the paired modification time per graph (stat is cheap, the graph doesn't
+/// carry it). Graphs and `mtimes` MUST be equal length and aligned by index.
+pub fn write_dirty_fragments_from_graphs(
+    session_dir: &Path,
+    graphs: &[LocalGraph],
+    mtimes: &[u64],
+) -> io::Result<Vec<FragmentOutcome>> {
+    if graphs.len() != mtimes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "graphs ({}) and mtimes ({}) must be aligned 1:1",
+                graphs.len(),
+                mtimes.len()
+            ),
+        ));
+    }
+    if graphs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let overlay_dir = session_dir.join("graph_overlay");
+    fs::create_dir_all(&overlay_dir)?;
+    let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let results: Vec<io::Result<(String, DirtyEntry, FragmentOutcome)>> = graphs
+        .par_iter()
+        .zip(mtimes.par_iter())
+        .enumerate()
+        .map(|(idx, (graph, &mtime_ns))| {
+            write_fragment_from_graph(&overlay_dir, batch_seq, idx as u64, graph, mtime_ns)
+        })
+        .collect();
+
+    commit_fragment_results(session_dir, results, graphs.len())
+}
+
+/// Shared tail for both write paths: collect per-file results, then commit the
+/// manifest + `overlay_version` bump in one atomic write each (coalesces N
+/// read-modify-write cycles down to 2).
+fn commit_fragment_results(
+    session_dir: &Path,
+    results: Vec<io::Result<(String, DirtyEntry, FragmentOutcome)>>,
+    n_inputs: usize,
+) -> io::Result<Vec<FragmentOutcome>> {
+    let mut outcomes = Vec::with_capacity(n_inputs);
+    let mut pending = Vec::with_capacity(n_inputs);
 
     for res in results {
         let (rel, entry, outcome) = res?;
@@ -155,7 +208,7 @@ pub fn write_dirty_fragments_batch(
 
     let sm_path = session_dir.join("session_meta.json");
     let mut sm = SessionMeta::read(&sm_path)?;
-    sm.overlay_version += inputs.len() as u32;
+    sm.overlay_version += n_inputs as u32;
     sm.last_touched = chrono::Utc::now().to_rfc3339();
     atomic_write_json(&sm_path, &sm)?;
 
@@ -207,10 +260,61 @@ fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
     let graph = pipeline()
         .parse_file_raw(path, content)
         .map_err(io::Error::other)?;
-    let fragments = fragments_from_local_graph(&graph);
+    archive_fragments(&graph)
+}
+
+/// rkyv-serialise a graph's fragments. Shared by the re-parse route
+/// (`parse_to_fragment`) and the pre-parsed route (`write_fragment_from_graph`)
+/// so both emit byte-identical fragment archives.
+fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
+    let fragments = fragments_from_local_graph(graph);
     rkyv::to_bytes::<rkyv::rancor::Error>(&fragments)
         .map(|v| v.into_vec())
         .map_err(io::Error::other)
+}
+
+/// Pre-parsed twin of `write_fragment_file`: the dirty file was already parsed
+/// upstream (`reanalyze_files`), so this skips the tree-sitter re-parse and
+/// derives `fragment_id` from the graph's own `content_hash` (the `xxh3_64`
+/// LE bytes — `u64::from_le_bytes` + `{:016x}` reproduces `xxh3_hex16` exactly).
+fn write_fragment_from_graph(
+    overlay_dir: &Path,
+    batch_seq: u64,
+    input_idx: u64,
+    graph: &LocalGraph,
+    mtime_ns: u64,
+) -> io::Result<(String, DirtyEntry, FragmentOutcome)> {
+    let content_hash = format!("{:016x}", u64::from_le_bytes(graph.content_hash));
+    let fragment_id = content_hash.clone();
+    let fragment_path = overlay_dir.join(format!("{fragment_id}.bin"));
+
+    let parse_failed = match archive_fragments(graph) {
+        Ok(archive_bytes) => {
+            let tmp = overlay_dir.join(format!("{fragment_id}.{batch_seq}.{input_idx}.tmp"));
+            fs::write(&tmp, &archive_bytes)?;
+            let f = fs::OpenOptions::new().write(true).open(&tmp)?;
+            f.sync_all()?;
+            drop(f);
+            replace_file(&tmp, &fragment_path)?;
+            false
+        }
+        Err(_) => true,
+    };
+
+    let rel_path = graph.file_path.to_string_lossy().into_owned();
+    let entry = DirtyEntry {
+        mtime_ns,
+        content_hash: content_hash.clone(),
+        fragment_id: fragment_id.clone(),
+        tantivy_delta_segment: None,
+        parse_failed,
+        dirty_symbols: vec![],
+    };
+    let outcome = FragmentOutcome {
+        fragment_id,
+        parse_failed,
+    };
+    Ok((rel_path, entry, outcome))
 }
 
 fn content_hash_hex(bytes: &[u8]) -> String {
