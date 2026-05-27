@@ -1,4 +1,9 @@
 //! Integration tests for `ecp uninstall`.
+//!
+//! NB: every integration test here must pass `--dry-run` or `--agent`. A bare
+//! `ecp uninstall` now deletes the running binary as its last step — which, for
+//! `CARGO_BIN_EXE_ecp`, is the test harness's own copy. Exercise the real
+//! deletion via the `remove_self_binary_at` unit tests (tmpdir), never the CLI.
 
 use std::process::Command;
 use tempfile::TempDir;
@@ -107,9 +112,9 @@ fn test_uninstall_dry_run_lists_without_deleting() {
 }
 
 #[test]
-fn test_uninstall_host_flag_filters_to_one_host() {
+fn test_uninstall_agent_flag_filters_to_one_agent() {
     let out = Command::new(ecp_bin())
-        .args(["uninstall", "--host", "codex", "--dry-run"])
+        .args(["uninstall", "--agent", "codex", "--dry-run"])
         .output()
         .unwrap();
 
@@ -124,38 +129,55 @@ fn test_uninstall_host_flag_filters_to_one_host() {
     // Claude/Gemini steps must NOT appear (filtered out).
     assert!(
         !stdout.contains("claude"),
-        "claude steps must be absent when --host codex"
+        "claude steps must be absent when --agent codex"
     );
     assert!(
         !stdout.contains("gemini"),
-        "gemini steps must be absent when --host codex"
+        "gemini steps must be absent when --agent codex"
     );
-    // With --host set, ecp-cache and git-hook are suppressed too.
+    // With --agent set, ecp-cache, git-hook and self-binary are suppressed too.
     assert!(
         !stdout.contains("ecp-cache"),
-        "ecp-cache must be suppressed when --host is set"
+        "ecp-cache must be suppressed when --agent is set"
     );
     assert!(
         !stdout.contains("git-hook"),
-        "git-hook must be suppressed when --host is set"
+        "git-hook must be suppressed when --agent is set"
+    );
+    assert!(
+        !stdout.contains("self-binary"),
+        "self-binary must be suppressed when --agent is set"
     );
 }
 
 #[test]
-fn test_uninstall_invalid_host_errors() {
+fn test_uninstall_invalid_agent_errors() {
     let out = Command::new(ecp_bin())
-        .args(["uninstall", "--host", "unknown-host", "--dry-run"])
+        .args(["uninstall", "--agent", "unknown-agent", "--dry-run"])
         .output()
         .unwrap();
 
     assert!(
         !out.status.success(),
-        "invalid --host should cause non-zero exit"
+        "invalid --agent should cause non-zero exit"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("unknown host") || stderr.contains("unknown-host"),
-        "error message should mention the unknown host, got: {stderr}"
+        stderr.contains("unknown agent") || stderr.contains("unknown-agent"),
+        "error message should mention the unknown agent, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_uninstall_old_host_flag_is_rejected() {
+    let out = Command::new(ecp_bin())
+        .args(["uninstall", "--host", "codex", "--dry-run"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "renamed-away --host flag should be a clap error"
     );
 }
 
@@ -169,9 +191,63 @@ fn test_uninstall_help_is_visible() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("--host")
+        stdout.contains("--agent")
             && stdout.contains("--dry-run")
             && stdout.contains("--keep-cache"),
         "help must show all three flags, got: {stdout}"
+    );
+}
+
+// ─── self-delete binary tests ───────────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn test_remove_self_binary_at_deletes_the_file() {
+    let dir = TempDir::new().unwrap();
+    let fake_bin = dir.path().join("ecp");
+    std::fs::write(&fake_bin, b"#!/bin/sh\necho fake ecp\n").unwrap();
+
+    let outcome = ecp_cli::commands::uninstall::remove_self_binary_at(&fake_bin).unwrap();
+
+    assert!(
+        matches!(
+            outcome,
+            ecp_cli::commands::uninstall::SelfDeleteOutcome::Deleted
+        ),
+        "unix should delete synchronously"
+    );
+    assert!(!fake_bin.exists(), "binary should be unlinked on unix");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_remove_self_binary_at_schedules_on_windows() {
+    let dir = TempDir::new().unwrap();
+    let fake_bin = dir.path().join("ecp.exe");
+    std::fs::write(&fake_bin, b"fake").unwrap();
+
+    let outcome = ecp_cli::commands::uninstall::remove_self_binary_at(&fake_bin).unwrap();
+
+    assert!(
+        matches!(
+            outcome,
+            ecp_cli::commands::uninstall::SelfDeleteOutcome::Scheduled
+        ),
+        "windows should schedule a delayed delete, not delete in-process"
+    );
+}
+
+#[test]
+fn test_remove_self_binary_at_missing_is_skip() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("does-not-exist");
+
+    let outcome = ecp_cli::commands::uninstall::remove_self_binary_at(&missing).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ecp_cli::commands::uninstall::SelfDeleteOutcome::Skipped
+        ),
+        "a non-existent binary path is a graceful skip"
     );
 }
