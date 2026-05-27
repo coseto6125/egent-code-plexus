@@ -63,3 +63,51 @@ fn gain_json_aggregates_a_fixture() {
     assert_eq!(v["errors_by_kind"]["cypher-parse"], 1);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn gain_text_dashboard_is_plain_when_piped() {
+    let tmp = std::env::temp_dir().join(format!("ecp-gain-txt-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__1");
+    std::fs::create_dir_all(&tel).unwrap();
+    std::fs::write(
+        tel.join("cli-calls.jsonl"),
+        r#"{"ts":"2026-05-27T07:00:00Z","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}"#,
+    ).unwrap();
+    let out = Command::new(ecp_bin())
+        .args(["gain", "--telemetry-dir", tel.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let s = String::from_utf8(out.stdout).unwrap();
+    assert!(!s.contains('\x1b'), "piped output must be color-free");
+    assert!(s.contains("Usage"));
+    assert!(s.contains("inspect"));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn gain_failures_lists_only_errors() {
+    let tmp = std::env::temp_dir().join(format!("ecp-gain-fail-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__2");
+    std::fs::create_dir_all(&tel).unwrap();
+    let lines = [
+        r#"{"ts":"2026-05-27T07:00:00Z","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}"#,
+        r#"{"ts":"2026-05-27T07:02:00Z","tool":"cypher","duration_ms":9,"ok":false,"source":"cli","error_kind":"cypher-parse"}"#,
+    ].join("\n");
+    std::fs::write(tel.join("cli-calls.jsonl"), lines).unwrap();
+    let out = Command::new(ecp_bin())
+        .args([
+            "gain",
+            "--failures",
+            "--telemetry-dir",
+            tel.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let s = String::from_utf8(out.stdout).unwrap();
+    assert!(s.contains("cypher-parse"));
+    assert!(
+        !s.contains("inspect"),
+        "failures view must omit successful commands"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
