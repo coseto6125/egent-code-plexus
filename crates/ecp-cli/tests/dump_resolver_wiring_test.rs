@@ -25,7 +25,7 @@ fn admin_index_dump_resolver_writes_jsonl() {
     )
     .expect("write b.ts");
 
-    // git repo required: head_sha_hex is read before the bypass branch.
+    // Commit the fixture so it's a real tree the analyzer can walk.
     for args in [vec!["init", "-q", "-b", "main"], vec!["add", "-A"]] {
         assert!(Command::new("git")
             .args(&args)
@@ -73,8 +73,9 @@ fn admin_index_dump_resolver_writes_jsonl() {
     );
     let body =
         std::fs::read_to_string(&dump).unwrap_or_else(|e| panic!("dump file not written: {e}"));
-    assert!(!body.trim().is_empty(), "dump JSONL is empty");
-    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(!lines.is_empty(), "dump JSONL is empty");
+    for line in &lines {
         let v: serde_json::Value =
             serde_json::from_str(line).unwrap_or_else(|e| panic!("bad JSONL line {line:?}: {e}"));
         assert!(v.get("src_file").is_some(), "missing src_file: {line}");

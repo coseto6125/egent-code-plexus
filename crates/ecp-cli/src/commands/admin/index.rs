@@ -376,8 +376,9 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     // oracle harness), NOT a publish. Bypass build_l2 — its same-SHA fast-path
     // attach would skip the analyzer, so the dump would never be produced — and
     // discard the graph; only the JSONL is wanted. ~/.ecp is left untouched.
-    if let Some(dump_path) = args.dump_resolver.clone() {
-        let worktree = std::path::PathBuf::from(&args.repo);
+    let repo_path = std::path::PathBuf::from(&args.repo);
+    if let Some(dump_path) = args.dump_resolver {
+        let worktree = repo_path;
         if !worktree.exists() {
             return Err(format!("repo path does not exist: {}", worktree.display()));
         }
@@ -390,7 +391,7 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let worktree = std::path::PathBuf::from(&args.repo);
+    let worktree = repo_path;
     if !worktree.exists() {
         return Err(format!("repo path does not exist: {}", worktree.display()));
     }
