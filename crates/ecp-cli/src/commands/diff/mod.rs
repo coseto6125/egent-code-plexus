@@ -200,13 +200,16 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
     {
         let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
         bindings::dump(&repo_dir, &baseline_jsonl)?;
-        let baseline_graph = crate::graph_path::resolve(legacy_default, &repo_dir);
         // Baseline side: ensure under the checked-out baseline SHA so both
         // snapshots are produced by the SAME ecp binary — a fingerprint drift
         // here means the cached baseline graph was built by an older ecp, which
         // would surface as a phantom diff. Rebuild it before the copy.
-        crate::auto_ensure::ensure_fresh(&baseline_graph, &repo_dir)
+        // Resolve the path AFTER ensure_fresh so the correct commit-indexed path
+        // is used if the graph was just created by build_l2.
+        let baseline_graph_for_ensure = crate::graph_path::resolve(legacy_default, &repo_dir);
+        crate::auto_ensure::ensure_fresh(&baseline_graph_for_ensure, &repo_dir)
             .map_err(|e| EcpError::Output(format!("ensure baseline graph: {e}")))?;
+        let baseline_graph = crate::graph_path::resolve(legacy_default, &repo_dir);
         std::fs::copy(&baseline_graph, &baseline_graph_tmp).map_err(|e| {
             EcpError::Output(format!(
                 "copy baseline graph {}: {e}",
