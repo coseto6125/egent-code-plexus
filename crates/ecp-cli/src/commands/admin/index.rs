@@ -371,11 +371,23 @@ pub fn run_analyzer_for_paths(
 }
 
 pub fn run(args: IndexArgs) -> Result<(), String> {
-    if args.dump_resolver.is_some() {
-        eprintln!(
-            "warning: --dump-resolver accepted but not yet wired in v2 layout; \
-             will be re-wired alongside `ecp diff` baseline path"
-        );
+    // --dump-resolver: produce a resolver-decision JSONL side-output. This is
+    // a debug / diff path (consumed by `ecp diff --section bindings` and the
+    // oracle harness), NOT a publish. Bypass build_l2 — its same-SHA fast-path
+    // attach would skip the analyzer, so the dump would never be produced — and
+    // discard the graph; only the JSONL is wanted. ~/.ecp is left untouched.
+    if let Some(dump_path) = args.dump_resolver.clone() {
+        let worktree = std::path::PathBuf::from(&args.repo);
+        if !worktree.exists() {
+            return Err(format!("repo path does not exist: {}", worktree.display()));
+        }
+        let scratch = std::env::temp_dir().join(format!("ecp-dumponly-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("create scratch dir: {e}"))?;
+        let result = run_analyzer_for_paths(&worktree, &scratch, None, Some(&dump_path))
+            .map_err(|e| format!("analyzer dump pass: {e}"));
+        let _ = std::fs::remove_dir_all(&scratch);
+        result?;
+        return Ok(());
     }
 
     let worktree = std::path::PathBuf::from(&args.repo);
