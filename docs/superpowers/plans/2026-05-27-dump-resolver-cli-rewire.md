@@ -6,7 +6,7 @@
 
 **Architecture:** The analyzer (`GraphBuilder.with_resolver_dump` → `write_resolver_dump`) already works and is tested. Only CLI wiring is missing. Approach A: when `--dump-resolver` is set, `admin index` bypasses `build_l2` (whose same-SHA fast-path attach would skip the analyzer) and calls `run_analyzer_for_paths` directly with the dump path, discarding the graph and keeping only the JSONL dump.
 
-**Tech Stack:** Rust, clap, the ecp-cli + ecp-analyzer crates. Tests: `cargo test -p ecp-cli`.
+**Tech Stack:** Rust, clap, the ecp-cli + ecp-analyzer crates. Tests: `cargo test -p egent-code-plexus`.
 
 **Spec:** `docs/superpowers/specs/2026-05-27-dump-resolver-cli-rewire-design.md`
 
@@ -72,12 +72,12 @@ In `crates/ecp-cli/src/build/orchestrator.rs`, the call at line 150 becomes:
 
 - [ ] **Step 4: Compile**
 
-Run: `cargo build -p ecp-cli 2>&1 | tail -20`
+Run: `cargo build -p egent-code-plexus 2>&1 | tail -20`
 Expected: builds clean (no other callers exist — verified by `rg run_analyzer_for_paths crates/ --type rust`).
 
 - [ ] **Step 5: Run existing index/build tests to confirm no regression**
 
-Run: `cargo test -p ecp-cli --test build_orchestrator 2>&1 | tail -15`
+Run: `cargo test -p egent-code-plexus --test build_orchestrator 2>&1 | tail -15`
 Expected: PASS (or the existing `#[ignore]` cases stay ignored; no new failures).
 
 - [ ] **Step 6: Commit**
@@ -170,7 +170,7 @@ fn admin_index_dump_resolver_writes_jsonl() {
 
 - [ ] **Step 2: Run it to confirm it fails**
 
-Run: `cargo test -p ecp-cli --test dump_resolver_wiring_test 2>&1 | tail -20`
+Run: `cargo test -p egent-code-plexus --test dump_resolver_wiring_test 2>&1 | tail -20`
 Expected: FAIL — `dump file not written` (the current warning-only block never writes it).
 
 - [ ] **Step 3: Implement the bypass branch**
@@ -202,12 +202,12 @@ In `crates/ecp-cli/src/commands/admin/index.rs`, replace the block at lines 372-
 
 - [ ] **Step 4: Run the wiring test to confirm it passes**
 
-Run: `cargo test -p ecp-cli --test dump_resolver_wiring_test 2>&1 | tail -20`
+Run: `cargo test -p egent-code-plexus --test dump_resolver_wiring_test 2>&1 | tail -20`
 Expected: PASS.
 
 - [ ] **Step 5: Confirm normal index still bypasses the dump path**
 
-Run: `cargo test -p ecp-cli --test build_orchestrator 2>&1 | tail -10`
+Run: `cargo test -p egent-code-plexus --test build_orchestrator 2>&1 | tail -10`
 Expected: no new failures (the bypass is `if let Some(...)`-gated, so `dump_resolver = None` runs the original `build_l2` path untouched).
 
 - [ ] **Step 6: Commit**
@@ -246,7 +246,7 @@ fn diff_bindings_two_commit_resolution_change() {
 
 - [ ] **Step 2: Run it to confirm it passes**
 
-Run: `cargo test -p ecp-cli --test diff_bindings_test 2>&1 | tail -20`
+Run: `cargo test -p egent-code-plexus --test diff_bindings_test 2>&1 | tail -20`
 Expected: PASS for both `diff_bindings_two_commit_resolution_change` and
 `diff_bindings_against_head_yields_empty`.
 
@@ -300,12 +300,12 @@ Delete the three comment lines immediately above `let diff_args` that start with
 
 - [ ] **Step 2: Compile**
 
-Run: `cargo build -p ecp-cli 2>&1 | tail -10`
+Run: `cargo build -p egent-code-plexus 2>&1 | tail -10`
 Expected: builds clean.
 
 - [ ] **Step 3: Verify review still runs end-to-end**
 
-Run: `cargo test -p ecp-cli review 2>&1 | tail -15`
+Run: `cargo test -p egent-code-plexus review 2>&1 | tail -15`
 Expected: no new failures. (If no review-specific test exists, this is a no-op
 compile gate; the manual check in Task 5 covers behavior.)
 
@@ -324,7 +324,7 @@ git commit -m "feat(review): re-enable bindings in verdicts now that dump-resolv
 
 - [ ] **Step 1: Build the release binary used by the manual check**
 
-Run: `cargo build -p ecp-cli 2>&1 | tail -5`
+Run: `cargo build -p egent-code-plexus 2>&1 | tail -5`
 Expected: clean build. Note the debug binary path is `target/debug/ecp`.
 
 - [ ] **Step 2: Reproduce the original crash is now fixed**
@@ -355,7 +355,7 @@ Expected: `OK: no scratch leak`.
 
 - [ ] **Step 5: Full crate test suite**
 
-Run: `cargo test -p ecp-cli 2>&1 | tail -25`
+Run: `cargo test -p egent-code-plexus 2>&1 | tail -25`
 Expected: PASS (no `--dump-resolver`-related ignores remain; no new failures).
 
 - [ ] **Step 6: Commit any incidental fixes; otherwise nothing to commit**

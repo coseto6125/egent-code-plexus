@@ -143,6 +143,18 @@ terms (`--section bindings --format json`, asserts `sections.bindings.*`) — it
 was authored for exactly this fix and should pass once wiring lands. No
 expectation rewrite expected; verify by running.
 
+**Pre-existing bug found while un-ignoring (fixed in same commit):** the test
+exposed a path-resolution race in `diff/mod.rs`. The baseline graph path was
+resolved via `graph_path::resolve` *before* `ensure_fresh` built the graph. For a
+baseline SHA that was never indexed before (e.g. a fresh TempDir repo, or any
+first-time diff of a never-seen baseline), `resolve_v2`'s `CommitIndex.find`
+returns `None` → falls back to the non-existent legacy `.ecp/graph.bin` → the
+later `std::fs::copy` fails. Fix: resolve the path *after* `ensure_fresh`, so the
+freshly-built commit dir is in the index. Safe because `CommitIndex::scan_cached`
+keys its process cache on `commits/` mtime, which `ensure_fresh` bumps. This bug
+was latent because earlier manual `--section routes --baseline` tests used
+already-indexed baselines, so the first `resolve` already hit the v2 path.
+
 Note: the sibling test `diff_bindings_against_head_yields_empty` (line 159) is
 *not* ignored and passes today because HEAD-vs-HEAD hits the
 `baseline_sha == current_sha` fast-path (`builder.rs:161`) and returns empty
