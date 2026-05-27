@@ -78,7 +78,8 @@ pub fn render_dashboard(recs: &[Rec], color: bool, show_all: bool) -> String {
     let _ = writeln!(o, "{}", "─".repeat(76));
     let _ = writeln!(
         o,
-        "  #  Command                      Count   Share   p50    p99   Err%"
+        "  {:<2} {:<22} {:>6}  {:>6}  {:>5}  {:>6}  Err%",
+        "#", "Command", "Count", "Share", "p50", "p99"
     );
     let _ = writeln!(o, "{}", "─".repeat(76));
     let stats = by_command(recs);
@@ -103,13 +104,13 @@ pub fn render_dashboard(recs: &[Rec], color: bool, show_all: bool) -> String {
         let b = bar(s.count as f64 / max_count as f64, BAR_W);
         let _ = writeln!(
             o,
-            "  {:<2} {:<22} {:>6}  {:>5.1}%  {:>3}ms {:>4}ms  {}  {}",
+            "  {:<2} {:<22} {:>6}  {:>6}  {:>5}  {:>6}  {}  {}",
             i + 1,
             s.cmd,
             s.count,
-            share,
-            s.p50,
-            s.p99,
+            format!("{share:.1}%"),
+            format!("{}ms", s.p50),
+            format!("{}ms", s.p99),
             er_cell,
             b
         );
