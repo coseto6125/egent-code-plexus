@@ -19,6 +19,8 @@ pub struct Config {
     pub group: GroupConfig,
     #[serde(default)]
     pub index: IndexConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -125,6 +127,36 @@ fn default_group_cross_depth() -> u32 {
 }
 fn default_group_timeout_ms() -> u64 {
     5000
+}
+
+/// **stored** — CLI telemetry knobs consumed by the telemetry recorder
+/// (`cli-calls.jsonl`). An absent `[telemetry]` section yields these defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TelemetryConfig {
+    /// **stored** — record CLI invocations to `cli-calls.jsonl`. Set
+    /// `cli = false` to opt out of local telemetry recording entirely.
+    #[serde(default = "default_telemetry_cli")]
+    pub cli: bool,
+    /// **stored** — days of CLI telemetry to keep; lines older than this
+    /// threshold are pruned on the off-hot-path GC pass.
+    #[serde(default = "default_telemetry_retention_days")]
+    pub retention_days: u64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            cli: default_telemetry_cli(),
+            retention_days: default_telemetry_retention_days(),
+        }
+    }
+}
+
+fn default_telemetry_cli() -> bool {
+    true
+}
+fn default_telemetry_retention_days() -> u64 {
+    7
 }
 
 /// Single source of truth for the indexing file cap. Shared between the
@@ -257,5 +289,20 @@ mod tests {
         let resolved = resolve_max_file_bytes(dir.path());
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
         assert_eq!(resolved, 4096);
+    }
+
+    #[test]
+    fn telemetry_defaults_when_section_absent() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.telemetry.cli);
+        assert_eq!(cfg.telemetry.retention_days, 7);
+    }
+
+    #[test]
+    fn telemetry_section_overrides() {
+        let cfg: Config =
+            toml::from_str("[telemetry]\ncli = false\nretention_days = 14\n").unwrap();
+        assert!(!cfg.telemetry.cli);
+        assert_eq!(cfg.telemetry.retention_days, 14);
     }
 }
