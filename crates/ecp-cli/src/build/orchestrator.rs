@@ -151,6 +151,7 @@ pub(crate) fn build_inside_locked(
             &src_root,
             building,
             Some(repo_root),
+            None,
         )?;
 
         let t_refs = std::time::Instant::now();

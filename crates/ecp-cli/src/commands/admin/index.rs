@@ -70,6 +70,7 @@ pub fn run_analyzer_for_paths(
     src_root: &std::path::Path,
     out_dir: &std::path::Path,
     parse_cache_root: Option<&std::path::Path>,
+    dump_resolver: Option<&std::path::Path>,
 ) -> std::io::Result<(usize, ecp_core::graph::ZeroCopyGraph)> {
     let prof = std::env::var("ECP_PROF").is_ok();
     let t_step1 = std::time::Instant::now();
@@ -326,7 +327,8 @@ pub fn run_analyzer_for_paths(
     let t_ingest = std::time::Instant::now();
     let mut builder = GraphBuilder::new()
         .with_path_aliases(aliases)
-        .with_repo_root(src_root.to_path_buf());
+        .with_repo_root(src_root.to_path_buf())
+        .with_resolver_dump(dump_resolver.map(std::path::Path::to_path_buf));
     for graph in local_graphs {
         builder.add_graph(graph);
     }
