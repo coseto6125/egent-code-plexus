@@ -1,14 +1,14 @@
-# `ecp gain` Usage Dashboard Implementation Plan
+# `ecp usage` Usage Dashboard Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `ecp gain` — a terminal ASCII usage dashboard (invocation counts, latency vs the <30 ms budget, persisted error log) — plus the CLI-path telemetry instrumentation that feeds it.
+**Goal:** Add `ecp usage` — a terminal ASCII usage dashboard (invocation counts, latency vs the <30 ms budget, persisted error log) — plus the CLI-path telemetry instrumentation that feeds it.
 
-**Architecture:** Three layers. (1) **Collection**: `main()` is refactored so all dispatch flows through one `Result`-returning inner function; `main()` wraps it in a timer and appends one `CallRecord` per invocation (success or failure) to `~/.ecp/telemetry/<repo>/cli-calls.jsonl`, best-effort, no flock, no sync — zero hot-path cost. (2) **Aggregation**: a new `gain` reader merges the CLI file + the existing MCP `calls.jsonl`, reusing the percentile/grouping shape from `insight.rs`. (3) **Presentation**: an ASCII dashboard with auto color detection. The shared `CallRecord` struct moves from `ecp-mcp` to `ecp-core` and gains two append-only fields (`source`, `error_kind`); the MCP path keeps working unchanged.
+**Architecture:** Three layers. (1) **Collection**: `main()` is refactored so all dispatch flows through one `Result`-returning inner function; `main()` wraps it in a timer and appends one `CallRecord` per invocation (success or failure) to `~/.ecp/telemetry/<repo>/cli-calls.jsonl`, best-effort, no flock, no sync — zero hot-path cost. (2) **Aggregation**: a new `usage` reader merges the CLI file + the existing MCP `calls.jsonl`, reusing the percentile/grouping shape from `insight.rs`. (3) **Presentation**: an ASCII dashboard with auto color detection. The shared `CallRecord` struct moves from `ecp-mcp` to `ecp-core` and gains two append-only fields (`source`, `error_kind`); the MCP path keeps working unchanged.
 
 **Tech Stack:** Rust, clap (derive), serde / serde_json, `std::io::IsTerminal` (zero-dep color detection), existing `ecp_core::time` RFC3339 helpers.
 
-**Spec:** `docs/superpowers/specs/2026-05-27-ecp-gain-usage-dashboard-design.md`
+**Spec:** `docs/superpowers/specs/2026-05-27-ecp-usage-usage-dashboard-design.md`
 
 ---
 
@@ -22,11 +22,11 @@
 | `crates/ecp-mcp/src/server.rs` | `CallRecord` literal gains `source:"mcp", error_kind:None`. | Modify |
 | `crates/ecp-cli/src/telemetry_cli.rs` | CLI-side recorder: classify error → `error_kind`, build `CallRecord{source:"cli"}`, append to `cli-calls.jsonl`; opt-out check; arg-summary helper. | **Create** |
 | `crates/ecp-cli/src/main.rs` | Refactor dispatch into `fn dispatch(cli) -> Result<&'static str, EcpError>` (returns subcommand label) + timer wrapper in `main()`. | Modify |
-| `crates/ecp-cli/src/commands/gain.rs` | `GainArgs`, `run`, aggregation (reuses insight shapes), ASCII rendering, color detection, retention prune. | **Create** |
-| `crates/ecp-cli/src/commands/mod.rs` | `pub mod gain;` | Modify |
-| `crates/ecp-cli/src/cli.rs` | `Gain(commands::gain::GainArgs)` variant in `Commands`. | Modify |
+| `crates/ecp-cli/src/commands/usage.rs` | `UsageArgs`, `run`, aggregation (reuses insight shapes), ASCII rendering, color detection, retention prune. | **Create** |
+| `crates/ecp-cli/src/commands/mod.rs` | `pub mod usage;` | Modify |
+| `crates/ecp-cli/src/cli.rs` | `Gain(commands::usage::UsageArgs)` variant in `Commands`. | Modify |
 | `crates/ecp-cli/src/config_parser.rs` | Parse optional `[telemetry]` section: `cli` (bool, default true), `retention_days` (u64, default 7). | Modify |
-| `crates/ecp-cli/tests/gain_cmd.rs` | Integration tests: collection, aggregation, rendering, color, retention, taxonomy. | **Create** |
+| `crates/ecp-cli/tests/usage_cmd.rs` | Integration tests: collection, aggregation, rendering, color, retention, taxonomy. | **Create** |
 
 ---
 
@@ -424,7 +424,7 @@ git commit -m "feat(cli): telemetry recorder — taxonomy, opt-out, arg summary"
 
 - [ ] **Step 1: Write the failing test** (integration — proves a real invocation writes a line)
 
-Create `crates/ecp-cli/tests/gain_cmd.rs` with:
+Create `crates/ecp-cli/tests/usage_cmd.rs` with:
 
 ```rust
 use std::process::Command;
@@ -435,7 +435,7 @@ fn ecp_bin() -> &'static str {
 
 #[test]
 fn invocation_appends_one_cli_telemetry_line() {
-    let tmp = std::env::temp_dir().join(format!("ecp-gain-it-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-it-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     // A guaranteed-fast no-graph command: `find` against an empty dir errors
@@ -472,7 +472,7 @@ fn invocation_appends_one_cli_telemetry_line() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p egent-code-plexus --test gain_cmd invocation_appends`
+Run: `cargo test -p egent-code-plexus --test usage_cmd invocation_appends`
 Expected: FAIL — no cli-calls.jsonl written (instrumentation not wired).
 
 - [ ] **Step 3: Implement the refactor.** Restructure `main()` in `crates/ecp-cli/src/main.rs`:
@@ -509,7 +509,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::Group { .. } => "group",
         Commands::Schema(_) => "schema",
         Commands::Insight(_) => "insight",
-        Commands::Gain(_) => "gain",
+        Commands::Usage(_) => "usage",
         Commands::Uninstall(_) => "uninstall",
     }
 }
@@ -542,7 +542,7 @@ Inside `dispatch`, replace every `eprintln!("Command failed: {e}"); std::process
 
 - [ ] **Step 4: Build, then run the test**
 
-Run: `cargo build -p egent-code-plexus --bin ecp` then `cargo test -p egent-code-plexus --test gain_cmd invocation_appends`
+Run: `cargo build -p egent-code-plexus --bin ecp` then `cargo test -p egent-code-plexus --test usage_cmd invocation_appends`
 Expected: build OK; test PASS (one `source:"cli"` line written).
 
 - [ ] **Step 5: Sanity — existing CLI tests still pass**
@@ -553,28 +553,28 @@ Expected: PASS (the refactor preserved behavior).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/ecp-cli/src/main.rs crates/ecp-cli/tests/gain_cmd.rs
+git add crates/ecp-cli/src/main.rs crates/ecp-cli/tests/usage_cmd.rs
 git commit -m "feat(cli): single recorded dispatch exit point; instrument all invocations"
 ```
 
 ---
 
-## Task 6: `ecp gain` command skeleton + clap wiring + aggregation
+## Task 6: `ecp usage` command skeleton + clap wiring + aggregation
 
 **Files:**
-- Create: `crates/ecp-cli/src/commands/gain.rs`
+- Create: `crates/ecp-cli/src/commands/usage.rs`
 - Modify: `crates/ecp-cli/src/commands/mod.rs`, `crates/ecp-cli/src/cli.rs`, `crates/ecp-cli/src/main.rs`
 
-**Context:** Aggregation reuses the shape from `insight.rs` (`read_window`, `aggregate_by_tool`, `percentile`). `gain` reads BOTH `cli-calls.jsonl` and `calls.jsonl`, parses the superset record (with `source`/`error_kind`), and produces a `GainReport` struct that the renderer (Task 7) consumes. This task wires the command end-to-end with JSON output only; text rendering is Task 7.
+**Context:** Aggregation reuses the shape from `insight.rs` (`read_window`, `aggregate_by_tool`, `percentile`). `usage` reads BOTH `cli-calls.jsonl` and `calls.jsonl`, parses the superset record (with `source`/`error_kind`), and produces a `GainReport` struct that the renderer (Task 7) consumes. This task wires the command end-to-end with JSON output only; text rendering is Task 7.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `crates/ecp-cli/tests/gain_cmd.rs`:
+Add to `crates/ecp-cli/tests/usage_cmd.rs`:
 
 ```rust
 #[test]
 fn gain_json_aggregates_a_fixture() {
-    let tmp = std::env::temp_dir().join(format!("ecp-gain-json-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-json-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/myrepo__deadbeef");
     std::fs::create_dir_all(&tel).unwrap();
     let lines = [
@@ -584,7 +584,7 @@ fn gain_json_aggregates_a_fixture() {
     ].join("\n");
     std::fs::write(tel.join("cli-calls.jsonl"), lines).unwrap();
     let out = Command::new(ecp_bin())
-        .args(["gain", "--format", "json", "--telemetry-dir", tel.to_str().unwrap()])
+        .args(["usage", "--format", "json", "--telemetry-dir", tel.to_str().unwrap()])
         .output()
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -599,13 +599,13 @@ fn gain_json_aggregates_a_fixture() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p egent-code-plexus --test gain_cmd gain_json`
-Expected: FAIL — `gain` is not a subcommand.
+Run: `cargo test -p egent-code-plexus --test usage_cmd gain_json`
+Expected: FAIL — `usage` is not a subcommand.
 
-- [ ] **Step 3: Implement `gain.rs` (args + aggregation + JSON).**
+- [ ] **Step 3: Implement `usage.rs` (args + aggregation + JSON).**
 
 ```rust
-//! `ecp gain` — human-facing usage dashboard over CLI + MCP telemetry.
+//! `ecp usage` — human-facing usage dashboard over CLI + MCP telemetry.
 //!
 //! Reads `cli-calls.jsonl` (+ MCP `calls.jsonl`) for a repo (or all repos),
 //! aggregates invocation counts, p50/p99 latency, error rate, and per-kind
@@ -626,7 +626,7 @@ use std::path::{Path, PathBuf};
 const BUDGET_MS: u64 = 30;
 
 #[derive(Args, Debug, Clone)]
-pub struct GainArgs {
+pub struct UsageArgs {
     /// Scope to the current repository only (default: all repos).
     #[arg(short = 'p', long)]
     pub project: bool,
@@ -657,18 +657,18 @@ pub struct Rec {
     pub raw: String,
 }
 
-pub fn run(args: GainArgs) -> Result<(), EcpError> {
+pub fn run(args: UsageArgs) -> Result<(), EcpError> {
     let format = OutputFormat::parse(args.format.as_deref());
     let recs = collect_records(&args)?;
     if matches!(format, OutputFormat::Json) {
         return emit(&build_json(&recs), format);
     }
     // text path → Task 7 renderer
-    let want_color = crate::commands::gain_render::color_enabled(&args, &format);
+    let want_color = crate::commands::usage_render::color_enabled(&args, &format);
     let text = if args.failures {
-        crate::commands::gain_render::render_failures(&recs, want_color)
+        crate::commands::usage_render::render_failures(&recs, want_color)
     } else {
-        crate::commands::gain_render::render_dashboard(&recs, want_color, args.all)
+        crate::commands::usage_render::render_dashboard(&recs, want_color, args.all)
     };
     println!("{text}");
     Ok(())
@@ -676,7 +676,7 @@ pub fn run(args: GainArgs) -> Result<(), EcpError> {
 
 /// Telemetry dirs to scan. Explicit `--telemetry-dir` wins; else `-p` →
 /// current repo's dir; else every `~/.ecp/telemetry/*`.
-fn scan_dirs(args: &GainArgs) -> Result<Vec<PathBuf>, EcpError> {
+fn scan_dirs(args: &UsageArgs) -> Result<Vec<PathBuf>, EcpError> {
     if let Some(d) = &args.telemetry_dir {
         return Ok(vec![d.clone()]);
     }
@@ -699,7 +699,7 @@ fn scan_dirs(args: &GainArgs) -> Result<Vec<PathBuf>, EcpError> {
     Ok(dirs)
 }
 
-fn collect_records(args: &GainArgs) -> Result<Vec<Rec>, EcpError> {
+fn collect_records(args: &UsageArgs) -> Result<Vec<Rec>, EcpError> {
     let mut recs = Vec::new();
     for dir in scan_dirs(args)? {
         for name in ["cli-calls.jsonl", "calls.jsonl"] {
@@ -809,31 +809,31 @@ fn build_json(recs: &[Rec]) -> Value {
 }
 ```
 
-> NOTE: `gain_render` is created in Task 7; for THIS task, add a temporary stub module so it compiles — create `crates/ecp-cli/src/commands/gain_render.rs` with just:
+> NOTE: `usage_render` is created in Task 7; for THIS task, add a temporary stub module so it compiles — create `crates/ecp-cli/src/commands/usage_render.rs` with just:
 > ```rust
-> use super::gain::Rec;
+> use super::usage::Rec;
 > use crate::output::OutputFormat;
-> pub fn color_enabled(_a: &super::gain::GainArgs, _f: &OutputFormat) -> bool { false }
+> pub fn color_enabled(_a: &super::usage::UsageArgs, _f: &OutputFormat) -> bool { false }
 > pub fn render_dashboard(_r: &[Rec], _c: bool, _all: bool) -> String { String::new() }
 > pub fn render_failures(_r: &[Rec], _c: bool) -> String { String::new() }
 > ```
 > Task 7 replaces the stub bodies.
 
 - [ ] **Step 4: Wire the command.**
-  - `crates/ecp-cli/src/commands/mod.rs`: add `pub mod gain;` and `pub mod gain_render;`.
-  - `crates/ecp-cli/src/cli.rs`: add `Gain(commands::gain::GainArgs),` to the `Commands` enum (place near `Insight`).
-  - `crates/ecp-cli/src/main.rs`: in the no-graph `match &cli.command` block, add `Commands::Gain(args) => run_no_graph!(commands::gain::run(args.clone())),`. Add `Commands::Gain(_)` to the two `unreachable!("handled before graph load")` arms (the `repo_opt` match and the final match) and to any other exhaustive `Commands` match the compiler flags.
+  - `crates/ecp-cli/src/commands/mod.rs`: add `pub mod usage;` and `pub mod usage_render;`.
+  - `crates/ecp-cli/src/cli.rs`: add `Gain(commands::usage::UsageArgs),` to the `Commands` enum (place near `Insight`).
+  - `crates/ecp-cli/src/main.rs`: in the no-graph `match &cli.command` block, add `Commands::Usage(args) => run_no_graph!(commands::usage::run(args.clone())),`. Add `Commands::Usage(_)` to the two `unreachable!("handled before graph load")` arms (the `repo_opt` match and the final match) and to any other exhaustive `Commands` match the compiler flags.
 
 - [ ] **Step 5: Build + run the test**
 
-Run: `cargo build -p egent-code-plexus --bin ecp` then `cargo test -p egent-code-plexus --test gain_cmd gain_json`
+Run: `cargo build -p egent-code-plexus --bin ecp` then `cargo test -p egent-code-plexus --test usage_cmd gain_json`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/ecp-cli/src/commands/gain.rs crates/ecp-cli/src/commands/gain_render.rs crates/ecp-cli/src/commands/mod.rs crates/ecp-cli/src/cli.rs crates/ecp-cli/src/main.rs
-git commit -m "feat(cli): ecp gain command — aggregation + json output"
+git add crates/ecp-cli/src/commands/usage.rs crates/ecp-cli/src/commands/usage_render.rs crates/ecp-cli/src/commands/mod.rs crates/ecp-cli/src/cli.rs crates/ecp-cli/src/main.rs
+git commit -m "feat(cli): ecp usage command — aggregation + json output"
 ```
 
 ---
@@ -841,18 +841,18 @@ git commit -m "feat(cli): ecp gain command — aggregation + json output"
 ## Task 7: ASCII dashboard renderer + color detection + `--failures`
 
 **Files:**
-- Modify: `crates/ecp-cli/src/commands/gain_render.rs` (replace the stub)
+- Modify: `crates/ecp-cli/src/commands/usage_render.rs` (replace the stub)
 
 **Context:** Replace the Task-6 stub with the real renderer. Sections in order Usage → Performance → Errors, matching spec §4.1. Color via `std::io::IsTerminal` three-state rule (spec §5). Sparkline is per-day buckets; degrades to blank with <2 days.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `crates/ecp-cli/tests/gain_cmd.rs`:
+Add to `crates/ecp-cli/tests/usage_cmd.rs`:
 
 ```rust
 #[test]
 fn gain_text_dashboard_is_plain_when_piped() {
-    let tmp = std::env::temp_dir().join(format!("ecp-gain-txt-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-txt-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/r__1");
     std::fs::create_dir_all(&tel).unwrap();
     std::fs::write(
@@ -860,7 +860,7 @@ fn gain_text_dashboard_is_plain_when_piped() {
         r#"{"ts":"2026-05-27T07:00:00Z","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}"#,
     ).unwrap();
     let out = Command::new(ecp_bin())
-        .args(["gain", "--telemetry-dir", tel.to_str().unwrap()])
+        .args(["usage", "--telemetry-dir", tel.to_str().unwrap()])
         .output()
         .unwrap();
     let s = String::from_utf8(out.stdout).unwrap();
@@ -873,7 +873,7 @@ fn gain_text_dashboard_is_plain_when_piped() {
 
 #[test]
 fn gain_failures_lists_only_errors() {
-    let tmp = std::env::temp_dir().join(format!("ecp-gain-fail-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-fail-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/r__2");
     std::fs::create_dir_all(&tel).unwrap();
     let lines = [
@@ -882,7 +882,7 @@ fn gain_failures_lists_only_errors() {
     ].join("\n");
     std::fs::write(tel.join("cli-calls.jsonl"), lines).unwrap();
     let out = Command::new(ecp_bin())
-        .args(["gain", "--failures", "--telemetry-dir", tel.to_str().unwrap()])
+        .args(["usage", "--failures", "--telemetry-dir", tel.to_str().unwrap()])
         .output()
         .unwrap();
     let s = String::from_utf8(out.stdout).unwrap();
@@ -894,16 +894,16 @@ fn gain_failures_lists_only_errors() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p egent-code-plexus --test gain_cmd gain_text gain_failures`
+Run: `cargo test -p egent-code-plexus --test usage_cmd gain_text gain_failures`
 Expected: FAIL — stub returns empty string (no "Usage"/"inspect").
 
-- [ ] **Step 3: Replace the stub** in `crates/ecp-cli/src/commands/gain_render.rs`:
+- [ ] **Step 3: Replace the stub** in `crates/ecp-cli/src/commands/usage_render.rs`:
 
 ```rust
-//! ASCII rendering for `ecp gain`. Sections: Usage → Performance → Errors.
+//! ASCII rendering for `ecp usage`. Sections: Usage → Performance → Errors.
 //! Color is opt-in and auto-disabled off a TTY / under NO_COLOR / for json.
 
-use super::gain::{by_command, errors_by_kind, GainArgs, Rec};
+use super::usage::{by_command, errors_by_kind, UsageArgs, Rec};
 use crate::output::OutputFormat;
 use std::fmt::Write as _;
 use std::io::IsTerminal;
@@ -919,7 +919,7 @@ const RESET: &str = "\x1b[0m";
 
 /// Three-state rule (spec §5): --no-color/NO_COLOR off; json off; non-TTY off;
 /// else on.
-pub fn color_enabled(args: &GainArgs, format: &OutputFormat) -> bool {
+pub fn color_enabled(args: &UsageArgs, format: &OutputFormat) -> bool {
     if args.no_color || std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
@@ -954,8 +954,8 @@ pub fn render_dashboard(recs: &[Rec], color: bool, show_all: bool) -> String {
     let mcp_n = total - cli_n;
     let mut all_durs: Vec<u64> = recs.iter().map(|r| r.duration_ms).collect();
     all_durs.sort_unstable();
-    let p50 = super::gain_render::pctl(&all_durs, 50);
-    let p99 = super::gain_render::pctl(&all_durs, 99);
+    let p50 = super::usage_render::pctl(&all_durs, 50);
+    let p99 = super::usage_render::pctl(&all_durs, 99);
     let err_pct = errors as f64 / total as f64 * 100.0;
 
     let _ = writeln!(o, "ecp Usage Dashboard");
@@ -1018,7 +1018,7 @@ pub fn render_dashboard(recs: &[Rec], color: bool, show_all: bool) -> String {
         for (kind, n) in pairs {
             let _ = writeln!(o, "  {:<20} {:>4}  {}", kind, n, bar(n as f64 / max_e as f64, 16));
         }
-        let _ = writeln!(o, "  Tip: ecp gain --failures   for recent failing commands + messages");
+        let _ = writeln!(o, "  Tip: ecp usage --failures   for recent failing commands + messages");
     }
     let _ = writeln!(o, "{}", "─".repeat(76));
     o
@@ -1038,7 +1038,7 @@ pub fn render_failures(recs: &[Rec], _color: bool) -> String {
     o
 }
 
-/// Shared percentile (gain.rs's is private; expose one here for the renderer).
+/// Shared percentile (usage.rs's is private; expose one here for the renderer).
 pub fn pctl(sorted: &[u64], pct: usize) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -1047,23 +1047,23 @@ pub fn pctl(sorted: &[u64], pct: usize) -> u64 {
 }
 ```
 
-> NOTE: the `super::gain_render::pctl` / `super::gain_render::` self-paths in `render_dashboard` are just `pctl(...)` (same module) — drop the `super::gain_render::` prefix when implementing; it's shown qualified only to name the function. Remove the now-unused `color_enabled` import of `Rec` if the compiler warns.
+> NOTE: the `super::usage_render::pctl` / `super::usage_render::` self-paths in `render_dashboard` are just `pctl(...)` (same module) — drop the `super::usage_render::` prefix when implementing; it's shown qualified only to name the function. Remove the now-unused `color_enabled` import of `Rec` if the compiler warns.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p egent-code-plexus --test gain_cmd`
+Run: `cargo test -p egent-code-plexus --test usage_cmd`
 Expected: all `gain_*` tests PASS (json, text-plain, failures, invocation).
 
 - [ ] **Step 5: Eyeball it** (human-visible sanity, color path)
 
-Run: `cargo run -p egent-code-plexus --bin ecp -- gain` (in a repo that has telemetry)
+Run: `cargo run -p egent-code-plexus --bin ecp -- usage` (in a repo that has telemetry)
 Expected: a three-section dashboard; if run in a real terminal, budget bars are colored.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/ecp-cli/src/commands/gain_render.rs crates/ecp-cli/tests/gain_cmd.rs
-git commit -m "feat(cli): ecp gain ASCII dashboard + failures view + color detection"
+git add crates/ecp-cli/src/commands/usage_render.rs crates/ecp-cli/tests/usage_cmd.rs
+git commit -m "feat(cli): ecp usage ASCII dashboard + failures view + color detection"
 ```
 
 ---
@@ -1071,19 +1071,19 @@ git commit -m "feat(cli): ecp gain ASCII dashboard + failures view + color detec
 ## Task 8: Retention prune (off the hot path) + GC fallback
 
 **Files:**
-- Modify: `crates/ecp-cli/src/commands/gain.rs` (prune on read)
+- Modify: `crates/ecp-cli/src/commands/usage.rs` (prune on read)
 - Modify: `crates/ecp-cli/src/commands/admin/gc.rs` (fallback prune)
 
-**Context:** Append never prunes. `ecp gain` prunes when it runs (it reads the whole file anyway). `gc.rs:44` currently exempts the whole `telemetry/` dir — narrow that so MCP `calls.jsonl` stays exempt but `cli-calls.jsonl` gets `retention_days` pruning.
+**Context:** Append never prunes. `ecp usage` prunes when it runs (it reads the whole file anyway). `gc.rs:44` currently exempts the whole `telemetry/` dir — narrow that so MCP `calls.jsonl` stays exempt but `cli-calls.jsonl` gets `retention_days` pruning.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `crates/ecp-cli/tests/gain_cmd.rs`:
+Add to `crates/ecp-cli/tests/usage_cmd.rs`:
 
 ```rust
 #[test]
 fn gain_prunes_lines_older_than_retention() {
-    let tmp = std::env::temp_dir().join(format!("ecp-gain-prune-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-prune-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/r__3");
     std::fs::create_dir_all(&tel).unwrap();
     // one ancient line (2020) + one fresh line (far-future so it survives any window)
@@ -1093,9 +1093,9 @@ fn gain_prunes_lines_older_than_retention() {
     ].join("\n");
     let f = tel.join("cli-calls.jsonl");
     std::fs::write(&f, lines).unwrap();
-    // gain with explicit dir + project-agnostic; retention default 7 days prunes 2020 line
+    // usage with explicit dir + project-agnostic; retention default 7 days prunes 2020 line
     let _ = Command::new(ecp_bin())
-        .args(["gain", "--format", "json", "--telemetry-dir", tel.to_str().unwrap()])
+        .args(["usage", "--format", "json", "--telemetry-dir", tel.to_str().unwrap()])
         .output()
         .unwrap();
     let body = std::fs::read_to_string(&f).unwrap();
@@ -1107,14 +1107,14 @@ fn gain_prunes_lines_older_than_retention() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p egent-code-plexus --test gain_cmd gain_prunes`
+Run: `cargo test -p egent-code-plexus --test usage_cmd gain_prunes`
 Expected: FAIL — 2020 line still present (no prune).
 
-- [ ] **Step 3: Implement prune in `gain.rs`.** Add and call it from `collect_records` after reading each `cli-calls.jsonl`:
+- [ ] **Step 3: Implement prune in `usage.rs`.** Add and call it from `collect_records` after reading each `cli-calls.jsonl`:
 
 ```rust
 /// Rewrite `cli-calls.jsonl` dropping lines older than `retention_days`.
-/// Off the hot path: only `ecp gain` (and GC) call this. Best-effort.
+/// Off the hot path: only `ecp usage` (and GC) call this. Best-effort.
 fn prune_retention(dir: &Path) {
     let days = crate::config_parser::load_effective_config()
         .map(|c| c.telemetry.retention_days)
@@ -1148,20 +1148,20 @@ In `collect_records`, before/after reading each dir, call `prune_retention(&dir)
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p egent-code-plexus --test gain_cmd gain_prunes`
+Run: `cargo test -p egent-code-plexus --test usage_cmd gain_prunes`
 Expected: PASS.
 
-- [ ] **Step 5: GC fallback.** In `crates/ecp-cli/src/commands/admin/gc.rs`, find the `telemetry` exemption (`grep -n "telemetry" crates/ecp-cli/src/commands/admin/gc.rs`). Change it so the `telemetry/` dir is still walked but, for each `<repo>/cli-calls.jsonl`, call the same retention logic. Extract `prune_retention` into a `pub(crate)` fn reachable from gc (or duplicate the ~12-line filter — prefer extracting to `gain.rs` as `pub(crate) fn prune_retention`). Keep `calls.jsonl` (MCP) exempt.
+- [ ] **Step 5: GC fallback.** In `crates/ecp-cli/src/commands/admin/gc.rs`, find the `telemetry` exemption (`grep -n "telemetry" crates/ecp-cli/src/commands/admin/gc.rs`). Change it so the `telemetry/` dir is still walked but, for each `<repo>/cli-calls.jsonl`, call the same retention logic. Extract `prune_retention` into a `pub(crate)` fn reachable from gc (or duplicate the ~12-line filter — prefer extracting to `usage.rs` as `pub(crate) fn prune_retention`). Keep `calls.jsonl` (MCP) exempt.
 
-- [ ] **Step 6: Build + full gain test pass**
+- [ ] **Step 6: Build + full usage test pass**
 
-Run: `cargo build -p egent-code-plexus --bin ecp` then `cargo test -p egent-code-plexus --test gain_cmd`
+Run: `cargo build -p egent-code-plexus --bin ecp` then `cargo test -p egent-code-plexus --test usage_cmd`
 Expected: all PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/ecp-cli/src/commands/gain.rs crates/ecp-cli/src/commands/admin/gc.rs crates/ecp-cli/tests/gain_cmd.rs
+git add crates/ecp-cli/src/commands/usage.rs crates/ecp-cli/src/commands/admin/gc.rs crates/ecp-cli/tests/usage_cmd.rs
 git commit -m "feat(cli): 7-day retention prune on gain-read + gc fallback"
 ```
 
@@ -1189,7 +1189,7 @@ Expected: no warnings on touched files. Fix any.
 
 - [ ] **Step 3: Format touched files only.**
 
-Run: `rustfmt --edition 2021 crates/ecp-core/src/telemetry.rs crates/ecp-cli/src/telemetry_cli.rs crates/ecp-cli/src/commands/gain.rs crates/ecp-cli/src/commands/gain_render.rs crates/ecp-cli/src/main.rs`
+Run: `rustfmt --edition 2021 crates/ecp-core/src/telemetry.rs crates/ecp-cli/src/telemetry_cli.rs crates/ecp-cli/src/commands/usage.rs crates/ecp-cli/src/commands/usage_render.rs crates/ecp-cli/src/main.rs`
 
 - [ ] **Step 4: Full relevant test sweep.**
 
@@ -1198,7 +1198,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Help-text sanity.**
 
-Run: `cargo run -p egent-code-plexus --bin ecp -- gain --help`
+Run: `cargo run -p egent-code-plexus --bin ecp -- usage --help`
 Expected: shows `-p/--project`, `--failures`, `--all`, `--format`, `--no-color`; hides `--telemetry-dir`.
 
 - [ ] **Step 6: Commit.**
@@ -1216,4 +1216,4 @@ git commit -m "chore(gain): hot-path bench evidence, clippy clean, fmt"
 - **Open decision §8 (crate home)**: resolved → ecp-core (T1), because telemetry.rs already depends only on ecp-core (`time`, `registry`).
 - **Open decision §8 (cli/mcp split row)**: resolved → summary line only (T7 header shows `Sources cli N · mcp N`), no per-row split.
 - **Sparkline note**: the spec's per-day sparkline (§4.1) is the lowest-priority visual. Tasks 6–7 ship the dashboard WITHOUT the sparkline column to keep the renderer focused; the `Trend` column is a fast-follow once the core is green (tracked as a follow-up, not a blocker). If the executor has budget, add a per-day bucket + `▁▃▅█` mapping in `render_dashboard` and a test asserting it degrades to blank with <2 distinct days.
-- **PR discipline**: per global CLAUDE.md, run `/simplify` before pushing; open the PR from a dedicated `feat/ecp-gain-dashboard` branch (the worktree branch). No `Co-Authored-By` / "Generated with" trailers. Read `.claude/FOLLOWUPS.md` Open section before opening the PR; file the sparkline deferral as a new FU entry.
+- **PR discipline**: per global CLAUDE.md, run `/simplify` before pushing; open the PR from a dedicated `feat/ecp-usage-dashboard` branch (the worktree branch). No `Co-Authored-By` / "Generated with" trailers. Read `.claude/FOLLOWUPS.md` Open section before opening the PR; file the sparkline deferral as a new FU entry.

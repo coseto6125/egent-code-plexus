@@ -1,4 +1,4 @@
-# `ecp gain` — Usage Dashboard Design
+# `ecp usage` — Usage Dashboard Design
 
 **Date**: 2026-05-27
 **Status**: Design — pending implementation plan
@@ -10,7 +10,7 @@
 
 ecp records per-call telemetry **only for the MCP path** (`~/.ecp/telemetry/<repo>/calls.jsonl`, consumed by `ecp insight`). The **CLI path — the primary integration in Claude Code (see memory `project_ecp_cli_native_not_mcp`) — emits zero usage data.** Every `ecp inspect` / `find` / `impact` runs untracked: no invocation count, no latency record, and on failure only a `Command failed: {e}` print to stderr before exit (`main.rs:48-52, 197-200`). There is no error log.
 
-**Goal**: a human-facing maintenance command `ecp gain` that surfaces, as a terminal ASCII dashboard:
+**Goal**: a human-facing maintenance command `ecp usage` that surfaces, as a terminal ASCII dashboard:
 
 1. **Usage counts** (primary) — how often each subcommand runs.
 2. **Performance** (secondary) — latency vs the <30 ms budget.
@@ -22,13 +22,13 @@ It records **all events (success + failure)** so the three concerns derive from 
 
 - No HTML / TUI surface — terminal ASCII only.
 - No color theme system — auto-detect + `NO_COLOR` standard only.
-- Not an LLM context-building tool. `ecp gain` is for the **human maintainer**, like `ecp admin doctor`. It stays out of every hot path.
+- Not an LLM context-building tool. `ecp usage` is for the **human maintainer**, like `ecp admin doctor`. It stays out of every hot path.
 
 ---
 
 ## 2. Positioning
 
-- **Top-level visible command** `ecp gain`, sibling to `ecp insight`.
+- **Top-level visible command** `ecp usage`, sibling to `ecp insight`.
 - **Audience**: human maintainer. The LLM-utility A/B/C gate does not apply (this is a maintenance command, not graph schema). Documented as such.
 - **Telemetry default-on, opt-out**: data is local-only (`~/.ecp/`, never transmitted, same as MCP telemetry). A `NO_COLOR`-style off switch (`ECP_NO_TELEMETRY=1` or config `telemetry.cli = false`) respects user control.
 
@@ -53,7 +53,7 @@ Three layers; only **collection** and **presentation** are new — **aggregation
 │  read cli-calls.jsonl + calls.jsonl (MCP), merge & aggregate │
 └─────────────────────────────────────────────────────────────┘
                        ↓
-┌─ Presentation (NEW) — ecp gain ─────────────────────────────┐
+┌─ Presentation (NEW) — ecp usage ─────────────────────────────┐
 │  ASCII dashboard: Usage > Performance > Errors              │
 │  flags: -p (this repo) · --failures · --all · --format json │
 └─────────────────────────────────────────────────────────────┘
@@ -61,7 +61,7 @@ Three layers; only **collection** and **presentation** are new — **aggregation
 
 ### 3.1 Data model — extend the shared `CallRecord`
 
-`CallRecord` (`crates/ecp-mcp/src/telemetry.rs:29`) gains two append-only fields so CLI and MCP share one schema and one directory; `ecp gain` reads both, `ecp insight` keeps working:
+`CallRecord` (`crates/ecp-mcp/src/telemetry.rs:29`) gains two append-only fields so CLI and MCP share one schema and one directory; `ecp usage` reads both, `ecp insight` keeps working:
 
 ```rust
 pub struct CallRecord<'a> {
@@ -107,7 +107,7 @@ Classification lives at the dispatch boundary, mapping the error type/variant to
 
 Section order follows the user's priority: **Usage → Performance → Errors.**
 
-### 4.1 `ecp gain` (default)
+### 4.1 `ecp usage` (default)
 
 ```
 ecp Usage Dashboard                                    repo: code-graph-nexus
@@ -140,14 +140,14 @@ ecp Usage Dashboard                                    repo: code-graph-nexus
   index-stale          52  █████░░░░░░░░░░░
   other                21  ██░░░░░░░░░░░░░░
 ────────────────────────────────────────────────────────────────────────────
-  Tip: ecp gain --failures   for recent failing commands + messages
+  Tip: ecp usage --failures   for recent failing commands + messages
 ```
 
 - Top three-column summary = at-a-glance state.
 - `!` marks commands with anomalously high error rate.
 - `Trend` sparkline (`▁▃▅█`) = recent per-day bucket. **Cost note**: requires daily bucketing (like insight's `hourly_buckets`). Kept — it is the strongest "dashboard feel" element and reuses insight's bucketing approach. Degrades gracefully to blank when <2 days of data.
 
-### 4.2 `ecp gain --failures`
+### 4.2 `ecp usage --failures`
 
 ```
 ecp Failures  (recent 20 of 296)                       repo: code-graph-nexus
@@ -164,7 +164,7 @@ ecp Failures  (recent 20 of 296)                       repo: code-graph-nexus
 
 Pure scan of `ok:false` records — no extra storage. Each entry: ts · command · error_kind · args summary · actual message.
 
-### 4.3 `ecp gain --format json` (program/agent consumption — color always off)
+### 4.3 `ecp usage --format json` (program/agent consumption — color always off)
 
 ```json
 {
@@ -195,7 +195,7 @@ Pure scan of `ok:false` records — no extra storage. Each entry: ts · command 
 
 ## 5. Color
 
-rtk's `gain` has no color flag and emits plain text when piped (verified: `█░` are Unicode blocks, not ANSI). `ecp gain` goes slightly stricter, because the project's primary consumer is an agent and ANSI escapes pollute context.
+rtk's `usage` has no color flag and emits plain text when piped (verified: `█░` are Unicode blocks, not ANSI). `ecp usage` goes slightly stricter, because the project's primary consumer is an agent and ANSI escapes pollute context.
 
 **Three-state detection, in order:**
 
@@ -219,7 +219,7 @@ rtk's `gain` has no color flag and emits plain text when piped (verified: `█�
 - **Disk growth / retention**: ~100 bytes/line. Bounded by **time-based retention, not size rotation** — time aligns with the dashboard's per-day sparkline window (a fixed 7-day window means the chart shows the whole file, no "graph ends yesterday but file has last week's residue" mismatch), and gives predictable disk (7 days × usage, naturally capped at a few MB).
   - **Window**: configurable `telemetry.retention_days` (default `7`). Not hardcoded (per `feedback_generality_no_hardcode`).
   - **Pruning timing — the hot-path rule**: append is **always append-only**; pruning is NEVER done on the write path (read-whole-file → filter → rewrite is O(n) I/O + lock, would violate <30 ms — same trap as `project_ecp_registry_lock_deadlock`). Instead:
-    - **Primary**: when `ecp gain` itself runs (it already reads the whole file; the reader is the human maintainer, off the hot path) — drop lines older than the window and rewrite once.
+    - **Primary**: when `ecp usage` itself runs (it already reads the whole file; the reader is the human maintainer, off the hot path) — drop lines older than the window and rewrite once.
     - **Fallback**: hook into the existing `ecp admin gc` / `prune` background flow (the established `flock -n` pattern). `gc.rs:44` currently exempts the whole `telemetry/` dir — change to: keep exempting MCP `calls.jsonl`, but apply `retention_days` pruning to `cli-calls.jsonl`.
   - **Rule of thumb**: the writer never prunes; the reader and GC prune.
 
@@ -227,7 +227,7 @@ rtk's `gain` has no color flag and emits plain text when piped (verified: `█�
 
 ## 7. Testing
 
-`ecp gain` is CLI-surface, single-language (Rust internal), so the 14-language parity rule does **not** apply (it touches no parser / graph-construction primitive).
+`ecp usage` is CLI-surface, single-language (Rust internal), so the 14-language parity rule does **not** apply (it touches no parser / graph-construction primitive).
 
 - **Collection**: a command runs → exactly one well-formed JSONL line appended with correct `ok` and `source:"cli"`; a failing command → `ok:false` with the expected `error_kind`. Opt-out → no line written.
 - **Hot-path**: telemetry-on vs off latency delta within noise (benchmark assertion).
