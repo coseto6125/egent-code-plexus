@@ -143,3 +143,37 @@ fn cpp_enum_class_emits_two_variants() {
         .expect("parse");
     assert_variants(&g, "State", &["Active", "Idle"]);
 }
+
+// ── C ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn c_enum_emits_variants() {
+    let p = ecp_analyzer::c::parser::CProvider::new().expect("provider");
+    let src = "enum Color { Red, Green, Blue };\n";
+    let g = p
+        .parse_file(Path::new("color.c"), src.as_bytes())
+        .expect("parse");
+    assert_variants(&g, "Color", &["Red", "Green", "Blue"]);
+}
+
+#[test]
+fn c_enum_explicit_values_emits_variants() {
+    let p = ecp_analyzer::c::parser::CProvider::new().expect("provider");
+    let src = "enum Status { Active = 0, Inactive = 1 };\n";
+    let g = p
+        .parse_file(Path::new("status.c"), src.as_bytes())
+        .expect("parse");
+    assert_variants(&g, "Status", &["Active", "Inactive"]);
+}
+
+#[test]
+fn c_named_enum_with_typedef_alias_emits_variants() {
+    // `typedef enum Tag { ... } Alias;` — the named `enum Tag` still owns the
+    // variants; the typedef alias is a separate RawImport, not the owner.
+    let p = ecp_analyzer::c::parser::CProvider::new().expect("provider");
+    let src = "typedef enum Level { Low, High } Level_t;\n";
+    let g = p
+        .parse_file(Path::new("level.c"), src.as_bytes())
+        .expect("parse");
+    assert_variants(&g, "Level", &["Low", "High"]);
+}

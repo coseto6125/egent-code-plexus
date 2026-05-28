@@ -20,6 +20,7 @@ impl LangSpec for CSpec {
         "struct.name"   => NodeKind::Struct,
         "union.name"    => NodeKind::Struct,
         "enum.name"     => NodeKind::Enum,
+        "name.enumerator" => NodeKind::EnumVariant,
         "typedef.name"  => NodeKind::Typedef,
         "macro.name"    => NodeKind::Macro,
     };

@@ -27,6 +27,32 @@
   )
 ) @interface
 
+;; Defined types — `type Celsius float64`, `type Handler func(...)`,
+;; `type StringMap map[string]string`, `type Bytes []byte`, `type Dir int`.
+;; The `type:` alternation explicitly excludes struct_type / interface_type
+;; (handled by the two patterns above) so a struct/interface is never
+;; double-emitted as a Typedef. These named types carry methods
+;; (`func (c Celsius) String()`), so the defining node is required for the
+;; method's owner to resolve in rename / impact queries.
+(type_spec
+  name: (type_identifier) @typedef.name
+  type: [
+    (type_identifier)
+    (qualified_type)
+    (pointer_type)
+    (function_type)
+    (map_type)
+    (slice_type)
+    (array_type)
+    (channel_type)
+    (generic_type)
+  ]
+) @typedef
+
+;; Type aliases — `type Celsius = float64` (distinct `type_alias` grammar node).
+(type_alias
+  name: (type_identifier) @typedef.name) @typedef
+
 ;; Methods
 (method_declaration
   receiver: (parameter_list

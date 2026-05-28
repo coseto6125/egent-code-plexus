@@ -347,6 +347,7 @@ impl LanguageProvider for GoProvider {
 
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
+        let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_method = self.query.capture_index_for_name("method");
         let idx_function = self.query.capture_index_for_name("function");
         let idx_const = self.query.capture_index_for_name("const");
@@ -463,6 +464,7 @@ impl LanguageProvider for GoProvider {
                     kind = Some(k_from_spec);
                 } else if cap_idx == idx_struct
                     || cap_idx == idx_interface
+                    || cap_idx == idx_typedef
                     || cap_idx == idx_method
                     || cap_idx == idx_function
                     || cap_idx == idx_const

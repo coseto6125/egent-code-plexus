@@ -11,6 +11,7 @@ impl LangSpec for GoSpec {
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
         "struct.name"    => NodeKind::Struct,
         "interface.name" => NodeKind::Interface,
+        "typedef.name"   => NodeKind::Typedef,
         "method.name"    => NodeKind::Method,
         "function.name"  => NodeKind::Function,
         "const.name"     => NodeKind::Const,

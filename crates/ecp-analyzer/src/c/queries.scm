@@ -39,6 +39,16 @@
   name: (type_identifier) @enum.name
   body: (enumerator_list)) @enum
 
+;; Enum enumerators — `enum Color { Red, Green, Blue }`. Each `enumerator`
+;; is a translation-unit-scope named constant referenced across compilation
+;; units, so it must surface as its own node for rename / impact queries
+;; (mirrors the C++ sibling at cpp/queries.scm). owner_class linkage to the
+;; owning Enum is filled by stamp_owner_class_by_span.
+(enum_specifier
+  body: (enumerator_list
+    (enumerator
+      name: (identifier) @name.enumerator) @enumerator_node))
+
 ;; Typedefs
 (type_definition
   declarator: (type_identifier) @typedef.name) @typedef
