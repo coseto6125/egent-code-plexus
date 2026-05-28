@@ -33,29 +33,88 @@ fn sanitize_error_msg(raw: &str) -> String {
     format!("{}…", &trimmed[..end])
 }
 
-/// Map an error to a small closed taxonomy. Substring match on the message —
-/// the error type lacks structured variants for these. Unknown → "other".
+/// Map an error to a small closed taxonomy.
+///
+/// Dispatches on the structured `EcpError` variant first (covers known
+/// no-symbol / ambiguous-symbol / git-diff failures), then falls back to a
+/// substring match for free-form variants (`InvalidArgument`, `Output`,
+/// `Rkyv`). `InvalidArgument` is the dumping ground for clap-level user
+/// input errors (`unknown agent 'foo'`, `--graph path does not exist`,
+/// `exactly one host flag required`); those collapse to `user-input` so
+/// `ecp usage --failures` separates "user typed something invalid" from
+/// "ecp blew up". `ok` is still `false` — err_rate keeps reflecting how
+/// often invocations don't produce a useful result.
 pub fn classify_error(e: &EcpError) -> &'static str {
-    let msg = e.to_string().to_ascii_lowercase();
-    if msg.contains("cypher")
-        && (msg.contains("parse") || msg.contains("label") || msg.contains("syntax"))
-    {
-        "cypher-parse"
-    } else if msg.contains("not found")
-        || msg.contains("no symbol")
-        || msg.contains("no such symbol")
-    {
-        "no-such-symbol"
-    } else if msg.contains("stale") || msg.contains("older than head") {
-        "index-stale"
-    } else if (msg.contains("load") && msg.contains("graph"))
-        || msg.contains("registry lock")
-        || msg.contains("corrupt")
-    {
-        "graph-load-failed"
-    } else {
-        "other"
+    match e {
+        EcpError::SymbolNotFound { .. } | EcpError::AmbiguousSymbol { .. } => "no-such-symbol",
+        EcpError::GraphNotFound { .. } => "graph-load-failed",
+        EcpError::GitDiff { .. } => "git-diff",
+        EcpError::Io(_) => "io",
+        EcpError::Rkyv(_) => "graph-load-failed",
+        EcpError::InvalidArgument(msg) => classify_invalid_argument(msg),
+        EcpError::Output(msg) | EcpError::Serialization(msg) => classify_freeform(msg),
     }
+}
+
+/// `InvalidArgument` carries both clap-validation strings ("unknown agent
+/// 'foo'", "missing --host") and lower-level guard strings ("registry lock
+/// timeout"). Distinguish by signal phrases — user-input messages tend to
+/// name an expected value; internal ones name a system resource.
+fn classify_invalid_argument(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("cypher") && (m.contains("parse") || m.contains("label") || m.contains("syntax"))
+    {
+        return "cypher-parse";
+    }
+    if m.contains("not found") || m.contains("no symbol") || m.contains("no such symbol") {
+        return "no-such-symbol";
+    }
+    if m.contains("stale") || m.contains("older than head") {
+        return "index-stale";
+    }
+    if (m.contains("load") && m.contains("graph"))
+        || m.contains("registry lock")
+        || m.contains("corrupt")
+    {
+        return "graph-load-failed";
+    }
+    // Heuristic for "user typed something wrong": clap-validation strings.
+    // Captures `unknown agent 'x'`, `--graph path does not exist`,
+    // `exactly one host flag required`, `expected <choices>`, `usage:`.
+    if m.contains("unknown ")
+        || m.contains("expected ")
+        || m.contains("does not exist")
+        || m.contains("required")
+        || m.contains("invalid value")
+        || m.contains("usage:")
+    {
+        return "user-input";
+    }
+    "other"
+}
+
+/// Free-form `Output` / `Serialization` payloads. Same heuristics as the
+/// pre-v2 substring rule, no user-input bucket here (these variants are
+/// emitted by internal code paths, not clap).
+fn classify_freeform(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("cypher") && (m.contains("parse") || m.contains("label") || m.contains("syntax"))
+    {
+        return "cypher-parse";
+    }
+    if m.contains("not found") || m.contains("no symbol") || m.contains("no such symbol") {
+        return "no-such-symbol";
+    }
+    if m.contains("stale") || m.contains("older than head") {
+        return "index-stale";
+    }
+    if (m.contains("load") && m.contains("graph"))
+        || m.contains("registry lock")
+        || m.contains("corrupt")
+    {
+        return "graph-load-failed";
+    }
+    "other"
 }
 
 /// Disabled by `ECP_NO_TELEMETRY` (any value) or config `telemetry.cli=false`.
@@ -142,6 +201,70 @@ mod tests {
         assert_eq!(
             classify_error(&EcpError::InvalidArgument("totally novel boom".into())),
             "other"
+        );
+    }
+
+    #[test]
+    fn classify_user_input_clap_messages() {
+        // Three real failure modes seen in the v2 telemetry sample.
+        assert_eq!(
+            classify_error(&EcpError::InvalidArgument(
+                "unknown agent 'unknown-agent' — expected claude, codex, or gemini".into()
+            )),
+            "user-input"
+        );
+        assert_eq!(
+            classify_error(&EcpError::InvalidArgument(
+                "Error: --graph path does not exist: /tmp/x.bin".into()
+            )),
+            "user-input"
+        );
+        assert_eq!(
+            classify_error(&EcpError::InvalidArgument(
+                "ecp hook: exactly one host flag required (e.g. --claude-code)".into()
+            )),
+            "user-input"
+        );
+    }
+
+    #[test]
+    fn classify_structured_variants() {
+        assert_eq!(
+            classify_error(&EcpError::SymbolNotFound {
+                uid: "Foo::bar".into()
+            }),
+            "no-such-symbol"
+        );
+        assert_eq!(
+            classify_error(&EcpError::AmbiguousSymbol {
+                name: "Foo".into(),
+                count: 3
+            }),
+            "no-such-symbol"
+        );
+        assert_eq!(
+            classify_error(&EcpError::GraphNotFound {
+                path: std::path::PathBuf::from("/x")
+            }),
+            "graph-load-failed"
+        );
+        assert_eq!(
+            classify_error(&EcpError::GitDiff {
+                reason: "no such ref".into()
+            }),
+            "git-diff"
+        );
+    }
+
+    #[test]
+    fn classify_user_input_does_not_swallow_internal_invalid_argument() {
+        // Internal guard messages must keep their specific bucket, not fall
+        // through to "user-input".
+        assert_eq!(
+            classify_error(&EcpError::InvalidArgument(
+                "registry lock timeout after 5s".into()
+            )),
+            "graph-load-failed"
         );
     }
 
