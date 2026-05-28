@@ -1060,4 +1060,55 @@ mod tests {
             _ => panic!("expected And as root"),
         }
     }
+
+    // Backtick-quoted identifier (Neo4j standard) — alias / prop / label
+    // slots that already accept Token::Ident transparently pick up the
+    // quoted form because the lexer emits Ident not a new variant.
+
+    #[test]
+    fn return_backtick_alias_with_dot() {
+        let r = rt("RETURN a.name AS `a.name`");
+        assert_eq!(r.items[0].alias.as_deref(), Some("a.name"));
+    }
+
+    #[test]
+    fn return_backtick_alias_with_space() {
+        let r = rt("RETURN a.name AS `display name`");
+        assert_eq!(r.items[0].alias.as_deref(), Some("display name"));
+    }
+
+    #[test]
+    fn return_backtick_alias_matches_plain_ident() {
+        // `pname` and pname must produce identical AST.
+        let r1 = rt("RETURN a.name AS pname");
+        let r2 = rt("RETURN a.name AS `pname`");
+        assert_eq!(r1.items[0].alias, r2.items[0].alias);
+    }
+
+    #[test]
+    fn lex_backtick_escaped_double() {
+        // Neo4j escape: doubled backtick inside a quoted identifier yields
+        // a single literal backtick — `tick``mark` → tick`mark.
+        let toks = tokenize("RETURN x AS `tick``mark`").unwrap();
+        // Last token is the alias ident.
+        assert!(matches!(toks.last(), Some(Token::Ident(s)) if s == "tick`mark"));
+    }
+
+    #[test]
+    fn lex_backtick_unterminated_errors() {
+        let err = tokenize("RETURN a AS `oops").unwrap_err();
+        assert!(
+            matches!(err, CypherError::Lex { ref msg, .. } if msg.contains("unterminated backtick")),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn lex_backtick_empty_errors() {
+        let err = tokenize("RETURN a AS ``").unwrap_err();
+        assert!(
+            matches!(err, CypherError::Lex { ref msg, .. } if msg.contains("empty backtick")),
+            "got: {err:?}",
+        );
+    }
 }
