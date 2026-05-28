@@ -16,6 +16,8 @@ fn append_to_produces_valid_jsonl_line() {
         ok: true,
         source: "mcp",
         error_kind: None,
+        subcommand: None,
+        error_msg: None,
     };
     append_to(&record, dir.path());
 
@@ -49,6 +51,8 @@ fn append_to_accumulates_multiple_lines() {
             ok: i % 2 == 0,
             source: "mcp",
             error_kind: None,
+            subcommand: None,
+            error_msg: None,
         };
         append_to(&record, dir.path());
     }
@@ -81,6 +85,8 @@ fn append_to_read_only_dir_does_not_panic() {
         ok: true,
         source: "mcp",
         error_kind: None,
+        subcommand: None,
+        error_msg: None,
     };
     // Must not panic.
     append_to(&record, unreachable);

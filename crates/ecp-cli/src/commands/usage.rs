@@ -50,6 +50,10 @@ pub struct Rec {
     pub ok: bool,
     pub source: String,
     pub error_kind: Option<String>,
+    /// v2 nested verb (e.g. `"gc"` for tool=`"admin"`). Absent on pre-v2 lines.
+    pub subcommand: Option<String>,
+    /// v2 sanitized error message. Absent on pre-v2 lines and on success.
+    pub error_msg: Option<String>,
     pub raw: String,
 }
 
@@ -200,6 +204,14 @@ fn read_file(path: &Path, out: &mut Vec<Rec>) {
                 .to_string(),
             error_kind: v
                 .get("error_kind")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            subcommand: v
+                .get("subcommand")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            error_msg: v
+                .get("error_msg")
                 .and_then(Value::as_str)
                 .map(str::to_string),
             raw: line.to_string(),

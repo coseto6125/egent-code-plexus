@@ -31,16 +31,62 @@ fn main() {
     maybe_spawn_background_gc();
 
     let cli = Cli::parse();
-    // `command_label` borrows `&cli.command` before `dispatch(cli)` consumes
-    // `cli`; keep label computed first so dispatch can take ownership.
+    // `command_label` + `subcommand_label` borrow `&cli.command` before
+    // `dispatch(cli)` consumes `cli`; compute both first so dispatch can take
+    // ownership. `subcommand` stays None for flat verbs (find, impact, …);
+    // populated for `admin <sub>`, `dev <sub>`, `group <sub>` so `ecp usage`
+    // can drill into `admin gc` vs `admin index` vs the bare TUI.
     let label = command_label(&cli.command);
+    let sub = subcommand_label(&cli.command);
     let start = std::time::Instant::now();
     let outcome = dispatch(cli);
     let duration_ms = start.elapsed().as_millis() as u64;
-    ecp_cli::telemetry_cli::record(label, duration_ms, outcome.as_ref().err());
+    ecp_cli::telemetry_cli::record(label, sub, duration_ms, outcome.as_ref().err());
     if let Err(e) = outcome {
         eprintln!("Command failed: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Stable nested-verb label for telemetry. `None` for flat commands;
+/// `Some("gc")` / `Some("index")` / `Some("group sync")` for nested ones.
+/// Not exhaustive — unknown variants safely degrade to `None` so a new
+/// admin/dev/group subcommand still indexes under the parent verb.
+fn subcommand_label(cmd: &Commands) -> Option<&'static str> {
+    use ecp_cli::commands;
+    match cmd {
+        Commands::Admin { command: Some(c) } => Some(match c {
+            commands::admin::AdminCommands::InstallHook(_) => "install-hook",
+            commands::admin::AdminCommands::UninstallHook(_) => "uninstall-hook",
+            commands::admin::AdminCommands::Status(_) => "status",
+            commands::admin::AdminCommands::Drop(_) => "drop",
+            commands::admin::AdminCommands::Prune(_) => "prune",
+            commands::admin::AdminCommands::Gc(_) => "gc",
+            commands::admin::AdminCommands::Config(_) => "config",
+            commands::admin::AdminCommands::Group { .. } => "group",
+            commands::admin::AdminCommands::Index(_) => "index",
+            commands::admin::AdminCommands::Sessions { .. } => "sessions",
+            commands::admin::AdminCommands::Claude { .. } => "claude",
+            commands::admin::AdminCommands::Codex { .. } => "codex",
+            commands::admin::AdminCommands::Gemini { .. } => "gemini",
+            commands::admin::AdminCommands::Mcp(_) => "mcp",
+            commands::admin::AdminCommands::Doctor(_) => "doctor",
+        }),
+        Commands::Admin { command: None } => Some("tui"),
+        Commands::Dev { command } => Some(match command {
+            commands::dev::DevCommands::PrAnalyze(_) => "pr-analyze",
+            commands::dev::DevCommands::UidAudit(_) => "uid-audit",
+            commands::dev::DevCommands::VerifyResolver(_) => "verify-resolver",
+        }),
+        Commands::Group { cmd } => Some(match cmd {
+            commands::group::GroupCommands::Sync(_) => "sync",
+            commands::group::GroupCommands::Status(_) => "status",
+            commands::group::GroupCommands::Contracts(_) => "contracts",
+            commands::group::GroupCommands::Impact(_) => "impact",
+            commands::group::GroupCommands::Find(_) => "find",
+            commands::group::GroupCommands::Summary(_) => "summary",
+        }),
+        _ => None,
     }
 }
 

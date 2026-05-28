@@ -177,20 +177,26 @@ pub fn render_failures(recs: &[Rec], _color: bool) -> String {
         fails.len()
     );
     let _ = writeln!(o, "{}", "═".repeat(76));
+    // Header row: tool column widens to fit "tool sub" for v2 records.
     for r in fails.iter().rev().take(20) {
         let kind = r.error_kind.as_deref().unwrap_or("other");
+        let verb = match &r.subcommand {
+            Some(s) => format!("{} {}", r.tool, s),
+            None => r.tool.clone(),
+        };
         let _ = writeln!(
             o,
-            "  {}  {:<14} {}",
+            "  {}  {:<22} {}",
             unix_secs_to_rfc3339(r.ts_secs),
-            r.tool,
+            verb,
             kind
         );
-        let _ = writeln!(
-            o,
-            "       └ {}",
-            r.raw.chars().take(100).collect::<String>()
-        );
+        // Prefer the v2 `error_msg` field (already sanitized + capped at 200
+        // bytes by the writer); fall back to the raw jsonl line for pre-v2
+        // records. No further truncation — the writer is the canonical
+        // truncation point so the reader stays losslessly diagnostic.
+        let detail = r.error_msg.as_deref().unwrap_or(&r.raw);
+        let _ = writeln!(o, "       └ {detail}");
     }
     let _ = writeln!(o, "{}", "─".repeat(76));
     o
