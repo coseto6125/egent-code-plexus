@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.5.4 - 2026-05-28
+
+### Features
+
+- capture class fields as Property nodes (#499)
+- emit C enum constants + Go defined types as graph nodes (#498)
+- clean wipe — kill daemons, drop empty shells, warn on stale backups (#494)
+- user-input error classification (#493)
+- backtick-quoted identifier (Neo4j-compat) (#492)
+- diagnosable failures + ephemeral cwd bucket (#491)
+- --clear flag to delete CLI telemetry log (#486)
+- self-delete binary + rename --host to --agent + README install/uninstall (#485)
+
+### Bug Fixes
+
+- skip index --fix in non-git dirs to prevent OOM (#487)
+
+### Performance
+
+- build tantivy uid→idx map for matched subset only (#497)
 ## v0.5.3 - 2026-05-27
 
 ### Features
