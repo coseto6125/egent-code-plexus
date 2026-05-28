@@ -195,6 +195,7 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
         let idx_method = self.query.capture_index_for_name("method");
+        let idx_property = self.query.capture_index_for_name("property");
         let idx_function_anonymous = self.query.capture_index_for_name("function.anonymous");
 
         // 14-lang-parity Variable captures — use cached indices.
@@ -402,6 +403,7 @@ impl LanguageProvider for JavaScriptProvider {
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
+                    || Some(cap_idx) == idx_property
                 {
                     root_span_node = Some(cap.node);
                 }

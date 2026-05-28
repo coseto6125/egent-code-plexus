@@ -6,14 +6,16 @@
 //! the field's `Property` node exists. The parser captures the member-access
 //! read, the resolver wires it to the Property target, the builder emits.
 //!
-//! Two of the 14 languages are pinned as negative cases rather than positive,
-//! each for a concrete reason (kept explicit so neither is a silent gap):
+//! One of the 14 languages is pinned as a negative case rather than positive,
+//! for a concrete reason (kept explicit so it is not a silent gap):
 //!   - Ruby: `obj.attr` is syntactically a method call (no distinct
 //!     member-access node), already covered by `Calls`; a ReadsField capture
 //!     would be a false positive. See `ruby_attr_read_is_call_not_field`.
-//!   - JavaScript: class fields are not modeled as `Property` nodes (no
-//!     property capture in its queries.scm, unlike TS), so the read has no
-//!     resolvable target. See `javascript_field_read_has_no_property_target`.
+//!
+//! JavaScript was pinned negative until it gained `field_definition` →
+//! `Property` capture (FU-2026-05-26-002); it is now a positive case, with
+//! `javascript_constructor_assignment_is_not_a_property` guarding the
+//! field-declaration-vs-mutation boundary.
 
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
@@ -65,24 +67,47 @@ function readTimeout(c: Config): number { return c.timeout; }
     assert_reads_field(&build(&p, "a.ts", src), "timeout");
 }
 
-/// JavaScript does not model class fields as `Property` nodes (its
-/// `queries.scm` has no property capture — unlike TypeScript's
-/// `public_field_definition`), so a `c.timeout` read has no Property target to
-/// resolve against and `ReadsField` does not fire. The member-access capture
-/// itself works (verified by the TS sibling); this is a JS node-coverage gap
-/// tracked as a follow-up, pinned here so it is explicit, not silent.
+/// JavaScript class fields (`field_definition`) are captured as `Property`
+/// nodes — parity with the TS sibling — so a `c.timeout` read resolves to the
+/// field and `ReadsField` fires. (Pinned negative until JS gained property
+/// capture; see FU-2026-05-26-002.)
 #[test]
-fn javascript_field_read_has_no_property_target() {
+fn javascript_reads_field() {
     let p = ecp_analyzer::javascript::parser::JavaScriptProvider::new().unwrap();
     let src = r#"
 class Config { timeout = 0; }
 function readTimeout(c) { return c.timeout; }
 "#;
+    assert_reads_field(&build(&p, "a.js", src), "timeout");
+}
+
+/// A bare `this.x = …` inside a constructor is an `assignment_expression`, not a
+/// `field_definition`, so it does NOT declare a Property — only an explicit
+/// class-body field does. Pinning this keeps the capture from drifting into
+/// treating mutations as declarations (which would inflate Property counts and
+/// mint phantom ReadsField targets). Contrast `javascript_reads_field`, where
+/// `timeout = 0` IS a class-body field.
+#[test]
+fn javascript_constructor_assignment_is_not_a_property() {
+    let p = ecp_analyzer::javascript::parser::JavaScriptProvider::new().unwrap();
+    let src = r#"
+class Config { constructor(t) { this.timeout = t; } }
+function readTimeout(c) { return c.timeout; }
+"#;
     let g = build(&p, "a.js", src);
-    let has_reads_field = g.edges.iter().any(|e| e.rel_type == RelType::ReadsField);
+    let timeout_property = g
+        .nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Property && n.name.resolve(&g.string_pool) == "timeout");
     assert!(
-        !has_reads_field,
-        "JS class fields are not Property nodes yet; ReadsField cannot resolve"
+        !timeout_property,
+        "constructor `this.timeout =` is an assignment, not a field declaration; \
+         no Property should be emitted.\nProperties: {:?}",
+        g.nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Property)
+            .map(|n| n.name.resolve(&g.string_pool))
+            .collect::<Vec<_>>()
     );
 }
 

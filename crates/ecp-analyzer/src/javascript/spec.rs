@@ -24,5 +24,6 @@ impl LangSpec for JavaScriptSpec {
         "name.function" => NodeKind::Function,
         "name.class"    => NodeKind::Class,
         "name.method"   => NodeKind::Method,
+        "property.name" => NodeKind::Property,
     };
 }

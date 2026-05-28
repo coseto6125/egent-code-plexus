@@ -92,6 +92,15 @@
 (method_definition
   name: (property_identifier) @name.method) @method
 
+;; Properties — class fields. JS uses `field_definition` (TypeScript renames it
+;; to `public_field_definition` and adds an accessibility modifier). The field
+;; name lives in the `property:` child. Only class-body declarations match —
+;; `this.x = …` constructor assignments are `assignment_expression`, not
+;; `field_definition`, so a mutation never emits a Property node (keeps the
+;; ReadsField target set to declared fields, parity with the TS sibling).
+(field_definition
+  property: (property_identifier) @property.name) @property
+
 ;; Imports (Named)
 (import_statement
   (import_clause
