@@ -489,6 +489,7 @@ impl LanguageProvider for CProvider {
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_union = self.query.capture_index_for_name("union");
         let idx_enum = self.query.capture_index_for_name("enum");
+        let idx_enumerator_node = self.query.capture_index_for_name("enumerator_node");
         let idx_typedef = self.query.capture_index_for_name("typedef");
         let idx_macro = self.query.capture_index_for_name("macro");
 
@@ -532,6 +533,7 @@ impl LanguageProvider for CProvider {
                     || Some(cap_idx) == idx_struct
                     || Some(cap_idx) == idx_union
                     || Some(cap_idx) == idx_enum
+                    || Some(cap_idx) == idx_enumerator_node
                     || Some(cap_idx) == idx_typedef
                     || Some(cap_idx) == idx_macro
                 {
