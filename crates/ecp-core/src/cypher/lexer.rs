@@ -236,6 +236,47 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CypherError> {
             continue;
         }
 
+        // Backtick-quoted identifier — Neo4j standard for ident names that
+        // contain non-ident chars (dot, space, hyphen) or shadow reserved
+        // words. `foo` is the literal identifier `foo`; the doubled-backtick
+        // sequence ``` `` ``` inside escapes one backtick (matching Neo4j).
+        // Emitted as Token::Ident so every parser site that already accepts
+        // an identifier (alias slot, prop name, label name, function name)
+        // transparently picks up the quoted form — no parser change.
+        if c == b'`' {
+            let start = i;
+            i += 1;
+            let mut s = String::new();
+            loop {
+                if i >= bytes.len() {
+                    return Err(CypherError::Lex {
+                        offset: start,
+                        msg: "unterminated backtick identifier".into(),
+                    });
+                }
+                if bytes[i] == b'`' {
+                    // `` inside backticks → escaped single backtick (Neo4j).
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'`' {
+                        s.push('`');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                s.push(bytes[i] as char);
+                i += 1;
+            }
+            if s.is_empty() {
+                return Err(CypherError::Lex {
+                    offset: start,
+                    msg: "empty backtick identifier".into(),
+                });
+            }
+            out.push(Token::Ident(s));
+            continue;
+        }
+
         // Number
         if c.is_ascii_digit() {
             let start = i;
