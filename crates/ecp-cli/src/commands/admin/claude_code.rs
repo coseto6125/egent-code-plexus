@@ -257,13 +257,24 @@ fn remove_entry(settings: &mut Value, ev: &str) {
     let Some(hooks_obj) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return;
     };
-    let Some(arr) = hooks_obj.get_mut(camel).and_then(|a| a.as_array_mut()) else {
-        return;
-    };
-    arr.retain(|e| {
-        let c = command_of_entry(e);
-        !(c.contains(&format!("hook {ev}")) && c.contains("--claude-code"))
-    });
+    if let Some(arr) = hooks_obj.get_mut(camel).and_then(|a| a.as_array_mut()) {
+        arr.retain(|e| {
+            let c = command_of_entry(e);
+            !(c.contains(&format!("hook {ev}")) && c.contains("--claude-code"))
+        });
+        // Drop the per-event array key when it goes empty — settings.json
+        // tolerates `"PreToolUse": []`, but a literal empty array is visible
+        // noise every time the user opens the file.
+        if arr.is_empty() {
+            hooks_obj.remove(camel);
+        }
+    }
+    // And drop the `hooks` key entirely if no event arrays remain.
+    if hooks_obj.is_empty() {
+        if let Some(root) = settings.as_object_mut() {
+            root.remove("hooks");
+        }
+    }
 }
 
 fn is_installed(settings: &Value, ev: &str) -> bool {

@@ -101,12 +101,22 @@ fn remove_server(path: &Path) -> Result<(), EcpError> {
         return Ok(());
     }
     let mut config = read_config(path)?;
-    if let Some(servers) = config
+    let mcp_servers_now_empty = config
         .as_table_mut()
         .and_then(|root| root.get_mut("mcp_servers"))
         .and_then(Value::as_table_mut)
-    {
-        servers.remove(SERVER_NAME);
+        .map(|servers| {
+            servers.remove(SERVER_NAME);
+            servers.is_empty()
+        })
+        .unwrap_or(false);
+    // Drop the `mcp_servers` key when nothing else lives there, so a future
+    // `cat ~/.codex/config.toml` doesn't show a hollow `[mcp_servers]` section
+    // ecp left behind.
+    if mcp_servers_now_empty {
+        if let Some(root) = config.as_table_mut() {
+            root.remove("mcp_servers");
+        }
     }
     write_config(path, &config)
 }
@@ -232,6 +242,57 @@ args = ["-y", "@modelcontextprotocol/server-github"]
         remove_server(&path).expect("remove missing");
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_server_drops_empty_mcp_servers_table() {
+        // Only `mcp_servers.ecp` was set — after removal, the parent table
+        // is empty, so the entire `mcp_servers` key should disappear so the
+        // user's config.toml has no hollow `[mcp_servers]` section.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"[mcp_servers.ecp]
+command = "/usr/local/bin/ecp"
+args = ["admin", "mcp", "serve"]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        remove_server(&path).expect("remove");
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("mcp_servers"),
+            "empty mcp_servers table must be dropped, got: {body}"
+        );
+    }
+
+    #[test]
+    fn remove_server_keeps_sibling_servers() {
+        // A user-defined `mcp_servers.other` must NOT be touched.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"[mcp_servers.ecp]
+command = "ecp"
+args = []
+
+[mcp_servers.other]
+command = "other"
+args = []
+"#,
+        )
+        .unwrap();
+
+        remove_server(&path).expect("remove");
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("mcp_servers.other"), "sibling kept");
+        assert!(!body.contains("mcp_servers.ecp"), "ecp removed");
     }
 
     #[test]

@@ -95,6 +95,15 @@ pub fn run(args: UninstallArgs) -> Result<(), EcpError> {
         run_step("git-hook", args.dry_run, remove_git_hook, &mut summary);
     }
 
+    // ── Stop watch + background daemons before the cache wipe ────────────────
+    // Otherwise the daemons race the `remove_dir_all` and re-create the dirs +
+    // jsonl files we just deleted, producing ghost telemetry buckets and
+    // half-restored sessions. Same gate as the cache wipe: a scoped uninstall
+    // keeps daemons alive.
+    if agent_filter.is_none() && !args.keep_cache {
+        run_step("ecp-daemons", args.dry_run, stop_all_daemons, &mut summary);
+    }
+
     // ── ~/.ecp wipe (only when no --agent filter and not --keep-cache) ───────
     if agent_filter.is_none() && !args.keep_cache {
         run_step("ecp-cache", args.dry_run, wipe_ecp_home, &mut summary);
@@ -172,6 +181,7 @@ fn remove_git_hook() -> Result<(), EcpError> {
 pub fn remove_git_hook_at(hook_path: &Path) -> Result<(), EcpError> {
     if !hook_path.exists() {
         println!("git-hook: not installed, skip");
+        report_stale_backups(hook_path);
         return Ok(());
     }
     // An unreadable-but-present hook must surface, not be silently mistaken for
@@ -183,6 +193,7 @@ pub fn remove_git_hook_at(hook_path: &Path) -> Result<(), EcpError> {
             "git-hook: {} is not ecp-managed, left untouched",
             hook_path.display()
         );
+        report_stale_backups(hook_path);
         return Ok(());
     }
     let chained = hook_path.with_extension("chained-prev");
@@ -193,7 +204,134 @@ pub fn remove_git_hook_at(hook_path: &Path) -> Result<(), EcpError> {
         std::fs::remove_file(hook_path)?;
         println!("git-hook: removed {}", hook_path.display());
     }
+    report_stale_backups(hook_path);
     Ok(())
+}
+
+/// Surface `reference-transaction.bak.<timestamp>` files left by past
+/// `--force` / `--no-chain` installs. NOT auto-deleted: those backups hold
+/// the user's pre-ecp hook content, and silently removing them would be
+/// destructive on a partial reinstall flow. Listing them is enough — the
+/// user can decide whether to restore one or `rm` them.
+fn report_stale_backups(hook_path: &Path) {
+    let Some(parent) = hook_path.parent() else {
+        return;
+    };
+    let Some(stem) = hook_path.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let prefix = format!("{stem}.bak.");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str.starts_with(&prefix) {
+            found.push(entry.path());
+        }
+    }
+    if found.is_empty() {
+        return;
+    }
+    found.sort();
+    println!(
+        "git-hook: {} pre-ecp backup(s) left in {} — review or remove manually:",
+        found.len(),
+        parent.display()
+    );
+    for path in found {
+        println!("  {}", path.display());
+    }
+}
+
+// ─── daemon shutdown (gap E) ─────────────────────────────────────────────────
+
+/// SIGTERM every `watcher_pid` recorded in any
+/// `~/.ecp/<repo>/sessions/<sid>/session_meta.json` so the daemons stop
+/// touching the cache before `wipe_ecp_home` deletes it.
+///
+/// Best-effort by design — a stale pid (process already exited, or pid reused
+/// by an unrelated process) is skipped via `pid_alive`. Dead-letter sessions
+/// are logged then ignored.
+fn stop_all_daemons() -> Result<(), EcpError> {
+    let home = ecp_core::registry::resolve_home_ecp();
+    if !home.exists() {
+        println!("ecp-daemons: ~/.ecp does not exist, skip");
+        return Ok(());
+    }
+    let mut sent = 0usize;
+    let mut scanned = 0usize;
+    for meta_path in collect_session_meta_paths(&home) {
+        scanned += 1;
+        if try_signal_watcher(&meta_path) {
+            sent += 1;
+        }
+    }
+    println!("ecp-daemons: signalled {sent} watcher(s) across {scanned} session(s)");
+    Ok(())
+}
+
+/// Walk `~/.ecp/<repo>/sessions/*/session_meta.json`. Two `read_dir` levels —
+/// shallow, no recursion past the sessions/ floor. Returns paths in arbitrary
+/// order; caller doesn't care about ordering.
+fn collect_session_meta_paths(home: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(repos) = std::fs::read_dir(home) else {
+        return out;
+    };
+    for repo in repos.flatten() {
+        let sessions_dir = repo.path().join("sessions");
+        let Ok(sessions) = std::fs::read_dir(&sessions_dir) else {
+            continue;
+        };
+        for sess in sessions.flatten() {
+            let meta = sess.path().join("session_meta.json");
+            if meta.is_file() {
+                out.push(meta);
+            }
+        }
+    }
+    out
+}
+
+/// Send SIGTERM to the recorded watcher_pid (if alive) and zero the field so a
+/// later `ecp watch --status` doesn't show a ghost. Returns `true` iff a real
+/// signal was sent.
+fn try_signal_watcher(meta_path: &Path) -> bool {
+    let Ok(mut meta) = ecp_core::session::SessionMeta::read(meta_path) else {
+        return false;
+    };
+    let Some(pid) = meta.watcher_pid else {
+        return false;
+    };
+    if !ecp_core::peer::registry::pid_alive(pid) {
+        // Stale pid; clear the field anyway so post-wipe state stays clean if
+        // the cache wipe is later disabled with --keep-cache.
+        meta.watcher_pid = None;
+        let _ = ecp_core::session::SessionMeta::write_atomic(meta_path, &meta);
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+    #[cfg(windows)]
+    {
+        // No portable SIGTERM on Windows. Best we can do without taskkill is
+        // skip — wipe_ecp_home will still succeed (Windows allows unlink-while-
+        // open of NTFS handles opened with FILE_SHARE_DELETE, which our
+        // BufWriter does not set). Surface the gap to the user instead.
+        eprintln!("  ecp-daemons: cannot signal pid {pid} on Windows — close the watcher manually");
+    }
+    meta.watcher_pid = None;
+    let _ = ecp_core::session::SessionMeta::write_atomic(meta_path, &meta);
+    true
 }
 
 // ─── ~/.ecp wipe (gap B) ─────────────────────────────────────────────────────

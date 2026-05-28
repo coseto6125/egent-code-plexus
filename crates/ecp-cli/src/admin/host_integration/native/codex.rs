@@ -55,6 +55,7 @@ pub(crate) fn pending_message() -> &'static str {
 pub(crate) fn run_uninstall() -> Result<PathBuf, EcpError> {
     let path = patch_path();
     remove_patch(&path)?;
+    prune_empty_parents(&path);
     Ok(path)
 }
 
@@ -63,6 +64,26 @@ fn remove_patch(path: &Path) -> Result<(), EcpError> {
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+/// Walk up from `<config>/ecp/host-integration/<file>` removing each ancestor
+/// that is now empty. `remove_dir` fails on non-empty dirs, so this cannot
+/// delete unrelated files. Stops the moment we leave the `ecp/` segment so
+/// we never touch `~/.config/` or anything above ours.
+fn prune_empty_parents(start: &Path) {
+    let mut cursor = start.parent();
+    while let Some(dir) = cursor {
+        let is_ours = dir
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new("ecp"));
+        if !is_ours {
+            break;
+        }
+        if fs::remove_dir(dir).is_err() {
+            break;
+        }
+        cursor = dir.parent();
+    }
 }
 
 fn patch_path() -> PathBuf {
@@ -237,5 +258,56 @@ mod tests {
         remove_patch(&patch).expect("remove missing patch");
 
         assert!(!patch.exists());
+    }
+
+    #[test]
+    fn prune_empty_parents_collapses_empty_ancestors_up_to_ecp() {
+        // Mirror the on-disk layout `<config>/ecp/host-integration/<patch>`
+        // and confirm both `host-integration/` and `ecp/` disappear once
+        // the patch is gone — but the synthetic `<config>` root stays.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host_integ = dir.path().join("ecp").join("host-integration");
+        fs::create_dir_all(&host_integ).unwrap();
+        let patch = host_integ.join(PATCH_NAME);
+        fs::write(&patch, "patch body").unwrap();
+
+        fs::remove_file(&patch).unwrap();
+        prune_empty_parents(&patch);
+
+        assert!(!host_integ.exists(), "host-integration/ should be pruned");
+        assert!(
+            !dir.path().join("ecp").exists(),
+            "ecp/ should be pruned too"
+        );
+        assert!(
+            dir.path().exists(),
+            "the synthetic config root must NOT be touched"
+        );
+    }
+
+    #[test]
+    fn prune_empty_parents_keeps_non_empty_dirs() {
+        // If the user (or a sibling tool) wrote something into ecp/, we
+        // must not delete it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host_integ = dir.path().join("ecp").join("host-integration");
+        fs::create_dir_all(&host_integ).unwrap();
+        let patch = host_integ.join(PATCH_NAME);
+        let sibling = dir.path().join("ecp").join("user-marker");
+        fs::write(&patch, "patch body").unwrap();
+        fs::write(&sibling, "user data").unwrap();
+
+        fs::remove_file(&patch).unwrap();
+        prune_empty_parents(&patch);
+
+        assert!(
+            !host_integ.exists(),
+            "host-integration/ (now empty) should be pruned"
+        );
+        assert!(
+            dir.path().join("ecp").exists(),
+            "ecp/ must stay because user-marker lives in it"
+        );
+        assert!(sibling.exists(), "sibling file untouched");
     }
 }

@@ -155,3 +155,51 @@ fn uninstall_removes_only_specified_event() {
         "PreToolUse retained"
     );
 }
+
+#[test]
+fn uninstall_all_events_drops_hooks_key_entirely() {
+    // After removing every event ecp installed, settings.json must NOT
+    // retain a hollow `"hooks": {}` — that's the visible leftover this
+    // test guards against. A user's pre-existing non-ecp fields stay.
+    let tmp = TempDir::new().unwrap();
+    let settings_path = tmp.path().join("settings.json");
+    std::fs::write(
+        &settings_path,
+        r#"{"theme":"dark","editor":{"font_size":14}}"#,
+    )
+    .unwrap();
+
+    Command::new(ecp_bin())
+        .args([
+            "admin",
+            "install-hook",
+            "--claude-code",
+            "--events",
+            "session-start,pre-tool-use,post-tool-use,user-prompt-submit",
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+
+    Command::new(ecp_bin())
+        .args([
+            "admin",
+            "uninstall-hook",
+            "--claude-code",
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert!(
+        merged.get("hooks").is_none(),
+        "hooks key must be dropped entirely, got: {merged}"
+    );
+    // Non-ecp settings preserved.
+    assert_eq!(merged["theme"], "dark");
+    assert_eq!(merged["editor"]["font_size"], 14);
+}

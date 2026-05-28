@@ -80,6 +80,55 @@ fn test_remove_git_hook_at_missing_hook_is_noop() {
     ecp_cli::commands::uninstall::remove_git_hook_at(&hook_path).unwrap();
 }
 
+#[test]
+fn test_remove_git_hook_at_leaves_bak_timestamp_files_untouched() {
+    // `ecp admin install-hook --force` (or --no-chain) renames the pre-ecp
+    // hook to `reference-transaction.bak.<ts>`. Uninstall must NOT delete
+    // those files — they're the user's pre-ecp backup. It surfaces them in
+    // stdout instead so the user can decide.
+    let dir = TempDir::new().unwrap();
+    let hook_path = dir.path().join("reference-transaction");
+    let bak1 = dir.path().join("reference-transaction.bak.1700000000");
+    let bak2 = dir.path().join("reference-transaction.bak.1800000000");
+
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\n# ecp-managed reference-transaction hook\nexec \"/usr/local/bin/ecp\" hook-handle \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::write(&bak1, "#!/bin/sh\nexec old-tool \"$@\"\n").unwrap();
+    std::fs::write(&bak2, "#!/bin/sh\nexec other-tool \"$@\"\n").unwrap();
+
+    ecp_cli::commands::uninstall::remove_git_hook_at(&hook_path).unwrap();
+
+    // Active hook removed.
+    assert!(!hook_path.exists(), "ecp-managed hook should be gone");
+    // Backups preserved verbatim.
+    assert!(bak1.exists(), "bak.1700000000 must NOT be auto-deleted");
+    assert!(bak2.exists(), "bak.1800000000 must NOT be auto-deleted");
+    assert_eq!(
+        std::fs::read_to_string(&bak1).unwrap(),
+        "#!/bin/sh\nexec old-tool \"$@\"\n",
+        "backup content untouched"
+    );
+}
+
+#[test]
+fn test_remove_git_hook_at_reports_backups_even_when_no_hook_present() {
+    // `ecp uninstall` is sometimes a no-op for the hook itself (already gone)
+    // but the user may still have ancient backups from a long-past install.
+    // Surface them so the manual cleanup path doesn't depend on the hook
+    // file existing right now.
+    let dir = TempDir::new().unwrap();
+    let hook_path = dir.path().join("reference-transaction");
+    let bak = dir.path().join("reference-transaction.bak.1700000000");
+    std::fs::write(&bak, "old").unwrap();
+
+    // Hook itself doesn't exist — this is the "not installed" branch.
+    ecp_cli::commands::uninstall::remove_git_hook_at(&hook_path).unwrap();
+    assert!(bak.exists(), "backup still kept on the missing-hook branch");
+}
+
 // ─── CLI surface tests ────────────────────────────────────────────────────────
 
 #[test]
