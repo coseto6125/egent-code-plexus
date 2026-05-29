@@ -1,7 +1,7 @@
 use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::commands::symbol_id::{resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use crate::session::overlay_reader::load_overlay;
 use clap::Args;
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -551,7 +551,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             "status": "error",
             "message": format!("Symbol '{}' not found.", name)
         });
-        return emit(&result, format);
+        return emit_with_caveat(&result, format, engine.caveat());
     }
 
     // When the only ambiguity is Impl vs a primary type declaration (Struct /
@@ -652,7 +652,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
                 "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
             );
         }
-        return emit(&result, format);
+        return emit_with_caveat(&result, format, engine.caveat());
     }
 
     // Ambiguous: return ALL matches as full inspect blocks (not a candidates list).
@@ -689,5 +689,5 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         "matches": blocks,
         "omitted_kinds": omitted_kinds,
     });
-    emit(&result, format)
+    emit_with_caveat(&result, format, engine.caveat())
 }

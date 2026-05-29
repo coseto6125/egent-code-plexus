@@ -77,6 +77,37 @@ pub fn emit(value: &Value, format: OutputFormat) -> Result<(), EcpError> {
     Ok(())
 }
 
+/// Attach an optional `result` caveat to a payload in place. The `result`
+/// field is the single, uniform channel for "how to read this answer": it
+/// appears ONLY when the answer carries a caveat the LLM must heed — a
+/// warm-attach stale graph, a same-name ambiguity that suppressed call
+/// edges, a blind-spot region. Its absence is itself the signal that the
+/// result is trustworthy, so reliable queries pay no token cost (the
+/// signal-density rule). One string consolidates what would otherwise be N
+/// per-caveat boolean fields the LLM must learn to combine.
+pub fn attach_caveat(value: &mut Value, caveat: Option<String>) {
+    if let (Some(obj), Some(text)) = (value.as_object_mut(), caveat) {
+        obj.insert("result".to_string(), Value::String(text));
+    }
+}
+
+/// Like [`emit`] but injects an optional `result` caveat first. Commands with
+/// access to a caveat source (e.g. a warm-attach engine) route through here so
+/// the staleness/completeness signal lands in the structured payload the LLM
+/// parses, never only on stderr.
+pub fn emit_with_caveat(
+    value: &Value,
+    format: OutputFormat,
+    caveat: Option<String>,
+) -> Result<(), EcpError> {
+    if caveat.is_none() {
+        return emit(value, format);
+    }
+    let mut v = value.clone();
+    attach_caveat(&mut v, caveat);
+    emit(&v, format)
+}
+
 /// Walk a payload and apply LLM-friendly lossy compression in-place:
 ///
 /// - `f64` numbers → rounded to 4 decimals (integers untouched)
@@ -281,6 +312,32 @@ mod tests {
         assert!(out.contains("\"results\":[]"));
         // No trailing newline — caller is responsible for println! if they want stdout.
         assert!(!out.ends_with('\n'));
+    }
+
+    #[test]
+    fn attach_caveat_some_adds_result_field() {
+        let mut value = json!({"found": false, "matches": [], "status": "success"});
+        attach_caveat(&mut value, Some("graph is stale; rebuild".to_string()));
+        assert_eq!(
+            value.get("result").and_then(|v| v.as_str()),
+            Some("graph is stale; rebuild"),
+            "Some caveat must surface as a `result` field the LLM parses"
+        );
+    }
+
+    #[test]
+    fn attach_caveat_none_leaves_payload_untouched() {
+        let original = json!({"found": true, "matches": [1], "status": "success"});
+        let mut value = original.clone();
+        attach_caveat(&mut value, None);
+        assert_eq!(
+            value, original,
+            "no caveat must add zero fields — trustworthy results pay no token cost"
+        );
+        assert!(
+            value.get("result").is_none(),
+            "absence of `result` is the signal that the answer is reliable"
+        );
     }
 
     #[test]

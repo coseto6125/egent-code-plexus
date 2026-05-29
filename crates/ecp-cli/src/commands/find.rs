@@ -30,7 +30,7 @@
 
 use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit, emit_with_caveat, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedZeroCopyGraph, FileCategory};
@@ -482,9 +482,10 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 tests_excluded,
                 status: "success".to_string(),
             };
-            emit(
+            emit_with_caveat(
                 &serde_json::to_value(&result).map_err(|e| EcpError::Output(e.to_string()))?,
                 format,
+                engine.caveat(),
             )
         }
     }

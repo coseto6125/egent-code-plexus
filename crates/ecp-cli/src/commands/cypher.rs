@@ -1,5 +1,5 @@
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use crate::repo_selector;
 use clap::Args;
 use ecp_core::cypher;
@@ -101,7 +101,11 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
         .map(|row| row.iter().map(value_to_json_value).collect())
         .collect();
     let payload = build_payload(result.columns, rows_json);
-    emit(&payload, OutputFormat::parse(args.format.as_deref()))?;
+    emit_with_caveat(
+        &payload,
+        OutputFormat::parse(args.format.as_deref()),
+        engine.caveat(),
+    )?;
     Ok(())
 }
 

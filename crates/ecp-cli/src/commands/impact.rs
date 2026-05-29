@@ -2,7 +2,7 @@ use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::commands::symbol_id::{format_fqn, resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use crate::reanalyze::make_pipeline;
 use clap::{Args, ValueEnum};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -394,11 +394,11 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     let format = OutputFormat::parse(args.format.as_deref());
     if args.literal_coherence {
         let payload = build_literal_coherence_payload(engine)?;
-        return emit(&payload, format);
+        return emit_with_caveat(&payload, format, engine.caveat());
     }
     if let Some(literal_value) = args.literal.clone() {
         let payload = build_literal_payload(&literal_value, engine)?;
-        return emit(&payload, format);
+        return emit_with_caveat(&payload, format, engine.caveat());
     }
     let (payload, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(name) = &hints.empty_hint_name {
@@ -418,7 +418,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             hints.hidden_heuristic_edges
         );
     }
-    emit(&payload, format)
+    emit_with_caveat(&payload, format, engine.caveat())
 }
 
 /// Library API: returns the JSON payload only, dropping stderr hints.

@@ -61,6 +61,22 @@ impl Engine {
         Ok(eng)
     }
 
+    /// The single caveat string for query output, or `None` when results are
+    /// trustworthy. Today the only source is warm-attach staleness; future
+    /// caveats (blind-spot coverage, ambiguity-suppressed edges) extend the
+    /// `Some` arm. Routed into the payload's `result` field by
+    /// `output::emit_with_caveat`, so a `found:false` under a stale graph is
+    /// no longer indistinguishable from a definitive "does not exist".
+    pub fn caveat(&self) -> Option<String> {
+        self.is_stale_for_sha.then(|| {
+            "results may be incomplete: graph is a warm-attach from a sibling commit \
+             (current HEAD not yet indexed); symbols added since are invisible. A background \
+             rebuild is in flight — rerun, or `ecp admin index --force --repo .` for a \
+             definitive answer."
+                .to_string()
+        })
+    }
+
     /// SessionState-driven constructor (spec §5.1). Classifies the session and
     /// picks the right load path: PureReference → L2-only view (no overlay
     /// touch, satisfies invariant F5); AugmentedReference → L2 + record the
