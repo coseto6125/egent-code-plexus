@@ -3652,8 +3652,12 @@ mod tests {
         kind_offsets[function_idx] = 0;
         kind_offsets[function_idx + 1] = 2;
         // Pad remaining entries at 2 (no more nodes after the two functions)
-        for i in (function_idx + 2)..=variant_count {
-            kind_offsets[i] = 2;
+        for entry in kind_offsets
+            .iter_mut()
+            .take(variant_count + 1)
+            .skip(function_idx + 2)
+        {
+            *entry = 2;
         }
         let kind_node_idx: Vec<u32> = vec![0, 1]; // caller=0, callee=1
 
@@ -3759,12 +3763,12 @@ mod tests {
         });
     }
 
-    /// MATCH (n {filePath:"src/x.ts"}) must return both nodes (both share the
+    /// `MATCH (n {filePath:"src/x.ts"})` must return both nodes (both share the
     /// same file path in the two-node fixture).  Previously broken: `filePath`
     /// was not handled in node_matches, so the `_ => return false` catch-all
     /// made every node fail the match → 0 rows instead of 2.
     #[test]
-    fn exec_inline_prop_filePath_filters_correctly() {
+    fn exec_inline_prop_file_path_filters_correctly() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {filePath:"src/x.ts"}) RETURN n.name"#).unwrap();
             let r = execute(&q, g, Path::new(".")).unwrap();
@@ -3777,9 +3781,9 @@ mod tests {
         });
     }
 
-    /// MATCH (n {filePath:"nonexistent.ts"}) must return 0 rows.
+    /// `MATCH (n {filePath:"nonexistent.ts"})` must return 0 rows.
     #[test]
-    fn exec_inline_prop_filePath_nonexistent_returns_empty() {
+    fn exec_inline_prop_file_path_nonexistent_returns_empty() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {filePath:"nonexistent.ts"}) RETURN n.name"#).unwrap();
             let r = execute(&q, g, Path::new(".")).unwrap();
