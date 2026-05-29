@@ -131,7 +131,7 @@ pub fn run(args: DoctorArgs) -> Result<(), EcpError> {
         OutputFormat::Json | OutputFormat::Toon => {
             emit(&serde_json::json!({ "checks": results }), format)?;
         }
-        _ => print_text(&results),
+        _ => print_text(&results, color_enabled()),
     }
 
     if fail > 0 {
@@ -140,22 +140,43 @@ pub fn run(args: DoctorArgs) -> Result<(), EcpError> {
     Ok(())
 }
 
-fn print_text(results: &[CheckResult]) {
+// ANSI color, gated by `color_enabled()`. Same opt-in rule as `ecp usage`:
+// off under NO_COLOR, off a non-TTY stdout (so piped/redirected output stays
+// plain), text format only (json/toon never reach here).
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+fn color_enabled() -> bool {
+    use std::io::IsTerminal;
+    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+
+fn paint(s: &str, color: &str, on: bool) -> String {
+    if on {
+        format!("{color}{s}{RESET}")
+    } else {
+        s.to_string()
+    }
+}
+
+fn print_text(results: &[CheckResult], color: bool) {
     let mut warn = 0usize;
     let mut fail = 0usize;
     for r in results {
-        let tag = match r.status {
-            CheckStatus::Ok => "ok  ",
+        let (tag, hue) = match r.status {
+            CheckStatus::Ok => ("ok  ", GREEN),
             CheckStatus::Warn => {
                 warn += 1;
-                "warn"
+                ("warn", YELLOW)
             }
             CheckStatus::Fail => {
                 fail += 1;
-                "fail"
+                ("fail", RED)
             }
         };
-        println!("[{tag}] {}: {}", r.name, r.message);
+        println!("[{}] {}: {}", paint(tag, hue, color), r.name, r.message);
         if let Some(hint) = &r.remediation {
             match r.fix_applied {
                 Some(true) => println!("       fixed: ran `{hint}`"),
@@ -164,11 +185,12 @@ fn print_text(results: &[CheckResult]) {
             }
         }
     }
+    let ok = results.len() - warn - fail;
     println!(
         "\n{} checks · {} ok · {} warn · {} fail",
         results.len(),
-        results.len() - warn - fail,
-        warn,
-        fail
+        paint(&ok.to_string(), GREEN, color),
+        paint(&warn.to_string(), YELLOW, color),
+        paint(&fail.to_string(), RED, color),
     );
 }
