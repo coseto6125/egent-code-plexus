@@ -19,17 +19,23 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Show symbol's full context: signature, body, edges, callers, overrides, and 1-hop upstream impact
+    /// Show a symbol's full context: signature, body, edges, callers, overrides, 1-hop impact
     Inspect(commands::inspect::InspectArgs),
-    /// Locate symbols by exact name (default), substring (`--mode fuzzy`), or BM25 lexical ranking (`--mode bm25`). Exact / fuzzy return a single most-likely definition (or all via `--all`); bm25 returns top-K partitioned into source / tests / reference / document / config buckets and supports stdin `--batch`.
+    /// Locate symbols by exact name (default), substring (`--mode fuzzy`), or BM25 ranking (`--mode bm25`).
+    ///
+    /// Exact / fuzzy return a single most-likely definition (or all via `--all`); bm25 returns top-K
+    /// partitioned into source / tests / reference / document / config buckets and supports stdin `--batch`.
     Find(commands::find::FindArgs),
-    /// Symbol blast radius — affected callers + risk_level. For binding tier-degradation or resolver delta, use `ecp diff`.
+    /// Symbol blast radius — affected callers + risk_level.
+    ///
+    /// For binding tier-degradation or resolver delta, use `ecp diff`.
     Impact(commands::impact::ImpactArgs),
     /// AST-aware multi-file rename
     Rename(commands::rename::RenameArgs),
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),
     /// Registry + repo health (indexed repos, freshness, frameworks, blind spots).
+    ///
     /// `blind_spots` lists only LLM-actionable opacity (dynamic-import / reflection / eval);
     /// parser-metric buckets (uid-collision / overload / ifdef-redef) live under `ecp dev uid-audit`.
     /// External-client (HTTP/DB/Redis/queue) usage detail: see `ecp tool-map`.
@@ -38,10 +44,13 @@ pub enum Commands {
     Routes(commands::routes::RoutesArgs),
     /// Cross-repo API contracts inventory (routes / queue / RPC)
     Contracts(commands::contracts::ContractsArgs),
-    /// Edge-level resolver delta — binding tier-degradation (silent break), route / contract changes. For symbol blast-radius, use `ecp impact`.
+    /// Edge-level resolver delta — binding tier-degradation (silent break), route / contract changes.
+    ///
+    /// For symbol blast-radius, use `ecp impact`.
     Diff(commands::diff::DiffArgs),
 
     /// Remove all ecp host integrations and optionally wipe the index cache.
+    ///
     /// Reverses hooks, MCP registration, and skills for Claude Code, Codex,
     /// and Gemini. Use --host to limit to one host; --dry-run to preview.
     Uninstall(commands::uninstall::UninstallArgs),
@@ -82,9 +91,10 @@ pub enum Commands {
     Watch(commands::watch::WatchArgs),
     /// Multi-session peer collaboration (status / diff / log / gc + Ƀ messaging)
     Peers(commands::peers::PeersArgs),
-    /// LLM-workflow audit aggregator — runs impact, summary (blind-spot),
-    /// egress (tool-map), shape-check, and resolver-diff over changed files in
-    /// one shot, filtered to high-confidence signals only.
+    /// LLM-workflow audit aggregator over changed files, high-confidence signals only.
+    ///
+    /// Runs impact, summary (blind-spot), egress (tool-map), shape-check, and
+    /// resolver-diff in one shot.
     Review(commands::review::ReviewArgs),
     /// Multi-repo group contract extraction and cross-link matching
     #[command(hide = true)]
@@ -93,13 +103,16 @@ pub enum Commands {
         cmd: commands::group::GroupCommands,
     },
     /// Heuristic Saga compensate/undo/rollback name-pair detector.
+    ///
     /// All findings carry `requires_verification: true`; never enters the graph.
     FindTransactionPatterns(commands::find_tx_patterns::FindTxPatternsArgs),
-    /// Surface MirrorsField heuristic edges for a SchemaField and list
-    /// blind-spot candidates (cross-owner-class fields that share the name
-    /// but have no mirror edge). Accepts `Class.field` or bare `field`.
+    /// Surface MirrorsField heuristic edges for a SchemaField; list blind-spot candidates.
+    ///
+    /// Blind spots are cross-owner-class fields that share the name but have no
+    /// mirror edge. Accepts `Class.field` or bare `field`.
     FindSchemaBindings(commands::find_schema_bindings::FindSchemaBindingsArgs),
     /// List `EventTopicMirror` heuristic edges: (publisher_fn, subscriber_fn, topic, confidence).
+    ///
     /// Edges are emitted by T5-33 at confidence=0.85; filter with --min-confidence, --topic, --lib.
     FindEventMirrors(commands::find_event_mirrors::FindEventMirrorsArgs),
     /// Per-language BlindSpot emitter inventory (`schema blindspots`) —
@@ -112,18 +125,19 @@ pub enum Commands {
     /// `ecp schema --help` (hidden subcommands still respond to help).
     #[command(hide = true)]
     Schema(commands::schema::SchemaArgs),
-    /// List detected Process (execution-flow) nodes, or `processes trace
-    /// <pattern>` to dump the full Function/Method step sequence for a
-    /// matching process. Surfaces the Leiden-community + BFS detection
-    /// already emitted at index time (`pass4_processes` in builder.rs).
+    /// List detected Process (execution-flow) nodes, or `processes trace <pattern>` for step sequence.
+    ///
+    /// Surfaces the Leiden-community + BFS detection emitted at index time
+    /// (`pass4_processes` in builder.rs).
     Processes(commands::processes::ProcessesArgs),
-    /// MCP call telemetry aggregator — per-tool p50/p99/error-rate + hourly
-    /// bucket counts. Reads ~/.ecp/telemetry/<repo>/calls.jsonl written by
-    /// the MCP server. Schema is unstable (v1).
+    /// MCP call telemetry aggregator — per-tool p50/p99/error-rate + hourly bucket counts.
+    ///
+    /// Reads ~/.ecp/telemetry/<repo>/calls.jsonl written by the MCP server.
+    /// Schema is unstable (v1).
     Insight(commands::insight::InsightArgs),
-    /// Usage dashboard over CLI + MCP telemetry — invocation counts, p50/p99
-    /// latency, error rate, and per-kind error tallies. Reads
-    /// `~/.ecp/telemetry/<repo>/{cli-calls,calls}.jsonl`. Default output is a
-    /// terminal ASCII dashboard; `--format json` emits machine-readable stats.
+    /// Usage dashboard over CLI + MCP telemetry — counts, p50/p99 latency, error rate.
+    ///
+    /// Reads `~/.ecp/telemetry/<repo>/{cli-calls,calls}.jsonl`. Default output is
+    /// a terminal ASCII dashboard; `--format json` emits machine-readable stats.
     Usage(commands::usage::UsageArgs),
 }
