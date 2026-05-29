@@ -21,7 +21,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.4"
+version = "0.6.0"
 edition = "2021"
 authors = ["E-NoR"]
 license = "MIT OR Apache-2.0"
@@ -35,9 +35,9 @@ categories = ["development-tools"]
 # `scripts/release/cut-release.sh` bumps all four sites together on each release so
 # they never drift.
 [workspace.dependencies]
-ecp-core = { path = "crates/ecp-core", version = "0.5.4" }
-ecp-analyzer = { path = "crates/ecp-analyzer", version = "0.5.4" }
-ecp-mcp = { path = "crates/ecp-mcp", version = "0.5.4" }
+ecp-core = { path = "crates/ecp-core", version = "0.6.0" }
+ecp-analyzer = { path = "crates/ecp-analyzer", version = "0.6.0" }
+ecp-mcp = { path = "crates/ecp-mcp", version = "0.6.0" }
 
 # 工作區層級 lints 設定。目前無 override；後續可在此精準 allow/warn/deny
 # 特定 lint 規則，所有 crate 透過 [lints] workspace = true opt-in。

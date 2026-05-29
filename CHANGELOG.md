@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.0 - 2026-05-29
+
+### Features
+
+- raise ecp adoption — reflex-first skill, daily update probe, Windows home, doctor color, slimmer help (#505)
+- optional `result` caveat field for unreliable query answers (#504)
+
+### Bug Fixes
+
+- expand Rust crate::/self::/super:: import paths in Tier 2 (#503)
+- inline node-property map filters all known properties (#502)
+- gate warm-attach on sibling commit distance (#501)
 ## v0.5.4 - 2026-05-28
 
 ### Features
