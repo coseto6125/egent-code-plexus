@@ -968,7 +968,7 @@ fn exec_pattern(
     if let Some(var) = &first_np.var {
         if let Some(&already) = base.node_vars.get(var) {
             let node = &graph.nodes[already as usize];
-            if node_matches(node, first_np, graph) {
+            if node_matches(node, already, first_np, graph) {
                 frontier.push((base.clone(), already));
             }
         } else if use_kind_csr {
@@ -979,7 +979,7 @@ fn exec_pattern(
                 for &raw in &graph.kind_node_idx[start..end] {
                     let idx = raw.to_native();
                     let node = &graph.nodes[idx as usize];
-                    if !node_matches(node, first_np, graph) {
+                    if !node_matches(node, idx, first_np, graph) {
                         continue;
                     }
                     let mut b = base.clone();
@@ -989,7 +989,7 @@ fn exec_pattern(
             }
         } else {
             for (idx, node) in graph.nodes.iter().enumerate() {
-                if !node_matches(node, first_np, graph) {
+                if !node_matches(node, idx as u32, first_np, graph) {
                     continue;
                 }
                 let mut b = base.clone();
@@ -1005,7 +1005,7 @@ fn exec_pattern(
             for &raw in &graph.kind_node_idx[start..end] {
                 let idx = raw.to_native();
                 let node = &graph.nodes[idx as usize];
-                if !node_matches(node, first_np, graph) {
+                if !node_matches(node, idx, first_np, graph) {
                     continue;
                 }
                 frontier.push((base.clone(), idx));
@@ -1014,7 +1014,7 @@ fn exec_pattern(
     } else {
         // Anonymous first node: scan all nodes.
         for (idx, node) in graph.nodes.iter().enumerate() {
-            if !node_matches(node, first_np, graph) {
+            if !node_matches(node, idx as u32, first_np, graph) {
                 continue;
             }
             frontier.push((base.clone(), idx as u32));
@@ -1032,7 +1032,7 @@ fn exec_pattern(
                     let reached = bfs_var_len(*cur_idx, rel, graph, min, max);
                     for (tgt_idx, edge_idx_opt) in reached {
                         let tgt_node = &graph.nodes[tgt_idx as usize];
-                        if !node_matches(tgt_node, next_np, graph) {
+                        if !node_matches(tgt_node, tgt_idx, next_np, graph) {
                             continue;
                         }
                         let mut nb = b.clone();
@@ -1051,7 +1051,7 @@ fn exec_pattern(
                 None => {
                     walk_rel(*cur_idx, rel, graph, |tgt_idx, edge_idx| {
                         let tgt_node = &graph.nodes[tgt_idx as usize];
-                        if !node_matches(tgt_node, next_np, graph) {
+                        if !node_matches(tgt_node, tgt_idx, next_np, graph) {
                             return;
                         }
                         let mut nb = b.clone();
@@ -1108,48 +1108,128 @@ fn bfs_var_len(
 
 fn node_matches(
     node: &crate::graph::ArchivedNode,
+    node_idx: u32,
     np: &NodePat,
     graph: &ArchivedZeroCopyGraph,
 ) -> bool {
-    // Zero-cost discriminant read; reused by both label filter and `kind` prop filter below.
+    // Zero-cost discriminant read; reused by both label filter and prop_value below.
     let kind: NodeKind = NodeKind::from(&node.kind);
     if !np.kinds.is_empty() && !np.kinds.contains(&kind) {
         return false;
     }
     for (key, lit) in &np.props {
+        // Hot-path allocation-free checks for the three most common inline-map keys.
+        // All other properties fall through to the general path via node_prop_no_cache,
+        // which mirrors the full WHERE property set (minus "content" which requires a
+        // file read and is intentionally excluded from inline-map filtering).
         match key.as_str() {
             "name" => {
                 let n = node.name.resolve(&graph.string_pool);
-                if let Literal::Str(s) = lit {
-                    if n != s.as_str() {
-                        return false;
-                    }
-                } else {
+                if !matches!(lit, Literal::Str(s) if n == s.as_str()) {
                     return false;
                 }
             }
             "kind" => {
-                if let Literal::Str(s) = lit {
-                    if kind.as_str() != s {
-                        return false;
-                    }
-                } else {
+                if !matches!(lit, Literal::Str(s) if kind.as_str() == s.as_str()) {
                     return false;
                 }
             }
             "uid" => {
-                if let Literal::Int(v) = lit {
-                    if node.uid.to_native() as i64 != *v {
-                        return false;
-                    }
-                } else {
+                if !matches!(lit, Literal::Int(v) if node.uid.to_native() as i64 == *v) {
                     return false;
                 }
             }
-            _ => return false,
+            other => {
+                let val = node_prop_no_cache(node, node_idx, other, graph);
+                if !literal_matches_value(lit, &val) {
+                    return false;
+                }
+            }
         }
     }
     true
+}
+
+/// Evaluate a node property without requiring a `ContentCache`.
+/// Mirrors `node_prop_value` for all properties except `"content"` (which
+/// requires a file read) — returns `Value::Null` for unknown or excluded keys
+/// so that `literal_matches_value` falls through to `false` (no match).
+/// "name", "kind", "uid" are handled by the hot-3 in `node_matches` and
+/// never reach this function.
+fn node_prop_no_cache(
+    n: &crate::graph::ArchivedNode,
+    node_idx: u32,
+    prop: &str,
+    graph: &ArchivedZeroCopyGraph,
+) -> Value {
+    match prop {
+        "filePath" => Value::Str(if n.has_owning_file() {
+            let fi = n.file_idx.to_native() as usize;
+            graph.files[fi].path.resolve(&graph.string_pool).to_string()
+        } else {
+            String::new()
+        }),
+        "ownerClass" => {
+            let oc = n.owner_class.resolve(&graph.string_pool);
+            if oc.is_empty() {
+                Value::Null
+            } else {
+                Value::Str(oc.to_string())
+            }
+        }
+        "line" | "startLine" => Value::Int(n.start_line() as i64),
+        "endLine" => Value::Int(n.end_line() as i64),
+        "is_test" | "isTest" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_TEST,
+        )),
+        "is_async" | "isAsync" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_ASYNC,
+        )),
+        "is_static" | "isStatic" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_STATIC,
+        )),
+        "is_abstract" | "isAbstract" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_ABSTRACT,
+        )),
+        "is_generator" | "isGenerator" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_GENERATOR,
+        )),
+        "is_extern" | "isExtern" => Value::Bool(archived_fm_flag(
+            graph,
+            node_idx,
+            crate::graph::FunctionMeta::FLAG_EXTERN,
+        )),
+        "visibility" => Value::Int(archived_fm_visibility(graph, node_idx) as i64),
+        // "content" excluded: requires file I/O; use WHERE n.content = … instead.
+        // "decorators" is a list — inline-map equality against a list literal is
+        // an edge case handled by literal_matches_value's List arm.
+        "decorators" => archived_fm_decorators(graph, node_idx),
+        // Unknown property or "content": return Null so literal_matches_value → false.
+        _ => Value::Null,
+    }
+}
+
+/// True when a `Literal` filter value matches a property `Value`.
+/// `Value::Null` (missing/unsupported property) never matches any literal.
+fn literal_matches_value(lit: &Literal, val: &Value) -> bool {
+    match (lit, val) {
+        (Literal::Str(ls), Value::Str(vs)) => ls == vs,
+        (Literal::Int(li), Value::Int(vi)) => *li == *vi,
+        (Literal::Float(lf), Value::Float(vf)) => *lf == *vf,
+        (Literal::Bool(lb), Value::Bool(vb)) => *lb == *vb,
+        (Literal::Null, Value::Null) => true,
+        _ => false,
+    }
 }
 
 /// Walk one hop from `from` in the given direction, invoking `emit(target_idx, edge_idx)`
@@ -3482,5 +3562,253 @@ mod tests {
         let mut rows = vec![vec![Value::Int(1)], vec![Value::Float(1.0)]];
         dedup_rows(&mut rows);
         assert_eq!(rows.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Inline node property map filtering  {key: value}
+    // -----------------------------------------------------------------------
+
+    /// MATCH (n {name:"caller"}) on the two-node fixture must return exactly
+    /// 1 row — only the node whose name is "caller", not both nodes.
+    #[test]
+    fn exec_inline_prop_name_filters_correctly() {
+        with_two(|g| {
+            let q = parse(r#"MATCH (n {name:"caller"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                1,
+                "inline prop filter must return only matching node, got {:?}",
+                r.rows
+            );
+            assert_eq!(r.rows[0][0], Value::Str("caller".into()));
+        });
+    }
+
+    /// MATCH (n {name:"callee"}) must return only the callee node.
+    #[test]
+    fn exec_inline_prop_name_other_value_filters_correctly() {
+        with_two(|g| {
+            let q = parse(r#"MATCH (n {name:"callee"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                1,
+                "inline prop filter for callee must return 1 row, got {:?}",
+                r.rows
+            );
+            assert_eq!(r.rows[0][0], Value::Str("callee".into()));
+        });
+    }
+
+    /// MATCH (n {name:"nonexistent"}) must return 0 rows — no node matches.
+    #[test]
+    fn exec_inline_prop_name_nonexistent_returns_empty() {
+        with_two(|g| {
+            let q = parse(r#"MATCH (n {name:"nonexistent"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(
+                r.rows.is_empty(),
+                "inline prop filter for unknown name must return 0 rows, got {:?}",
+                r.rows
+            );
+        });
+    }
+
+    /// MATCH (n:Function {name:"caller"}) — label + inline prop both applied.
+    #[test]
+    fn exec_inline_prop_with_label_filters_correctly() {
+        with_two(|g| {
+            let q = parse(r#"MATCH (n:Function {name:"caller"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                1,
+                "label + inline prop filter must return 1 row, got {:?}",
+                r.rows
+            );
+            assert_eq!(r.rows[0][0], Value::Str("caller".into()));
+        });
+    }
+
+    /// Build a two-node Function graph WITH kind_offsets populated (real-graph CSR).
+    /// caller(idx=0), callee(idx=1), both :Function.
+    /// kind_offsets: File=0..0, Function=0..2, Class=2..2, ...
+    fn build_two_node_with_csr() -> Vec<u8> {
+        let mut pool = StringPool::new();
+        let caller_name = pool.add("caller");
+        let callee_name = pool.add("callee");
+        let file_path = pool.add("src/x.ts");
+        let reason = pool.add("ast-call");
+
+        // 29 NodeKind variants → kind_offsets has 30 entries (VARIANT_COUNT+1).
+        // Function = variant 1. Both nodes are Function, so:
+        //   kind_offsets[0]=0  (File, 0 nodes)   [1]=0
+        //   kind_offsets[1]=0  (Function, start)  [2]=2 (Function, end)
+        //   rest = 2 (no other kinds)
+        let variant_count = crate::graph::NodeKind::VARIANT_COUNT;
+        let mut kind_offsets: Vec<u32> = vec![0u32; variant_count + 1];
+        let function_idx = NodeKind::Function as usize;
+        kind_offsets[function_idx] = 0;
+        kind_offsets[function_idx + 1] = 2;
+        // Pad remaining entries at 2 (no more nodes after the two functions)
+        for entry in kind_offsets
+            .iter_mut()
+            .take(variant_count + 1)
+            .skip(function_idx + 2)
+        {
+            *entry = 2;
+        }
+        let kind_node_idx: Vec<u32> = vec![0, 1]; // caller=0, callee=1
+
+        let g = ZeroCopyGraph {
+            magic: GRAPH_MAGIC,
+            version: GRAPH_FORMAT_VERSION,
+            fingerprint: [0; 32],
+            string_pool: pool.bytes,
+            files: vec![File {
+                path: file_path,
+                mtime: 0,
+                content_hash: [0u8; 8],
+                category: FileCategory::Source,
+            }],
+            nodes: vec![
+                Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "caller"),
+                    name: caller_name,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (0, 0, 5, 1),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+                Node {
+                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "callee"),
+                    name: callee_name,
+                    file_idx: 0,
+                    kind: NodeKind::Function,
+                    span: (6, 0, 8, 1),
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                },
+            ],
+            edges: vec![Edge {
+                source: 0,
+                target: 1,
+                rel_type: RelType::Calls,
+                confidence: 1.0,
+                reason,
+            }],
+            out_offsets: vec![0, 1, 1],
+            in_offsets: vec![0, 0, 1],
+            in_edge_idx: vec![0],
+            name_index: vec![],
+            process_start: 2,
+            traces_offsets: vec![],
+            traces_data: vec![],
+            blind_spots: vec![],
+            route_shapes: vec![],
+            call_metas: vec![],
+            function_metas: vec![],
+            kind_offsets,
+            kind_node_idx,
+            node_flags: vec![],
+        };
+        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+    }
+
+    fn with_two_csr<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
+        let bytes = build_two_node_with_csr();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        f(archived);
+    }
+
+    /// CSR-path: MATCH (n:Function {name:"caller"}) must return 1 row, not 2.
+    /// This exercises the `use_kind_csr = true` branch in exec_pattern.
+    #[test]
+    fn exec_inline_prop_with_csr_label_filters_correctly() {
+        with_two_csr(|g| {
+            // Verify CSR is actually enabled for this fixture
+            assert!(
+                !g.kind_offsets.is_empty(),
+                "fixture must have CSR populated"
+            );
+            let q = parse(r#"MATCH (n:Function {name:"caller"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                1,
+                "CSR path: inline prop filter must return only caller, got {:?}",
+                r.rows
+            );
+            assert_eq!(r.rows[0][0], Value::Str("caller".into()));
+        });
+    }
+
+    /// CSR-path: MATCH (n:Function {name:"nobody"}) must return 0 rows.
+    #[test]
+    fn exec_inline_prop_with_csr_nonexistent_returns_empty() {
+        with_two_csr(|g| {
+            let q = parse(r#"MATCH (n:Function {name:"nobody"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(
+                r.rows.is_empty(),
+                "CSR path: inline prop filter for unknown name must return 0 rows, got {:?}",
+                r.rows
+            );
+        });
+    }
+
+    /// `MATCH (n {filePath:"src/x.ts"})` must return both nodes (both share the
+    /// same file path in the two-node fixture).  Previously broken: `filePath`
+    /// was not handled in node_matches, so the `_ => return false` catch-all
+    /// made every node fail the match → 0 rows instead of 2.
+    #[test]
+    fn exec_inline_prop_file_path_filters_correctly() {
+        with_two(|g| {
+            let q = parse(r#"MATCH (n {filePath:"src/x.ts"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                2,
+                "inline filePath filter must return both nodes with that path, got {:?}",
+                r.rows
+            );
+        });
+    }
+
+    /// `MATCH (n {filePath:"nonexistent.ts"})` must return 0 rows.
+    #[test]
+    fn exec_inline_prop_file_path_nonexistent_returns_empty() {
+        with_two(|g| {
+            let q = parse(r#"MATCH (n {filePath:"nonexistent.ts"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(
+                r.rows.is_empty(),
+                "inline filePath filter for nonexistent path must return 0 rows, got {:?}",
+                r.rows
+            );
+        });
+    }
+
+    /// MATCH (n {kind:"Function"}) must return both nodes (both are :Function).
+    /// `kind` is already in the hot-3 — regression guard that it stays working
+    /// after the general-property extension.
+    #[test]
+    fn exec_inline_prop_kind_filters_correctly() {
+        with_two(|g| {
+            let q = parse(r#"MATCH (n {kind:"Function"}) RETURN n.name"#).unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                2,
+                "inline kind filter must return both Function nodes, got {:?}",
+                r.rows
+            );
+        });
     }
 }
