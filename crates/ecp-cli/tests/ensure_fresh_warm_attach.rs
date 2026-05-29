@@ -104,6 +104,28 @@ fn add_second_commit(p: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
+/// Advance the repo by `n` extra commits on the same branch. Used to push the
+/// most-recent published sibling far enough behind HEAD that warm-attach would
+/// load a graph missing every symbol introduced in between. Returns the new
+/// HEAD SHA.
+fn advance_commits(p: &Path, n: usize) -> String {
+    let g = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
+    };
+    for i in 0..n {
+        fs::write(p.join("lib.rs"), format!("pub fn advanced_fn_{i}() {{}}\n")).unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-qm", &format!("advance {i}")]);
+    }
+    let out = g(&["rev-parse", "HEAD"]);
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
 /// Build the index for `repo` using `ECP_HOME=cache_dir`.
 fn run_admin_index(repo: &Path, cache_dir: &Path) {
     let out = Command::new(ecp_bin())
@@ -181,6 +203,54 @@ fn warm_attach_picks_up_sibling_sha_when_missing() {
             "engine loaded via load_warm must report is_stale_for_sha=true"
         );
     }
+}
+
+/// A sibling that is an ANCESTOR of HEAD by more than `WARM_ATTACH_MAX_DISTANCE`
+/// commits is too stale to warm-attach: loading it would silently drop every
+/// symbol introduced in the intervening commits, so `ecp find` would report
+/// `found:false` for code that genuinely landed (the #100-122 incident). Such a
+/// sibling must fall back to a synchronous build instead of warm-attaching.
+///
+/// Contrast Test 1: there the sibling is HEAD's *direct parent* (distance 1),
+/// which is within the threshold and still warm-attaches.
+#[test]
+fn distant_ancestor_sibling_falls_back_to_sync_build() {
+    let _env_guard = lock_env();
+    let _snap = EnvSnapshot::take();
+
+    let repo_tmp = TempDir::new().unwrap();
+    let cache_tmp = TempDir::new().unwrap();
+    let repo = repo_tmp.path();
+    let cache = cache_tmp.path();
+
+    // Build an index for the initial commit (the only published sibling).
+    git_init_with_commit(repo);
+    run_admin_index(repo, cache);
+
+    // Advance several commits on the same branch WITHOUT reindexing. The lone
+    // published sibling (SHA-1) is now a distant ancestor of HEAD.
+    advance_commits(repo, 4);
+
+    std::env::set_var("HOME", cache);
+    std::env::remove_var("ECP_HOME");
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
+    test_counters::reset();
+
+    let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
+    let resolved = graph_path::resolve(legacy_sentinel, repo);
+    let outcome = auto_ensure::ensure_fresh(&resolved, repo)
+        .expect("ensure_fresh should sync-build past a too-distant sibling");
+
+    assert!(
+        matches!(outcome, EnsureFreshOutcome::Ready),
+        "expected Ready (sync build) for a distant-ancestor sibling, got {:?}",
+        outcome
+    );
+    assert_eq!(
+        test_counters::warm_attach_calls(),
+        0,
+        "a sibling more than WARM_ATTACH_MAX_DISTANCE commits behind HEAD must NOT warm-attach"
+    );
 }
 
 // ── Test 2 ────────────────────────────────────────────────────────────────────

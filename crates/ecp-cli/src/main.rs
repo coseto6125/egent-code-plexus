@@ -232,17 +232,18 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             )));
         }
         Ok(auto_ensure::EnsureFreshOutcome::WarmAttach { sibling_graph_path }) => {
-            // New HEAD has no published graph. Load the sibling SHA's graph
-            // immediately so this invocation is not blocked; the real rebuild
-            // is running in the background.
-            eprintln!("note: results may be slightly stale (warm-attach, rebuild in progress)");
+            // The sibling passed auto_ensure's distance gate (≤1 commit behind),
+            // so it serves silently while the background rebuild runs. No "may be
+            // stale" note: a per-invocation apology for a near-current graph is
+            // context noise the LLM can't act on, and a too-stale sibling never
+            // reaches this arm. The actionable hint is reserved for load failure.
             match Engine::load_warm(&sibling_graph_path) {
                 Ok(e) => e,
                 Err(err) => {
                     return Err(ecp_core::EcpError::InvalidArgument(format!(
-                        "Error loading warm-attach graph from {}: {}",
+                        "warm-attach graph load failed ({}): {err}. \
+                         Rebuild the index with `ecp admin index --force --repo .`",
                         sibling_graph_path.display(),
-                        err
                     )));
                 }
             }

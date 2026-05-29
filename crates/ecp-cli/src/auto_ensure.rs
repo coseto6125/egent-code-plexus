@@ -540,11 +540,67 @@ fn attach_latest_sibling_sha_uncached(worktree_root: &Path) -> Option<PathBuf> {
     let commits_dir = home_ecp.join(&repo_dir_name).join("commits");
     let sibling_dir = crate::commit_lookup::find_latest_by_mtime(&commits_dir)?;
     let graph_bin = sibling_dir.join("graph.bin");
-    if graph_bin.is_file() && sibling_graph_compatible(&graph_bin) {
-        Some(graph_bin)
-    } else {
-        None
+    if !graph_bin.is_file() || !sibling_graph_compatible(&graph_bin) {
+        return None;
     }
+    // Staleness gate: warm-attach trades a ~0.3s sync build for a possibly-stale
+    // graph. That trade only pays when the sibling is near HEAD — sync cost is
+    // ~constant in commit distance, but symbols a distant sibling silently drops
+    // grow with it (≈13 at distance 1, ≈252 at distance 44), making `ecp find`
+    // answer `found:false` for code that genuinely landed. Too far behind ⇒
+    // refuse, forcing a sync build of the correct graph.
+    if !sibling_within_warm_distance(&sibling_dir, worktree_root) {
+        return None;
+    }
+    Some(graph_bin)
+}
+
+/// Max commit distance a sibling may sit behind HEAD and still be warm-attached.
+/// 1 = HEAD's direct parent only (the "just committed, not yet reindexed" case).
+/// See the staleness-gate comment in `attach_latest_sibling_sha_uncached`.
+const WARM_ATTACH_MAX_DISTANCE: usize = 1;
+
+/// True when `sibling_dir` names a commit that is an ancestor of the current
+/// HEAD at most `WARM_ATTACH_MAX_DISTANCE` commits back. A non-ancestor
+/// sibling (parallel branch — its diff vs HEAD is unbounded and uncontrolled)
+/// or one whose SHA can't be resolved is treated as "too far": the conservative
+/// choice is a sync build, never a stale warm graph.
+///
+/// `None`-defaulting on any git failure (not a repo, detached state, sibling
+/// SHA absent from the object DB after history rewrite) deliberately refuses
+/// the warm path — a missed warm-attach costs one sync build, a wrongly-granted
+/// one serves silently stale results.
+fn sibling_within_warm_distance(sibling_dir: &Path, worktree_root: &Path) -> bool {
+    let Some(dir_name) = sibling_dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Ok(parsed) = ecp_core::registry::CommitDirName::parse(dir_name) else {
+        return false;
+    };
+    let sibling_sha = hex::encode(parsed.sha);
+    let Ok(head_sha) = git_head_sha(worktree_root) else {
+        return false;
+    };
+    if sibling_sha == head_sha {
+        return true;
+    }
+    // `--count <sibling>..HEAD` = number of commits reachable from HEAD but not
+    // from the sibling. For a sibling that is a direct ancestor this is exactly
+    // the commit distance; for a parallel-branch sibling it counts HEAD-side
+    // commits since the merge-base, which is also a valid "too far" signal.
+    let range = format!("{sibling_sha}..HEAD");
+    let output = crate::git::safe_exec::git()
+        .args(["rev-list", "--count", &range])
+        .current_dir(worktree_root)
+        .output();
+    let Ok(out) = output else { return false };
+    if !out.status.success() {
+        return false;
+    }
+    let Ok(count) = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>() else {
+        return false;
+    };
+    count <= WARM_ATTACH_MAX_DISTANCE
 }
 
 /// Cheap compatibility predicate for `attach_latest_sibling_sha`: reads the
