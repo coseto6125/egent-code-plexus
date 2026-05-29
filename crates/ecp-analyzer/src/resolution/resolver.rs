@@ -541,6 +541,48 @@ fn crate_root_prefix(path: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Expand a Rust `use`-path module specifier to the caller crate's
+/// `src/<segments>` base so Tier-2 import resolution can pin the declaring
+/// module. Returns `None` for non-Rust specifiers (TS/Python/etc. keep their
+/// existing relative-resolution branches).
+///
+/// Handles the workspace-internal forms only — external crates (`std::`,
+/// `serde::`) are never indexed, so their expanded base never matches a
+/// SymbolTable key and resolution correctly falls through:
+/// * `crate::output` from `crates/ecp-cli/src/commands/find.rs`
+///   → `crates/ecp-cli/src/output`
+/// * `self::a` → caller-dir-relative `a`
+/// * `super::a` → caller parent-dir `a`
+///
+/// The trailing item name is NOT part of `import.source` (the parser splits
+/// `use crate::output::{emit}` into source=`crate::output`, name=`emit`), so
+/// every `::` segment here is a module path component.
+fn rust_module_path_base(
+    source_file: &std::path::Path,
+    specifier: &str,
+) -> Option<std::path::PathBuf> {
+    if !source_file
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+    {
+        return None;
+    }
+    let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
+    let (anchor, rest) = match segs.split_first()? {
+        (&"crate", rest) => {
+            let src_root = source_file
+                .to_string_lossy()
+                .rsplit_once("/src/")
+                .map(|(root, _)| format!("{root}/src"))?;
+            (std::path::PathBuf::from(src_root), rest)
+        }
+        (&"self", rest) => (source_file.parent()?.to_path_buf(), rest),
+        (&"super", rest) => (source_file.parent()?.parent()?.to_path_buf(), rest),
+        _ => return None,
+    };
+    Some(rest.iter().fold(anchor, |p, seg| p.join(seg)))
+}
+
 #[cfg(windows)]
 fn crate_root_prefix(path: &str) -> &str {
     // Windows paths use backslashes natively.
@@ -662,6 +704,15 @@ fn for_each_specifier_candidate<F>(
             s = rest;
         }
         Some(p.join(s))
+    } else if let Some(rust_base) = rust_module_path_base(source_file, specifier) {
+        // Rust `use` path: `crate::output`, `super::a::b`, `self::x`, or a
+        // workspace-internal `<crate>::mod::item` head. Map to the caller
+        // crate's `src/<segments>` so Tier-2 import resolution can pin a
+        // bare `emit()` call to its declaring module instead of dropping to
+        // the Tier-3 same-name ambiguity cap. Without this, `ecp impact`
+        // undercounts callers of any common-named cross-module Rust fn
+        // (the #100-122 incident: `emit` reported 1 of 21 callers).
+        Some(rust_base)
     } else if specifier.starts_with('.') {
         // Python-style relative: count leading dots, then a dotted submodule
         // path. `.foo` from `src/pkg/x.py` → `src/pkg/foo`. `..foo.bar` →
@@ -1441,6 +1492,76 @@ mod tests {
         assert_eq!(
             out,
             vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
+        );
+    }
+
+    #[test]
+    fn tier2_rust_crate_path_import_disambiguates_ambiguous_callable() {
+        // The #100-122 incident root cause: a Rust bare call `emit(...)` whose
+        // `use crate::output::{emit}` import names the exact source module.
+        // With several same-named `emit` definitions across the workspace, the
+        // Tier-3 ambiguity cap suppresses the edge — UNLESS Tier 2 expands the
+        // Rust module path `crate::output` to the caller crate's
+        // `src/output.rs` and resolves there first. Without the crate:: path
+        // expansion, `ecp impact` undercounts callers of any common-named
+        // cross-module Rust function.
+        use ecp_core::analyzer::types::RawImport;
+        let st = st_with(&[
+            ("crates/ecp-cli/src/output.rs", "emit", NodeKind::Function),
+            (
+                "crates/ecp-cli/src/commands/diff/output.rs",
+                "emit",
+                NodeKind::Function,
+            ),
+            (
+                "crates/ecp-analyzer/src/javascript/path_literals.rs",
+                "emit",
+                NodeKind::Function,
+            ),
+        ]);
+        let r = Resolver::new(&st);
+        let imports = vec![RawImport {
+            source: "crate::output".to_string(),
+            imported_name: "emit".to_string(),
+            alias: None,
+            binding_kind: None,
+        }];
+        let out = r.resolve_symbol(
+            &PathBuf::from("crates/ecp-cli/src/commands/find.rs"),
+            "emit",
+            &imports,
+            ResolveTarget::Callable,
+        );
+        assert_eq!(
+            out,
+            vec![(0, ResolutionTier::ImportScoped.base_confidence())],
+            "crate::output import must resolve `emit` to crates/ecp-cli/src/output.rs (node 0), \
+             not be suppressed by the same-name ambiguity cap"
+        );
+    }
+
+    #[test]
+    fn rust_module_path_expansion_does_not_touch_non_rust_callers() {
+        // Generality guard: the crate::/self::/super:: expansion is gated on a
+        // `.rs` caller extension. A non-Rust caller (e.g. a Move file) with a
+        // `crate::`-looking specifier must NOT be expanded — its own language's
+        // resolution path stays authoritative, and a same-name ambiguity is
+        // still correctly suppressed rather than mis-resolved.
+        assert!(
+            rust_module_path_base(&PathBuf::from("src/x.ts"), "crate::output").is_none(),
+            "non-.rs caller must not trigger Rust module-path expansion"
+        );
+        assert!(
+            rust_module_path_base(&PathBuf::from("lib/m.move"), "self::a").is_none(),
+            "non-.rs caller must not trigger self:: expansion"
+        );
+        // External crate path from a Rust caller still expands (harmless): it
+        // produces a base that no SymbolTable key matches, so resolution falls
+        // through exactly as before — verified by it returning Some(path) here
+        // but the std symbol never being indexed.
+        assert!(
+            rust_module_path_base(&PathBuf::from("crates/c/src/a.rs"), "std::fs").is_none(),
+            "std:: (non crate/self/super head) must not expand"
         );
     }
 
