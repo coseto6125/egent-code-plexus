@@ -54,6 +54,7 @@ pub mod schema_field;
 pub mod sfc_common;
 pub mod solidity;
 pub mod sql;
+pub mod sql_literal;
 pub mod svelte;
 pub mod swift;
 pub mod typescript;
