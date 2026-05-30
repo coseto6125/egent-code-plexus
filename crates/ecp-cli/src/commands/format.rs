@@ -97,5 +97,6 @@ pub fn rel_to_str(rel: &ArchivedRelType) -> &'static str {
         ArchivedRelType::UsesPathLiteral => "uses_path_literal",
         ArchivedRelType::ReadsField => "reads_field",
         ArchivedRelType::CompensatedBy => "compensated_by",
+        ArchivedRelType::QueriesTable => "queries_table",
     }
 }

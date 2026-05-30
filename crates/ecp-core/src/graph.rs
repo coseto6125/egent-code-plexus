@@ -91,6 +91,7 @@ impl std::str::FromStr for RelType {
             "USESPATHLITERAL" | "USES_PATH_LITERAL" => Ok(RelType::UsesPathLiteral),
             "READSFIELD" | "READS_FIELD" => Ok(RelType::ReadsField),
             "COMPENSATEDBY" | "COMPENSATED_BY" => Ok(RelType::CompensatedBy),
+            "QUERIESTABLE" | "QUERIES_TABLE" => Ok(RelType::QueriesTable),
             _ => Err(()),
         }
     }
@@ -142,6 +143,7 @@ impl RelType {
             Self::UsesPathLiteral => "UsesPathLiteral",
             Self::ReadsField => "ReadsField",
             Self::CompensatedBy => "CompensatedBy",
+            Self::QueriesTable => "QueriesTable",
         }
     }
 }
@@ -520,6 +522,14 @@ pub enum RelType {
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     CompensatedBy,
+    /// `Function` / `Method` → a database `Class` (table) it reads or writes
+    /// via a raw SQL string literal. `Edge.reason` carries `"read"` (SELECT) or
+    /// `"write"` (INSERT/UPDATE/DELETE). LLM-utility (A) Graph completeness:
+    /// without this edge `ecp impact <table> --upstream` omits every caller
+    /// that touches the table through raw SQL, so a schema-migration query
+    /// silently misses breaking callers. Appended at the END for rkyv
+    /// discriminant stability.
+    QueriesTable,
 }
 
 impl ArchivedRelType {
@@ -1239,6 +1249,16 @@ mod tests {
             graph.call_meta(19).is_none(),
             "edge_idx=19 must not be found"
         );
+    }
+
+    #[test]
+    fn queries_table_reltype_roundtrips() {
+        use rkyv::rancor::Error;
+        let rt = RelType::QueriesTable;
+        let bytes = rkyv::to_bytes::<Error>(&rt).expect("serialize");
+        let archived = rkyv::access::<ArchivedRelType, Error>(&bytes).expect("access");
+        let back: RelType = RelType::from(archived);
+        assert_eq!(back, RelType::QueriesTable);
     }
 
     #[test]

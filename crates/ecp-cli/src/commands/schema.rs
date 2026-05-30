@@ -268,7 +268,7 @@ struct ReltypesReport {
     reltypes: Vec<RelTypeView>,
 }
 
-/// 19 RelType variants. Order matches the `#[repr(u8)]` discriminant in
+/// 22 RelType variants. Order matches the `#[repr(u8)]` discriminant in
 /// `ecp_core::graph::RelType` — kept aligned so the JSON output's index
 /// matches the rkyv ordinal.
 const RELTYPES: &[RelTypeEntry] = &[
@@ -293,6 +293,7 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { rel: RelType::Decorates, name: "Decorates", utility: "A", heuristic: false, note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
     RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", heuristic: false, note: "Function/Method → PathLiteral. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
     RelTypeEntry { rel: RelType::CompensatedBy, name: "CompensatedBy", utility: "C", heuristic: true, note: "Heuristic Saga compensation: compensator → operation it rolls back. reason encodes evidence (saga:calls-back 0.8 / saga:name-only 0.6). Shown by default in heuristic_callers; --no-heuristic suppresses." },
+    RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", heuristic: false, note: "Function/Method → database table (Class node) via raw SQL string literal. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
 ];
 
 fn reltypes(args: FormatArgs) -> Result<(), EcpError> {
@@ -508,14 +509,15 @@ mod tests {
 
     #[test]
     fn reltypes_inventory_count_matches_repr_u8_enum() {
-        // RelType currently has 21 variants (post-merge: `Decorates` from
-        // #365 + `UsesPathLiteral` from #367 + `CompensatedBy` from FU-008).
+        // RelType currently has 22 variants (post-merge: `Decorates` from
+        // #365 + `UsesPathLiteral` from #367 + `CompensatedBy` from FU-008 +
+        // `QueriesTable` for code→table SQL edges).
         // If a new variant lands, bump this number AND append the entry to
         // RELTYPES. RelType has no VARIANT_COUNT constant like NodeKind does —
         // manual sync.
         assert_eq!(
             RELTYPES.len(),
-            21,
+            22,
             "reltypes inventory drifted from RelType enum"
         );
     }
