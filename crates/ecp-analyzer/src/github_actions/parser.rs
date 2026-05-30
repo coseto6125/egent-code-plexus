@@ -200,6 +200,7 @@ impl LanguageProvider for GitHubActionsProvider {
                     event_topics: None,
                     tx_scopes: None,
                     path_literals: None,
+                    sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
                 });
@@ -232,6 +233,7 @@ impl LanguageProvider for GitHubActionsProvider {
                 event_topics: None,
                 tx_scopes: None,
                 path_literals: None,
+                sql_refs: None,
                 call_metas: vec![],
                 raw_function_metas: vec![],
             });
@@ -406,6 +408,7 @@ impl LanguageProvider for GitHubActionsProvider {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         })

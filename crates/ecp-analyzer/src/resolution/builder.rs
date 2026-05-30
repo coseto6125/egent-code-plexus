@@ -2478,6 +2478,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         };
@@ -2507,6 +2508,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         };
@@ -2674,6 +2676,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         };
@@ -2768,6 +2771,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         };
@@ -2840,6 +2844,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         };
@@ -2890,6 +2895,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         }
@@ -2994,6 +3000,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         };
@@ -3114,6 +3121,7 @@ mod tests {
                     event_topics: None,
                     tx_scopes: None,
                     path_literals: None,
+                    sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
                 },
@@ -3179,6 +3187,7 @@ mod tests {
                     event_topics: None,
                     tx_scopes: None,
                     path_literals: None,
+                    sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
                 },
@@ -3210,6 +3219,7 @@ mod tests {
                     event_topics: None,
                     tx_scopes: None,
                     path_literals: None,
+                    sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
                 },
@@ -3372,6 +3382,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         }
@@ -3404,6 +3415,7 @@ mod tests {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
         }

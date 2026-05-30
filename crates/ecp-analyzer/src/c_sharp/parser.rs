@@ -508,6 +508,7 @@ impl LanguageProvider for CSharpProvider {
             tx_scopes,
             path_literals: (!raw_path_literals.is_empty())
                 .then(|| raw_path_literals.into_boxed_slice()),
+            sql_refs: None,
             call_metas: vec![],
             raw_function_metas,
         })

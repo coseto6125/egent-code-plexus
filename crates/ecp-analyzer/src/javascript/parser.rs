@@ -754,6 +754,7 @@ impl LanguageProvider for JavaScriptProvider {
             event_topics,
             tx_scopes: None,
             path_literals,
+            sql_refs: None,
             call_metas,
             raw_function_metas,
         })

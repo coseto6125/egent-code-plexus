@@ -133,6 +133,46 @@ pub struct RawPathLiteral {
     pub sink_reason: String,
 }
 
+/// Read vs write classification of a SQL statement, derived from its leading
+/// verb. Carried into `Edge.reason` so `ecp impact` can distinguish readers
+/// from writers of a table.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum SqlVerb {
+    Read,
+    Write,
+}
+
+impl SqlVerb {
+    pub fn as_reason(self) -> &'static str {
+        match self {
+            SqlVerb::Read => "read",
+            SqlVerb::Write => "write",
+        }
+    }
+}
+
+/// A raw-SQL string literal in application code, resolved to the tables it
+/// references. Emitted by per-language parsers (same `string_literal` capture
+/// hook that feeds `path_literals`) and promoted to `QueriesTable` edges by
+/// `post_process::sql_table_edges`.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RawSqlRef {
+    /// Tables referenced by the statement, each with its access verb. Empty
+    /// when `unresolved`.
+    pub tables: Vec<(String, SqlVerb)>,
+    /// True when the SQL could not be statically resolved (interpolated table
+    /// name, parse failure) — becomes a `BlindSpot`, never a fabricated edge.
+    pub unresolved: bool,
+    /// Span of the literal in source.
+    pub span: (u32, u32, u32, u32),
+    /// Enclosing Function/Method name; `None` for module-top-level literals.
+    pub enclosing_symbol: Option<String>,
+    /// Owner class when the enclosing symbol is a method.
+    pub enclosing_owner: Option<String>,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawDocumentBlock {
@@ -569,6 +609,9 @@ pub struct LocalGraph {
     /// extractor populates it; most files carry no path literals so this stays
     /// cheap to archive.
     pub path_literals: Option<Box<[RawPathLiteral]>>,
+    /// Raw-SQL string references captured by per-language parsers; promoted to
+    /// `QueriesTable` edges in post-process. `None` when the file has none.
+    pub sql_refs: Option<Box<[RawSqlRef]>>,
     /// Indirect-dispatch annotations for individual call sites. Sparse:
     /// only non-direct calls (fn-pointer / vtable / callback / dyn-trait)
     /// have entries. The builder promotes these to `ZeroCopyGraph.call_metas`
@@ -596,8 +639,30 @@ impl Default for LocalGraph {
             event_topics: None,
             tx_scopes: None,
             path_literals: None,
+            sql_refs: None,
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_sql_ref_carries_tables_and_verb() {
+        let r = RawSqlRef {
+            tables: vec![("channels".to_string(), SqlVerb::Read)],
+            unresolved: false,
+            span: (1, 0, 1, 40),
+            enclosing_symbol: Some("list_channels".to_string()),
+            enclosing_owner: None,
+        };
+        assert_eq!(r.tables[0].0, "channels");
+        assert_eq!(r.tables[0].1, SqlVerb::Read);
+        assert!(!r.unresolved);
+        assert_eq!(SqlVerb::Read.as_reason(), "read");
+        assert_eq!(SqlVerb::Write.as_reason(), "write");
     }
 }
