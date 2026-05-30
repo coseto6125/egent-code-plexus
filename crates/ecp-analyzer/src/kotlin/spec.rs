@@ -35,6 +35,9 @@ impl LangSpec for KotlinSpec {
         // resolve to the correct level (was `Enum` before NodeKind::EnumVariant
         // was introduced).
         "enum_entry.name"  => NodeKind::EnumVariant,
+        // `typealias Callback = ...` — type aliases are real reference targets;
+        // `ecp find` and impact queries need the Typedef node to avoid grep fallback.
+        "typedef.name"     => NodeKind::Typedef,
     };
 
     // Kotlin uses query-level scope anchoring; no runtime scope gate needed.

@@ -137,6 +137,64 @@
   name: (_) @namespace.name
 ) @namespace
 
+;; Destructors — `~ClassName()`. The `name:` field is the bare class identifier;
+;; parser.rs prepends `~` to produce the canonical name `~ClassName`.
+;; Emitted as Method so body-calls attach via attach_to_enclosing.
+(destructor_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+  name: (identifier) @destructor.name
+) @destructor
+
+;; Event declarations with add/remove accessors — `public event EventHandler E { add{} remove{} }`.
+;; Body-calls inside add/remove must attach to the event member. Emitted as
+;; Method (not Property) so enclosing_containers includes the span.
+(event_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+  type: (_) @type
+  name: (identifier) @event.name
+) @event_decl
+
+;; Event field declarations — `public event EventHandler Click, Hover;`.
+;; No body, but the node must exist for who-subscribes/who-raises queries.
+;; Name extracted per declarator from the variable_declaration child.
+;; Emitted as Method for consistency (matches event_declaration node kind).
+(event_field_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+  (variable_declaration
+    (variable_declarator
+      name: (identifier) @event_field.name))
+) @event_field
+
+;; Operator declarations — `public static Foo operator +(Foo a, Foo b) {}`.
+;; The operator token (field `operator:`) is anonymous, so the name is
+;; synthesised in parser.rs as `"op_" + token_text` (e.g. `op_+`, `op_==`).
+;; Root captured as @operator_decl; parser.rs walks the node for the token.
+(operator_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+) @operator_decl
+
+;; Conversion operator declarations — `public static explicit operator int(Foo f) {}`.
+;; Name synthesised in parser.rs as `op_Implicit` or `op_Explicit` based on the
+;; implicit/explicit keyword, matching .NET operator-overload naming convention.
+(conversion_operator_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+) @conv_operator_decl
+
+;; Indexer declarations — `public int this[int idx] { get { ... } set { ... } }`.
+;; No identifier name; parser.rs assigns the canonical name `"this[...]"` so the
+;; node is unambiguously recognisable in ecp find/impact output.
+;; Emitted as Method so body-calls inside get/set attach.
+(indexer_declaration
+  (attribute_list)* @decorator
+  (modifier)* @export
+  type: (_) @type
+) @indexer_decl
+
 ;; Anonymous callbacks passed as call arguments (`list.ForEach(x => ...)`,
 ;; `Task.Run(() => ...)`, `delegate { ... }`). Without a node here their
 ;; body's calls are dropped by attach_to_enclosing when no named enclosing

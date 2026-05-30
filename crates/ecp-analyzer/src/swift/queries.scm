@@ -77,6 +77,15 @@
 (property_declaration
   (pattern) @property.name.pat) @property
 
+;; Protocol property requirements — `var name: String { get }` inside a
+;; `protocol` body produces `protocol_property_declaration` (distinct from
+;; `property_declaration`). Reuses the same @property / @property.name.pat
+;; captures so parser.rs emits a Property node via the existing property
+;; path; the parent-chain walk already recognises `protocol_body` as a
+;; class-like scope → NodeKind::Property (parser.rs line 472-474).
+(protocol_property_declaration
+  name: (pattern) @property.name.pat) @property
+
 ;; Enum cases — `case foo` / `case bar(Int)` / `case a, b, c`. Each
 ;; `simple_identifier` inside `enum_entry` is a separately-named case;
 ;; multi-name `case a, b, c` produces three captures. parser.rs emits

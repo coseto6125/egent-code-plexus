@@ -56,6 +56,7 @@ struct KotlinCaptureIndices {
     class: Option<u32>,
     function: Option<u32>,
     enum_entry: Option<u32>,
+    typedef: Option<u32>,
     // BlindSpot captures (FU-001 P2b).
     blind_class_forname: Option<u32>,
     blind_method_invoke: Option<u32>,
@@ -114,9 +115,16 @@ fn is_class_method(func: tree_sitter::Node) -> bool {
     if parent.kind() != "class_body" {
         return false;
     }
-    parent
-        .parent()
-        .is_some_and(|p| p.kind() == "class_declaration")
+    // class_body may be owned by class_declaration OR companion_object.
+    // companion_object methods are class-level (static-equivalent) and should
+    // be Method, not Function — the companion_object node is a class-body
+    // sibling of regular members, so its parent is also class_declaration.
+    parent.parent().is_some_and(|p| {
+        matches!(
+            p.kind(),
+            "class_declaration" | "companion_object" | "object_declaration"
+        )
+    })
 }
 
 /// True when `class_decl` has a direct child whose kind matches `keyword`.
@@ -210,6 +218,7 @@ impl KotlinProvider {
             class: query.capture_index_for_name("class"),
             function: query.capture_index_for_name("function"),
             enum_entry: query.capture_index_for_name("enum_entry"),
+            typedef: query.capture_index_for_name("typedef"),
             blind_class_forname: query.capture_index_for_name("blind.class_forname"),
             blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
             function_anonymous: query.capture_index_for_name("function.anonymous"),
@@ -264,6 +273,7 @@ impl LanguageProvider for KotlinProvider {
         let idx_decorator = idx.decorator;
         let idx_override_marker = idx.override_marker;
         let idx_class = idx.class;
+        let idx_typedef = idx.typedef;
         let idx_function = idx.function;
         let idx_enum_entry = idx.enum_entry;
 
@@ -398,7 +408,8 @@ impl LanguageProvider for KotlinProvider {
                     || Some(cap_idx) == self.idx_constructor
                     || Some(cap_idx) == self.idx_property
                     || Some(cap_idx) == self.idx_variable
-                    || Some(cap_idx) == idx_enum_entry)
+                    || Some(cap_idx) == idx_enum_entry
+                    || Some(cap_idx) == idx_typedef)
                     && root_span_node.is_none()
                 {
                     root_span_node = Some(cap.node);

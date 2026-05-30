@@ -53,6 +53,25 @@
     name: (identifier) @property.name)
 ) @property
 
+;; Records — Java 16+ record declarations. Reuse NodeKind::Class (same
+;; reference-target semantics; no separate NodeKind needed). Record header
+;; components (formal_parameters) emit Property nodes, mirroring field_declaration.
+(record_declaration
+  (modifiers [
+    "public"
+    "protected"
+  ])? @export
+  name: (identifier) @class.name
+  interfaces: (super_interfaces (type_list (_) @heritage))?
+) @class
+
+(record_declaration
+  parameters: (formal_parameters
+    (formal_parameter
+      type: (_) @type
+      name: (identifier) @property.name) @property)
+)
+
 ;; Imports — regular named import
 (import_declaration
   [
@@ -132,3 +151,11 @@
   ])
   name: (identifier) @constructor.name
 ) @constructor
+
+(record_declaration
+  (modifiers [
+    (annotation) @decorator
+    (marker_annotation) @decorator
+  ])
+  name: (identifier) @class.name
+) @class

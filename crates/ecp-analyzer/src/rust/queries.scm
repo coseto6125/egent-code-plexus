@@ -78,6 +78,18 @@
       name: (identifier) @function_item.name
       return_type: (_)? @type) @method))
 
+;; FFI declarations: `extern "C" { fn foo(x: i32) -> i32; }`.
+;; `foreign_mod_item` body is a `declaration_list` of `function_signature_item`
+;; nodes (grammar-verified against tree-sitter-rust 0.24.2 node-types.json).
+;; These are callable symbols; without this pattern ecp impact misses callers
+;; of extern-C functions — filter (A) graph completeness.
+(foreign_mod_item
+  body: (declaration_list
+    (function_signature_item
+      (visibility_modifier)? @export
+      name: (identifier) @function_item.name
+      return_type: (_)? @type) @function))
+
 ;; Associated types inside impl blocks: `type Item = T::Item;`
 (impl_item
   body: (declaration_list

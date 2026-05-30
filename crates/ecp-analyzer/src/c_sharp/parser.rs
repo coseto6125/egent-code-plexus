@@ -106,6 +106,17 @@ struct CSharpCaptureIndices {
     blind_activator_create: Option<u32>,
     blind_method_invoke: Option<u32>,
     function_anonymous: Option<u32>,
+    // Special-member root captures — handled with custom name synthesis in
+    // the parse loop (these nodes lack a plain `name: (identifier)` field).
+    operator_decl: Option<u32>,
+    conv_operator_decl: Option<u32>,
+    indexer_decl: Option<u32>,
+    // event_field root (variable_declaration pattern — multiple declarators).
+    event_field: Option<u32>,
+    // Roots for destructor and event_decl (name-based captures also exist in
+    // spec, but we need the root span separately like enum_member_node).
+    destructor: Option<u32>,
+    event_decl: Option<u32>,
 }
 
 pub struct CSharpProvider {
@@ -161,6 +172,12 @@ impl CSharpProvider {
             blind_activator_create: query.capture_index_for_name("blind.activator_create"),
             blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
             function_anonymous: query.capture_index_for_name("function.anonymous"),
+            operator_decl: query.capture_index_for_name("operator_decl"),
+            conv_operator_decl: query.capture_index_for_name("conv_operator_decl"),
+            indexer_decl: query.capture_index_for_name("indexer_decl"),
+            event_field: query.capture_index_for_name("event_field"),
+            destructor: query.capture_index_for_name("destructor"),
+            event_decl: query.capture_index_for_name("event_decl"),
         };
 
         Ok(Self {
@@ -220,6 +237,11 @@ impl LanguageProvider for CSharpProvider {
         let idx_enum_member_node = idx.enum_member_node;
         let idx_struct = idx.struct_;
 
+        // Pre-resolve capture indices needed only for per-node name logic
+        // (destructor ~ prefix; event_field multi-declarator keying).
+        let idx_destructor_name = self.query.capture_index_for_name("destructor.name");
+        let idx_event_field_name = self.query.capture_index_for_name("event_field.name");
+
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -233,6 +255,17 @@ impl LanguageProvider for CSharpProvider {
             let mut heritage_list = Vec::new();
             let mut type_annotation = None;
             let mut decorators = Vec::new();
+            // Set when the name capture comes from a destructor_declaration so
+            // the name string gets a `~` prefix appended below.
+            let mut is_destructor_name = false;
+            // Set for event_field_declaration declarator names so node_id keys
+            // on the identifier (same logic as Property/Variable multi-declarator).
+            let mut is_event_field_name = false;
+            // Deferred special-member root captures — node is emitted AFTER the
+            // capture loop so decorator/export/type metadata is fully collected.
+            let mut deferred_operator: Option<tree_sitter::Node<'_>> = None;
+            let mut deferred_conv_operator: Option<tree_sitter::Node<'_>> = None;
+            let mut deferred_indexer: Option<tree_sitter::Node<'_>> = None;
 
             for cap in m.captures {
                 let cap_idx = cap.index;
@@ -248,6 +281,12 @@ impl LanguageProvider for CSharpProvider {
                     // Source of truth: CSharpSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
                     kind = Some(k_from_spec);
+                    // Track special captures for name post-processing.
+                    if Some(cap_idx) == idx_destructor_name {
+                        is_destructor_name = true;
+                    } else if Some(cap_idx) == idx_event_field_name {
+                        is_event_field_name = true;
+                    }
                 } else if Some(cap_idx) == idx_import_name {
                     import_name = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_source {
@@ -329,6 +368,23 @@ impl LanguageProvider for CSharpProvider {
                             });
                         }
                     }
+                } else if Some(cap_idx) == idx.operator_decl {
+                    // Defer: node emitted after capture loop with fully-collected metadata.
+                    deferred_operator = Some(cap.node);
+                } else if Some(cap_idx) == idx.conv_operator_decl {
+                    // Defer: node emitted after capture loop with fully-collected metadata.
+                    deferred_conv_operator = Some(cap.node);
+                } else if Some(cap_idx) == idx.indexer_decl {
+                    // Defer: node emitted after capture loop with fully-collected metadata.
+                    deferred_indexer = Some(cap.node);
+                } else if Some(cap_idx) == idx.event_field {
+                    // event_field_declaration root — span anchor for the per-declarator
+                    // nodes emitted by the @event_field.name spec-driven captures.
+                    // We only track this as a root; name_node / kind come from the
+                    // spec dispatch above.
+                    if root_span_node.is_none() {
+                        root_span_node = Some(cap.node);
+                    }
                 } else if (Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_method
@@ -339,11 +395,104 @@ impl LanguageProvider for CSharpProvider {
                     || Some(cap_idx) == idx_namespace
                     || Some(cap_idx) == idx_enum
                     || Some(cap_idx) == idx_enum_member_node
-                    || Some(cap_idx) == idx_struct)
+                    || Some(cap_idx) == idx_struct
+                    || Some(cap_idx) == idx.destructor
+                    || Some(cap_idx) == idx.event_decl)
                     && root_span_node.is_none()
                 {
                     root_span_node = Some(cap.node);
                 }
+            }
+
+            // Emit deferred special-member nodes (operator/conv-operator/indexer).
+            // These are processed AFTER the capture loop so that decorator/export/type
+            // metadata is fully accumulated before the RawNode is pushed.
+            let emit_special =
+                |n: tree_sitter::Node<'_>,
+                 name: String,
+                 is_exp: bool,
+                 ty: Option<String>,
+                 decs: Vec<String>,
+                 nodes: &mut Vec<RawNode>,
+                 id_map: &mut rustc_hash::FxHashMap<usize, usize>| {
+                    let start = n.start_position();
+                    let end = n.end_position();
+                    id_map.entry(n.id()).or_insert_with(|| {
+                        let i = nodes.len();
+                        nodes.push(RawNode {
+                            decorators: decs,
+                            is_exported: is_exp,
+                            heritage: Vec::new(),
+                            type_annotation: ty,
+                            name,
+                            kind: NodeKind::Method,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            calls: Vec::new(),
+                            field_reads: Vec::new(),
+                            owner_class: None,
+                            content_hash: ecp_core::uid::xxh3_64_bytes(
+                                &source[n.start_byte()..n.end_byte()],
+                            ),
+                        });
+                        i
+                    });
+                };
+            if let Some(op_node) = deferred_operator {
+                // operator_declaration: name = "op_<token>" from the `operator:` field.
+                let op_name = op_node
+                    .child_by_field_name("operator")
+                    .and_then(|tok| {
+                        std::str::from_utf8(&source[tok.start_byte()..tok.end_byte()]).ok()
+                    })
+                    .map(|tok| format!("op_{tok}"))
+                    .unwrap_or_else(|| "op_unknown".to_string());
+                emit_special(
+                    op_node,
+                    op_name,
+                    is_exported,
+                    type_annotation.clone(),
+                    decorators.clone(),
+                    &mut nodes,
+                    &mut node_id_to_idx,
+                );
+            }
+            if let Some(cv_node) = deferred_conv_operator {
+                // conversion_operator_declaration: name = "op_Implicit" / "op_Explicit".
+                let conv_name = {
+                    let mut c = cv_node.walk();
+                    let found = cv_node.children(&mut c).find_map(|ch| match ch.kind() {
+                        "implicit" => Some("op_Implicit"),
+                        "explicit" => Some("op_Explicit"),
+                        _ => None,
+                    });
+                    found.unwrap_or("op_Conversion").to_string()
+                };
+                emit_special(
+                    cv_node,
+                    conv_name,
+                    is_exported,
+                    type_annotation.clone(),
+                    decorators.clone(),
+                    &mut nodes,
+                    &mut node_id_to_idx,
+                );
+            }
+            if let Some(idx_node) = deferred_indexer {
+                // indexer_declaration: canonical name "this[...]".
+                emit_special(
+                    idx_node,
+                    "this[...]".to_string(),
+                    is_exported,
+                    type_annotation.clone(),
+                    decorators.clone(),
+                    &mut nodes,
+                    &mut node_id_to_idx,
+                );
             }
 
             // Reclassify class declarations inheriting from `Attribute` (or any
@@ -402,10 +551,20 @@ impl LanguageProvider for CSharpProvider {
                     // For Property + Variable nodes, multiple declarators
                     // share the same root node id (`int x, y, z;`); key on
                     // the identifier node so each declarator is distinct.
-                    let node_id = if matches!(k, NodeKind::Property | NodeKind::Variable) {
+                    // event_field_declaration has the same multiple-declarator
+                    // pattern (`event EventHandler E, F;`), so same keying.
+                    let node_id = if matches!(k, NodeKind::Property | NodeKind::Variable)
+                        || is_event_field_name
+                    {
                         n.id()
                     } else {
                         root.id()
+                    };
+                    // Destructors: prefix the bare class name with `~`.
+                    let canonical_name = if is_destructor_name {
+                        format!("~{name_str}")
+                    } else {
+                        name_str.to_string()
                     };
                     let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
                         let i = nodes.len();
@@ -414,7 +573,7 @@ impl LanguageProvider for CSharpProvider {
                             is_exported,
                             heritage: Vec::new(),
                             type_annotation: type_annotation.clone(),
-                            name: name_str.to_string(),
+                            name: canonical_name.clone(),
                             kind: k,
                             span: (
                                 start.row as u32,

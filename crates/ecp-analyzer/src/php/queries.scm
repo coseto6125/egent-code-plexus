@@ -46,6 +46,22 @@
 (trait_declaration
   name: (name) @name.trait) @trait
 
+;; In-class trait composition — `use TraitName;` inside a class body
+;; (use_declaration inside declaration_list). Each trait name in a
+;; multi-trait `use A, B;` is a separate named child, so this pattern
+;; fires once per trait name and accumulates into the class's heritage
+;; list via the same @heritage + node_id_to_idx merge as base_clause /
+;; class_interface_clause. Deliberately excludes the use_list child
+;; (adaptation-block `use A { ... }`) because use_list children are
+;; conflict-resolution clauses, not trait names. Note: the top-level
+;; file-import `use Some\Namespace\Thing;` is a namespace_use_declaration
+;; node — structurally different and NOT matched here.
+(class_declaration
+  name: (name) @name.class
+  body: (declaration_list
+    (use_declaration
+      (name) @heritage))) @class
+
 ;; Enums (PHP 8.1+)
 (enum_declaration
   name: (name) @name.enum) @enum
