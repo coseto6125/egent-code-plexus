@@ -197,9 +197,13 @@ impl TantivyEngine {
             return None;
         }
         let index = Index::open_in_dir(&index_dir).ok()?;
+        // Cold-open one-shot query: the index is already committed on disk and
+        // never mutated during this searcher's lifetime, so OnCommitWithDelay's
+        // background commit-watcher thread is pure overhead. Manual reads the
+        // current committed state on first searcher() with no watcher.
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .ok()?;
         let searcher: tantivy::Searcher = reader.searcher();
