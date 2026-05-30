@@ -1712,7 +1712,7 @@ impl GraphBuilder {
             &self.local_graphs,
             &symbol_table,
             &mut string_pool,
-            &mut nodes,
+            &nodes,
             &mut edges,
         );
 

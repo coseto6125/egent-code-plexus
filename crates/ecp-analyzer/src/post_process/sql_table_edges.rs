@@ -21,7 +21,7 @@ pub fn emit_edges(
     local_graphs: &[LocalGraph],
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
-    nodes: &mut Vec<Node>,
+    nodes: &[Node],
     edges: &mut Vec<Edge>,
 ) -> usize {
     // Language-neutral table index: every Class node keyed by name. The SQL DDL

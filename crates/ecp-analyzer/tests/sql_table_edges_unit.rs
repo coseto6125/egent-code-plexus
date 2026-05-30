@@ -110,7 +110,7 @@ fn test_emit_edges_cross_lang_produces_queries_table_edge() {
         &local_graphs,
         &symbol_table,
         &mut string_pool,
-        &mut nodes,
+        &nodes,
         &mut edges,
     );
 
@@ -155,7 +155,7 @@ fn test_emit_edges_unresolved_skipped() {
         &local_graphs,
         &symbol_table,
         &mut string_pool,
-        &mut nodes,
+        &nodes,
         &mut edges,
     );
     assert_eq!(count, 0);
@@ -186,7 +186,7 @@ fn test_emit_edges_unknown_table_dropped() {
         &local_graphs,
         &symbol_table,
         &mut string_pool,
-        &mut nodes,
+        &nodes,
         &mut edges,
     );
     assert_eq!(count, 0);
@@ -217,7 +217,7 @@ fn test_emit_edges_write_verb_reason() {
         &local_graphs,
         &symbol_table,
         &mut string_pool,
-        &mut nodes,
+        &nodes,
         &mut edges,
     );
     assert_eq!(count, 1);
@@ -246,7 +246,7 @@ fn test_emit_edges_no_enclosing_symbol_skipped() {
         &local_graphs,
         &symbol_table,
         &mut string_pool,
-        &mut nodes,
+        &nodes,
         &mut edges,
     );
     assert_eq!(count, 0);

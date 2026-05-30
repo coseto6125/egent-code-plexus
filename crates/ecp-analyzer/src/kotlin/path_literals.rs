@@ -191,7 +191,7 @@ fn leading_callee_name(call: Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 /// Re-exported for use in `receiver_types` SQL-ref extraction.
-pub(super) fn strip_kotlin_string_value<'a>(raw: &'a str) -> Option<&'a str> {
+pub(super) fn strip_kotlin_string_value(raw: &str) -> Option<&str> {
     strip_quotes(raw)
 }
 

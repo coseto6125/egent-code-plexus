@@ -91,7 +91,7 @@ fn strip_quotes(raw: &str) -> Option<&str> {
 }
 
 /// Re-exported for use in receiver_types SQL extraction.
-pub(super) fn strip_csharp_string_value<'a>(raw: &'a str) -> Option<&'a str> {
+pub(super) fn strip_csharp_string_value(raw: &str) -> Option<&str> {
     strip_quotes(raw)
 }
 
