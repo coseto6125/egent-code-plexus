@@ -510,14 +510,17 @@ pub fn load_ensured(
 /// this path, so cache staleness across rebuilds is harmless.
 static SIBLING_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> = OnceLock::new();
 
-/// Returns the `graph.bin` path of the most recently built sibling commit dir
-/// for this repo, or `None` if no published sibling exists.
+/// Returns the `graph.bin` path of the best published sibling commit dir for
+/// this repo to warm-attach, or `None` if none qualifies.
 ///
-/// Scans `~/.ecp/<repo>/commits/` and picks the dir whose `graph.bin` mtime
-/// is newest among all complete (non-recovery) entries. Mtime rather than
-/// generation order is intentional here: we want the most recently *written*
-/// graph regardless of which branch it came from, so the warm base is as fresh
-/// as possible without needing to parse generation suffixes.
+/// Scans `~/.ecp/<repo>/commits/` newest-first by `graph.bin` mtime and returns
+/// the first dir that is both header-compatible AND within
+/// `WARM_ATTACH_MAX_DISTANCE` commits of HEAD. Mtime ordering (rather than
+/// generation order) is intentional: the most recently *written* graph is the
+/// freshest warm base regardless of which branch produced it. Iterating rather
+/// than taking only the single newest matters because the newest sibling may be
+/// a parallel-branch build that fails the distance gate — giving up there would
+/// leave a usable distance-1 sibling unused and force an unnecessary sync build.
 fn attach_latest_sibling_sha(worktree_root: &Path) -> Option<PathBuf> {
     let cache = SIBLING_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(map) = cache.lock() {
@@ -534,25 +537,40 @@ fn attach_latest_sibling_sha(worktree_root: &Path) -> Option<PathBuf> {
     result
 }
 
+/// Cap on sibling dirs probed per warm-attach. A within-distance sibling
+/// (distance ≤ `WARM_ATTACH_MAX_DISTANCE`) is, by definition, HEAD or its direct
+/// parent — overwhelmingly among the few most-recently-built graphs. Bounding
+/// the scan keeps the worst case (a repo with many parallel-branch builds) to a
+/// handful of `git rev-list` execs instead of one per published commit, while
+/// the common case (newest sibling is the parent) still returns on the first.
+const WARM_ATTACH_PROBE_LIMIT: usize = 8;
+
 fn attach_latest_sibling_sha_uncached(worktree_root: &Path) -> Option<PathBuf> {
     let home_ecp = ecp_core::registry::resolve_home_ecp();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(worktree_root).ok()?;
     let commits_dir = home_ecp.join(&repo_dir_name).join("commits");
-    let sibling_dir = crate::commit_lookup::find_latest_by_mtime(&commits_dir)?;
-    let graph_bin = sibling_dir.join("graph.bin");
-    if !graph_bin.is_file() || !sibling_graph_compatible(&graph_bin) {
-        return None;
+    // Newest-first, so the first qualifying sibling is also the freshest one.
+    for sibling_dir in crate::commit_lookup::find_all_by_mtime_desc(&commits_dir)
+        .into_iter()
+        .take(WARM_ATTACH_PROBE_LIMIT)
+    {
+        let graph_bin = sibling_dir.join("graph.bin");
+        if !graph_bin.is_file() || !sibling_graph_compatible(&graph_bin) {
+            continue;
+        }
+        // Staleness gate: warm-attach trades a ~0.3s sync build for a possibly-stale
+        // graph. That trade only pays when the sibling is near HEAD — sync cost is
+        // ~constant in commit distance, but symbols a distant sibling silently drops
+        // grow with it (≈13 at distance 1, ≈252 at distance 44), making `ecp find`
+        // answer `found:false` for code that genuinely landed. Too far behind ⇒
+        // skip this candidate and try the next-newest; if none qualifies, the
+        // caller falls back to a sync build of the correct graph.
+        if !sibling_within_warm_distance(&sibling_dir, worktree_root) {
+            continue;
+        }
+        return Some(graph_bin);
     }
-    // Staleness gate: warm-attach trades a ~0.3s sync build for a possibly-stale
-    // graph. That trade only pays when the sibling is near HEAD — sync cost is
-    // ~constant in commit distance, but symbols a distant sibling silently drops
-    // grow with it (≈13 at distance 1, ≈252 at distance 44), making `ecp find`
-    // answer `found:false` for code that genuinely landed. Too far behind ⇒
-    // refuse, forcing a sync build of the correct graph.
-    if !sibling_within_warm_distance(&sibling_dir, worktree_root) {
-        return None;
-    }
-    Some(graph_bin)
+    None
 }
 
 /// Max commit distance a sibling may sit behind HEAD and still be warm-attached.

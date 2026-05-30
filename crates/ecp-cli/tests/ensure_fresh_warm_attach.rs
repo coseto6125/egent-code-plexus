@@ -253,6 +253,87 @@ fn distant_ancestor_sibling_falls_back_to_sync_build() {
     );
 }
 
+/// The mtime-newest published sibling can be a parallel-branch build that is
+/// too far from HEAD (distance > `WARM_ATTACH_MAX_DISTANCE`), while a usable
+/// distance-1 sibling sits on disk with an older mtime. Warm-attach must skip
+/// the distant-but-newest one and fall through to the within-distance sibling
+/// instead of giving up and forcing a sync build (the bug: picking only the
+/// single newest left the good sibling unused).
+#[test]
+fn within_distance_sibling_attached_despite_newer_distant_sibling() {
+    let _env_guard = lock_env();
+    let _snap = EnvSnapshot::take();
+
+    let repo_tmp = TempDir::new().unwrap();
+    let cache_tmp = TempDir::new().unwrap();
+    let repo = repo_tmp.path();
+    let cache = cache_tmp.path();
+
+    let g = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
+    };
+
+    // main: A → B → C (HEAD). B is C's direct parent (distance 1).
+    git_init_with_commit(repo); // A
+    let sha_b = add_second_commit(repo); // B
+    advance_commits(repo, 1); // C (HEAD)
+
+    // Publish B's graph first (older mtime). Checkout detaches to B, index, return.
+    g(&["checkout", "-q", &sha_b]);
+    run_admin_index(repo, cache);
+    g(&["checkout", "-q", "main"]);
+
+    // Parallel branch off A: its build is the NEWEST by mtime but distance 2
+    // from C (rev-list X1..C = {B, C}), so it fails the distance gate.
+    g(&["checkout", "-q", "-b", "parallel", "HEAD~2"]); // A
+    fs::write(repo.join("other.rs"), "pub fn parallel_fn() {}\n").unwrap();
+    g(&["add", "."]);
+    g(&["commit", "-qm", "parallel"]);
+    run_admin_index(repo, cache); // newest graph.bin mtime
+    g(&["checkout", "-q", "main"]); // back to C (HEAD)
+
+    std::env::set_var("HOME", cache);
+    std::env::remove_var("ECP_HOME");
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
+    test_counters::reset();
+
+    let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
+    let resolved = graph_path::resolve(legacy_sentinel, repo);
+    let outcome = auto_ensure::ensure_fresh(&resolved, repo)
+        .expect("ensure_fresh should warm-attach the within-distance sibling");
+
+    assert!(
+        matches!(outcome, EnsureFreshOutcome::WarmAttach { .. }),
+        "expected WarmAttach to the distance-1 sibling, got {:?}",
+        outcome
+    );
+    assert_eq!(
+        test_counters::warm_attach_calls(),
+        1,
+        "must warm-attach the older within-distance sibling, not sync-build past it"
+    );
+
+    // The attached graph must be B's (distance 1), not the newer parallel build.
+    if let EnsureFreshOutcome::WarmAttach { sibling_graph_path } = outcome {
+        let dir_name = sibling_graph_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            dir_name.contains(&sha_b[..12]),
+            "attached sibling should be B ({}), got dir {dir_name}",
+            &sha_b[..12]
+        );
+    }
+}
+
 // ── Test 2 ────────────────────────────────────────────────────────────────────
 
 /// After the background rebuild completes, the next ensure_fresh resolves to
