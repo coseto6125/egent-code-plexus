@@ -1708,6 +1708,14 @@ impl GraphBuilder {
             &mut edges,
         );
 
+        crate::post_process::sql_table_edges::emit_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut nodes,
+            &mut edges,
+        );
+
         // Saga compensation pairing — emits heuristic `CompensatedBy` edges
         // (compensator → operation) over the node/edge buffer. Runs AFTER all
         // Calls edges exist (so calls-back evidence is checkable) and AFTER
