@@ -57,3 +57,30 @@ fn parse_tables_interpolated_table_is_unresolved() {
     let r = parse_tables("SELECT * FROM {tbl} WHERE id = $1");
     assert!(r.unresolved);
 }
+
+#[test]
+fn parse_tables_cte_alias_is_not_a_table() {
+    let r = parse_tables("WITH t AS (SELECT id FROM channels) SELECT * FROM t");
+    let names: Vec<&str> = r.tables.iter().map(|(t, _)| t.as_str()).collect();
+    assert!(
+        names.contains(&"channels"),
+        "real table channels must be present"
+    );
+    assert!(!names.contains(&"t"), "CTE alias t must NOT be a table");
+}
+
+#[test]
+fn parse_tables_insert_select_separates_read_and_write_verbs() {
+    let r = parse_tables("INSERT INTO channels (id) SELECT id FROM bots");
+    // channels is the insert target → Write; bots is the select source → Read.
+    assert!(
+        r.tables.contains(&("channels".to_string(), SqlVerb::Write)),
+        "channels must be Write, got {:?}",
+        r.tables
+    );
+    assert!(
+        r.tables.contains(&("bots".to_string(), SqlVerb::Read)),
+        "bots must be Read, got {:?}",
+        r.tables
+    );
+}

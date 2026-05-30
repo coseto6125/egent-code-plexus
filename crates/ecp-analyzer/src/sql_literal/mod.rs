@@ -50,14 +50,16 @@ pub fn parse_tables(sql: &str) -> SqlTables {
             };
         };
         let root = tree.root_node();
-        let Some(verb) = statement_verb(root) else {
+        // Must have at least one recognisable statement verb anywhere in the tree.
+        if !has_any_statement(root) {
             return SqlTables {
                 tables: vec![],
                 unresolved: true,
             };
-        };
+        }
+        let cte_names = collect_cte_names(root, sql.as_bytes());
         let mut tables = Vec::new();
-        collect_tables(root, sql.as_bytes(), verb, &mut tables);
+        collect_tables(root, sql.as_bytes(), &cte_names, &mut tables);
         if tables.is_empty() {
             return SqlTables {
                 tables: vec![],
@@ -71,21 +73,117 @@ pub fn parse_tables(sql: &str) -> SqlTables {
     })
 }
 
-/// Find the first statement node and map it to a verb.
-fn statement_verb(node: Node) -> Option<SqlVerb> {
+/// Return true when the tree contains at least one select/insert/update/delete node.
+fn has_any_statement(node: Node) -> bool {
     let mut cursor = node.walk();
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
-        match n.kind() {
-            "select" => return Some(SqlVerb::Read),
-            "insert" | "update" | "delete" => return Some(SqlVerb::Write),
-            _ => {}
+        if matches!(n.kind(), "select" | "insert" | "update" | "delete") {
+            return true;
         }
         for child in n.children(&mut cursor) {
             stack.push(child);
         }
     }
-    None
+    false
+}
+
+/// Collect all CTE alias names bound by `WITH <name> AS (...)`.
+/// In tree-sitter-sequel the structure is:
+///   `(cte (identifier) (keyword_as) (...))` — the first child `identifier`
+///   is the alias, not an `object_reference`.
+fn collect_cte_names(node: Node, src: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cursor = node.walk();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "cte" {
+            // First child of kind "identifier" is the alias.
+            if let Some(alias) = n.child(0) {
+                if alias.kind() == "identifier" {
+                    if let Ok(name) = alias.utf8_text(src) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+        for child in n.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    names
+}
+
+/// Resolve the read/write verb for a table reference node by walking its
+/// ancestor chain.
+///
+/// Grammar shapes (from tree-sitter-sequel sexps):
+/// - SELECT: `statement → select` is a sibling of `from`; the object_reference
+///   is under `from → statement`. Neither `select` nor any write verb appears
+///   as an ancestor — the `statement` has no write-verb child.
+/// - INSERT target: `object_reference` is a direct child of `insert`.
+/// - INSERT…SELECT source: `object_reference` is under `from → insert`; but
+///   `select` appears as a sibling of `from` inside `insert`. We detect this
+///   by seeing `select` as a sibling of any `from` ancestor before we confirm
+///   a Write verb.
+/// - UPDATE: `object_reference` is under `relation → update`.
+/// - DELETE: `(statement (delete) (from (object_reference)))` — `from` is a
+///   child of `statement`; `delete` is a sibling of `from`, never an ancestor.
+///   We detect this by checking whether any sibling of `from` (or `statement`)
+///   is a `delete` node.
+fn verb_for(node: Node) -> SqlVerb {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            // Direct ancestor is a write-verb node.
+            "insert" | "update" | "delete" => {
+                // Inside INSERT: check if `cur` is under a `from` that has a
+                // `select` sibling — that means the table is a SELECT source,
+                // not the INSERT target.
+                if parent.kind() == "insert" && is_select_from_under(node) {
+                    return SqlVerb::Read;
+                }
+                return SqlVerb::Write;
+            }
+            // Direct ancestor is select → always Read.
+            "select" => return SqlVerb::Read,
+            // Reached the top-level statement node: check whether any of its
+            // direct children is a `delete` node (the DELETE grammar puts
+            // `delete` and `from` as siblings under `statement`).
+            "statement" | "program" => {
+                if node_has_child_kind(parent, "delete") {
+                    return SqlVerb::Write;
+                }
+                return SqlVerb::Read;
+            }
+            _ => {}
+        }
+        cur = parent;
+    }
+    SqlVerb::Read
+}
+
+/// Return true when `node` is part of a `from` clause that also has a `select`
+/// sibling under the same `insert` parent — i.e. the node is the SELECT-source
+/// of an INSERT…SELECT, not the insert target itself.
+fn is_select_from_under(node: Node) -> bool {
+    // Walk up looking for a `from` ancestor whose parent is `insert`.
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        if cur.kind() == "from" && parent.kind() == "insert" {
+            // Check whether `insert` also has a `select` child.
+            return node_has_child_kind(parent, "select");
+        }
+        cur = parent;
+    }
+    false
+}
+
+/// Return true if any direct child of `node` has kind `target_kind`.
+fn node_has_child_kind(node: Node, target_kind: &str) -> bool {
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(|c| c.kind() == target_kind);
+    found
 }
 
 /// Return true when a table name is a valid SQL identifier (not a brace
@@ -123,8 +221,10 @@ fn has_error_sibling(node: Node) -> bool {
 /// Collect table identifiers: `object_reference` nodes whose PARENT is a table
 /// position (`from` / `relation` / `insert` / `update` / `delete`), never a
 /// `field` (column qualifier like `c.x`). Rejects recovered identifiers whose
-/// parent has ERROR siblings (placeholder syntax like `{tbl}`).
-fn collect_tables(node: Node, src: &[u8], verb: SqlVerb, out: &mut Vec<(String, SqlVerb)>) {
+/// parent has ERROR siblings (placeholder syntax like `{tbl}`). Skips any name
+/// that is a CTE alias. Verb is resolved per-table from the nearest ancestor
+/// statement node so that INSERT...SELECT correctly marks the SELECT source as Read.
+fn collect_tables(node: Node, src: &[u8], cte_names: &[String], out: &mut Vec<(String, SqlVerb)>) {
     let mut cursor = node.walk();
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
@@ -142,9 +242,12 @@ fn collect_tables(node: Node, src: &[u8], verb: SqlVerb, out: &mut Vec<(String, 
                 if !contaminated {
                     if let Some(name_node) = n.child_by_field_name("name") {
                         if let Ok(name) = name_node.utf8_text(src) {
-                            if is_valid_identifier(name) {
+                            if is_valid_identifier(name) && !cte_names.iter().any(|c| c == name) {
                                 let owned = name.to_string();
                                 if !out.iter().any(|(t, _)| *t == owned) {
+                                    // Resolve verb per-table from ancestor context,
+                                    // not from a single global verb for the whole tree.
+                                    let verb = verb_for(n);
                                     out.push((owned, verb));
                                 }
                             }
