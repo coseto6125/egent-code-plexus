@@ -9,8 +9,14 @@
 
 ### Bug Fixes
 
+- drop stale gnx name + trim product skills (#518)
 - capture namespace import `import * as ns` as RawImport (#513)
 - re-wire --dump-resolver + fix WarmAttach race breaking diff on fresh baselines (#488)
+
+### Performance
+
+- use ReloadPolicy::Manual for cold-open BM25 query (#517)
+
 ## v0.6.0 - 2026-05-29
 
 ### Features
