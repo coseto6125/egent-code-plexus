@@ -2,6 +2,7 @@
 //! `docs/specs/2026-05-16-cypher-expansion-design.md`.
 
 pub mod ast;
+pub mod diagnostics;
 pub mod error;
 pub mod executor;
 pub mod lexer;
@@ -9,6 +10,7 @@ pub mod parser;
 pub mod value;
 
 pub use ast::Query;
+pub use diagnostics::{unknown_properties, UnknownProp};
 pub use error::CypherError;
 pub use value::{QueryResult, Value};
 

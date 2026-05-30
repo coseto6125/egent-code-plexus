@@ -1524,6 +1524,10 @@ fn archived_kind_str(node: &crate::graph::ArchivedNode) -> &'static str {
 /// `node_idx` is the position of `n` in `graph.nodes` — needed for the sparse
 /// `function_metas` binary-search lookup.
 /// `cache` is used for the `content` property (C12).
+///
+/// The set of names matched here is mirrored by `diagnostics::KNOWN_NODE_PROPS`
+/// (the unknown-property warning). A new arm added below must be added there
+/// too, or legal queries using it will false-positive as unknown.
 fn node_prop_value(
     n: &crate::graph::ArchivedNode,
     node_idx: u32,

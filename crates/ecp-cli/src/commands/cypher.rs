@@ -15,8 +15,10 @@ pub struct CypherArgs {
     /// - Label alternation:  (a:Function|Method)
     /// - WHERE:              =, <>, <, <=, >, >=, AND, OR, NOT, IN, =~, CONTAINS, STARTS WITH, ENDS WITH
     /// - Properties (node):  name, kind, filePath, uid, ownerClass, content,
-    ///   is_test, is_async, is_static, is_abstract, is_generator, is_extern,
-    ///   visibility, decorators
+    ///   line, startLine, endLine, visibility, decorators, and the boolean
+    ///   flags is_test/is_async/is_static/is_abstract/is_generator/is_extern
+    ///   (camelCase aliases isTest/isAsync/… also accepted). An unknown
+    ///   property name warns on stderr and resolves to null.
     /// - Properties (edge):  confidence, reason, rel_type
     /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
     /// - Pipeline:           WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
@@ -92,6 +94,8 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
     let query = cypher::parse(query_str)
         .map_err(|e| ecp_core::EcpError::InvalidArgument(format_cypher_error(query_str, &e)))?;
 
+    warn_unknown_properties(&query);
+
     let result = cypher::execute(&query, graph, &resolve_repo_root(args.repo.as_deref()))
         .map_err(|e| ecp_core::EcpError::InvalidArgument(format_cypher_error(query_str, &e)))?;
 
@@ -107,6 +111,30 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
         engine.caveat(),
     )?;
     Ok(())
+}
+
+/// Surface property names that match neither the node nor the edge schema.
+/// Such a name resolves to `Null` in the executor (OpenCypher convention), so
+/// the query silently returns 0 rows — indistinguishable from a real empty
+/// result. The warning lets the caller tell a typo (`n.file` → `n.filePath`)
+/// apart from genuine no-data. Stderr-only; the query semantics are unchanged.
+/// Runs once over the parsed AST (no graph access), so it is off the per-row
+/// hot path and adds no measurable latency for a well-formed query.
+fn warn_unknown_properties(query: &cypher::Query) {
+    for u in cypher::unknown_properties(query) {
+        match u.suggestion {
+            Some(s) => eprintln!(
+                "warning: unknown cypher property '{}' — did you mean '{s}'?",
+                u.prop
+            ),
+            None => eprintln!(
+                "warning: unknown cypher property '{}' (known node: {}; edge: {})",
+                u.prop,
+                ecp_core::cypher::diagnostics::KNOWN_NODE_PROPS.join(", "),
+                ecp_core::cypher::diagnostics::KNOWN_EDGE_PROPS.join(", "),
+            ),
+        }
+    }
 }
 
 /// Wrap the cypher result into the emitted JSON shape, collapsing

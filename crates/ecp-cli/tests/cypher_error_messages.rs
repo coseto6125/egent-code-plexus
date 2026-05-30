@@ -54,8 +54,10 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
     );
 }
 
-/// Run a cypher query that is expected to fail; return stderr.
-fn run_expect_failure(repo: &std::path::Path, query: &str) -> (std::process::ExitStatus, String) {
+/// Run a cypher query and return (exit status, stderr) without asserting on the
+/// status — callers decide whether they expect success (warning path) or
+/// failure (parse / semantic error path).
+fn run_capture(repo: &std::path::Path, query: &str) -> (std::process::ExitStatus, String) {
     let out = Command::new(ecp_bin())
         .args(["cypher", query, "--format", "json"])
         .current_dir(repo)
@@ -72,7 +74,7 @@ fn parse_error_truncated() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    let (status, stderr) = run_expect_failure(tmp.path(), "MATCH");
+    let (status, stderr) = run_capture(tmp.path(), "MATCH");
 
     assert!(
         !status.success(),
@@ -91,7 +93,7 @@ fn semantic_unknown_nodekind() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    let (status, stderr) = run_expect_failure(tmp.path(), "MATCH (a:Foo) RETURN a");
+    let (status, stderr) = run_capture(tmp.path(), "MATCH (a:Foo) RETURN a");
 
     assert!(
         !status.success(),
@@ -110,7 +112,7 @@ fn semantic_unknown_reltype() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    let (status, stderr) = run_expect_failure(tmp.path(), "MATCH (a)-[r:NOSUCH]->(b) RETURN a, b");
+    let (status, stderr) = run_capture(tmp.path(), "MATCH (a)-[r:NOSUCH]->(b) RETURN a, b");
 
     assert!(
         !status.success(),
@@ -123,6 +125,57 @@ fn semantic_unknown_reltype() {
     );
 }
 
+/// Unknown property name (`n.file` — the real one is `filePath`) evaluates to
+/// Null and silently returns 0 rows. The query still succeeds (exit 0), but a
+/// stderr warning must surface the typo + the closest known name, so the caller
+/// can tell a typo'd-property empty result from a genuine no-match.
+#[test]
+fn unknown_property_emits_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    let (status, stderr) = run_capture(
+        tmp.path(),
+        "MATCH (n) WHERE n.file CONTAINS 'x' RETURN n.name",
+    );
+
+    assert!(
+        status.success(),
+        "unknown-property query should still succeed (warning, not error); stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("unknown cypher property") && stderr.contains("file"),
+        "stderr should warn about unknown property 'file': {stderr}"
+    );
+    assert!(
+        stderr.contains("filePath"),
+        "stderr should suggest the closest known property 'filePath': {stderr}"
+    );
+}
+
+/// Legal properties — including `startLine` and the camelCase flag aliases that
+/// the doc comment omits — must NOT trigger the unknown-property warning.
+/// Guards against building the known-set from the stale doc comment.
+#[test]
+fn known_property_no_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    let (status, stderr) = run_capture(
+        tmp.path(),
+        "MATCH (n) WHERE n.filePath CONTAINS 'x' RETURN n.startLine",
+    );
+
+    assert!(
+        status.success(),
+        "valid query should succeed; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown cypher property"),
+        "valid properties must not warn (startLine is legal): {stderr}"
+    );
+}
+
 /// Parse errors must emit a `^` caret pointer indicating the error offset.
 #[test]
 fn error_includes_caret_pointer() {
@@ -130,7 +183,7 @@ fn error_includes_caret_pointer() {
     init_repo_and_analyze(tmp.path());
 
     // `MATCH` alone triggers a parse error which includes an offset → caret.
-    let (status, stderr) = run_expect_failure(tmp.path(), "MATCH");
+    let (status, stderr) = run_capture(tmp.path(), "MATCH");
 
     assert!(!status.success(), "expected non-zero exit; stderr={stderr}");
     assert!(
