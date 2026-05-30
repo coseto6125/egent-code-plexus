@@ -67,6 +67,7 @@ pub enum AdminCommands {
     /// Environment health check: skills / index / host / config / registry / version. `--fix` repairs fixable items.
     Doctor(doctor::DoctorArgs),
     /// Background-only: throttled daily probe for a newer ecp release. Spawned by the session_start hook; never run manually.
+    #[command(hide = true)]
     CheckUpdate,
     /// List indexed repos (alias for `ecp summary` registry overview; no `--repo` / `--detailed`).
     ListRepos(ListReposArgs),

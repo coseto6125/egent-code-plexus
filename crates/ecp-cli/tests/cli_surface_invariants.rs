@@ -125,8 +125,9 @@ const ADMIN_SUBCMDS: &[&str] = &[
     "gemini",
     "mcp",
     "doctor",
-    "check-update",
     "list-repos",
+    // Hidden
+    "check-update",
 ];
 
 /// `ecp admin group <subcmd>` — management-only (no query verbs here).
