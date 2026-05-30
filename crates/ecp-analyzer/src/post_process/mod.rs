@@ -16,4 +16,5 @@ pub mod path_literal_nodes;
 pub mod saga_pairs;
 pub mod schema_field_mirrors;
 pub mod scope_defines;
+pub mod sql_table_edges;
 pub mod tx_scope_edges;
