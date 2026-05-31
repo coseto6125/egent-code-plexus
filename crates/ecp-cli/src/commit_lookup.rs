@@ -165,15 +165,15 @@ fn is_recovery_dir_name(name: &str) -> bool {
         || suffix.contains(".dead.")
 }
 
-/// Find the commit dir under `commits_dir` whose `graph.bin` has the
-/// most recent mtime. Used as fallback when SHA-keyed lookup misses
-/// (e.g. branch not yet indexed; pick most-recently-built as best guess).
-///
-/// Skips `.building` / `.stale-*` dirs (belt-and-suspenders — `scan()`
-/// already filters these, but this operates on the raw dir listing).
-pub fn find_latest_by_mtime(commits_dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(commits_dir)
-        .ok()?
+/// Collect every non-recovery commit dir under `commits_dir` that has a
+/// `graph.bin`, paired with that file's mtime. Shared by the single-best and
+/// all-by-mtime accessors so the readdir + recovery-dir filter live in one
+/// place. Returns an empty vec when the dir is absent or unreadable.
+fn graph_dirs_with_mtime(commits_dir: &Path) -> Vec<(SystemTime, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(commits_dir) else {
+        return Vec::new();
+    };
+    entries
         .filter_map(Result::ok)
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter(|e| {
@@ -186,6 +186,92 @@ pub fn find_latest_by_mtime(commits_dir: &Path) -> Option<PathBuf> {
             let mtime = std::fs::metadata(&graph_bin).ok()?.modified().ok()?;
             Some((mtime, e.path()))
         })
+        .collect()
+}
+
+/// Find the commit dir under `commits_dir` whose `graph.bin` has the
+/// most recent mtime. Used as fallback when SHA-keyed lookup misses
+/// (e.g. branch not yet indexed; pick most-recently-built as best guess).
+///
+/// Skips `.building` / `.stale-*` dirs (belt-and-suspenders — `scan()`
+/// already filters these, but this operates on the raw dir listing).
+pub fn find_latest_by_mtime(commits_dir: &Path) -> Option<PathBuf> {
+    graph_dirs_with_mtime(commits_dir)
+        .into_iter()
         .max_by_key(|(t, _)| *t)
         .map(|(_, p)| p)
+}
+
+/// Like `find_latest_by_mtime`, but returns ALL candidate commit dirs sorted
+/// newest-first. Used by warm-attach to try the next-best sibling when the
+/// single newest one fails a downstream gate (compatibility / commit distance)
+/// — picking only the newest and giving up there leaves a usable sibling
+/// unused on disk.
+pub fn find_all_by_mtime_desc(commits_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = graph_dirs_with_mtime(commits_dir);
+    dirs.sort_unstable_by_key(|(t, _)| std::cmp::Reverse(*t));
+    dirs.into_iter().map(|(_, p)| p).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create `<commits>/<name>/graph.bin` with the given mtime offset (secs
+    /// after the UNIX epoch) so ordering is deterministic regardless of the
+    /// host filesystem's mtime granularity.
+    fn published(commits: &Path, name: &str, mtime_secs: u64) -> PathBuf {
+        let dir = commits.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let graph_bin = dir.join("graph.bin");
+        std::fs::write(&graph_bin, b"x").unwrap();
+        let t = filetime::FileTime::from_unix_time(mtime_secs as i64, 0);
+        filetime::set_file_mtime(&graph_bin, t).unwrap();
+        dir
+    }
+
+    #[test]
+    fn all_by_mtime_desc_is_newest_first_and_latest_agrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commits = tmp.path();
+        let oldest = published(commits, "commit__aa", 1_000);
+        let middle = published(commits, "commit__bb", 2_000);
+        let newest = published(commits, "commit__cc", 3_000);
+
+        let all = find_all_by_mtime_desc(commits);
+        assert_eq!(all, vec![newest.clone(), middle, oldest]);
+        assert_eq!(find_latest_by_mtime(commits), Some(newest));
+    }
+
+    #[test]
+    fn recovery_dirs_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commits = tmp.path();
+        let good = published(commits, "commit__aa", 1_000);
+        // Newest by mtime, but a recovery dir → must not surface.
+        published(commits, "commit__bb.building", 9_000);
+        published(commits, "commit__cc.dead", 9_000);
+
+        assert_eq!(find_all_by_mtime_desc(commits), vec![good.clone()]);
+        assert_eq!(find_latest_by_mtime(commits), Some(good));
+    }
+
+    /// A dir without a `graph.bin` is not a usable candidate.
+    #[test]
+    fn dirs_without_graph_bin_excluded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commits = tmp.path();
+        std::fs::create_dir_all(commits.join("commit__nobin")).unwrap();
+        let good = published(commits, "commit__aa", 1_000);
+
+        assert_eq!(find_all_by_mtime_desc(commits), vec![good]);
+    }
+
+    #[test]
+    fn missing_dir_yields_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let absent = tmp.path().join("does-not-exist");
+        assert!(find_all_by_mtime_desc(&absent).is_empty());
+        assert_eq!(find_latest_by_mtime(&absent), None);
+    }
 }
