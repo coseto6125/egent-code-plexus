@@ -66,6 +66,9 @@ pub struct UnknownProp {
 pub fn unknown_properties(q: &Query) -> Vec<UnknownProp> {
     let mut names: Vec<String> = Vec::new();
     collect_query(q, &mut names);
+    // Filter to the unknown subset BEFORE sort/dedup: a well-formed query (every
+    // property known) becomes empty here and skips the rest entirely.
+    names.retain(|n| !is_known(n));
     if names.is_empty() {
         return Vec::new();
     }
@@ -73,7 +76,6 @@ pub fn unknown_properties(q: &Query) -> Vec<UnknownProp> {
     names.dedup();
     names
         .into_iter()
-        .filter(|n| !is_known(n))
         .map(|n| {
             let suggestion = nearest(&n);
             UnknownProp {
