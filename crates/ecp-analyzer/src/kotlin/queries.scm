@@ -90,6 +90,14 @@
     (#eq? @override_marker "override"))
   (simple_identifier) @function.name) @function
 
+; Type aliases — `typealias Callback = (String) -> Unit`.
+; WHY: type aliases are real reference targets; `ecp find Callback` must resolve
+; without grep, and impact queries need the Typedef→Function edges.
+; tree-sitter-kotlin grammar: type_alias node contains (type_identifier) as the
+; alias name (grammar.js: `alias($.simple_identifier, $.type_identifier)`).
+(type_alias
+  (type_identifier) @typedef.name) @typedef
+
 ; Anonymous callbacks: trailing lambda (`list.forEach { process(it) }`) and
 ; paren-position lambda (`list.map({ x -> f(x) })`). Without a node here their
 ; body's calls are dropped by attach_to_enclosing when no named enclosing scope

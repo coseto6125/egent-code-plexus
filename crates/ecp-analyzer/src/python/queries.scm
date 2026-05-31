@@ -64,10 +64,15 @@
 ;; Both forms produce an `assignment` node in tree-sitter-python; the annotated
 ;; form additionally has a `type:` field, but the `left:` field is present in
 ;; both, so a single pattern suffices.
+;; The optional `type:` field is captured in the same match so parser.rs can
+;; reclassify `X: TypeAlias = …` (PEP 613) Variable→Typedef — a reference
+;; target for `ecp find`/impact, not a value binding. Plain `x = …` and other
+;; annotations (`x: int = …`) keep Variable.
 (module
   (expression_statement
     (assignment
-      left: (identifier) @variable.name) @variable))
+      left: (identifier) @variable.name
+      (type)? @type) @variable))
 
 ;; Decorators — attach raw decorator text to the parent function or class so
 ;; downstream consumers (Task #10/11 flag wiring, Tier 3 route detectors) can

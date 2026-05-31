@@ -141,6 +141,30 @@ fn is_cpp_reserved_keyword(name: &str) -> bool {
     )
 }
 
+/// True if a file-scope `declaration` node carries a `const` or `constexpr`
+/// qualifier. In tree-sitter-cpp a qualifying keyword appears as a
+/// `type_qualifier` named child of the `declaration` with text `"const"` or
+/// `"constexpr"`. Mutable globals have no such child.
+///
+/// This is intentionally scoped to the `@var` use-site (translation-unit
+/// level `declaration` nodes). Class fields use `field_declaration` and
+/// function parameters use `parameter_declaration` — neither reaches this
+/// helper.
+fn is_const_qualified(decl: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = decl.walk();
+    for child in decl.children(&mut cursor) {
+        if child.kind() == "type_qualifier" {
+            if let Ok(text) = std::str::from_utf8(&source[child.start_byte()..child.end_byte()]) {
+                let text = text.trim();
+                if text == "const" || text == "constexpr" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Per upstream `c-cpp.ts:414-431` `cppProvider.astFrameworkPatterns`.
 /// Note: upstream's `cProvider` has no `astFrameworkPatterns`, so this is
 /// C++-only.
@@ -502,6 +526,15 @@ impl LanguageProvider for CppProvider {
             // parameters and type keywords as @var.name. Real var decls in
             // well-formed code carry has_error=false and never use keywords
             // as identifier names.
+            //
+            // const/constexpr globals → NodeKind::Const: a file-scope
+            // `declaration` whose first named child is a `type_qualifier`
+            // with text "const" or "constexpr" is a compile-time constant.
+            // The `@var` query already anchors to `(translation_unit
+            // (declaration ...))`, so `v_root` is always translation-unit
+            // level; const-qualified class fields use `field_declaration`
+            // (→ @field) and const params use `parameter_declaration`
+            // (→ @param) — neither reaches this branch.
             if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
                 if let Ok(name_str) =
                     std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
@@ -509,13 +542,18 @@ impl LanguageProvider for CppProvider {
                     if !v_root.has_error() && !is_cpp_reserved_keyword(name_str) {
                         let start = v_root.start_position();
                         let end = v_root.end_position();
+                        let kind = if is_const_qualified(v_root, source) {
+                            NodeKind::Const
+                        } else {
+                            NodeKind::Variable
+                        };
                         nodes.push(RawNode {
                             decorators: vec![],
                             is_exported: is_header || is_exported_by_query,
                             heritage: vec![],
                             type_annotation: slice_type_before(v_root, v_name, source),
                             name: name_str.to_string(),
-                            kind: NodeKind::Variable,
+                            kind,
                             span: (
                                 start.row as u32,
                                 start.column as u32,

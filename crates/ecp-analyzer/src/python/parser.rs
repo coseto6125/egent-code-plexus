@@ -1092,6 +1092,18 @@ impl LanguageProvider for PythonProvider {
                             .map(|s| s.to_string())
                     });
 
+                    // `X: TypeAlias = …` (PEP 613) is a reference target, not a
+                    // value binding — reclassify Variable→Typedef. Match the bare
+                    // and dotted (`typing.TypeAlias`) annotation forms.
+                    let k = if k == NodeKind::Variable
+                        && type_str
+                            .as_deref()
+                            .is_some_and(|t| t == "TypeAlias" || t == "typing.TypeAlias")
+                    {
+                        NodeKind::Typedef
+                    } else {
+                        k
+                    };
                     let final_kind = if k == NodeKind::Function && is_class_method(root) {
                         NodeKind::Method
                     } else {
