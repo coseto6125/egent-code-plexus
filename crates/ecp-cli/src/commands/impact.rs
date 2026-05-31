@@ -50,7 +50,8 @@ pub struct ImpactArgs {
     pub baseline: Option<String>,
 
     /// Disambiguate when name has multiple matches: substring on file path.
-    #[arg(long = "file_path", alias = "file-path")]
+    /// `--file_path` / `--file-path` stay as aliases for back-compat.
+    #[arg(long = "file", alias = "file_path", alias = "file-path")]
     pub file: Option<String>,
 
     /// Disambiguate by kind (function | method | class | route | ...).
