@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.2 - 2026-05-31
+
+### Bug Fixes
+
+- try next-best sibling instead of giving up on the newest (#522)
+- close symbol-extraction gaps across 8 languages (#520)
+- warn on unknown property name instead of silent 0 rows (#521)
 ## v0.6.1 - 2026-05-30
 
 ### Features
