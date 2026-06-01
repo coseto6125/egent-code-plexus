@@ -173,8 +173,11 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
         return json!({ "status": "missing" });
     };
     // Derive worktree root from common_dir (parent of `.git`).
+    // Via the shared helper so a Windows verbatim `\\?\` prefix in the stored
+    // common_dir is stripped before it reaches `ensure_index`'s WalkBuilder
+    // (else os error 267 on Windows — see git_cache::worktree_root_from_common_dir).
     let common = Path::new(&r.common_dir);
-    let worktree = common.parent().unwrap_or(common);
+    let worktree = crate::git_cache::worktree_root_from_common_dir(common);
 
     let mut out = match ensure_index(&graph_path, worktree) {
         Ok(EnsureResult::Ready) => json!({ "status": "ready" }),

@@ -91,11 +91,10 @@ fn resolve_member_status(member: &str, reg: &RegistryFile, meta: &GroupMeta) -> 
         return MemberStatus::Missing;
     };
 
+    // Shared helper strips any Windows verbatim `\\?\` prefix the registry may
+    // carry; `git -C <repo_root>` rejects verbatim paths (os error 267).
     let common_dir = std::path::PathBuf::from(&alias.common_dir);
-    let repo_root = match common_dir.parent() {
-        Some(p) => p.to_path_buf(),
-        None => common_dir.clone(),
-    };
+    let repo_root = crate::git_cache::worktree_root_from_common_dir(&common_dir).to_path_buf();
 
     let Some(snapshot) = meta.repo_snapshots.get(member) else {
         return MemberStatus::NoSnapshot;
