@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.3 - 2026-06-01
+
+### Bug Fixes
+
+- strip Windows verbatim \?\ prefix from registry common_dir (#528)
 ## v0.6.2 - 2026-05-31
 
 ### Bug Fixes
