@@ -163,12 +163,11 @@ fn extract_member(
     })?;
 
     // Derive the source root from common_dir. common_dir is the `.git` dir;
-    // the source root is its parent (for non-bare repos).
+    // the source root is its parent (for non-bare repos). The shared helper
+    // also strips any Windows verbatim `\\?\` prefix the registry may carry,
+    // so it never reaches `WalkDir` below (else os error 267 on Windows).
     let common_dir = std::path::PathBuf::from(&alias.common_dir);
-    let src_root = common_dir
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or(common_dir.clone());
+    let src_root = crate::git_cache::worktree_root_from_common_dir(&common_dir).to_path_buf();
 
     if !src_root.exists() {
         return Err((
