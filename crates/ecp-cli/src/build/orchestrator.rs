@@ -565,7 +565,10 @@ fn git_common_dir_string(worktree: &Path) -> io::Result<String> {
         // `find_by_path` in `repo_selector.rs`, which also falls back to the
         // canonical worktree path when git is unavailable. Both sides converge
         // on the same string so registry lookup succeeds for nogit repos.
-        return Ok(std::fs::canonicalize(worktree)?
+        // `dunce::canonicalize` keeps the path plain on Windows (no `\\?\`
+        // verbatim prefix), so the stored `common_dir` never feeds a verbatim
+        // path into the build pipeline (`ignore::WalkBuilder` / `git archive`).
+        return Ok(dunce::canonicalize(worktree)?
             .to_string_lossy()
             .into_owned());
     }
@@ -574,7 +577,7 @@ fn git_common_dir_string(worktree: &Path) -> io::Result<String> {
         .trim();
     let p = std::path::PathBuf::from(s);
     let resolved = if p.is_absolute() { p } else { worktree.join(p) };
-    Ok(std::fs::canonicalize(resolved)
+    Ok(dunce::canonicalize(resolved)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| s.to_string()))
 }

@@ -146,8 +146,16 @@ pub fn common_dir(cwd: &Path) -> io::Result<PathBuf> {
 /// Falls back to `common_dir` itself when it has no parent (defensive: a
 /// bare-repo or root path). Used wherever a registry entry's `.git` common
 /// dir must be turned into the source tree `ensure_fresh` walks.
+///
+/// `dunce::simplified` strips any Windows verbatim `\\?\` prefix the registry
+/// may carry — older builds wrote `common_dir` via `std::fs::canonicalize`,
+/// which emits UNC/verbatim paths on Windows. Feeding such a path straight to
+/// `ignore::WalkBuilder` / `git archive` makes them treat a file component as
+/// a directory and fail with `ERROR_DIRECTORY` (os error 267). On non-Windows
+/// and on already-plain paths this is a no-op, returning a sub-slice of the
+/// input (no allocation, borrow preserved).
 pub fn worktree_root_from_common_dir(common_dir: &Path) -> &Path {
-    common_dir.parent().unwrap_or(common_dir)
+    dunce::simplified(common_dir.parent().unwrap_or(common_dir))
 }
 
 fn read_common_dir(cwd: &Path) -> io::Result<PathBuf> {
@@ -166,5 +174,55 @@ fn read_common_dir(cwd: &Path) -> io::Result<PathBuf> {
         Ok(p)
     } else {
         Ok(cwd.join(p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_root_drops_dot_git_component() {
+        let common = Path::new("/home/me/proj/.git");
+        assert_eq!(
+            worktree_root_from_common_dir(common),
+            Path::new("/home/me/proj")
+        );
+    }
+
+    #[test]
+    fn worktree_root_falls_back_when_no_parent() {
+        // A root path has no parent — return it unchanged rather than panic.
+        let root = Path::new("/");
+        assert_eq!(worktree_root_from_common_dir(root), root);
+    }
+
+    // ── Windows-only: verbatim `\\?\` prefix handling ───────────────────────
+    // Registries written by older builds (`std::fs::canonicalize`) store a
+    // verbatim `common_dir`; the worktree root handed to `ensure_fresh` /
+    // `build_l2` must be plain, else `ignore::WalkBuilder` / `git archive`
+    // fail with ERROR_DIRECTORY (os error 267). `dunce::simplified` is a no-op
+    // on non-Windows, so these assertions are meaningful only on Windows.
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_root_strips_verbatim_disk_prefix() {
+        let common = Path::new(r"\\?\C:\Revice_Code\backstage_api_test_new\.git");
+        assert_eq!(
+            worktree_root_from_common_dir(common),
+            Path::new(r"C:\Revice_Code\backstage_api_test_new")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_root_leaves_plain_path_untouched() {
+        // Already-plain paths (the post-fix writer output) must pass through
+        // unchanged — the simplification is idempotent.
+        let common = Path::new(r"C:\Revice_Code\backstage_api_test_new\.git");
+        assert_eq!(
+            worktree_root_from_common_dir(common),
+            Path::new(r"C:\Revice_Code\backstage_api_test_new")
+        );
     }
 }
