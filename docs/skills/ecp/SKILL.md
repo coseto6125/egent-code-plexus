@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Use for symbol-level code analysis, blast-radius impact, cross-repo API contracts, AST-aware rename, route map. Defer to grep for string literals, config keys, vendored / generated code, and fs layout.
+description: When you want to explore code structure — where a symbol is defined, who calls it, a refactor's blast radius, routes/contracts, or to trace how code connects — reach here before grep or an Explore agent. Verb by question: where→find, who-calls/blast-radius→impact, full-context→inspect, where-a-filename-is-read-vs-written→impact --literal, routes/contracts→those, trace-flow→processes, graph-question-with-no-verb (orphans, all-impls)→cypher. Grep only for non-code text: config values, log strings, fs layout.
 ---
 
 # EgentCodePlexus (ecp) — Structural Analysis Entry
@@ -12,13 +12,13 @@ Directives = when to reach for ecp and when to distrust it. Quick Reference = co
 ## 🧭 Layer 1: Core Principles
 
 ### Directive 1: ecp-first reflex (full rule in @ECP.md §"The reflex")
-Code-structure queries go to ecp before grep or an Explore agent — definitions, callers, blast radius, traces, "fan out and read these files." Pick the verb: `find` (definitions), `impact` (callers / blast radius), `inspect` (full context), `routes` / `contracts` (API surfaces), `cypher` (else). Holds for ecp's own repo too.
+The moment you'd fan out to read files or grep for a symbol to understand structure, that's the ecp trigger — for any indexed repo, ecp's own included. Verb map is in the description above. Two traps weak models hit: (a) **"who calls X" → `ecp impact`, not `ecp find`** — find locates the definition + a caller *count*; impact returns the caller *list* you need before a refactor; (b) on an **ambiguous-name error** (`'handle' is ambiguous`), don't fall back to Read — re-run with `--file <f>` or `--kind function`.
 
 ### Directive 2: Blast Radius before Refactor — and it's a lower bound
 Before modifying a function or class, run `ecp impact` for callers (HIGH / CRITICAL → confirm with user). The caller set is a **lower bound**: a bare call to a common name can be suppressed by the resolver's ambiguity cap. **Tell:** suspiciously low caller count → `grep` the call sites to cross-check.
 
-### Directive 3: `found:false` is two-valued — read the `result` field
-ecp auto-refreshes the index, but `found:false` can mean "doesn't exist" OR "graph is a warm-attach, HEAD not indexed yet". **Tell:** a `result` field in the payload or an `l2.warm-attach` / `note:` line on stderr → provisional; rerun or `ecp admin index --force --repo .` before concluding it's gone. For genuine misses, `ecp find <fragment> --mode fuzzy`. See [`guides/troubleshooting.md`](./guides/troubleshooting.md).
+### Directive 3: `found:false` is two-valued — and a real miss means "report it, don't invent"
+`found:false` can mean "doesn't exist" OR "warm-attach, HEAD not indexed yet". **Tell:** a `result` field or `l2.warm-attach` / `note:` on stderr → provisional; rerun or `ecp admin index --force --repo .`. Then `ecp find <fragment> --mode fuzzy` for a genuine miss. **If the symbol truly isn't there, say exactly that — never synthesize a blast radius / caller list for a symbol ecp couldn't find** (that's the fabrication ecp exists to prevent). See [`guides/troubleshooting.md`](./guides/troubleshooting.md).
 
 ### Directive 4: Surprising output has a root cause; grep is right for text
 Before concluding "ecp is broken", verify against source (definition, fresh reindex, grep cross-check) — doc-comment inference ≠ verification. **Tell:** non-code text — string literals, error messages, config keys, vendored / generated code, fs layout — belongs to grep / Read; ecp parses code, not text.
@@ -50,16 +50,9 @@ Before concluding "ecp is broken", verify against source (definition, fresh rein
 | `ecp impact --baseline origin/main` | All symbols changed baseline → HEAD |
 | `ecp review --baseline origin/main` | Post-edit audit: impact + route drift + egress, one pass |
 
-**Literal mode** (path-string sink lookup):
-| Command | Use for |
-|---|---|
-| `ecp impact --literal session_meta.json` | Read/write sites for that path string, classified (`sink:read` / `sink:write` / `sink:join` / `sink:free` / …). For split-brain bugs, query each literal alone |
-| `ecp impact --literal-coherence` | Auto-detect filename split-brain pairs across PathLiteral nodes |
+**Literal mode**: `ecp impact --literal session_meta.json` → each site classified `sink:read`/`write`/`join`/`free` (grep can't tell read from write); `--literal-coherence` finds split-brain filename pairs.
 
-**Related (edge-level)**:
-| Command | Use for |
-|---|---|
-| `ecp diff` | Edge-level resolver delta (binding tier-degradation, route / contract changes) |
+`ecp diff` — edge-level resolver delta (binding tier-degradation, route/contract changes).
 
 ### Architecture / cross-cutting
 | Command | Use for |
@@ -69,38 +62,19 @@ Before concluding "ecp is broken", verify against source (definition, fresh rein
 | `ecp contracts` | Cross-repo API contracts |
 | `ecp tool-map` | External HTTP / DB / Redis / queue calls |
 | `ecp shape-check` | HTTP consumer ↔ Route response shape drift |
-| `ecp processes` | List execution-flow Process nodes (Leiden + BFS at index time) |
-| `ecp processes trace <pat>` | Full step sequence for a matching Process — actual execution order, cleaner than `impact --direction down` |
+| `ecp processes` / `processes trace <pat>` | List execution-flow Processes / full ordered step sequence — real execution order, cleaner than `impact --direction down` |
 | `ecp review` | Full audit (impact + summary + tool-map + shape-check + diff) |
 | `ecp rename <old> <new>` | AST-aware multi-file rename |
-| `ecp admin doctor [check] [--fix]` | Environment health (skills / index / host / config / registry / version); `--fix` repairs fixable |
+| `ecp admin doctor [check] [--fix]` | Environment health (skills/index/host/config/registry/version); `--fix` repairs |
 
 ### Multi-repo / groups (cross-repo scope only)
-Run in order: `sync` → `contracts` → `impact`.
-| Command | Use for |
-|---|---|
-| `ecp group sync <name>` | Build cross-links + extract contracts for the group |
-| `ecp group status <name>` | Check staleness of group members |
-| `ecp group contracts <name> [--unmatched]` | Inspect contract registry; `--unmatched` finds orphaned consumers |
-| `ecp group impact <name> --target <symbol> --repo <provider>` | Cross-repo blast radius — which repos call this symbol |
-| `ecp group find <name>` | Search across all group members |
-| `ecp contracts --repo @all` | Registry-wide contract view (no group) |
+Run in order `sync` → `contracts` → `impact`: `ecp group sync <name>` (cross-links + contracts), `group status` (staleness), `group contracts <name> [--unmatched]` (registry; `--unmatched` = orphaned consumers), `group impact <name> --target <sym> --repo <provider>` (which repos call it), `group find <name>`. Without a group: `ecp contracts --repo @all`.
 
 ### Cypher escape hatch
-| Command | Use for |
-|---|---|
-| `ecp cypher "<query>"` | Ad-hoc `MATCH ... RETURN ...` when no command fits |
+`ecp cypher "MATCH ... RETURN ..."` for graph questions with no dedicated verb (orphans, all-impls, edges-of-type). One query beats looping `impact` over every symbol.
 
-
-### Schema introspection (graph-loadless)
-| Command | Output |
-|---|---|
-| `ecp schema blindspots` | Per-lang BlindSpot coverage; "no dispatch in diff" vs "parser doesn't detect it" |
-| `ecp schema reltypes` | All 20 RelType edges + LLM-utility category + heuristic flag |
-| `ecp schema node-kinds` | All 29 NodeKind variants + same-name distinctions (Struct vs Class, Trait vs Interface) |
-| `ecp schema graph-version` | rkyv `graph.bin` format version + bump history |
-
-`schema` commands default to `--format json`; `--format text` for a table.
+### Schema introspection (graph-loadless, default `--format json`)
+`ecp schema blindspots` (per-lang BlindSpot coverage), `reltypes` (RelType edges + LLM-utility + heuristic flag), `node-kinds` (NodeKind variants + Struct-vs-Class etc.), `graph-version` (graph.bin format version).
 
 ---
 
