@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.4 - 2026-06-03
+
+### Features
+
+- **Build concurrency cap**: bound machine-wide simultaneous L2 rebuilds (`ECP_MAX_CONCURRENT_BUILDS`, env-aware default) so concurrent builds across repos can't saturate disk I/O and hang the host — most relevant on WSL2's vhdx. Gates only rebuilds; cache hits, warm-attach, and queries never queue.
+
+### Bug Fixes
+
+- usage_cmd aggregation fixtures used a fixed past date that aged out of the telemetry retention window, failing every PR's Test run (#534).
+
+### Docs
+
+- A/B-tuned the embedded `ecp` skill (`docs/skills/ecp/`) for agent usability (#532): question→verb map, anchors for `impact --literal` / `cypher`, no-fabrication rule on `found:false`. Ships via `ecp admin claude install skills`.
+
 ## v0.6.3 - 2026-06-01
 
 ### Bug Fixes

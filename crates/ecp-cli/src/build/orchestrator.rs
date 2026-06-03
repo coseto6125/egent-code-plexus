@@ -120,6 +120,14 @@ pub(crate) fn build_inside_locked(
     commit_dir: &Path,
     lock_guard: File,
 ) -> io::Result<BuildResult> {
+    // Machine-wide build throttle. The caller already holds this repo's
+    // `.build.lock` (no duplicate work for one SHA); this additionally bounds how
+    // many *different* repos rebuild at once, since each build issues ~180 MB of
+    // I/O and concurrent builds saturate the WSL2 vhdx and hang the host. Covers
+    // both rebuild entry points (`build_l2` and `force_rebuild_l2`). Held for the
+    // whole build; degrades open (unthrottled) if the slot machinery errors.
+    let _build_slot = crate::build::semaphore::acquire(&resolve_home_ecp());
+
     let mut lock_guard = Some(lock_guard);
     let result = (|| {
         let prof = std::env::var("ECP_PROF").is_ok();
