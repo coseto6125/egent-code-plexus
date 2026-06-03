@@ -4,6 +4,15 @@ fn ecp_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ecp")
 }
 
+/// A recent RFC3339 timestamp (now − 1h) so aggregation-fixture lines stay inside
+/// the default 7-day telemetry retention window. Using a fixed past date here is a
+/// time-bomb: `usage` prunes lines older than retention before aggregating, so a
+/// hard-coded date silently starts failing once it ages past the window.
+fn recent_ts() -> String {
+    use chrono::{SecondsFormat, Utc};
+    (Utc::now() - chrono::Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
 #[test]
 fn invocation_appends_one_cli_telemetry_line() {
     let tmp = std::env::temp_dir().join(format!("ecp-usage-it-{}", std::process::id()));
@@ -39,10 +48,11 @@ fn usage_json_aggregates_a_fixture() {
     let tmp = std::env::temp_dir().join(format!("ecp-usage-json-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/myrepo__deadbeef");
     std::fs::create_dir_all(&tel).unwrap();
+    let ts = recent_ts();
     let lines = [
-        r#"{"ts":"2026-05-27T07:00:00Z","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}"#,
-        r#"{"ts":"2026-05-27T07:01:00Z","tool":"inspect","duration_ms":48,"ok":true,"source":"cli","error_kind":null}"#,
-        r#"{"ts":"2026-05-27T07:02:00Z","tool":"cypher","duration_ms":9,"ok":false,"source":"cli","error_kind":"cypher-parse"}"#,
+        format!(r#"{{"ts":"{ts}","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}}"#),
+        format!(r#"{{"ts":"{ts}","tool":"inspect","duration_ms":48,"ok":true,"source":"cli","error_kind":null}}"#),
+        format!(r#"{{"ts":"{ts}","tool":"cypher","duration_ms":9,"ok":false,"source":"cli","error_kind":"cypher-parse"}}"#),
     ].join("\n");
     std::fs::write(tel.join("cli-calls.jsonl"), lines).unwrap();
     let out = Command::new(ecp_bin())
@@ -69,9 +79,10 @@ fn usage_text_dashboard_is_plain_when_piped() {
     let tmp = std::env::temp_dir().join(format!("ecp-usage-txt-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/r__1");
     std::fs::create_dir_all(&tel).unwrap();
+    let ts = recent_ts();
     std::fs::write(
         tel.join("cli-calls.jsonl"),
-        r#"{"ts":"2026-05-27T07:00:00Z","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}"#,
+        format!(r#"{{"ts":"{ts}","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}}"#),
     ).unwrap();
     let out = Command::new(ecp_bin())
         .args(["usage", "--telemetry-dir", tel.to_str().unwrap()])
@@ -89,9 +100,10 @@ fn usage_failures_lists_only_errors() {
     let tmp = std::env::temp_dir().join(format!("ecp-usage-fail-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/r__2");
     std::fs::create_dir_all(&tel).unwrap();
+    let ts = recent_ts();
     let lines = [
-        r#"{"ts":"2026-05-27T07:00:00Z","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}"#,
-        r#"{"ts":"2026-05-27T07:02:00Z","tool":"cypher","duration_ms":9,"ok":false,"source":"cli","error_kind":"cypher-parse"}"#,
+        format!(r#"{{"ts":"{ts}","tool":"inspect","duration_ms":6,"ok":true,"source":"cli","error_kind":null}}"#),
+        format!(r#"{{"ts":"{ts}","tool":"cypher","duration_ms":9,"ok":false,"source":"cli","error_kind":"cypher-parse"}}"#),
     ].join("\n");
     std::fs::write(tel.join("cli-calls.jsonl"), lines).unwrap();
     let out = Command::new(ecp_bin())
