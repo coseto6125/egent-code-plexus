@@ -2,7 +2,10 @@
 
 ## v0.6.4 - 2026-06-03
 
-- (no user-facing changes)
+### Docs
+
+- A/B-tuned the embedded `ecp` skill (`docs/skills/ecp/`) for agent usability (#532): reframed the description into a question→verb map, added anchors for under-used verbs (`impact --literal`, `cypher`), and a no-fabrication rule on `found:false`. Net −26 lines; ships via `ecp admin claude install skills`.
+
 ## v0.6.3 - 2026-06-01
 
 ### Bug Fixes
