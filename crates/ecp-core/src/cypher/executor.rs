@@ -4026,4 +4026,95 @@ mod tests {
             );
         });
     }
+
+    /// Direction-inversion path: the bound endpoint is the SECOND node, so
+    /// `pattern_exists` must invert the rel direction before walking. This is
+    /// the actual execution shape of `NOT EXISTS((n)-[:Calls]->(callee))` where
+    /// `callee` is the outer-bound var. Edge is node0 -[:Calls]-> node1, so
+    /// node1 (callee) HAS an incoming Calls edge: with Out inverted to In the
+    /// walk finds it → true. Without inversion, walking Out from node1 finds
+    /// nothing → false, so this assertion fails if invert_dir is removed.
+    #[test]
+    fn eval_exists_pattern_second_node_anchor_inverts_dir() {
+        with_two(|g| {
+            // callee is node 1 — bound as the SECOND node of the pattern.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("callee", 1);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("n".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: Some("callee".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "EXISTS((n)-[:Calls]->(callee)) with callee second-node-bound must invert dir and find the incoming edge"
+            );
+        });
+    }
+
+    /// Orphan-shape negative on the inversion path: `caller` (node0) bound as
+    /// the SECOND node — dir Out inverts to In, and node0 has NO incoming Calls
+    /// edge → existence is false. This is the true-positive case for the real
+    /// `NOT EXISTS((n)-[:Calls]->(caller))` orphan query (no incoming caller).
+    #[test]
+    fn eval_exists_pattern_second_node_anchor_no_incoming_is_false() {
+        with_two(|g| {
+            // caller is node 0 — bound as the SECOND node; it has no incoming edge.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("caller", 0);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("n".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: Some("caller".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: true,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "NOT EXISTS((n)-[:Calls]->(caller)) must be true: caller has no incoming Calls edge"
+            );
+        });
+    }
 }
