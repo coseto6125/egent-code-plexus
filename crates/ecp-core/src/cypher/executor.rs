@@ -1406,9 +1406,70 @@ fn eval_expr(
             let kind_str = archived_kind_str(&graph.nodes[idx as usize]);
             Ok(Value::Bool(labels.iter().any(|l| l == kind_str)))
         }
+        IsNull { expr, negated } => {
+            let v = eval_expr(expr, b, graph, cache)?;
+            let is_null = matches!(v, Value::Null);
+            Ok(Value::Bool(is_null ^ negated))
+        }
+        ExistsPattern { pattern, negated } => {
+            Ok(Value::Bool(pattern_exists(pattern, b, graph) ^ negated))
+        }
         FunCall { .. } => Err(CypherError::Exec {
             msg: "function calls in WHERE not yet supported".into(),
         }),
+    }
+}
+
+/// Returns `true` if `pattern` matches at least one edge in `graph` given the
+/// current variable bindings in `b`. Short-circuits on the first matching edge —
+/// never materialises the full result set (performance red line).
+///
+/// Supports two shapes:
+/// - Bare node pattern (`rels` empty): true iff the node var is bound.
+/// - Single-hop `(a)-[r]->(b)`: anchors on whichever endpoint is bound,
+///   walks that endpoint's adjacency list, and checks the other endpoint
+///   with `node_matches`. If neither endpoint is bound returns false immediately.
+fn pattern_exists(pattern: &Pattern, b: &Binding, graph: &ArchivedZeroCopyGraph) -> bool {
+    if pattern.rels.is_empty() {
+        return pattern
+            .nodes
+            .first()
+            .and_then(|n| n.var.as_deref())
+            .is_some_and(|v| b.node_vars.contains_key(v));
+    }
+    let n0 = &pattern.nodes[0];
+    let n1 = &pattern.nodes[1];
+    let rel = &pattern.rels[0];
+    let bound0 = n0.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
+    let bound1 = n1.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
+    let (anchor, target_pat, dir) = match (bound0, bound1) {
+        (Some(idx), _) => (idx, n1, rel.dir),
+        (None, Some(idx)) => (idx, n0, invert_dir(rel.dir)),
+        (None, None) => return false,
+    };
+    let probe = RelPat {
+        var: rel.var.clone(),
+        types: rel.types.clone(),
+        range: rel.range,
+        dir,
+    };
+    let mut found = false;
+    walk_rel(anchor, &probe, graph, |tgt, _e| {
+        if found {
+            return;
+        }
+        if node_matches(&graph.nodes[tgt as usize], tgt, target_pat, graph) {
+            found = true;
+        }
+    });
+    found
+}
+
+fn invert_dir(d: Direction) -> Direction {
+    match d {
+        Direction::Out => Direction::In,
+        Direction::In => Direction::Out,
+        Direction::Both => Direction::Both,
     }
 }
 
@@ -3812,6 +3873,156 @@ mod tests {
                 2,
                 "inline kind filter must return both Function nodes, got {:?}",
                 r.rows
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // IS [NOT] NULL evaluation (Task 3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eval_is_null_unbound_var_is_true() {
+        with_two(|g| {
+            // Binding has no var "b" → Var("b") → Value::Null → IS NULL = true.
+            let binding = Binding::default();
+            let expr = Expr::IsNull {
+                expr: Box::new(Expr::Var("b".into())),
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "unbound var IS NULL must be true"
+            );
+        });
+    }
+
+    #[test]
+    fn eval_is_not_null_unbound_var_is_false() {
+        with_two(|g| {
+            let binding = Binding::default();
+            let expr = Expr::IsNull {
+                expr: Box::new(Expr::Var("b".into())),
+                negated: true,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(false),
+                "unbound var IS NOT NULL must be false"
+            );
+        });
+    }
+
+    #[test]
+    fn eval_is_null_bound_var_is_false() {
+        with_two(|g| {
+            // Bind "n" to node 0 — Var("n") → Value::Str("caller") → not null.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("n", 0);
+            let expr = Expr::IsNull {
+                expr: Box::new(Expr::Var("n".into())),
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(false),
+                "bound var IS NULL must be false"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // EXISTS pattern evaluation (Task 4)
+    // -----------------------------------------------------------------------
+
+    /// NOT EXISTS((callee)-[:Calls]->()) with `callee` bound (node 1 has no
+    /// outgoing Calls) → callee has no outgoing edge → pattern_exists = false
+    /// → negated=true → EXISTS result = true.
+    #[test]
+    fn eval_exists_pattern_callee_no_outgoing_negated_true() {
+        with_two(|g| {
+            // callee is node 1 — it has no outgoing Calls edge.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("callee", 1);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("callee".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: None,
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: true,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "NOT EXISTS((callee)-[:Calls]->()) must be true (callee has no outgoing)"
+            );
+        });
+    }
+
+    /// EXISTS((caller)-[:Calls]->()) with `caller` bound (node 0 HAS an
+    /// outgoing Calls edge) → pattern_exists = true → negated=false → true.
+    #[test]
+    fn eval_exists_pattern_caller_has_outgoing() {
+        with_two(|g| {
+            // caller is node 0 — it has an outgoing Calls edge to callee.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("caller", 0);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("caller".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: None,
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "EXISTS((caller)-[:Calls]->()) must be true"
             );
         });
     }
