@@ -10,6 +10,7 @@ pub enum CypherError {
         offset: usize,
         expected: String,
         found: String,
+        hint: Option<String>,
     },
     Semantic {
         msg: String,
@@ -27,10 +28,17 @@ impl fmt::Display for CypherError {
                 offset,
                 expected,
                 found,
-            } => write!(
-                f,
-                "parse error at byte {offset}: expected {expected}, found {found}"
-            ),
+                hint,
+            } => {
+                write!(
+                    f,
+                    "parse error at byte {offset}: expected {expected}, found {found}"
+                )?;
+                if let Some(h) = hint {
+                    write!(f, "\n  hint: {h}")?;
+                }
+                Ok(())
+            }
             Self::Semantic { msg } => write!(f, "semantic error: {msg}"),
             Self::Exec { msg } => write!(f, "execution error: {msg}"),
         }

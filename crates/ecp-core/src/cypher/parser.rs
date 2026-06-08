@@ -49,12 +49,50 @@ impl<'a> Cursor<'a> {
             offset: self.pos,
             expected: expected.into(),
             found: format!("{:?}", self.peek()),
+            hint: hint_for_unsupported(self.tokens, self.pos),
         }
     }
 
     pub fn at_end(&self) -> bool {
         self.pos >= self.tokens.len()
     }
+}
+
+/// Maps recognizable non-subset constructs (by the token sequence at/near the
+/// error position) to a guiding hint. Returns None for ordinary parse errors.
+fn hint_for_unsupported(tokens: &[Token], pos: usize) -> Option<String> {
+    let ident_at = |i: usize| -> Option<String> {
+        match tokens.get(i) {
+            Some(Token::Ident(s)) => Some(s.to_ascii_uppercase()),
+            _ => None,
+        }
+    };
+    // Scan a small window around pos — the error may point just past the offending token.
+    for i in pos.saturating_sub(1)..=pos {
+        if let Some(a) = ident_at(i) {
+            if matches!(a.as_str(), "LEFT" | "RIGHT" | "INNER" | "FULL")
+                && ident_at(i + 1).as_deref() == Some("JOIN")
+            {
+                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+            }
+            if a == "JOIN" {
+                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+            }
+            if a == "CALL" {
+                return Some("stored procedures (CALL \u{2026} YIELD) are unsupported; for a node's edge types use `ecp inspect --name X`".into());
+            }
+        }
+    }
+    // Pattern-in-aggregate: COUNT immediately followed by '(' then '(' indicates a pattern argument.
+    for i in 0..tokens.len().saturating_sub(2) {
+        if ident_at(i).as_deref() == Some("COUNT")
+            && matches!(tokens.get(i + 1), Some(Token::LParen))
+            && matches!(tokens.get(i + 2), Some(Token::LParen))
+        {
+            return Some("pattern in aggregate is non-standard; use WHERE EXISTS((a)-[:R]->(b)) to test existence, or OPTIONAL MATCH (a)-[:R]->(b) WITH b, COUNT(a) AS n".into());
+        }
+    }
+    None
 }
 
 pub fn parse_query(tokens: &[Token]) -> Result<Query, CypherError> {
@@ -165,6 +203,7 @@ pub fn parse_pattern(c: &mut Cursor) -> Result<Pattern, CypherError> {
                     offset: c.pos,
                     expected: "single-direction arrow".into(),
                     found: "<- and -> both".into(),
+                    hint: None,
                 })
             }
         };
