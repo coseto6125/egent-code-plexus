@@ -78,6 +78,9 @@ fn run_json(repo: &std::path::Path, args: &[&str]) -> Value {
 // (lang_label, file_extension, source_code)
 // Each fixture: callee is called by caller; orphan is defined but never called.
 // Java/C# use PascalCase method names to match their convention.
+// Java/C# use a cross-class static call: intra-class bare-method-call Calls
+// edges are a known parser blind spot (FU-2026-05-29-001), out of scope here.
+// EXISTS is what's under test.
 const CASES: &[(&str, &str, &str)] = &[
     (
         "typescript",
@@ -97,7 +100,7 @@ const CASES: &[(&str, &str, &str)] = &[
     (
         "java",
         "java",
-        "class A{ void callee(){} void caller(){callee();} void orphan(){} }",
+        "class B{ static void callee(){} }\nclass A{ void caller(){ B.callee(); } void orphan(){} }",
     ),
     (
         "kotlin",
@@ -107,7 +110,7 @@ const CASES: &[(&str, &str, &str)] = &[
     (
         "csharp",
         "cs",
-        "class A{ void Callee(){} void Caller(){Callee();} void Orphan(){} }",
+        "class B{ public static void Callee(){} }\nclass A{ void Caller(){ B.Callee(); } void Orphan(){} }",
     ),
     (
         "go",
@@ -127,7 +130,7 @@ const CASES: &[(&str, &str, &str)] = &[
     (
         "ruby",
         "rb",
-        "def callee\nend\ndef caller\n  callee\nend\ndef orphan\nend",
+        "def callee\nend\ndef caller\n  callee()\nend\ndef orphan\nend",
     ),
     (
         "swift",
