@@ -958,10 +958,11 @@ fn impact_by_name(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        return Err(EcpError::InvalidArgument(format!(
-            "'{fqn_label}' is ambiguous ({} candidates) — add --file or --kind to disambiguate\ncandidates[filePath,kind,line]:\n{candidate_lines}",
-            matches.len()
-        )));
+        return Err(EcpError::AmbiguousSymbol {
+            name: fqn_label.to_string(),
+            count: matches.len(),
+            candidates: Some(candidate_lines),
+        });
     }
 
     let min_conf = resolve_min_conf(args);
