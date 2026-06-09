@@ -11,11 +11,14 @@ ecp cypher "MATCH (a)-[r]->(b) RETURN a,b" [--repo <PATH>]
 - **Boolean WHERE**: `AND`, `OR`, `NOT`.
 - **Comparisons**: `=`, `!=`, `<`, `<=`, `>`, `>=`.
 - **String Ops**: `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `=~`, `IN [...]`.
+- **Null / existence**: `IS [NOT] NULL` (pair with `OPTIONAL MATCH`), `[NOT] EXISTS((a)-[:Rel]->(b))` (multi-hop + `*min..max` supported; multi-hop needs a var bound by an outer MATCH).
 - **Aggregations**: `COUNT(*)`.
 - **Pathing**: Variable-length paths `[:Rel*1..2]`, reverse arrows `<-[r]-`.
 
 ## NodeKinds
 `Function`, `Method`, `Class`, `Property`, `Constructor`, `Interface`, `Const`, `Variable`, `Import`, `Route`, `Process`, `File`, `Struct`, `Enum`, `Trait`, `Impl`, `Module`, `Namespace`, `Typedef`, `Macro`, `Annotation`, `SchemaField`, `EventTopic`, `TransactionScope`, `PathLiteral`.
+
+Category labels expand in MATCH and WHERE: `:Callable` (Function|Method|Constructor), `:Type` (Class|Interface|Struct|Enum|Typedef|Trait), `:Data` (Property|Variable|Const|EnumVariant|SchemaField). Prefer `:Callable` over bare `:Function` — the latter skips methods.
 
 ## RelTypes
 `Calls`, `Extends`, `Imports`, `Implements`, `HasMethod`, `HasProperty`, `Accesses`, `HandlesRoute`, `References`, `Defines`, `Fetches`, `MirrorsField`, `Publishes`, `Subscribes`, `EventTopicMirror`, `OpensTxScope`, `Overrides`, `UsesPathLiteral`.
