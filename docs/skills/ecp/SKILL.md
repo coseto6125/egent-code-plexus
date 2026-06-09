@@ -68,8 +68,8 @@ Before concluding "ecp is broken", verify against source (definition, fresh rein
 Run in order `sync` → `contracts` → `impact`: `ecp group sync <name>` (cross-links + contracts), `group status` (staleness), `group contracts <name> [--unmatched]` (`--unmatched` = orphaned consumers), `group impact <name> --target <sym> --repo <provider>` (which repos call it), `group find <name>`. Without a group: `ecp contracts --repo @all`.
 
 ### Cypher escape hatch
-`ecp cypher "MATCH ... RETURN ..."` for graph questions with no dedicated verb (orphans, all-impls, edges-of-type). One query beats looping `impact` over every symbol.
-- Orphans (canonical): `MATCH (f:Callable) WHERE NOT EXISTS((c)-[:Calls]->(f)) RETURN f.name` — `:Callable` = Function|Method|Constructor (also `:Type`, `:Data`); bare `:Function` silently skips methods. `IS [NOT] NULL` and `EXISTS((pat))` are supported; SQL shapes (LEFT JOIN / CALL) error with a hint.
+`ecp cypher "MATCH ... RETURN ..."` for graph questions with no dedicated verb (orphans, all-impls, edges-of-type). One query beats looping `impact`.
+- Orphans: `MATCH (f:Callable) WHERE NOT EXISTS((c)-[:Calls]->(f)) RETURN f.name` — `:Callable` = Function|Method|Constructor (also `:Type`, `:Data`); bare `:Function` silently skips methods. `IS [NOT] NULL` and `EXISTS((pat))` are supported; SQL shapes (LEFT JOIN / CALL) error with a hint.
 - Absence-of-Calls over-reports (lower bound) — heed the `result` caveat before declaring dead code.
 
 ### Schema introspection (no graph load)
@@ -79,7 +79,7 @@ Run in order `sync` → `contracts` → `impact`: `ecp group sync <name>` (cross
 
 ## 📚 On-Demand References
 
-- [`guides/troubleshooting.md`](./guides/troubleshooting.md) — `found:false`, index staleness, resolver misses, the four output-trust tells.
+- [`guides/troubleshooting.md`](./guides/troubleshooting.md) — `found:false`, index staleness, resolver misses, output-trust tells.
 - `_shared/cli/` — Per-command flag references (`inspect`, `impact`, `cypher`, `group`, `processes`, …).
 - `_shared/refs/` — Cypher syntax, repo resolution.
 
