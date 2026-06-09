@@ -946,6 +946,37 @@ fn exec_pattern(
     base: &Binding,
     graph: &ArchivedZeroCopyGraph,
 ) -> Result<Vec<Binding>, CypherError> {
+    // If the first node is unbound but the last one is already bound, walk the
+    // pattern right-to-left: reverse nodes/rels and invert each hop direction.
+    // Seeding from the bound endpoint replaces a full-node scan per prior row
+    // with one adjacency walk — `OPTIONAL MATCH (c)-[:Calls]->(f)` with `f`
+    // bound (the orphan-query shape) is O(deg f) instead of O(V+E).
+    let bound_in_base = |np: &NodePat| {
+        np.var
+            .as_deref()
+            .is_some_and(|v| base.node_vars.get(v).is_some())
+    };
+    if pat.nodes.len() > 1
+        && !bound_in_base(&pat.nodes[0])
+        && bound_in_base(&pat.nodes[pat.nodes.len() - 1])
+    {
+        let rev = Pattern {
+            nodes: pat.nodes.iter().rev().cloned().collect(),
+            rels: pat
+                .rels
+                .iter()
+                .rev()
+                .map(|r| RelPat {
+                    var: r.var.clone(),
+                    types: r.types.clone(),
+                    range: r.range,
+                    dir: invert_dir(r.dir),
+                })
+                .collect(),
+        };
+        return exec_pattern(&rev, base, graph);
+    }
+
     // Frontier: (binding, last_matched_node_idx)
     let mut frontier: Vec<(Binding, u32)> = Vec::new();
     let first_np = &pat.nodes[0];
@@ -1035,6 +1066,16 @@ fn exec_pattern(
                         if !node_matches(tgt_node, tgt_idx, next_np, graph) {
                             continue;
                         }
+                        // A var already bound earlier pins the hop target —
+                        // filter on it, never rebind.
+                        if let Some(var) = &next_np.var {
+                            if b.node_vars
+                                .get(var)
+                                .is_some_and(|&pinned| pinned != tgt_idx)
+                            {
+                                continue;
+                            }
+                        }
                         let mut nb = b.clone();
                         if let Some(var) = &next_np.var {
                             nb.node_vars.insert(var, tgt_idx);
@@ -1053,6 +1094,16 @@ fn exec_pattern(
                         let tgt_node = &graph.nodes[tgt_idx as usize];
                         if !node_matches(tgt_node, tgt_idx, next_np, graph) {
                             return;
+                        }
+                        // A var already bound earlier pins the hop target —
+                        // filter on it, never rebind.
+                        if let Some(var) = &next_np.var {
+                            if b.node_vars
+                                .get(var)
+                                .is_some_and(|&pinned| pinned != tgt_idx)
+                            {
+                                return;
+                            }
                         }
                         let mut nb = b.clone();
                         if let Some(var) = &next_np.var {
@@ -1406,9 +1457,122 @@ fn eval_expr(
             let kind_str = archived_kind_str(&graph.nodes[idx as usize]);
             Ok(Value::Bool(labels.iter().any(|l| l == kind_str)))
         }
+        IsNull { expr, negated } => {
+            let v = eval_expr(expr, b, graph, cache)?;
+            let is_null = matches!(v, Value::Null);
+            Ok(Value::Bool(is_null ^ negated))
+        }
+        ExistsPattern { pattern, negated } => {
+            Ok(Value::Bool(pattern_exists(pattern, b, graph)? ^ negated))
+        }
         FunCall { .. } => Err(CypherError::Exec {
             msg: "function calls in WHERE not yet supported".into(),
         }),
+    }
+}
+
+/// Returns `true` if `pattern` matches at least one path in `graph` given the
+/// current variable bindings in `b`.
+///
+/// Shapes, fastest first:
+/// - Bare node pattern (`rels` empty): true iff the node var is bound.
+/// - Single-hop fixed-length `(a)-[r]->(b)` with a bound endpoint: anchors on
+///   it, walks that adjacency list, short-circuits on the first match.
+/// - Single-hop fixed-length with NO bound endpoint ("does any such edge
+///   exist"): linear edge scan, short-circuiting on the first match.
+/// - Variable-length (`*min..max`) or multi-hop: delegated to the full
+///   pattern walker — `exec_pattern` anchors on a bound endpoint via its
+///   right-to-left reversal, but materialises matches rather than
+///   short-circuiting, so it requires at least one bound variable.
+fn pattern_exists(
+    pattern: &Pattern,
+    b: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+) -> Result<bool, CypherError> {
+    if pattern.rels.is_empty() {
+        return Ok(pattern
+            .nodes
+            .first()
+            .and_then(|n| n.var.as_deref())
+            .is_some_and(|v| b.node_vars.contains_key(v)));
+    }
+    if pattern.rels.len() == 1 && pattern.rels[0].range.is_none() {
+        let n0 = &pattern.nodes[0];
+        let n1 = &pattern.nodes[1];
+        let rel = &pattern.rels[0];
+        let bound0 = n0.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
+        let bound1 = n1.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
+        let (anchor, target_pat, dir) = match (bound0, bound1) {
+            (Some(idx), _) => (idx, n1, rel.dir),
+            (None, Some(idx)) => (idx, n0, invert_dir(rel.dir)),
+            (None, None) => {
+                return Ok(edge_scan_exists(n0, n1, rel, graph));
+            }
+        };
+        let probe = RelPat {
+            var: rel.var.clone(),
+            types: rel.types.clone(),
+            range: rel.range,
+            dir,
+        };
+        let mut found = false;
+        walk_rel(anchor, &probe, graph, |tgt, _e| {
+            if found {
+                return;
+            }
+            if node_matches(&graph.nodes[tgt as usize], tgt, target_pat, graph) {
+                found = true;
+            }
+        });
+        return Ok(found);
+    }
+
+    let any_bound = pattern.nodes.iter().any(|n| {
+        n.var
+            .as_deref()
+            .is_some_and(|v| b.node_vars.get(v).is_some())
+    });
+    if !any_bound {
+        return Err(CypherError::Exec {
+            msg: "EXISTS over a multi-hop or variable-length pattern needs at least one \
+                  variable bound by an outer MATCH"
+                .into(),
+        });
+    }
+    Ok(!exec_pattern(pattern, b, graph)?.is_empty())
+}
+
+/// "Does any edge match" for a single-hop pattern with no bound endpoint:
+/// scan the flat edge slice and short-circuit on the first hit.
+fn edge_scan_exists(
+    n0: &NodePat,
+    n1: &NodePat,
+    rel: &RelPat,
+    graph: &ArchivedZeroCopyGraph,
+) -> bool {
+    graph.edges.iter().any(|edge| {
+        if !rel.types.is_empty() && !rel.types.contains(&RelType::from(&edge.rel_type)) {
+            return false;
+        }
+        let s = edge.source.to_native();
+        let t = edge.target.to_native();
+        let fits = |a: u32, pa: &NodePat, z: u32, pz: &NodePat| {
+            node_matches(&graph.nodes[a as usize], a, pa, graph)
+                && node_matches(&graph.nodes[z as usize], z, pz, graph)
+        };
+        match rel.dir {
+            Direction::Out => fits(s, n0, t, n1),
+            Direction::In => fits(t, n0, s, n1),
+            Direction::Both => fits(s, n0, t, n1) || fits(t, n0, s, n1),
+        }
+    })
+}
+
+fn invert_dir(d: Direction) -> Direction {
+    match d {
+        Direction::Out => Direction::In,
+        Direction::In => Direction::Out,
+        Direction::Both => Direction::Both,
     }
 }
 
@@ -2691,6 +2855,50 @@ mod tests {
         });
     }
 
+    #[test]
+    fn exec_pattern_bound_second_node_is_constrained_not_rebound() {
+        // f is pre-bound to leaf_a; when it reappears in the SECOND position of
+        // a later pattern the hop must filter on that binding, not overwrite it.
+        with_fan(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'leaf_a'}) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN f.name, c.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "expected exactly the fan→leaf_a edge");
+            assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
+            assert_eq!(r.rows[0][1], Value::Str("fan".into()));
+        });
+    }
+
+    #[test]
+    fn exec_optional_match_is_null_finds_orphans() {
+        // The canonical orphan query: fan calls leaf_a/leaf_b; nobody calls fan.
+        with_fan(|g| {
+            let q = parse(
+                "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NULL RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "only the uncalled function survives");
+            assert_eq!(r.rows[0][0], Value::Str("fan".into()));
+        });
+    }
+
+    #[test]
+    fn exec_optional_match_is_not_null_finds_called() {
+        with_fan(|g| {
+            let q = parse(
+                "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NOT NULL RETURN f.name ORDER BY f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2);
+            assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
+            assert_eq!(r.rows[1][0], Value::Str("leaf_b".into()));
+        });
+    }
+
     // -----------------------------------------------------------------------
     // RETURN auto-expand bare node/edge vars
     // -----------------------------------------------------------------------
@@ -3812,6 +4020,337 @@ mod tests {
                 2,
                 "inline kind filter must return both Function nodes, got {:?}",
                 r.rows
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // EXISTS: variable-length range, multi-hop, and unbound shapes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eval_exists_var_len_range_respects_depth_bounds() {
+        // chain a→b→c: paths into c are b→c (depth 1) and a→b→c (depth 2).
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*2..3]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "a→b→c is a depth-2 path into c");
+
+            let q = parse(
+                "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*3..4]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(
+                r.rows.is_empty(),
+                "no depth-3 path into c — *3..4 must not match the depth-1/2 paths"
+            );
+
+            // b has only the depth-1 edge a→b: *2..2 must NOT degrade to single-hop.
+            let q = parse(
+                "MATCH (f:Function {name: 'b'}) WHERE EXISTS((x)-[:Calls*2..2]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "only a depth-1 edge reaches b");
+        });
+    }
+
+    #[test]
+    fn eval_exists_multi_hop_pattern_supported() {
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "a→b→c satisfies the two-hop pattern");
+
+            let q = parse(
+                "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "nothing two-hops into a");
+        });
+    }
+
+    #[test]
+    fn eval_exists_single_hop_all_unbound_scans_edges() {
+        // EXISTS((x)-[:Calls]->(y)) with nothing bound = "does any Calls edge
+        // exist" — answered by a short-circuit edge scan, not silent false.
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Calls]->(y)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "the chain has Calls edges");
+
+            let q = parse(
+                "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Implements]->(y)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "the chain has no Implements edges");
+        });
+    }
+
+    #[test]
+    fn eval_exists_multi_hop_all_unbound_errors_not_silent_false() {
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(z)) RETURN f.name",
+            )
+            .unwrap();
+            let e = execute(&q, g, Path::new(".")).unwrap_err();
+            assert!(
+                format!("{e}").contains("bound"),
+                "must name the missing bound variable, got: {e}"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // IS [NOT] NULL evaluation (Task 3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eval_is_null_unbound_var_is_true() {
+        with_two(|g| {
+            // Binding has no var "b" → Var("b") → Value::Null → IS NULL = true.
+            let binding = Binding::default();
+            let expr = Expr::IsNull {
+                expr: Box::new(Expr::Var("b".into())),
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "unbound var IS NULL must be true"
+            );
+        });
+    }
+
+    #[test]
+    fn eval_is_not_null_unbound_var_is_false() {
+        with_two(|g| {
+            let binding = Binding::default();
+            let expr = Expr::IsNull {
+                expr: Box::new(Expr::Var("b".into())),
+                negated: true,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(false),
+                "unbound var IS NOT NULL must be false"
+            );
+        });
+    }
+
+    #[test]
+    fn eval_is_null_bound_var_is_false() {
+        with_two(|g| {
+            // Bind "n" to node 0 — Var("n") → Value::Str("caller") → not null.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("n", 0);
+            let expr = Expr::IsNull {
+                expr: Box::new(Expr::Var("n".into())),
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(false),
+                "bound var IS NULL must be false"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // EXISTS pattern evaluation (Task 4)
+    // -----------------------------------------------------------------------
+
+    /// NOT EXISTS((callee)-[:Calls]->()) with `callee` bound (node 1 has no
+    /// outgoing Calls) → callee has no outgoing edge → pattern_exists = false
+    /// → negated=true → EXISTS result = true.
+    #[test]
+    fn eval_exists_pattern_callee_no_outgoing_negated_true() {
+        with_two(|g| {
+            // callee is node 1 — it has no outgoing Calls edge.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("callee", 1);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("callee".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: None,
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: true,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "NOT EXISTS((callee)-[:Calls]->()) must be true (callee has no outgoing)"
+            );
+        });
+    }
+
+    /// EXISTS((caller)-[:Calls]->()) with `caller` bound (node 0 HAS an
+    /// outgoing Calls edge) → pattern_exists = true → negated=false → true.
+    #[test]
+    fn eval_exists_pattern_caller_has_outgoing() {
+        with_two(|g| {
+            // caller is node 0 — it has an outgoing Calls edge to callee.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("caller", 0);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("caller".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: None,
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "EXISTS((caller)-[:Calls]->()) must be true"
+            );
+        });
+    }
+
+    /// Direction-inversion path: the bound endpoint is the SECOND node, so
+    /// `pattern_exists` must invert the rel direction before walking. This is
+    /// the actual execution shape of `NOT EXISTS((n)-[:Calls]->(callee))` where
+    /// `callee` is the outer-bound var. Edge is node0 -[:Calls]-> node1, so
+    /// node1 (callee) HAS an incoming Calls edge: with Out inverted to In the
+    /// walk finds it → true. Without inversion, walking Out from node1 finds
+    /// nothing → false, so this assertion fails if invert_dir is removed.
+    #[test]
+    fn eval_exists_pattern_second_node_anchor_inverts_dir() {
+        with_two(|g| {
+            // callee is node 1 — bound as the SECOND node of the pattern.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("callee", 1);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("n".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: Some("callee".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: false,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "EXISTS((n)-[:Calls]->(callee)) with callee second-node-bound must invert dir and find the incoming edge"
+            );
+        });
+    }
+
+    /// Orphan-shape negative on the inversion path: `caller` (node0) bound as
+    /// the SECOND node — dir Out inverts to In, and node0 has NO incoming Calls
+    /// edge → existence is false. This is the true-positive case for the real
+    /// `NOT EXISTS((n)-[:Calls]->(caller))` orphan query (no incoming caller).
+    #[test]
+    fn eval_exists_pattern_second_node_anchor_no_incoming_is_false() {
+        with_two(|g| {
+            // caller is node 0 — bound as the SECOND node; it has no incoming edge.
+            let mut binding = Binding::default();
+            binding.node_vars.insert("caller", 0);
+            let pattern = Pattern {
+                nodes: vec![
+                    NodePat {
+                        var: Some("n".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                    NodePat {
+                        var: Some("caller".into()),
+                        kinds: vec![],
+                        props: vec![],
+                    },
+                ],
+                rels: vec![RelPat {
+                    var: None,
+                    types: vec![RelType::Calls],
+                    range: None,
+                    dir: Direction::Out,
+                }],
+            };
+            let expr = Expr::ExistsPattern {
+                pattern,
+                negated: true,
+            };
+            let mut cache = ContentCache::new(PathBuf::from("."));
+            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            assert_eq!(
+                result,
+                Value::Bool(true),
+                "NOT EXISTS((n)-[:Calls]->(caller)) must be true: caller has no incoming Calls edge"
             );
         });
     }

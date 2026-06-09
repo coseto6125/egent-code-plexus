@@ -176,6 +176,55 @@ fn known_property_no_warning() {
     );
 }
 
+/// SQL JOIN syntax → hint toward OPTIONAL MATCH.
+#[test]
+fn left_join_gets_sql_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+    let (status, stderr) = run_capture(
+        tmp.path(),
+        "MATCH (f) WITH f LEFT JOIN (x)-[r]->(f) RETURN f",
+    );
+    assert!(!status.success());
+    assert!(stderr.contains("hint:"), "expected a hint, got: {stderr}");
+    assert!(
+        stderr.contains("OPTIONAL MATCH"),
+        "expected OPTIONAL MATCH guidance, got: {stderr}"
+    );
+}
+
+/// CALL … YIELD stored-procedure syntax → hint toward ecp inspect.
+#[test]
+fn call_yield_gets_procedure_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+    let (status, stderr) = run_capture(
+        tmp.path(),
+        "MATCH (n) CALL ecp.edge_types(n) YIELD relation RETURN n",
+    );
+    assert!(!status.success());
+    assert!(
+        stderr.contains("ecp inspect"),
+        "expected inspect guidance, got: {stderr}"
+    );
+}
+
+/// COUNT((pattern)) aggregate → hint toward EXISTS / OPTIONAL MATCH.
+#[test]
+fn count_pattern_gets_exists_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+    let (status, stderr) = run_capture(
+        tmp.path(),
+        "MATCH (f) WITH f, COUNT((x)-[r]->(f)) AS n RETURN f",
+    );
+    assert!(!status.success());
+    assert!(
+        stderr.contains("EXISTS") || stderr.contains("OPTIONAL MATCH"),
+        "expected exists/optional guidance, got: {stderr}"
+    );
+}
+
 /// Parse errors must emit a `^` caret pointer indicating the error offset.
 #[test]
 fn error_includes_caret_pointer() {

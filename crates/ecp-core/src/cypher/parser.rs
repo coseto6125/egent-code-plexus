@@ -49,12 +49,50 @@ impl<'a> Cursor<'a> {
             offset: self.pos,
             expected: expected.into(),
             found: format!("{:?}", self.peek()),
+            hint: hint_for_unsupported(self.tokens, self.pos),
         }
     }
 
     pub fn at_end(&self) -> bool {
         self.pos >= self.tokens.len()
     }
+}
+
+/// Maps recognizable non-subset constructs (by the token sequence at/near the
+/// error position) to a guiding hint. Returns None for ordinary parse errors.
+fn hint_for_unsupported(tokens: &[Token], pos: usize) -> Option<String> {
+    let ident_at = |i: usize| -> Option<String> {
+        match tokens.get(i) {
+            Some(Token::Ident(s)) => Some(s.to_ascii_uppercase()),
+            _ => None,
+        }
+    };
+    // Scan a small window around pos — the error may point just past the offending token.
+    for i in pos.saturating_sub(1)..=pos {
+        if let Some(a) = ident_at(i) {
+            if matches!(a.as_str(), "LEFT" | "RIGHT" | "INNER" | "FULL")
+                && ident_at(i + 1).as_deref() == Some("JOIN")
+            {
+                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+            }
+            if a == "JOIN" {
+                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+            }
+            if a == "CALL" {
+                return Some("stored procedures (CALL \u{2026} YIELD) are unsupported; for a node's edge types use `ecp inspect --name X`".into());
+            }
+        }
+    }
+    // Pattern-in-aggregate: COUNT immediately followed by '(' then '(' indicates a pattern argument.
+    for i in 0..tokens.len().saturating_sub(2) {
+        if ident_at(i).as_deref() == Some("COUNT")
+            && matches!(tokens.get(i + 1), Some(Token::LParen))
+            && matches!(tokens.get(i + 2), Some(Token::LParen))
+        {
+            return Some("pattern in aggregate is non-standard; use WHERE EXISTS((a)-[:R]->(b)) to test existence, or OPTIONAL MATCH (a)-[:R]->(b) WITH b, COUNT(a) AS n".into());
+        }
+    }
+    None
 }
 
 pub fn parse_query(tokens: &[Token]) -> Result<Query, CypherError> {
@@ -165,6 +203,7 @@ pub fn parse_pattern(c: &mut Cursor) -> Result<Pattern, CypherError> {
                     offset: c.pos,
                     expected: "single-direction arrow".into(),
                     found: "<- and -> both".into(),
+                    hint: None,
                 })
             }
         };
@@ -449,6 +488,18 @@ fn parse_and(c: &mut Cursor) -> Result<Expr, CypherError> {
 
 fn parse_not(c: &mut Cursor) -> Result<Expr, CypherError> {
     if c.eat(&Token::Not) {
+        // Fold NOT EXISTS(...) into ExistsPattern{negated:true} so the
+        // executor short-circuits without an extra UnaryOp wrapper.
+        if c.check(&Token::Exists) {
+            let inner = parse_comparison(c)?;
+            if let Expr::ExistsPattern { pattern, .. } = inner {
+                return Ok(Expr::ExistsPattern {
+                    pattern,
+                    negated: true,
+                });
+            }
+            return Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(inner)));
+        }
         let inner = parse_not(c)?;
         Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(inner)))
     } else {
@@ -507,6 +558,14 @@ fn parse_comparison(c: &mut Cursor) -> Result<Expr, CypherError> {
         };
         return Ok(Expr::Contains(Box::new(lhs), s));
     }
+    if c.eat(&Token::Is) {
+        let negated = c.eat(&Token::Not);
+        c.expect(&Token::Null)?;
+        return Ok(Expr::IsNull {
+            expr: Box::new(lhs),
+            negated,
+        });
+    }
 
     // Infix binary comparisons
     let op = if c.eat(&Token::Eq) {
@@ -534,6 +593,22 @@ fn parse_comparison(c: &mut Cursor) -> Result<Expr, CypherError> {
 }
 
 fn parse_primary(c: &mut Cursor) -> Result<Expr, CypherError> {
+    if c.eat(&Token::Exists) {
+        let brace = c.eat(&Token::LBrace);
+        if !brace {
+            c.expect(&Token::LParen)?;
+        }
+        let pattern = parse_pattern(c)?;
+        if brace {
+            c.expect(&Token::RBrace)?;
+        } else {
+            c.expect(&Token::RParen)?;
+        }
+        return Ok(Expr::ExistsPattern {
+            pattern,
+            negated: false,
+        });
+    }
     if c.eat(&Token::LParen) {
         let e = parse_expr(c)?;
         c.expect(&Token::RParen)?;
@@ -1110,5 +1185,82 @@ mod tests {
             matches!(err, CypherError::Lex { ref msg, .. } if msg.contains("empty backtick")),
             "got: {err:?}",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // EXISTS pattern + IS [NOT] NULL parsing (Task 5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expr_exists_pattern_parens() {
+        match ex("EXISTS((n)-[:Calls]->(f))") {
+            Expr::ExistsPattern { pattern, negated } => {
+                assert!(!negated, "plain EXISTS must have negated=false");
+                assert_eq!(pattern.nodes.len(), 2);
+                assert_eq!(pattern.rels.len(), 1);
+                assert_eq!(pattern.rels[0].types, vec![RelType::Calls]);
+                assert_eq!(pattern.rels[0].dir, Direction::Out);
+            }
+            other => panic!("expected ExistsPattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_exists_pattern_braces() {
+        match ex("EXISTS{(n)-[:Calls]->(f)}") {
+            Expr::ExistsPattern { pattern, negated } => {
+                assert!(!negated, "plain EXISTS{{}} must have negated=false");
+                assert_eq!(pattern.nodes.len(), 2);
+                assert_eq!(pattern.rels.len(), 1);
+            }
+            other => panic!("expected ExistsPattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_not_exists_pattern_folds_negated() {
+        // NOT EXISTS(...) must fold into ExistsPattern{negated:true}, not
+        // UnaryOp(Not, ExistsPattern{negated:false}).
+        match ex("NOT EXISTS((n)-[:Calls]->(f))") {
+            Expr::ExistsPattern { negated, .. } => {
+                assert!(negated, "NOT EXISTS must fold to negated=true");
+            }
+            other => panic!("expected folded ExistsPattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_is_null() {
+        match ex("r IS NULL") {
+            Expr::IsNull { negated, .. } => {
+                assert!(!negated, "IS NULL must have negated=false");
+            }
+            other => panic!("expected IsNull, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_is_not_null() {
+        match ex("r IS NOT NULL") {
+            Expr::IsNull { negated, .. } => {
+                assert!(negated, "IS NOT NULL must have negated=true");
+            }
+            other => panic!("expected IsNull(negated=true), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_not_exists_pattern() {
+        // Full WHERE NOT EXISTS(...) pipeline.
+        let toks = tokenize("WHERE NOT EXISTS((n)-[:Calls]->(f))").unwrap();
+        let mut c = Cursor::new(&toks);
+        let e = parse_where(&mut c).unwrap();
+        match e {
+            Expr::ExistsPattern { negated, pattern } => {
+                assert!(negated);
+                assert_eq!(pattern.rels.len(), 1);
+            }
+            other => panic!("expected folded ExistsPattern in WHERE, got {other:?}"),
+        }
     }
 }

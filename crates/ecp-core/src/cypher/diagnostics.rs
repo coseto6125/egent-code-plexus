@@ -140,6 +140,14 @@ fn collect_expr(e: &Expr, out: &mut Vec<String>) {
                 collect_expr(a, out);
             }
         }
+        Expr::IsNull { expr, .. } => collect_expr(expr, out),
+        Expr::ExistsPattern { pattern, .. } => {
+            for np in &pattern.nodes {
+                for (k, _) in &np.props {
+                    out.push(k.clone());
+                }
+            }
+        }
         Expr::Var(_) | Expr::Lit(_) | Expr::HasLabel(_, _) => {}
     }
 }

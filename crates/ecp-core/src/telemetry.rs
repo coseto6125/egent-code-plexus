@@ -39,6 +39,10 @@ pub struct CallRecord<'a> {
     /// without leaking long stack traces. Added v2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_msg: Option<&'a str>,
+    /// `ecp` binary version at record time. Allows dashboards to attribute
+    /// error-rate changes to a specific release. Added v3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<&'a str>,
 }
 
 /// Append one jsonl line to `dir/filename`. Best-effort: all I/O errors are
@@ -75,6 +79,7 @@ mod tests {
             error_kind: None,
             subcommand: None,
             error_msg: None,
+            version: None,
         };
         let line = serde_json::to_string(&r).unwrap();
         assert!(line.contains(r#""source":"cli""#));
@@ -96,6 +101,7 @@ mod tests {
             error_kind: Some("graph-load-failed"),
             subcommand: Some("gc"),
             error_msg: Some("registry lock timeout after 5s"),
+            version: Some("0.6.4"),
         };
         let line = serde_json::to_string(&r).unwrap();
         assert!(line.contains(r#""subcommand":"gc""#));
@@ -115,6 +121,7 @@ mod tests {
             error_kind: Some("no-such-symbol"),
             subcommand: None,
             error_msg: Some("symbol 'foo' not found"),
+            version: None,
         };
         append_record(&dir, "cli-calls.jsonl", &r);
         let body = std::fs::read_to_string(dir.join("cli-calls.jsonl")).unwrap();

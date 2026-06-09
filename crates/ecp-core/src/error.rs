@@ -15,8 +15,12 @@ pub enum EcpError {
     #[error("symbol UID '{uid}' not found in graph")]
     SymbolNotFound { uid: String },
 
-    #[error("symbol name '{name}' is ambiguous ({count} candidates) — pass --uid")]
-    AmbiguousSymbol { name: String, count: usize },
+    #[error("symbol name '{name}' is ambiguous ({count} candidates){}", candidates.as_ref().map(|c| format!(" — add --file or --kind:\ncandidates[filePath,kind,line]:\n{c}")).unwrap_or_else(|| " — pass --uid".into()))]
+    AmbiguousSymbol {
+        name: String,
+        count: usize,
+        candidates: Option<String>,
+    },
 
     #[error("git diff failed: {reason}")]
     GitDiff { reason: String },

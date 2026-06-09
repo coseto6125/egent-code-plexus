@@ -61,7 +61,11 @@ pub fn classify_error(e: &EcpError) -> &'static str {
 /// timeout"). Distinguish by signal phrases — user-input messages tend to
 /// name an expected value; internal ones name a system resource.
 fn classify_invalid_argument(msg: &str) -> &'static str {
-    let m = msg.to_ascii_lowercase();
+    // Match the error SUBJECT (first line) only — candidate dumps and other
+    // multi-line payloads (filePaths containing "parse"/"label") must not sway
+    // classification.
+    let subject = msg.lines().next().unwrap_or(msg);
+    let m = subject.to_ascii_lowercase();
     if m.contains("cypher") && (m.contains("parse") || m.contains("label") || m.contains("syntax"))
     {
         return "cypher-parse";
@@ -97,7 +101,11 @@ fn classify_invalid_argument(msg: &str) -> &'static str {
 /// pre-v2 substring rule, no user-input bucket here (these variants are
 /// emitted by internal code paths, not clap).
 fn classify_freeform(msg: &str) -> &'static str {
-    let m = msg.to_ascii_lowercase();
+    // Match the error SUBJECT (first line) only — candidate dumps and other
+    // multi-line payloads (filePaths containing "parse"/"label") must not sway
+    // classification.
+    let subject = msg.lines().next().unwrap_or(msg);
+    let m = subject.to_ascii_lowercase();
     if m.contains("cypher") && (m.contains("parse") || m.contains("label") || m.contains("syntax"))
     {
         return "cypher-parse";
@@ -177,6 +185,7 @@ pub fn record(tool: &str, subcommand: Option<&str>, duration_ms: u64, err: Optio
         error_kind: kind,
         subcommand,
         error_msg: msg.as_deref(),
+        version: Some(env!("CARGO_PKG_VERSION")),
     };
     append_record(&dir, CLI_TELEMETRY_FILE, &rec);
 }
@@ -238,7 +247,8 @@ mod tests {
         assert_eq!(
             classify_error(&EcpError::AmbiguousSymbol {
                 name: "Foo".into(),
-                count: 3
+                count: 3,
+                candidates: None,
             }),
             "no-such-symbol"
         );
@@ -307,5 +317,41 @@ mod tests {
             let h = std::path::PathBuf::from(home);
             assert!(!is_ephemeral_cwd(&h));
         }
+    }
+
+    // Task 8: typed AmbiguousSymbol with candidates classifies correctly.
+    #[test]
+    fn ambiguous_with_candidates_classifies_as_no_such_symbol() {
+        let e = EcpError::AmbiguousSymbol {
+            name: "check".into(),
+            count: 8,
+            candidates: Some("a.rs,Function,9\nb.rs,Function,20".into()),
+        };
+        assert_eq!(classify_error(&e), "no-such-symbol");
+    }
+
+    // Task 9: candidate dump containing a path with "parse" must not trigger cypher-parse.
+    #[test]
+    fn candidate_path_containing_parse_is_not_cypher_parse() {
+        let msg = "'check' is ambiguous (2 candidates) — add --file or --kind\ncandidates[filePath,kind,line]:\ncrates/x/parser.rs,Function,9";
+        assert_ne!(classify_invalid_argument(msg), "cypher-parse");
+    }
+
+    // Task 10: version field is present in serialized CallRecord.
+    #[test]
+    fn call_record_includes_version() {
+        let json = serde_json::to_string(&CallRecord {
+            ts: "2026-06-08T00:00:00Z",
+            tool: "cypher",
+            duration_ms: 1,
+            ok: true,
+            source: "cli",
+            error_kind: None,
+            subcommand: None,
+            error_msg: None,
+            version: Some(env!("CARGO_PKG_VERSION")),
+        })
+        .unwrap();
+        assert!(json.contains("\"version\""), "got: {json}");
     }
 }

@@ -21,6 +21,8 @@ pub enum Token {
     Or,
     Not,
     In,
+    Is,
+    Exists,
     StartsWith,
     EndsWith,
     Contains,
@@ -342,6 +344,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CypherError> {
                 "OR" => Token::Or,
                 "NOT" => Token::Not,
                 "IN" => Token::In,
+                "IS" => Token::Is,
+                "EXISTS" => Token::Exists,
                 "STARTS" => {
                     if try_consume_word(input, bytes, &mut i, "WITH") {
                         Token::StartsWith
@@ -479,5 +483,13 @@ mod tests {
             CypherError::Lex { .. } => {}
             e => panic!("expected Lex, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn keyword_is_and_exists() {
+        assert_eq!(lex("IS"), vec![Token::Is]);
+        assert_eq!(lex("is"), vec![Token::Is]);
+        assert_eq!(lex("EXISTS"), vec![Token::Exists]);
+        assert_eq!(lex("exists"), vec![Token::Exists]);
     }
 }

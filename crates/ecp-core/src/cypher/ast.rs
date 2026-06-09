@@ -95,6 +95,21 @@ pub enum Expr {
     /// fall through to `false` instead of erroring at parse time — matches
     /// how MATCH pattern handles unknown kinds.
     HasLabel(String, Vec<String>),
+    /// `EXISTS { pattern }` / `NOT EXISTS (pattern)` WHERE predicate.
+    /// `negated` folds a leading NOT so the executor short-circuits on the
+    /// first matching edge without an extra UnaryOp wrap. Outer-scope-bound
+    /// vars in the pattern are fixed; unbound vars form the traversal frontier.
+    ExistsPattern {
+        pattern: Pattern,
+        negated: bool,
+    },
+    /// `x IS [NOT] NULL`. Distinct from `BinOp(Eq, x, NULL)` because NULL
+    /// comparison in Cypher is itself NULL (never true), so `= NULL` can't
+    /// express the test the way `IS NULL` does.
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
     FunCall {
         name: String,
         distinct: bool,
