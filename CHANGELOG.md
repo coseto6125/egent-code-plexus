@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.6.5 - 2026-06-09
+
+### Features
+
+- Callable/Type/Data category labels + Calls-absence caveat (#548)
+- EXISTS pattern + IS [NOT] NULL predicates, SQL-shape hints, exec_pattern fixes (#543)
+
+### Bug Fixes
+
+- classify unresolvable baseline/PR as user input (#544)
+
+### Performance
+
+- push WHERE prop-equality conjuncts into MATCH node patterns (#547)
+- find-first DFS behind EXISTS + WillNeed readahead on graph mmap (#545)
 ## v0.6.4 - 2026-06-03
 
 ### Features
