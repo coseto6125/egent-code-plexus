@@ -946,6 +946,37 @@ fn exec_pattern(
     base: &Binding,
     graph: &ArchivedZeroCopyGraph,
 ) -> Result<Vec<Binding>, CypherError> {
+    // If the first node is unbound but the last one is already bound, walk the
+    // pattern right-to-left: reverse nodes/rels and invert each hop direction.
+    // Seeding from the bound endpoint replaces a full-node scan per prior row
+    // with one adjacency walk — `OPTIONAL MATCH (c)-[:Calls]->(f)` with `f`
+    // bound (the orphan-query shape) is O(deg f) instead of O(V+E).
+    let bound_in_base = |np: &NodePat| {
+        np.var
+            .as_deref()
+            .is_some_and(|v| base.node_vars.get(v).is_some())
+    };
+    if pat.nodes.len() > 1
+        && !bound_in_base(&pat.nodes[0])
+        && bound_in_base(&pat.nodes[pat.nodes.len() - 1])
+    {
+        let rev = Pattern {
+            nodes: pat.nodes.iter().rev().cloned().collect(),
+            rels: pat
+                .rels
+                .iter()
+                .rev()
+                .map(|r| RelPat {
+                    var: r.var.clone(),
+                    types: r.types.clone(),
+                    range: r.range,
+                    dir: invert_dir(r.dir),
+                })
+                .collect(),
+        };
+        return exec_pattern(&rev, base, graph);
+    }
+
     // Frontier: (binding, last_matched_node_idx)
     let mut frontier: Vec<(Binding, u32)> = Vec::new();
     let first_np = &pat.nodes[0];
@@ -1035,6 +1066,16 @@ fn exec_pattern(
                         if !node_matches(tgt_node, tgt_idx, next_np, graph) {
                             continue;
                         }
+                        // A var already bound earlier pins the hop target —
+                        // filter on it, never rebind.
+                        if let Some(var) = &next_np.var {
+                            if b.node_vars
+                                .get(var)
+                                .is_some_and(|&pinned| pinned != tgt_idx)
+                            {
+                                continue;
+                            }
+                        }
                         let mut nb = b.clone();
                         if let Some(var) = &next_np.var {
                             nb.node_vars.insert(var, tgt_idx);
@@ -1053,6 +1094,16 @@ fn exec_pattern(
                         let tgt_node = &graph.nodes[tgt_idx as usize];
                         if !node_matches(tgt_node, tgt_idx, next_np, graph) {
                             return;
+                        }
+                        // A var already bound earlier pins the hop target —
+                        // filter on it, never rebind.
+                        if let Some(var) = &next_np.var {
+                            if b.node_vars
+                                .get(var)
+                                .is_some_and(|&pinned| pinned != tgt_idx)
+                            {
+                                return;
+                            }
                         }
                         let mut nb = b.clone();
                         if let Some(var) = &next_np.var {
@@ -2749,6 +2800,50 @@ mod tests {
                 .find(|row| row[0] == Value::Str("callee".into()))
                 .unwrap();
             assert_eq!(callee_row[1], Value::Null);
+        });
+    }
+
+    #[test]
+    fn exec_pattern_bound_second_node_is_constrained_not_rebound() {
+        // f is pre-bound to leaf_a; when it reappears in the SECOND position of
+        // a later pattern the hop must filter on that binding, not overwrite it.
+        with_fan(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'leaf_a'}) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN f.name, c.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "expected exactly the fan→leaf_a edge");
+            assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
+            assert_eq!(r.rows[0][1], Value::Str("fan".into()));
+        });
+    }
+
+    #[test]
+    fn exec_optional_match_is_null_finds_orphans() {
+        // The canonical orphan query: fan calls leaf_a/leaf_b; nobody calls fan.
+        with_fan(|g| {
+            let q = parse(
+                "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NULL RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "only the uncalled function survives");
+            assert_eq!(r.rows[0][0], Value::Str("fan".into()));
+        });
+    }
+
+    #[test]
+    fn exec_optional_match_is_not_null_finds_called() {
+        with_fan(|g| {
+            let q = parse(
+                "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NOT NULL RETURN f.name ORDER BY f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2);
+            assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
+            assert_eq!(r.rows[1][0], Value::Str("leaf_b".into()));
         });
     }
 
