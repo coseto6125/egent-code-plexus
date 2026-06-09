@@ -91,6 +91,7 @@ fn classify_invalid_argument(msg: &str) -> &'static str {
         || m.contains("required")
         || m.contains("invalid value")
         || m.contains("usage:")
+        || m.contains("cannot resolve")
     {
         return "user-input";
     }
@@ -335,6 +336,24 @@ mod tests {
     fn candidate_path_containing_parse_is_not_cypher_parse() {
         let msg = "'check' is ambiguous (2 candidates) — add --file or --kind\ncandidates[filePath,kind,line]:\ncrates/x/parser.rs,Function,9";
         assert_ne!(classify_invalid_argument(msg), "cypher-parse");
+    }
+
+    // Unresolvable diff baselines are user input (bad ref / bad PR number),
+    // not internal failures — they must land in the user-input bucket.
+    #[test]
+    fn unresolvable_baseline_classifies_as_user_input() {
+        let e = EcpError::InvalidArgument(
+            "cannot resolve baseline `definitely-no-such-ref`: fatal: Needed a single revision\naccepted: branch / tag / commit SHA / HEAD~N / PR/<n>".into(),
+        );
+        assert_eq!(classify_error(&e), "user-input");
+    }
+
+    #[test]
+    fn unresolvable_pr_classifies_as_user_input() {
+        let e = EcpError::InvalidArgument(
+            "cannot resolve PR/9999999: GraphQL: Could not resolve to a PullRequest".into(),
+        );
+        assert_eq!(classify_error(&e), "user-input");
     }
 
     // Task 10: version field is present in serialized CallRecord.
