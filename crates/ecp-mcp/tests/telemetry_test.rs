@@ -18,6 +18,7 @@ fn append_to_produces_valid_jsonl_line() {
         error_kind: None,
         subcommand: None,
         error_msg: None,
+        version: None,
     };
     append_to(&record, dir.path());
 
@@ -53,6 +54,7 @@ fn append_to_accumulates_multiple_lines() {
             error_kind: None,
             subcommand: None,
             error_msg: None,
+            version: None,
         };
         append_to(&record, dir.path());
     }
@@ -87,6 +89,7 @@ fn append_to_read_only_dir_does_not_panic() {
         error_kind: None,
         subcommand: None,
         error_msg: None,
+        version: None,
     };
     // Must not panic.
     append_to(&record, unreachable);
