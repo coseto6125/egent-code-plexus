@@ -98,10 +98,8 @@ pub fn execute(
     repo_root: &Path,
 ) -> Result<QueryResult, CypherError> {
     let mut cache = ContentCache::new(repo_root.to_path_buf());
-    match pushdown_where(query) {
-        Some(rewritten) => execute_inner(&rewritten, graph, &mut cache),
-        None => execute_inner(query, graph, &mut cache),
-    }
+    let rewritten = pushdown_where(query);
+    execute_inner(rewritten.as_ref().unwrap_or(query), graph, &mut cache)
 }
 
 /// Move `var.prop = literal` conjuncts from the top-level WHERE into the node
@@ -151,13 +149,14 @@ fn pushdown_where(q: &Query) -> Option<Query> {
         }
     };
 
+    // Borrow-scan first: the common no-move query must not clone anything.
     let mut moved: Vec<(String, String, Literal)> = Vec::new();
-    let mut residual: Vec<Expr> = Vec::new();
+    let mut residual: Vec<&Expr> = Vec::new();
     if let Some(w) = &q.where_ {
         let mut conjuncts = Vec::new();
         split_and(w, &mut conjuncts);
         for c in conjuncts {
-            match pushable(&c) {
+            match pushable(c) {
                 Some(t) => moved.push(t),
                 None => residual.push(c),
             }
@@ -187,6 +186,7 @@ fn pushdown_where(q: &Query) -> Option<Query> {
     }
     rw.where_ = residual
         .into_iter()
+        .cloned()
         .reduce(|l, r| Expr::BinOp(Op::And, Box::new(l), Box::new(r)));
     if let Some(u) = union_rw {
         rw.union = Some(Box::new(u));
@@ -194,12 +194,12 @@ fn pushdown_where(q: &Query) -> Option<Query> {
     Some(rw)
 }
 
-fn split_and(e: &Expr, out: &mut Vec<Expr>) {
+fn split_and<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     if let Expr::BinOp(Op::And, l, r) = e {
         split_and(l, out);
         split_and(r, out);
     } else {
-        out.push(e.clone());
+        out.push(e);
     }
 }
 
@@ -1542,6 +1542,8 @@ fn eval_expr(
             let Some(&idx) = b.node_vars.get(var) else {
                 return Ok(Value::Null);
             };
+            // Category labels were normalized to member kind names at parse
+            // time, so this stays an allocation-free per-row string compare.
             let kind_str = archived_kind_str(&graph.nodes[idx as usize]);
             Ok(Value::Bool(labels.iter().any(|l| l == kind_str)))
         }
@@ -3399,6 +3401,28 @@ mod tests {
             rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
                 .unwrap();
         f(archived);
+    }
+
+    #[test]
+    fn exec_virtual_label_callable_in_match() {
+        // :Callable must cover Function AND Method (and Constructor) — the
+        // :Function-only orphan-query shape silently missed every Method.
+        with_func_and_method(|g| {
+            let q = parse("MATCH (n:Callable) RETURN n.name ORDER BY n.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2);
+            assert_eq!(r.rows[0][0], Value::Str("my_func".into()));
+            assert_eq!(r.rows[1][0], Value::Str("my_method".into()));
+        });
+    }
+
+    #[test]
+    fn exec_virtual_label_callable_in_where() {
+        with_func_and_method(|g| {
+            let q = parse("MATCH (n) WHERE n:Callable RETURN n.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2, "WHERE n:Callable must match both kinds");
+        });
     }
 
     #[test]

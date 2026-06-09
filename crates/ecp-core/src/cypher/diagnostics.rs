@@ -201,10 +201,110 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b_chars.len()]
 }
 
+/// The caveat consumers attach when `absence_over_calls` fires. Lives next to
+/// the detection so a future in-process consumer (e.g. an MCP path that stops
+/// shelling out to the CLI) cannot get the detection without the text.
+pub const CALLS_LOWER_BOUND_CAVEAT: &str =
+    "Calls edges are a lower bound: ambiguous bare calls are suppressed at index time, \
+     so 'no incoming Calls' does not prove dead code. Cross-check candidates with grep \
+     or `ecp impact --target <name>` before acting.";
+
+/// True when the query treats the ABSENCE of a Calls edge as signal — the
+/// orphan-hunting shapes: `OPTIONAL MATCH (c)-[:Calls]->(f) … WHERE c IS NULL`
+/// or `WHERE NOT EXISTS((c)-[:Calls]->(f))`. Calls edges are a lower bound
+/// (the resolver suppresses ambiguous bare calls at index time), so these
+/// results over-report and the caller deserves a caveat. Untyped rels
+/// (`-->`) count as Calls-inclusive.
+///
+/// `WithClause` is projection-only in this AST (items + WHERE, no MATCH of its
+/// own), so `calls_in_matches` computed from `q.matches` is the right context
+/// for `with.where_` too — revisit if WITH ever grows patterns.
+pub fn absence_over_calls(q: &Query) -> bool {
+    fn pattern_may_be_calls(p: &crate::cypher::ast::Pattern) -> bool {
+        p.rels
+            .iter()
+            .any(|r| r.types.is_empty() || r.types.contains(&crate::graph::RelType::Calls))
+    }
+    fn expr_has_absence(e: &Expr, calls_in_matches: bool) -> bool {
+        match e {
+            Expr::IsNull { negated: false, .. } => calls_in_matches,
+            Expr::ExistsPattern { pattern, negated } => {
+                // NOT EXISTS over a Calls-shaped pattern is absence-as-signal
+                // regardless of what the MATCH clauses traverse.
+                *negated && pattern_may_be_calls(pattern)
+            }
+            Expr::UnaryOp(_, inner) => expr_has_absence(inner, calls_in_matches),
+            Expr::BinOp(_, l, r) => {
+                expr_has_absence(l, calls_in_matches) || expr_has_absence(r, calls_in_matches)
+            }
+            _ => false,
+        }
+    }
+    let calls_in_matches = q
+        .matches
+        .iter()
+        .flat_map(|mc| &mc.patterns)
+        .any(pattern_may_be_calls);
+    let in_where = q
+        .where_
+        .as_ref()
+        .is_some_and(|w| expr_has_absence(w, calls_in_matches));
+    let in_with = q
+        .with
+        .as_ref()
+        .and_then(|w| w.where_.as_ref())
+        .is_some_and(|w| expr_has_absence(w, calls_in_matches));
+    in_where || in_with || q.union.as_deref().is_some_and(absence_over_calls)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cypher::parse;
+
+    #[test]
+    fn absence_caveat_fires_on_optional_match_is_null() {
+        let q = parse(
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NULL RETURN f.name",
+        )
+        .unwrap();
+        assert!(absence_over_calls(&q));
+    }
+
+    #[test]
+    fn absence_caveat_fires_on_not_exists_calls() {
+        let q =
+            parse("MATCH (f:Function) WHERE NOT EXISTS((c)-[:Calls]->(f)) RETURN f.name").unwrap();
+        assert!(absence_over_calls(&q));
+    }
+
+    #[test]
+    fn absence_caveat_fires_on_untyped_rel() {
+        let q = parse("MATCH (f:Function) OPTIONAL MATCH (c)-->(f) WHERE c IS NULL RETURN f.name")
+            .unwrap();
+        assert!(absence_over_calls(&q));
+    }
+
+    #[test]
+    fn absence_caveat_silent_on_presence_queries() {
+        let q = parse("MATCH (c)-[:Calls]->(f) RETURN c.name, f.name").unwrap();
+        assert!(!absence_over_calls(&q));
+        let q = parse(
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NOT NULL RETURN f.name",
+        )
+        .unwrap();
+        assert!(
+            !absence_over_calls(&q),
+            "IS NOT NULL is presence, not absence"
+        );
+    }
+
+    #[test]
+    fn absence_caveat_silent_on_non_calls_rel() {
+        let q = parse("MATCH (t:Trait) WHERE NOT EXISTS((n)-[:Implements]->(t)) RETURN t.name")
+            .unwrap();
+        assert!(!absence_over_calls(&q), "Implements absence is reliable");
+    }
 
     #[test]
     fn flags_typo_with_suggestion() {

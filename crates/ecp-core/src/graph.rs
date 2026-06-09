@@ -317,11 +317,77 @@ impl NodeKind {
         matches!(self, Self::Property)
     }
 
+    /// Category super-labels for Cypher: `:Callable` / `:Type` / `:Data`
+    /// expand to their member kinds at label-resolution time (case-insensitive,
+    /// like `FromStr`). Exists because the Function/Method/Constructor split is
+    /// load-bearing for dispatch queries but a silent-miss trap for the common
+    /// agent shapes — a `:Function`-only orphan query skips every Method.
+    /// Membership mirrors `is_callable` / `is_type`; `Data` covers the
+    /// source-level value-holding kinds plus their DB/heuristic mirrors.
+    pub fn expand_category_label(label: &str) -> Option<&'static [NodeKind]> {
+        match label.to_lowercase().as_str() {
+            "callable" => Some(&[Self::Function, Self::Method, Self::Constructor]),
+            "type" => Some(&[
+                Self::Class,
+                Self::Interface,
+                Self::Struct,
+                Self::Enum,
+                Self::Typedef,
+                Self::Trait,
+            ]),
+            "data" => Some(&[
+                Self::Property,
+                Self::Variable,
+                Self::Const,
+                Self::EnumVariant,
+                Self::SchemaField,
+            ]),
+            _ => None,
+        }
+    }
+
     /// Number of `NodeKind` variants. Used to size the v10 `kind_offsets`
     /// CSR array (`length = VARIANT_COUNT + 1`). Append-only schema rule
     /// means this only ever grows; matching the variant total at the bottom
     /// of the enum keeps the CI green when a new kind lands.
     pub const VARIANT_COUNT: usize = 29;
+
+    /// Every variant in `#[repr(u8)]` order. The guard test pins
+    /// `ALL[i].as_index() == i` for all i, so a new variant that is appended
+    /// to the enum but not here (or vice versa) fails CI — this is what lets
+    /// other code (category-label guard tests, exhaustive dumps) iterate the
+    /// kind space without growing its own drift-prone list.
+    pub const ALL: [NodeKind; Self::VARIANT_COUNT] = [
+        Self::File,
+        Self::Function,
+        Self::Class,
+        Self::Method,
+        Self::Interface,
+        Self::Constructor,
+        Self::Property,
+        Self::Variable,
+        Self::Const,
+        Self::Import,
+        Self::Route,
+        Self::Process,
+        Self::Document,
+        Self::Section,
+        Self::EntryPoint,
+        Self::Struct,
+        Self::Enum,
+        Self::Typedef,
+        Self::Namespace,
+        Self::Module,
+        Self::Macro,
+        Self::Annotation,
+        Self::Trait,
+        Self::Impl,
+        Self::SchemaField,
+        Self::EventTopic,
+        Self::TransactionScope,
+        Self::EnumVariant,
+        Self::PathLiteral,
+    ];
 
     /// Discriminant as a usize, suitable for indexing into the v10
     /// `kind_offsets` array. Matches the `#[repr(u8)]` order so the
@@ -1112,6 +1178,33 @@ mod tests {
     use super::*;
     use crate::pool::StringPool;
     use rkyv::rancor::Error;
+
+    #[test]
+    fn node_kind_all_is_exhaustive_and_ordered() {
+        for (i, k) in NodeKind::ALL.iter().enumerate() {
+            assert_eq!(k.as_index(), i, "ALL out of repr order at {i}: {k:?}");
+        }
+    }
+
+    #[test]
+    fn category_labels_mirror_kind_predicates() {
+        // expand_category_label's slices are the queryable face of the
+        // is_callable / is_type predicates — any divergence is a schema bug.
+        let callable = NodeKind::expand_category_label("callable").unwrap();
+        let type_ = NodeKind::expand_category_label("type").unwrap();
+        for k in NodeKind::ALL {
+            assert_eq!(
+                k.is_callable(),
+                callable.contains(&k),
+                ":Callable diverges from is_callable for {k:?}"
+            );
+            assert_eq!(
+                k.is_type(),
+                type_.contains(&k),
+                ":Type diverges from is_type for {k:?}"
+            );
+        }
+    }
 
     fn make_base_graph(pool: StringPool, name_ref: StrRef, uid_val: u64) -> ZeroCopyGraph {
         ZeroCopyGraph {
