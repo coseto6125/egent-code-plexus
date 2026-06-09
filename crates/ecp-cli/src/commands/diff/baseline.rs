@@ -57,7 +57,7 @@ fn resolve_via_git(ref_str: &str, repo_dir: &Path) -> Result<String, EcpError> {
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(EcpError::Output(format!(
+        return Err(EcpError::InvalidArgument(format!(
             "cannot resolve baseline `{ref_str}`: {}\n\
              accepted: branch / tag / commit SHA / HEAD~N / PR/<n>",
             stderr.trim()
@@ -74,7 +74,7 @@ fn resolve_via_git(ref_str: &str, repo_dir: &Path) -> Result<String, EcpError> {
 
 fn resolve_pr(pr_num: &str, repo_dir: &Path) -> Result<String, EcpError> {
     if !pr_num.chars().all(|c| c.is_ascii_digit()) {
-        return Err(EcpError::Output(format!(
+        return Err(EcpError::InvalidArgument(format!(
             "PR number must be numeric, got `{pr_num}`"
         )));
     }
@@ -91,12 +91,14 @@ fn resolve_pr(pr_num: &str, repo_dir: &Path) -> Result<String, EcpError> {
         .current_dir(repo_dir)
         .output()
         .map_err(|_| {
-            EcpError::Output("gh CLI not found; install gh or pass commit SHA directly".into())
+            EcpError::Output(
+                "gh CLI is unavailable; install gh or pass a commit SHA directly".into(),
+            )
         })?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(EcpError::Output(format!(
+        return Err(EcpError::InvalidArgument(format!(
             "cannot resolve PR/{pr_num}: {}",
             stderr.trim()
         )));
