@@ -1463,7 +1463,7 @@ fn eval_expr(
             Ok(Value::Bool(is_null ^ negated))
         }
         ExistsPattern { pattern, negated } => {
-            Ok(Value::Bool(pattern_exists(pattern, b, graph) ^ negated))
+            Ok(Value::Bool(pattern_exists(pattern, b, graph)? ^ negated))
         }
         FunCall { .. } => Err(CypherError::Exec {
             msg: "function calls in WHERE not yet supported".into(),
@@ -1471,49 +1471,101 @@ fn eval_expr(
     }
 }
 
-/// Returns `true` if `pattern` matches at least one edge in `graph` given the
-/// current variable bindings in `b`. Short-circuits on the first matching edge —
-/// never materialises the full result set (performance red line).
+/// Returns `true` if `pattern` matches at least one path in `graph` given the
+/// current variable bindings in `b`.
 ///
-/// Supports two shapes:
+/// Shapes, fastest first:
 /// - Bare node pattern (`rels` empty): true iff the node var is bound.
-/// - Single-hop `(a)-[r]->(b)`: anchors on whichever endpoint is bound,
-///   walks that endpoint's adjacency list, and checks the other endpoint
-///   with `node_matches`. If neither endpoint is bound returns false immediately.
-fn pattern_exists(pattern: &Pattern, b: &Binding, graph: &ArchivedZeroCopyGraph) -> bool {
+/// - Single-hop fixed-length `(a)-[r]->(b)` with a bound endpoint: anchors on
+///   it, walks that adjacency list, short-circuits on the first match.
+/// - Single-hop fixed-length with NO bound endpoint ("does any such edge
+///   exist"): linear edge scan, short-circuiting on the first match.
+/// - Variable-length (`*min..max`) or multi-hop: delegated to the full
+///   pattern walker — `exec_pattern` anchors on a bound endpoint via its
+///   right-to-left reversal, but materialises matches rather than
+///   short-circuiting, so it requires at least one bound variable.
+fn pattern_exists(
+    pattern: &Pattern,
+    b: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+) -> Result<bool, CypherError> {
     if pattern.rels.is_empty() {
-        return pattern
+        return Ok(pattern
             .nodes
             .first()
             .and_then(|n| n.var.as_deref())
-            .is_some_and(|v| b.node_vars.contains_key(v));
+            .is_some_and(|v| b.node_vars.contains_key(v)));
     }
-    let n0 = &pattern.nodes[0];
-    let n1 = &pattern.nodes[1];
-    let rel = &pattern.rels[0];
-    let bound0 = n0.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
-    let bound1 = n1.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
-    let (anchor, target_pat, dir) = match (bound0, bound1) {
-        (Some(idx), _) => (idx, n1, rel.dir),
-        (None, Some(idx)) => (idx, n0, invert_dir(rel.dir)),
-        (None, None) => return false,
-    };
-    let probe = RelPat {
-        var: rel.var.clone(),
-        types: rel.types.clone(),
-        range: rel.range,
-        dir,
-    };
-    let mut found = false;
-    walk_rel(anchor, &probe, graph, |tgt, _e| {
-        if found {
-            return;
-        }
-        if node_matches(&graph.nodes[tgt as usize], tgt, target_pat, graph) {
-            found = true;
-        }
+    if pattern.rels.len() == 1 && pattern.rels[0].range.is_none() {
+        let n0 = &pattern.nodes[0];
+        let n1 = &pattern.nodes[1];
+        let rel = &pattern.rels[0];
+        let bound0 = n0.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
+        let bound1 = n1.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
+        let (anchor, target_pat, dir) = match (bound0, bound1) {
+            (Some(idx), _) => (idx, n1, rel.dir),
+            (None, Some(idx)) => (idx, n0, invert_dir(rel.dir)),
+            (None, None) => {
+                return Ok(edge_scan_exists(n0, n1, rel, graph));
+            }
+        };
+        let probe = RelPat {
+            var: rel.var.clone(),
+            types: rel.types.clone(),
+            range: rel.range,
+            dir,
+        };
+        let mut found = false;
+        walk_rel(anchor, &probe, graph, |tgt, _e| {
+            if found {
+                return;
+            }
+            if node_matches(&graph.nodes[tgt as usize], tgt, target_pat, graph) {
+                found = true;
+            }
+        });
+        return Ok(found);
+    }
+
+    let any_bound = pattern.nodes.iter().any(|n| {
+        n.var
+            .as_deref()
+            .is_some_and(|v| b.node_vars.get(v).is_some())
     });
-    found
+    if !any_bound {
+        return Err(CypherError::Exec {
+            msg: "EXISTS over a multi-hop or variable-length pattern needs at least one \
+                  variable bound by an outer MATCH"
+                .into(),
+        });
+    }
+    Ok(!exec_pattern(pattern, b, graph)?.is_empty())
+}
+
+/// "Does any edge match" for a single-hop pattern with no bound endpoint:
+/// scan the flat edge slice and short-circuit on the first hit.
+fn edge_scan_exists(
+    n0: &NodePat,
+    n1: &NodePat,
+    rel: &RelPat,
+    graph: &ArchivedZeroCopyGraph,
+) -> bool {
+    graph.edges.iter().any(|edge| {
+        if !rel.types.is_empty() && !rel.types.contains(&RelType::from(&edge.rel_type)) {
+            return false;
+        }
+        let s = edge.source.to_native();
+        let t = edge.target.to_native();
+        let fits = |a: u32, pa: &NodePat, z: u32, pz: &NodePat| {
+            node_matches(&graph.nodes[a as usize], a, pa, graph)
+                && node_matches(&graph.nodes[z as usize], z, pz, graph)
+        };
+        match rel.dir {
+            Direction::Out => fits(s, n0, t, n1),
+            Direction::In => fits(t, n0, s, n1),
+            Direction::Both => fits(s, n0, t, n1) || fits(t, n0, s, n1),
+        }
+    })
 }
 
 fn invert_dir(d: Direction) -> Direction {
@@ -3968,6 +4020,96 @@ mod tests {
                 2,
                 "inline kind filter must return both Function nodes, got {:?}",
                 r.rows
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // EXISTS: variable-length range, multi-hop, and unbound shapes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eval_exists_var_len_range_respects_depth_bounds() {
+        // chain a→b→c: paths into c are b→c (depth 1) and a→b→c (depth 2).
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*2..3]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "a→b→c is a depth-2 path into c");
+
+            let q = parse(
+                "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*3..4]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(
+                r.rows.is_empty(),
+                "no depth-3 path into c — *3..4 must not match the depth-1/2 paths"
+            );
+
+            // b has only the depth-1 edge a→b: *2..2 must NOT degrade to single-hop.
+            let q = parse(
+                "MATCH (f:Function {name: 'b'}) WHERE EXISTS((x)-[:Calls*2..2]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "only a depth-1 edge reaches b");
+        });
+    }
+
+    #[test]
+    fn eval_exists_multi_hop_pattern_supported() {
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "a→b→c satisfies the two-hop pattern");
+
+            let q = parse(
+                "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "nothing two-hops into a");
+        });
+    }
+
+    #[test]
+    fn eval_exists_single_hop_all_unbound_scans_edges() {
+        // EXISTS((x)-[:Calls]->(y)) with nothing bound = "does any Calls edge
+        // exist" — answered by a short-circuit edge scan, not silent false.
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Calls]->(y)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1, "the chain has Calls edges");
+
+            let q = parse(
+                "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Implements]->(y)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "the chain has no Implements edges");
+        });
+    }
+
+    #[test]
+    fn eval_exists_multi_hop_all_unbound_errors_not_silent_false() {
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(z)) RETURN f.name",
+            )
+            .unwrap();
+            let e = execute(&q, g, Path::new(".")).unwrap_err();
+            assert!(
+                format!("{e}").contains("bound"),
+                "must name the missing bound variable, got: {e}"
             );
         });
     }
