@@ -201,12 +201,24 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b_chars.len()]
 }
 
+/// The caveat consumers attach when `absence_over_calls` fires. Lives next to
+/// the detection so a future in-process consumer (e.g. an MCP path that stops
+/// shelling out to the CLI) cannot get the detection without the text.
+pub const CALLS_LOWER_BOUND_CAVEAT: &str =
+    "Calls edges are a lower bound: ambiguous bare calls are suppressed at index time, \
+     so 'no incoming Calls' does not prove dead code. Cross-check candidates with grep \
+     or `ecp impact --target <name>` before acting.";
+
 /// True when the query treats the ABSENCE of a Calls edge as signal — the
 /// orphan-hunting shapes: `OPTIONAL MATCH (c)-[:Calls]->(f) … WHERE c IS NULL`
 /// or `WHERE NOT EXISTS((c)-[:Calls]->(f))`. Calls edges are a lower bound
 /// (the resolver suppresses ambiguous bare calls at index time), so these
 /// results over-report and the caller deserves a caveat. Untyped rels
 /// (`-->`) count as Calls-inclusive.
+///
+/// `WithClause` is projection-only in this AST (items + WHERE, no MATCH of its
+/// own), so `calls_in_matches` computed from `q.matches` is the right context
+/// for `with.where_` too — revisit if WITH ever grows patterns.
 pub fn absence_over_calls(q: &Query) -> bool {
     fn pattern_may_be_calls(p: &crate::cypher::ast::Pattern) -> bool {
         p.rels

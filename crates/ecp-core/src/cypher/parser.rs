@@ -641,18 +641,28 @@ fn parse_primary(c: &mut Cursor) -> Result<Expr, CypherError> {
         // level so WHERE clauses can disjoin labels (the `WHERE n:A OR n:B`
         // form is illegal in OpenCypher; pipe is the correct disjunction).
         if c.eat(&Token::Colon) {
+            // Category labels (`Callable`/`Type`/`Data`) normalize to their
+            // member kind names HERE, same eager altitude as the MATCH-pattern
+            // path — eval stays a plain per-row string compare. Unknown labels
+            // pass through unchanged and fall through to `false` at eval.
             let mut labels = Vec::new();
+            let push_label =
+                |lab: String, labels: &mut Vec<String>| match NodeKind::expand_category_label(&lab)
+                {
+                    Some(set) => labels.extend(set.iter().map(|k| k.as_str().to_string())),
+                    None => labels.push(lab),
+                };
             let first = match c.advance() {
                 Some(Token::Ident(s)) => s.clone(),
                 _ => return Err(c.err("label name after :")),
             };
-            labels.push(first);
+            push_label(first, &mut labels);
             while c.eat(&Token::Pipe) {
                 let lab = match c.advance() {
                     Some(Token::Ident(s)) => s.clone(),
                     _ => return Err(c.err("label name after |")),
                 };
-                labels.push(lab);
+                push_label(lab, &mut labels);
             }
             return Ok(Expr::HasLabel(name, labels));
         }
@@ -999,6 +1009,22 @@ mod tests {
                 NodeKind::Class
             ]
         );
+    }
+
+    #[test]
+    fn where_label_category_normalizes_to_member_kinds() {
+        // WHERE-side category labels normalize at parse time (same eager
+        // altitude as the MATCH path) so eval stays a plain string compare.
+        let toks = tokenize("WHERE n:Callable").unwrap();
+        let mut c = Cursor::new(&toks);
+        let e = parse_where(&mut c).unwrap();
+        match e {
+            Expr::HasLabel(v, labels) => {
+                assert_eq!(v, "n");
+                assert_eq!(labels, vec!["Function", "Method", "Constructor"]);
+            }
+            other => panic!("expected HasLabel, got {other:?}"),
+        }
     }
 
     #[test]

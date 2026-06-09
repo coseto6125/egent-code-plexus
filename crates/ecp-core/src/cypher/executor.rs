@@ -98,10 +98,8 @@ pub fn execute(
     repo_root: &Path,
 ) -> Result<QueryResult, CypherError> {
     let mut cache = ContentCache::new(repo_root.to_path_buf());
-    match pushdown_where(query) {
-        Some(rewritten) => execute_inner(&rewritten, graph, &mut cache),
-        None => execute_inner(query, graph, &mut cache),
-    }
+    let rewritten = pushdown_where(query);
+    execute_inner(rewritten.as_ref().unwrap_or(query), graph, &mut cache)
 }
 
 /// Move `var.prop = literal` conjuncts from the top-level WHERE into the node
@@ -151,13 +149,14 @@ fn pushdown_where(q: &Query) -> Option<Query> {
         }
     };
 
+    // Borrow-scan first: the common no-move query must not clone anything.
     let mut moved: Vec<(String, String, Literal)> = Vec::new();
-    let mut residual: Vec<Expr> = Vec::new();
+    let mut residual: Vec<&Expr> = Vec::new();
     if let Some(w) = &q.where_ {
         let mut conjuncts = Vec::new();
         split_and(w, &mut conjuncts);
         for c in conjuncts {
-            match pushable(&c) {
+            match pushable(c) {
                 Some(t) => moved.push(t),
                 None => residual.push(c),
             }
@@ -187,6 +186,7 @@ fn pushdown_where(q: &Query) -> Option<Query> {
     }
     rw.where_ = residual
         .into_iter()
+        .cloned()
         .reduce(|l, r| Expr::BinOp(Op::And, Box::new(l), Box::new(r)));
     if let Some(u) = union_rw {
         rw.union = Some(Box::new(u));
@@ -194,12 +194,12 @@ fn pushdown_where(q: &Query) -> Option<Query> {
     Some(rw)
 }
 
-fn split_and(e: &Expr, out: &mut Vec<Expr>) {
+fn split_and<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     if let Expr::BinOp(Op::And, l, r) = e {
         split_and(l, out);
         split_and(r, out);
     } else {
-        out.push(e.clone());
+        out.push(e);
     }
 }
 
@@ -1542,12 +1542,10 @@ fn eval_expr(
             let Some(&idx) = b.node_vars.get(var) else {
                 return Ok(Value::Null);
             };
-            let kind = NodeKind::from(&graph.nodes[idx as usize].kind);
-            let kind_str = kind.as_str();
-            Ok(Value::Bool(labels.iter().any(|l| {
-                l == kind_str
-                    || NodeKind::expand_category_label(l).is_some_and(|set| set.contains(&kind))
-            })))
+            // Category labels were normalized to member kind names at parse
+            // time, so this stays an allocation-free per-row string compare.
+            let kind_str = archived_kind_str(&graph.nodes[idx as usize]);
+            Ok(Value::Bool(labels.iter().any(|l| l == kind_str)))
         }
         IsNull { expr, negated } => {
             let v = eval_expr(expr, b, graph, cache)?;
