@@ -98,7 +98,109 @@ pub fn execute(
     repo_root: &Path,
 ) -> Result<QueryResult, CypherError> {
     let mut cache = ContentCache::new(repo_root.to_path_buf());
-    execute_inner(query, graph, &mut cache)
+    match pushdown_where(query) {
+        Some(rewritten) => execute_inner(&rewritten, graph, &mut cache),
+        None => execute_inner(query, graph, &mut cache),
+    }
+}
+
+/// Move `var.prop = literal` conjuncts from the top-level WHERE into the node
+/// patterns that introduce those vars, so they filter during the scan/walk
+/// instead of after full materialisation (`MATCH (a)-[:Calls]->(b) WHERE
+/// b.name = 'x'` otherwise materialises every Calls binding first).
+///
+/// A conjunct moves only when ALL of:
+/// - it is a top-level AND term of shape `var.prop = lit` (either side),
+/// - the prop is not `content` (node_matches excludes it: needs a file read)
+///   and not `uid` against a string literal (that shape has a dedicated eval
+///   diagnostic worth keeping),
+/// - the var's first appearance across the ordered MATCH clauses is in a
+///   non-OPTIONAL clause — pushing into an OPTIONAL pattern would flip
+///   "row kept with null, then WHERE-filtered" into "row kept".
+///
+/// Returns the rewritten query, or `None` when nothing can move (the caller
+/// then runs the original, clone-free).
+fn pushdown_where(q: &Query) -> Option<Query> {
+    // var -> introduced by an OPTIONAL clause? First appearance wins.
+    let mut first_optional: Vec<(&str, bool)> = Vec::new();
+    for mc in &q.matches {
+        for pat in &mc.patterns {
+            for n in &pat.nodes {
+                if let Some(v) = n.var.as_deref() {
+                    if !first_optional.iter().any(|(k, _)| *k == v) {
+                        first_optional.push((v, mc.optional));
+                    }
+                }
+            }
+        }
+    }
+    let pushable = |e: &Expr| -> Option<(String, String, Literal)> {
+        let Expr::BinOp(Op::Eq, l, r) = e else {
+            return None;
+        };
+        let (v, p, lit) = match (&**l, &**r) {
+            (Expr::Prop(v, p), Expr::Lit(lit)) | (Expr::Lit(lit), Expr::Prop(v, p)) => (v, p, lit),
+            _ => return None,
+        };
+        if p == "content" || (p == "uid" && matches!(lit, Literal::Str(_))) {
+            return None;
+        }
+        match first_optional.iter().find(|(k, _)| k == v) {
+            Some((_, false)) => Some((v.clone(), p.clone(), lit.clone())),
+            _ => None,
+        }
+    };
+
+    let mut moved: Vec<(String, String, Literal)> = Vec::new();
+    let mut residual: Vec<Expr> = Vec::new();
+    if let Some(w) = &q.where_ {
+        let mut conjuncts = Vec::new();
+        split_and(w, &mut conjuncts);
+        for c in conjuncts {
+            match pushable(&c) {
+                Some(t) => moved.push(t),
+                None => residual.push(c),
+            }
+        }
+    }
+
+    let union_rw = q.union.as_deref().and_then(pushdown_where);
+    if moved.is_empty() && union_rw.is_none() {
+        return None;
+    }
+
+    let mut rw = q.clone();
+    for (v, p, lit) in moved {
+        let mut payload = Some((p, lit));
+        // The first non-OPTIONAL occurrence introduces the binding — filtering
+        // there prunes earliest; later occurrences agree via the binding pin.
+        'place: for mc in rw.matches.iter_mut().filter(|m| !m.optional) {
+            for pat in &mut mc.patterns {
+                for n in &mut pat.nodes {
+                    if n.var.as_deref() == Some(v.as_str()) {
+                        n.props.push(payload.take().expect("placed once"));
+                        break 'place;
+                    }
+                }
+            }
+        }
+    }
+    rw.where_ = residual
+        .into_iter()
+        .reduce(|l, r| Expr::BinOp(Op::And, Box::new(l), Box::new(r)));
+    if let Some(u) = union_rw {
+        rw.union = Some(Box::new(u));
+    }
+    Some(rw)
+}
+
+fn split_and(e: &Expr, out: &mut Vec<Expr>) {
+    if let Expr::BinOp(Op::And, l, r) = e {
+        split_and(l, out);
+        split_and(r, out);
+    } else {
+        out.push(e.clone());
+    }
 }
 
 fn execute_inner(
@@ -3010,6 +3112,87 @@ mod tests {
             assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
             assert_eq!(r.rows[0][1], Value::Str("fan".into()));
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // WHERE prop-equality pushdown into MATCH node patterns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pushdown_moves_eq_conjunct_into_node_props() {
+        let q = parse("MATCH (a:Function)-[:Calls]->(b) WHERE b.name = 'leaf_a' AND a.startLine > 0 RETURN a.name").unwrap();
+        let rw = pushdown_where(&q).expect("b.name = literal must be pushed");
+        let b_node = &rw.matches[0].patterns[0].nodes[1];
+        assert!(
+            b_node
+                .props
+                .iter()
+                .any(|(k, l)| k == "name" && matches!(l, Literal::Str(s) if s == "leaf_a")),
+            "pushed prop missing: {:?}",
+            b_node.props
+        );
+        // The non-pushable comparison stays as residual WHERE.
+        assert!(rw.where_.is_some(), "a.startLine > 0 must remain residual");
+    }
+
+    #[test]
+    fn pushdown_results_identical_on_fan() {
+        with_fan(|g| {
+            let q = parse("MATCH (a:Function)-[:Calls]->(b) WHERE b.name = 'leaf_a' RETURN a.name")
+                .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Str("fan".into()));
+        });
+    }
+
+    #[test]
+    fn pushdown_skips_var_introduced_by_optional_match() {
+        // Pushing into an OPTIONAL pattern flips "row kept with null, then
+        // WHERE-filtered" into "row kept" — left-join semantics must win.
+        let q = parse(
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c.name = 'fan' RETURN f.name",
+        )
+        .unwrap();
+        assert!(
+            pushdown_where(&q).is_none(),
+            "var first bound by OPTIONAL MATCH must not be pushed"
+        );
+    }
+
+    #[test]
+    fn pushdown_skips_uid_string_literal() {
+        // BinOp eval has a dedicated diagnostic for n.uid = "string"; pushing
+        // it down would silently return zero rows instead of that error.
+        let q = parse("MATCH (n:Function) WHERE n.uid = '42' RETURN n.name").unwrap();
+        assert!(pushdown_where(&q).is_none());
+        with_fan(|g| {
+            let err = execute(&q, g, Path::new(".")).unwrap_err();
+            assert!(format!("{err}").contains("uid"), "diagnostic lost: {err}");
+        });
+    }
+
+    #[test]
+    fn pushdown_skips_content_prop() {
+        // node_matches deliberately excludes "content" (file read).
+        let q = parse("MATCH (n:Function) WHERE n.content = 'x' RETURN n.name").unwrap();
+        assert!(pushdown_where(&q).is_none());
+    }
+
+    #[test]
+    fn pushdown_recurses_into_union_branches() {
+        let q = parse(
+            "MATCH (a:Function) WHERE a.name = 'fan' RETURN a.name UNION MATCH (b:Method) WHERE b.name = 'err' RETURN b.name",
+        )
+        .unwrap();
+        let rw = pushdown_where(&q).expect("both branches push");
+        assert!(rw.where_.is_none(), "first branch fully pushed");
+        let u = rw.union.as_ref().expect("union preserved");
+        assert!(u.where_.is_none(), "union branch fully pushed");
+        assert!(u.matches[0].patterns[0].nodes[0]
+            .props
+            .iter()
+            .any(|(k, _)| k == "name"));
     }
 
     #[test]
