@@ -35,6 +35,14 @@ pub struct IdentifierRange {
     pub col: usize,
 }
 
+/// One symbol as a language parser saw it, before cross-file resolution.
+///
+/// NOTE: function-level flags (`is_static` / `is_async` / `visibility` /
+/// `is_extern` …) do NOT live here — they are extracted by the per-language
+/// `function_meta/<lang>.rs` pass into a span-keyed side-table and merged onto
+/// the graph `Node` at build time. "RawNode has no such field" therefore does
+/// NOT mean the schema lacks the concept; check `function_meta` first (this
+/// exact misread has produced two wrong audit conclusions).
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawNode {
