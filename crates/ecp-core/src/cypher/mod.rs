@@ -10,7 +10,7 @@ pub mod parser;
 pub mod value;
 
 pub use ast::Query;
-pub use diagnostics::{unknown_properties, UnknownProp};
+pub use diagnostics::{absence_over_calls, unknown_properties, UnknownProp};
 pub use error::CypherError;
 pub use value::{QueryResult, Value};
 

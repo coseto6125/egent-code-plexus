@@ -317,6 +317,35 @@ impl NodeKind {
         matches!(self, Self::Property)
     }
 
+    /// Category super-labels for Cypher: `:Callable` / `:Type` / `:Data`
+    /// expand to their member kinds at label-resolution time (case-insensitive,
+    /// like `FromStr`). Exists because the Function/Method/Constructor split is
+    /// load-bearing for dispatch queries but a silent-miss trap for the common
+    /// agent shapes — a `:Function`-only orphan query skips every Method.
+    /// Membership mirrors `is_callable` / `is_type`; `Data` covers the
+    /// source-level value-holding kinds plus their DB/heuristic mirrors.
+    pub fn expand_category_label(label: &str) -> Option<&'static [NodeKind]> {
+        match label.to_lowercase().as_str() {
+            "callable" => Some(&[Self::Function, Self::Method, Self::Constructor]),
+            "type" => Some(&[
+                Self::Class,
+                Self::Interface,
+                Self::Struct,
+                Self::Enum,
+                Self::Typedef,
+                Self::Trait,
+            ]),
+            "data" => Some(&[
+                Self::Property,
+                Self::Variable,
+                Self::Const,
+                Self::EnumVariant,
+                Self::SchemaField,
+            ]),
+            _ => None,
+        }
+    }
+
     /// Number of `NodeKind` variants. Used to size the v10 `kind_offsets`
     /// CSR array (`length = VARIANT_COUNT + 1`). Append-only schema rule
     /// means this only ever grows; matching the variant total at the bottom

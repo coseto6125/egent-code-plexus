@@ -228,9 +228,9 @@ pub fn parse_node_pat(c: &mut Cursor) -> Result<NodePat, CypherError> {
 
     let mut kinds = Vec::new();
     if c.eat(&Token::Colon) {
-        kinds.push(parse_node_kind(c)?);
+        parse_node_kinds_into(c, &mut kinds)?;
         while c.eat(&Token::Pipe) {
-            kinds.push(parse_node_kind(c)?);
+            parse_node_kinds_into(c, &mut kinds)?;
         }
     }
 
@@ -312,13 +312,25 @@ pub fn parse_rel_pat(c: &mut Cursor) -> Result<RelPat, CypherError> {
     })
 }
 
-fn parse_node_kind(c: &mut Cursor) -> Result<NodeKind, CypherError> {
+/// One label segment → one concrete kind, or a category super-label
+/// (`Callable` / `Type` / `Data`) expanded to its member kinds.
+fn parse_node_kinds_into(c: &mut Cursor, kinds: &mut Vec<NodeKind>) -> Result<(), CypherError> {
     let name = match c.advance() {
         Some(Token::Ident(s)) => s.clone(),
         _ => return Err(c.err("NodeKind ident")),
     };
-    name.parse::<NodeKind>().map_err(|_| CypherError::Semantic {
-        msg: format!("unknown NodeKind '{name}'"),
+    if let Ok(k) = name.parse::<NodeKind>() {
+        kinds.push(k);
+        return Ok(());
+    }
+    if let Some(set) = NodeKind::expand_category_label(&name) {
+        kinds.extend_from_slice(set);
+        return Ok(());
+    }
+    Err(CypherError::Semantic {
+        msg: format!(
+            "unknown NodeKind '{name}' (concrete kinds like Function/Class, or the category labels Callable/Type/Data)"
+        ),
     })
 }
 
@@ -959,6 +971,42 @@ mod tests {
             }
             other => panic!("expected Not(HasLabel), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn node_pat_virtual_label_callable_expands() {
+        let toks = tokenize("(n:Callable)").unwrap();
+        let mut c = Cursor::new(&toks);
+        let np = parse_node_pat(&mut c).unwrap();
+        assert_eq!(
+            np.kinds,
+            vec![NodeKind::Function, NodeKind::Method, NodeKind::Constructor]
+        );
+    }
+
+    #[test]
+    fn node_pat_virtual_label_mixes_with_concrete_kinds() {
+        // Case-insensitive, and composable with the pipe disjunction.
+        let toks = tokenize("(n:callable|Class)").unwrap();
+        let mut c = Cursor::new(&toks);
+        let np = parse_node_pat(&mut c).unwrap();
+        assert_eq!(
+            np.kinds,
+            vec![
+                NodeKind::Function,
+                NodeKind::Method,
+                NodeKind::Constructor,
+                NodeKind::Class
+            ]
+        );
+    }
+
+    #[test]
+    fn node_pat_unknown_label_error_mentions_virtual_labels() {
+        let toks = tokenize("(n:Funtcion)").unwrap();
+        let mut c = Cursor::new(&toks);
+        let e = parse_node_pat(&mut c).unwrap_err();
+        assert!(format!("{e:?}").contains("Callable"), "got: {e:?}");
     }
 
     fn q(s: &str) -> Query {

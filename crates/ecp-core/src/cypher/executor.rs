@@ -1542,8 +1542,12 @@ fn eval_expr(
             let Some(&idx) = b.node_vars.get(var) else {
                 return Ok(Value::Null);
             };
-            let kind_str = archived_kind_str(&graph.nodes[idx as usize]);
-            Ok(Value::Bool(labels.iter().any(|l| l == kind_str)))
+            let kind = NodeKind::from(&graph.nodes[idx as usize].kind);
+            let kind_str = kind.as_str();
+            Ok(Value::Bool(labels.iter().any(|l| {
+                l == kind_str
+                    || NodeKind::expand_category_label(l).is_some_and(|set| set.contains(&kind))
+            })))
         }
         IsNull { expr, negated } => {
             let v = eval_expr(expr, b, graph, cache)?;
@@ -3399,6 +3403,28 @@ mod tests {
             rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
                 .unwrap();
         f(archived);
+    }
+
+    #[test]
+    fn exec_virtual_label_callable_in_match() {
+        // :Callable must cover Function AND Method (and Constructor) — the
+        // :Function-only orphan-query shape silently missed every Method.
+        with_func_and_method(|g| {
+            let q = parse("MATCH (n:Callable) RETURN n.name ORDER BY n.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2);
+            assert_eq!(r.rows[0][0], Value::Str("my_func".into()));
+            assert_eq!(r.rows[1][0], Value::Str("my_method".into()));
+        });
+    }
+
+    #[test]
+    fn exec_virtual_label_callable_in_where() {
+        with_func_and_method(|g| {
+            let q = parse("MATCH (n) WHERE n:Callable RETURN n.name").unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2, "WHERE n:Callable must match both kinds");
+        });
     }
 
     #[test]

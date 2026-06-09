@@ -13,6 +13,7 @@ pub struct CypherArgs {
     /// - Multi-hop patterns: (a)-[:Calls]->(b)-[:Calls]->(c)
     /// - Variable-length:    (a)-[:Calls*1..3]->(b)
     /// - Label alternation:  (a:Function|Method)
+    /// - Category labels:    (a:Callable) = Function|Method|Constructor · :Type = Class|Interface|Struct|Enum|Typedef|Trait · :Data = Property|Variable|Const|EnumVariant|SchemaField
     /// - WHERE:              =, <>, <, <=, >, >=, AND, OR, NOT, IN, =~, CONTAINS, STARTS WITH, ENDS WITH
     /// - Properties (node):  name, kind, filePath, uid, ownerClass, content,
     ///   line, startLine, endLine, visibility, decorators, and the boolean
@@ -105,10 +106,23 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
         .map(|row| row.iter().map(value_to_json_value).collect())
         .collect();
     let payload = build_payload(result.columns, rows_json);
+    // Orphan-shaped queries read the ABSENCE of a Calls edge as signal, but
+    // Calls edges are a lower bound (ambiguous bare calls are suppressed at
+    // index time) — without this caveat an LLM consumer deletes live code.
+    let absence_caveat = cypher::absence_over_calls(&query).then(|| {
+        "Calls edges are a lower bound: ambiguous bare calls are suppressed at index time, \
+         so 'no incoming Calls' does not prove dead code. Cross-check candidates with grep \
+         or `ecp impact --target <name>` before acting."
+            .to_string()
+    });
+    let caveat = match (engine.caveat(), absence_caveat) {
+        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+        (a, b) => a.or(b),
+    };
     emit_with_caveat(
         &payload,
         OutputFormat::parse(args.format.as_deref()),
-        engine.caveat(),
+        caveat,
     )?;
     Ok(())
 }
