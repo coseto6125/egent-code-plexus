@@ -960,21 +960,7 @@ fn exec_pattern(
         && !bound_in_base(&pat.nodes[0])
         && bound_in_base(&pat.nodes[pat.nodes.len() - 1])
     {
-        let rev = Pattern {
-            nodes: pat.nodes.iter().rev().cloned().collect(),
-            rels: pat
-                .rels
-                .iter()
-                .rev()
-                .map(|r| RelPat {
-                    var: r.var.clone(),
-                    types: r.types.clone(),
-                    range: r.range,
-                    dir: invert_dir(r.dir),
-                })
-                .collect(),
-        };
-        return exec_pattern(&rev, base, graph);
+        return exec_pattern(&invert_pattern(pat), base, graph);
     }
 
     // Frontier: (binding, last_matched_node_idx)
@@ -1539,7 +1525,7 @@ fn pattern_exists(
                 .into(),
         });
     }
-    Ok(!exec_pattern(pattern, b, graph)?.is_empty())
+    exists_dfs(pattern, b, graph)
 }
 
 /// "Does any edge match" for a single-hop pattern with no bound endpoint:
@@ -1574,6 +1560,161 @@ fn invert_dir(d: Direction) -> Direction {
         Direction::In => Direction::Out,
         Direction::Both => Direction::Both,
     }
+}
+
+/// The same pattern walked right-to-left: nodes reversed, hops reversed with
+/// each direction inverted. Matching semantics are identical; only the seed
+/// endpoint changes.
+fn invert_pattern(pat: &Pattern) -> Pattern {
+    Pattern {
+        nodes: pat.nodes.iter().rev().cloned().collect(),
+        rels: pat
+            .rels
+            .iter()
+            .rev()
+            .map(|r| RelPat {
+                var: r.var.clone(),
+                types: r.types.clone(),
+                range: r.range,
+                dir: invert_dir(r.dir),
+            })
+            .collect(),
+    }
+}
+
+/// Find-first DFS behind EXISTS for multi-hop / variable-length patterns:
+/// answers "does at least one full match exist" and stops at the first one,
+/// instead of materialising every per-hop binding like `exec_pattern`.
+/// On a high-fan-in pattern the difference is one path versus the full
+/// k-hop expansion.
+///
+/// Vars bound in `base` pin their hop targets; vars introduced inside the
+/// pattern are tracked in `local` so a var repeated within the pattern
+/// (a cycle probe like `(x)-->(y)-->(x)`) stays consistent. Edge vars are
+/// ignored — a boolean answer never reads them.
+fn exists_dfs(
+    pat: &Pattern,
+    base: &Binding,
+    graph: &ArchivedZeroCopyGraph,
+) -> Result<bool, CypherError> {
+    let bound_in_base = |np: &NodePat| {
+        np.var
+            .as_deref()
+            .is_some_and(|v| base.node_vars.get(v).is_some())
+    };
+    if pat.nodes.len() > 1
+        && !bound_in_base(&pat.nodes[0])
+        && bound_in_base(&pat.nodes[pat.nodes.len() - 1])
+    {
+        return exists_dfs(&invert_pattern(pat), base, graph);
+    }
+
+    fn hop(
+        pat: &Pattern,
+        depth: usize,
+        cur: u32,
+        base: &Binding,
+        local: &mut Vec<(String, u32)>,
+        graph: &ArchivedZeroCopyGraph,
+    ) -> bool {
+        if depth == pat.rels.len() {
+            return true;
+        }
+        let rel = &pat.rels[depth];
+        let next_np = &pat.nodes[depth + 1];
+        let pinned = next_np.var.as_deref().and_then(|v| {
+            base.node_vars
+                .get(v)
+                .copied()
+                .or_else(|| local.iter().find(|(k, _)| k == v).map(|(_, i)| *i))
+        });
+        // Collect this hop's neighbours (degree-bounded) so the recursion
+        // doesn't run inside walk_rel's borrow.
+        let mut targets: Vec<u32> = Vec::new();
+        match rel.range {
+            Some((min, max)) => {
+                for (tgt, _e) in bfs_var_len(cur, rel, graph, min, max) {
+                    targets.push(tgt);
+                }
+            }
+            None => walk_rel(cur, rel, graph, |tgt, _e| targets.push(tgt)),
+        }
+        for tgt in targets {
+            if pinned.is_some_and(|p| p != tgt) {
+                continue;
+            }
+            if !node_matches(&graph.nodes[tgt as usize], tgt, next_np, graph) {
+                continue;
+            }
+            let introduced = match next_np.var.as_deref() {
+                Some(v) if pinned.is_none() => {
+                    local.push((v.to_string(), tgt));
+                    true
+                }
+                _ => false,
+            };
+            if hop(pat, depth + 1, tgt, base, local, graph) {
+                return true;
+            }
+            if introduced {
+                local.pop();
+            }
+        }
+        false
+    }
+
+    let first_np = &pat.nodes[0];
+    let mut local: Vec<(String, u32)> = Vec::new();
+    let try_seed = |idx: u32, local: &mut Vec<(String, u32)>| -> bool {
+        if !node_matches(&graph.nodes[idx as usize], idx, first_np, graph) {
+            return false;
+        }
+        let introduced = match first_np.var.as_deref() {
+            Some(v) if base.node_vars.get(v).is_none() => {
+                local.push((v.to_string(), idx));
+                true
+            }
+            _ => false,
+        };
+        let hit = hop(pat, 0, idx, base, local, graph);
+        if introduced {
+            local.pop();
+        }
+        hit
+    };
+
+    if let Some(var) = first_np.var.as_deref() {
+        if let Some(&idx) = base.node_vars.get(var) {
+            return Ok(try_seed(idx, &mut local));
+        }
+    }
+    // Mirror exec_pattern's seeding: kind-CSR slice when available, else a
+    // full scan — but short-circuit on the first seed that completes.
+    let use_kind_csr = !graph.kind_offsets.is_empty()
+        && !first_np.kinds.is_empty()
+        && first_np
+            .kinds
+            .iter()
+            .all(|k| graph.kind_offsets.len() > k.as_index() + 1);
+    if use_kind_csr {
+        for &kind in &first_np.kinds {
+            let kidx = kind.as_index();
+            let start = graph.kind_offsets[kidx].to_native() as usize;
+            let end = graph.kind_offsets[kidx + 1].to_native() as usize;
+            for &raw in &graph.kind_node_idx[start..end] {
+                if try_seed(raw.to_native(), &mut local) {
+                    return Ok(true);
+                }
+            }
+        }
+        return Ok(false);
+    }
+    for idx in 0..graph.nodes.len() as u32 {
+        if try_seed(idx, &mut local) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn lit_to_value(l: &Literal) -> Value {
@@ -4111,6 +4252,21 @@ mod tests {
                 format!("{e}").contains("bound"),
                 "must name the missing bound variable, got: {e}"
             );
+        });
+    }
+
+    #[test]
+    fn eval_exists_repeated_var_within_pattern_stays_consistent() {
+        // (x)-->(y)-->(x) is a 2-cycle probe; the chain a→b→c has none, so the
+        // repeated `f` must pin both ends to the SAME node and the predicate
+        // must come back false — never true via two different endpoints.
+        with_three(|g| {
+            let q = parse(
+                "MATCH (f:Function {name: 'a'}) WHERE EXISTS((f)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "chain has no cycle back to a");
         });
     }
 

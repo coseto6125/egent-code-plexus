@@ -42,6 +42,11 @@ impl Engine {
             fs::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf());
         let file = File::open(&graph_path)?;
         let mmap = unsafe { Mmap::map(&file)? };
+        // Queries touch most of the graph (node slice scans, CSR walks), so a
+        // cold first invocation pays one page fault per 4K page. WillNeed lets
+        // the kernel read ahead in bulk; best-effort, and a no-op when warm.
+        #[cfg(unix)]
+        let _ = mmap.advise(memmap2::Advice::WillNeed);
         validate_header(&mmap)?;
         Ok(Self {
             mmap,
