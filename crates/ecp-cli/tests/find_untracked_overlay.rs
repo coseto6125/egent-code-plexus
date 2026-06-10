@@ -51,14 +51,26 @@ fn init_and_index(repo: &Path, home: &Path) {
 }
 
 fn find_exact(repo: &Path, home: &Path, pattern: &str) -> serde_json::Value {
-    let out = Command::new(ecp_bin())
-        .args(["find", pattern, "--format", "json"])
+    let mut cmd = Command::new(ecp_bin());
+    cmd.args(["find", pattern, "--format", "json"])
         .current_dir(repo)
         .env("HOME", home)
         .env_remove("ECP_HOME")
-        .env("ECP_SKIP_BG_REBUILD", "1")
-        .output()
-        .expect("find failed to spawn");
+        .env("ECP_SKIP_BG_REBUILD", "1");
+    // Pin the bare-CLI session path: with no host session id, the overlay
+    // writer and reader must still agree on one per-process fallback id.
+    // (A per-CALL fallback id sent fragments to one session dir and read
+    // another — overlay invisible exactly when no agent host is present.)
+    for key in [
+        "ECP_SESSION_ID",
+        "GEMINI_CLI_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+    ] {
+        cmd.env_remove(key);
+    }
+    let out = cmd.output().expect("find failed to spawn");
     assert!(
         out.status.success(),
         "find {pattern} failed: {}",
