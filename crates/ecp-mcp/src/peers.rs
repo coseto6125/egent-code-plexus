@@ -95,7 +95,11 @@ fn tool_peers() -> DerivedTool {
                 "format": {
                     "type": "string",
                     "enum": ["text", "json"],
-                    "description": "[status] Output format. `json` returns an array with session_id, agent_name, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid."
+                    "description": "[status] Output format. `json` returns an array with session_id, agent_name, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid. [plan] also honored."
+                },
+                "pairs": {
+                    "type": "boolean",
+                    "description": "[status] Lead overview: pairwise HARD dirty-overlap matrix across all alive sessions instead of the per-session list."
                 },
                 "repo": {
                     "type": "string",

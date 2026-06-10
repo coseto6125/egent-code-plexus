@@ -89,11 +89,19 @@ fn hard_payload_prefers_agent_name_keeps_session_id() {
         out.contains("Peer:   rust-parser (session abc12, pid 1234)"),
         "named peer line wrong: {out}"
     );
+    assert!(
+        out.contains(r#"coordinate: SendMessage to "rust-parser""#),
+        "named HARD must carry an actionable coordinate hint: {out}"
+    );
 
     let anon = render_payload(&[dirty_hard()]);
     assert!(
         anon.contains("Peer:   abc12 (pid 1234)"),
         "anon peer line wrong: {anon}"
+    );
+    assert!(
+        !anon.contains("SendMessage"),
+        "no speculative hint when the peer has no team name: {anon}"
     );
 }
 

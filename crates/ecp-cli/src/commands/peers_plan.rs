@@ -146,12 +146,9 @@ fn analyze(targets: &[TargetImpact]) -> (Vec<Overlap>, Vec<Vec<String>>) {
         }
     }
     let mut groups: HashMap<usize, Vec<String>> = HashMap::new();
-    for i in 0..n {
+    for (i, t) in targets.iter().enumerate() {
         let root = find(&mut parent, i);
-        groups
-            .entry(root)
-            .or_default()
-            .push(targets[i].name.clone());
+        groups.entry(root).or_default().push(t.name.clone());
     }
     let mut clusters: Vec<Vec<String>> = groups.into_values().collect();
     clusters.sort();

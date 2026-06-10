@@ -119,6 +119,11 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
             buf,
             "  Suggest: Review peer delta before saving conflicting edits"
         );
+        // Actionable only with a team name — session ids aren't addressable
+        // by the harness's SendMessage, so no hint rather than a dead one.
+        if let Some(n) = peer_name {
+            let _ = writeln!(buf, "  \u{2192} coordinate: SendMessage to \"{n}\"");
+        }
     }
 }
 
