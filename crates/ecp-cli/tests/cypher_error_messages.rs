@@ -55,17 +55,26 @@ fn init_repo_and_analyze(repo: &std::path::Path) {
 }
 
 /// Run a cypher query and return (exit status, stderr) without asserting on the
-/// status — callers decide whether they expect success (warning path) or
-/// failure (parse / semantic error path).
+/// status — callers decide whether they expect success or failure.
 fn run_capture(repo: &std::path::Path, query: &str) -> (std::process::ExitStatus, String) {
+    let (status, _stdout, stderr) = run_capture_full(repo, query);
+    (status, stderr)
+}
+
+/// Run a cypher query and return (exit status, stdout, stderr).
+fn run_capture_full(
+    repo: &std::path::Path,
+    query: &str,
+) -> (std::process::ExitStatus, String, String) {
     let out = Command::new(ecp_bin())
         .args(["cypher", query, "--format", "json"])
         .current_dir(repo)
         .env("HOME", repo)
         .output()
         .expect("command failed to spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    (out.status, stderr)
+    (out.status, stdout, stderr)
 }
 
 /// `MATCH` alone (no pattern) → parse error, non-zero exit.
@@ -125,54 +134,84 @@ fn semantic_unknown_reltype() {
     );
 }
 
-/// Unknown property name (`n.file` — the real one is `filePath`) evaluates to
-/// Null and silently returns 0 rows. The query still succeeds (exit 0), but a
-/// stderr warning must surface the typo + the closest known name, so the caller
-/// can tell a typo'd-property empty result from a genuine no-match.
+/// Unknown property with a close match (`n.file` → `filePath`): must fail
+/// with non-zero exit. The suggestion must appear in both stderr AND the stdout
+/// JSON payload, so LLM consumers reading only stdout see the error, not empty
+/// rows (which are indistinguishable from a genuine no-match).
 #[test]
-fn unknown_property_emits_warning() {
+fn unknown_property_with_suggestion_fails_with_error() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    let (status, stderr) = run_capture(
+    let (status, stdout, stderr) = run_capture_full(
         tmp.path(),
         "MATCH (n) WHERE n.file CONTAINS 'x' RETURN n.name",
     );
 
     assert!(
-        status.success(),
-        "unknown-property query should still succeed (warning, not error); stderr={stderr}"
+        !status.success(),
+        "unknown-property query must fail (exit non-zero); stderr={stderr} stdout={stdout}"
+    );
+    // Suggestion must be visible in stdout payload so LLM agents see it.
+    assert!(
+        stdout.contains("filePath"),
+        "stdout must carry the did-you-mean suggestion 'filePath': {stdout}"
     );
     assert!(
-        stderr.contains("unknown cypher property") && stderr.contains("file"),
-        "stderr should warn about unknown property 'file': {stderr}"
+        stdout.contains("file"),
+        "stdout must name the unknown property 'file': {stdout}"
     );
+    // Stderr carries the human-readable "Command failed:" line.
     assert!(
-        stderr.contains("filePath"),
-        "stderr should suggest the closest known property 'filePath': {stderr}"
+        stderr.contains("unknown") || stderr.contains("filePath"),
+        "stderr must reference the error: {stderr}"
     );
 }
 
-/// Legal properties — including `startLine` and the camelCase flag aliases that
-/// the doc comment omits — must NOT trigger the unknown-property warning.
-/// Guards against building the known-set from the stale doc comment.
+/// Unknown property with NO close match: must fail and list known properties in
+/// the stdout payload so the LLM can pick the right one.
 #[test]
-fn known_property_no_warning() {
+fn unknown_property_no_suggestion_fails_listing_known() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
-    let (status, stderr) = run_capture(
+    // "xyzzy" is far enough from every known property that no suggestion fires.
+    let (status, stdout, stderr) = run_capture_full(tmp.path(), "MATCH (n) RETURN n.xyzzy");
+
+    assert!(
+        !status.success(),
+        "unknown-property query must fail; stderr={stderr} stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("xyzzy"),
+        "stdout must name the unknown property 'xyzzy': {stdout}"
+    );
+    // At least one known property must appear in the stdout payload.
+    assert!(
+        stdout.contains("name") || stdout.contains("filePath") || stdout.contains("startLine"),
+        "stdout must list known properties: {stdout}"
+    );
+}
+
+/// Legal properties — including `startLine` and camelCase flag aliases —
+/// must not fail. Guards against building the known-set from the stale doc comment.
+#[test]
+fn known_property_succeeds() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_analyze(tmp.path());
+
+    let (status, stdout, stderr) = run_capture_full(
         tmp.path(),
         "MATCH (n) WHERE n.filePath CONTAINS 'x' RETURN n.startLine",
     );
 
     assert!(
         status.success(),
-        "valid query should succeed; stderr={stderr}"
+        "valid query should succeed; stderr={stderr} stdout={stdout}"
     );
     assert!(
-        !stderr.contains("unknown cypher property"),
-        "valid properties must not warn (startLine is legal): {stderr}"
+        !stdout.contains("unknown"),
+        "valid properties must not trigger an error payload: {stdout}"
     );
 }
 
