@@ -2,10 +2,136 @@ use crate::cypher::ast::*;
 use crate::cypher::error::CypherError;
 use crate::cypher::value::{QueryResult, Value};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::session::{OverlayView, ViewEdge, ViewNode};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// Base graph + optional L1 overlay view, threaded through the executor as
+/// one `Copy` bundle. Derefs to the base graph so the existing `graph.nodes`
+/// / `graph.edges` / `graph.string_pool` expressions read unchanged; all
+/// merged-space awareness lives in the helpers below. With `view: None`
+/// every helper degenerates to the pre-overlay behaviour.
+#[derive(Clone, Copy)]
+struct Gv<'a> {
+    g: &'a ArchivedZeroCopyGraph,
+    v: Option<&'a OverlayView>,
+}
+
+impl std::ops::Deref for Gv<'_> {
+    type Target = ArchivedZeroCopyGraph;
+    fn deref(&self) -> &Self::Target {
+        self.g
+    }
+}
+
+/// One merged-space node: a base archived node or an overlay virtual node.
+enum MNode<'a> {
+    Base(&'a crate::graph::ArchivedNode),
+    Virt(&'a ViewNode),
+}
+
+impl<'a> Gv<'a> {
+    fn base_len(&self) -> u32 {
+        self.g.nodes.len() as u32
+    }
+
+    /// Merged-space node fetch. `None` for an out-of-range virtual index.
+    fn mnode(&self, idx: u32) -> Option<MNode<'a>> {
+        if idx < self.base_len() {
+            Some(MNode::Base(&self.g.nodes[idx as usize]))
+        } else {
+            self.v.and_then(|v| v.node(idx)).map(MNode::Virt)
+        }
+    }
+
+    /// Scan visibility of a BASE index: false when the view suppressed it
+    /// (deleted on disk) or replaced it (its virtual twin scans instead).
+    fn base_visible(&self, idx: u32) -> bool {
+        match self.v {
+            Some(v) => v.redirect(idx) == Some(idx),
+            None => true,
+        }
+    }
+
+    /// Overlay edge behind a merged edge index (`>= g.edges.len()`), if any.
+    fn overlay_edge(&self, merged_edge_idx: u32) -> Option<&'a ViewEdge> {
+        let n = self.g.edges.len() as u32;
+        merged_edge_idx
+            .checked_sub(n)
+            .and_then(|i| self.v.and_then(|v| v.edge(i)))
+    }
+}
+
+impl<'a> MNode<'a> {
+    fn kind(&self) -> NodeKind {
+        match self {
+            Self::Base(n) => NodeKind::from(&n.kind),
+            Self::Virt(n) => n.kind,
+        }
+    }
+
+    fn uid(&self) -> u64 {
+        match self {
+            Self::Base(n) => n.uid.to_native(),
+            Self::Virt(n) => n.uid,
+        }
+    }
+
+    fn name(&self, gv: &Gv<'a>) -> &'a str {
+        match self {
+            Self::Base(n) => n.name.resolve(&gv.g.string_pool),
+            Self::Virt(n) => n.name.as_str(),
+        }
+    }
+
+    fn owner_class(&self, gv: &Gv<'a>) -> Option<&'a str> {
+        match self {
+            Self::Base(n) => {
+                let oc = n.owner_class.resolve(&gv.g.string_pool);
+                (!oc.is_empty()).then_some(oc)
+            }
+            Self::Virt(n) => n.owner_class.as_deref(),
+        }
+    }
+
+    fn file_path(&self, gv: &Gv<'a>) -> Option<&'a str> {
+        match self {
+            Self::Base(n) => n.has_owning_file().then(|| {
+                gv.g.files[n.file_idx.to_native() as usize]
+                    .path
+                    .resolve(&gv.g.string_pool)
+            }),
+            Self::Virt(n) => Some(&n.rel_path),
+        }
+    }
+
+    fn start_line(&self) -> u32 {
+        match self {
+            Self::Base(n) => n.start_line(),
+            Self::Virt(n) => n.start_line,
+        }
+    }
+
+    fn end_line(&self) -> u32 {
+        match self {
+            Self::Base(n) => n.end_line(),
+            Self::Virt(n) => n.end_line,
+        }
+    }
+
+    /// Base index to consult for function-meta / span-keyed side tables
+    /// (flags, decorators, content spans): the node itself when base, the
+    /// uid-identical base twin when replaced, `None` for a brand-new symbol
+    /// (no metas exist for it yet).
+    fn fm_idx(&self, idx: u32) -> Option<u32> {
+        match self {
+            Self::Base(_) => Some(idx),
+            Self::Virt(n) => n.replaced_base,
+        }
+    }
+}
 
 /// Small-N variable lookup. Replaces `HashMap<String, u32>` on the
 /// `Binding` fields cloned once per matched node in `exec_pattern`'s
@@ -95,11 +221,13 @@ impl ContentCache {
 pub fn execute(
     query: &Query,
     graph: &ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
     repo_root: &Path,
 ) -> Result<QueryResult, CypherError> {
+    let gv = Gv { g: graph, v: view };
     let mut cache = ContentCache::new(repo_root.to_path_buf());
     let rewritten = pushdown_where(query);
-    execute_inner(rewritten.as_ref().unwrap_or(query), graph, &mut cache)
+    execute_inner(rewritten.as_ref().unwrap_or(query), gv, &mut cache)
 }
 
 /// Move `var.prop = literal` conjuncts from the top-level WHERE into the node
@@ -205,7 +333,7 @@ fn split_and<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 
 fn execute_inner(
     query: &Query,
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Result<QueryResult, CypherError> {
     // Produce bindings from MATCH clauses.
@@ -563,7 +691,7 @@ fn expand_return_items(
 fn eval_return_expr(
     expr: &ReturnExpr,
     b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Result<Value, CypherError> {
     match expr {
@@ -572,12 +700,10 @@ fn eval_return_expr(
             if let Some(v) = b.computed.get(var) {
                 Ok(v.clone())
             } else if let Some(&idx) = b.node_vars.get(var) {
-                Ok(Value::Str(
-                    graph.nodes[idx as usize]
-                        .name
-                        .resolve(&graph.string_pool)
-                        .to_string(),
-                ))
+                Ok(match graph.mnode(idx) {
+                    Some(m) => Value::Str(m.name(&graph).to_string()),
+                    None => Value::Null,
+                })
             } else {
                 Ok(Value::Null)
             }
@@ -603,7 +729,7 @@ fn value_key(v: &Value) -> String {
 fn eval_return_item_rich(
     item: &ReturnItem,
     b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Value {
     match &item.expr {
@@ -613,21 +739,26 @@ fn eval_return_item_rich(
                 return v.clone();
             }
             if let Some(&idx) = b.node_vars.get(var) {
-                let n = &graph.nodes[idx as usize];
-                let file_path = if n.has_owning_file() {
-                    let fi = n.file_idx.to_native() as usize;
-                    graph.files[fi].path.resolve(&graph.string_pool).to_string()
-                } else {
-                    String::new()
+                let Some(m) = graph.mnode(idx) else {
+                    return Value::Null;
                 };
                 return Value::NodeRef {
                     idx,
-                    name: n.name.resolve(&graph.string_pool).to_string(),
-                    kind: archived_kind_str(n).to_string(),
-                    file_path,
+                    name: m.name(&graph).to_string(),
+                    kind: m.kind().as_str().to_string(),
+                    file_path: m.file_path(&graph).unwrap_or("").to_string(),
                 };
             }
             if let Some(&eidx) = b.edge_vars.get(var) {
+                if let Some(e) = graph.overlay_edge(eidx) {
+                    return Value::EdgeRef {
+                        src: e.source,
+                        tgt: e.target,
+                        rel_type: e.rel_type,
+                        confidence: e.confidence,
+                        reason: "l1-overlay".to_string(),
+                    };
+                }
                 let e = &graph.edges[eidx as usize];
                 let rt: crate::graph::RelType =
                     rkyv::deserialize::<crate::graph::RelType, rkyv::rancor::Error>(&e.rel_type)
@@ -652,7 +783,7 @@ fn eval_return_item_rich(
 fn exec_with(
     wc: &WithClause,
     bindings: Vec<Binding>,
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Result<Vec<Binding>, CypherError> {
     let has_agg = wc
@@ -809,12 +940,7 @@ fn is_aggregate_fn(name: &str) -> bool {
 /// `matches!` path). Supports the three functions LLM agents reach for most:
 /// `type(r)` → edge rel-type as Str; `id(n)` → node index as Int;
 /// `labels(n)` → single-element list of node-kind Str.
-fn eval_scalar_funcall(
-    name: &str,
-    args: &[Expr],
-    b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
-) -> Value {
+fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) -> Value {
     match name {
         "TYPE" => {
             // type(r) — args[0] must be a Var bound to an edge.
@@ -824,6 +950,9 @@ fn eval_scalar_funcall(
             let Some(&eidx) = b.edge_vars.get(var) else {
                 return Value::Null;
             };
+            if let Some(e) = graph.overlay_edge(eidx) {
+                return Value::Str(e.rel_type.as_str().to_string());
+            }
             let e = &graph.edges[eidx as usize];
             Value::Str(RelType::from(&e.rel_type).as_str().to_string())
         }
@@ -845,9 +974,10 @@ fn eval_scalar_funcall(
             let Some(&idx) = b.node_vars.get(var) else {
                 return Value::Null;
             };
-            Value::List(vec![Value::Str(
-                archived_kind_str(&graph.nodes[idx as usize]).to_string(),
-            )])
+            match graph.mnode(idx) {
+                Some(m) => Value::List(vec![Value::Str(m.kind().as_str().to_string())]),
+                None => Value::Null,
+            }
         }
         _ => Value::Null,
     }
@@ -1020,7 +1150,7 @@ impl Accumulator {
 fn exec_match_clause(
     mc: &MatchClause,
     prior: &[Binding],
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
 ) -> Result<Vec<Binding>, CypherError> {
     let mut out = Vec::new();
     for pat in &mc.patterns {
@@ -1043,11 +1173,21 @@ fn exec_match_clause(
 /// anonymous nodes (no var) still allow subsequent hops to advance correctly.
 /// If the first node pattern has a variable that is already bound in `base`,
 /// we seed from that single node rather than scanning all nodes.
-fn exec_pattern(
-    pat: &Pattern,
-    base: &Binding,
-    graph: &ArchivedZeroCopyGraph,
-) -> Result<Vec<Binding>, CypherError> {
+/// Push every overlay virtual node matching `np` — the virtual complement of
+/// the base scans (which skip suppressed/replaced base indices). Linear over
+/// O(dirty symbols); no-op without a view.
+fn seed_virtuals(graph: Gv<'_>, np: &NodePat, mut push: impl FnMut(u32)) {
+    if let Some(v) = graph.v {
+        for i in 0..v.virtual_nodes().len() as u32 {
+            let idx = graph.base_len() + i;
+            if node_matches(idx, np, graph) {
+                push(idx);
+            }
+        }
+    }
+}
+
+fn exec_pattern(pat: &Pattern, base: &Binding, graph: Gv<'_>) -> Result<Vec<Binding>, CypherError> {
     // If the first node is unbound but the last one is already bound, walk the
     // pattern right-to-left: reverse nodes/rels and invert each hop direction.
     // Seeding from the bound endpoint replaces a full-node scan per prior row
@@ -1086,8 +1226,7 @@ fn exec_pattern(
     // If the first node var is already bound, pin to that node only.
     if let Some(var) = &first_np.var {
         if let Some(&already) = base.node_vars.get(var) {
-            let node = &graph.nodes[already as usize];
-            if node_matches(node, already, first_np, graph) {
+            if node_matches(already, first_np, graph) {
                 frontier.push((base.clone(), already));
             }
         } else if use_kind_csr {
@@ -1097,8 +1236,7 @@ fn exec_pattern(
                 let end = graph.kind_offsets[kidx + 1].to_native() as usize;
                 for &raw in &graph.kind_node_idx[start..end] {
                     let idx = raw.to_native();
-                    let node = &graph.nodes[idx as usize];
-                    if !node_matches(node, idx, first_np, graph) {
+                    if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
                         continue;
                     }
                     let mut b = base.clone();
@@ -1106,15 +1244,25 @@ fn exec_pattern(
                     frontier.push((b, idx));
                 }
             }
+            seed_virtuals(graph, first_np, |idx| {
+                let mut b = base.clone();
+                b.node_vars.insert(var, idx);
+                frontier.push((b, idx));
+            });
         } else {
-            for (idx, node) in graph.nodes.iter().enumerate() {
-                if !node_matches(node, idx as u32, first_np, graph) {
+            for idx in 0..graph.nodes.len() as u32 {
+                if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
                     continue;
                 }
                 let mut b = base.clone();
-                b.node_vars.insert(var, idx as u32);
-                frontier.push((b, idx as u32));
+                b.node_vars.insert(var, idx);
+                frontier.push((b, idx));
             }
+            seed_virtuals(graph, first_np, |idx| {
+                let mut b = base.clone();
+                b.node_vars.insert(var, idx);
+                frontier.push((b, idx));
+            });
         }
     } else if use_kind_csr {
         for &kind in &first_np.kinds {
@@ -1123,21 +1271,22 @@ fn exec_pattern(
             let end = graph.kind_offsets[kidx + 1].to_native() as usize;
             for &raw in &graph.kind_node_idx[start..end] {
                 let idx = raw.to_native();
-                let node = &graph.nodes[idx as usize];
-                if !node_matches(node, idx, first_np, graph) {
+                if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
                     continue;
                 }
                 frontier.push((base.clone(), idx));
             }
         }
+        seed_virtuals(graph, first_np, |idx| frontier.push((base.clone(), idx)));
     } else {
         // Anonymous first node: scan all nodes.
-        for (idx, node) in graph.nodes.iter().enumerate() {
-            if !node_matches(node, idx as u32, first_np, graph) {
+        for idx in 0..graph.nodes.len() as u32 {
+            if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
                 continue;
             }
-            frontier.push((base.clone(), idx as u32));
+            frontier.push((base.clone(), idx));
         }
+        seed_virtuals(graph, first_np, |idx| frontier.push((base.clone(), idx)));
     }
 
     for (hop, rel) in pat.rels.iter().enumerate() {
@@ -1150,8 +1299,7 @@ fn exec_pattern(
                 Some((min, max)) => {
                     let reached = bfs_var_len(*cur_idx, rel, graph, min, max);
                     for (tgt_idx, edge_idx_opt) in reached {
-                        let tgt_node = &graph.nodes[tgt_idx as usize];
-                        if !node_matches(tgt_node, tgt_idx, next_np, graph) {
+                        if !node_matches(tgt_idx, next_np, graph) {
                             continue;
                         }
                         // A var already bound earlier pins the hop target —
@@ -1179,8 +1327,7 @@ fn exec_pattern(
                 // Single-hop
                 None => {
                     walk_rel(*cur_idx, rel, graph, |tgt_idx, edge_idx| {
-                        let tgt_node = &graph.nodes[tgt_idx as usize];
-                        if !node_matches(tgt_node, tgt_idx, next_np, graph) {
+                        if !node_matches(tgt_idx, next_np, graph) {
                             return;
                         }
                         // A var already bound earlier pins the hop target —
@@ -1216,7 +1363,7 @@ fn exec_pattern(
 fn bfs_var_len(
     start: u32,
     rel: &RelPat,
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
     min: u32,
     max: u32,
 ) -> Vec<(u32, Option<u32>)> {
@@ -1245,14 +1392,13 @@ fn bfs_var_len(
     out
 }
 
-fn node_matches(
-    node: &crate::graph::ArchivedNode,
-    node_idx: u32,
-    np: &NodePat,
-    graph: &ArchivedZeroCopyGraph,
-) -> bool {
+/// Merged-space node filter: `node_idx` may be a base or virtual index.
+fn node_matches(node_idx: u32, np: &NodePat, graph: Gv<'_>) -> bool {
+    let Some(m) = graph.mnode(node_idx) else {
+        return false;
+    };
     // Zero-cost discriminant read; reused by both label filter and prop_value below.
-    let kind: NodeKind = NodeKind::from(&node.kind);
+    let kind = m.kind();
     if !np.kinds.is_empty() && !np.kinds.contains(&kind) {
         return false;
     }
@@ -1263,7 +1409,7 @@ fn node_matches(
         // file read and is intentionally excluded from inline-map filtering).
         match key.as_str() {
             "name" => {
-                let n = node.name.resolve(&graph.string_pool);
+                let n = m.name(&graph);
                 if !matches!(lit, Literal::Str(s) if n == s.as_str()) {
                     return false;
                 }
@@ -1274,12 +1420,12 @@ fn node_matches(
                 }
             }
             "uid" => {
-                if !matches!(lit, Literal::Int(v) if node.uid.to_native() as i64 == *v) {
+                if !matches!(lit, Literal::Int(v) if m.uid() as i64 == *v) {
                     return false;
                 }
             }
             other => {
-                let val = node_prop_no_cache(node, node_idx, other, graph);
+                let val = node_prop_no_cache(node_idx, other, graph);
                 if !literal_matches_value(lit, &val) {
                     return false;
                 }
@@ -1295,64 +1441,51 @@ fn node_matches(
 /// so that `literal_matches_value` falls through to `false` (no match).
 /// "name", "kind", "uid" are handled by the hot-3 in `node_matches` and
 /// never reach this function.
-fn node_prop_no_cache(
-    n: &crate::graph::ArchivedNode,
-    node_idx: u32,
-    prop: &str,
-    graph: &ArchivedZeroCopyGraph,
-) -> Value {
+fn node_prop_no_cache(node_idx: u32, prop: &str, graph: Gv<'_>) -> Value {
+    let Some(m) = graph.mnode(node_idx) else {
+        return Value::Null;
+    };
+    // Function-meta side tables are span/idx-keyed on the BASE graph: a
+    // replaced virtual node reads its uid-identical base twin; a brand-new
+    // symbol has no metas yet and takes the sparse defaults.
+    let fm = m.fm_idx(node_idx);
     match prop {
-        "filePath" => Value::Str(if n.has_owning_file() {
-            let fi = n.file_idx.to_native() as usize;
-            graph.files[fi].path.resolve(&graph.string_pool).to_string()
-        } else {
-            String::new()
-        }),
-        "ownerClass" => {
-            let oc = n.owner_class.resolve(&graph.string_pool);
-            if oc.is_empty() {
-                Value::Null
-            } else {
-                Value::Str(oc.to_string())
-            }
+        "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").to_string()),
+        "ownerClass" => match m.owner_class(&graph) {
+            Some(oc) => Value::Str(oc.to_string()),
+            None => Value::Null,
+        },
+        "line" | "startLine" => Value::Int(m.start_line() as i64),
+        "endLine" => Value::Int(m.end_line() as i64),
+        "is_test" | "isTest" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_TEST))
         }
-        "line" | "startLine" => Value::Int(n.start_line() as i64),
-        "endLine" => Value::Int(n.end_line() as i64),
-        "is_test" | "isTest" => Value::Bool(archived_fm_flag(
+        "is_async" | "isAsync" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_ASYNC))
+        }
+        "is_static" | "isStatic" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_STATIC))
+        }
+        "is_abstract" | "isAbstract" => Value::Bool(fm_flag(
             graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_TEST,
-        )),
-        "is_async" | "isAsync" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_ASYNC,
-        )),
-        "is_static" | "isStatic" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_STATIC,
-        )),
-        "is_abstract" | "isAbstract" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
+            fm,
             crate::graph::FunctionMeta::FLAG_ABSTRACT,
         )),
-        "is_generator" | "isGenerator" => Value::Bool(archived_fm_flag(
+        "is_generator" | "isGenerator" => Value::Bool(fm_flag(
             graph,
-            node_idx,
+            fm,
             crate::graph::FunctionMeta::FLAG_GENERATOR,
         )),
-        "is_extern" | "isExtern" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_EXTERN,
-        )),
-        "visibility" => Value::Int(archived_fm_visibility(graph, node_idx) as i64),
+        "is_extern" | "isExtern" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_EXTERN))
+        }
+        "visibility" => Value::Int(fm.map_or(0, |i| archived_fm_visibility(graph, i)) as i64),
         // "content" excluded: requires file I/O; use WHERE n.content = … instead.
         // "decorators" is a list — inline-map equality against a list literal is
         // an edge case handled by literal_matches_value's List arm.
-        "decorators" => archived_fm_decorators(graph, node_idx),
+        "decorators" => fm
+            .map(|i| archived_fm_decorators(graph, i))
+            .unwrap_or(Value::List(Vec::new())),
         // Unknown property or "content": return Null so literal_matches_value → false.
         _ => Value::Null,
     }
@@ -1375,38 +1508,89 @@ fn literal_matches_value(lit: &Literal, val: &Value) -> bool {
 /// per matching edge. Closure-based instead of returning `Vec` so the frontier-expansion
 /// loop in `exec_pattern` doesn't pay a per-source-node allocation — at 110k+ source nodes
 /// the cumulative `Vec::new()` cost was ~6 ms of edge-traversal query time.
-fn walk_rel<F: FnMut(u32, u32)>(
-    from: u32,
-    rel: &RelPat,
-    graph: &ArchivedZeroCopyGraph,
-    mut emit: F,
-) {
+/// Merged-space hop: `from` may be a base or virtual index; emitted targets
+/// and edge indices are merged-space (overlay edges live at
+/// `graph.edges.len() + i`). Base adjacency anchors on the node itself
+/// (base) or its replaced base twin (virtual); the mask ⊆ rebuild invariant
+/// drops base edges whose rel the overlay re-resolves, and endpoints
+/// redirect into merged space. With no view this is exactly the old walk.
+fn walk_rel<F: FnMut(u32, u32)>(from: u32, rel: &RelPat, graph: Gv<'_>, mut emit: F) {
     let dir = rel.dir;
 
-    let check_type = |edge: &crate::graph::ArchivedEdge| -> bool {
-        if rel.types.is_empty() {
-            return true;
-        }
-        rel.types.contains(&RelType::from(&edge.rel_type))
+    let type_ok = |rt: RelType| -> bool { rel.types.is_empty() || rel.types.contains(&rt) };
+
+    // Base CSR anchor: None for a brand-new virtual symbol.
+    let anchor = if from < graph.base_len() {
+        Some(from as usize)
+    } else {
+        graph
+            .v
+            .and_then(|v| v.node(from))
+            .and_then(|n| n.replaced_base)
+            .map(|b| b as usize)
     };
 
     if matches!(dir, Direction::Out | Direction::Both) {
-        let s = graph.out_offsets[from as usize].to_native() as usize;
-        let e = graph.out_offsets[from as usize + 1].to_native() as usize;
-        for (i, edge) in graph.edges[s..e].iter().enumerate() {
-            if check_type(edge) {
-                emit(edge.target.to_native(), (s + i) as u32);
+        if let Some(a) = anchor {
+            let s = graph.out_offsets[a].to_native() as usize;
+            let e = graph.out_offsets[a + 1].to_native() as usize;
+            for (i, edge) in graph.edges[s..e].iter().enumerate() {
+                let rt = RelType::from(&edge.rel_type);
+                if !type_ok(rt) {
+                    continue;
+                }
+                let target = edge.target.to_native();
+                match graph.v {
+                    Some(v) => {
+                        if v.masks_base_edge(a as u32, rt) {
+                            continue;
+                        }
+                        if let Some(t) = v.redirect(target) {
+                            emit(t, (s + i) as u32);
+                        }
+                    }
+                    None => emit(target, (s + i) as u32),
+                }
+            }
+        }
+        if let Some(v) = graph.v {
+            for (ei, e) in v.overlay_out(from) {
+                if type_ok(e.rel_type) {
+                    emit(e.target, graph.g.edges.len() as u32 + ei);
+                }
             }
         }
     }
     if matches!(dir, Direction::In | Direction::Both) {
-        let s = graph.in_offsets[from as usize].to_native() as usize;
-        let e = graph.in_offsets[from as usize + 1].to_native() as usize;
-        for i in s..e {
-            let edge_idx = graph.in_edge_idx[i].to_native();
-            let edge = &graph.edges[edge_idx as usize];
-            if check_type(edge) {
-                emit(edge.source.to_native(), edge_idx);
+        if let Some(a) = anchor {
+            let s = graph.in_offsets[a].to_native() as usize;
+            let e = graph.in_offsets[a + 1].to_native() as usize;
+            for i in s..e {
+                let edge_idx = graph.in_edge_idx[i].to_native();
+                let edge = &graph.edges[edge_idx as usize];
+                let rt = RelType::from(&edge.rel_type);
+                if !type_ok(rt) {
+                    continue;
+                }
+                let source = edge.source.to_native();
+                match graph.v {
+                    Some(v) => {
+                        if v.masks_base_edge(source, rt) {
+                            continue;
+                        }
+                        if let Some(src) = v.redirect(source) {
+                            emit(src, edge_idx);
+                        }
+                    }
+                    None => emit(source, edge_idx),
+                }
+            }
+        }
+        if let Some(v) = graph.v {
+            for (ei, e) in v.overlay_in(from) {
+                if type_ok(e.rel_type) {
+                    emit(e.source, graph.g.edges.len() as u32 + ei);
+                }
             }
         }
     }
@@ -1415,7 +1599,7 @@ fn walk_rel<F: FnMut(u32, u32)>(
 fn eval_expr(
     e: &Expr,
     b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Result<Value, CypherError> {
     use Expr::*;
@@ -1427,18 +1611,25 @@ fn eval_expr(
                 return Ok(v.clone());
             }
             if let Some(&idx) = b.node_vars.get(var) {
-                return Ok(Value::Str(
-                    graph.nodes[idx as usize]
-                        .name
-                        .resolve(&graph.string_pool)
-                        .to_string(),
-                ));
+                return Ok(match graph.mnode(idx) {
+                    Some(m) => Value::Str(m.name(&graph).to_string()),
+                    None => Value::Null,
+                });
             }
             // Edge variables must resolve to non-Null so aggregates like
             // `count(r)` and `count(DISTINCT r)` see a value per binding.
             // Returns EdgeRef (same shape as the rich projection path uses)
             // so `value_key` partitions on edge identity for DISTINCT.
             if let Some(&eidx) = b.edge_vars.get(var) {
+                if let Some(e) = graph.overlay_edge(eidx) {
+                    return Ok(Value::EdgeRef {
+                        src: e.source,
+                        tgt: e.target,
+                        rel_type: e.rel_type,
+                        confidence: e.confidence,
+                        reason: "l1-overlay".to_string(),
+                    });
+                }
                 let e = &graph.edges[eidx as usize];
                 return Ok(Value::EdgeRef {
                     src: e.source.to_native(),
@@ -1544,7 +1735,10 @@ fn eval_expr(
             };
             // Category labels were normalized to member kind names at parse
             // time, so this stays an allocation-free per-row string compare.
-            let kind_str = archived_kind_str(&graph.nodes[idx as usize]);
+            let Some(m) = graph.mnode(idx) else {
+                return Ok(Value::Null);
+            };
+            let kind_str = m.kind().as_str();
             Ok(Value::Bool(labels.iter().any(|l| l == kind_str)))
         }
         IsNull { expr, negated } => {
@@ -1574,11 +1768,7 @@ fn eval_expr(
 ///   pattern walker — `exec_pattern` anchors on a bound endpoint via its
 ///   right-to-left reversal, but materialises matches rather than
 ///   short-circuiting, so it requires at least one bound variable.
-fn pattern_exists(
-    pattern: &Pattern,
-    b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
-) -> Result<bool, CypherError> {
+fn pattern_exists(pattern: &Pattern, b: &Binding, graph: Gv<'_>) -> Result<bool, CypherError> {
     if pattern.rels.is_empty() {
         return Ok(pattern
             .nodes
@@ -1610,7 +1800,7 @@ fn pattern_exists(
             if found {
                 return;
             }
-            if node_matches(&graph.nodes[tgt as usize], tgt, target_pat, graph) {
+            if node_matches(tgt, target_pat, graph) {
                 found = true;
             }
         });
@@ -1634,28 +1824,50 @@ fn pattern_exists(
 
 /// "Does any edge match" for a single-hop pattern with no bound endpoint:
 /// scan the flat edge slice and short-circuit on the first hit.
-fn edge_scan_exists(
-    n0: &NodePat,
-    n1: &NodePat,
-    rel: &RelPat,
-    graph: &ArchivedZeroCopyGraph,
-) -> bool {
-    graph.edges.iter().any(|edge| {
-        if !rel.types.is_empty() && !rel.types.contains(&RelType::from(&edge.rel_type)) {
+fn edge_scan_exists(n0: &NodePat, n1: &NodePat, rel: &RelPat, graph: Gv<'_>) -> bool {
+    let fits = |a: u32, pa: &NodePat, z: u32, pz: &NodePat| {
+        node_matches(a, pa, graph) && node_matches(z, pz, graph)
+    };
+    let base_hit = graph.edges.iter().any(|edge| {
+        let rt = RelType::from(&edge.rel_type);
+        if !rel.types.is_empty() && !rel.types.contains(&rt) {
             return false;
         }
         let s = edge.source.to_native();
-        let t = edge.target.to_native();
-        let fits = |a: u32, pa: &NodePat, z: u32, pz: &NodePat| {
-            node_matches(&graph.nodes[a as usize], a, pa, graph)
-                && node_matches(&graph.nodes[z as usize], z, pz, graph)
+        // mask ⊆ rebuild + endpoint redirect, mirroring walk_rel.
+        let (s, t) = match graph.v {
+            Some(v) => {
+                if v.masks_base_edge(s, rt) {
+                    return false;
+                }
+                match (v.redirect(s), v.redirect(edge.target.to_native())) {
+                    (Some(s), Some(t)) => (s, t),
+                    _ => return false,
+                }
+            }
+            None => (s, edge.target.to_native()),
         };
         match rel.dir {
             Direction::Out => fits(s, n0, t, n1),
             Direction::In => fits(t, n0, s, n1),
             Direction::Both => fits(s, n0, t, n1) || fits(t, n0, s, n1),
         }
-    })
+    });
+    base_hit
+        || graph.v.is_some_and(|v| {
+            v.edges().iter().any(|e| {
+                if !rel.types.is_empty() && !rel.types.contains(&e.rel_type) {
+                    return false;
+                }
+                match rel.dir {
+                    Direction::Out => fits(e.source, n0, e.target, n1),
+                    Direction::In => fits(e.target, n0, e.source, n1),
+                    Direction::Both => {
+                        fits(e.source, n0, e.target, n1) || fits(e.target, n0, e.source, n1)
+                    }
+                }
+            })
+        })
 }
 
 fn invert_dir(d: Direction) -> Direction {
@@ -1696,11 +1908,7 @@ fn invert_pattern(pat: &Pattern) -> Pattern {
 /// pattern are tracked in `local` so a var repeated within the pattern
 /// (a cycle probe like `(x)-->(y)-->(x)`) stays consistent. Edge vars are
 /// ignored — a boolean answer never reads them.
-fn exists_dfs(
-    pat: &Pattern,
-    base: &Binding,
-    graph: &ArchivedZeroCopyGraph,
-) -> Result<bool, CypherError> {
+fn exists_dfs(pat: &Pattern, base: &Binding, graph: Gv<'_>) -> Result<bool, CypherError> {
     let bound_in_base = |np: &NodePat| {
         np.var
             .as_deref()
@@ -1719,7 +1927,7 @@ fn exists_dfs(
         cur: u32,
         base: &Binding,
         local: &mut Vec<(String, u32)>,
-        graph: &ArchivedZeroCopyGraph,
+        graph: Gv<'_>,
     ) -> bool {
         if depth == pat.rels.len() {
             return true;
@@ -1747,7 +1955,7 @@ fn exists_dfs(
             if pinned.is_some_and(|p| p != tgt) {
                 continue;
             }
-            if !node_matches(&graph.nodes[tgt as usize], tgt, next_np, graph) {
+            if !node_matches(tgt, next_np, graph) {
                 continue;
             }
             let introduced = match next_np.var.as_deref() {
@@ -1770,7 +1978,7 @@ fn exists_dfs(
     let first_np = &pat.nodes[0];
     let mut local: Vec<(String, u32)> = Vec::new();
     let try_seed = |idx: u32, local: &mut Vec<(String, u32)>| -> bool {
-        if !node_matches(&graph.nodes[idx as usize], idx, first_np, graph) {
+        if !node_matches(idx, first_np, graph) {
             return false;
         }
         let introduced = match first_np.var.as_deref() {
@@ -1800,20 +2008,34 @@ fn exists_dfs(
             .kinds
             .iter()
             .all(|k| graph.kind_offsets.len() > k.as_index() + 1);
+    let virtual_range = || {
+        graph.base_len()..graph.base_len() + graph.v.map_or(0, |v| v.virtual_nodes().len()) as u32
+    };
     if use_kind_csr {
         for &kind in &first_np.kinds {
             let kidx = kind.as_index();
             let start = graph.kind_offsets[kidx].to_native() as usize;
             let end = graph.kind_offsets[kidx + 1].to_native() as usize;
             for &raw in &graph.kind_node_idx[start..end] {
-                if try_seed(raw.to_native(), &mut local) {
+                let idx = raw.to_native();
+                if graph.base_visible(idx) && try_seed(idx, &mut local) {
                     return Ok(true);
                 }
+            }
+        }
+        for idx in virtual_range() {
+            if try_seed(idx, &mut local) {
+                return Ok(true);
             }
         }
         return Ok(false);
     }
     for idx in 0..graph.nodes.len() as u32 {
+        if graph.base_visible(idx) && try_seed(idx, &mut local) {
+            return Ok(true);
+        }
+    }
+    for idx in virtual_range() {
         if try_seed(idx, &mut local) {
             return Ok(true);
         }
@@ -1871,17 +2093,14 @@ fn prop_value(
     var: &str,
     prop: &str,
     b: &Binding,
-    graph: &ArchivedZeroCopyGraph,
+    graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Value {
     // Check computed values first (set by WITH clause).
     if let Some(computed_val) = b.computed.get(var) {
         return match computed_val {
             // If the computed value is a NodeRef, resolve the property from the graph.
-            Value::NodeRef { idx, .. } => {
-                let n = &graph.nodes[*idx as usize];
-                node_prop_value(n, *idx, prop, graph, cache)
-            }
+            Value::NodeRef { idx, .. } => node_prop_value(*idx, prop, graph, cache),
             // EdgeRef: resolve edge properties.
             Value::EdgeRef {
                 src: _,
@@ -1906,10 +2125,17 @@ fn prop_value(
         };
     }
     if let Some(&idx) = b.node_vars.get(var) {
-        let n = &graph.nodes[idx as usize];
-        return node_prop_value(n, idx, prop, graph, cache);
+        return node_prop_value(idx, prop, graph, cache);
     }
     if let Some(&edge_idx) = b.edge_vars.get(var) {
+        if let Some(e) = graph.overlay_edge(edge_idx) {
+            return match prop {
+                "confidence" => Value::Float(e.confidence as f64),
+                "reason" => Value::Str("l1-overlay".to_string()),
+                "rel_type" => Value::Str(e.rel_type.as_str().to_string()),
+                _ => Value::Null,
+            };
+        }
         let e = &graph.edges[edge_idx as usize];
         return match prop {
             "confidence" => Value::Float(e.confidence.to_native() as f64),
@@ -1921,14 +2147,6 @@ fn prop_value(
     Value::Null
 }
 
-/// Zero-cost archived-kind → static variant name (`"Function"`, `"Class"`, …).
-/// Shared by the NodeRef projection, the `n.kind` property, and the WHERE
-/// label-test arm so a future Display tweak on `NodeKind` lands at one site
-/// instead of three.
-fn archived_kind_str(node: &crate::graph::ArchivedNode) -> &'static str {
-    NodeKind::from(&node.kind).as_str()
-}
-
 /// Resolve a single property from an archived node.
 /// `node_idx` is the position of `n` in `graph.nodes` — needed for the sparse
 /// `function_metas` binary-search lookup.
@@ -1937,94 +2155,104 @@ fn archived_kind_str(node: &crate::graph::ArchivedNode) -> &'static str {
 /// The set of names matched here is mirrored by `diagnostics::KNOWN_NODE_PROPS`
 /// (the unknown-property warning). A new arm added below must be added there
 /// too, or legal queries using it will false-positive as unknown.
-fn node_prop_value(
-    n: &crate::graph::ArchivedNode,
-    node_idx: u32,
-    prop: &str,
-    graph: &ArchivedZeroCopyGraph,
-    cache: &mut ContentCache,
-) -> Value {
+fn node_prop_value(node_idx: u32, prop: &str, graph: Gv<'_>, cache: &mut ContentCache) -> Value {
+    let Some(m) = graph.mnode(node_idx) else {
+        return Value::Null;
+    };
+    let fm = m.fm_idx(node_idx);
     match prop {
-        "name" => Value::Str(n.name.resolve(&graph.string_pool).to_string()),
+        "name" => Value::Str(m.name(&graph).to_string()),
         // u64 uid stored as i64 bits — no allocation per row.
-        "uid" => Value::Int(n.uid.to_native() as i64),
-        "ownerClass" => {
-            let oc = n.owner_class.resolve(&graph.string_pool);
-            if oc.is_empty() {
-                Value::Null
-            } else {
-                Value::Str(oc.to_string())
-            }
-        }
-        "kind" => Value::Str(archived_kind_str(n).to_string()),
+        "uid" => Value::Int(m.uid() as i64),
+        "ownerClass" => match m.owner_class(&graph) {
+            Some(oc) => Value::Str(oc.to_string()),
+            None => Value::Null,
+        },
+        "kind" => Value::Str(m.kind().as_str().to_string()),
         // 1-based, matching impact/find/inspect output (see Node::start_line).
         // `span.0` is the raw 0-based tree-sitter row; never expose it as `line`.
-        "line" | "startLine" => Value::Int(n.start_line() as i64),
-        "endLine" => Value::Int(n.end_line() as i64),
-        "filePath" => Value::Str(if n.has_owning_file() {
-            let fi = n.file_idx.to_native() as usize;
-            graph.files[fi].path.resolve(&graph.string_pool).to_string()
-        } else {
-            String::new()
-        }),
+        "line" | "startLine" => Value::Int(m.start_line() as i64),
+        "endLine" => Value::Int(m.end_line() as i64),
+        "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").to_string()),
         "content" => {
-            // Lazy file read + span slice.
-            let file_idx = n.file_idx.to_native();
-            let span = (
-                n.span.0.to_native(),
-                n.span.1.to_native(),
-                n.span.2.to_native(),
-                n.span.3.to_native(),
-            );
-            let slice = cache
-                .body_for_file(graph, file_idx)
-                .map(|body| slice_by_span(body, span))
-                .unwrap_or_default();
+            let slice = match &m {
+                MNode::Base(n) => {
+                    // Lazy file read + span slice.
+                    let file_idx = n.file_idx.to_native();
+                    let span = (
+                        n.span.0.to_native(),
+                        n.span.1.to_native(),
+                        n.span.2.to_native(),
+                        n.span.3.to_native(),
+                    );
+                    cache
+                        .body_for_file(&graph, file_idx)
+                        .map(|body| slice_by_span(body, span))
+                        .unwrap_or_default()
+                }
+                // Virtual node: the dirty file on disk is the truth, and the
+                // fragment carries line-resolution spans only — slice whole
+                // lines. Uncached read, bounded by dirty symbols per query.
+                MNode::Virt(vn) => {
+                    std::fs::read_to_string(cache.repo_root.join(vn.rel_path.as_ref()))
+                        .map(|body| {
+                            let start = vn.start_line.saturating_sub(1) as usize;
+                            let take =
+                                (vn.end_line.max(vn.start_line) - vn.start_line + 1) as usize;
+                            body.lines()
+                                .skip(start)
+                                .take(take)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default()
+                }
+            };
             Value::Str(slice)
         }
         // ── FunctionMeta flag properties ────────────────────────────────────
         // FunctionMeta is sparse (only Function/Method/Constructor nodes).
         // Nodes without a record return safe defaults (false / 0 / empty list)
         // so WHERE m.is_async = true works without needing a Null check.
-        "is_test" | "isTest" => Value::Bool(archived_fm_flag(
+        "is_test" | "isTest" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_TEST))
+        }
+        "is_async" | "isAsync" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_ASYNC))
+        }
+        "is_static" | "isStatic" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_STATIC))
+        }
+        "is_abstract" | "isAbstract" => Value::Bool(fm_flag(
             graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_TEST,
-        )),
-        "is_async" | "isAsync" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_ASYNC,
-        )),
-        "is_static" | "isStatic" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_STATIC,
-        )),
-        "is_abstract" | "isAbstract" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
+            fm,
             crate::graph::FunctionMeta::FLAG_ABSTRACT,
         )),
-        "is_generator" | "isGenerator" => Value::Bool(archived_fm_flag(
+        "is_generator" | "isGenerator" => Value::Bool(fm_flag(
             graph,
-            node_idx,
+            fm,
             crate::graph::FunctionMeta::FLAG_GENERATOR,
         )),
-        "is_extern" | "isExtern" => Value::Bool(archived_fm_flag(
-            graph,
-            node_idx,
-            crate::graph::FunctionMeta::FLAG_EXTERN,
-        )),
-        "visibility" => Value::Int(archived_fm_visibility(graph, node_idx) as i64),
-        "decorators" => archived_fm_decorators(graph, node_idx),
+        "is_extern" | "isExtern" => {
+            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_EXTERN))
+        }
+        "visibility" => Value::Int(fm.map_or(0, |i| archived_fm_visibility(graph, i)) as i64),
+        "decorators" => fm
+            .map(|i| archived_fm_decorators(graph, i))
+            .unwrap_or(Value::List(Vec::new())),
         _ => Value::Null,
     }
 }
 
+/// `archived_fm_flag` over an optional BASE index (`MNode::fm_idx`): a
+/// brand-new virtual symbol has no meta record and takes the sparse default.
+fn fm_flag(graph: Gv<'_>, base_idx: Option<u32>, flag: u16) -> bool {
+    base_idx.is_some_and(|i| archived_fm_flag(graph, i, flag))
+}
+
 /// Return true when the node's FunctionMeta has the given flag set.
 /// Nodes with no FunctionMeta record return false (sparse-record default).
-fn archived_fm_flag(graph: &ArchivedZeroCopyGraph, node_idx: u32, flag: u16) -> bool {
+fn archived_fm_flag(graph: Gv<'_>, node_idx: u32, flag: u16) -> bool {
     if flag <= u8::MAX as u16 && graph.node_flags.len() > node_idx as usize {
         return graph.node_flags[node_idx as usize] & flag as u8 != 0;
     }
@@ -2040,7 +2268,7 @@ fn archived_fm_flag(graph: &ArchivedZeroCopyGraph, node_idx: u32, flag: u16) -> 
 
 /// Return the 3-bit visibility code for the node's FunctionMeta.
 /// Nodes with no FunctionMeta record return 0 (public default).
-fn archived_fm_visibility(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> u8 {
+fn archived_fm_visibility(graph: Gv<'_>, node_idx: u32) -> u8 {
     match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
@@ -2056,7 +2284,7 @@ fn archived_fm_visibility(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> u8 {
 /// Nodes with no FunctionMeta record return an empty list.
 /// TODO: the per-row Vec allocation here is unavoidable with the current
 /// Value::List representation; profile if decorators filtering becomes a hotspot.
-fn archived_fm_decorators(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Value {
+fn archived_fm_decorators(graph: Gv<'_>, node_idx: u32) -> Value {
     let items = match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
@@ -2095,7 +2323,7 @@ fn const_str_in_decorators<'e>(
 /// Walk the archived decorator slice for `node_idx` and return true if any entry,
 /// after stripping a leading `@`, equals `needle`. Zero heap allocation — reads
 /// directly from the rkyv-archived string pool.
-fn archived_decorator_contains(graph: &ArchivedZeroCopyGraph, node_idx: u32, needle: &str) -> bool {
+fn archived_decorator_contains(graph: Gv<'_>, node_idx: u32, needle: &str) -> bool {
     match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
@@ -2470,7 +2698,7 @@ mod tests {
         with_two(|g| {
             let q =
                 parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a.name, b.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.columns, vec!["a.name", "b.name"]);
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("caller".into()));
@@ -2485,7 +2713,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name = 'caller' RETURN b.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("callee".into()));
         });
@@ -2498,7 +2726,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name = 'nobody' RETURN a.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.columns, vec!["a.name"]);
             assert!(r.rows.is_empty());
         });
@@ -2515,7 +2743,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls]->(b:Function)-[:Calls]->(c:Function) RETURN a.name, b.name, c.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("a".into()));
             assert_eq!(r.rows[0][1], Value::Str("b".into()));
@@ -2535,7 +2763,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls*1..3]->(b:Function) WHERE a.name = 'a' RETURN b.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 3, "expected 3 rows, got {:?}", r.rows);
             let names: Vec<&str> = r
                 .rows
@@ -2562,7 +2790,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls*2..3]->(b:Function) WHERE a.name = 'a' RETURN b.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 2, "expected c and d, got {:?}", r.rows);
         });
     }
@@ -2577,7 +2805,7 @@ mod tests {
         with_two(|g| {
             let q =
                 parse("MATCH (b:Function)<-[:Calls]-(a:Function) RETURN a.name, b.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("caller".into()));
             assert_eq!(r.rows[0][1], Value::Str("callee".into()));
@@ -2590,7 +2818,7 @@ mod tests {
         with_two(|g| {
             let q =
                 parse("MATCH (a:Function)-[:Calls]-(b:Function) RETURN a.name, b.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 2);
         });
     }
@@ -2606,7 +2834,7 @@ mod tests {
                 "MATCH (a:Function)-[r:Calls]->(b:Function) WHERE r.confidence > 0.5 RETURN a.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
         });
     }
@@ -2618,7 +2846,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name IN ['caller', 'other'] RETURN b.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
         });
     }
@@ -2630,7 +2858,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name =~ '.*aller.*' RETURN a.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
         });
     }
@@ -2642,7 +2870,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls]->(b:Function) WHERE b.name CONTAINS 'all' RETURN b.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
         });
     }
@@ -2654,7 +2882,7 @@ mod tests {
                 "MATCH (a:Function)-[:Calls]->(b:Function) WHERE a.name STARTS WITH 'cal' RETURN a.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
         });
     }
@@ -2666,7 +2894,7 @@ mod tests {
                 "MATCH (a:Function)-[r:Calls]->(b:Function) WHERE r.reason = 'ast-call' RETURN a.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
         });
     }
@@ -2680,7 +2908,7 @@ mod tests {
     fn exec_scalar_type_of_edge() {
         with_two(|g| {
             let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN type(r)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("Calls".into()));
         });
@@ -2690,7 +2918,7 @@ mod tests {
     fn exec_scalar_id_of_node() {
         with_two(|g| {
             let q = parse("MATCH (a:Function) RETURN id(a)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 2);
             // First node's id is its index in graph.nodes.
             assert!(matches!(r.rows[0][0], Value::Int(_)));
@@ -2701,7 +2929,7 @@ mod tests {
     fn exec_scalar_labels_of_node() {
         with_two(|g| {
             let q = parse("MATCH (a:Function) WHERE a.name = 'caller' RETURN labels(a)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             match &r.rows[0][0] {
                 Value::List(xs) => {
@@ -2720,7 +2948,7 @@ mod tests {
             let q =
                 parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN type(r), count(*) AS c")
                     .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("Calls".into()));
             assert_eq!(r.rows[0][1], Value::Int(1));
@@ -2792,7 +3020,7 @@ mod tests {
         // impact/find output — never the raw 0-based span.
         with_lone(|g| {
             let q = parse("MATCH (n:Function) RETURN n.line, n.startLine, n.endLine").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Int(1), "n.line = span.0 + 1");
             assert_eq!(r.rows[0][1], Value::Int(1), "n.startLine = span.0 + 1");
@@ -2807,7 +3035,7 @@ mod tests {
             let q =
                 parse("MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(b) RETURN a.name, b.name")
                     .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 1,
@@ -2926,7 +3154,7 @@ mod tests {
         // fan graph: MATCH (a:Function) RETURN COUNT(*) → 3 nodes total
         with_fan(|g| {
             let q = parse("MATCH (a:Function) RETURN COUNT(*)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "expected 1 aggregated row");
             assert_eq!(r.rows[0][0], Value::Int(3));
         });
@@ -2939,7 +3167,7 @@ mod tests {
         with_fan(|g| {
             let q =
                 parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN a.name, COUNT(*)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             // fan calls both leaf_a and leaf_b → 2 bindings, all with a.name="fan"
             // so 1 group: fan → COUNT=2
             assert_eq!(r.rows.len(), 1, "expected 1 group: fan→2, got {:?}", r.rows);
@@ -2956,7 +3184,7 @@ mod tests {
             let q =
                 parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN COUNT(DISTINCT b.name)")
                     .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Int(2));
         });
@@ -2974,7 +3202,7 @@ mod tests {
         // COUNT(r) = 2, matching COUNT(*) on the same pattern.
         with_fan(|g| {
             let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN COUNT(r)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(
                 r.rows[0][0],
@@ -2993,7 +3221,7 @@ mod tests {
         with_fan(|g| {
             let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN COUNT(DISTINCT r)")
                 .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Int(2));
         });
@@ -3007,7 +3235,7 @@ mod tests {
                 "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN SUM(r.confidence), MIN(r.confidence), MAX(r.confidence), AVG(r.confidence)",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             // SUM ≈ 1.4 (f32→f64 precision: tolerance 1e-6)
             assert!(matches!(r.rows[0][0], Value::Float(f) if (f - 1.4).abs() < 1e-6));
@@ -3026,7 +3254,7 @@ mod tests {
         with_fan(|g| {
             let q =
                 parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN COLLECT(b.name)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             let list = match &r.rows[0][0] {
                 Value::List(v) => v.clone(),
@@ -3049,7 +3277,7 @@ mod tests {
                 "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(b) WITH a, COUNT(b) AS n WHERE n > 0 RETURN a.name, n",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 1,
@@ -3067,7 +3295,7 @@ mod tests {
         with_fan(|g| {
             let q = parse("MATCH (a:Function)-[:Calls]->(b:Function) WITH a.name AS nm RETURN nm")
                 .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             // Two hops from fan: both have a.name="fan"
             assert_eq!(r.rows.len(), 2);
             assert_eq!(r.columns, vec!["nm"]);
@@ -3082,7 +3310,7 @@ mod tests {
             let q =
                 parse("MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(b) RETURN a.name, b.name")
                     .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             // caller has callee; callee has no outgoing → 2 rows
             assert_eq!(r.rows.len(), 2);
             let caller_row = r
@@ -3109,7 +3337,7 @@ mod tests {
                 "MATCH (f:Function {name: 'leaf_a'}) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN f.name, c.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "expected exactly the fan→leaf_a edge");
             assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
             assert_eq!(r.rows[0][1], Value::Str("fan".into()));
@@ -3142,7 +3370,7 @@ mod tests {
         with_fan(|g| {
             let q = parse("MATCH (a:Function)-[:Calls]->(b) WHERE b.name = 'leaf_a' RETURN a.name")
                 .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("fan".into()));
         });
@@ -3169,7 +3397,7 @@ mod tests {
         let q = parse("MATCH (n:Function) WHERE n.uid = '42' RETURN n.name").unwrap();
         assert!(pushdown_where(&q).is_none());
         with_fan(|g| {
-            let err = execute(&q, g, Path::new(".")).unwrap_err();
+            let err = execute(&q, g, None, Path::new(".")).unwrap_err();
             assert!(format!("{err}").contains("uid"), "diagnostic lost: {err}");
         });
     }
@@ -3205,7 +3433,7 @@ mod tests {
                 "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NULL RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "only the uncalled function survives");
             assert_eq!(r.rows[0][0], Value::Str("fan".into()));
         });
@@ -3218,7 +3446,7 @@ mod tests {
                 "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NOT NULL RETURN f.name ORDER BY f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 2);
             assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
             assert_eq!(r.rows[1][0], Value::Str("leaf_b".into()));
@@ -3234,7 +3462,7 @@ mod tests {
         // RETURN a for a node-bound var → 3 columns: a.name, a.kind, a.filePath
         with_two(|g| {
             let q = parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN a").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.columns, vec!["a.name", "a.kind", "a.filePath"]);
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0].len(), 3, "expected 3 values per row");
@@ -3249,7 +3477,7 @@ mod tests {
         // RETURN r for an edge-bound var → 3 columns: r.rel_type, r.confidence, r.reason
         with_two(|g| {
             let q = parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN r").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.columns, vec!["r.rel_type", "r.confidence", "r.reason"]);
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0].len(), 3);
@@ -3269,7 +3497,7 @@ mod tests {
         // Actually nodes are fan(0), leaf_a(1), leaf_b(2). Sort asc → fan < leaf_a < leaf_b
         with_fan(|g| {
             let q = parse("MATCH (a:Function) RETURN a.name ORDER BY a.name ASC").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 3);
             let names: Vec<&str> = r
                 .rows
@@ -3291,7 +3519,7 @@ mod tests {
     fn exec_order_by_desc() {
         with_fan(|g| {
             let q = parse("MATCH (a:Function) RETURN a.name ORDER BY a.name DESC").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             let names: Vec<&str> = r
                 .rows
                 .iter()
@@ -3314,7 +3542,7 @@ mod tests {
         with_fan(|g| {
             let q =
                 parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN DISTINCT a.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "expected 1 distinct row, got {:?}", r.rows);
             assert_eq!(r.rows[0][0], Value::Str("fan".into()));
         });
@@ -3326,7 +3554,7 @@ mod tests {
         with_fan(|g| {
             let q = parse("MATCH (a:Function) RETURN a.name ORDER BY a.name ASC SKIP 1 LIMIT 1")
                 .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "expected 1 row after skip+limit");
             assert_eq!(r.rows[0][0], Value::Str("leaf_a".into()));
         });
@@ -3409,7 +3637,7 @@ mod tests {
         // :Function-only orphan-query shape silently missed every Method.
         with_func_and_method(|g| {
             let q = parse("MATCH (n:Callable) RETURN n.name ORDER BY n.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 2);
             assert_eq!(r.rows[0][0], Value::Str("my_func".into()));
             assert_eq!(r.rows[1][0], Value::Str("my_method".into()));
@@ -3420,7 +3648,7 @@ mod tests {
     fn exec_virtual_label_callable_in_where() {
         with_func_and_method(|g| {
             let q = parse("MATCH (n) WHERE n:Callable RETURN n.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 2, "WHERE n:Callable must match both kinds");
         });
     }
@@ -3431,7 +3659,7 @@ mod tests {
         with_func_and_method(|g| {
             let q = parse("MATCH (a:Function) RETURN a.name UNION MATCH (b:Method) RETURN b.name")
                 .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             // 1 Function + 1 Method = 2 rows (distinct by default).
             assert_eq!(r.columns, vec!["a.name"], "left-side column names kept");
             let names: Vec<&str> = r
@@ -3462,7 +3690,7 @@ mod tests {
                 "MATCH (a:Function) RETURN a.name UNION ALL MATCH (b:Function) RETURN b.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 6, "UNION ALL keeps duplicates: 3+3");
         });
     }
@@ -3474,7 +3702,7 @@ mod tests {
             let q =
                 parse("MATCH (a:Function) RETURN a.name UNION MATCH (b:Function) RETURN b.name")
                     .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 3, "UNION deduplicates: 3 unique names");
         });
     }
@@ -3547,7 +3775,7 @@ mod tests {
                 .unwrap();
 
         let q = parse("MATCH (a:Function) RETURN a.content").unwrap();
-        let result = execute(&q, archived, dir.path()).unwrap();
+        let result = execute(&q, archived, None, dir.path()).unwrap();
 
         assert_eq!(result.columns, vec!["a.content"]);
         assert_eq!(result.rows.len(), 1);
@@ -3740,7 +3968,7 @@ mod tests {
         with_fm(|g| {
             let q =
                 parse("MATCH (f:Function|Method) WHERE f.is_async = true RETURN f.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             let names: Vec<_> = r
                 .rows
                 .iter()
@@ -3764,7 +3992,7 @@ mod tests {
         with_fm(|g| {
             let q =
                 parse("MATCH (f:Function|Method) WHERE f.is_test = true RETURN f.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             let names: Vec<_> = r
                 .rows
                 .iter()
@@ -3793,7 +4021,7 @@ mod tests {
             let q =
                 parse("MATCH (m:Function|Method) WHERE 'Override' IN m.decorators RETURN m.name")
                     .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "expected exactly override_method");
             assert_eq!(r.rows[0][0], Value::Str("override_method".into()));
         });
@@ -3807,7 +4035,7 @@ mod tests {
             let q_py =
                 parse("MATCH (f:Function|Method) WHERE 'app.get' IN f.decorators RETURN f.name")
                     .unwrap();
-            let r_py = execute(&q_py, g, Path::new(".")).unwrap();
+            let r_py = execute(&q_py, g, None, Path::new(".")).unwrap();
             assert_eq!(r_py.rows.len(), 1, "expected py_route for app.get");
             assert_eq!(r_py.rows[0][0], Value::Str("py_route".into()));
 
@@ -3815,7 +4043,7 @@ mod tests {
             let q_java =
                 parse("MATCH (m:Function|Method) WHERE 'Override' IN m.decorators RETURN m.name")
                     .unwrap();
-            let r_java = execute(&q_java, g, Path::new(".")).unwrap();
+            let r_java = execute(&q_java, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r_java.rows.len(),
                 1,
@@ -3827,7 +4055,7 @@ mod tests {
             let q_raw =
                 parse("MATCH (m:Function|Method) WHERE '@Override' IN m.decorators RETURN m.name")
                     .unwrap();
-            let r_raw = execute(&q_raw, g, Path::new(".")).unwrap();
+            let r_raw = execute(&q_raw, g, None, Path::new(".")).unwrap();
             assert!(r_raw.rows.is_empty(), "@Override with @ should not match");
         });
     }
@@ -3838,7 +4066,7 @@ mod tests {
         with_fm(|g| {
             let q =
                 parse("MATCH (f:Function|Method) WHERE f.visibility = 2 RETURN f.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "expected exactly override_method");
             assert_eq!(r.rows[0][0], Value::Str("override_method".into()));
         });
@@ -3853,7 +4081,7 @@ mod tests {
                 "MATCH (f:Function) WHERE f.name = 'sync_fn' RETURN f.is_async, f.decorators",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(
                 r.rows[0][0],
@@ -3878,20 +4106,20 @@ mod tests {
         with_two(|g| {
             // single column
             let q = parse("MATCH (n:Function) RETURN n.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.columns.len(), 1);
             assert!(r.rows.iter().all(|row| row.len() == 1));
 
             // multi column
             let q =
                 parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN a.name, b.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.columns.len(), 2);
             assert!(r.rows.iter().all(|row| row.len() == 2));
 
             // aggregation (COUNT) — 1 group, 1 column
             let q = parse("MATCH (n:Function) RETURN count(n)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(r.rows.iter().all(|row| row.len() == r.columns.len()));
         });
     }
@@ -3909,7 +4137,7 @@ mod tests {
             let q =
                 parse("MATCH (m:Function|Method) WHERE 'Override' IN m.decorators RETURN m.name")
                     .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("override_method".into()));
         });
@@ -3923,7 +4151,7 @@ mod tests {
                 "MATCH (m:Function|Method) WHERE 'NoSuchDecorator' IN m.decorators RETURN m.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(r.rows.is_empty(), "no node has 'NoSuchDecorator': {r:?}");
         });
     }
@@ -3937,7 +4165,7 @@ mod tests {
                 "MATCH (f:Function) WHERE f.name = 'sync_fn' AND 'Override' IN f.decorators RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(r.rows.is_empty(), "sync_fn has no decorators: {r:?}");
         });
     }
@@ -3948,7 +4176,7 @@ mod tests {
         with_two(|g| {
             let q = parse("MATCH (a:Function) WHERE a.name IN ['caller', 'callee'] RETURN a.name")
                 .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 2, "both caller and callee must match: {r:?}");
         });
     }
@@ -3962,7 +4190,7 @@ mod tests {
             // m.kind is a Str, not a List — generic path returns false for every node,
             // so the WHERE eliminates all rows.
             let q = parse("MATCH (m:Function) WHERE 'Function' IN m.kind RETURN m.name").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             // m.kind evaluates to Value::Str("Function"), not Value::List — generic
             // InCollection arm returns false → zero rows pass the WHERE filter.
             assert!(
@@ -3982,7 +4210,7 @@ mod tests {
         // No nodes of kind Class: COUNT(*) over empty binding set = 0 (not NULL).
         with_lone(|g| {
             let q = parse("MATCH (n:Class) RETURN COUNT(*)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Int(0));
         });
@@ -3992,7 +4220,7 @@ mod tests {
     fn agg_count_expr_empty_bindings_returns_zero() {
         with_lone(|g| {
             let q = parse("MATCH (n:Class) RETURN COUNT(n.name)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Int(0));
         });
@@ -4003,7 +4231,7 @@ mod tests {
         // OpenCypher: MIN/MAX over empty set = NULL.
         with_lone(|g| {
             let q = parse("MATCH (n:Class) RETURN MIN(n.uid), MAX(n.uid)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Null, "MIN empty -> Null");
             assert_eq!(r.rows[0][1], Value::Null, "MAX empty -> Null");
@@ -4014,7 +4242,7 @@ mod tests {
     fn agg_avg_empty_bindings_returns_null() {
         with_lone(|g| {
             let q = parse("MATCH (n:Class) RETURN AVG(n.uid)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Null, "AVG empty -> Null");
         });
@@ -4025,7 +4253,7 @@ mod tests {
         // One node -> COUNT(*) = 1.
         with_lone(|g| {
             let q = parse("MATCH (n:Function) RETURN COUNT(*)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows[0][0], Value::Int(1));
         });
     }
@@ -4035,7 +4263,7 @@ mod tests {
         // Fan fixture has 3 Function nodes.
         with_fan(|g| {
             let q = parse("MATCH (n:Function) RETURN COUNT(*)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows[0][0], Value::Int(3));
         });
     }
@@ -4047,7 +4275,7 @@ mod tests {
         with_fan(|g| {
             let q =
                 parse("MATCH (a:Function)-[:Calls]->(b:Function) RETURN COLLECT(b.name)").unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             let list = match &r.rows[0][0] {
                 Value::List(v) => v.clone(),
                 other => panic!("expected List, got {other:?}"),
@@ -4067,7 +4295,7 @@ mod tests {
                 "MATCH (a:Function)-[r:Calls]->(b:Function) RETURN a.name, COUNT(*), SUM(r.confidence)",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("fan".into()));
             assert_eq!(r.rows[0][1], Value::Int(2));
@@ -4134,7 +4362,7 @@ mod tests {
     fn exec_inline_prop_name_filters_correctly() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {name:"caller"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 1,
@@ -4150,7 +4378,7 @@ mod tests {
     fn exec_inline_prop_name_other_value_filters_correctly() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {name:"callee"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 1,
@@ -4166,7 +4394,7 @@ mod tests {
     fn exec_inline_prop_name_nonexistent_returns_empty() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {name:"nonexistent"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(
                 r.rows.is_empty(),
                 "inline prop filter for unknown name must return 0 rows, got {:?}",
@@ -4180,7 +4408,7 @@ mod tests {
     fn exec_inline_prop_with_label_filters_correctly() {
         with_two(|g| {
             let q = parse(r#"MATCH (n:Function {name:"caller"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 1,
@@ -4298,7 +4526,7 @@ mod tests {
                 "fixture must have CSR populated"
             );
             let q = parse(r#"MATCH (n:Function {name:"caller"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 1,
@@ -4314,7 +4542,7 @@ mod tests {
     fn exec_inline_prop_with_csr_nonexistent_returns_empty() {
         with_two_csr(|g| {
             let q = parse(r#"MATCH (n:Function {name:"nobody"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(
                 r.rows.is_empty(),
                 "CSR path: inline prop filter for unknown name must return 0 rows, got {:?}",
@@ -4331,7 +4559,7 @@ mod tests {
     fn exec_inline_prop_file_path_filters_correctly() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {filePath:"src/x.ts"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 2,
@@ -4346,7 +4574,7 @@ mod tests {
     fn exec_inline_prop_file_path_nonexistent_returns_empty() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {filePath:"nonexistent.ts"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(
                 r.rows.is_empty(),
                 "inline filePath filter for nonexistent path must return 0 rows, got {:?}",
@@ -4362,7 +4590,7 @@ mod tests {
     fn exec_inline_prop_kind_filters_correctly() {
         with_two(|g| {
             let q = parse(r#"MATCH (n {kind:"Function"}) RETURN n.name"#).unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(
                 r.rows.len(),
                 2,
@@ -4384,14 +4612,14 @@ mod tests {
                 "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*2..3]->(f)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "a→b→c is a depth-2 path into c");
 
             let q = parse(
                 "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*3..4]->(f)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(
                 r.rows.is_empty(),
                 "no depth-3 path into c — *3..4 must not match the depth-1/2 paths"
@@ -4402,7 +4630,7 @@ mod tests {
                 "MATCH (f:Function {name: 'b'}) WHERE EXISTS((x)-[:Calls*2..2]->(f)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(r.rows.is_empty(), "only a depth-1 edge reaches b");
         });
     }
@@ -4414,14 +4642,14 @@ mod tests {
                 "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "a→b→c satisfies the two-hop pattern");
 
             let q = parse(
                 "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(r.rows.is_empty(), "nothing two-hops into a");
         });
     }
@@ -4435,14 +4663,14 @@ mod tests {
                 "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Calls]->(y)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert_eq!(r.rows.len(), 1, "the chain has Calls edges");
 
             let q = parse(
                 "MATCH (f:Function {name: 'a'}) WHERE EXISTS((x)-[:Implements]->(y)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(r.rows.is_empty(), "the chain has no Implements edges");
         });
     }
@@ -4454,7 +4682,7 @@ mod tests {
                 "MATCH (f:Function) WHERE EXISTS((x)-[:Calls]->(y)-[:Calls]->(z)) RETURN f.name",
             )
             .unwrap();
-            let e = execute(&q, g, Path::new(".")).unwrap_err();
+            let e = execute(&q, g, None, Path::new(".")).unwrap_err();
             assert!(
                 format!("{e}").contains("bound"),
                 "must name the missing bound variable, got: {e}"
@@ -4472,7 +4700,7 @@ mod tests {
                 "MATCH (f:Function {name: 'a'}) WHERE EXISTS((f)-[:Calls]->(y)-[:Calls]->(f)) RETURN f.name",
             )
             .unwrap();
-            let r = execute(&q, g, Path::new(".")).unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
             assert!(r.rows.is_empty(), "chain has no cycle back to a");
         });
     }
@@ -4491,7 +4719,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4509,7 +4737,7 @@ mod tests {
                 negated: true,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(false),
@@ -4529,7 +4757,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(false),
@@ -4576,7 +4804,7 @@ mod tests {
                 negated: true,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4618,7 +4846,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4665,7 +4893,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4709,7 +4937,7 @@ mod tests {
                 negated: true,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, g, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),

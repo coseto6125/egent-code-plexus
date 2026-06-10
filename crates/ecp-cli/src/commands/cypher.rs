@@ -97,8 +97,13 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
 
     warn_unknown_properties(&query);
 
-    let result = cypher::execute(&query, graph, &resolve_repo_root(args.repo.as_deref()))
-        .map_err(|e| ecp_core::EcpError::InvalidArgument(format_cypher_error(query_str, &e)))?;
+    let result = cypher::execute(
+        &query,
+        graph,
+        engine.overlay_view(),
+        &resolve_repo_root(args.repo.as_deref()),
+    )
+    .map_err(|e| ecp_core::EcpError::InvalidArgument(format_cypher_error(query_str, &e)))?;
 
     let rows_json: Vec<Vec<serde_json::Value>> = result
         .rows

@@ -1817,7 +1817,7 @@ fn run_bfs(
                 }
             }
             if let Some(v) = view {
-                for e in v.overlay_in(curr_idx as u32) {
+                for (_, e) in v.overlay_in(curr_idx as u32) {
                     consider(MergedEdgeRef::Overlay(e), e.source as usize);
                 }
             }
@@ -1856,7 +1856,7 @@ fn run_bfs(
                 }
             }
             if let Some(v) = view {
-                for e in v.overlay_out(curr_idx as u32) {
+                for (_, e) in v.overlay_out(curr_idx as u32) {
                     consider(MergedEdgeRef::Overlay(e), e.target as usize);
                 }
             }

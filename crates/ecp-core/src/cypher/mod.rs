@@ -23,12 +23,14 @@ pub fn parse(input: &str) -> Result<Query, CypherError> {
     parser::parse_query(&tokens)
 }
 
-/// Execute a parsed query against a graph. `repo_root` is used only for
-/// `.content` projection (lazy file read).
+/// Execute a parsed query against a graph, optionally merged with the L1
+/// overlay view (uncommitted working-tree edits). `repo_root` is used only
+/// for `.content` projection (lazy file read).
 pub fn execute(
     query: &Query,
     graph: &ArchivedZeroCopyGraph,
+    view: Option<&crate::session::OverlayView>,
     repo_root: &Path,
 ) -> Result<QueryResult, CypherError> {
-    executor::execute(query, graph, repo_root)
+    executor::execute(query, graph, view, repo_root)
 }
