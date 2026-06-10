@@ -111,8 +111,12 @@ pub struct OverlayView {
     /// every base idx living in a dirty file (replaced ∪ suppressed):
     /// base edges sourced here are masked in favour of overlay adjacency.
     dirty_base: FxHashSet<u32>,
-    out_adj: FxHashMap<u32, Vec<ViewEdge>>,
-    in_adj: FxHashMap<u32, Vec<ViewEdge>>,
+    /// Flat overlay-edge store; adjacency maps hold indices into it so
+    /// consumers (cypher edge vars) can address an overlay edge by a stable
+    /// virtual edge index (`graph.edges.len() + i`).
+    edges: Vec<ViewEdge>,
+    out_adj: FxHashMap<u32, Vec<u32>>,
+    in_adj: FxHashMap<u32, Vec<u32>>,
 }
 
 impl OverlayView {
@@ -192,8 +196,9 @@ impl OverlayView {
         // ── overlay Calls edges ───────────────────────────────────────────
         // Inner scope: the name maps borrow `nodes`' strings and must drop
         // before `nodes` moves into Self.
-        let mut out_adj: FxHashMap<u32, Vec<ViewEdge>> = FxHashMap::default();
-        let mut in_adj: FxHashMap<u32, Vec<ViewEdge>> = FxHashMap::default();
+        let mut edges: Vec<ViewEdge> = Vec::new();
+        let mut out_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         {
             // (file ordinal, name) → virtual idxs of callable symbols: Tier 1.
             let mut same_file_callables: FxHashMap<(usize, &str), Vec<u32>> = FxHashMap::default();
@@ -228,8 +233,10 @@ impl OverlayView {
                     edge.source >= base_len,
                     "overlay edge sources must be virtual indices"
                 );
-                out_adj.entry(edge.source).or_default().push(edge);
-                in_adj.entry(edge.target).or_default().push(edge);
+                let ei = edges.len() as u32;
+                edges.push(edge);
+                out_adj.entry(edge.source).or_default().push(ei);
+                in_adj.entry(edge.target).or_default().push(ei);
             };
 
             let mut virt_cursor = base_len;
@@ -266,6 +273,7 @@ impl OverlayView {
             replaced,
             suppressed,
             dirty_base,
+            edges,
             out_adj,
             in_adj,
         })
@@ -307,17 +315,41 @@ impl OverlayView {
         matches!(rel, RelType::Calls) && self.dirty_base.contains(&base_idx)
     }
 
+    /// All overlay edges; index `i` here is overlay edge index `i`, addressed
+    /// by consumers as merged edge index `graph.edges.len() + i`.
+    pub fn edges(&self) -> &[ViewEdge] {
+        &self.edges
+    }
+
+    /// Overlay-edge accessor by overlay edge index (NOT merged index —
+    /// callers subtract `graph.edges.len()` first).
+    pub fn edge(&self, overlay_edge_idx: u32) -> Option<&ViewEdge> {
+        self.edges.get(overlay_edge_idx as usize)
+    }
+
     /// Overlay-resolved outgoing edges of `idx` (virtual sources only —
-    /// clean base nodes gain no new outgoing edges).
-    pub fn overlay_out(&self, idx: u32) -> &[ViewEdge] {
-        self.out_adj.get(&idx).map(Vec::as_slice).unwrap_or(&[])
+    /// clean base nodes gain no new outgoing edges). Yields
+    /// `(overlay_edge_idx, edge)`.
+    pub fn overlay_out(&self, idx: u32) -> impl Iterator<Item = (u32, &ViewEdge)> + '_ {
+        self.out_adj
+            .get(&idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .map(|&ei| (ei, &self.edges[ei as usize]))
     }
 
     /// Overlay-resolved incoming edges of `idx` (current callers living in
     /// dirty files). For a replaced virtual node, base CSR IN-edges of its
-    /// `replaced_base` are ALSO valid — consumers read both.
-    pub fn overlay_in(&self, idx: u32) -> &[ViewEdge] {
-        self.in_adj.get(&idx).map(Vec::as_slice).unwrap_or(&[])
+    /// `replaced_base` are ALSO valid — consumers read both. Yields
+    /// `(overlay_edge_idx, edge)`.
+    pub fn overlay_in(&self, idx: u32) -> impl Iterator<Item = (u32, &ViewEdge)> + '_ {
+        self.in_adj
+            .get(&idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .map(|&ei| (ei, &self.edges[ei as usize]))
     }
 }
 
@@ -564,7 +596,7 @@ mod tests {
 
     fn edge_to(view: &OverlayView, source: u32, target: u32) -> Option<ViewEdge> {
         view.overlay_out(source)
-            .iter()
+            .map(|(_, e)| e)
             .find(|e| e.target == target)
             .copied()
     }
@@ -629,7 +661,7 @@ mod tests {
         assert!(edge_to(&view, keep_virt, 3).is_none());
         assert!(edge_to(&view, keep_virt, 4).is_none());
         // the reverse index sees the resolved caller.
-        assert!(view.overlay_in(2).iter().any(|e| e.source == keep_virt));
+        assert!(view.overlay_in(2).any(|(_, e)| e.source == keep_virt));
     }
 
     #[test]
@@ -667,7 +699,6 @@ mod tests {
         assert_eq!(e.target, keep_virt);
         assert!(view
             .overlay_in(keep_virt)
-            .iter()
-            .any(|e| e.source == caller_two_virt));
+            .any(|(_, e)| e.source == caller_two_virt));
     }
 }

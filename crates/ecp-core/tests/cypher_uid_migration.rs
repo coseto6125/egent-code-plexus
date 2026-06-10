@@ -145,7 +145,7 @@ fn archived(bytes: &[u8]) -> &ecp_core::graph::ArchivedZeroCopyGraph {
 
 fn run(query: &str, bytes: &[u8]) -> ecp_core::cypher::QueryResult {
     let q = cypher::parse(query).expect("parse");
-    cypher::execute(&q, archived(bytes), Path::new(".")).expect("execute")
+    cypher::execute(&q, archived(bytes), None, Path::new(".")).expect("execute")
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ fn where_uid_numeric_literal_matches() {
 fn where_uid_string_literal_clear_error() {
     let (bytes, _, _) = build_two();
     let q = cypher::parse("MATCH (n) WHERE n.uid = \"1234\" RETURN n.name").expect("parse");
-    let err = cypher::execute(&q, archived(&bytes), Path::new("."))
+    let err = cypher::execute(&q, archived(&bytes), None, Path::new("."))
         .expect_err("expected error for uid string comparison");
 
     let msg = err.to_string().to_lowercase();
@@ -222,7 +222,7 @@ fn uid_equality_zero_alloc_smoke() {
 
     // 10k executions: Miri catches hidden allocs inside the Value::Int branch.
     for _ in 0..10_000 {
-        let res = cypher::execute(&q, archived, Path::new(".")).expect("execute");
+        let res = cypher::execute(&q, archived, None, Path::new(".")).expect("execute");
         let cell = &res.rows[0][0];
         if let Value::Int(v) = cell {
             std::hint::black_box(*v as u64 == expected_uid);

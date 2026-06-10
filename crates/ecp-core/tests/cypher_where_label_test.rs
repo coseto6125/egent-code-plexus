@@ -90,7 +90,7 @@ fn names_returned(cypher_query: &str) -> Vec<String> {
     let toks = tokenize(cypher_query).unwrap();
     let q = parse_query(&toks).unwrap();
     let repo = tempdir().unwrap();
-    let result = cypher::execute(&q, archived, repo.path()).unwrap();
+    let result = cypher::execute(&q, archived, None, repo.path()).unwrap();
     result
         .rows
         .iter()
