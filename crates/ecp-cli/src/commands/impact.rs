@@ -1,4 +1,4 @@
-use crate::commands::format::{kind_to_str, rel_to_str};
+use crate::commands::format::{kind_to_str, node_kind_to_str, rel_to_str};
 use crate::commands::symbol_id::{format_fqn, resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
@@ -7,7 +7,8 @@ use crate::reanalyze::make_pipeline;
 use clap::{Args, ValueEnum};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::config;
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{NodeKind, RelType};
+use ecp_core::session::{OverlayView, ViewEdge};
 use ecp_core::{EcpError, HIGH_TRUST_CONFIDENCE};
 use rayon::prelude::*;
 use serde_json::{json, Value};
@@ -193,20 +194,17 @@ fn archived_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, node_idx: us
 /// all graph nodes for every BFS caller entry (T1-6 fast-path).
 fn classify_symbol(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
     symbol_idx: usize,
     bfs_results: &[Value],
     uid_idx: &rustc_hash::FxHashMap<u64, u32>,
 ) -> SymbolCoverage {
-    let node = &graph.nodes[symbol_idx];
-    let file_idx = node.file_idx.to_native() as usize;
-    let uid = node.uid.to_native().to_string();
-    let name = node.name.resolve(&graph.string_pool).to_string();
-    let file = graph.files[file_idx]
-        .path
-        .resolve(&graph.string_pool)
-        .to_string();
-    let line = node.start_line();
-    let kind = kind_to_str(&node.kind).to_string();
+    let meta = merged_node_meta(graph, view, symbol_idx);
+    let uid = meta.uid.to_string();
+    let name = meta.name;
+    let file = meta.file_path;
+    let line = meta.line;
+    let kind = meta.kind.to_string();
 
     let mut test_callers: Vec<String> = Vec::new();
     let mut prod_caller_count: usize = 0;
@@ -259,6 +257,7 @@ fn classify_symbol(
 #[allow(clippy::too_many_arguments)]
 fn coverage_bfs_for_symbol(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
     symbol_idx: usize,
     requested_direction: &Direction,
     existing_bfs: &[Value],
@@ -274,6 +273,7 @@ fn coverage_bfs_for_symbol(
     // the heuristic / hidden-count fields from #264's expanded run_bfs return.
     let (det_results, _heur, _hidden_conf, _hidden_heur) = run_bfs(
         graph,
+        view,
         symbol_idx,
         &Direction::Up,
         depth,
@@ -285,8 +285,10 @@ fn coverage_bfs_for_symbol(
     det_results
 }
 
+#[allow(clippy::too_many_arguments)]
 fn coverage_analyses(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
     bfs_by_symbol: &[(usize, Vec<Value>)],
     requested_direction: &Direction,
     depth: usize,
@@ -304,6 +306,7 @@ fn coverage_analyses(
         .map(|(idx, bfs)| {
             let coverage_bfs = coverage_bfs_for_symbol(
                 graph,
+                view,
                 *idx,
                 requested_direction,
                 bfs,
@@ -312,7 +315,7 @@ fn coverage_analyses(
                 include_tests,
                 rel_filter,
             );
-            classify_symbol(graph, *idx, &coverage_bfs, &uid_idx)
+            classify_symbol(graph, view, *idx, &coverage_bfs, &uid_idx)
         })
         .collect()
 }
@@ -875,6 +878,7 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHi
         .or(args.target.as_deref())
         .expect("build_payload_with_hints gates on name||target");
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
+    let view = engine.overlay_view();
 
     // Split `Owner.Method` form for precise targeting.
     let (owner_filter, bare_name) = split_fqn_target(name);
@@ -894,6 +898,13 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHi
         // `decorates_edges`) carry SYNTHETIC_FILE_IDX — they aren't
         // real symbols at any file:line. Drop them from impact targets.
         if !node.has_owning_file() {
+            continue;
+        }
+        // Working-tree truth: a dirty-file symbol deleted/renamed on disk
+        // (suppressed by the overlay view) is not a valid impact target, and
+        // deliberately stops counting toward `same_name_defs` — the ambiguity
+        // caveat describes the on-disk world, not the stale base graph.
+        if view.is_some_and(|v| v.redirect(idx as u32).is_none()) {
             continue;
         }
         // Counted BEFORE --kind/--file/FQN narrowing: the Tier-3 resolver
@@ -922,7 +933,38 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHi
                 continue;
             }
         }
-        matches.push(idx);
+        // A replaced base node enters the merged space as its virtual twin
+        // (on-disk spans; masked stale adjacency handled by run_bfs).
+        matches.push(match view {
+            Some(v) => v.redirect(idx as u32).expect("suppressed filtered above") as usize,
+            None => idx,
+        });
+    }
+    // Symbols that only exist in the working tree (new functions in dirty
+    // files) — base-replacing twins are excluded: they arrived via redirect.
+    if let Some(v) = view {
+        for (i, vn) in v.virtual_nodes().iter().enumerate() {
+            if vn.replaced_base.is_some() || vn.name != bare_name {
+                continue;
+            }
+            same_name_defs += 1;
+            if let Some(ref kn) = kind_needle {
+                if &node_kind_to_str(&vn.kind).to_ascii_lowercase() != kn {
+                    continue;
+                }
+            }
+            if let Some(needle) = file_needle {
+                if !vn.rel_path.contains(needle) {
+                    continue;
+                }
+            }
+            if let Some(owner) = owner_filter {
+                if vn.owner_class.as_deref() != Some(owner) {
+                    continue;
+                }
+            }
+            matches.push(v.base_len() as usize + i);
+        }
     }
 
     if matches.is_empty() {
@@ -940,14 +982,11 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHi
         let candidates: Vec<Value> = matches
             .iter()
             .map(|&i| {
-                let node = &graph.nodes[i];
-                let file_path = graph.files[node.file_idx.to_native() as usize]
-                    .path
-                    .resolve(&graph.string_pool);
+                let meta = merged_node_meta(graph, view, i);
                 json!({
-                    "kind": kind_to_str(&node.kind),
-                    "filePath": file_path,
-                    "line": node.start_line(),
+                    "kind": meta.kind,
+                    "filePath": meta.file_path,
+                    "line": meta.line,
                 })
             })
             .collect();
@@ -983,6 +1022,7 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHi
     for start_idx in &matches {
         let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
             graph,
+            view,
             *start_idx,
             &args.direction,
             args.depth,
@@ -1016,13 +1056,7 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHi
     let mut seen_files = HashSet::new();
     let target_file_paths: Vec<String> = matches
         .iter()
-        .map(|&idx| {
-            let file_idx = graph.nodes[idx].file_idx.to_native() as usize;
-            graph.files[file_idx]
-                .path
-                .resolve(&graph.string_pool)
-                .to_string()
-        })
+        .map(|&idx| merged_node_meta(graph, view, idx).file_path)
         .filter(|p| seen_files.insert(p.clone()))
         .collect();
 
@@ -1070,6 +1104,7 @@ fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHi
     if args.test_coverage {
         let analyses = coverage_analyses(
             graph,
+            view,
             &per_match_bfs,
             &args.direction,
             args.depth,
@@ -1134,6 +1169,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     }
 
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
+    let view = engine.overlay_view();
 
     // Test-filtered subset for the semantic re-parse + BFS lookup. The JSON
     // envelope still emits the full `changed_paths` (above).
@@ -1296,18 +1332,26 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     let mut hidden_edges_total: u64 = 0;
     let mut hidden_heuristic_total: u64 = 0;
     let mut per_symbol_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
-    for &start_idx in &changed_node_indices {
-        let node = &graph.nodes[start_idx];
+    for &base_idx in &changed_node_indices {
+        let node = &graph.nodes[base_idx];
         if !node.has_owning_file() {
             continue;
         }
-        let sym_name = node.name.resolve(&graph.string_pool).to_string();
-        let sym_file = graph.files[node.file_idx.to_native() as usize]
-            .path
-            .resolve(&graph.string_pool)
-            .to_string();
+        // Merged-space entry: a changed symbol further edited in the working
+        // tree starts at its virtual twin; one deleted on disk is skipped
+        // (no node to traverse from).
+        let start_idx = match view {
+            Some(v) => match v.redirect(base_idx as u32) {
+                Some(t) => t as usize,
+                None => continue,
+            },
+            None => base_idx,
+        };
+        let meta = merged_node_meta(graph, view, start_idx);
+        let (sym_name, sym_file) = (meta.name, meta.file_path);
         let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
             graph,
+            view,
             start_idx,
             &args.direction,
             args.depth,
@@ -1332,6 +1376,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
         if args.direction == Direction::Up && det_results.len() <= 1 {
             let (downstream_results, _, _, _) = run_bfs(
                 graph,
+                view,
                 start_idx,
                 &Direction::Down,
                 1, // depth = 1, direct callees only
@@ -1370,6 +1415,7 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     if args.test_coverage {
         let analyses = coverage_analyses(
             graph,
+            view,
             &per_symbol_bfs,
             &args.direction,
             args.depth,
@@ -1474,7 +1520,94 @@ fn direction_str(dir: &Direction) -> &'static str {
     }
 }
 
-/// Core BFS over the graph from `start_idx`.
+/// Display metadata for a merged-space node index (`>= graph.nodes.len()` =
+/// overlay virtual node). Cold-path companion to `run_bfs`'s inline emission
+/// (which keeps its per-file test-path cache).
+struct MergedNodeMeta {
+    uid: u64,
+    name: String,
+    kind: &'static str,
+    file_path: String,
+    line: u32,
+}
+
+fn merged_node_meta(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
+    idx: usize,
+) -> MergedNodeMeta {
+    if let Some(vn) = view.and_then(|v| v.node(idx as u32)) {
+        return MergedNodeMeta {
+            uid: vn.uid,
+            name: vn.name.clone(),
+            kind: node_kind_to_str(&vn.kind),
+            file_path: vn.rel_path.to_string(),
+            line: vn.start_line,
+        };
+    }
+    let node = &graph.nodes[idx];
+    MergedNodeMeta {
+        uid: node.uid.to_native(),
+        name: node.name.resolve(&graph.string_pool).to_string(),
+        kind: kind_to_str(&node.kind),
+        file_path: graph.files[node.file_idx.to_native() as usize]
+            .path
+            .resolve(&graph.string_pool)
+            .to_string(),
+        line: node.start_line(),
+    }
+}
+
+/// One edge under merged traversal: an archived base-graph edge or an
+/// overlay-resolved [`ViewEdge`]. Unifies the filter chain (confidence,
+/// containment, heuristic, `--relation-types`) so base and overlay edges
+/// can never drift on traversal policy.
+enum MergedEdgeRef<'a> {
+    Base(&'a ecp_core::graph::ArchivedEdge),
+    Overlay(&'a ViewEdge),
+}
+
+impl MergedEdgeRef<'_> {
+    fn confidence(&self) -> f32 {
+        match self {
+            Self::Base(e) => e.confidence.to_native(),
+            Self::Overlay(e) => e.confidence,
+        }
+    }
+
+    fn rel_type(&self) -> RelType {
+        match self {
+            Self::Base(e) => RelType::from(&e.rel_type),
+            Self::Overlay(e) => e.rel_type,
+        }
+    }
+
+    fn rel_str(&self) -> &'static str {
+        match self {
+            Self::Base(e) => rel_to_str(&e.rel_type),
+            Self::Overlay(e) => {
+                debug_assert!(
+                    matches!(e.rel_type, RelType::Calls),
+                    "extend rel_str when the overlay gains new edge kinds"
+                );
+                "calls"
+            }
+        }
+    }
+
+    /// `viaReason` for the BFS payload. Overlay edges carry a static marker
+    /// so consumers can tell a caller comes from an uncommitted edit.
+    fn reason(&self, graph: &ecp_core::graph::ArchivedZeroCopyGraph) -> String {
+        match self {
+            Self::Base(e) => e.reason.resolve(&graph.string_pool).to_string(),
+            Self::Overlay(_) => "l1-overlay".to_string(),
+        }
+    }
+}
+
+/// Core BFS over the merged graph (base CSR + optional overlay view) from
+/// `start_idx`, which is a MERGED-space index: `< graph.nodes.len()` = base
+/// node, above = overlay virtual node.
 ///
 /// Returns `(det_results, heur_results, hidden_conf_edges, hidden_heuristic_edges)`.
 /// The start node appears at depth 0 in `det_results`.
@@ -1491,6 +1624,12 @@ fn direction_str(dir: &Direction) -> &'static str {
 /// `--include-tests` / `--relation-types` / `min_conf` are applied here;
 /// `--kind` / `--file` emission-only filtering is NOT applied here.
 ///
+/// With a view, the masking invariant (mask ⊆ rebuild) governs base edges:
+/// sourced-in-dirty-file edges are masked only for rels the overlay
+/// re-resolves (`Calls` today — overlay adjacency is that file's truth);
+/// other rels keep their base edges. Either endpoint in a dirty file is
+/// redirected (replaced) into merged space or dropped (suppressed).
+///
 /// **Invariant:** the deterministic result vec always begins with the start
 /// node itself at `depth = 0` (so `len() == 1` means "no neighbours reached").
 /// Callers relying on this for orphan-detection (see `impact_with_baseline`'s
@@ -1498,6 +1637,7 @@ fn direction_str(dir: &Direction) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn run_bfs(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
     start_idx: usize,
     direction: &Direction,
     max_depth: usize,
@@ -1510,6 +1650,7 @@ fn run_bfs(
     type ViaEdge = Option<(String, f32)>;
     type Step = (usize, usize, ViaEdge, bool);
 
+    let base_len = graph.nodes.len();
     let mut visited = HashSet::new();
     let mut queue: VecDeque<Step> = VecDeque::new();
     let mut det_results: Vec<Value> = Vec::new();
@@ -1522,41 +1663,69 @@ fn run_bfs(
     visited.insert(start_idx);
 
     while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
-        let curr_node = &graph.nodes[curr_idx];
-        // BFS via `Decorates` edges can reach synthetic Annotation nodes
-        // (SYNTHETIC_FILE_IDX); they have no file:line to report.
-        if !curr_node.has_owning_file() {
-            continue;
-        }
-        let file_idx = curr_node.file_idx.to_native() as usize;
-
-        if !include_tests {
-            let is_test = *test_path_cache.entry(file_idx).or_insert_with(|| {
-                let file_path = graph.files[file_idx].path.resolve(&graph.string_pool);
-                is_test_path(file_path)
-            });
-            if is_test {
+        // ── node emission (merged space: < base_len = base, else virtual) ──
+        let (uid, name, owner_class, kind_str, file_path, line): (
+            u64,
+            String,
+            Option<String>,
+            &'static str,
+            String,
+            u32,
+        );
+        if curr_idx < base_len {
+            let curr_node = &graph.nodes[curr_idx];
+            // BFS via `Decorates` edges can reach synthetic Annotation nodes
+            // (SYNTHETIC_FILE_IDX); they have no file:line to report.
+            if !curr_node.has_owning_file() {
                 continue;
             }
+            let file_idx = curr_node.file_idx.to_native() as usize;
+            if !include_tests {
+                let is_test = *test_path_cache.entry(file_idx).or_insert_with(|| {
+                    let file_path = graph.files[file_idx].path.resolve(&graph.string_pool);
+                    is_test_path(file_path)
+                });
+                if is_test {
+                    continue;
+                }
+            }
+            uid = curr_node.uid.to_native();
+            name = curr_node.name.resolve(&graph.string_pool).to_string();
+            owner_class = resolve_owner_class(graph, curr_idx).map(str::to_owned);
+            kind_str = kind_to_str(&curr_node.kind);
+            file_path = graph.files[file_idx]
+                .path
+                .resolve(&graph.string_pool)
+                .to_string();
+            line = curr_node.start_line();
+        } else {
+            // No has_owning_file guard here: virtual nodes come from freshly
+            // parsed source files, never from synthetic emission.
+            let vn = view
+                .and_then(|v| v.node(curr_idx as u32))
+                .expect("virtual index enqueued without a view");
+            if !include_tests && is_test_path(&vn.rel_path) {
+                continue;
+            }
+            uid = vn.uid;
+            name = vn.name.clone();
+            owner_class = vn.owner_class.clone();
+            kind_str = node_kind_to_str(&vn.kind);
+            file_path = vn.rel_path.to_string();
+            line = vn.start_line;
         }
 
-        let file_path = graph.files[file_idx]
-            .path
-            .resolve(&graph.string_pool)
-            .to_string();
         let (via_reason, via_confidence) = via
             .as_ref()
             .map(|(r, c)| (r.as_str(), *c))
             .unwrap_or(("", 1.0));
-
-        let owner_class = resolve_owner_class(graph, curr_idx);
         let entry = json!({
-            "uid": curr_node.uid.to_native().to_string(),
-            "name": curr_node.name.resolve(&graph.string_pool),
+            "uid": uid.to_string(),
+            "name": name,
             "ownerClass": owner_class,
-            "kind": kind_to_str(&curr_node.kind),
+            "kind": kind_str,
             "filePath": file_path,
-            "line": curr_node.start_line(),
+            "line": line,
             "depth": curr_depth,
             "viaReason": via_reason,
             "viaConfidence": via_confidence,
@@ -1571,123 +1740,124 @@ fn run_bfs(
             continue;
         }
 
-        match direction {
-            Direction::Up | Direction::Both => {
-                let in_start = graph.in_offsets[curr_idx].to_native() as usize;
-                let in_end = graph.in_offsets[curr_idx + 1].to_native() as usize;
+        // ── expansion ───────────────────────────────────────────────────
+        // Shared filter chain + enqueue for base and overlay edges.
+        let mut consider = |edge: MergedEdgeRef<'_>, next_idx: usize| {
+            let edge_conf = edge.confidence();
+            if edge_conf < min_conf {
+                hidden_conf_edges += 1;
+                return;
+            }
+            let rel = edge.rel_type();
+            // Structural containment edges (Defines, HasMethod, HasProperty,
+            // Imports) describe where a symbol lives, not who calls it.
+            // Exclude from BFS so File→Function Defines does not register
+            // as a caller.
+            if rel.is_scope_containment() {
+                return;
+            }
+            let is_heur = rel.is_heuristic();
+            if is_heur && !include_heuristic {
+                hidden_heuristic_edges += 1;
+                return;
+            }
+            if let Some(rels) = rel_filter.as_ref() {
+                let rel_str = edge.rel_str();
+                if !rels.iter().any(|r| r == rel_str) {
+                    return;
+                }
+            }
+            if !visited.contains(&next_idx) {
+                visited.insert(next_idx);
+                queue.push_back((
+                    next_idx,
+                    curr_depth + 1,
+                    Some((edge.reason(graph), edge_conf)),
+                    is_heur,
+                ));
+            }
+        };
+
+        if matches!(direction, Direction::Up | Direction::Both) {
+            // Base IN-edges anchor: the node itself when base; the replaced
+            // base twin when virtual (clean-file callers still point at it);
+            // None for a brand-new virtual symbol — no base edge can target
+            // it, so only the overlay reverse index below applies.
+            let in_anchor = if curr_idx < base_len {
+                Some(curr_idx)
+            } else {
+                view.and_then(|v| v.node(curr_idx as u32))
+                    .and_then(|n| n.replaced_base)
+                    .map(|b| b as usize)
+            };
+            if let Some(anchor) = in_anchor {
+                let in_start = graph.in_offsets[anchor].to_native() as usize;
+                let in_end = graph.in_offsets[anchor + 1].to_native() as usize;
                 for i in in_start..in_end {
                     let edge_idx = graph.in_edge_idx[i].to_native() as usize;
                     let edge = &graph.edges[edge_idx];
-                    let edge_conf = edge.confidence.to_native();
-                    if edge_conf < min_conf {
-                        hidden_conf_edges += 1;
-                        continue;
-                    }
-                    // Structural containment edges (Defines, HasMethod, HasProperty,
-                    // Imports) describe where a symbol lives, not who calls it.
-                    // Exclude from upstream BFS so File→Function Defines does not
-                    // register as a caller.
-                    if edge.rel_type.is_scope_containment() {
-                        continue;
-                    }
-                    let is_heur = edge.rel_type.is_heuristic();
-                    if is_heur && !include_heuristic {
-                        hidden_heuristic_edges += 1;
-                        continue;
-                    }
-                    if let Some(rels) = rel_filter.as_ref() {
-                        let rel_str = rel_to_str(&edge.rel_type);
-                        if !rels.iter().any(|r| r == rel_str) {
-                            continue;
+                    let src = edge.source.to_native() as usize;
+                    // mask ⊆ rebuild: drop a dirty-file source's edge only
+                    // for rels the overlay re-resolves (its truth is in
+                    // overlay_in below); other rels keep the base edge with
+                    // the source redirected into merged space.
+                    let next_idx = match view {
+                        Some(v) => {
+                            if v.masks_base_edge(src as u32, RelType::from(&edge.rel_type)) {
+                                continue;
+                            }
+                            match v.redirect(src as u32) {
+                                Some(s) => s as usize,
+                                None => continue, // source deleted on disk
+                            }
                         }
-                    }
-                    let next_idx = edge.source.to_native() as usize;
-                    if !visited.contains(&next_idx) {
-                        visited.insert(next_idx);
-                        let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
-                        queue.push_back((
-                            next_idx,
-                            curr_depth + 1,
-                            Some((edge_reason, edge_conf)),
-                            is_heur,
-                        ));
-                    }
-                }
-                if direction == &Direction::Up {
-                    continue;
-                }
-                // Falls through to Downstream for Both.
-                let out_start = graph.out_offsets[curr_idx].to_native() as usize;
-                let out_end = graph.out_offsets[curr_idx + 1].to_native() as usize;
-                for i in out_start..out_end {
-                    let edge = &graph.edges[i];
-                    let edge_conf = edge.confidence.to_native();
-                    if edge_conf < min_conf {
-                        hidden_conf_edges += 1;
-                        continue;
-                    }
-                    if edge.rel_type.is_scope_containment() {
-                        continue;
-                    }
-                    let is_heur = edge.rel_type.is_heuristic();
-                    if is_heur && !include_heuristic {
-                        hidden_heuristic_edges += 1;
-                        continue;
-                    }
-                    if let Some(rels) = rel_filter.as_ref() {
-                        let rel_str = rel_to_str(&edge.rel_type);
-                        if !rels.iter().any(|r| r == rel_str) {
-                            continue;
-                        }
-                    }
-                    let next_idx = edge.target.to_native() as usize;
-                    if !visited.contains(&next_idx) {
-                        visited.insert(next_idx);
-                        let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
-                        queue.push_back((
-                            next_idx,
-                            curr_depth + 1,
-                            Some((edge_reason, edge_conf)),
-                            is_heur,
-                        ));
-                    }
+                        None => src,
+                    };
+                    consider(MergedEdgeRef::Base(edge), next_idx);
                 }
             }
-            Direction::Down => {
-                let out_start = graph.out_offsets[curr_idx].to_native() as usize;
-                let out_end = graph.out_offsets[curr_idx + 1].to_native() as usize;
+            if let Some(v) = view {
+                for e in v.overlay_in(curr_idx as u32) {
+                    consider(MergedEdgeRef::Overlay(e), e.source as usize);
+                }
+            }
+        }
+
+        if matches!(direction, Direction::Down | Direction::Both) {
+            // Base OUT-edges anchor mirrors in_anchor: a replaced virtual
+            // node keeps its base twin's edges for rels the overlay can't
+            // rebuild (masks_base_edge filters the rebuilt ones).
+            let out_anchor = if curr_idx < base_len {
+                Some(curr_idx)
+            } else {
+                view.and_then(|v| v.node(curr_idx as u32))
+                    .and_then(|n| n.replaced_base)
+                    .map(|b| b as usize)
+            };
+            if let Some(anchor) = out_anchor {
+                let out_start = graph.out_offsets[anchor].to_native() as usize;
+                let out_end = graph.out_offsets[anchor + 1].to_native() as usize;
                 for i in out_start..out_end {
                     let edge = &graph.edges[i];
-                    let edge_conf = edge.confidence.to_native();
-                    if edge_conf < min_conf {
-                        hidden_conf_edges += 1;
-                        continue;
-                    }
-                    if edge.rel_type.is_scope_containment() {
-                        continue;
-                    }
-                    let is_heur = edge.rel_type.is_heuristic();
-                    if is_heur && !include_heuristic {
-                        hidden_heuristic_edges += 1;
-                        continue;
-                    }
-                    if let Some(rels) = rel_filter.as_ref() {
-                        let rel_str = rel_to_str(&edge.rel_type);
-                        if !rels.iter().any(|r| r == rel_str) {
-                            continue;
+                    let target = edge.target.to_native() as usize;
+                    let next_idx = match view {
+                        Some(v) => {
+                            if v.masks_base_edge(anchor as u32, RelType::from(&edge.rel_type)) {
+                                continue;
+                            }
+                            match v.redirect(target as u32) {
+                                Some(t) => t as usize,
+                                None => continue, // target deleted on disk
+                            }
                         }
-                    }
-                    let next_idx = edge.target.to_native() as usize;
-                    if !visited.contains(&next_idx) {
-                        visited.insert(next_idx);
-                        let edge_reason = edge.reason.resolve(&graph.string_pool).to_string();
-                        queue.push_back((
-                            next_idx,
-                            curr_depth + 1,
-                            Some((edge_reason, edge_conf)),
-                            is_heur,
-                        ));
-                    }
+                        None => target,
+                    };
+                    consider(MergedEdgeRef::Base(edge), next_idx);
+                }
+            }
+            if let Some(v) = view {
+                for e in v.overlay_out(curr_idx as u32) {
+                    consider(MergedEdgeRef::Overlay(e), e.target as usize);
                 }
             }
         }
@@ -1712,8 +1882,6 @@ fn collect_blind_spots(
         .map(|bs| bs.kind.resolve(&graph.string_pool).to_string())
         .collect()
 }
-
-use crate::commands::format::node_kind_to_str;
 
 /// FNV-64 hash of the source lines spanning [start_row, end_row] (inclusive,
 /// 0-based). Normalises trailing whitespace so indent-only edits are stable.

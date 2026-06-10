@@ -117,6 +117,12 @@ impl Overlay {
 /// tombstone mechanism; base nodes can only be overridden (uid collision),
 /// not deleted. T7-6 may add a `deleted_uids: Vec<u64>` field to `Overlay`
 /// and extend this function accordingly.
+///
+/// **String-pool trap**: `Overlay` carries NO string pool — yielded overlay
+/// nodes' `name` / `owner_class` StrRefs are dangling and must never be
+/// resolved (against the base pool they read garbage). Consumers should use
+/// the uid to find the base twin and read strings from there, or migrate to
+/// `session::view::OverlayView`, which owns real strings.
 pub fn merge_archived<'a>(
     base: &'a ArchivedZeroCopyGraph,
     overlay: &'a ArchivedOverlay,

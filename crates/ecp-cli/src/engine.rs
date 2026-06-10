@@ -1,9 +1,11 @@
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use ecp_core::session::OverlayView;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub struct Engine {
     mmap: Mmap,
@@ -11,6 +13,12 @@ pub struct Engine {
     // Phase 3 reserves the slot; Phase 5 will wire L1 overlay merge into query paths.
     #[allow(dead_code)]
     overlay_dir: Option<PathBuf>,
+    /// Worktree root the overlay session belongs to — needed to validate
+    /// fragment mtimes when materialising the [`OverlayView`].
+    worktree_root: Option<PathBuf>,
+    /// Lazily built query-time overlay merge view. `None` inside the cell =
+    /// clean tree (or no session): traversals take their original branch.
+    overlay_view: OnceLock<Option<OverlayView>>,
     view: GraphView,
     /// True when this engine was loaded from a sibling SHA's graph because the
     /// current HEAD had no published graph yet (OOB branch-switch warm-attach
@@ -58,6 +66,8 @@ impl Engine {
             mmap,
             graph_path,
             overlay_dir: None,
+            worktree_root: None,
+            overlay_view: OnceLock::new(),
             view: GraphView::L2Only,
             is_stale_for_sha: false,
             behind_head: false,
@@ -137,10 +147,28 @@ impl Engine {
     /// Attach an L1 session overlay dir (`~/.ecp/<repo>/sessions/<sid>/`) so
     /// query paths can surface dirty graph fragments over the L2 base. Wired
     /// from `main.rs` after the engine loads (when a session overlay resolves).
-    pub fn with_overlay(mut self, dir: PathBuf) -> Self {
+    /// `worktree_root` anchors fragment mtime validation for `overlay_view`.
+    pub fn with_overlay(mut self, dir: PathBuf, worktree_root: PathBuf) -> Self {
         self.overlay_dir = Some(dir);
+        self.worktree_root = Some(worktree_root);
         self.view = GraphView::L2WithOverlay;
         self
+    }
+
+    /// The query-time overlay merge view, built once per process on first
+    /// use. `None` when no session overlay is attached, the working tree is
+    /// clean, or every fragment failed validation — callers then traverse
+    /// the base graph exactly as before (zero added cost).
+    pub fn overlay_view(&self) -> Option<&OverlayView> {
+        self.overlay_view
+            .get_or_init(|| {
+                let dir = self.overlay_dir.as_deref()?;
+                let root = self.worktree_root.as_deref()?;
+                let graph = self.graph().ok()?;
+                let inputs = crate::session::overlay_reader::load_view_inputs(dir, root).ok()?;
+                OverlayView::build(graph, &inputs)
+            })
+            .as_ref()
     }
 
     /// Current view discriminator. PureReference sessions yield `L2Only`;
