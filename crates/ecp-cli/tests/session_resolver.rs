@@ -95,6 +95,32 @@ fn empty_env_falls_through_to_pid() {
 }
 
 #[test]
+fn agent_name_precedence_and_empty_handling() {
+    use ecp_cli::session::resolver::resolve_agent_name;
+    // Only this test touches the two agent-name vars; the shared lock keeps
+    // it serialized with the rest of the file's env mutations anyway.
+    let _guard = SESSION_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    std::env::remove_var("ECP_AGENT_NAME");
+    std::env::remove_var("CLAUDE_AGENT_NAME");
+    assert_eq!(resolve_agent_name(), None);
+
+    std::env::set_var("CLAUDE_AGENT_NAME", "from-claude");
+    assert_eq!(resolve_agent_name().as_deref(), Some("from-claude"));
+
+    std::env::set_var("ECP_AGENT_NAME", "from-ecp");
+    assert_eq!(resolve_agent_name().as_deref(), Some("from-ecp"));
+
+    std::env::set_var("ECP_AGENT_NAME", "  ");
+    assert_eq!(resolve_agent_name().as_deref(), Some("from-claude"));
+
+    std::env::set_var("ECP_AGENT_NAME", " padded-name ");
+    assert_eq!(resolve_agent_name().as_deref(), Some("padded-name"));
+
+    std::env::remove_var("ECP_AGENT_NAME");
+    std::env::remove_var("CLAUDE_AGENT_NAME");
+}
+
+#[test]
 fn pid_fallback_format_is_hex16() {
     let _guard = SESSION_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     clear_session_env();

@@ -31,6 +31,18 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
     fallback_id().to_string()
 }
 
+/// Resolve the team-visible agent name for this session, if any.
+/// `ECP_AGENT_NAME` (explicit contract) wins over `CLAUDE_AGENT_NAME`
+/// (harness-provided). Whitespace-only values are treated as unset.
+pub fn resolve_agent_name() -> Option<String> {
+    ["ECP_AGENT_NAME", "CLAUDE_AGENT_NAME"]
+        .iter()
+        .find_map(|k| match std::env::var(k) {
+            Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        })
+}
+
 /// Per-PROCESS fallback id. Must be computed exactly once: the L1 overlay
 /// writer (`apply_l1_overlay_updates`) and reader (engine construction) each
 /// resolve the session dir independently within one CLI invocation, so a
