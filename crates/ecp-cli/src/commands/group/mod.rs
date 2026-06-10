@@ -111,3 +111,16 @@ pub fn resolve_member_engines(
         })
         .collect()
 }
+
+/// One caveat line per member whose engine self-flags untrustworthy results
+/// (warm-attach or behind-HEAD graph), prefixed with the member's display
+/// name so the consumer knows WHICH repo's rows to distrust — a blanket
+/// warning would poison trust in the fresh members' rows too. `None` when
+/// every member is clean (no token cost on the common path).
+pub fn member_caveats(engines: &[(String, Engine)]) -> Option<String> {
+    let lines: Vec<String> = engines
+        .iter()
+        .filter_map(|(member, engine)| engine.caveat().map(|c| format!("{member}: {c}")))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}

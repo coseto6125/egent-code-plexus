@@ -17,6 +17,12 @@ pub struct Engine {
     /// path). LLM consumers should treat results as slightly stale; a background
     /// rebuild for the new SHA is already in flight.
     pub is_stale_for_sha: bool,
+    /// True when the loaded graph's commit dir names a SHA behind the repo's
+    /// current HEAD. By-repo loaders (`auto_ensure::load_ensured`) resolve the
+    /// latest *published* graph, which lags committed-but-unindexed work; the
+    /// L1 overlay absorbs the delta for freshness bookkeeping, but queries
+    /// read L2 only, so results genuinely miss the newer commits.
+    pub behind_head: bool,
 }
 
 /// Discriminated view over the L2 graph plus an optional L1 overlay.
@@ -54,6 +60,7 @@ impl Engine {
             overlay_dir: None,
             view: GraphView::L2Only,
             is_stale_for_sha: false,
+            behind_head: false,
         })
     }
 
@@ -67,19 +74,30 @@ impl Engine {
     }
 
     /// The single caveat string for query output, or `None` when results are
-    /// trustworthy. Today the only source is warm-attach staleness; future
-    /// caveats (blind-spot coverage, ambiguity-suppressed edges) extend the
-    /// `Some` arm. Routed into the payload's `result` field by
+    /// trustworthy. Sources today: warm-attach staleness and behind-HEAD
+    /// graphs; future caveats (blind-spot coverage, ambiguity-suppressed
+    /// edges) extend the chain. Routed into the payload's `result` field by
     /// `output::emit_with_caveat`, so a `found:false` under a stale graph is
     /// no longer indistinguishable from a definitive "does not exist".
     pub fn caveat(&self) -> Option<String> {
-        self.is_stale_for_sha.then(|| {
-            "results may be incomplete: graph is a warm-attach from a sibling commit \
-             (current HEAD not yet indexed); symbols added since are invisible. A background \
-             rebuild is in flight — rerun, or `ecp admin index --force --repo .` for a \
-             definitive answer."
-                .to_string()
-        })
+        if self.is_stale_for_sha {
+            Some(
+                "results may be incomplete: graph is a warm-attach from a sibling commit \
+                 (current HEAD not yet indexed); symbols added since are invisible. A background \
+                 rebuild is in flight — rerun, or `ecp admin index --force --repo .` for a \
+                 definitive answer."
+                    .to_string(),
+            )
+        } else if self.behind_head {
+            Some(
+                "results may be incomplete: graph predates the repo's current HEAD, so \
+                 committed changes since are not indexed. Run `ecp admin index --repo <path>` \
+                 for a definitive answer."
+                    .to_string(),
+            )
+        } else {
+            None
+        }
     }
 
     /// SessionState-driven constructor (spec §5.1). Classifies the session and

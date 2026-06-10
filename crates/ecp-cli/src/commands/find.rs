@@ -468,6 +468,12 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
 
     match format {
         OutputFormat::Text => {
+            // The JSON/toon paths carry the staleness caveat in the `result`
+            // field; text (the default format) must say it too, or a stale
+            // "no match" reads as a definitive "does not exist".
+            if let Some(c) = engine.caveat() {
+                eprintln!("note: {c}");
+            }
             if !found {
                 println!("no match for: {pattern}");
                 return Ok(());
