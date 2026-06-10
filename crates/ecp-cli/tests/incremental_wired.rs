@@ -359,3 +359,180 @@ fn test_version_incompatible_falls_through_to_build_l2() {
         "ensure_fresh must NOT call reanalyze_files when graph header is incompatible"
     );
 }
+
+// ── L1 freshness gate (FU-2026-06-10-f92cecba3daa) ──────────────────────────
+
+/// A repeat query over an UNCHANGED dirty working tree must not re-parse the
+/// dirty set: fragments record each parsed file's mtime_ns in
+/// `dirty_files.json`, so the Stale arm can prove the overlay is already
+/// current with stat calls alone. Observable contract (counters are
+/// process-local, the work happens in a spawned `ecp`): the `l1.refreshed
+/// written=N` stderr line appears only when fragments were actually written.
+#[test]
+fn test_fresh_fragments_skip_reanalyze_on_repeat_query() {
+    let tmp = TempDir::new().unwrap();
+    let worktree = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&home).unwrap();
+
+    let g = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    fs::write(worktree.join("lib.rs"), "pub fn original_fn() {}\n").unwrap();
+    fs::write(worktree.join("util.rs"), "pub fn helper_fn() {}\n").unwrap();
+    g(&["add", "."]);
+    g(&["commit", "-qm", "init"]);
+
+    let idx_out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "index", "--repo", worktree.to_str().unwrap()])
+        .env("HOME", &home)
+        .output()
+        .expect("admin index failed to spawn");
+    assert!(
+        idx_out.status.success(),
+        "admin index failed: stderr={}",
+        String::from_utf8_lossy(&idx_out.stderr)
+    );
+
+    // Same session id across queries — the manifest lives under the sid dir.
+    let find = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+            .args(["find", "original_fn", "--repo", worktree.to_str().unwrap()])
+            .env("HOME", &home)
+            .env("CLAUDE_CODE_SESSION_ID", "fresh-gate-sid")
+            .output()
+            .expect("ecp find failed to spawn");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    // Make both files dirty (mtime strictly newer than graph.bin).
+    std::thread::sleep(Duration::from_millis(50));
+    fs::write(
+        worktree.join("lib.rs"),
+        "pub fn original_fn() {}\npub fn added_a() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join("util.rs"),
+        "pub fn helper_fn() {}\npub fn added_b() {}\n",
+    )
+    .unwrap();
+
+    let s1 = find();
+    assert!(
+        s1.contains("l1.refreshed written=2"),
+        "first query must refresh both dirty files; stderr={s1}"
+    );
+
+    let s2 = find();
+    assert!(
+        !s2.contains("l1.refreshed"),
+        "repeat query with unchanged dirty files must skip the L1 refresh entirely; stderr={s2}"
+    );
+
+    // Touch ONE file — only that file may be re-parsed.
+    std::thread::sleep(Duration::from_millis(50));
+    fs::write(
+        worktree.join("util.rs"),
+        "pub fn helper_fn() {}\npub fn added_b2() {}\n",
+    )
+    .unwrap();
+    let s3 = find();
+    assert!(
+        s3.contains("l1.refreshed written=1"),
+        "after touching one of two dirty files, exactly one fragment refresh expected; stderr={s3}"
+    );
+}
+
+/// HEAD-drift disengagement: the gate may only trust fragments based on the
+/// CURRENT HEAD. After a commit moves HEAD mid-session, the next query must
+/// fall through to the full overlay path (where promotion rebases the
+/// session), even though the remaining dirty file's mtime still matches its
+/// manifest entry.
+#[test]
+fn test_fresh_gate_disengages_on_head_drift() {
+    let tmp = TempDir::new().unwrap();
+    let worktree = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&home).unwrap();
+
+    let g = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    fs::write(worktree.join("lib.rs"), "pub fn original_fn() {}\n").unwrap();
+    fs::write(worktree.join("util.rs"), "pub fn helper_fn() {}\n").unwrap();
+    g(&["add", "."]);
+    g(&["commit", "-qm", "init"]);
+
+    let idx_out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "index", "--repo", worktree.to_str().unwrap()])
+        .env("HOME", &home)
+        .output()
+        .expect("admin index failed to spawn");
+    assert!(idx_out.status.success());
+
+    let find = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+            .args(["find", "original_fn", "--repo", worktree.to_str().unwrap()])
+            .env("HOME", &home)
+            .env("CLAUDE_CODE_SESSION_ID", "drift-gate-sid")
+            .output()
+            .expect("ecp find failed to spawn");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    std::thread::sleep(Duration::from_millis(50));
+    fs::write(
+        worktree.join("lib.rs"),
+        "pub fn original_fn() {}\npub fn added_a() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join("util.rs"),
+        "pub fn helper_fn() {}\npub fn added_b() {}\n",
+    )
+    .unwrap();
+
+    let s1 = find();
+    assert!(s1.contains("l1.refreshed written=2"), "stderr={s1}");
+    let s2 = find();
+    assert!(!s2.contains("l1.refreshed"), "gate engaged; stderr={s2}");
+
+    // Commit ONE dirty file — HEAD moves, lib.rs stays dirty with an mtime
+    // that still matches its manifest entry. Re-index so the NEW head has a
+    // graph: without it the next query routes through warm-attach (Missing),
+    // never reaching the Stale arm whose gate this test pins.
+    g(&["add", "util.rs"]);
+    g(&["commit", "-qm", "drift"]);
+    let idx2 = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "index", "--repo", worktree.to_str().unwrap()])
+        .env("HOME", &home)
+        .output()
+        .expect("re-index failed to spawn");
+    assert!(idx2.status.success());
+
+    let s3 = find();
+    assert!(
+        s3.contains("l1.refreshed written=1"),
+        "after HEAD drift the gate must disengage and the full path must \
+         re-parse the remaining dirty file; stderr={s3}"
+    );
+}
