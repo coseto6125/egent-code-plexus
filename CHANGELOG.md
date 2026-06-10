@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.6 - 2026-06-10
+
+### Features
+
+- execute against the merged graph (root-cure 3/3) (#557)
+- traverse the query-time OverlayView (root-cure 2/3) (#556)
+- Fragment v2 + query-time OverlayView foundation (root-cure 1/3) (#555)
+- self-flag incomplete caller sets on name-collision targets (#551)
+
+### Bug Fixes
+
+- untracked files enter the L1 overlay dirty set (#554)
+- surface behind-HEAD staleness caveat on group verbs (#553)
+- unbreak cross-repo selectors + thread staleness caveat through bm25 paths (#552)
 ## v0.6.5 - 2026-06-09
 
 ### Features
