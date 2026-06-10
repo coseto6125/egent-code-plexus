@@ -103,7 +103,7 @@ fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Re
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
-        agent_name: None,
+        agent_name: crate::session::resolver::resolve_agent_name(),
     });
     meta.watcher_pid = Some(pid);
     SessionMeta::write_atomic(&meta_path, &meta)?;

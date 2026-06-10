@@ -32,6 +32,18 @@ impl SessionMeta {
         let bytes = fs::read(path)?;
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
+    /// Apply a freshly-resolved agent name. Returns true when the meta
+    /// changed and needs rewriting. `None` resolved name never clears an
+    /// existing name — env absence in a later process must not erase identity.
+    pub fn apply_agent_name(&mut self, resolved: Option<String>) -> bool {
+        match resolved {
+            Some(n) if self.agent_name.as_deref() != Some(n.as_str()) => {
+                self.agent_name = Some(n);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -55,6 +67,16 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         let back: SessionMeta = serde_json::from_str(&s).unwrap();
         assert_eq!(back.agent_name.as_deref(), Some("rust-parser"));
+    }
+
+    #[test]
+    fn test_apply_agent_name_set_update_preserve() {
+        let mut m: SessionMeta = serde_json::from_str(base_json()).unwrap();
+        assert!(m.apply_agent_name(Some("a".into())), "first set must dirty");
+        assert!(!m.apply_agent_name(Some("a".into())), "idempotent re-apply");
+        assert!(m.apply_agent_name(Some("b".into())), "rename must dirty");
+        assert!(!m.apply_agent_name(None), "env absence must not clear");
+        assert_eq!(m.agent_name.as_deref(), Some("b"));
     }
 
     #[test]

@@ -104,9 +104,10 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
     // If reading fails, fall back to empty string — the auto_ensure path
     // that triggers promotion will write a fresh session_meta with the real
     // worktree on the next L1 write.
-    let prev_worktree = SessionMeta::read(&session_dir.join("session_meta.json"))
-        .map(|sm| sm.source_worktree)
-        .unwrap_or_default();
+    let (prev_worktree, prev_agent_name) =
+        SessionMeta::read(&session_dir.join("session_meta.json"))
+            .map(|sm| (sm.source_worktree, sm.agent_name))
+            .unwrap_or_default();
 
     fs::rename(session_dir, &stale)?;
     fs::create_dir(session_dir)?;
@@ -123,7 +124,7 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
-        agent_name: None,
+        agent_name: prev_agent_name,
     };
     atomic_write_json(&session_dir.join("session_meta.json"), &sm)?;
     atomic_write_json(&session_dir.join("dirty_files.json"), &DirtyFiles::empty())?;
