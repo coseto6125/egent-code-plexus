@@ -489,8 +489,17 @@ pub fn load_ensured(
     worktree_root: &Path,
 ) -> Result<crate::engine::Engine, String> {
     match ensure_fresh(graph_path, worktree_root)? {
-        EnsureFreshOutcome::Ready => crate::engine::Engine::load(graph_path)
-            .map_err(|e| format!("load graph {}: {e}", graph_path.display())),
+        EnsureFreshOutcome::Ready => {
+            let mut engine = crate::engine::Engine::load(graph_path)
+                .map_err(|e| format!("load graph {}: {e}", graph_path.display()))?;
+            // Callers resolve `graph_path` as the latest *published* graph,
+            // which lags committed-but-unindexed work. `ensure_fresh` then
+            // reports Ready because the L1 overlay absorbed the delta — but
+            // queries read L2 only, so the engine must self-flag or a
+            // `found:false` would read as a definitive "does not exist".
+            engine.behind_head = graph_behind_head(graph_path, worktree_root);
+            Ok(engine)
+        }
         EnsureFreshOutcome::WarmAttach { sibling_graph_path } => {
             crate::engine::Engine::load_warm(&sibling_graph_path).map_err(|e| {
                 format!(
@@ -500,6 +509,30 @@ pub fn load_ensured(
             })
         }
     }
+}
+
+/// True when `graph_path` sits in a commit dir whose SHA differs from the
+/// current HEAD of `worktree_root`. The dir NAME is the authority: the
+/// `.head_sha` sidecar is rewritten to the current HEAD after every L1
+/// overlay refresh, so it cannot distinguish "graph built at HEAD" from
+/// "old graph whose overlay was refreshed at HEAD". Inconclusive cases
+/// (legacy layout, non-git worktree, unparseable dir name) return `false`
+/// — never caveat on a guess.
+fn graph_behind_head(graph_path: &Path, worktree_root: &Path) -> bool {
+    let Some(dir_name) = graph_path
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+    else {
+        return false;
+    };
+    let Ok(parsed) = ecp_core::registry::CommitDirName::parse(dir_name) else {
+        return false;
+    };
+    let Some(head) = crate::git_cache::head_sha(worktree_root) else {
+        return false;
+    };
+    parsed.sha_hex() != head
 }
 
 /// Process-lifetime cache for `attach_latest_sibling_sha` results, keyed by

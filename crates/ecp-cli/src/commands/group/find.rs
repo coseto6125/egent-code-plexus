@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use serde_json::{json, Value};
 
 use crate::commands::find::{self, Hit};
-use crate::commands::group::resolve_member_engines;
+use crate::commands::group::{member_caveats, resolve_member_engines};
 use crate::engine::Engine;
 
 /// Standard RRF constant — empirically tuned for dense-retrieval fusion.
@@ -83,14 +83,28 @@ pub fn run(args: FindArgs) -> Result<(), EcpError> {
         return Ok(());
     }
 
+    let caveat = member_caveats(&engines);
     if args.batch {
-        run_batch(&engines, args.merge, args.limit, args.json);
+        run_batch(
+            &engines,
+            args.merge,
+            args.limit,
+            args.json,
+            caveat.as_deref(),
+        );
     } else {
         let pattern = args
             .pattern
             .as_deref()
             .expect("clap required_unless_present");
-        run_one(&engines, pattern, args.merge, args.limit, args.json);
+        run_one(
+            &engines,
+            pattern,
+            args.merge,
+            args.limit,
+            args.json,
+            caveat.as_deref(),
+        );
     }
     Ok(())
 }
@@ -103,15 +117,22 @@ fn run_one(
     mode: MergeMode,
     limit: Option<usize>,
     json: bool,
+    caveat: Option<&str>,
 ) {
     let per_repo = fan_out_per_repo(engines, pattern);
     match mode {
-        MergeMode::None => emit_concat(&per_repo, json),
-        MergeMode::Rrf => emit_rrf(&per_repo, limit, json),
+        MergeMode::None => emit_concat(&per_repo, json, caveat),
+        MergeMode::Rrf => emit_rrf(&per_repo, limit, json, caveat),
     }
 }
 
-fn run_batch(engines: &[(String, Engine)], mode: MergeMode, limit: Option<usize>, json: bool) {
+fn run_batch(
+    engines: &[(String, Engine)],
+    mode: MergeMode,
+    limit: Option<usize>,
+    json: bool,
+    caveat: Option<&str>,
+) {
     use std::io::BufRead;
 
     let stdin = std::io::stdin();
@@ -132,7 +153,7 @@ fn run_batch(engines: &[(String, Engine)], mode: MergeMode, limit: Option<usize>
 
     for pattern in &patterns {
         println!("=== pattern: {pattern} ===");
-        run_one(engines, pattern, mode, limit, json);
+        run_one(engines, pattern, mode, limit, json, caveat);
     }
 }
 
@@ -196,7 +217,7 @@ fn emit_empty(mode: MergeMode, json: bool) {
     }
 }
 
-fn emit_concat(per_repo: &[(String, Vec<Hit>)], json: bool) {
+fn emit_concat(per_repo: &[(String, Vec<Hit>)], json: bool, caveat: Option<&str>) {
     if json {
         let repo_blocks: Vec<Value> = per_repo
             .iter()
@@ -217,11 +238,15 @@ fn emit_concat(per_repo: &[(String, Vec<Hit>)], json: bool) {
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({ "per_repo": repo_blocks })).unwrap_or_default()
-        );
+        let mut out = json!({ "per_repo": repo_blocks });
+        if let Some(c) = caveat {
+            out["result"] = json!(c);
+        }
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
+        if let Some(c) = caveat {
+            eprintln!("note: {c}");
+        }
         for (repo, hits) in per_repo {
             println!("=== {repo} ({} hits) ===", hits.len());
             for h in hits {
@@ -239,7 +264,12 @@ fn emit_concat(per_repo: &[(String, Vec<Hit>)], json: bool) {
     }
 }
 
-fn emit_rrf(per_repo: &[(String, Vec<Hit>)], limit: Option<usize>, json: bool) {
+fn emit_rrf(
+    per_repo: &[(String, Vec<Hit>)],
+    limit: Option<usize>,
+    json: bool,
+    caveat: Option<&str>,
+) {
     let merged = rrf_merge(per_repo, limit.unwrap_or(DEFAULT_RRF_LIMIT));
     let per_repo_summary: Vec<Value> = per_repo
         .iter()
@@ -262,15 +292,18 @@ fn emit_rrf(per_repo: &[(String, Vec<Hit>)], limit: Option<usize>, json: bool) {
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "results": results,
-                "per_repo": per_repo_summary,
-            }))
-            .unwrap_or_default()
-        );
+        let mut out = json!({
+            "results": results,
+            "per_repo": per_repo_summary,
+        });
+        if let Some(c) = caveat {
+            out["result"] = json!(c);
+        }
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
+        if let Some(c) = caveat {
+            eprintln!("note: {c}");
+        }
         for r in &merged {
             let h = r.hit;
             let repo_tag = h.repo.as_deref().unwrap_or("?");

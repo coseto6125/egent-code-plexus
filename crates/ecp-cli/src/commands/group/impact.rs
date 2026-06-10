@@ -92,6 +92,9 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
         crate::git_cache::worktree_root_from_common_dir(std::path::Path::new(&resolved.common_dir));
     let engine = crate::auto_ensure::load_ensured(&graph_path, worktree_root)
         .map_err(|e| EcpError::Io(std::io::Error::other(e)))?;
+    // Same member-prefixed shape as `group find`'s caveat, so consumers see
+    // one consistent staleness convention across group verbs.
+    let caveat = engine.caveat().map(|c| format!("{}: {c}", args.repo));
 
     // 4. Local impact.
     let local = local_impact::run_for_symbol(
@@ -163,9 +166,21 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
 
     // 9. Emit.
     if args.json {
-        emit_json(&args, &local, &cross_hits, cross_depth_warning.as_deref());
+        emit_json(
+            &args,
+            &local,
+            &cross_hits,
+            cross_depth_warning.as_deref(),
+            caveat.as_deref(),
+        );
     } else {
-        emit_toon(&args, &local, &cross_hits, cross_depth_warning.as_deref());
+        emit_toon(
+            &args,
+            &local,
+            &cross_hits,
+            cross_depth_warning.as_deref(),
+            caveat.as_deref(),
+        );
     }
 
     Ok(())
@@ -176,6 +191,7 @@ fn emit_toon(
     local: &local_impact::LocalImpact,
     cross_hits: &[Value],
     cross_depth_warning: Option<&str>,
+    caveat: Option<&str>,
 ) {
     println!("group         {}", args.name);
     println!("target        {}", args.target);
@@ -192,6 +208,9 @@ fn emit_toon(
     if let Some(warn) = cross_depth_warning {
         eprintln!("note: {warn}");
     }
+    if let Some(c) = caveat {
+        eprintln!("note: {c}");
+    }
 }
 
 fn emit_json(
@@ -199,6 +218,7 @@ fn emit_json(
     local: &local_impact::LocalImpact,
     cross_hits: &[Value],
     cross_depth_warning: Option<&str>,
+    caveat: Option<&str>,
 ) {
     let mut out = json!({
         "summary": {
@@ -215,6 +235,9 @@ fn emit_json(
     });
     if let Some(warn) = cross_depth_warning {
         out["cross_depth_warning"] = json!(warn);
+    }
+    if let Some(c) = caveat {
+        out["result"] = json!(c);
     }
     println!(
         "{}",
