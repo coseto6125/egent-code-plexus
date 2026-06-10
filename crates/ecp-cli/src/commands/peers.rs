@@ -130,8 +130,9 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
             }
             for p in &peers {
                 println!(
-                    "session={}\tpid={}\tlast_touched={}\twatcher={}",
+                    "session={}\tname={}\tpid={}\tlast_touched={}\twatcher={}",
                     p.session_id,
+                    p.agent_name.as_deref().unwrap_or("-"),
                     p.pid,
                     p.last_touched,
                     watcher_state(p)
@@ -144,6 +145,7 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
                 .map(|p| {
                     serde_json::json!({
                         "session_id": p.session_id,
+                        "agent_name": p.agent_name,
                         "pid": p.pid,
                         "last_touched": p.last_touched.to_rfc3339(),
                         "base_sha": p.base_sha,
