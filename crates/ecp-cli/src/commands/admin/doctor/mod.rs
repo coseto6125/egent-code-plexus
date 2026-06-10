@@ -16,6 +16,7 @@ use serde::Serialize;
 pub enum CheckTarget {
     Skills,
     Index,
+    Coverage,
     Host,
     Config,
     Registry,
@@ -24,8 +25,8 @@ pub enum CheckTarget {
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
-    /// Run only this check (skills / index / host / config / registry /
-    /// version). Omit to run all.
+    /// Run only this check (skills / index / coverage / host / config /
+    /// registry / version). Omit to run all.
     #[arg(value_enum)]
     pub check: Option<CheckTarget>,
     /// Apply fixable remediations for the selected check(s): reinstall stale
@@ -107,6 +108,9 @@ pub fn run(args: DoctorArgs) -> Result<(), EcpError> {
     }
     if want(CheckTarget::Index) {
         results.push(checks::index::check(fix));
+    }
+    if want(CheckTarget::Coverage) {
+        results.push(checks::coverage::check(fix));
     }
     if want(CheckTarget::Host) {
         results.extend(checks::host::check(fix));

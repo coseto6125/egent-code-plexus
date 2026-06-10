@@ -47,12 +47,17 @@ pub mod test_counters {
     /// blocking on a cold build. Lets integration tests assert the fast path
     /// fires for OOB branch-switch scenarios.
     pub static WARM_ATTACH_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// Incremented when `load_ensured` detects a behind-HEAD graph and spawns
+    /// the background self-heal (the spawn itself is skipped under
+    /// ECP_SKIP_BG_REBUILD, so tests assert intent via this counter).
+    pub static BEHIND_HEAD_HEAL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     pub fn reset() {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
         BUILD_L2_CALL_COUNT.store(0, Ordering::Relaxed);
         TANTIVY_JOIN_COUNT.store(0, Ordering::Relaxed);
         WARM_ATTACH_COUNT.store(0, Ordering::Relaxed);
+        BEHIND_HEAD_HEAL_COUNT.store(0, Ordering::Relaxed);
     }
 
     pub fn reanalyze_calls() -> usize {
@@ -69,6 +74,10 @@ pub mod test_counters {
 
     pub fn warm_attach_calls() -> usize {
         WARM_ATTACH_COUNT.load(Ordering::Relaxed)
+    }
+
+    pub fn behind_head_heal_calls() -> usize {
+        BEHIND_HEAD_HEAL_COUNT.load(Ordering::Relaxed)
     }
 }
 
@@ -550,6 +559,18 @@ pub fn load_ensured(
             // queries read L2 only, so the engine must self-flag or a
             // `found:false` would read as a definitive "does not exist".
             engine.behind_head = graph_behind_head(graph_path, worktree_root);
+            if engine.behind_head {
+                // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
+                // sidecar to the current HEAD, so `ensure_index` keeps
+                // answering Ready and a behind-HEAD L2 never rebuilds on its
+                // own (observed: 15 days stale before a manual --force).
+                // Reuse the warm-attach spawn — flock-deduped, skipped under
+                // ECP_SKIP_BG_REBUILD.
+                test_counters::BEHIND_HEAD_HEAL_COUNT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("l2.behind-head rebuild=background");
+                spawn_background_rebuild(worktree_root);
+            }
             Ok(engine)
         }
         EnsureFreshOutcome::WarmAttach { sibling_graph_path } => {
