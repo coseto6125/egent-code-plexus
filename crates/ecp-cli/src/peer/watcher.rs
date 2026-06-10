@@ -106,15 +106,85 @@ fn handle_event(
             continue;
         };
         if sid == cfg.my_session_id {
-            let mut c = cache.lock().expect("impact cache lock poisoned");
-            *c = rebuild_impact_cache(&cfg.my_session_dir);
-            // Invalidate my_dirty_cache so next dispatch_peer re-reads the updated file.
-            *my_dirty_cache.lock().expect("my_dirty_cache lock poisoned") = None;
+            let prev: Option<Vec<ecp_core::session::overlay::SymbolRef>> = {
+                let mut c = cache.lock().expect("impact cache lock poisoned");
+                *c = rebuild_impact_cache(&cfg.my_session_dir);
+                // Invalidate my_dirty_cache so next dispatch_peer re-reads the updated file.
+                my_dirty_cache
+                    .lock()
+                    .expect("my_dirty_cache lock poisoned")
+                    .take()
+            };
+            // Concerns are otherwise edge-triggered on PEER writes only: a
+            // peer event that arrived while our dirty set was still empty was
+            // classified Ignore and never re-evaluated — so the last session
+            // to go dirty would hear nothing (8-session audit: delivery
+            // staircase ending at 0). Our own dirty change is the moment new
+            // overlaps can appear; rescan every peer against the new set —
+            // but only when the set actually GAINED symbols, else every
+            // re-save of the same symbol would spam N duplicate concerns
+            // into our inbox between hook drains.
+            if my_dirty_gained_symbols(&cfg.my_session_dir, prev.as_deref()) {
+                rescan_peers(cfg, cache, my_dirty_cache);
+            }
             continue;
         }
         dispatch_peer(cfg, cache, my_dirty_cache, sid, path)?;
     }
     Ok(())
+}
+
+/// True when the current dirty set contains a symbol name absent from the
+/// previous cached set. `prev = None` (startup / first write) counts as
+/// gained — rescanning once too often is safe; missing the first transition
+/// recreates the late-writer blind spot.
+fn my_dirty_gained_symbols(
+    my_session_dir: &Path,
+    prev: Option<&[ecp_core::session::overlay::SymbolRef]>,
+) -> bool {
+    let Some(prev) = prev else {
+        return true;
+    };
+    let Ok(now) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
+        return false;
+    };
+    let prev_names: std::collections::HashSet<&str> =
+        prev.iter().map(|s| s.name.as_str()).collect();
+    now.entries
+        .values()
+        .flat_map(|e| &e.dirty_symbols)
+        .any(|s| !prev_names.contains(s.name.as_str()))
+}
+
+/// Fail-open per peer: one unreadable peer must not block the rest.
+fn rescan_peers(
+    cfg: &WatcherCfg,
+    cache: &Arc<Mutex<ImpactCache>>,
+    my_dirty_cache: &Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>>,
+) {
+    let sessions_dir = cfg.repo_root.join("sessions");
+    let Ok(read) = std::fs::read_dir(&sessions_dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(sid) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if sid == cfg.my_session_id || sid.starts_with('.') || sid.contains(".stale-") {
+            continue;
+        }
+        let dirty_path = path.join("dirty_files.json");
+        if !dirty_path.exists() {
+            continue;
+        }
+        if let Err(e) = dispatch_peer(cfg, cache, my_dirty_cache, sid, &dirty_path) {
+            log_watcher_error("rescan dispatch", &e);
+        }
+    }
 }
 
 fn dispatch_peer(

@@ -38,7 +38,7 @@ pub enum InboxEntry {
 
 /// Serde-friendly mirror of [`ConcernKind`] — `ConcernKind` itself lacks serde
 /// derives to keep `peer::concern` dependency-free.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ConcernKindSer {
     Hard,

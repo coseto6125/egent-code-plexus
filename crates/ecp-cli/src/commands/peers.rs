@@ -26,6 +26,10 @@ pub enum PeersCmd {
     Status {
         #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
         format: StatusFormat,
+        /// Lead overview: pairwise HARD dirty-symbol overlap across ALL alive
+        /// sessions (own session included), instead of the per-session list
+        #[arg(long, default_value_t = false)]
+        pairs: bool,
     },
     /// Show a peer's symbol-level dirty surface (optionally filtered by symbol)
     Diff {
@@ -60,6 +64,25 @@ pub enum PeersCmd {
     Thread { msg_id: String },
     /// Set this session's agent name (shown in status / payloads, targetable by say --to)
     Name { name: String },
+    /// Pre-spawn disjointness check: do these targets' blast radii collide?
+    /// Operates on the repo at cwd (not the peers data dir).
+    Plan {
+        /// Symbols the lead intends to split across agents (comma-separated)
+        #[arg(long, value_delimiter = ',', required = true)]
+        targets: Vec<String>,
+        /// Impact direction per target: a work package collides if either
+        /// caller or callee chains intersect, so `both` is the safe default
+        #[arg(long, default_value = "both", value_parser = ["upstream", "up", "downstream", "down", "both"])]
+        direction: String,
+        /// Max impact traversal depth per target
+        #[arg(long, default_value_t = 5)]
+        depth: u32,
+        /// Count test-only symbols as collisions
+        #[arg(long, default_value_t = false)]
+        include_tests: bool,
+        #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
+        format: StatusFormat,
+    },
     /// Start, stop, or check the inotify-driven peer-dirty watcher daemon.
     Watch(super::watch::WatchArgs),
     /// Rotate logs + cleanup
@@ -78,7 +101,13 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
         None => default_repo_root()?,
     };
     match args.cmd {
-        PeersCmd::Status { format } => cmd_status(&repo_root, format),
+        PeersCmd::Status { format, pairs } => {
+            if pairs {
+                cmd_status_pairs(&repo_root, format)
+            } else {
+                cmd_status(&repo_root, format)
+            }
+        }
         PeersCmd::Diff { peer, symbol } => cmd_diff(&repo_root, &peer, symbol.as_deref()),
         PeersCmd::Log {
             since,
@@ -97,6 +126,19 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
         }
         PeersCmd::Inbox { limit } => super::peers_msg::cmd_inbox(&repo_root, limit),
         PeersCmd::Name { name } => cmd_name(&repo_root, &name),
+        PeersCmd::Plan {
+            targets,
+            direction,
+            depth,
+            include_tests,
+            format,
+        } => super::peers_plan::cmd_plan(
+            &targets,
+            &direction,
+            depth,
+            include_tests,
+            matches!(format, StatusFormat::Json),
+        ),
         PeersCmd::Thread { msg_id } => super::peers_msg::cmd_thread(&repo_root, &msg_id),
         PeersCmd::Watch(wargs) => super::watch::run(wargs).map_err(io_from_ecp),
         PeersCmd::Gc => cmd_gc(&repo_root),
@@ -160,6 +202,108 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
             println!(
                 "{}",
                 serde_json::to_string(&rows).map_err(std::io::Error::other)?
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Pairwise HARD-overlap matrix across all alive sessions — the lead's
+/// global view. Reuses concern.rs's HARD definition (dirty-name intersection);
+/// SOFT (impact-neighbor) pairs are not computed here: that needs the graph
+/// engine, and an honest omission beats an empty column (`peers plan` covers
+/// the proactive impact-level question).
+fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Result<()> {
+    use ecp_core::session::overlay::DirtyFiles;
+    use std::collections::HashSet;
+
+    // Empty exclude id matches no session dir → own session included.
+    let sessions = alive_peers(repo_root, "");
+    let dirty: Vec<HashSet<String>> = sessions
+        .iter()
+        .map(|s| {
+            DirtyFiles::read(
+                &repo_root
+                    .join("sessions")
+                    .join(&s.session_id)
+                    .join("dirty_files.json"),
+            )
+            .map(|d| {
+                d.entries
+                    .into_values()
+                    .flat_map(|e| e.dirty_symbols)
+                    .map(|sym| sym.name)
+                    .collect()
+            })
+            .unwrap_or_default()
+        })
+        .collect();
+
+    const SYMBOLS_CAP: usize = 10;
+    let label = |i: usize| -> String {
+        match sessions[i].agent_name.as_deref() {
+            Some(n) => format!("{}({n})", sessions[i].session_id),
+            None => sessions[i].session_id.clone(),
+        }
+    };
+    let mut rows = Vec::new();
+    for i in 0..sessions.len() {
+        for j in (i + 1)..sessions.len() {
+            let mut shared: Vec<&String> = dirty[i].intersection(&dirty[j]).collect();
+            if shared.is_empty() {
+                continue;
+            }
+            shared.sort();
+            rows.push((i, j, shared));
+        }
+    }
+    match format {
+        StatusFormat::Text => {
+            println!(
+                "pairs: {} session{}, {} overlapping pair{}",
+                sessions.len(),
+                if sessions.len() == 1 { "" } else { "s" },
+                rows.len(),
+                if rows.len() == 1 { "" } else { "s" }
+            );
+            if rows.is_empty() {
+                println!("no overlapping pairs — dirty sets are disjoint");
+                return Ok(());
+            }
+            for (i, j, shared) in &rows {
+                let names: Vec<&str> = shared
+                    .iter()
+                    .take(SYMBOLS_CAP)
+                    .map(|s| s.as_str())
+                    .collect();
+                println!(
+                    "{} ↔ {}: HARD {} — {}",
+                    label(*i),
+                    label(*j),
+                    shared.len(),
+                    names.join(", ")
+                );
+            }
+        }
+        StatusFormat::Json => {
+            let payload = serde_json::json!({
+                "sessions": sessions.iter().map(|s| serde_json::json!({
+                    "session_id": s.session_id,
+                    "agent_name": s.agent_name,
+                })).collect::<Vec<_>>(),
+                "pairs": rows.iter().map(|(i, j, shared)| serde_json::json!({
+                    "a": sessions[*i].session_id,
+                    "a_name": sessions[*i].agent_name,
+                    "b": sessions[*j].session_id,
+                    "b_name": sessions[*j].agent_name,
+                    "hard_count": shared.len(),
+                    "symbols": shared.iter().take(SYMBOLS_CAP).collect::<Vec<_>>(),
+                    "symbols_capped": shared.len() > SYMBOLS_CAP,
+                })).collect::<Vec<_>>(),
+            });
+            println!(
+                "{}",
+                serde_json::to_string(&payload).map_err(std::io::Error::other)?
             );
         }
     }

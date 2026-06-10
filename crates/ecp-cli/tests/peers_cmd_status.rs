@@ -41,6 +41,93 @@ fn write_session(root: &std::path::Path, id: &str, agent_name: Option<&str>) {
     SessionMeta::write_atomic(&dir.join("session_meta.json"), &meta).unwrap();
 }
 
+fn write_dirty(root: &std::path::Path, id: &str, symbols: &[&str]) {
+    let syms: Vec<String> = symbols
+        .iter()
+        .map(|s| {
+            format!(
+                r#"{{"name":"{s}","kind":"function","file":"src/a.ts","line_start":1,"line_end":2}}"#
+            )
+        })
+        .collect();
+    let json = format!(
+        r#"{{"version":1,"entries":{{"src/a.ts":{{"mtime_ns":0,"content_hash":"h","fragment_id":"f","tantivy_delta_segment":null,"dirty_symbols":[{}]}}}}}}"#,
+        syms.join(",")
+    );
+    std::fs::write(
+        root.join("sessions").join(id).join("dirty_files.json"),
+        json,
+    )
+    .unwrap();
+}
+
+#[test]
+fn peers_status_pairs_reports_hard_overlap_matrix() {
+    let dir = tempdir().unwrap();
+    write_session(dir.path(), "s-one", Some("worker-a"));
+    write_session(dir.path(), "s-two", Some("worker-b"));
+    write_session(dir.path(), "s-three", None);
+    write_dirty(dir.path(), "s-one", &["verify_token", "parse_call"]);
+    write_dirty(dir.path(), "s-two", &["verify_token"]);
+    write_dirty(dir.path(), "s-three", &["unrelated_fn"]);
+
+    let out = Command::new(bin())
+        .args([
+            "peers",
+            "status",
+            "--pairs",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", "me-pairs")
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("worker-a") && stdout.contains("worker-b"),
+        "overlapping pair must be named: {stdout}"
+    );
+    assert!(
+        stdout.contains("verify_token"),
+        "overlap symbol must be listed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("unrelated_fn"),
+        "disjoint session must not appear as overlap: {stdout}"
+    );
+}
+
+#[test]
+fn peers_status_pairs_disjoint_says_none() {
+    let dir = tempdir().unwrap();
+    write_session(dir.path(), "s-one", None);
+    write_session(dir.path(), "s-two", None);
+    write_dirty(dir.path(), "s-one", &["fn_a"]);
+    write_dirty(dir.path(), "s-two", &["fn_b"]);
+
+    let out = Command::new(bin())
+        .args([
+            "peers",
+            "status",
+            "--pairs",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", "me-pairs2")
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no overlapping pairs"),
+        "disjoint matrix must say so plainly: {stdout}"
+    );
+}
+
 #[test]
 fn peers_status_shows_agent_name_and_dash_when_absent() {
     let dir = tempdir().unwrap();

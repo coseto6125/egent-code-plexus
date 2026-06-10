@@ -37,8 +37,20 @@ fn tool_peers() -> DerivedTool {
             "properties": {
                 "subcmd": {
                     "type": "string",
-                    "enum": ["status", "diff", "log", "say", "inbox", "thread", "name"],
+                    "enum": ["status", "diff", "log", "say", "inbox", "thread", "name", "plan"],
                     "description": "Which peer operation to run. Each subcmd uses a disjoint subset of the args below."
+                },
+                "targets": {
+                    "type": "string",
+                    "description": "[plan] Comma-separated symbols a lead intends to split across agents; reports blast-radius overlaps + disjoint work packages."
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "[plan] Max impact traversal depth per target (default 5)."
+                },
+                "include_tests": {
+                    "type": "boolean",
+                    "description": "[plan] Count test-only symbols as collisions (default false)."
                 },
                 "peer": {
                     "type": "string",
@@ -54,7 +66,7 @@ fn tool_peers() -> DerivedTool {
                 },
                 "direction": {
                     "type": "string",
-                    "description": "[log] Filter: 'in' or 'out'."
+                    "description": "[log] Filter: 'in' or 'out'. [plan] Impact direction: upstream|downstream|both (default both)."
                 },
                 "limit": {
                     "type": "integer",
@@ -83,7 +95,11 @@ fn tool_peers() -> DerivedTool {
                 "format": {
                     "type": "string",
                     "enum": ["text", "json"],
-                    "description": "[status] Output format. `json` returns an array with session_id, agent_name, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid."
+                    "description": "[status] Output format. `json` returns an array with session_id, agent_name, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid. [plan] also honored."
+                },
+                "pairs": {
+                    "type": "boolean",
+                    "description": "[status] Lead overview: pairwise HARD dirty-overlap matrix across all alive sessions instead of the per-session list."
                 },
                 "repo": {
                     "type": "string",
