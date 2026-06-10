@@ -203,3 +203,65 @@ fn uninstall_all_events_drops_hooks_key_entirely() {
     assert_eq!(merged["theme"], "dark");
     assert_eq!(merged["editor"]["font_size"], 14);
 }
+
+/// `agent-dispatch` installs as a SECOND PreToolUse entry with its own
+/// `Agent|Task` matcher, coexisting with the enrichment hook's
+/// `Grep|Glob|Bash` entry — and uninstalls independently of it.
+#[test]
+fn agent_dispatch_coexists_with_enrichment_and_uninstalls_alone() {
+    let tmp = TempDir::new().unwrap();
+    let settings_path = tmp.path().join("settings.json");
+    std::fs::write(&settings_path, "{}").unwrap();
+
+    let install = Command::new(ecp_bin())
+        .args([
+            "admin",
+            "install-hook",
+            "--claude-code",
+            "--events",
+            "pre-tool-use,agent-dispatch",
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+    assert!(install.status.success());
+
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let pre = merged["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 2, "two independent PreToolUse entries");
+    let tripwire = pre
+        .iter()
+        .find(|e| {
+            e["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("hook agent-dispatch")
+        })
+        .expect("agent-dispatch entry present");
+    assert_eq!(tripwire["matcher"].as_str(), Some("Agent|Task"));
+
+    let uninstall = Command::new(ecp_bin())
+        .args([
+            "admin",
+            "uninstall-hook",
+            "--claude-code",
+            "--events",
+            "agent-dispatch",
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+    assert!(uninstall.status.success());
+
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let pre = merged["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 1, "tripwire removed, enrichment survives");
+    assert!(pre[0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap_or("")
+        .contains("hook pre-tool-use"));
+}
