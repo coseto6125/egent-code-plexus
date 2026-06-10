@@ -25,7 +25,23 @@ pub struct DirtyEntry {
     pub parse_failed: bool,
     #[serde(default)]
     pub dirty_symbols: Vec<SymbolRef>,
+    /// Fragment bin encoding version. `1` (the serde default, so pre-field
+    /// manifests parse unchanged) = `Vec<Fragment>` symbol list; `2` =
+    /// `FragmentFile` (symbols + imports + per-symbol calls) consumed by the
+    /// query-time `OverlayView`. Readers MUST dispatch on this — decoding a
+    /// v1 bin as v2 is undefined under rkyv.
+    #[serde(default = "default_fragment_format")]
+    pub format: u32,
 }
+
+/// Serde default for `DirtyEntry::format`: entries written before the field
+/// existed are v1 `Vec<Fragment>` bins.
+fn default_fragment_format() -> u32 {
+    1
+}
+
+/// Current fragment bin encoding version written by `overlay_writer`.
+pub const FRAGMENT_FORMAT_V2: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {

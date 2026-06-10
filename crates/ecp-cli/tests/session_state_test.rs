@@ -55,6 +55,7 @@ fn one_dirty_entry() -> DirtyFiles {
             tantivy_delta_segment: None,
             parse_failed: false,
             dirty_symbols: vec![],
+            format: 1,
         },
     );
     df

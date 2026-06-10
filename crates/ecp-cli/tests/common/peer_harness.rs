@@ -91,6 +91,7 @@ impl PeerHarness {
                 fragment_id: "f".into(),
                 tantivy_delta_segment: None,
                 parse_failed: false,
+                format: 1,
                 dirty_symbols: symbols
                     .iter()
                     .map(|(n, f)| SymbolRef {

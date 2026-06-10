@@ -61,6 +61,7 @@ fn add_session(tmp: &Path, sid: &str, base_sha: &str, with_dirty: bool) {
                 tantivy_delta_segment: None,
                 parse_failed: false,
                 dirty_symbols: vec![],
+                format: 1,
             },
         );
         d

@@ -24,6 +24,7 @@ fn entry_with(syms: Vec<SymbolRef>) -> DirtyEntry {
         tantivy_delta_segment: None,
         parse_failed: false,
         dirty_symbols: syms,
+        format: 1,
     }
 }
 
