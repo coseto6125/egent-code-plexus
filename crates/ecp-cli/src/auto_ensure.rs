@@ -148,7 +148,7 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     }
 
     // Fast path: if the working tree is a git repo, the indexed HEAD matches
-    // the current HEAD, and `git status --porcelain -uno` is empty, the graph
+    // the current HEAD, and `git status --porcelain -uall` is empty, the graph
     // is fresh by construction — skip the 22k-file mtime walk entirely.
     // Saves ~140ms on a typical mid-size repo. None ⇒ fall through to walk.
     if let Some(result) = git_fingerprint_shortcut(graph_path, worktree_root, graph_mtime) {
@@ -293,7 +293,7 @@ fn fingerprint_drifted(graph_path: &Path) -> bool {
 
 /// Try to decide Ready vs Stale via the cheap git fingerprint.
 /// - Returns `Some(Ready)` when HEAD matches the sidecar AND `git status
-///   --porcelain -uno` is empty.
+///   --porcelain -uall` is empty.
 /// - Returns `Some(Stale)` when HEAD matches but the working tree has
 ///   uncommitted changes (skip walk; let L1 overlay collect dirty files).
 /// - Returns `None` when the fingerprint check is inconclusive (not a git
@@ -321,7 +321,16 @@ fn git_fingerprint_shortcut(
         // non-ASCII bytes, which the human-readable format would otherwise wrap
         // in double quotes and escape — producing a path that doesn't exist on
         // disk and silently dropping that file from the incremental refresh.
-        .args(["status", "--porcelain", "-z", "--untracked-files=no"])
+        //
+        // `--untracked-files=all`: untracked files must enter the dirty set or
+        // a brand-new file (the most common agent edit: Write, then query) is
+        // invisible to the L1 overlay and `found:false` reads as a definitive
+        // "does not exist" (FU-2026-06-10-8b98d5e991a6). `all` rather than
+        // `normal` because `normal` collapses a new directory to one `dir/`
+        // entry, hiding the files inside it from `reanalyze_files`. Gitignored
+        // files stay excluded — porcelain honours .gitignore, so scratch dirs
+        // cost nothing.
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
         .current_dir(worktree_root)
         .output()
         .ok()?;
@@ -331,18 +340,61 @@ fn git_fingerprint_shortcut(
     if porcelain.stdout.is_empty() {
         return Some(EnsureResult::Ready);
     }
+    // git already listed the exact changed paths here — carry them so
+    // ensure_fresh skips the whole-tree mtime walk in collect_dirty_files.
+    // ecp's own artifacts are filtered out (mirroring `any_source_newer_than`):
+    // with `--untracked-files=all` they would otherwise keep porcelain
+    // non-empty forever and downgrade every query from the Ready shortcut to
+    // the Stale/reanalyze path.
+    let home_ecp_canonical = fs::canonicalize(ecp_core::registry::resolve_home_ecp()).ok();
+    let graph_canonical = fs::canonicalize(graph_path).ok();
+    let dirty_files: Vec<PathBuf> = parse_porcelain_paths(&porcelain.stdout, worktree_root)
+        .into_iter()
+        .filter(|p| !is_ecp_artifact(p, graph_canonical.as_deref(), home_ecp_canonical.as_deref()))
+        .collect();
+    if dirty_files.is_empty() {
+        return Some(EnsureResult::Ready);
+    }
     let age = SystemTime::now()
         .duration_since(graph_mtime)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // git already listed the exact changed paths here — carry them so
-    // ensure_fresh skips the whole-tree mtime walk in collect_dirty_files.
-    let dirty_files = parse_porcelain_paths(&porcelain.stdout, worktree_root);
     Some(EnsureResult::Stale {
         age_seconds: age,
         needs_full_rebuild: false,
         dirty_files: Some(dirty_files),
     })
+}
+
+/// True when `path` is one of ecp's own files and must not count as dirty
+/// source. Two families: anything under the resolved `~/.ecp` cache root
+/// (covers ECP_HOME nested inside the worktree, where tantivy segments and
+/// session overlays churn on every query), and the graph file plus its
+/// `graph.bin.*` sidecars when the graph lives in-tree (legacy layout, test
+/// fixtures). Canonicalize failure (e.g. a deleted tracked file) ⇒ treat as
+/// a real source change — the conservative direction.
+fn is_ecp_artifact(
+    path: &Path,
+    graph_canonical: Option<&Path>,
+    home_ecp_canonical: Option<&Path>,
+) -> bool {
+    let Ok(p) = fs::canonicalize(path) else {
+        return false;
+    };
+    if home_ecp_canonical.is_some_and(|h| p.starts_with(h)) {
+        return true;
+    }
+    let Some(g) = graph_canonical else {
+        return false;
+    };
+    p.parent() == g.parent()
+        && match (
+            p.file_name().and_then(|n| n.to_str()),
+            g.file_name().and_then(|n| n.to_str()),
+        ) {
+            (Some(pf), Some(gf)) => pf.starts_with(gf),
+            _ => false,
+        }
 }
 
 /// Parse `git status --porcelain -z` stdout into absolute paths under `root`.
