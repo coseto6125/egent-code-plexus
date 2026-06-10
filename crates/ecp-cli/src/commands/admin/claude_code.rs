@@ -91,9 +91,22 @@ pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), EcpError> {
 
 pub fn run_status(args: StatusArgs) -> Result<(), EcpError> {
     if !args.claude_code {
-        return Err(EcpError::InvalidArgument("--claude-code required".into()));
+        // Bare `ecp admin status` — delegate to the per-host namespaces so
+        // all three hosts are visible without repeating the logic inline.
+        crate::commands::admin::claude::print_status()?;
+        crate::commands::admin::codex::print_status()?;
+        crate::commands::admin::gemini::print_status()?;
+        return Ok(());
     }
-    let settings_path = resolve_settings_path(args.settings_path.as_deref());
+    print_claude_code_hook_status(args.settings_path.as_deref())
+}
+
+/// Claude Code hooks-only status, used by both `admin status --claude-code`
+/// and `admin claude status`.
+pub(crate) fn print_claude_code_hook_status(
+    settings_path: Option<&std::path::Path>,
+) -> Result<(), EcpError> {
+    let settings_path = resolve_settings_path(settings_path);
     let settings = read_or_init(&settings_path)?;
     println!(
         "Claude Code hook status (settings: {}):",

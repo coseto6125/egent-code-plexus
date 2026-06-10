@@ -72,7 +72,6 @@ fn subcommand_label(cmd: &Commands) -> Option<&'static str> {
             commands::admin::AdminCommands::Mcp(_) => "mcp",
             commands::admin::AdminCommands::Doctor(_) => "doctor",
             commands::admin::AdminCommands::CheckUpdate => "check-update",
-            commands::admin::AdminCommands::ListRepos(_) => "list-repos",
         }),
         Commands::Admin { command: None } => Some("tui"),
         Commands::Dev { command } => Some(match command {
@@ -106,6 +105,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::ShapeCheck(_) => "shape-check",
         Commands::ToolMap(_) => "tool-map",
         Commands::Review(_) => "review",
+        Commands::Heuristics(_) => "heuristics",
         Commands::FindTransactionPatterns(_) => "find-transaction-patterns",
         Commands::FindSchemaBindings(_) => "find-schema-bindings",
         Commands::FindEventMirrors(_) => "find-event-mirrors",
@@ -200,6 +200,11 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         Commands::ShapeCheck(args) => args.repo.as_deref(),
         Commands::ToolMap(args) => args.repo.as_deref(),
         Commands::Review(args) => args.repo.as_deref(),
+        Commands::Heuristics(args) => match &args.kind {
+            commands::heuristics::HeuristicsKind::Saga(a) => a.repo.as_deref(),
+            commands::heuristics::HeuristicsKind::SchemaBindings(a) => a.repo.as_deref(),
+            commands::heuristics::HeuristicsKind::EventMirrors(a) => a.repo.as_deref(),
+        },
         Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
         Commands::Processes(args) => args.repo.as_deref(),
         Commands::FindSchemaBindings(args) => args.repo.as_deref(),
@@ -297,6 +302,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
         Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
         Commands::Review(args) => commands::review::run(args, &engine),
+        Commands::Heuristics(args) => commands::heuristics::run(args, &engine),
         Commands::FindTransactionPatterns(args) => commands::find_tx_patterns::run(args, &engine),
         Commands::FindSchemaBindings(args) => commands::find_schema_bindings::run(args, &engine),
         Commands::FindEventMirrors(args) => commands::find_event_mirrors::run(args, &engine),
@@ -345,6 +351,14 @@ fn check_group_atom(cli: &Cli) {
         Commands::ToolMap(a) => (a.repo.as_deref(), None),
         Commands::Review(a) => (a.repo.as_deref(), None),
         Commands::Diff(a) => (a.repo.as_deref(), None),
+        Commands::Heuristics(a) => {
+            let repo = match &a.kind {
+                commands::heuristics::HeuristicsKind::Saga(x) => x.repo.as_deref(),
+                commands::heuristics::HeuristicsKind::SchemaBindings(x) => x.repo.as_deref(),
+                commands::heuristics::HeuristicsKind::EventMirrors(x) => x.repo.as_deref(),
+            };
+            (repo, None)
+        }
         Commands::FindTransactionPatterns(a) => (a.repo.as_deref(), None),
         Commands::Processes(a) => (a.repo.as_deref(), None),
         Commands::FindSchemaBindings(a) => (a.repo.as_deref(), None),

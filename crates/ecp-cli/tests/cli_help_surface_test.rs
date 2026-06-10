@@ -62,3 +62,41 @@ fn admin_help_contains_mcp() {
         "admin --help should NOT mention verify-resolver (moved to `ecp dev`): {stdout}"
     );
 }
+
+#[test]
+fn top_level_help_contains_heuristics() {
+    let output = Command::new(ecp_bin())
+        .args(["--help"])
+        .output()
+        .expect("run ecp --help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("heuristics"),
+        "expected `heuristics` in top-level --help, got: {stdout}"
+    );
+}
+
+/// Deprecated verbs must not appear in the visible top-level help surface
+/// (they are `#[command(hide = true)]`).
+#[test]
+fn deprecated_heuristic_verbs_not_in_top_level_help() {
+    let output = Command::new(ecp_bin())
+        .args(["--help"])
+        .output()
+        .expect("run ecp --help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for hidden in [
+        "find-transaction-patterns",
+        "find-schema-bindings",
+        "find-event-mirrors",
+        "insight",
+    ] {
+        for line in stdout.lines() {
+            let t = line.trim_start();
+            assert!(
+                !t.starts_with(&format!("{hidden} ")) && !t.starts_with(&format!("{hidden}\t")),
+                "deprecated verb `{hidden}` leaked into top-level --help: {line}"
+            );
+        }
+    }
+}

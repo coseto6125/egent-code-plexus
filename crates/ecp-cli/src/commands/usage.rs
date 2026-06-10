@@ -41,6 +41,12 @@ pub struct UsageArgs {
     /// Hidden: read a single explicit telemetry dir (tests).
     #[arg(long, hide = true)]
     pub telemetry_dir: Option<PathBuf>,
+    /// Filter which telemetry files feed the dashboard: cli, mcp, or all (default).
+    ///
+    /// `cli` reads only `cli-calls.jsonl`; `mcp` reads only `calls.jsonl`;
+    /// `all` reads both (matches the pre-flag behavior).
+    #[arg(long, value_name = "SOURCE", default_value = "all")]
+    pub source: Option<String>,
 }
 
 pub struct Rec {
@@ -121,10 +127,16 @@ fn scan_dirs(args: &UsageArgs) -> Result<Vec<PathBuf>, EcpError> {
 }
 
 fn collect_records(args: &UsageArgs) -> Result<Vec<Rec>, EcpError> {
+    let source = args.source.as_deref().unwrap_or("all");
+    let files: &[&str] = match source {
+        "cli" => &["cli-calls.jsonl"],
+        "mcp" => &["calls.jsonl"],
+        _ => &["cli-calls.jsonl", "calls.jsonl"],
+    };
     let mut recs = Vec::new();
     for dir in scan_dirs(args)? {
         prune_retention(&dir);
-        for name in ["cli-calls.jsonl", "calls.jsonl"] {
+        for name in files {
             read_file(&dir.join(name), &mut recs);
         }
     }

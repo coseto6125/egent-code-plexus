@@ -103,18 +103,25 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: commands::group::GroupCommands,
     },
-    /// Heuristic Saga compensate/undo/rollback name-pair detector.
+    /// Heuristic detectors: `saga` (Saga/Outbox), `schema-bindings` (MirrorsField), `event-mirrors` (EventTopicMirror).
     ///
-    /// All findings carry `requires_verification: true`; never enters the graph.
+    /// All findings carry `requires_verification: true` and are confidence-tagged; none enter the graph.
+    /// Confidence semantics vary by kind — see `ecp heuristics <kind> --help`.
+    Heuristics(commands::heuristics::HeuristicsArgs),
+    /// Deprecated: use `ecp heuristics saga`
+    #[command(hide = true, long_about = "Deprecated: use `ecp heuristics saga`")]
     FindTransactionPatterns(commands::find_tx_patterns::FindTxPatternsArgs),
-    /// Surface MirrorsField heuristic edges for a SchemaField; list blind-spot candidates.
-    ///
-    /// Blind spots are cross-owner-class fields that share the name but have no
-    /// mirror edge. Accepts `Class.field` or bare `field`.
+    /// Deprecated: use `ecp heuristics schema-bindings`
+    #[command(
+        hide = true,
+        long_about = "Deprecated: use `ecp heuristics schema-bindings`"
+    )]
     FindSchemaBindings(commands::find_schema_bindings::FindSchemaBindingsArgs),
-    /// List `EventTopicMirror` heuristic edges: (publisher_fn, subscriber_fn, topic, confidence).
-    ///
-    /// Edges are emitted by T5-33 at confidence=0.85; filter with --min-confidence, --topic, --lib.
+    /// Deprecated: use `ecp heuristics event-mirrors`
+    #[command(
+        hide = true,
+        long_about = "Deprecated: use `ecp heuristics event-mirrors`"
+    )]
     FindEventMirrors(commands::find_event_mirrors::FindEventMirrorsArgs),
     /// Per-language BlindSpot emitter inventory (`schema blindspots`) —
     /// distinguishes "no blind spot in this diff" from "ecp doesn't detect
@@ -131,14 +138,13 @@ pub enum Commands {
     /// Surfaces the Leiden-community + BFS detection emitted at index time
     /// (`pass4_processes` in builder.rs).
     Processes(commands::processes::ProcessesArgs),
-    /// MCP call telemetry aggregator — per-tool p50/p99/error-rate + hourly bucket counts.
-    ///
-    /// Reads ~/.ecp/telemetry/<repo>/calls.jsonl written by the MCP server.
-    /// Schema is unstable (v1).
+    /// Deprecated: use `ecp usage --source mcp`
+    #[command(hide = true, long_about = "Deprecated: use `ecp usage --source mcp`")]
     Insight(commands::insight::InsightArgs),
     /// Usage dashboard over CLI + MCP telemetry — counts, p50/p99 latency, error rate.
     ///
     /// Reads `~/.ecp/telemetry/<repo>/{cli-calls,calls}.jsonl`. Default output is
     /// a terminal ASCII dashboard; `--format json` emits machine-readable stats.
+    /// `--source cli|mcp|all` (default `all`) filters which telemetry files feed the dashboard.
     Usage(commands::usage::UsageArgs),
 }

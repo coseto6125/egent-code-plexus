@@ -48,7 +48,7 @@ use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::EcpError;
 
 /// Args for `ecp find-schema-bindings`.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct FindSchemaBindingsArgs {
     /// Field to query. Accepts `Class.field` (owner-scoped) or bare `field`
     /// (returns all SchemaField nodes with that name across all classes).
