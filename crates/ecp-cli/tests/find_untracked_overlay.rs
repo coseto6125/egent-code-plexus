@@ -10,26 +10,10 @@
 
 mod common;
 
-use common::{ecp_bin, run_git};
+use common::{commit_all, ecp_bin, run_git};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-
-fn commit_all(repo: &Path, msg: &str) {
-    run_git(repo, &["add", "."]);
-    run_git(
-        repo,
-        &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-qm",
-            msg,
-        ],
-    );
-}
 
 fn init_and_index(repo: &Path, home: &Path) {
     fs::write(repo.join("lib.rs"), "pub fn base_fn() {}\n").unwrap();

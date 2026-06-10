@@ -30,6 +30,24 @@ pub fn ecp_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ecp")
 }
 
+/// `git add . && git commit` with a throwaway identity — the standard way
+/// tempdir-repo tests advance their fixture history.
+pub fn commit_all(repo: &Path, msg: &str) {
+    run_git(repo, &["add", "."]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            msg,
+        ],
+    );
+}
+
 pub fn write_graph(dir: &Path, bytes: &[u8]) -> PathBuf {
     let path = dir.join("graph.bin");
     std::fs::write(&path, bytes).unwrap();

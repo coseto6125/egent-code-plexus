@@ -21,13 +21,17 @@
 //!   against the archived `name_index` (O(log N) per lookup, no allocation
 //!   proportional to the graph).
 //!
-//! ## The masking invariant
+//! ## The masking invariant: mask ⊆ rebuild
 //!
-//! A base edge whose **source** lies in a dirty file is masked — that file
-//! was re-parsed and its outgoing truth is the overlay adjacency. A base
-//! edge whose **target** lies in a dirty file is redirected (replaced) or
-//! dropped (suppressed). Clean↔clean edges are untouched. Consumers apply
-//! this via [`OverlayView::base_source_masked`] + [`OverlayView::redirect`].
+//! A base edge whose **source** lies in a dirty file is masked ONLY when the
+//! overlay re-resolves that rel type from fragment data ([`REBUILT_RELS`],
+//! today `Calls`) — for those rels the overlay adjacency is the file's
+//! truth. Rels the fragment carries no inputs for (ReadsField, Extends, …)
+//! keep their base edges: slightly stale beats silently absent for a
+//! deterministic edge. A base edge whose **target** lies in a dirty file is
+//! redirected (replaced) or dropped (suppressed) regardless of rel.
+//! Clean↔clean edges are untouched. Consumers apply this via
+//! [`OverlayView::masks_base_edge`] + [`OverlayView::redirect`].
 //!
 //! ## What stays out of scope (documented fidelity gaps)
 //!
@@ -217,6 +221,13 @@ impl OverlayView {
             }
 
             let mut push_edge = |edge: ViewEdge| {
+                // Traversal consumers (impact's run_bfs) rely on overlay
+                // sources being virtual: a base-space source would bypass
+                // the masking invariant and resurrect stale base adjacency.
+                debug_assert!(
+                    edge.source >= base_len,
+                    "overlay edge sources must be virtual indices"
+                );
                 out_adj.entry(edge.source).or_default().push(edge);
                 in_adj.entry(edge.target).or_default().push(edge);
             };
@@ -285,10 +296,15 @@ impl OverlayView {
         Some(self.replaced.get(&idx).copied().unwrap_or(idx))
     }
 
-    /// True when base edges SOURCED at `base_idx` must be ignored — the
-    /// owning file was re-parsed and `overlay_out` carries its truth.
-    pub fn base_source_masked(&self, base_idx: u32) -> bool {
-        self.dirty_base.contains(&base_idx)
+    /// True when a base edge of type `rel` SOURCED at `base_idx` must be
+    /// ignored: the owning file was re-parsed AND the overlay rebuilds this
+    /// rel (`overlay_out` carries its truth). Masking a rel the overlay
+    /// can't rebuild would silently drop deterministic edges — keep
+    /// mask ⊆ rebuild as fragment capabilities grow.
+    pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
+        // REBUILT_RELS: extend alongside resolve_callee when fragments gain
+        // inputs for more rel types (e.g. field_reads → ReadsField).
+        matches!(rel, RelType::Calls) && self.dirty_base.contains(&base_idx)
     }
 
     /// Overlay-resolved outgoing edges of `idx` (virtual sources only —
@@ -572,11 +588,14 @@ mod tests {
         assert_eq!(view.node(base_len).unwrap().replaced_base, Some(0));
         // gone_fn was deleted: traversal must drop it entirely.
         assert_eq!(view.redirect(1), None);
-        // both dirty-file base nodes mask their stale outgoing base edges.
-        assert!(view.base_source_masked(0));
-        assert!(view.base_source_masked(1));
+        // both dirty-file base nodes mask their stale outgoing Calls edges —
+        // the overlay rebuilds Calls — but keep rels the fragment carries no
+        // inputs for (mask ⊆ rebuild).
+        assert!(view.masks_base_edge(0, RelType::Calls));
+        assert!(view.masks_base_edge(1, RelType::Calls));
+        assert!(!view.masks_base_edge(0, RelType::ReadsField));
         // clean nodes keep their base edges.
-        assert!(!view.base_source_masked(2));
+        assert!(!view.masks_base_edge(2, RelType::Calls));
         assert_eq!(view.redirect(2), Some(2));
     }
 

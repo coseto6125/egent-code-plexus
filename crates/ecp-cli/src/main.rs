@@ -277,12 +277,13 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
 
     // Attach the session's L1 overlay dir (if one resolves) so query commands
     // can surface uncommitted working-tree edits the L2 graph hasn't absorbed.
-    // The overlay is only meaningful when the session id is stable across the
-    // writer and reader processes (agent hosts inject ECP_SESSION_ID /
-    // CLAUDE_CODE_SESSION_ID); a bare CLI invocation gets a per-process id and
-    // simply sees no overlay. Empty/absent overlay = zero query-path cost.
+    // Agent hosts inject a stable session id (ECP_SESSION_ID /
+    // CLAUDE_CODE_SESSION_ID); a bare CLI invocation falls back to a
+    // per-process id, so the fragments `ensure_fresh` just wrote above are
+    // still read back by this same process. Empty/absent overlay = zero
+    // query-path cost.
     let engine = match auto_ensure::resolve_session_overlay_dir(&cwd) {
-        Some(dir) if dir.is_dir() => engine.with_overlay(dir),
+        Some(dir) if dir.is_dir() => engine.with_overlay(dir, cwd.clone()),
         _ => engine,
     };
 
