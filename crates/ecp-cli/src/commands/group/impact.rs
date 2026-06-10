@@ -236,9 +236,7 @@ fn emit_json(
     if let Some(warn) = cross_depth_warning {
         out["cross_depth_warning"] = json!(warn);
     }
-    if let Some(c) = caveat {
-        out["result"] = json!(c);
-    }
+    crate::output::attach_caveat(&mut out, caveat.map(str::to_owned));
     println!(
         "{}",
         serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())

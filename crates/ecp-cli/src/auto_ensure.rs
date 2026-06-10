@@ -511,6 +511,16 @@ pub fn load_ensured(
     }
 }
 
+/// The SHA a published commit dir was built for, parsed out of the dir NAME
+/// (`CommitDirName` handles `.gen.<ts>.<pid>.<n>` rebuild suffixes). `None`
+/// for legacy layouts or unparseable names.
+fn commit_dir_sha(dir: &Path) -> Option<String> {
+    let name = dir.file_name()?.to_str()?;
+    ecp_core::registry::CommitDirName::parse(name)
+        .ok()
+        .map(|p| p.sha_hex())
+}
+
 /// True when `graph_path` sits in a commit dir whose SHA differs from the
 /// current HEAD of `worktree_root`. The dir NAME is the authority: the
 /// `.head_sha` sidecar is rewritten to the current HEAD after every L1
@@ -519,20 +529,13 @@ pub fn load_ensured(
 /// (legacy layout, non-git worktree, unparseable dir name) return `false`
 /// — never caveat on a guess.
 fn graph_behind_head(graph_path: &Path, worktree_root: &Path) -> bool {
-    let Some(dir_name) = graph_path
-        .parent()
-        .and_then(|d| d.file_name())
-        .and_then(|n| n.to_str())
-    else {
-        return false;
-    };
-    let Ok(parsed) = ecp_core::registry::CommitDirName::parse(dir_name) else {
+    let Some(graph_sha) = graph_path.parent().and_then(commit_dir_sha) else {
         return false;
     };
     let Some(head) = crate::git_cache::head_sha(worktree_root) else {
         return false;
     };
-    parsed.sha_hex() != head
+    graph_sha != head
 }
 
 /// Process-lifetime cache for `attach_latest_sibling_sha` results, keyed by
@@ -622,13 +625,9 @@ const WARM_ATTACH_MAX_DISTANCE: usize = 1;
 /// the warm path — a missed warm-attach costs one sync build, a wrongly-granted
 /// one serves silently stale results.
 fn sibling_within_warm_distance(sibling_dir: &Path, worktree_root: &Path) -> bool {
-    let Some(dir_name) = sibling_dir.file_name().and_then(|n| n.to_str()) else {
+    let Some(sibling_sha) = commit_dir_sha(sibling_dir) else {
         return false;
     };
-    let Ok(parsed) = ecp_core::registry::CommitDirName::parse(dir_name) else {
-        return false;
-    };
-    let sibling_sha = hex::encode(parsed.sha);
     let Ok(head_sha) = git_head_sha(worktree_root) else {
         return false;
     };

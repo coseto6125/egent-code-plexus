@@ -158,9 +158,13 @@ fn group_find_rrf_carries_caveat_too() {
         home_tmp.path(),
     );
     let v = parse_json(&out);
+    let caveat = v
+        .get("result")
+        .and_then(|c| c.as_str())
+        .unwrap_or_else(|| panic!("rrf output must carry the same staleness caveat: {v}"));
     assert!(
-        v.get("result").and_then(|c| c.as_str()).is_some(),
-        "rrf output must carry the same staleness caveat: {v}"
+        caveat.contains("stalerepo"),
+        "rrf caveat must name the stale member: {caveat}"
     );
 }
 
@@ -208,8 +212,11 @@ fn group_impact_behind_head_member_carries_caveat() {
         home_tmp.path(),
     );
     let v = parse_json(&out);
+    let caveat = v.get("result").and_then(|c| c.as_str()).unwrap_or_else(|| {
+        panic!("group impact on a behind-HEAD member must carry a `result` caveat: {v}")
+    });
     assert!(
-        v.get("result").and_then(|c| c.as_str()).is_some(),
-        "group impact on a behind-HEAD member must carry a `result` caveat: {v}"
+        caveat.contains(&dir_names[0]),
+        "impact caveat must name the stale member: {caveat}"
     );
 }

@@ -239,9 +239,7 @@ fn emit_concat(per_repo: &[(String, Vec<Hit>)], json: bool, caveat: Option<&str>
             })
             .collect();
         let mut out = json!({ "per_repo": repo_blocks });
-        if let Some(c) = caveat {
-            out["result"] = json!(c);
-        }
+        crate::output::attach_caveat(&mut out, caveat.map(str::to_owned));
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
         if let Some(c) = caveat {
@@ -296,9 +294,7 @@ fn emit_rrf(
             "results": results,
             "per_repo": per_repo_summary,
         });
-        if let Some(c) = caveat {
-            out["result"] = json!(c);
-        }
+        crate::output::attach_caveat(&mut out, caveat.map(str::to_owned));
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
         if let Some(c) = caveat {
