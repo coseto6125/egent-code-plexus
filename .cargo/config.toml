@@ -1,0 +1,5 @@
+# Suppress telemetry writes for every cargo-spawned process (test harnesses
+# and the ecp binaries they spawn). Installed release binaries on PATH inherit
+# the shell environment, not this file, so live developer installs are unaffected.
+[env]
+ECP_NO_TELEMETRY = "1"
