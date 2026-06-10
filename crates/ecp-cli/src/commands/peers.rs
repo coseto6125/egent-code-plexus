@@ -60,6 +60,23 @@ pub enum PeersCmd {
     Thread { msg_id: String },
     /// Set this session's agent name (shown in status / payloads, targetable by say --to)
     Name { name: String },
+    /// Pre-spawn disjointness check: do these targets' blast radii collide?
+    /// Operates on the repo at cwd (not the peers data dir).
+    Plan {
+        /// Symbols the lead intends to split across agents (comma-separated)
+        #[arg(long, value_delimiter = ',', required = true)]
+        targets: Vec<String>,
+        /// Impact direction per target: a work package collides if either
+        /// caller or callee chains intersect, so `both` is the safe default
+        #[arg(long, default_value = "both")]
+        direction: String,
+        #[arg(long, default_value_t = 5)]
+        depth: u32,
+        #[arg(long, default_value_t = false)]
+        include_tests: bool,
+        #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
+        format: StatusFormat,
+    },
     /// Start, stop, or check the inotify-driven peer-dirty watcher daemon.
     Watch(super::watch::WatchArgs),
     /// Rotate logs + cleanup
@@ -97,6 +114,19 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
         }
         PeersCmd::Inbox { limit } => super::peers_msg::cmd_inbox(&repo_root, limit),
         PeersCmd::Name { name } => cmd_name(&repo_root, &name),
+        PeersCmd::Plan {
+            targets,
+            direction,
+            depth,
+            include_tests,
+            format,
+        } => super::peers_plan::cmd_plan(
+            &targets,
+            &direction,
+            depth,
+            include_tests,
+            matches!(format, StatusFormat::Json),
+        ),
         PeersCmd::Thread { msg_id } => super::peers_msg::cmd_thread(&repo_root, &msg_id),
         PeersCmd::Watch(wargs) => super::watch::run(wargs).map_err(io_from_ecp),
         PeersCmd::Gc => cmd_gc(&repo_root),

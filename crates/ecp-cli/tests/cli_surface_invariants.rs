@@ -93,7 +93,7 @@ const GROUP_SUBCMDS: &[&str] = &["sync", "status", "contracts", "impact", "find"
 
 /// `ecp peers <subcmd>` — keep in sync with `PeersCmd` enum.
 const PEERS_SUBCMDS: &[&str] = &[
-    "status", "diff", "log", "say", "inbox", "thread", "name", "watch", "gc",
+    "status", "diff", "log", "say", "inbox", "thread", "name", "plan", "watch", "gc",
 ];
 
 /// `ecp processes <subcmd>` — keep in sync with `ProcessesCommands` enum

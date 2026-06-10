@@ -37,8 +37,12 @@ fn tool_peers() -> DerivedTool {
             "properties": {
                 "subcmd": {
                     "type": "string",
-                    "enum": ["status", "diff", "log", "say", "inbox", "thread", "name"],
+                    "enum": ["status", "diff", "log", "say", "inbox", "thread", "name", "plan"],
                     "description": "Which peer operation to run. Each subcmd uses a disjoint subset of the args below."
+                },
+                "targets": {
+                    "type": "string",
+                    "description": "[plan] Comma-separated symbols a lead intends to split across agents; reports blast-radius overlaps + disjoint work packages."
                 },
                 "peer": {
                     "type": "string",
@@ -54,7 +58,7 @@ fn tool_peers() -> DerivedTool {
                 },
                 "direction": {
                     "type": "string",
-                    "description": "[log] Filter: 'in' or 'out'."
+                    "description": "[log] Filter: 'in' or 'out'. [plan] Impact direction: upstream|downstream|both (default both)."
                 },
                 "limit": {
                     "type": "integer",
