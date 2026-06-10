@@ -37,6 +37,7 @@ pub const ALL_EVENTS: &[&str] = &[
     "user-prompt-submit",
     "pre-tool-use",
     "post-tool-use",
+    "agent-dispatch",
 ];
 
 /// Entry point for `ecp admin install-hook --claude-code`.
@@ -165,11 +166,15 @@ fn read_or_init(path: &Path) -> Result<Value, EcpError> {
         .map_err(|e| EcpError::InvalidArgument(format!("settings.json parse: {e}")))
 }
 
+/// Claude Code settings.json event KEY for an ecp install unit. ecp's
+/// kebab event names are install units, not a 1:1 mirror of Claude Code
+/// events: `agent-dispatch` is a second PreToolUse entry with its own
+/// matcher, separately installable/removable from the enrichment hook.
 fn event_kebab_to_camel(ev: &str) -> &'static str {
     match ev {
         "session-start" => "SessionStart",
         "user-prompt-submit" => "UserPromptSubmit",
-        "pre-tool-use" => "PreToolUse",
+        "pre-tool-use" | "agent-dispatch" => "PreToolUse",
         "post-tool-use" => "PostToolUse",
         _ => unreachable!(),
     }
@@ -179,6 +184,9 @@ fn matcher_for(ev: &str) -> &'static str {
     match ev {
         "pre-tool-use" => "Grep|Glob|Bash",
         "post-tool-use" => "Bash",
+        // `Task` is the pre-rename name of the Agent tool — match both so
+        // the tripwire works across Claude Code versions.
+        "agent-dispatch" => "Agent|Task",
         _ => "",
     }
 }
@@ -187,6 +195,8 @@ fn timeout_for(ev: &str) -> u64 {
     match ev {
         "user-prompt-submit" => 3,
         "pre-tool-use" => 10,
+        // Pure in-process regex decision — no I/O beyond binary startup.
+        "agent-dispatch" => 5,
         _ => 5,
     }
 }
@@ -245,6 +255,11 @@ fn merge_entry(settings: &mut Value, ev: &str, exe: &str) -> Result<(), EcpError
         h.insert(
             "statusMessage".into(),
             Value::String("Checking ecp index freshness...".into()),
+        );
+    } else if matches!(ev, "agent-dispatch") {
+        h.insert(
+            "statusMessage".into(),
+            Value::String("Checking if the graph answers this structurally...".into()),
         );
     }
     entry.insert("hooks".into(), Value::Array(vec![Value::Object(h)]));

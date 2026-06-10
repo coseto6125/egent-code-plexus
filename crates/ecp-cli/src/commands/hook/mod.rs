@@ -9,6 +9,7 @@
 //! self-contained file. Shared utilities (stdin parse, response emit,
 //! marker paths, shell-quote stripping) live in `common`.
 
+pub mod agent_dispatch;
 pub mod common;
 pub mod post_tool_use;
 pub mod pre_tool_use;
@@ -38,6 +39,9 @@ pub enum HookEvent {
     PreToolUse,
     PostToolUse,
     SessionStart,
+    /// PreToolUse(Agent|Task) tripwire: redirect structural code queries
+    /// from agent dispatch to ecp verbs.
+    AgentDispatch,
 }
 
 pub fn run(args: HookArgs) -> Result<(), EcpError> {
@@ -52,5 +56,6 @@ pub fn run(args: HookArgs) -> Result<(), EcpError> {
         HookEvent::PreToolUse => pre_tool_use::handle(&input),
         HookEvent::PostToolUse => post_tool_use::handle(&input),
         HookEvent::SessionStart => session_start::handle(&input),
+        HookEvent::AgentDispatch => agent_dispatch::handle(&input),
     }
 }
