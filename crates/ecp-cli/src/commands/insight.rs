@@ -7,10 +7,11 @@
 //! **Schema is unstable.** The jsonl line format and the JSON output
 //! shape may change in v2 without a semver bump.
 
+use super::usage::percentile;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use ecp_core::registry::resolve_home_ecp;
-use ecp_core::time::{parse_rfc3339_secs, unix_secs_to_rfc3339};
+use ecp_core::time::{now_unix_secs, parse_rfc3339_secs, unix_secs_to_rfc3339};
 use ecp_core::EcpError;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -229,23 +230,7 @@ fn hourly_buckets(records: &[Record], hours: u64) -> Value {
     Value::Array(arr)
 }
 
-fn percentile(sorted: &[u64], pct: usize) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let idx = ((sorted.len() - 1) * pct) / 100;
-    sorted[idx]
-}
-
 // ─── time helpers ────────────────────────────────────────────────────────────
-
-fn now_unix_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 fn cutoff_unix_secs(hours: u64) -> u64 {
     now_unix_secs().saturating_sub(hours * 3600)
