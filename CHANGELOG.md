@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.7.0 - 2026-06-10
+
+### Features
+
+- pre-spawn plan query, lead pairs view, scale-audit fixes (P2-P4) (#562)
+- agent_name identity bridge for agent-team peer-sync (#561)
+
+### Bug Fixes
+
+- audit batch — verb consolidation, --batch impact, self-heal gate, output slimming (#563)
+
+### Performance
+
+- L1 freshness gate — skip re-parse of unchanged dirty files (#567)
+
+### Refactor
+
+- simplify pass over the 0.7.0 diff — gate dedupe, Windows keys, heuristic-set lock (#568)
 ## v0.6.7 - 2026-06-10
 
 ### Features
