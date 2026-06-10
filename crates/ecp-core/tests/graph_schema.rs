@@ -39,29 +39,85 @@ fn test_from_str_roundtrip_all_new_variants() {
     }
 }
 
+// Golden (discriminant -> variant name) tables for BOTH enums. rkyv archives
+// store raw discriminants, so any reorder/insert/rename silently re-labels
+// every node and edge in every existing `graph.bin` — queries return wrong
+// answers without crashing. A failure here means the enum changed shape:
+// the ONLY allowed fix is appending the new variant at the END of the
+// matching golden list. Never reorder these lists to make the test pass.
+
 #[test]
 fn test_node_kind_discriminants_locked() {
-    assert_eq!(NodeKind::SchemaField as u8, 24, "SchemaField discriminant");
-    assert_eq!(NodeKind::EventTopic as u8, 25, "EventTopic discriminant");
-    assert_eq!(
-        NodeKind::TransactionScope as u8,
-        26,
-        "TransactionScope discriminant"
-    );
-    assert_eq!(NodeKind::EnumVariant as u8, 27, "EnumVariant discriminant");
+    const GOLDEN: [&str; 29] = [
+        "File",
+        "Function",
+        "Class",
+        "Method",
+        "Interface",
+        "Constructor",
+        "Property",
+        "Variable",
+        "Const",
+        "Import",
+        "Route",
+        "Process",
+        "Document",
+        "Section",
+        "EntryPoint",
+        "Struct",
+        "Enum",
+        "Typedef",
+        "Namespace",
+        "Module",
+        "Macro",
+        "Annotation",
+        "Trait",
+        "Impl",
+        "SchemaField",
+        "EventTopic",
+        "TransactionScope",
+        "EnumVariant",
+        "PathLiteral",
+    ];
+    assert_eq!(NodeKind::ALL.len(), GOLDEN.len(), "NodeKind variant count");
+    for (i, (kind, expected)) in NodeKind::ALL.iter().zip(GOLDEN).enumerate() {
+        assert_eq!(*kind as u8 as usize, i, "{expected} discriminant moved");
+        assert_eq!(kind.as_str(), expected, "name at discriminant {i}");
+    }
 }
 
 #[test]
 fn test_rel_type_discriminants_locked() {
-    assert_eq!(RelType::MirrorsField as u8, 12, "MirrorsField discriminant");
-    assert_eq!(RelType::Publishes as u8, 13, "Publishes discriminant");
-    assert_eq!(RelType::Subscribes as u8, 14, "Subscribes discriminant");
-    assert_eq!(
-        RelType::EventTopicMirror as u8,
-        15,
-        "EventTopicMirror discriminant"
-    );
-    assert_eq!(RelType::OpensTxScope as u8, 16, "OpensTxScope discriminant");
+    const GOLDEN: [&str; 23] = [
+        "Defines",
+        "Imports",
+        "Calls",
+        "Extends",
+        "Implements",
+        "HasMethod",
+        "HasProperty",
+        "Accesses",
+        "HandlesRoute",
+        "StepInProcess",
+        "References",
+        "Fetches",
+        "MirrorsField",
+        "Publishes",
+        "Subscribes",
+        "EventTopicMirror",
+        "OpensTxScope",
+        "Overrides",
+        "Decorates",
+        "UsesPathLiteral",
+        "ReadsField",
+        "CompensatedBy",
+        "QueriesTable",
+    ];
+    assert_eq!(RelType::ALL.len(), GOLDEN.len(), "RelType variant count");
+    for (i, (rel, expected)) in RelType::ALL.iter().zip(GOLDEN).enumerate() {
+        assert_eq!(*rel as u8 as usize, i, "{expected} discriminant moved");
+        assert_eq!(rel.as_str(), expected, "name at discriminant {i}");
+    }
 }
 
 #[test]
