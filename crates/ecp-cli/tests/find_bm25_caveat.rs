@@ -150,6 +150,65 @@ fn bm25_cross_repo_caveat_names_only_the_stale_repo() {
     );
 }
 
+/// Regression lock: a same-SHA rebuild publishes a `.gen.<…>` commit dir and
+/// `find_latest_by_mtime` picks it. Naive dir-name suffix matching against
+/// HEAD would flag this perfectly fresh repo as stale — the SHA must be
+/// parsed out of the dir name (`CommitDirName::parse`) before comparing.
+#[test]
+fn bm25_gen_dir_for_current_head_is_not_stale() {
+    let repo_tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo = repo_tmp.path().join("genrepo");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo, "gen_marker_fn");
+    index_repo(&repo, home_tmp.path());
+    // Second build for the SAME commit → publishes a `.gen.` dir that wins
+    // the latest-by-mtime pick. HEAD has not moved.
+    let out = Command::new(ecp_bin())
+        .args(["admin", "index", "--force", "--repo", "."])
+        .current_dir(&repo)
+        .env("HOME", home_tmp.path())
+        .env_remove("ECP_HOME")
+        .output()
+        .expect("force reindex failed to spawn");
+    assert!(
+        out.status.success(),
+        "force reindex failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json = find_bm25(&repo, home_tmp.path(), "gen_marker_fn", &["--repo", "@all"]);
+    assert!(
+        json.get("result").is_none(),
+        "a .gen dir for the current HEAD is fresh — no caveat: {json}"
+    );
+}
+
+#[test]
+fn exact_mode_rejects_registry_selector() {
+    let repo_tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    init_repo(repo_tmp.path(), "exact_marker_fn");
+    index_repo(repo_tmp.path(), home_tmp.path());
+
+    let out = Command::new(ecp_bin())
+        .args(["find", "exact_marker_fn", "--repo", "@all"])
+        .current_dir(repo_tmp.path())
+        .env("HOME", home_tmp.path())
+        .env_remove("ECP_HOME")
+        .output()
+        .expect("find failed to spawn");
+    assert!(
+        !out.status.success(),
+        "exact mode with a registry selector must fail loudly, not answer from cwd"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("only supported with"),
+        "error must explain the bm25-only restriction: {stderr}"
+    );
+}
+
 #[test]
 fn bm25_cross_repo_all_fresh_stays_caveat_free() {
     let a_tmp = tempfile::tempdir().unwrap();

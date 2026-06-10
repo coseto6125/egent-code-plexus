@@ -34,7 +34,7 @@ use crate::output::{emit_with_caveat, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedZeroCopyGraph, FileCategory};
-use ecp_core::registry::{resolve_home_ecp, Registry};
+use ecp_core::registry::{resolve_home_ecp, CommitDirName, Registry};
 use ecp_core::EcpError;
 use rayon::prelude::*;
 use std::cmp::Reverse;
@@ -1322,11 +1322,18 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         ))
         .to_string_lossy()
         .into_owned();
-        // Commit dirs are named `branch_<branch>__<sha>`; a HEAD that no
-        // longer matches the picked dir's suffix means the graph predates it.
+        // Commit dirs are named `<prefix>__<sha>[.gen.<…>]` — a same-SHA
+        // rebuild publishes a `.gen.` dir, so suffix matching would flag
+        // perfectly fresh repos. Parse the SHA out and compare against HEAD;
+        // an unparseable dir name proves nothing, so it stays un-flagged
+        // (the engine's own warm-attach caveat still covers that load).
         let stale_for_head = crate::git_cache::head_sha(std::path::Path::new(&worktree_root))
             .zip(graph_path.parent().and_then(|d| d.file_name()))
-            .map(|(head, dir)| !dir.to_string_lossy().ends_with(&head))
+            .map(|(head, dir)| {
+                CommitDirName::parse(&dir.to_string_lossy())
+                    .map(|parsed| parsed.sha_hex() != head)
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
         targets.push(RepoTarget {
             display_name,

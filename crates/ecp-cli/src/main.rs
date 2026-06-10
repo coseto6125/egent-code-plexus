@@ -186,7 +186,9 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         // repo name) for the bm25 fan-out; those aren't paths, and feeding
         // them to ensure_fresh as a cwd dies with "Error preparing index for
         // @all". Only treat the value as this process's repo when it's a real
-        // directory; selectors resolve inside find::run_bm25.
+        // directory; selectors resolve inside find::run_bm25. Trade-off: a
+        // registry name shadowed by an identically-named local directory is
+        // read as the path — path semantics win on ambiguity.
         Commands::Find(args) => args
             .repo
             .as_deref()
