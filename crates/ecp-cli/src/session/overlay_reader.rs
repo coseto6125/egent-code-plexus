@@ -30,7 +30,7 @@ use std::io;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use super::overlay_writer::{ArchivedFragment, ArchivedFragmentFile, FragmentFile};
+use super::overlay_writer::{ArchivedFragment, ArchivedFragmentFile};
 
 /// A single overlay symbol with the source-relative path it came from.
 ///
@@ -49,13 +49,34 @@ pub struct OverlayHit {
 }
 
 /// Borrowed per-symbol view shared by both fragment encodings so the
-/// `load_overlay*` consumers stay agnostic of the bin version.
+/// `load_overlay*` consumers stay agnostic of the bin version. `uid` is
+/// computed once at dispatch (owner-aware for v2 bins) so consumers can't
+/// drift on the canonical stream.
 struct FragSym<'a> {
+    uid: u64,
     name: &'a str,
     kind: NodeKind,
     /// `(start_row, start_col, end_row, end_col)` — 0-based.
     span: (u32, u32, u32, u32),
     owner_class: Option<&'a str>,
+}
+
+impl<'a> FragSym<'a> {
+    fn new(
+        rel_path: &str,
+        name: &'a str,
+        kind: NodeKind,
+        span: (u32, u32, u32, u32),
+        owner_class: Option<&'a str>,
+    ) -> Self {
+        Self {
+            uid: ecp_core::uid::compute(kind, rel_path, owner_class, name),
+            name,
+            kind,
+            span,
+            owner_class,
+        }
+    }
 }
 
 /// Visit every non-failed fragment symbol under `session_dir`, calling `f`
@@ -89,17 +110,18 @@ fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -
             for sym in archived.symbols.iter() {
                 f(
                     rel_path,
-                    FragSym {
-                        name: sym.name.as_str(),
-                        kind: NodeKind::from(&sym.kind),
-                        span: (
+                    FragSym::new(
+                        rel_path,
+                        sym.name.as_str(),
+                        NodeKind::from(&sym.kind),
+                        (
                             sym.span.0.to_native(),
                             sym.span.1.to_native(),
                             sym.span.2.to_native(),
                             sym.span.3.to_native(),
                         ),
-                        owner_class: sym.owner_class.as_ref().map(|o| o.as_str()),
-                    },
+                        sym.owner_class.as_ref().map(|o| o.as_str()),
+                    ),
                 );
             }
         } else {
@@ -111,17 +133,18 @@ fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -
             for frag in archived.iter() {
                 f(
                     rel_path,
-                    FragSym {
-                        name: frag.name.as_str(),
-                        kind: NodeKind::from(&frag.kind),
-                        span: (
+                    FragSym::new(
+                        rel_path,
+                        frag.name.as_str(),
+                        NodeKind::from(&frag.kind),
+                        (
                             frag.span.0.to_native(),
                             frag.span.1.to_native(),
                             frag.span.2.to_native(),
                             frag.span.3.to_native(),
                         ),
-                        owner_class: None,
-                    },
+                        None,
+                    ),
                 );
             }
         }
@@ -135,9 +158,8 @@ fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -
 pub fn load_overlay_hits(session_dir: &Path) -> io::Result<Vec<OverlayHit>> {
     let mut hits = Vec::new();
     for_each_fragment(session_dir, |rel_path, sym| {
-        let uid = ecp_core::uid::compute(sym.kind, rel_path, sym.owner_class, sym.name);
         hits.push(OverlayHit {
-            uid,
+            uid: sym.uid,
             name: sym.name.to_string(),
             kind: sym.kind,
             rel_path: rel_path.to_string(),
@@ -153,12 +175,11 @@ pub fn load_overlay_hits(session_dir: &Path) -> io::Result<Vec<OverlayHit>> {
 pub fn load_overlay(session_dir: &Path) -> io::Result<Option<Overlay>> {
     let mut pool = StringPool::new();
     let mut nodes: Vec<Node> = Vec::new();
-    for_each_fragment(session_dir, |rel_path, sym| {
-        let uid = ecp_core::uid::compute(sym.kind, rel_path, sym.owner_class, sym.name);
+    for_each_fragment(session_dir, |_rel_path, sym| {
         let name_ref: StrRef = pool.add(sym.name);
         let owner_ref: StrRef = sym.owner_class.map(|o| pool.add(o)).unwrap_or_default();
         nodes.push(Node {
-            uid,
+            uid: sym.uid,
             name: name_ref,
             file_idx: 0,
             kind: sym.kind,
@@ -221,25 +242,32 @@ pub fn load_view_inputs(
         let Ok(archived) = rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes) else {
             continue;
         };
-        let Ok(file) = rkyv::deserialize::<FragmentFile, RkyvError>(archived) else {
+        // Symbols copy straight off the archived view — a full
+        // `rkyv::deserialize` of the whole FragmentFile would allocate every
+        // string twice (once into FragmentFile, once into OverlaySymbol).
+        // Imports keep the one-line deserialize: their `binding_kind` enum
+        // makes a manual field map noisier than the small allocation it saves.
+        let Ok(imports) = rkyv::deserialize::<Vec<ecp_core::analyzer::types::RawImport>, RkyvError>(
+            &archived.imports,
+        ) else {
             continue;
         };
         out.push(OverlayFileInput {
             rel_path: rel_path.clone(),
-            symbols: file
+            symbols: archived
                 .symbols
-                .into_iter()
+                .iter()
                 .map(|s| OverlaySymbol {
-                    name: s.name,
-                    kind: s.kind,
-                    owner_class: s.owner_class,
+                    name: s.name.as_str().to_owned(),
+                    kind: NodeKind::from(&s.kind),
+                    owner_class: s.owner_class.as_ref().map(|o| o.as_str().to_owned()),
                     // span rows are 0-based; Node line conventions are 1-based.
-                    start_line: s.span.0 + 1,
-                    end_line: s.span.2 + 1,
-                    calls: s.calls,
+                    start_line: s.span.0.to_native() + 1,
+                    end_line: s.span.2.to_native() + 1,
+                    calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
                 })
                 .collect(),
-            imports: file.imports,
+            imports,
         });
     }
     Ok(out)

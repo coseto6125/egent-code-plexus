@@ -299,7 +299,8 @@ fn write_fragment_file(
         parse_failed,
     };
 
-    Ok((input.rel_path.clone(), entry, outcome))
+    // Same forward-slash invariant as `write_fragment_from_graph`.
+    Ok((input.rel_path.replace('\\', "/"), entry, outcome))
 }
 
 fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
@@ -348,7 +349,11 @@ fn write_fragment_from_graph(
         Err(_) => true,
     };
 
-    let rel_path = graph.file_path.to_string_lossy().into_owned();
+    // Manifest keys feed uid streams and graph-file matching, which both use
+    // forward slashes (the graph builder normalizes `File.path` that way) —
+    // a Windows PathBuf would leak backslashes here and silently kill every
+    // overlay↔base match.
+    let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
     let entry = DirtyEntry {
         mtime_ns,
         content_hash: content_hash.clone(),

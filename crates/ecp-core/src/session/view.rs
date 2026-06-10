@@ -114,9 +114,9 @@ pub struct OverlayView {
 impl OverlayView {
     /// Build the view. Returns `None` when `files` is empty — the clean-tree
     /// path must stay literally view-free so traversals take their original
-    /// branch. Cost: one pass over `graph.nodes` to find dirty-file base
-    /// nodes (no per-node allocation for clean files), then O(dirty symbols
-    /// × callees × log N) name-index lookups.
+    /// branch. Cost when dirty: one O(files) pass over `graph.files` plus one
+    /// O(nodes) pass over `graph.nodes` (pure scans; allocation stays O(dirty
+    /// symbols)), then O(dirty symbols × callees × log N) name-index lookups.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
         if files.is_empty() {
             return None;
@@ -163,7 +163,8 @@ impl OverlayView {
                     &sym.name,
                 );
                 let virt = base_len + nodes.len() as u32;
-                if let Some(&base_idx) = dirty_base_by_uid.get(&uid) {
+                let replaced_base = dirty_base_by_uid.get(&uid).copied();
+                if let Some(base_idx) = replaced_base {
                     replaced.insert(base_idx, virt);
                 }
                 nodes.push(ViewNode {
@@ -174,7 +175,7 @@ impl OverlayView {
                     rel_path: rel.clone(),
                     start_line: sym.start_line,
                     end_line: sym.end_line,
-                    replaced_base: dirty_base_by_uid.get(&uid).copied(),
+                    replaced_base,
                 });
             }
         }
@@ -372,26 +373,26 @@ fn resolve_callee(
                 })
                 .collect();
             if scoped.len() == 1 {
-                return Some((redirect_target(scoped[0], replaced), CONF_IMPORT_SCOPED));
+                // `base_candidates` excludes every dirty-base node, so a
+                // scoped match can never need a replaced-base redirect —
+                // surviving dirty symbols compete as overlay candidates with
+                // their virtual index instead.
+                debug_assert!(!replaced.contains_key(&scoped[0]));
+                return Some((scoped[0], CONF_IMPORT_SCOPED));
             }
         }
     }
 
-    // Tier 3: global uniqueness over clean base + overlay.
+    // Tier 3: global uniqueness over clean base + overlay. Same invariant as
+    // Tier 2: a base candidate is clean by construction, never redirected.
     match (base_candidates.len(), overlay_candidates.len()) {
-        (1, 0) => Some((
-            redirect_target(base_candidates[0], replaced),
-            CONF_GLOBAL_UNIQUE,
-        )),
+        (1, 0) => {
+            debug_assert!(!replaced.contains_key(&base_candidates[0]));
+            Some((base_candidates[0], CONF_GLOBAL_UNIQUE))
+        }
         (0, 1) => Some((overlay_candidates[0], CONF_GLOBAL_UNIQUE)),
         _ => None,
     }
-}
-
-/// Replaced base targets redirect to their virtual successor so edge
-/// endpoints always reference the live version of a symbol.
-fn redirect_target(base_idx: u32, replaced: &FxHashMap<u32, u32>) -> u32 {
-    replaced.get(&base_idx).copied().unwrap_or(base_idx)
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -413,16 +414,11 @@ fn path_matches_segment(rel_path: &str, segment: &str) -> bool {
         .any(|c| match c.as_os_str().to_str() {
             Some(s) => {
                 s == segment
-                    || s.strip_suffix(".rs")
-                        .map(|stem| stem == segment)
+                    || std::path::Path::new(s)
+                        .file_stem()
+                        .and_then(|st| st.to_str())
+                        .map(|st| st == segment)
                         .unwrap_or(false)
-                    || {
-                        std::path::Path::new(s)
-                            .file_stem()
-                            .and_then(|st| st.to_str())
-                            .map(|st| st == segment)
-                            .unwrap_or(false)
-                    }
             }
             None => false,
         })
