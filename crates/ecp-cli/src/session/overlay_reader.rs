@@ -1,26 +1,36 @@
 //! L1 overlay reader: materialises the on-disk fragment set
-//! (`dirty_files.json` + `graph_overlay/<id>.bin` files) into an
-//! `ecp_core::session::Overlay` that `merge_archived` can consume directly.
+//! (`dirty_files.json` + `graph_overlay/<id>.bin` files) for the query side.
+//!
+//! Three consumers, three shapes:
+//! - `load_overlay_hits` — flat per-symbol rows for `find`'s overlay-only
+//!   name matching.
+//! - `load_overlay` — `ecp_core::session::Overlay` for `merge_archived`
+//!   (inspect's node-set merge).
+//! - `load_view_inputs` — per-file `OverlayFileInput`s (symbols + imports +
+//!   calls) for the query-time `OverlayView` edge merge.
 //!
 //! Fragment → Node conversion:
-//! - `uid`:  `ecp_core::uid::compute(kind, rel_path, None, name)` — same
+//! - `uid`:  `ecp_core::uid::compute(kind, rel_path, owner, name)` — same
 //!   canonical stream used by the full-reindex path, so overlay uids match
-//!   base-graph uids for the same symbol.
+//!   base-graph uids for the same symbol. v1 bins carry no owner (methods
+//!   keep the pre-v2 empty-owner uid); v2 bins match methods exactly.
 //! - `file_idx`: 0 (placeholder; overlay nodes have no base-graph file entry
 //!   until full merge promotion in T7-7).
 //! - `content_hash`: 0 (fragment bins don't carry the source-byte hash yet).
 //!
-//! Fragment bins with `parse_failed = true` are skipped.
+//! Fragment bins with `parse_failed = true` are skipped. Bins are decoded
+//! per the manifest's `DirtyEntry.format` marker — never guessed.
 
 use ecp_core::graph::{Node, NodeKind};
 use ecp_core::pool::{StrRef, StringPool};
-use ecp_core::session::{DirtyFiles, Overlay};
+use ecp_core::session::{DirtyFiles, Overlay, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V2};
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
-use super::overlay_writer::ArchivedFragment;
+use super::overlay_writer::{ArchivedFragment, ArchivedFragmentFile, FragmentFile};
 
 /// A single overlay symbol with the source-relative path it came from.
 ///
@@ -38,16 +48,23 @@ pub struct OverlayHit {
     pub line: u32,
 }
 
-/// Visit every non-failed fragment under `session_dir`, calling `f` with the
-/// owning rel_path and the archived fragment. Returns `false` when there is no
-/// overlay (`dirty_files.json` absent or empty) so callers can short-circuit;
-/// `true` when the manifest was present (even if every fragment was skipped).
-/// Shared by `load_overlay` and `load_overlay_hits` so the manifest-walk +
-/// fragment-decode logic lives in exactly one place.
-fn for_each_fragment(
-    session_dir: &Path,
-    mut f: impl FnMut(&str, &ArchivedFragment),
-) -> io::Result<bool> {
+/// Borrowed per-symbol view shared by both fragment encodings so the
+/// `load_overlay*` consumers stay agnostic of the bin version.
+struct FragSym<'a> {
+    name: &'a str,
+    kind: NodeKind,
+    /// `(start_row, start_col, end_row, end_col)` — 0-based.
+    span: (u32, u32, u32, u32),
+    owner_class: Option<&'a str>,
+}
+
+/// Visit every non-failed fragment symbol under `session_dir`, calling `f`
+/// with the owning rel_path and a version-agnostic symbol view. Returns
+/// `false` when there is no overlay (`dirty_files.json` absent or empty) so
+/// callers can short-circuit; `true` when the manifest was present (even if
+/// every fragment was skipped). Shared by `load_overlay` and
+/// `load_overlay_hits` so manifest-walk + decode-dispatch live in one place.
+fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -> io::Result<bool> {
     let manifest = session_dir.join("dirty_files.json");
     if !manifest.exists() {
         return Ok(false);
@@ -65,13 +82,48 @@ fn for_each_fragment(
         let Ok(bytes) = fs::read(&bin_path) else {
             continue; // fragment not written yet or already promoted
         };
-        let Ok(archived) =
-            rkyv::access::<rkyv::vec::ArchivedVec<ArchivedFragment>, RkyvError>(&bytes)
-        else {
-            continue; // corrupt fragment — skip
-        };
-        for frag in archived.iter() {
-            f(rel_path, frag);
+        if entry.format >= FRAGMENT_FORMAT_V2 {
+            let Ok(archived) = rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes) else {
+                continue; // corrupt fragment — skip
+            };
+            for sym in archived.symbols.iter() {
+                f(
+                    rel_path,
+                    FragSym {
+                        name: sym.name.as_str(),
+                        kind: NodeKind::from(&sym.kind),
+                        span: (
+                            sym.span.0.to_native(),
+                            sym.span.1.to_native(),
+                            sym.span.2.to_native(),
+                            sym.span.3.to_native(),
+                        ),
+                        owner_class: sym.owner_class.as_ref().map(|o| o.as_str()),
+                    },
+                );
+            }
+        } else {
+            let Ok(archived) =
+                rkyv::access::<rkyv::vec::ArchivedVec<ArchivedFragment>, RkyvError>(&bytes)
+            else {
+                continue; // corrupt fragment — skip
+            };
+            for frag in archived.iter() {
+                f(
+                    rel_path,
+                    FragSym {
+                        name: frag.name.as_str(),
+                        kind: NodeKind::from(&frag.kind),
+                        span: (
+                            frag.span.0.to_native(),
+                            frag.span.1.to_native(),
+                            frag.span.2.to_native(),
+                            frag.span.3.to_native(),
+                        ),
+                        owner_class: None,
+                    },
+                );
+            }
         }
     }
     Ok(true)
@@ -82,17 +134,15 @@ fn for_each_fragment(
 /// on the query hot path pay nothing on a clean working tree.
 pub fn load_overlay_hits(session_dir: &Path) -> io::Result<Vec<OverlayHit>> {
     let mut hits = Vec::new();
-    for_each_fragment(session_dir, |rel_path, frag| {
-        let name = frag.name.as_str().to_string();
-        let kind = NodeKind::from(&frag.kind);
-        let uid = ecp_core::uid::compute(kind, rel_path, None, &name);
+    for_each_fragment(session_dir, |rel_path, sym| {
+        let uid = ecp_core::uid::compute(sym.kind, rel_path, sym.owner_class, sym.name);
         hits.push(OverlayHit {
             uid,
-            name,
-            kind,
+            name: sym.name.to_string(),
+            kind: sym.kind,
             rel_path: rel_path.to_string(),
             // span.0 is the 0-based start row; +1 to match start_line().
-            line: frag.span.0.to_native() + 1,
+            line: sym.span.0 + 1,
         });
     })?;
     Ok(hits)
@@ -103,24 +153,18 @@ pub fn load_overlay_hits(session_dir: &Path) -> io::Result<Vec<OverlayHit>> {
 pub fn load_overlay(session_dir: &Path) -> io::Result<Option<Overlay>> {
     let mut pool = StringPool::new();
     let mut nodes: Vec<Node> = Vec::new();
-    for_each_fragment(session_dir, |rel_path, frag| {
-        let name_str = frag.name.as_str();
-        let kind = NodeKind::from(&frag.kind);
-        let uid = ecp_core::uid::compute(kind, rel_path, None, name_str);
-        let name_ref: StrRef = pool.add(name_str);
+    for_each_fragment(session_dir, |rel_path, sym| {
+        let uid = ecp_core::uid::compute(sym.kind, rel_path, sym.owner_class, sym.name);
+        let name_ref: StrRef = pool.add(sym.name);
+        let owner_ref: StrRef = sym.owner_class.map(|o| pool.add(o)).unwrap_or_default();
         nodes.push(Node {
             uid,
             name: name_ref,
             file_idx: 0,
-            kind,
-            span: (
-                frag.span.0.to_native(),
-                frag.span.1.to_native(),
-                frag.span.2.to_native(),
-                frag.span.3.to_native(),
-            ),
+            kind: sym.kind,
+            span: sym.span,
             community_id: 0,
-            owner_class: StrRef::default(),
+            owner_class: owner_ref,
             content_hash: 0,
         });
     })?;
@@ -129,4 +173,74 @@ pub fn load_overlay(session_dir: &Path) -> io::Result<Option<Overlay>> {
         return Ok(None);
     }
     Ok(Some(Overlay::new(nodes)))
+}
+
+/// Read the dirty-file set as `OverlayView` inputs: one `OverlayFileInput`
+/// per VALID v2 manifest entry. Entry validation guards the two staleness
+/// holes the manifest has by construction:
+///
+/// - **format < v2** — written by an older binary; carries no calls/imports.
+///   Treating the file as clean (skip) is the conservative choice: the next
+///   `ensure_fresh` on a still-dirty file rewrites the bin as v2.
+/// - **mtime mismatch** — `commit_fragment_results` only ever inserts
+///   entries, so a file edited and then REVERTED keeps its (now stale)
+///   manifest entry. Serving that fragment would beat fresh base data with
+///   stale overlay data; the on-disk mtime is the cheap tell (the entry's
+///   `mtime_ns` was stat'ed at fragment-write time from the same path).
+///
+/// Returns an empty Vec on a clean tree — `OverlayView::build` then returns
+/// `None` and query paths stay on their original branch.
+pub fn load_view_inputs(
+    session_dir: &Path,
+    worktree_root: &Path,
+) -> io::Result<Vec<OverlayFileInput>> {
+    let manifest = session_dir.join("dirty_files.json");
+    if !manifest.exists() {
+        return Ok(Vec::new());
+    }
+    let df = DirtyFiles::read(&manifest)?;
+    let overlay_dir = session_dir.join("graph_overlay");
+    let mut out = Vec::new();
+
+    for (rel_path, entry) in &df.entries {
+        if entry.parse_failed || entry.format < FRAGMENT_FORMAT_V2 {
+            continue;
+        }
+        let on_disk_mtime_ns = fs::metadata(worktree_root.join(rel_path))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64);
+        if on_disk_mtime_ns != Some(entry.mtime_ns) {
+            continue; // reverted, deleted, or touched since the fragment write
+        }
+        let bin_path = overlay_dir.join(format!("{}.bin", entry.fragment_id));
+        let Ok(bytes) = fs::read(&bin_path) else {
+            continue;
+        };
+        let Ok(archived) = rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes) else {
+            continue;
+        };
+        let Ok(file) = rkyv::deserialize::<FragmentFile, RkyvError>(archived) else {
+            continue;
+        };
+        out.push(OverlayFileInput {
+            rel_path: rel_path.clone(),
+            symbols: file
+                .symbols
+                .into_iter()
+                .map(|s| OverlaySymbol {
+                    name: s.name,
+                    kind: s.kind,
+                    owner_class: s.owner_class,
+                    // span rows are 0-based; Node line conventions are 1-based.
+                    start_line: s.span.0 + 1,
+                    end_line: s.span.2 + 1,
+                    calls: s.calls,
+                })
+                .collect(),
+            imports: file.imports,
+        });
+    }
+    Ok(out)
 }

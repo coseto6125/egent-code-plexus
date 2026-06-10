@@ -70,6 +70,52 @@ pub fn fragments_from_local_graph(graph: &LocalGraph) -> Vec<Fragment> {
         .collect()
 }
 
+/// One symbol in a v2 fragment bin. Compared to v1 `Fragment` it adds the
+/// fields the query-time `OverlayView` needs: `owner_class` (so the
+/// recomputed uid matches base-graph method uids exactly), `calls` (callee
+/// short names — the raw material for overlay `Calls` edges) and
+/// `is_exported`; it drops the always-empty v1 detector vectors.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct FragmentSymbol {
+    pub name: String,
+    pub kind: NodeKind,
+    /// `(start_row, start_col, end_row, end_col)` — 0-based.
+    pub span: (u32, u32, u32, u32),
+    pub owner_class: Option<String>,
+    pub is_exported: bool,
+    pub calls: Vec<String>,
+}
+
+/// v2 fragment bin payload: the whole dirty file's fresh parse, including
+/// file-level imports for query-time Tier-2 (import-scoped) resolution.
+/// `DirtyEntry.format == FRAGMENT_FORMAT_V2` marks bins of this shape —
+/// readers MUST dispatch on the manifest marker, not guess the encoding.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct FragmentFile {
+    pub symbols: Vec<FragmentSymbol>,
+    pub imports: Vec<ecp_core::analyzer::types::RawImport>,
+}
+
+pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
+    FragmentFile {
+        symbols: graph
+            .nodes
+            .iter()
+            .map(|n| FragmentSymbol {
+                name: n.name.clone(),
+                kind: n.kind,
+                span: n.span,
+                owner_class: n.owner_class.clone(),
+                is_exported: n.is_exported,
+                calls: n.calls.clone(),
+            })
+            .collect(),
+        imports: graph.imports.clone(),
+    }
+}
+
 pub struct FragmentInput {
     pub rel_path: String,
     pub content: Vec<u8>,
@@ -245,6 +291,7 @@ fn write_fragment_file(
         tantivy_delta_segment: None,
         parse_failed,
         dirty_symbols: vec![],
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
     };
 
     let outcome = FragmentOutcome {
@@ -263,12 +310,12 @@ fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
     archive_fragments(&graph)
 }
 
-/// rkyv-serialise a graph's fragments. Shared by the re-parse route
+/// rkyv-serialise a graph's v2 fragment file. Shared by the re-parse route
 /// (`parse_to_fragment`) and the pre-parsed route (`write_fragment_from_graph`)
 /// so both emit byte-identical fragment archives.
 fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
-    let fragments = fragments_from_local_graph(graph);
-    rkyv::to_bytes::<rkyv::rancor::Error>(&fragments)
+    let file = fragment_file_from_local_graph(graph);
+    rkyv::to_bytes::<rkyv::rancor::Error>(&file)
         .map(|v| v.into_vec())
         .map_err(io::Error::other)
 }
@@ -309,6 +356,7 @@ fn write_fragment_from_graph(
         tantivy_delta_segment: None,
         parse_failed,
         dirty_symbols: vec![],
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -387,6 +435,7 @@ impl OverlayWriter {
                 tantivy_delta_segment: None,
                 parse_failed,
                 dirty_symbols,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
             },
         );
         atomic_write_json(&manifest_path, &df)

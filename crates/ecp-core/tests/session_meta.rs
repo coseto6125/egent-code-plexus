@@ -34,6 +34,7 @@ fn dirty_files_deterministic_btreemap_order() {
             tantivy_delta_segment: None,
             parse_failed: false,
             dirty_symbols: vec![],
+            format: 1,
         },
     );
     entries.insert(
@@ -45,6 +46,7 @@ fn dirty_files_deterministic_btreemap_order() {
             tantivy_delta_segment: Some("seg_xxx".into()),
             parse_failed: false,
             dirty_symbols: vec![],
+            format: 1,
         },
     );
     let df = DirtyFiles {

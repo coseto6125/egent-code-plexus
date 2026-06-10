@@ -9,6 +9,7 @@ fn dirty_entry_serialises_dirty_symbols() {
         fragment_id: "f".into(),
         tantivy_delta_segment: None,
         parse_failed: false,
+        format: 1,
         dirty_symbols: vec![SymbolRef {
             name: "verify_token".into(),
             kind: SymbolKind::Function,
@@ -48,6 +49,7 @@ fn dirty_files_round_trip_via_disk() {
             fragment_id: "f".into(),
             tantivy_delta_segment: None,
             parse_failed: false,
+            format: 1,
             dirty_symbols: vec![SymbolRef {
                 name: "foo".into(),
                 kind: SymbolKind::Function,
