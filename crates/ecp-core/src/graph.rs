@@ -98,6 +98,40 @@ impl std::str::FromStr for RelType {
 }
 
 impl RelType {
+    /// rkyv discriminants are append-only (see `NodeKind::ALL`). Length of
+    /// the `#[repr(u8)]` variant space.
+    pub const VARIANT_COUNT: usize = 23;
+
+    /// Every variant in `#[repr(u8)]` order. The schema guard test pins
+    /// `ALL[i] as u8 == i` plus the variant name for all i, so a reorder /
+    /// insert / rename that would silently re-label edges in existing
+    /// `graph.bin` archives fails CI instead.
+    pub const ALL: [RelType; Self::VARIANT_COUNT] = [
+        Self::Defines,
+        Self::Imports,
+        Self::Calls,
+        Self::Extends,
+        Self::Implements,
+        Self::HasMethod,
+        Self::HasProperty,
+        Self::Accesses,
+        Self::HandlesRoute,
+        Self::StepInProcess,
+        Self::References,
+        Self::Fetches,
+        Self::MirrorsField,
+        Self::Publishes,
+        Self::Subscribes,
+        Self::EventTopicMirror,
+        Self::OpensTxScope,
+        Self::Overrides,
+        Self::Decorates,
+        Self::UsesPathLiteral,
+        Self::ReadsField,
+        Self::CompensatedBy,
+        Self::QueriesTable,
+    ];
+
     pub const fn is_heuristic(self) -> bool {
         matches!(
             self,
