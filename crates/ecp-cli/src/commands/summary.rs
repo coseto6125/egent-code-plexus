@@ -2,10 +2,11 @@
 //!
 //! Folds doctor + status + list + summarize into one command:
 //!
-//! - No `--repo`     → registry-level overview (indexed repos + groups)
-//! - `--repo <sel>`  → per-repo health (frameworks / freshness / blind spots)
+//! - No `--repo`, cwd is indexed → scoped per-repo health for the cwd repo
+//! - No `--repo`, cwd not indexed → registry-level overview (same as `--repo @all`)
+//! - `--repo <sel>` → per-repo health (frameworks / freshness / blind spots)
 //!   for each resolved repo
-//! - `--repo @group` → same, aggregated for all group members
+//! - `--repo @all`  → registry-level overview (indexed repos + groups)
 //!
 //! `blind_spots` here lists only Type 1 (LLM-signal) buckets: source-code
 //! opacity sites such as dynamic-import / reflection / eval / exec. Type 2
@@ -30,8 +31,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug, Clone)]
 pub struct SummaryArgs {
-    /// Repository selector (path | name | @group | @all | csv mix).
-    /// If omitted: registry-level overview only.
+    /// Repository selector (path | name | @all | csv mix).
+    /// If omitted and cwd is an indexed repo: scoped per-repo health.
+    /// If omitted and cwd is not indexed: registry overview.
+    /// Use `--repo @all` to force the registry overview regardless of cwd.
     #[arg(long)]
     pub repo: Option<String>,
 
@@ -60,29 +63,52 @@ pub fn build_payload(args: &SummaryArgs, _graph_arg: &Path) -> Result<Value, Ecp
     let reg = registry.snapshot();
 
     let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd_str = cwd.to_string_lossy();
 
     let mut sections: serde_json::Map<String, Value> = serde_json::Map::new();
 
-    // `--repo` acts as filter: drop the registry-wide overview to keep
-    // single-repo output focused (the per_repo section already contains
-    // the relevant entries). Without `--repo`, fall back to registry view.
-    if let Some(repo_sel) = args.repo.as_deref() {
-        let selector = crate::repo_selector::parse(repo_sel)
-            .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
-        let cwd_str = cwd.to_string_lossy();
-        let resolved = crate::repo_selector::resolve_top_level(&selector, reg, &cwd_str, "summary")
-            .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
-        let per_repo: Vec<Value> = resolved
-            .iter()
-            .map(|r| build_repo_health(r, args.detailed))
-            .collect();
-        sections.insert("per_repo".into(), Value::Array(per_repo));
-    } else {
-        sections.insert(
-            "indexed_repos".into(),
-            build_registry_overview(reg, args.detailed),
-        );
-        sections.insert("groups".into(), build_groups_overview(reg));
+    match args.repo.as_deref() {
+        // `--repo @all` → registry overview regardless of cwd.
+        Some("@all") => {
+            sections.insert(
+                "indexed_repos".into(),
+                build_registry_overview(reg, args.detailed),
+            );
+            sections.insert("groups".into(), build_groups_overview(reg));
+        }
+        // Explicit selector → per-repo health.
+        Some(repo_sel) => {
+            let selector = crate::repo_selector::parse(repo_sel)
+                .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
+            let resolved =
+                crate::repo_selector::resolve_top_level(&selector, reg, &cwd_str, "summary")
+                    .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
+            let per_repo: Vec<Value> = resolved
+                .iter()
+                .map(|r| build_repo_health(r, args.detailed))
+                .collect();
+            sections.insert("per_repo".into(), Value::Array(per_repo));
+        }
+        // No `--repo`: scope to cwd repo when indexed; fall back to registry overview.
+        None => {
+            if let Some(alias) = crate::repo_selector::find_by_path(reg, &cwd_str) {
+                let resolved = crate::repo_selector::ResolvedRepo {
+                    dir_name: alias.dir_name.clone(),
+                    common_dir: alias.common_dir.clone(),
+                    aliases: alias.aliases.clone(),
+                };
+                sections.insert(
+                    "per_repo".into(),
+                    Value::Array(vec![build_repo_health(&resolved, args.detailed)]),
+                );
+            } else {
+                sections.insert(
+                    "indexed_repos".into(),
+                    build_registry_overview(reg, args.detailed),
+                );
+                sections.insert("groups".into(), build_groups_overview(reg));
+            }
+        }
     }
 
     Ok(json!({ "summary": Value::Object(sections) }))
@@ -100,12 +126,18 @@ fn build_registry_overview(reg: &RegistryFile, detailed: bool) -> Value {
                 .first()
                 .map(|s| s.as_str())
                 .unwrap_or(dir_name);
-            json!({
-                "name": display_name,
-                "dir_name": dir_name,
-                "last_touched": alias.last_touched,
-                "groups": alias.groups,
-            })
+            let mut row = serde_json::Map::new();
+            row.insert("name".into(), json!(display_name));
+            // Omit dir_name when redundant (byte-identical to the display name).
+            if display_name != dir_name.as_str() {
+                row.insert("dir_name".into(), json!(dir_name));
+            }
+            row.insert("last_touched".into(), json!(alias.last_touched));
+            // Omit groups when empty — carries no information.
+            if !alias.groups.is_empty() {
+                row.insert("groups".into(), json!(alias.groups));
+            }
+            Value::Object(row)
         })
         .collect();
 

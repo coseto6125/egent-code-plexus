@@ -34,7 +34,8 @@ pub enum Commands {
     Rename(commands::rename::RenameArgs),
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),
-    /// Registry + repo health (indexed repos, freshness, frameworks, blind spots).
+    /// Registry + repo health. Default: scoped to the cwd repo when indexed; registry overview otherwise.
+    /// Use `--repo @all` for the registry overview explicitly.
     ///
     /// `blind_spots` lists only LLM-actionable opacity (dynamic-import / reflection / eval);
     /// parser-metric buckets (uid-collision / overload / ifdef-redef) live under `ecp dev uid-audit`.
