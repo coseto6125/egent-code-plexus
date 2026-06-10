@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 pub struct UninstallArgs {
     /// Only uninstall integration for one coding agent (claude, codex, gemini).
     /// Omit to uninstall all detected agents (and remove the binary itself).
-    #[arg(long)]
+    #[arg(long, value_parser = ["claude", "codex", "gemini"])]
     pub agent: Option<String>,
 
     /// List what would be removed without actually deleting anything.
@@ -41,7 +41,6 @@ pub struct UninstallArgs {
 
 pub fn run(args: UninstallArgs) -> Result<(), EcpError> {
     let agent_filter = args.agent.as_deref();
-    validate_agent_filter(agent_filter)?;
 
     let mut summary: Vec<(&'static str, StepStatus)> = Vec::new();
 
@@ -365,16 +364,6 @@ fn list_top_level_entries(dir: &Path) -> Result<Vec<PathBuf>, EcpError> {
 }
 
 // ─── agent filter ────────────────────────────────────────────────────────────
-
-fn validate_agent_filter(agent: Option<&str>) -> Result<(), EcpError> {
-    let Some(a) = agent else { return Ok(()) };
-    match a {
-        "claude" | "codex" | "gemini" => Ok(()),
-        other => Err(EcpError::InvalidArgument(format!(
-            "unknown agent '{other}' — expected claude, codex, or gemini"
-        ))),
-    }
-}
 
 fn matches_agent(filter: Option<&str>, agent: &str) -> bool {
     filter.is_none_or(|f| f == agent)

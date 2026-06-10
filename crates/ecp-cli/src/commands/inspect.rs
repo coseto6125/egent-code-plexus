@@ -35,7 +35,7 @@ pub struct InspectArgs {
 
     /// Substring filter applied to the target file path of incoming/outgoing
     /// edges. Case-sensitive substring match (not glob).
-    #[arg(long = "file_path", alias = "file-path")]
+    #[arg(long = "file", alias = "file_path", alias = "file-path")]
     pub file_path: Option<String>,
 
     /// Comma-separated list of relation types (lowercase, e.g. `calls,imports`).
@@ -83,6 +83,79 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
         None
     } else {
         Some(parts)
+    }
+}
+
+/// Strip constant-across-all-edges boilerplate from an edge-section map for
+/// toon/llm output. Operates on the `incoming`, `outgoing`,
+/// `heuristic_incoming`, and `heuristic_outgoing` sections of the inspect
+/// result — each is a `{rel_type: [{name, kind, filePath, ...}, ...]}` map.
+///
+/// Fields removed (when constant):
+/// - `tier`: always `"unresolved"` pre-T4-7; dropping saves ~20 bytes/edge
+/// - `checks`: always `{}` pre-T4-7; empty object adds token noise without signal
+/// - `ownerClass`: dropped when every entry across ALL edge sections has
+///   `ownerClass: null`; when any entry has a non-null ownerClass the column
+///   is kept because the LLM needs it to distinguish method callers
+///
+/// Affects only the toon/llm path; json format uses the unstripped block.
+fn strip_edge_boilerplate(result: &mut serde_json::Value) {
+    // Collect which edge-section keys exist in this result.
+    let section_keys = [
+        "incoming",
+        "outgoing",
+        "heuristic_incoming",
+        "heuristic_outgoing",
+    ];
+
+    // First pass: determine whether any entry has a non-null ownerClass.
+    // If so, keep the column so callers can see method ownership.
+    let any_non_null_owner = section_keys.iter().any(|&key| {
+        result
+            .get(key)
+            .and_then(|s| s.as_object())
+            .map(|map| {
+                map.values()
+                    .filter_map(|v| v.as_array())
+                    .flatten()
+                    .any(|entry| {
+                        !matches!(
+                            entry.get("ownerClass"),
+                            Some(serde_json::Value::Null) | None
+                        )
+                    })
+            })
+            .unwrap_or(false)
+    });
+
+    for &key in &section_keys {
+        if let Some(section) = result.get_mut(key).and_then(|s| s.as_object_mut()) {
+            for entries in section.values_mut() {
+                if let Some(arr) = entries.as_array_mut() {
+                    for entry in arr.iter_mut() {
+                        if let Some(obj) = entry.as_object_mut() {
+                            // Always drop: constant sentinel values.
+                            obj.remove("tier");
+                            obj.remove("checks");
+                            // Conditional: only drop when the column is all-null.
+                            if !any_non_null_owner {
+                                obj.remove("ownerClass");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also strip ownerClass: null from the symbol header when no edge carries a
+    // non-null ownerClass — the null conveys no information and adds noise.
+    if !any_non_null_owner {
+        if let Some(symbol) = result.get_mut("symbol").and_then(|s| s.as_object_mut()) {
+            if matches!(symbol.get("ownerClass"), Some(serde_json::Value::Null)) {
+                symbol.remove("ownerClass");
+            }
+        }
     }
 }
 
@@ -661,6 +734,9 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
                 "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
             );
         }
+        if !matches!(format, OutputFormat::Json) {
+            strip_edge_boilerplate(&mut result);
+        }
         return emit_with_caveat(&result, format, engine.caveat());
     }
 
@@ -688,15 +764,23 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
         );
     }
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "status": "ambiguous",
         "message": format!(
-            "Found {} symbols matching '{}'. Use --file_path or --kind to disambiguate.",
+            "Found {} symbols matching '{}'. Use --file or --kind to disambiguate.",
             blocks.len(),
             name
         ),
         "matches": blocks,
         "omitted_kinds": omitted_kinds,
     });
+    if !matches!(format, OutputFormat::Json) {
+        // Strip boilerplate from each match block's edge sections.
+        if let Some(matches) = result.get_mut("matches").and_then(|m| m.as_array_mut()) {
+            for block in matches.iter_mut() {
+                strip_edge_boilerplate(block);
+            }
+        }
+    }
     emit_with_caveat(&result, format, engine.caveat())
 }

@@ -19,7 +19,7 @@ pub struct CypherArgs {
     ///   line, startLine, endLine, visibility, decorators, and the boolean
     ///   flags is_test/is_async/is_static/is_abstract/is_generator/is_extern
     ///   (camelCase aliases isTest/isAsync/… also accepted). An unknown
-    ///   property name warns on stderr and resolves to null.
+    ///   property name fails the query with a structured error on stdout.
     /// - Properties (edge):  confidence, reason, rel_type
     /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
     /// - Pipeline:           WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
@@ -95,7 +95,7 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
     let query = cypher::parse(query_str)
         .map_err(|e| ecp_core::EcpError::InvalidArgument(format_cypher_error(query_str, &e)))?;
 
-    warn_unknown_properties(&query);
+    fail_on_unknown_properties(&query, OutputFormat::parse(args.format.as_deref()))?;
 
     let result = cypher::execute(
         &query,
@@ -124,28 +124,57 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
     Ok(())
 }
 
-/// Surface property names that match neither the node nor the edge schema.
-/// Such a name resolves to `Null` in the executor (OpenCypher convention), so
-/// the query silently returns 0 rows — indistinguishable from a real empty
-/// result. The warning lets the caller tell a typo (`n.file` → `n.filePath`)
-/// apart from genuine no-data. Stderr-only; the query semantics are unchanged.
-/// Runs once over the parsed AST (no graph access), so it is off the per-row
-/// hot path and adds no measurable latency for a well-formed query.
-fn warn_unknown_properties(query: &cypher::Query) {
-    for u in cypher::unknown_properties(query) {
-        match u.suggestion {
-            Some(s) => eprintln!(
-                "warning: unknown cypher property '{}' — did you mean '{s}'?",
-                u.prop
-            ),
-            None => eprintln!(
-                "warning: unknown cypher property '{}' (known node: {}; edge: {})",
-                u.prop,
-                ecp_core::cypher::diagnostics::KNOWN_NODE_PROPS.join(", "),
-                ecp_core::cypher::diagnostics::KNOWN_EDGE_PROPS.join(", "),
-            ),
-        }
+/// Reject a query that references a property name absent from the node and edge
+/// schema. An unknown property resolves to `Null` in the executor (OpenCypher
+/// convention), making the query return 0 rows — indistinguishable from a real
+/// empty result. LLM agents read only stdout, so a stderr-only warning is a
+/// silent hallucination vector; failing here ensures they see the error payload
+/// instead of empty rows.
+///
+/// The structured error is emitted to stdout before returning `Err` so the
+/// consuming agent parses the same channel it uses for success results.
+fn fail_on_unknown_properties(
+    query: &cypher::Query,
+    format: OutputFormat,
+) -> Result<(), ecp_core::EcpError> {
+    let unknowns = cypher::unknown_properties(query);
+    if unknowns.is_empty() {
+        return Ok(());
     }
+    // Emit the first unknown property as the error (multiple are unusual; the
+    // first hit is the actionable signal — fix it, then rerun to catch others).
+    let u = &unknowns[0];
+    let (msg, payload) = match &u.suggestion {
+        Some(s) => {
+            let m = format!("unknown cypher property '{}' — did you mean '{s}'?", u.prop);
+            let p = serde_json::json!({
+                "error": "unknown_property",
+                "property": u.prop,
+                "suggestion": s,
+                "message": m,
+            });
+            (m, p)
+        }
+        None => {
+            let known_node = ecp_core::cypher::diagnostics::KNOWN_NODE_PROPS.join(", ");
+            let known_edge = ecp_core::cypher::diagnostics::KNOWN_EDGE_PROPS.join(", ");
+            let m = format!(
+                "unknown cypher property '{}' (known node: {known_node}; edge: {known_edge})",
+                u.prop,
+            );
+            let p = serde_json::json!({
+                "error": "unknown_property",
+                "property": u.prop,
+                "known_node_props": ecp_core::cypher::diagnostics::KNOWN_NODE_PROPS,
+                "known_edge_props": ecp_core::cypher::diagnostics::KNOWN_EDGE_PROPS,
+                "message": m,
+            });
+            (m, p)
+        }
+    };
+    // Emit structured error on stdout so LLM stdout-only consumers see it.
+    let _ = crate::output::emit(&payload, format);
+    Err(ecp_core::EcpError::InvalidArgument(msg))
 }
 
 /// Wrap the cypher result into the emitted JSON shape, collapsing

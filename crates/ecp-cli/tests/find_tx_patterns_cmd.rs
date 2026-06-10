@@ -58,21 +58,16 @@ fn ecp_index(repo: &Path) {
     );
 }
 
-fn run_find_tx(repo: &Path, extra: &[&str]) -> Value {
-    let mut args = vec![
-        "find-transaction-patterns",
-        "--repo",
-        ".",
-        "--format",
-        "json",
-    ];
+fn run_verb_json(repo: &Path, verb: &[&str], extra: &[&str]) -> Value {
+    let mut args = verb.to_vec();
+    args.extend_from_slice(&["--repo", ".", "--format", "json"]);
     args.extend_from_slice(extra);
     let out = Command::new(ecp_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("find-transaction-patterns failed to spawn");
+        .unwrap_or_else(|e| panic!("{args:?} failed to spawn: {e}"));
     assert!(
         out.status.success(),
         "{args:?} failed:\nstderr={}\nstdout={}",
@@ -85,6 +80,14 @@ fn run_find_tx(repo: &Path, extra: &[&str]) -> Value {
         .unwrap_or_else(|| panic!("{args:?} did not return JSON\nstdout={stdout}"));
     serde_json::from_str(&stdout[json_start..])
         .unwrap_or_else(|e| panic!("{args:?} invalid JSON: {e}\nstdout={stdout}"))
+}
+
+fn run_find_tx(repo: &Path, extra: &[&str]) -> Value {
+    run_verb_json(repo, &["find-transaction-patterns"], extra)
+}
+
+fn run_heuristics_saga(repo: &Path, extra: &[&str]) -> Value {
+    run_verb_json(repo, &["heuristics", "saga"], extra)
 }
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -532,5 +535,38 @@ fn class_scope_filter_works() {
             .unwrap_or("")
             .starts_with("Order."),
         "pair should belong to Order class: {json}"
+    );
+}
+
+// ── New-path coverage (`ecp heuristics saga`) ─────────────────────────────────
+
+#[test]
+fn heuristics_saga_new_path_matches_deprecated_path() {
+    let tmp = setup_single_file(SAGA_COMPENSATE);
+    let via_new = run_heuristics_saga(tmp.path(), &[]);
+    let via_old = run_find_tx(tmp.path(), &[]);
+    // Both paths surface the same saga pair.
+    assert_eq!(
+        via_new["saga_pairs"].as_array().map(|a| a.len()),
+        via_old["saga_pairs"].as_array().map(|a| a.len()),
+        "new `heuristics saga` path must return same count as deprecated path"
+    );
+}
+
+#[test]
+fn heuristics_saga_outbox_only_flag_via_new_path() {
+    let tmp = setup_outbox_file(OUTBOX_FULL);
+    let json = run_heuristics_saga(tmp.path(), &["--outbox-only"]);
+    // saga_pairs suppressed; outbox_patterns field must be present.
+    assert!(
+        json["saga_pairs"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "--outbox-only via new path must suppress saga_pairs: {json}"
+    );
+    assert!(
+        json["outbox_patterns"].as_array().is_some(),
+        "outbox_patterns field must exist via new path: {json}"
     );
 }

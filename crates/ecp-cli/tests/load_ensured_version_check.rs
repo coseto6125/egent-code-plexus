@@ -162,3 +162,59 @@ fn load_ensured_no_rebuild_when_fresh() {
         "loaded graph must contain the source symbol"
     );
 }
+
+/// The 15-days-stale incident: the commit dir names an old SHA, but the
+/// `.head_sha` sidecar was rewritten to the current HEAD by an L1 overlay
+/// refresh, so `ensure_index` answers Ready forever and the L2 never
+/// rebuilds. `load_ensured` must self-flag (`behind_head`, the #552 caveat)
+/// AND spawn the background heal instead of leaving recovery to a human.
+#[test]
+fn load_ensured_behind_head_flags_and_spawns_heal() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path();
+    git_init_with_commit(worktree);
+    std::env::set_var("HOME", worktree);
+    std::env::remove_var("ECP_HOME");
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
+
+    let graph_path = build_initial_graph(worktree);
+
+    // Advance HEAD one commit past the indexed dir, then mimic the L1
+    // overlay's bookkeeping: sidecar = new HEAD while the dir name keeps the
+    // old SHA. Tree stays clean so the git-fingerprint shortcut answers Ready.
+    fs::write(worktree.join("newer.rs"), "pub fn newer_fn() {}\n").unwrap();
+    let g = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
+    };
+    g(&["add", "."]);
+    g(&["commit", "-qm", "advance"]);
+    auto_ensure::write_head_sha_sidecar(&graph_path, worktree);
+
+    test_counters::reset();
+    let engine = auto_ensure::load_ensured(&graph_path, worktree)
+        .expect("load_ensured on behind-HEAD graph");
+    std::env::remove_var("ECP_SKIP_BG_REBUILD");
+
+    assert!(
+        engine.behind_head,
+        "old-SHA dir + current-HEAD sidecar must flag behind_head"
+    );
+    assert_eq!(
+        test_counters::behind_head_heal_calls(),
+        1,
+        "behind-HEAD load must spawn the background self-heal"
+    );
+    assert_eq!(
+        test_counters::build_l2_calls(),
+        0,
+        "the heal is background-only — the query itself must not block on a rebuild"
+    );
+}

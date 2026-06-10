@@ -279,11 +279,14 @@ mod tests {
         );
     }
 
+    // ECP_NO_TELEMETRY=1 is set process-wide by .cargo/config.toml [env]
+    // (tests must never write the developer's live telemetry), so asserting
+    // is_enabled() exercises the env opt-out without set_var/remove_var —
+    // mutating process env here would race parallel tests into transiently
+    // seeing telemetry as enabled.
     #[test]
     fn opt_out_via_env() {
-        std::env::set_var("ECP_NO_TELEMETRY", "1");
         assert!(!is_enabled());
-        std::env::remove_var("ECP_NO_TELEMETRY");
     }
 
     #[test]

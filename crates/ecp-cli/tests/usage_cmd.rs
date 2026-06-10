@@ -203,3 +203,136 @@ fn usage_clear_reports_what_it_cleared() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── --source filter tests ─────────────────────────────────────────────────────
+
+/// `--source cli` reads only cli-calls.jsonl; MCP tool names in calls.jsonl
+/// must not appear in the aggregated output.
+#[test]
+fn usage_source_cli_excludes_mcp_file() {
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-src-cli-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__src");
+    std::fs::create_dir_all(&tel).unwrap();
+    let ts = recent_ts();
+    std::fs::write(
+        tel.join("cli-calls.jsonl"),
+        format!(r#"{{"ts":"{ts}","tool":"impact","duration_ms":10,"ok":true,"source":"cli","error_kind":null}}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        tel.join("calls.jsonl"),
+        format!(r#"{{"ts":"{ts}","tool":"ecp_inspect","duration_ms":5,"ok":true}}"#),
+    )
+    .unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "usage",
+            "--source",
+            "cli",
+            "--format",
+            "json",
+            "--telemetry-dir",
+            tel.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["total"], 1,
+        "--source cli must count only CLI record: {v}"
+    );
+    let by = v["by_command"].as_array().unwrap();
+    assert!(
+        by.iter().any(|c| c["cmd"] == "impact"),
+        "--source cli must include 'impact': {v}"
+    );
+    assert!(
+        !by.iter().any(|c| c["cmd"] == "ecp_inspect"),
+        "--source cli must exclude MCP tool 'ecp_inspect': {v}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `--source mcp` reads only calls.jsonl; CLI tool names in cli-calls.jsonl
+/// must not appear in the aggregated output.
+#[test]
+fn usage_source_mcp_excludes_cli_file() {
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-src-mcp-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__srcm");
+    std::fs::create_dir_all(&tel).unwrap();
+    let ts = recent_ts();
+    std::fs::write(
+        tel.join("cli-calls.jsonl"),
+        format!(r#"{{"ts":"{ts}","tool":"cypher","duration_ms":8,"ok":true,"source":"cli","error_kind":null}}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        tel.join("calls.jsonl"),
+        format!(r#"{{"ts":"{ts}","tool":"ecp_find","duration_ms":3,"ok":true}}"#),
+    )
+    .unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "usage",
+            "--source",
+            "mcp",
+            "--format",
+            "json",
+            "--telemetry-dir",
+            tel.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["total"], 1,
+        "--source mcp must count only MCP record: {v}"
+    );
+    let by = v["by_command"].as_array().unwrap();
+    assert!(
+        by.iter().any(|c| c["cmd"] == "ecp_find"),
+        "--source mcp must include 'ecp_find': {v}"
+    );
+    assert!(
+        !by.iter().any(|c| c["cmd"] == "cypher"),
+        "--source mcp must exclude CLI tool 'cypher': {v}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `--source all` (default) reads both files — existing behavior preserved.
+#[test]
+fn usage_source_all_reads_both_files() {
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-src-all-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__srcall");
+    std::fs::create_dir_all(&tel).unwrap();
+    let ts = recent_ts();
+    std::fs::write(
+        tel.join("cli-calls.jsonl"),
+        format!(r#"{{"ts":"{ts}","tool":"rename","duration_ms":12,"ok":true,"source":"cli","error_kind":null}}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        tel.join("calls.jsonl"),
+        format!(r#"{{"ts":"{ts}","tool":"ecp_impact","duration_ms":6,"ok":true}}"#),
+    )
+    .unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "usage",
+            "--source",
+            "all",
+            "--format",
+            "json",
+            "--telemetry-dir",
+            tel.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"], 2, "--source all must count both records: {v}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

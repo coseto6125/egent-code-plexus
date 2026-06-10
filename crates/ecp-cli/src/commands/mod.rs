@@ -10,6 +10,7 @@ pub mod find_tx_patterns;
 pub mod format;
 pub mod graph_csr;
 pub mod group;
+pub mod heuristics;
 pub mod hook;
 pub mod hook_handle;
 pub mod hook_watcher;

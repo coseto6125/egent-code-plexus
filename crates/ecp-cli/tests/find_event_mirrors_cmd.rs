@@ -58,15 +58,16 @@ fn ecp_index(repo: &Path) {
     );
 }
 
-fn run_find_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
-    let mut args = vec!["find-event-mirrors", "--format", "json"];
+fn run_verb_json(repo: &Path, verb: &[&str], extra: &[&str]) -> (Value, String) {
+    let mut args = verb.to_vec();
+    args.extend_from_slice(&["--format", "json"]);
     args.extend_from_slice(extra);
     let out = Command::new(ecp_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("find-event-mirrors failed to spawn");
+        .unwrap_or_else(|e| panic!("{args:?} failed to spawn: {e}"));
     assert!(
         out.status.success(),
         "{args:?} failed:\nstderr={}\nstdout={}",
@@ -80,6 +81,14 @@ fn run_find_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
     let json: Value = serde_json::from_str(&stdout[json_start..])
         .unwrap_or_else(|e| panic!("{args:?} invalid JSON: {e}\nstdout={stdout}"));
     (json, stdout)
+}
+
+fn run_find_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
+    run_verb_json(repo, &["find-event-mirrors"], extra)
+}
+
+fn run_heuristics_event_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
+    run_verb_json(repo, &["heuristics", "event-mirrors"], extra)
 }
 
 fn run_find_mirrors_text(repo: &Path, extra: &[&str]) -> String {
@@ -337,5 +346,30 @@ fn two_topics_both_mirrored() {
         2,
         "expected 2 mirrors (orders + payments); got {}: {json}",
         rows.len()
+    );
+}
+
+// ── New-path coverage (`ecp heuristics event-mirrors`) ───────────────────────
+
+#[test]
+fn heuristics_event_mirrors_new_path_matches_deprecated_path() {
+    let tmp = setup_two_files(REDIS_PUBLISHER, REDIS_SUBSCRIBER);
+    let (json_new, _) = run_heuristics_event_mirrors(tmp.path(), &[]);
+    let (json_old, _) = run_find_mirrors(tmp.path(), &[]);
+    assert_eq!(
+        mirrors(&json_new).len(),
+        mirrors(&json_old).len(),
+        "new `heuristics event-mirrors` path must return same count as deprecated path"
+    );
+}
+
+#[test]
+fn heuristics_event_mirrors_topic_filter_via_new_path() {
+    let tmp = setup_two_files(REDIS_PUBLISHER, REDIS_SUBSCRIBER);
+    let (json, _) = run_heuristics_event_mirrors(tmp.path(), &["--topic", "orders"]);
+    assert_eq!(
+        mirrors(&json).len(),
+        1,
+        "exact topic filter via new path must return 1 row: {json}"
     );
 }

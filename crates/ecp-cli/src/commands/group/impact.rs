@@ -10,7 +10,6 @@ use std::collections::HashSet;
 use crate::commands::group::types::{ArchivedContractRegistry, ArchivedMatchType, MatchType};
 use crate::commands::group::{lookup_member, storage};
 use crate::commands::impact as local_impact;
-use crate::commit_lookup::find_latest_by_mtime;
 use crate::repo_selector::ResolvedRepo;
 
 #[derive(Args, Debug, Clone)]
@@ -243,14 +242,10 @@ fn emit_json(
     );
 }
 
-/// Resolve the latest graph.bin for a given repo. Delegates to
-/// `commit_lookup::find_latest_by_mtime` (which also skips `.building` /
-/// `.stale-*` dirs); we append `graph.bin` since that helper returns the
-/// commit dir, not the archive path itself.
+/// Resolve the latest graph.bin for a given repo.
 pub fn latest_graph_path_for(
     r: &ResolvedRepo,
     home_ecp: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let commits_dir = home_ecp.join(&r.dir_name).join("commits");
-    find_latest_by_mtime(&commits_dir).map(|dir| dir.join("graph.bin"))
+    crate::commit_lookup::latest_graph_bin(home_ecp, &r.dir_name)
 }

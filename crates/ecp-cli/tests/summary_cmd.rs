@@ -1,9 +1,12 @@
 //! Integration tests for `ecp summary`.
 //!
 //! Tests validate:
-//!   1. Without `--repo`: registry-level overview (indexed_repos + groups).
-//!   2. With `--repo .`: per-repo health sections present.
-//!   3. With `--repo @test-group`: graceful handling (no crash).
+//!   1. Without `--repo`, cwd not indexed → registry-level overview (indexed_repos + groups).
+//!   2. Without `--repo`, cwd IS indexed → per-repo health (per_repo key).
+//!   3. With `--repo .`: per-repo health sections present.
+//!   4. With `--repo @all`: registry-level overview.
+//!   5. With `--repo @test-group`: graceful handling (no crash).
+//!   6. Registry overview rows omit dir_name when identical to name, omit empty groups.
 //!
 //! The registry is built from a temp HOME so tests are isolated from the
 //! developer's real ~/.ecp registry.
@@ -110,10 +113,10 @@ fn init_git_repo(repo: &Path) {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-/// Without `--repo`, summary must emit a registry-level overview that
-/// includes the `indexed_repos` and `groups` keys.
+/// Without `--repo`, cwd not in an indexed repo → registry-level overview
+/// (indexed_repos + groups). An empty registry produces count:0 rows.
 #[test]
-fn summary_without_repo_lists_registry() {
+fn summary_without_repo_lists_registry_when_cwd_not_indexed() {
     let stdout = run_summary_empty_registry(&["--format", "json"]);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
         panic!("summary --format json is not valid JSON: {e}\nstdout: {stdout}")
@@ -132,10 +135,64 @@ fn summary_without_repo_lists_registry() {
         summary.get("groups").is_some(),
         "missing groups key:\n{stdout}"
     );
-    // No per_repo when --repo omitted.
+    // No per_repo when cwd is not indexed.
     assert!(
         summary.get("per_repo").is_none(),
-        "unexpected per_repo when no --repo given:\n{stdout}"
+        "unexpected per_repo when cwd not in any indexed repo:\n{stdout}"
+    );
+}
+
+/// Without `--repo`, cwd IS an indexed repo → scoped per-repo health
+/// (per_repo key present, indexed_repos absent).
+#[test]
+fn summary_without_repo_scoped_to_cwd_when_indexed() {
+    let (stdout, _home) = run_summary_with_registered_repo(&["--format", "json"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("summary --format json is not valid JSON: {e}\nstdout: {stdout}")
+    });
+
+    let summary = &v["summary"];
+    let per_repo = summary["per_repo"]
+        .as_array()
+        .expect("`summary.per_repo` must be an array when cwd is indexed");
+    assert_eq!(
+        per_repo.len(),
+        1,
+        "expected exactly 1 per_repo entry for the cwd repo, got {}: {stdout}",
+        per_repo.len()
+    );
+    // registry overview fields must NOT be present in scoped mode.
+    assert!(
+        summary.get("indexed_repos").is_none(),
+        "indexed_repos must be absent when cwd is scoped:\n{stdout}"
+    );
+
+    let entry = &per_repo[0];
+    for key in ["frameworks", "freshness", "metrics", "blind_spots"] {
+        assert!(entry.get(key).is_some(), "entry missing `{key}`: {stdout}");
+    }
+}
+
+/// `--repo @all` must always produce the registry overview regardless of cwd.
+#[test]
+fn summary_repo_at_all_produces_registry_overview() {
+    let (stdout, _home) = run_summary_with_registered_repo(&["--format", "json", "--repo", "@all"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("summary --format json is not valid JSON: {e}\nstdout: {stdout}")
+    });
+
+    let summary = &v["summary"];
+    assert!(
+        summary.get("indexed_repos").is_some(),
+        "indexed_repos must be present with --repo @all:\n{stdout}"
+    );
+    assert!(
+        summary.get("groups").is_some(),
+        "groups must be present with --repo @all:\n{stdout}"
+    );
+    assert!(
+        summary.get("per_repo").is_none(),
+        "per_repo must be absent with --repo @all:\n{stdout}"
     );
 }
 
@@ -221,4 +278,38 @@ fn summary_help_output() {
         stdout.contains("--format") || stdout.contains("format"),
         "help should mention --format:\n{stdout}"
     );
+}
+
+/// Registry overview rows must omit `dir_name` when identical to `name`,
+/// and must omit `groups` when empty — both are redundant bytes for LLM consumers.
+#[test]
+fn summary_registry_overview_omits_redundant_dir_name_and_empty_groups() {
+    let (stdout, _home) = run_summary_with_registered_repo(&["--format", "json", "--repo", "@all"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nstdout: {stdout}"));
+
+    let rows = v["summary"]["indexed_repos"]["rows"]
+        .as_array()
+        .expect("indexed_repos.rows must be an array");
+
+    for row in rows {
+        // When name == dir_name, dir_name must be absent.
+        if let (Some(name), Some(dir_name)) = (
+            row.get("name").and_then(|v| v.as_str()),
+            row.get("dir_name").and_then(|v| v.as_str()),
+        ) {
+            assert_ne!(
+                name, dir_name,
+                "dir_name must be omitted when identical to name, got row: {row}"
+            );
+        }
+        // groups must be absent when empty.
+        if let Some(groups) = row.get("groups") {
+            let arr = groups.as_array().expect("groups must be an array");
+            assert!(
+                !arr.is_empty(),
+                "empty groups array must be omitted from registry overview rows: {row}"
+            );
+        }
+    }
 }

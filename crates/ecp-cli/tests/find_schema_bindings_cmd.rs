@@ -271,13 +271,15 @@ fn find_graph_bin(repo: &Path) -> std::path::PathBuf {
     walk(&repo.join(".ecp")).expect("graph.bin not found")
 }
 
-fn run_find_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
+fn run_verb_json(repo: &Path, verb: &[&str], field: &str) -> (bool, Value) {
+    let mut args = verb.to_vec();
+    args.extend_from_slice(&[field, "--format", "json"]);
     let out = Command::new(ecp_bin())
-        .args(["find-schema-bindings", field, "--format", "json"])
+        .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("ecp find-schema-bindings spawn");
+        .unwrap_or_else(|e| panic!("{args:?} failed to spawn: {e}"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let start = stdout.find('{').unwrap_or_else(|| {
         panic!(
@@ -288,6 +290,14 @@ fn run_find_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
     let val: Value = serde_json::from_str(&stdout[start..])
         .unwrap_or_else(|e| panic!("JSON parse: {e}\n{stdout}"));
     (out.status.success(), val)
+}
+
+fn run_find_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
+    run_verb_json(repo, &["find-schema-bindings"], field)
+}
+
+fn run_heuristics_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
+    run_verb_json(repo, &["heuristics", "schema-bindings"], field)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -514,5 +524,44 @@ fn field_with_no_node_returns_clear_not_found() {
     assert!(
         val["blind_spot_candidates"].is_array(),
         "blind_spot_candidates must be array in not_found"
+    );
+}
+
+// ── New-path coverage (`ecp heuristics schema-bindings`) ─────────────────────
+
+/// `ecp heuristics schema-bindings` must return the same mirrors as the
+/// deprecated `ecp find-schema-bindings` for the same graph.
+#[test]
+fn heuristics_schema_bindings_new_path_matches_deprecated_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_and_index(tmp.path());
+
+    let bytes = build_graph(
+        &[
+            SfSpec {
+                file: "models/pyd.py",
+                owner: "User",
+                name: "email",
+                line: 4,
+            },
+            SfSpec {
+                file: "models/sqla.py",
+                owner: "User",
+                name: "email",
+                line: 5,
+            },
+        ],
+        &[(0, 1, 0.9)],
+    );
+    std::fs::write(find_graph_bin(tmp.path()), bytes).unwrap();
+
+    let (ok_old, val_old) = run_find_schema_bindings_json(tmp.path(), "User.email");
+    let (ok_new, val_new) = run_heuristics_schema_bindings_json(tmp.path(), "User.email");
+    assert!(ok_old);
+    assert!(ok_new, "new path must exit 0 for found field");
+    assert_eq!(
+        val_new["mirrors"].as_array().map(|a| a.len()),
+        val_old["mirrors"].as_array().map(|a| a.len()),
+        "new `heuristics schema-bindings` path must return same mirror count as deprecated path"
     );
 }

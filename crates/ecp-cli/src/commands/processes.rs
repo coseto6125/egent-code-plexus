@@ -9,6 +9,17 @@
 //! `detect_processes` over the Calls graph (BFS forward with confidence /
 //! depth / branching bounds) and stores trace step indices in the CSR
 //! `traces_offsets` + `traces_data` pair on `ZeroCopyGraph`.
+//!
+//! ## Default min-signal filter (list view only)
+//!
+//! Short intra-community chains dominate raw output but carry near-zero LLM
+//! signal — they trace single-module helper sequences ("Run → Len") rather
+//! than real cross-boundary orchestration. A row passes when either holds:
+//!   • `cross_community` — touches ≥2 Leiden communities (architectural boundary)
+//!   • `step_count >= MIN_INTRA_STEPS` — long enough to represent real orchestration
+//!
+//! `--all` disables the filter. `filtered: N` in the payload is always
+//! present so the LLM knows when rows were dropped.
 
 use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
@@ -17,6 +28,10 @@ use clap::{Args, Subcommand};
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::EcpError;
 use std::collections::HashSet;
+
+/// Minimum step_count for an intra_community process to pass the default filter.
+/// Cross_community processes always pass regardless of length.
+const MIN_INTRA_STEPS: usize = 7;
 
 #[derive(Args, Debug, Clone)]
 pub struct ProcessesArgs {
@@ -38,6 +53,12 @@ pub struct ProcessesArgs {
     /// Cap on listed processes (default 50).
     #[arg(long, default_value = "50")]
     pub limit: usize,
+
+    /// Return all processes, disabling the default min-signal filter.
+    /// Without this flag, short intra-community chains (step_count < 7) are
+    /// suppressed because they carry near-zero architectural signal.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -91,6 +112,7 @@ fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<
 
     let wanted_community = args.community.map(|c| c as u16);
     let mut results = Vec::new();
+    let mut filtered: usize = 0;
 
     for idx in process_start..process_end {
         let k = (idx - process_start) as usize;
@@ -114,11 +136,19 @@ fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<
                 comms_seen.insert(mc);
             }
         }
-        let process_type = if comms_seen.len() > 1 {
+        let is_cross = comms_seen.len() > 1;
+        let process_type = if is_cross {
             "cross_community"
         } else {
             "intra_community"
         };
+
+        // Default filter: drop low-signal intra-community chains.
+        // Cross-community always passes; intra only when long enough.
+        if !args.all && !is_cross && step_count < MIN_INTRA_STEPS {
+            filtered += 1;
+            continue;
+        }
 
         let label = node.name.resolve(&graph.string_pool);
         let file_path = if node.has_owning_file() {
@@ -156,6 +186,7 @@ fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<
         "status": "success",
         "total": total_processes,
         "shown": results.len(),
+        "filtered": filtered,
         "community_filter": args.community,
         "results": results,
     });

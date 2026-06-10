@@ -54,7 +54,7 @@ fn assert_help_ok(path: &[&str]) {
 // ── 1. CLI surface inventory ─────────────────────────────────────────────────
 
 /// Every reachable top-level subcommand (visible + hidden). Hidden ones
-/// (`admin`, `group`, `hook-*`, `watch`) still must respond to `--help`.
+/// (`admin`, `group`, `hook-*`, `watch`, deprecated verbs) still must respond to `--help`.
 const TOP_LEVEL_COMMANDS: &[&str] = &[
     // Visible
     "inspect",
@@ -70,15 +70,16 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "tool-map",
     "peers",
     "review",
+    "heuristics",
+    "schema",
+    "processes",
+    "usage",
+    "uninstall",
+    // Hidden (deprecated paths kept functional; internal/lifecycle)
     "find-transaction-patterns",
     "find-schema-bindings",
     "find-event-mirrors",
-    "schema",
-    "processes",
     "insight",
-    "usage",
-    "uninstall",
-    // Hidden
     "admin",
     "group",
     "hook-handle",
@@ -86,6 +87,10 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "hook",
     "watch",
 ];
+
+/// `ecp heuristics <kind>` — keep in sync with `HeuristicsKind` enum in
+/// `crates/ecp-cli/src/commands/heuristics.rs`.
+const HEURISTICS_KINDS: &[&str] = &["saga", "schema-bindings", "event-mirrors"];
 
 /// `ecp group <subcmd>` — keep in sync with `GroupCommands` enum in
 /// `crates/ecp-cli/src/commands/group/mod.rs`.
@@ -125,7 +130,6 @@ const ADMIN_SUBCMDS: &[&str] = &[
     "gemini",
     "mcp",
     "doctor",
-    "list-repos",
     // Hidden
     "check-update",
 ];
@@ -205,6 +209,27 @@ fn every_processes_subcommand_has_help() {
 fn every_schema_subcommand_has_help() {
     for sub in SCHEMA_SUBCMDS {
         assert_help_ok(&["schema", sub]);
+    }
+}
+
+#[test]
+fn every_heuristics_kind_has_help() {
+    for kind in HEURISTICS_KINDS {
+        assert_help_ok(&["heuristics", kind]);
+    }
+}
+
+/// Deprecated paths (`find-transaction-patterns`, `find-schema-bindings`,
+/// `find-event-mirrors`, `insight`) must still respond to `--help` with exit 0.
+#[test]
+fn deprecated_heuristic_paths_still_respond_to_help() {
+    for cmd in [
+        "find-transaction-patterns",
+        "find-schema-bindings",
+        "find-event-mirrors",
+        "insight",
+    ] {
+        assert_help_ok(&[cmd]);
     }
 }
 
@@ -472,7 +497,7 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
     );
     let listing = String::from_utf8_lossy(&out.stdout);
 
-    for must_have in ["ecp_peers", "ecp_group", "ecp_schema"] {
+    for must_have in ["ecp_peers", "ecp_group", "ecp_schema", "ecp_heuristics"] {
         let count = listing.matches(must_have).count();
         assert!(
             count >= 1,
@@ -486,6 +511,14 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
         "ecp_hook_watcher",
         "ecp_hook",
         "ecp_watch",
+        // deprecated heuristic verbs must not leak
+        "ecp_find_transaction_patterns",
+        "ecp_find-transaction-patterns",
+        "ecp_find_schema_bindings",
+        "ecp_find-schema-bindings",
+        "ecp_find_event_mirrors",
+        "ecp_find-event-mirrors",
+        "ecp_insight",
     ] {
         assert!(
             !listing.contains(forbidden),
@@ -558,37 +591,48 @@ fn cli_peers_flags_all_exist_in_mcp_peers_schema() {
     }
 }
 
+/// `ecp heuristics schema-bindings` and `ecp heuristics event-mirrors` expose
+/// `--repo` in their nested CLI help. The derived MCP tool `ecp_heuristics`
+/// must be visible in the tool registry (deprecated flat verbs are hidden).
 #[test]
 fn repo_aware_heuristic_commands_expose_repo_in_cli_and_mcp() {
     let tools = ecp_mcp::schema::ecp_tools(&ecp_cli::cli::Cli::command());
-    let cases = [
-        ("find-schema-bindings", "ecp_find-schema-bindings"),
-        ("find-event-mirrors", "ecp_find-event-mirrors"),
-    ];
 
-    for (cmd, tool_name) in cases {
-        let out = run(&[cmd, "--help"]);
-        assert!(out.status.success(), "ecp {cmd} --help failed");
+    // CLI side: the new nested paths must carry --repo.
+    for (args, desc) in [
+        (
+            &["heuristics", "schema-bindings", "--help"] as &[&str],
+            "ecp heuristics schema-bindings",
+        ),
+        (
+            &["heuristics", "event-mirrors", "--help"],
+            "ecp heuristics event-mirrors",
+        ),
+    ] {
+        let out = run(args);
+        assert!(out.status.success(), "{desc} --help failed");
         let help = String::from_utf8_lossy(&out.stdout);
         assert!(
             help.contains("--repo"),
-            "ecp {cmd}: --help missing `--repo`\n--- help ---\n{help}"
-        );
-
-        let tool = tools
-            .iter()
-            .find(|t| t.name == tool_name)
-            .unwrap_or_else(|| panic!("MCP tool `{tool_name}` missing"));
-        let props = tool
-            .schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .expect("properties object");
-        assert!(
-            props.contains_key("repo"),
-            "MCP tool `{tool_name}` missing `repo` schema property"
+            "{desc}: --help missing `--repo`\n--- help ---\n{help}"
         );
     }
+
+    // MCP side: `ecp_heuristics` must be present. `repo` lives on the nested
+    // subcommand args, not on the top-level tool schema (which only exposes
+    // the `kind` subcommand selector). Verify the tool exists and is not hidden.
+    let tool = tools
+        .iter()
+        .find(|t| t.name == "ecp_heuristics")
+        .expect("MCP tool `ecp_heuristics` missing — new heuristics verb must be visible");
+    // Sanity: the derived schema must have a properties object (non-empty tool).
+    assert!(
+        tool.schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .is_some(),
+        "ecp_heuristics: schema properties object missing"
+    );
 }
 
 // ── 6. Dynamic inventory diff vs hardcoded tables ────────────────────────────
