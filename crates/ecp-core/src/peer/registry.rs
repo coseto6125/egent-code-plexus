@@ -16,6 +16,8 @@ pub struct PeerSession {
     /// `Some(_)` with `!watcher_alive` = watcher pid recorded but process died.
     /// Lets callers distinguish "not-started" from "dead" without re-reading meta.
     pub watcher_pid: Option<u32>,
+    /// Team-visible agent name from session_meta (None for solo sessions).
+    pub agent_name: Option<String>,
 }
 
 pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
@@ -52,6 +54,7 @@ pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
             base_sha: meta.base_sha,
             watcher_alive,
             watcher_pid: meta.watcher_pid,
+            agent_name: meta.agent_name,
         });
     }
     out
