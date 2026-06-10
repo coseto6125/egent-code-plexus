@@ -111,14 +111,10 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
     // index time) — without this caveat an LLM consumer deletes live code.
     let absence_caveat = cypher::absence_over_calls(&query)
         .then(|| cypher::diagnostics::CALLS_LOWER_BOUND_CAVEAT.to_string());
-    let caveat = match (engine.caveat(), absence_caveat) {
-        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
-        (a, b) => a.or(b),
-    };
     emit_with_caveat(
         &payload,
         OutputFormat::parse(args.format.as_deref()),
-        caveat,
+        crate::output::merge_caveats(engine.caveat(), absence_caveat),
     )?;
     Ok(())
 }
