@@ -2,7 +2,7 @@ use crate::commands::format::{kind_to_str, rel_to_str};
 use crate::commands::symbol_id::{format_fqn, resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
-use crate::output::{emit_with_caveat, OutputFormat};
+use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
 use crate::reanalyze::make_pipeline;
 use clap::{Args, ValueEnum};
 use ecp_core::algorithms::process_trace::is_test_path;
@@ -377,10 +377,11 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     })
 }
 
-/// Stderr hints produced during impact computation. Collected by helpers and
-/// emitted by `run` so that library callers via `build_payload` stay stderr-clean.
+/// Hints produced during impact computation and routed by `run`: stderr
+/// nudges for the human/agent reading the terminal, plus a payload caveat.
+/// Library callers via `build_payload` stay stderr-clean.
 #[derive(Default)]
-struct ImpactStderrHints {
+struct ImpactHints {
     empty_hint_name: Option<String>,
     /// The empty-hint target is a field (Property); the hint adds the
     /// field-read-coverage caveat.
@@ -389,10 +390,10 @@ struct ImpactStderrHints {
     hidden_edges: u64,
     /// Heuristic edges hidden by the is_heuristic() filter (T-H1).
     hidden_heuristic_edges: u64,
-    /// Payload caveat (not a stderr hint): the target name collides with
-    /// other definitions, so bare calls were Tier-3-suppressed at index time
-    /// and the caller set is a lower bound. Merged with `Engine::caveat()`
-    /// into the `result` field by `run`.
+    /// Payload caveat: the target name collides with other definitions, so
+    /// bare calls were Tier-3-suppressed at index time and the caller set is
+    /// a lower bound. Merged with `Engine::caveat()` into the `result` field
+    /// by `run`.
     ambiguity_caveat: Option<String>,
 }
 
@@ -424,11 +425,11 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             hints.hidden_heuristic_edges
         );
     }
-    let caveat = match (engine.caveat(), hints.ambiguity_caveat) {
-        (Some(stale), Some(ambig)) => Some(format!("{stale} {ambig}")),
-        (stale, ambig) => stale.or(ambig),
-    };
-    emit_with_caveat(&payload, format, caveat)
+    emit_with_caveat(
+        &payload,
+        format,
+        merge_caveats(engine.caveat(), hints.ambiguity_caveat),
+    )
 }
 
 /// Library API: returns the JSON payload only, dropping stderr hints.
@@ -854,13 +855,11 @@ pub fn run_for_symbol(
 fn build_payload_with_hints(
     args: &ImpactArgs,
     engine: &Engine,
-) -> Result<(Value, ImpactStderrHints), EcpError> {
+) -> Result<(Value, ImpactHints), EcpError> {
     let has_name = args.name.is_some() || args.target.is_some();
     match (has_name, args.baseline.as_ref()) {
         (true, None) => impact_by_name(args, engine),
-        (false, Some(_)) => {
-            impact_with_baseline(args, engine).map(|v| (v, ImpactStderrHints::default()))
-        }
+        (false, Some(_)) => impact_with_baseline(args, engine).map(|v| (v, ImpactHints::default())),
         (false, None) => Err(EcpError::InvalidArgument(
             "impact requires a symbol (positional <name> or --target <name>) or --baseline <ref>"
                 .into(),
@@ -869,10 +868,7 @@ fn build_payload_with_hints(
     }
 }
 
-fn impact_by_name(
-    args: &ImpactArgs,
-    engine: &Engine,
-) -> Result<(Value, ImpactStderrHints), EcpError> {
+fn impact_by_name(args: &ImpactArgs, engine: &Engine) -> Result<(Value, ImpactHints), EcpError> {
     let name = args
         .name
         .as_deref()
@@ -888,51 +884,46 @@ fn impact_by_name(
     let file_needle = args.file.as_deref();
     let kind_needle = args.kind.as_deref().map(|s| s.to_ascii_lowercase());
 
-    // Same-name def count BEFORE --kind/--file/FQN narrowing: the Tier-3
-    // resolver defence keys on the global name collision, not on whichever
-    // single def the user disambiguated to.
     let mut same_name_defs = 0usize;
-    let matches: Vec<usize> = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(idx, node)| {
-            if node.name.resolve(&graph.string_pool) != bare_name {
-                return false;
+    let mut matches: Vec<usize> = Vec::new();
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        if node.name.resolve(&graph.string_pool) != bare_name {
+            continue;
+        }
+        // Synthetic nodes (e.g. resolver-miss `Annotation` from
+        // `decorates_edges`) carry SYNTHETIC_FILE_IDX — they aren't
+        // real symbols at any file:line. Drop them from impact targets.
+        if !node.has_owning_file() {
+            continue;
+        }
+        // Counted BEFORE --kind/--file/FQN narrowing: the Tier-3 resolver
+        // defence keys on the global name collision, not on whichever
+        // single def the user disambiguated to.
+        same_name_defs += 1;
+        if let Some(ref kn) = kind_needle {
+            let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
+            if &node_kind != kn {
+                continue;
             }
-            // Synthetic nodes (e.g. resolver-miss `Annotation` from
-            // `decorates_edges`) carry SYNTHETIC_FILE_IDX — they aren't
-            // real symbols at any file:line. Drop them from impact targets.
-            if !node.has_owning_file() {
-                return false;
+        }
+        if let Some(needle) = file_needle {
+            let file_path = graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(&graph.string_pool);
+            if !file_path.contains(needle) {
+                continue;
             }
-            same_name_defs += 1;
-            if let Some(ref kn) = kind_needle {
-                let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
-                if &node_kind != kn {
-                    return false;
-                }
+        }
+        if let Some(owner) = owner_filter {
+            if !resolve_owner_class(graph, idx)
+                .map(|oc| oc == owner)
+                .unwrap_or(false)
+            {
+                continue;
             }
-            if let Some(needle) = file_needle {
-                let file_path = graph.files[node.file_idx.to_native() as usize]
-                    .path
-                    .resolve(&graph.string_pool);
-                if !file_path.contains(needle) {
-                    return false;
-                }
-            }
-            if let Some(owner) = owner_filter {
-                if !resolve_owner_class(graph, *idx)
-                    .map(|oc| oc == owner)
-                    .unwrap_or(false)
-                {
-                    return false;
-                }
-            }
-            true
-        })
-        .map(|(i, _)| i)
-        .collect();
+        }
+        matches.push(idx);
+    }
 
     if matches.is_empty() {
         return Err(EcpError::InvalidArgument(format!(
@@ -1106,7 +1097,7 @@ fn impact_by_name(
 
     Ok((
         result_obj,
-        ImpactStderrHints {
+        ImpactHints {
             empty_hint_name: emit_empty_hint.then(|| format_fqn(owner_filter, bare_name)),
             empty_hint_is_field,
             hidden_edges: hidden_edges_total,

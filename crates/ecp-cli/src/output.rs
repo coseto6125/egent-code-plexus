@@ -91,6 +91,15 @@ pub fn attach_caveat(value: &mut Value, caveat: Option<String>) {
     }
 }
 
+/// Merge two optional caveat sources into the single `result` string,
+/// newline-separated so an LLM consumer reads one distinct warning per line.
+pub fn merge_caveats(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Like [`emit`] but injects an optional `result` caveat first. Commands with
 /// access to a caveat source (e.g. a warm-attach engine) route through here so
 /// the staleness/completeness signal lands in the structured payload the LLM

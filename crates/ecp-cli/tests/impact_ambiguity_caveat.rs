@@ -4,25 +4,11 @@
 //! time (Tier-3 `AmbiguousGlobal`) — the upstream BFS can't see them, and a
 //! silent low caller count reads as "safe to refactor" when it isn't.
 
+mod common;
+
+use common::{ecp_bin, run_git};
 use std::path::Path;
 use std::process::Command;
-
-fn ecp_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ecp")
-}
-
-fn run_git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git failed to spawn");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 /// Two same-named `process` defs in different files, a bare caller that the
 /// Tier-3 defence suppresses, and one collision-free symbol as control.
@@ -118,7 +104,7 @@ fn impact_on_collision_name_flags_incomplete_callers() {
         "caveat must say the caller set may be incomplete: {caveat}"
     );
     assert!(
-        caveat.contains('2') && caveat.contains("same-named"),
+        caveat.contains("2 same-named"),
         "caveat must count the same-named definitions: {caveat}"
     );
 }
