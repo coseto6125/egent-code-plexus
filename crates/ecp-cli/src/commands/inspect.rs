@@ -494,8 +494,17 @@ fn search_nodes<'a>(
             return merge_archived(graph, archived_overlay)
                 .filter_map(|node| {
                     let base_idx = uid_to_base.get(&node.uid.to_native()).copied()?;
-                    if name_owner_matches(node, base_idx) {
-                        Some((base_idx, &graph.nodes[base_idx]))
+                    // Match via the BASE twin, never the overlay node: an
+                    // `Overlay` carries no string pool, so an overlay node's
+                    // `name`/`owner_class` StrRefs are NOT resolvable against
+                    // `graph.string_pool` (garbage bytes ⇒ every dirty-file
+                    // symbol silently vanished from inspect). Identical uid ⇒
+                    // identical kind/path/owner/name, so base-side matching
+                    // is exact. Overlay-only uids (brand-new symbols) have no
+                    // base twin and stay find's overlay-hits concern.
+                    let base_node = &graph.nodes[base_idx];
+                    if name_owner_matches(base_node, base_idx) {
+                        Some((base_idx, base_node))
                     } else {
                         None
                     }
