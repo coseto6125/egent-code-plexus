@@ -37,17 +37,20 @@ pub const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.85;
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
     /// Target symbol name (mutually exclusive with --baseline). Equivalent to
-    /// the `--target` named form below.
+    /// the `--target` named form below. Optional when `--batch` is set or
+    /// when a non-positional mode flag (`--target`, `--baseline`, `--literal`,
+    /// `--literal-coherence`) supplies the query.
+    #[arg(required_unless_present_any = ["target", "batch", "baseline", "literal", "literal_coherence"])]
     pub name: Option<String>,
 
     /// Named alias for the positional NAME argument — kept for parity with
     /// old MCP / wrapper habits.
-    #[arg(long = "target", value_name = "TARGET", conflicts_with_all = ["name", "baseline"])]
+    #[arg(long = "target", value_name = "TARGET", conflicts_with_all = ["name", "baseline", "batch"])]
     pub target: Option<String>,
 
     /// Git ref — compute blast radius across all symbols changed between
     /// this baseline and HEAD. Mutually exclusive with positional <name>.
-    #[arg(long, conflicts_with = "name")]
+    #[arg(long, conflicts_with_all = ["name", "batch"])]
     pub baseline: Option<String>,
 
     /// Disambiguate when name has multiple matches: substring on file path.
@@ -134,8 +137,20 @@ pub struct ImpactArgs {
     /// Auto-detect likely path-literal split-brain pairs across all
     /// PathLiteral nodes. Conservative: same extension, similar basename,
     /// nearby directories, and read-only vs write-only sink separation.
-    #[arg(long = "literal-coherence", conflicts_with_all = ["name", "target", "baseline", "literal"])]
+    #[arg(long = "literal-coherence", conflicts_with_all = ["name", "target", "baseline", "literal", "batch"])]
     pub literal_coherence: bool,
+
+    /// Read target symbol names from stdin (one per line; `#` and blank lines
+    /// skipped). The graph is loaded once and N symbols are resolved
+    /// sequentially — amortises mmap + process spawn across queries.
+    /// Each result is prefixed by `=== target: <name> ===` so callers can
+    /// split the stream unambiguously. Flags like --direction / --depth /
+    /// --include-tests apply uniformly to all targets.
+    ///
+    /// Symbol-mode only: `--batch` combined with `--baseline` or `--literal`
+    /// is rejected as an invalid argument.
+    #[arg(long, conflicts_with_all = ["baseline", "literal", "literal_coherence"])]
+    pub batch: bool,
 }
 
 // ── Test-coverage gap analysis ────────────────────────────────────────────────
@@ -401,6 +416,9 @@ struct ImpactHints {
 }
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
+    if args.batch {
+        return run_batch(args, engine);
+    }
     let format = OutputFormat::parse(args.format.as_deref());
     if args.literal_coherence {
         let payload = build_literal_coherence_payload(engine)?;
@@ -433,6 +451,93 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         format,
         merge_caveats(engine.caveat(), hints.ambiguity_caveat),
     )
+}
+
+// ── Batch dispatch ────────────────────────────────────────────────────────────
+
+/// Read target names from stdin, one per line (`#` and blank lines skipped).
+///
+/// The graph is loaded once (by the caller via `Engine`) and N symbols are
+/// resolved sequentially against it — amortises the mmap + process-spawn cost
+/// that agents would otherwise pay for each single-target call.
+///
+/// Output: each target's block is prefixed by `=== target: <name> ===` so
+/// callers can split the stream unambiguously regardless of `--format`.
+/// Per-target fields are identical to single-target mode (status, target,
+/// direction, impact, …). A target that fails to resolve (not found, ambiguous)
+/// gets a per-target JSON error entry — the batch never aborts early.
+fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
+    use std::io::BufRead;
+
+    let format = OutputFormat::parse(args.format.as_deref());
+
+    let stdin = std::io::stdin();
+    let targets: Vec<String> = stdin
+        .lock()
+        .lines()
+        .map_while(Result::ok)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.starts_with('#'))
+        .collect();
+
+    if targets.is_empty() {
+        eprintln!("→ batch: no targets on stdin (one symbol name per line, `#` for comments)");
+        return Ok(());
+    }
+
+    let caveat = engine.caveat();
+
+    for target_name in &targets {
+        println!("=== target: {target_name} ===");
+
+        // Clone flags; substitute this target's name.
+        let per_target_args = ImpactArgs {
+            name: Some(target_name.clone()),
+            target: None,
+            baseline: None,
+            file: args.file.clone(),
+            kind: args.kind.clone(),
+            direction: args.direction.clone(),
+            depth: args.depth,
+            high_trust_only: args.high_trust_only,
+            min_confidence: args.min_confidence,
+            include_tests: args.include_tests,
+            relation_types: args.relation_types.clone(),
+            repo: args.repo.clone(),
+            test_coverage: args.test_coverage,
+            no_heuristic: args.no_heuristic,
+            confidence_threshold: args.confidence_threshold,
+            explain_confidence: args.explain_confidence,
+            format: args.format.clone(),
+            literal: None,
+            literal_coherence: false,
+            batch: false,
+        };
+
+        let payload = match build_payload_with_hints(&per_target_args, engine) {
+            Ok((p, hints)) => {
+                emit_hidden_edges_footer(hints.hidden_edges);
+                let merged = merge_caveats(caveat.clone(), hints.ambiguity_caveat);
+                // Inline the caveat into the payload so per-target output is
+                // self-contained (same contract as single-target mode's
+                // `emit_with_caveat`).
+                let mut p = p;
+                if let Some(c) = merged {
+                    p["result"] = serde_json::json!(c);
+                }
+                p
+            }
+            Err(e) => {
+                serde_json::json!({
+                    "error": e.to_string(),
+                    "target": target_name,
+                    "status": "not_found",
+                })
+            }
+        };
+        emit_with_caveat(&payload, format, None)?;
+    }
+    Ok(())
 }
 
 /// Library API: returns the JSON payload only, dropping stderr hints.
@@ -849,6 +954,7 @@ pub fn run_for_symbol(
         explain_confidence: false,
         literal: None,
         literal_coherence: false,
+        batch: false,
     };
     let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
     let (payload, _hints) = build_payload_with_hints(&args, engine)?;

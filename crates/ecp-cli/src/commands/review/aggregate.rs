@@ -105,6 +105,7 @@ fn run_impact(
         format: None,
         literal: None,
         literal_coherence: false,
+        batch: false,
     };
     let v = match impact::build_payload(&args, engine) {
         Ok(v) => v,
