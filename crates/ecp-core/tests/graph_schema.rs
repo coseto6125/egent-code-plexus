@@ -122,28 +122,16 @@ fn test_rel_type_discriminants_locked() {
 
 #[test]
 fn test_is_heuristic_classification() {
-    assert!(RelType::MirrorsField.is_heuristic());
-    assert!(RelType::EventTopicMirror.is_heuristic());
-
-    // All non-heuristic variants must return false.
-    let non_heuristic = [
-        RelType::Defines,
-        RelType::Imports,
-        RelType::Calls,
-        RelType::Extends,
-        RelType::Implements,
-        RelType::HasMethod,
-        RelType::HasProperty,
-        RelType::Accesses,
-        RelType::HandlesRoute,
-        RelType::StepInProcess,
-        RelType::References,
-        RelType::Fetches,
-        RelType::Publishes,
-        RelType::Subscribes,
-        RelType::OpensTxScope,
-    ];
-    for rel in non_heuristic {
-        assert!(!rel.is_heuristic(), "{rel:?} should not be heuristic");
-    }
+    // Exact partition over the full variant space (the hand-kept list this
+    // replaces had drifted: CompensatedBy was heuristic but asserted nowhere).
+    let heuristic: Vec<&str> = RelType::ALL
+        .iter()
+        .filter(|r| r.is_heuristic())
+        .map(|r| r.as_str())
+        .collect();
+    assert_eq!(
+        heuristic,
+        ["MirrorsField", "EventTopicMirror", "CompensatedBy"],
+        "heuristic edge set changed — reclassify deliberately, impact filters depend on it"
+    );
 }

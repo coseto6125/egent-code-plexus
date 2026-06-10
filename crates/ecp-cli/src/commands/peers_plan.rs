@@ -23,7 +23,6 @@ struct TargetImpact {
     name: String,
     uids: HashSet<String>,
     uid_names: HashMap<String, String>,
-    count: usize,
 }
 
 pub fn cmd_plan(
@@ -83,12 +82,10 @@ pub fn cmd_plan(
                 }
             }
         }
-        let count = uids.len();
         resolved.push(TargetImpact {
             name: t.clone(),
             uids,
             uid_names,
-            count,
         });
     }
 
@@ -167,7 +164,7 @@ fn render(
         let payload = serde_json::json!({
             "targets": targets.iter().map(|t| serde_json::json!({
                 "name": t.name,
-                "impact_count": t.count,
+                "impact_count": t.uids.len(),
             })).collect::<Vec<_>>(),
             "unresolved": unresolved,
             "overlaps": overlaps.iter().map(|o| serde_json::json!({

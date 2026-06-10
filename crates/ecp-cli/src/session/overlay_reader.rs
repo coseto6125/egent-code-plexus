@@ -28,7 +28,6 @@ use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 use super::overlay_writer::{ArchivedFragment, ArchivedFragmentFile};
 
@@ -227,11 +226,7 @@ pub fn load_view_inputs(
         if entry.parse_failed || entry.format < FRAGMENT_FORMAT_V2 {
             continue;
         }
-        let on_disk_mtime_ns = fs::metadata(worktree_root.join(rel_path))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as u64);
+        let on_disk_mtime_ns = crate::auto_ensure::mtime_ns_of(&worktree_root.join(rel_path));
         if on_disk_mtime_ns != Some(entry.mtime_ns) {
             continue; // reverted, deleted, or touched since the fragment write
         }
