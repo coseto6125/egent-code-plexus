@@ -157,7 +157,8 @@ fn list_returns_process_label_and_step_count() {
         &[1, 1, 1],
     );
 
-    let out = run_processes(&graph, &[]);
+    // --all bypasses the default min-signal filter so a 3-step intra process is shown.
+    let out = run_processes(&graph, &["--all"]);
     assert!(
         out.status.success(),
         "ecp processes exited non-zero: {}",
@@ -328,7 +329,8 @@ fn list_does_not_overcount_or_panic_with_trailing_non_process_nodes() {
     let (_dir, graph) = build_graph_with_trailing_non_process_nodes();
     // A limit far past the real process count (1) used to walk into the
     // trailing PathLiteral nodes and panic at `traces_offsets[k+1]`.
-    let out = run_processes(&graph, &["--limit", "100"]);
+    // --all bypasses the min-signal filter so the 3-step intra process is shown.
+    let out = run_processes(&graph, &["--limit", "100", "--all"]);
     assert!(
         out.status.success(),
         "ecp processes panicked on trailing non-Process nodes: {}",
@@ -353,4 +355,243 @@ fn trace_does_not_panic_with_trailing_non_process_nodes() {
     let payload = parse_json_stdout(&out);
     assert_eq!(payload["status"], "success");
     assert_eq!(payload["matched"], 1);
+}
+
+// ── min-signal filter tests ────────────────────────────────────────────────
+
+/// Build a graph with multiple Process nodes at varying step_counts and
+/// community configurations. Used to verify the default min-signal filter.
+///
+/// Processes inserted (all intra_community unless noted):
+///   P0 "Noise3"        — 3 steps, intra_community  → should be filtered
+///   P1 "Noise5"        — 5 steps, intra_community  → should be filtered
+///   P2 "CrossShort3"   — 3 steps, cross_community  → should pass (cross)
+///   P3 "LongIntra8"    — 8 steps, intra_community  → should pass (long)
+///   P4 "LongIntra7"    — 7 steps, intra_community  → should pass (>=7)
+fn build_multi_process_graph() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let mut pool = StringPool::new();
+
+    let file_path = pool.add("src/lib.rs");
+    let files = vec![File {
+        path: file_path,
+        mtime: 0,
+        content_hash: [0; 8],
+        category: FileCategory::Source,
+    }];
+
+    // Pre-allocate member functions (indices 0..N) then Process nodes.
+    // Communities: comm=1 for intra, comms 1+2 for cross.
+    struct ProcSpec {
+        label: &'static str,
+        steps: usize,
+        cross: bool,
+    }
+    let specs = [
+        ProcSpec {
+            label: "Noise3 → End",
+            steps: 3,
+            cross: false,
+        },
+        ProcSpec {
+            label: "Noise5 → End",
+            steps: 5,
+            cross: false,
+        },
+        ProcSpec {
+            label: "CrossShort3 → End",
+            steps: 3,
+            cross: true,
+        },
+        ProcSpec {
+            label: "LongIntra8 → End",
+            steps: 8,
+            cross: false,
+        },
+        ProcSpec {
+            label: "LongIntra7 → End",
+            steps: 7,
+            cross: false,
+        },
+    ];
+
+    let mut nodes: Vec<Node> = Vec::new();
+
+    // Track (member_start, member_end) per process so we can build
+    // traces_offsets / traces_data.
+    let mut member_ranges: Vec<(u32, u32)> = Vec::new();
+    let mut total_members: u32 = 0;
+
+    for spec in &specs {
+        let start = total_members;
+        for j in 0..spec.steps as u32 {
+            let comm: u16 = if spec.cross && j == 1 { 2 } else { 1 };
+            let name_str = format!(
+                "fn_{}_{}",
+                spec.label.split_whitespace().next().unwrap_or("x"),
+                j
+            );
+            nodes.push(Node {
+                uid: ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, &name_str),
+                name: pool.add(&name_str),
+                file_idx: 0,
+                kind: NodeKind::Function,
+                span: (total_members * 10 + 1, 0, total_members * 10 + 5, 0),
+                community_id: comm,
+                owner_class: StrRef::default(),
+                content_hash: 0,
+            });
+            total_members += 1;
+        }
+        member_ranges.push((start, total_members));
+    }
+
+    let process_start = nodes.len() as u32;
+    for spec in &specs {
+        nodes.push(Node {
+            uid: ecp_core::uid::compute(NodeKind::Process, "src/lib.rs", None, spec.label),
+            name: pool.add(spec.label),
+            file_idx: 0,
+            kind: NodeKind::Process,
+            span: (1, 0, 5, 0),
+            community_id: 1,
+            owner_class: StrRef::default(),
+            content_hash: 0,
+        });
+    }
+
+    let n = nodes.len();
+
+    // traces_offsets[k] / traces_data: one entry per Process node.
+    let mut traces_offsets: Vec<u32> = vec![0];
+    let mut traces_data: Vec<u32> = Vec::new();
+    for (start, end) in &member_ranges {
+        for idx in *start..*end {
+            traces_data.push(idx);
+        }
+        traces_offsets.push(traces_data.len() as u32);
+    }
+
+    let reason = pool.add("step:test");
+    let mut edges: Vec<Edge> = Vec::new();
+    for (k, (start, end)) in member_ranges.iter().enumerate() {
+        let proc_idx = process_start + k as u32;
+        for idx in *start..*end {
+            edges.push(Edge {
+                source: idx,
+                target: proc_idx,
+                rel_type: RelType::StepInProcess,
+                confidence: 1.0,
+                reason,
+            });
+        }
+    }
+
+    let graph = ZeroCopyGraph {
+        magic: GRAPH_MAGIC,
+        version: GRAPH_FORMAT_VERSION,
+        fingerprint: [0; 32],
+        string_pool: pool.bytes,
+        files,
+        nodes,
+        edges,
+        out_offsets: vec![0u32; n + 1],
+        in_offsets: vec![0u32; n + 1],
+        in_edge_idx: Vec::new(),
+        name_index: Vec::new(),
+        process_start,
+        traces_offsets,
+        traces_data,
+        blind_spots: vec![],
+        route_shapes: vec![],
+        call_metas: vec![],
+        function_metas: vec![],
+        kind_offsets: vec![],
+        kind_node_idx: vec![],
+        node_flags: vec![],
+    };
+
+    let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+    let graph_path = dir.path().join("graph.bin");
+    std::fs::write(&graph_path, &bytes).unwrap();
+    (dir, graph_path)
+}
+
+/// Default output silently drops low-signal (intra, step_count < 7) rows and
+/// reports `filtered` count so the LLM knows truncation happened.
+///
+/// Fixture has 5 processes: 2 noise (intra, <7 steps) → filtered;
+/// 3 signal (cross or ≥7 steps) → shown.
+#[test]
+fn default_filter_drops_noise_and_emits_filtered_count() {
+    let (_dir, graph) = build_multi_process_graph();
+    let payload = parse_json_stdout(&run_processes(&graph, &[]));
+
+    assert_eq!(payload["status"], "success");
+    // total = all 5 processes in graph
+    assert_eq!(payload["total"], 5, "total must count all graph processes");
+    // filtered = 2 noise rows dropped
+    let filtered = payload["filtered"]
+        .as_u64()
+        .expect("payload must carry `filtered` (u64)");
+    assert_eq!(
+        filtered, 2,
+        "2 intra+short processes should be filtered: {payload}"
+    );
+    // shown = 3 signal processes
+    let results = payload["results"].as_array().expect("results array");
+    assert_eq!(
+        results.len(),
+        3,
+        "3 signal processes should be shown: {payload}"
+    );
+
+    // None of the shown rows should be the noise labels.
+    for r in results {
+        let label = r["label"].as_str().unwrap_or("");
+        assert!(
+            !label.starts_with("Noise"),
+            "noise process leaked into default output: {label}"
+        );
+    }
+}
+
+/// `--all` disables the filter and returns every process; `filtered` is 0.
+#[test]
+fn all_flag_disables_filter_returns_every_process() {
+    let (_dir, graph) = build_multi_process_graph();
+    let payload = parse_json_stdout(&run_processes(&graph, &["--all"]));
+
+    assert_eq!(payload["status"], "success");
+    assert_eq!(payload["total"], 5);
+    let filtered = payload["filtered"]
+        .as_u64()
+        .expect("payload must carry `filtered` even with --all");
+    assert_eq!(filtered, 0, "`filtered` must be 0 when --all is passed");
+    let results = payload["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 5, "--all must return all 5 processes");
+}
+
+/// `processes trace <pattern>` is not affected by the min-signal filter:
+/// matching a noise label must still return steps.
+#[test]
+fn trace_unaffected_by_signal_filter() {
+    let (_dir, graph) = build_multi_process_graph();
+    // "Noise3" has only 3 steps and is intra — would be filtered in list view.
+    let out = run_processes(&graph, &["trace", "noise3"]);
+    assert!(
+        out.status.success(),
+        "ecp processes trace failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload = parse_json_stdout(&out);
+    // trace bypasses the filter — must still find and return the process.
+    assert_eq!(
+        payload["status"], "success",
+        "trace must find Noise3 even though list would filter it: {payload}"
+    );
+    let steps = payload["results"][0]["steps"]
+        .as_array()
+        .expect("steps array");
+    assert_eq!(steps.len(), 3, "Noise3 has 3 steps");
 }
