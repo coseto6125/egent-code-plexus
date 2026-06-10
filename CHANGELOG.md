@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.7 - 2026-06-10
+
+### Features
+
+- agent-dispatch tripwire — redirect structural queries to ecp (#559)
 ## v0.6.6 - 2026-06-10
 
 ### Features
