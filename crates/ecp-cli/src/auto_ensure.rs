@@ -51,6 +51,10 @@ pub mod test_counters {
     /// the background self-heal (the spawn itself is skipped under
     /// ECP_SKIP_BG_REBUILD, so tests assert intent via this counter).
     pub static BEHIND_HEAD_HEAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// FU-2026-06-10-f92cecba3daa: incremented when the L1 freshness gate
+    /// proves every dirty file's fragment current (manifest mtime_ns match)
+    /// and skips the refresh entirely.
+    pub static FRESH_GATE_SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     pub fn reset() {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
@@ -59,6 +63,7 @@ pub mod test_counters {
         WARM_ATTACH_COUNT.store(0, Ordering::Relaxed);
         BEHIND_HEAD_HEAL_COUNT.store(0, Ordering::Relaxed);
         super::BEHIND_HEAD_SPAWNED.store(false, Ordering::Relaxed);
+        FRESH_GATE_SKIP_COUNT.store(0, Ordering::Relaxed);
     }
 
     pub fn reanalyze_calls() -> usize {
@@ -79,6 +84,10 @@ pub mod test_counters {
 
     pub fn behind_head_heal_calls() -> usize {
         BEHIND_HEAD_HEAL_COUNT.load(Ordering::Relaxed)
+    }
+
+    pub fn fresh_gate_skips() -> usize {
+        FRESH_GATE_SKIP_COUNT.load(Ordering::Relaxed)
     }
 }
 
@@ -507,6 +516,38 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
                     .filter_map(|p| p.strip_prefix(worktree_root).ok())
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect();
+                // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
+                // records its source file's mtime_ns in `dirty_files.json`, so
+                // a dirty file whose mtime still matches was already parsed
+                // into a current fragment by an earlier query of this session —
+                // re-parsing it rewrites identical state. Filtering those out
+                // turns the typical agent burst (30+ queries, no edits in
+                // between) from N full L1 refreshes into stat checks.
+                let rel_paths = retain_stale_fragments(worktree_root, rel_paths);
+                if rel_paths.is_empty() {
+                    test_counters::FRESH_GATE_SKIP_COUNT
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(EnsureFreshOutcome::Ready);
+                }
+                // Stat BEFORE parsing: the manifest mtime must belong to the
+                // content that was parsed. Statting after the parse would let
+                // an edit landing mid-parse record (new mtime, old content) —
+                // and the freshness gate would then skip the re-parse that
+                // edit needs. A pre-parse mtime in the same race instead
+                // records (old mtime, mixed content), which the next query
+                // sees as stale — the gate only errs toward re-parsing.
+                let pre_parse_mtimes: std::collections::HashMap<String, u64> = rel_paths
+                    .iter()
+                    .map(|rel| {
+                        let ns = fs::metadata(worktree_root.join(rel))
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
+                        (rel.clone(), ns)
+                    })
+                    .collect();
                 // Parse the dirty set ONCE here; the resulting `LocalGraph`s are
                 // handed straight to the overlay writer, which no longer
                 // re-parses them. This removes the second full tree-sitter pass
@@ -520,7 +561,7 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
                 test_counters::REANALYZE_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                apply_l1_overlay_updates(worktree_root, &fresh_graphs)
+                apply_l1_overlay_updates(worktree_root, &fresh_graphs, &pre_parse_mtimes)
                     .map_err(|e| format!("L1 overlay refresh: {e}"))?;
                 // L1 overlay only touches dirty fragments under
                 // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
@@ -817,9 +858,59 @@ pub fn resolve_session_overlay_dir(worktree_root: &Path) -> Option<PathBuf> {
     Some(home_ecp.join(&repo_dir).join("sessions").join(&session_id))
 }
 
+/// L1 freshness gate: drop dirty files whose overlay fragment is provably
+/// current, keep the rest for re-parse.
+///
+/// A fragment is current when its `dirty_files.json` entry is a v2 bin that
+/// parsed cleanly AND records exactly the file's present mtime_ns. Any doubt
+/// (no session dir / meta / manifest, HEAD drifted since the fragments were
+/// based, v1 bin, parse_failed, stat error) keeps the file in the re-parse
+/// set — the gate may only ever skip work it can prove redundant.
+///
+/// The HEAD-drift check matters: promotion (rebasing fragments onto the new
+/// base SHA) runs inside the full overlay path, so a drifted session must
+/// fall through to it rather than short-circuit here.
+fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> Vec<String> {
+    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V2};
+
+    let Some(session_dir) = resolve_session_overlay_dir(worktree_root) else {
+        return rel_paths;
+    };
+    let Ok(meta) = SessionMeta::read(&session_dir.join("session_meta.json")) else {
+        return rel_paths;
+    };
+    let Ok(head) = git_head_sha(worktree_root) else {
+        return rel_paths;
+    };
+    if meta.base_sha != head {
+        return rel_paths;
+    }
+    let Ok(manifest) = DirtyFiles::read(&session_dir.join("dirty_files.json")) else {
+        return rel_paths;
+    };
+    rel_paths
+        .into_iter()
+        .filter(|rel| {
+            let Some(entry) = manifest.entries.get(rel) else {
+                return true;
+            };
+            if entry.format != FRAGMENT_FORMAT_V2 || entry.parse_failed {
+                return true;
+            }
+            let current_mtime = fs::metadata(worktree_root.join(rel))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64);
+            current_mtime != Some(entry.mtime_ns)
+        })
+        .collect()
+}
+
 fn apply_l1_overlay_updates(
     worktree_root: &Path,
     fresh_graphs: &[ecp_core::analyzer::types::LocalGraph],
+    pre_parse_mtimes: &std::collections::HashMap<String, u64>,
 ) -> io::Result<()> {
     use crate::session::{overlay_writer, promotion};
 
@@ -852,17 +943,17 @@ fn apply_l1_overlay_updates(
     // ─────────────────────────────────────────────────────────────────────
 
     // `fresh_graphs` were already parsed by `reanalyze_files`; the overlay
-    // writer consumes them directly (no second tree-sitter pass). We only need
-    // each file's mtime — a cheap stat the graph doesn't carry. `file_path` is
-    // relative to the worktree root.
+    // writer consumes them directly (no second tree-sitter pass). Each file's
+    // mtime was statted by the caller BEFORE the parse, so the manifest entry
+    // can only under-claim freshness, never over-claim it (see the freshness
+    // gate in `ensure_fresh`). A missing entry records 0 — no real mtime
+    // matches it, so that fragment is permanently treated as stale.
     let mtimes: Vec<u64> = fresh_graphs
         .iter()
         .map(|g| {
-            fs::metadata(worktree_root.join(&g.file_path))
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as u64)
+            pre_parse_mtimes
+                .get(g.file_path.to_string_lossy().as_ref())
+                .copied()
                 .unwrap_or(0)
         })
         .collect();
