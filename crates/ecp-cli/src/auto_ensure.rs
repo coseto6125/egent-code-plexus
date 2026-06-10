@@ -856,6 +856,17 @@ fn apply_l1_overlay_updates(
 fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
     let meta_path = session_dir.join("session_meta.json");
     if meta_path.exists() {
+        // Team harnesses may export ECP_AGENT_NAME / CLAUDE_AGENT_NAME after
+        // this session's meta was first written — refresh so peers see the
+        // name. The env check gates the extra read: solo sessions (no env)
+        // keep the stat-only fast path.
+        if let Some(name) = crate::session::resolver::resolve_agent_name() {
+            if let Ok(mut meta) = SessionMeta::read(&meta_path) {
+                if meta.apply_agent_name(Some(name)) {
+                    SessionMeta::write_atomic(&meta_path, &meta)?;
+                }
+            }
+        }
         return Ok(());
     }
     let head_sha = git_head_sha(worktree)?;
@@ -876,6 +887,7 @@ fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: crate::session::resolver::resolve_agent_name(),
     };
     SessionMeta::write_atomic(&meta_path, &sm)
 }

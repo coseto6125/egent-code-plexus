@@ -25,6 +25,7 @@ fn write_session(repo_root: &Path, sid: &str, watcher_pid: Option<u32>) {
         overlay_version: 1,
         watcher_pid,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sdir.join("session_meta.json"), &meta).unwrap();
 }
@@ -107,6 +108,7 @@ fn inbox_round_trip_targeted_message() {
         ts: Utc::now().to_rfc3339(),
         msg_id: "m_test1".into(),
         from: "sender".into(),
+        from_name: None,
         to: Some("receiver".into()),
         reply_to: None,
         body: "ping".into(),

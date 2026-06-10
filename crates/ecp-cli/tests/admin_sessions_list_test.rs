@@ -76,6 +76,7 @@ fn admin_sessions_list_shows_pure_reference_state() {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     ecp_core::session::SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm).unwrap();
     ecp_core::session::DirtyFiles::write_atomic(

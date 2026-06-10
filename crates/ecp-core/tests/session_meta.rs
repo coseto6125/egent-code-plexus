@@ -14,6 +14,7 @@ fn session_meta_round_trip() {
         overlay_version: 5,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     let s1 = serde_json::to_string(&sm).unwrap();
     let s2 = serde_json::to_string(&sm).unwrap();
@@ -79,6 +80,7 @@ fn atomic_write_session_meta_full_equality() {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&path, &sm).unwrap();
     let r = SessionMeta::read(&path).unwrap();

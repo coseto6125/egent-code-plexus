@@ -14,6 +14,9 @@ pub enum InboxEntry {
         ts: String,
         peer_session: String,
         peer_pid: u32,
+        /// Team-visible name of the peer session, when its meta carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_name: Option<String>,
         kind: ConcernKindSer,
         symbol: SymbolRef,
         reason: String,
@@ -24,6 +27,9 @@ pub enum InboxEntry {
         ts: String,
         msg_id: String,
         from: String,
+        /// Team-visible name of the sender, when its meta carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
         to: Option<String>,
         reply_to: Option<String>,
         body: String,

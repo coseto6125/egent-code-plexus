@@ -39,6 +39,7 @@ fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &sm).unwrap();
     let df = DirtyFiles::empty();

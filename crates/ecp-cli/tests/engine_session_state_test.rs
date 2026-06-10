@@ -63,6 +63,7 @@ fn put_session(repo_root: &Path, sid: &str, base_sha: &str, dirty: DirtyFiles) {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm).unwrap();
     DirtyFiles::write_atomic(&sd.join("dirty_files.json"), &dirty).unwrap();

@@ -33,6 +33,10 @@ impl PeerHarness {
     }
 
     pub fn spawn_session(&mut self, id: &str) -> &SpawnedSession {
+        self.spawn_session_named(id, None)
+    }
+
+    pub fn spawn_session_named(&mut self, id: &str, agent_name: Option<&str>) -> &SpawnedSession {
         let session_dir = self.repo_root.path().join("sessions").join(id);
         std::fs::create_dir_all(&session_dir).unwrap();
         let meta = SessionMeta {
@@ -46,6 +50,7 @@ impl PeerHarness {
             overlay_version: 1,
             watcher_pid: None,
             last_drained_offset: 0,
+            agent_name: agent_name.map(str::to_string),
         };
         SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
 

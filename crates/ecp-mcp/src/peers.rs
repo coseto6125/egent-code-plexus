@@ -37,12 +37,12 @@ fn tool_peers() -> DerivedTool {
             "properties": {
                 "subcmd": {
                     "type": "string",
-                    "enum": ["status", "diff", "log", "say", "inbox", "thread"],
+                    "enum": ["status", "diff", "log", "say", "inbox", "thread", "name"],
                     "description": "Which peer operation to run. Each subcmd uses a disjoint subset of the args below."
                 },
                 "peer": {
                     "type": "string",
-                    "description": "[diff] Peer session ID (from subcmd=status). [log] Filter messages to/from this peer."
+                    "description": "[diff] Peer session ID or agent name (from subcmd=status). [log] Filter messages to/from this peer."
                 },
                 "symbol": {
                     "type": "string",
@@ -66,7 +66,11 @@ fn tool_peers() -> DerivedTool {
                 },
                 "to": {
                     "type": "string",
-                    "description": "[say] Target peer session ID. Omit to broadcast."
+                    "description": "[say] Target peer session ID or agent name. Omit to broadcast."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "[name] Agent name to assign to this session (shown in status / payloads, targetable by say)."
                 },
                 "reply": {
                     "type": "string",
@@ -79,7 +83,7 @@ fn tool_peers() -> DerivedTool {
                 "format": {
                     "type": "string",
                     "enum": ["text", "json"],
-                    "description": "[status] Output format. `json` returns an array with session_id, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid."
+                    "description": "[status] Output format. `json` returns an array with session_id, agent_name, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid."
                 },
                 "repo": {
                     "type": "string",
@@ -99,6 +103,7 @@ fn tool_peers() -> DerivedTool {
             "symbol".into(),
             "body".into(),
             "msg_id".into(),
+            "name".into(),
         ],
         prefix_args: Vec::new(),
         subcmd_arg: Some("subcmd".into()),

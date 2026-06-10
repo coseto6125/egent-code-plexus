@@ -69,6 +69,7 @@ fn make_session(
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sid.join("session_meta.json"), &sm).unwrap();
     DirtyFiles::write_atomic(&sid.join("dirty_files.json"), &DirtyFiles::empty()).unwrap();

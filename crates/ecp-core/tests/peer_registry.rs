@@ -19,6 +19,7 @@ fn write_meta(root: &std::path::Path, id: &str, pid: u32) {
         overlay_version: 1,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     atomic_write_json(&dir.join("session_meta.json"), &meta).unwrap();
 }
@@ -73,6 +74,7 @@ fn alive_peers_skips_session_with_unparseable_timestamp() {
         overlay_version: 1,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     atomic_write_json(&s.join("session_meta.json"), &meta).unwrap();
     let peers = alive_peers(dir.path(), "self");

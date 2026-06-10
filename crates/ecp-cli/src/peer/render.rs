@@ -75,6 +75,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
     if let InboxEntry::DirtyEvent {
         peer_session,
         peer_pid,
+        peer_name,
         ts,
         symbol,
         reason,
@@ -83,7 +84,13 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
         ..
     } = e
     {
-        let _ = writeln!(buf, "  Peer:   {peer_session} (pid {peer_pid})");
+        let _ = match peer_name {
+            Some(n) => writeln!(
+                buf,
+                "  Peer:   {n} (session {peer_session}, pid {peer_pid})"
+            ),
+            None => writeln!(buf, "  Peer:   {peer_session} (pid {peer_pid})"),
+        };
         let _ = writeln!(buf, "  When:   {ts}");
         let _ = writeln!(
             buf,
@@ -118,14 +125,16 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
 fn render_soft_one_line(buf: &mut String, e: &InboxEntry) {
     if let InboxEntry::DirtyEvent {
         peer_session,
+        peer_name,
         ts,
         symbol,
         ..
     } = e
     {
+        let by = peer_name.as_deref().unwrap_or(peer_session);
         let _ = writeln!(
             buf,
-            "  · {} ({:?}, {}:{}) by {peer_session} ({ts})",
+            "  · {} ({:?}, {}:{}) by {by} ({ts})",
             symbol.name, symbol.kind, symbol.file, symbol.line_start
         );
     }
@@ -135,6 +144,7 @@ fn render_message(buf: &mut String, e: &InboxEntry) {
     if let InboxEntry::Message {
         msg_id,
         from,
+        from_name,
         to,
         reply_to,
         body,
@@ -151,7 +161,8 @@ fn render_message(buf: &mut String, e: &InboxEntry) {
             .map(|r| format!(" (reply to {r})"))
             .unwrap_or_default();
         let truncated: String = body.chars().take(500).collect();
-        let _ = writeln!(buf, "  [{msg_id}] {from}{to_part}{reply_part} ({ts})");
+        let sender = from_name.as_deref().unwrap_or(from);
+        let _ = writeln!(buf, "  [{msg_id}] {sender}{to_part}{reply_part} ({ts})");
         let _ = writeln!(buf, "    {truncated}");
     }
 }
