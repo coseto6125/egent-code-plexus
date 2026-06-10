@@ -8,7 +8,7 @@
 use crate::output::{emit, OutputFormat};
 use clap::Args;
 use ecp_core::registry::resolve_home_ecp;
-use ecp_core::time::parse_rfc3339_secs;
+use ecp_core::time::{now_unix_secs, parse_rfc3339_secs};
 use ecp_core::EcpError;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -163,14 +163,6 @@ fn retention_days() -> u64 {
     ecp_core::config::load(&cwd)
         .map(|c| c.telemetry.retention_days)
         .unwrap_or(7)
-}
-
-fn now_unix_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn read_file(path: &Path, out: &mut Vec<Rec>) {

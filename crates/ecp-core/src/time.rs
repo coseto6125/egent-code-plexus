@@ -13,13 +13,17 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// `SystemTime::now()` rendered as RFC3339 UTC, e.g. `2026-05-23T07:30:00Z`.
-pub fn rfc3339_now() -> String {
-    let secs = SystemTime::now()
+/// `SystemTime::now()` as Unix seconds (0 if the clock reads pre-epoch).
+pub fn now_unix_secs() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    unix_secs_to_rfc3339(secs)
+        .as_secs()
+}
+
+/// `SystemTime::now()` rendered as RFC3339 UTC, e.g. `2026-05-23T07:30:00Z`.
+pub fn rfc3339_now() -> String {
+    unix_secs_to_rfc3339(now_unix_secs())
 }
 
 /// Convert Unix seconds → `YYYY-MM-DDTHH:MM:SSZ` (UTC, second precision).

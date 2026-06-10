@@ -124,6 +124,10 @@ fn usage_failures_lists_only_errors() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+// Literal dates fed into a now-relative retention window must be
+// monotone-safe: ancient (always pruned) or far-future (always survives).
+// A recent past date asserted as "fresh" expires once the wall clock passes
+// ts + retention and turns every PR's CI red (PR #534, FU-2026-06-03-001).
 #[test]
 fn usage_prunes_lines_older_than_retention() {
     let tmp = std::env::temp_dir().join(format!("ecp-usage-prune-{}", std::process::id()));
