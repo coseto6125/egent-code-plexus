@@ -876,6 +876,7 @@ fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&meta_path, &sm)
 }

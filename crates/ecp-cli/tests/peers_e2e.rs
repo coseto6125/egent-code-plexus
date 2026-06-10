@@ -25,6 +25,7 @@ fn write_session(repo_root: &Path, sid: &str, watcher_pid: Option<u32>) {
         overlay_version: 1,
         watcher_pid,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sdir.join("session_meta.json"), &meta).unwrap();
 }

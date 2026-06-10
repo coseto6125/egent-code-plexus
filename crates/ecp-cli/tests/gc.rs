@@ -69,6 +69,7 @@ fn reachability_includes_branch_refs_and_active_sessions() {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
 
@@ -100,6 +101,7 @@ fn reachability_excludes_idle_sessions() {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
 
@@ -213,6 +215,7 @@ fn sweep_sessions_marks_idle_sessions_dead() {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
 

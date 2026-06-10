@@ -48,6 +48,7 @@ fn add_session(tmp: &Path, sid: &str, base_sha: &str, with_dirty: bool) {
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,
+        agent_name: None,
     };
     SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm).unwrap();
     let df = if with_dirty {
