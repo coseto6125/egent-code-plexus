@@ -50,10 +50,19 @@ pub fn cmd_say(
         .transpose()?;
     let msg_id = format!("m_{}", &Uuid::now_v7().simple().to_string()[..12]);
     let ts = Utc::now().to_rfc3339();
+    let from_name = ecp_core::session::SessionMeta::read(
+        &repo_root
+            .join("sessions")
+            .join(&me)
+            .join("session_meta.json"),
+    )
+    .ok()
+    .and_then(|m| m.agent_name);
     let entry = InboxEntry::Message {
         ts: ts.clone(),
         msg_id: msg_id.clone(),
         from: me.clone(),
+        from_name: from_name.clone(),
         to: to_sid.clone(),
         reply_to: reply.map(|s| s.to_string()),
         body: body.to_string(),
@@ -82,6 +91,7 @@ pub fn cmd_say(
         "direction": "sent",
         "msg_id": msg_id,
         "from": me,
+        "from_name": from_name,
         "to": to_sid,
         "reply_to": reply,
         "body": body,

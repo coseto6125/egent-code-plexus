@@ -108,6 +108,7 @@ fn inbox_round_trip_targeted_message() {
         ts: Utc::now().to_rfc3339(),
         msg_id: "m_test1".into(),
         from: "sender".into(),
+        from_name: None,
         to: Some("receiver".into()),
         reply_to: None,
         body: "ping".into(),

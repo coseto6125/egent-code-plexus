@@ -6,10 +6,12 @@ use ecp_core::session::overlay::{DirtyEntry, SymbolRef};
 use std::io;
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_peer_dirty_event(
     receiver_session_dir: &Path,
     peer_session: &str,
     peer_pid: u32,
+    peer_name: Option<&str>,
     ts: &str,
     peer_entry: &DirtyEntry,
     my_dirty_symbols: &[SymbolRef],
@@ -28,6 +30,7 @@ pub fn dispatch_peer_dirty_event(
         ts: ts.to_string(),
         peer_session: peer_session.to_string(),
         peer_pid,
+        peer_name: peer_name.map(str::to_string),
         kind: ConcernKindSer::from(kind),
         symbol,
         reason,

@@ -7,6 +7,7 @@ fn dirty_event_fixture() -> InboxEntry {
         ts: "2026-05-17T00:00:00Z".into(),
         peer_session: "abc12".into(),
         peer_pid: 1234,
+        peer_name: None,
         kind: ConcernKindSer::Hard,
         symbol: SymbolRef {
             name: "verify_token".into(),
@@ -32,6 +33,7 @@ fn append_then_drain_returns_all_entries() {
             ts: "2026-05-17T00:00:01Z".into(),
             msg_id: "m_1".into(),
             from: "abc12".into(),
+            from_name: None,
             to: None,
             reply_to: None,
             body: "hi".into(),

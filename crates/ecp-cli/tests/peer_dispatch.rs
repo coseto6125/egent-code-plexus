@@ -42,6 +42,7 @@ fn hard_dispatches_event() {
         &receiver_dir,
         "abc12",
         1234,
+        None,
         &Utc::now().to_rfc3339(),
         &peer_entry,
         &my_dirty,
@@ -52,6 +53,38 @@ fn hard_dispatches_event() {
     let (entries, _) = drain(&inbox, 0).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(matches!(&entries[0], InboxEntry::DirtyEvent { .. }));
+}
+
+#[test]
+fn dispatch_carries_peer_name_into_entry() {
+    let dir = tempdir().unwrap();
+    let receiver_dir = dir.path().to_path_buf();
+    let inbox = receiver_dir.join("inbox.jsonl");
+
+    let peer_entry = entry_with(vec![sym("verify_token")]);
+    let my_dirty = vec![sym("verify_token")];
+    let cache = ImpactCache::from_set(FxHashSet::default());
+
+    dispatch_peer_dirty_event(
+        &receiver_dir,
+        "abc12",
+        1234,
+        Some("rust-parser"),
+        &Utc::now().to_rfc3339(),
+        &peer_entry,
+        &my_dirty,
+        &cache,
+    )
+    .unwrap();
+
+    let (entries, _) = drain(&inbox, 0).unwrap();
+    assert_eq!(entries.len(), 1);
+    match &entries[0] {
+        InboxEntry::DirtyEvent { peer_name, .. } => {
+            assert_eq!(peer_name.as_deref(), Some("rust-parser"));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
 }
 
 #[test]
@@ -70,6 +103,7 @@ fn soft_dispatches_event() {
         &receiver_dir,
         "abc12",
         1234,
+        None,
         &Utc::now().to_rfc3339(),
         &peer_entry,
         &my_dirty,
@@ -95,6 +129,7 @@ fn ignore_writes_nothing() {
         &receiver_dir,
         "abc12",
         1234,
+        None,
         &Utc::now().to_rfc3339(),
         &peer_entry,
         &my_dirty,
@@ -120,6 +155,7 @@ fn empty_dirty_symbols_writes_nothing() {
         &receiver_dir,
         "abc12",
         1234,
+        None,
         &Utc::now().to_rfc3339(),
         &peer_entry,
         &my_dirty,

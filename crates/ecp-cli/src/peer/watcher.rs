@@ -151,6 +151,7 @@ fn dispatch_peer(
             &cfg.my_session_dir,
             peer_sid,
             peer_pid,
+            peer_meta.agent_name.as_deref(),
             &ts,
             entry,
             &my_dirty,
