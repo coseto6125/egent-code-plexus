@@ -12,8 +12,29 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
     if entries.is_empty() {
         return String::new();
     }
+    // The watcher's self-dirty rescan (and repeated peer re-saves) can
+    // deliver the same (peer, symbol, kind) concern more than once between
+    // drains. Keep only the LAST occurrence — it carries the freshest
+    // peer_delta — by scanning in reverse with a seen-set.
+    let mut seen: std::collections::HashSet<(&str, &str, ConcernKindSer)> =
+        std::collections::HashSet::new();
+    let mut deduped: Vec<&InboxEntry> = entries
+        .iter()
+        .rev()
+        .filter(|e| match e {
+            InboxEntry::DirtyEvent {
+                peer_session,
+                symbol,
+                kind,
+                ..
+            } => seen.insert((peer_session.as_str(), symbol.name.as_str(), *kind)),
+            InboxEntry::Message { .. } => true,
+        })
+        .collect();
+    deduped.reverse();
+
     let (mut hard, mut soft, mut msgs) = (Vec::new(), Vec::new(), Vec::new());
-    for e in entries {
+    for e in deduped {
         match e {
             InboxEntry::DirtyEvent {
                 kind: ConcernKindSer::Hard,

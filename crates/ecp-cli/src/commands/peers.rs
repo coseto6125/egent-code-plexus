@@ -72,10 +72,12 @@ pub enum PeersCmd {
         targets: Vec<String>,
         /// Impact direction per target: a work package collides if either
         /// caller or callee chains intersect, so `both` is the safe default
-        #[arg(long, default_value = "both")]
+        #[arg(long, default_value = "both", value_parser = ["upstream", "up", "downstream", "down", "both"])]
         direction: String,
+        /// Max impact traversal depth per target
         #[arg(long, default_value_t = 5)]
         depth: u32,
+        /// Count test-only symbols as collisions
         #[arg(long, default_value_t = false)]
         include_tests: bool,
         #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
@@ -296,6 +298,7 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
                     "b_name": sessions[*j].agent_name,
                     "hard_count": shared.len(),
                     "symbols": shared.iter().take(SYMBOLS_CAP).collect::<Vec<_>>(),
+                    "symbols_capped": shared.len() > SYMBOLS_CAP,
                 })).collect::<Vec<_>>(),
             });
             println!(

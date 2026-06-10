@@ -56,20 +56,21 @@ pub fn cmd_plan(
             include_tests,
         ) {
             Ok(l) => l,
-            // Missing symbol is an expected per-target outcome here, not a
-            // command failure: the lead asks about a batch and needs the
-            // honest miss-list alongside the resolved ones.
-            Err(e) if e.to_string().contains("No symbol named") => {
+            // Per-target misses are expected outcomes here, not command
+            // failures: the lead asks about a batch and needs the honest
+            // miss-list alongside the resolved ones. Ambiguous names can't
+            // be planned either (which candidate would the agent edit?).
+            Err(ecp_core::EcpError::AmbiguousSymbol { .. }) => {
+                unresolved.push(t.clone());
+                continue;
+            }
+            Err(ecp_core::EcpError::InvalidArgument(msg)) if msg.contains("No symbol named") => {
                 unresolved.push(t.clone());
                 continue;
             }
             Err(e) => return Err(io::Error::other(e.to_string())),
         };
         let payload = local.as_json();
-        if payload.get("error").is_some() {
-            unresolved.push(t.clone());
-            continue;
-        }
         let mut uids = HashSet::new();
         let mut uid_names = HashMap::new();
         if let Some(items) = payload["impact"].as_array() {

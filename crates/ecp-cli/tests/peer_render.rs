@@ -157,3 +157,20 @@ fn enforces_4kb_cap_with_hard_priority() {
     assert!(out.len() <= 4096, "payload exceeds 4 KB cap: {}", out.len());
     assert!(out.contains("HARD overlap"), "HARD must survive trimming");
 }
+
+#[test]
+fn duplicate_dirty_events_same_peer_symbol_render_once() {
+    // The watcher's self-dirty rescan can re-dispatch an overlap a peer
+    // event already delivered; the payload must not show the same
+    // (peer, symbol) concern twice.
+    let out = render_payload(&[dirty_hard(), dirty_hard()]);
+    assert!(
+        out.contains("HARD overlap (1 event)"),
+        "duplicates must collapse: {out}"
+    );
+    assert_eq!(
+        out.matches("Peer:   abc12").count(),
+        1,
+        "one Peer block expected: {out}"
+    );
+}

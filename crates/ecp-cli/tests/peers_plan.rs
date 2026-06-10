@@ -31,6 +31,17 @@ fn init_repo_and_index(repo: &Path) {
     assert!(out.status.success());
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src/lib.ts"), SOURCE).unwrap();
+    // `dup` defined in two files -> AmbiguousSymbol from the impact resolver
+    std::fs::write(
+        repo.join("src/a.ts"),
+        "export function dup(): number { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/b.ts"),
+        "export function dup(): number { return 2; }\n",
+    )
+    .unwrap();
     let _ = Command::new("git")
         .args(["add", "-A"])
         .current_dir(repo)
@@ -171,5 +182,26 @@ fn plan_all_disjoint_yields_singleton_clusters_text() {
     assert!(
         stdout.contains("no overlaps"),
         "disjoint targets should say so plainly: {stdout}"
+    );
+}
+
+#[test]
+fn plan_ambiguous_target_lands_in_unresolved_not_abort() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_and_index(dir.path());
+
+    // batch must survive the ambiguous member and still plan the rest
+    let v = run_plan_json(dir.path(), "omega,dup");
+    let unresolved: Vec<&str> = v["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x.as_str())
+        .collect();
+    assert_eq!(unresolved, vec!["dup"], "payload: {v}");
+    assert_eq!(
+        v["clusters"].as_array().unwrap().len(),
+        1,
+        "omega must still be planned: {v}"
     );
 }
