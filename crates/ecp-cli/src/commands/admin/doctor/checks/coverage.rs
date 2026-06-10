@@ -49,10 +49,12 @@ fn check_in(cwd: &Path, fix: bool) -> CheckResult {
         return CheckResult::ok("coverage", "skipped — no loadable graph (see index check)");
     };
 
+    // Normalize to `/` — git always emits forward slashes while graph paths
+    // follow the indexer's PathBuf rendering (backslashes on Windows).
     let indexed: HashSet<String> = g
         .files
         .iter()
-        .map(|f| f.path.resolve(&g.string_pool).to_string())
+        .map(|f| f.path.resolve(&g.string_pool).replace('\\', "/"))
         .collect();
     let known_exts: HashSet<&str> = indexed.iter().filter_map(|p| ext_of(p)).collect();
 
@@ -123,8 +125,7 @@ fn ext_of(path: &str) -> Option<&str> {
 fn latest_published_graph(cwd: &Path) -> Option<PathBuf> {
     let home_ecp = ecp_core::registry::resolve_home_ecp();
     let repo_dir_name = crate::repo_identity::repo_dir_name_for_cwd(cwd).ok()?;
-    let commits = home_ecp.join(&repo_dir_name).join("commits");
-    crate::commit_lookup::find_latest_by_mtime(&commits).map(|dir| dir.join("graph.bin"))
+    crate::commit_lookup::latest_graph_bin(&home_ecp, &repo_dir_name)
 }
 
 /// Tracked files relative to the repo top (`--full-name` keeps subdir cwds

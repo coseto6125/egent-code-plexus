@@ -271,13 +271,15 @@ fn find_graph_bin(repo: &Path) -> std::path::PathBuf {
     walk(&repo.join(".ecp")).expect("graph.bin not found")
 }
 
-fn run_find_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
+fn run_verb_json(repo: &Path, verb: &[&str], field: &str) -> (bool, Value) {
+    let mut args = verb.to_vec();
+    args.extend_from_slice(&[field, "--format", "json"]);
     let out = Command::new(ecp_bin())
-        .args(["find-schema-bindings", field, "--format", "json"])
+        .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("ecp find-schema-bindings spawn");
+        .unwrap_or_else(|e| panic!("{args:?} failed to spawn: {e}"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let start = stdout.find('{').unwrap_or_else(|| {
         panic!(
@@ -290,23 +292,12 @@ fn run_find_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
     (out.status.success(), val)
 }
 
+fn run_find_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
+    run_verb_json(repo, &["find-schema-bindings"], field)
+}
+
 fn run_heuristics_schema_bindings_json(repo: &Path, field: &str) -> (bool, Value) {
-    let out = Command::new(ecp_bin())
-        .args(["heuristics", "schema-bindings", field, "--format", "json"])
-        .current_dir(repo)
-        .env("HOME", repo)
-        .output()
-        .expect("ecp heuristics schema-bindings spawn");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let start = stdout.find('{').unwrap_or_else(|| {
-        panic!(
-            "no JSON in stdout (exit={}): {stdout}",
-            out.status.code().unwrap_or(-1)
-        )
-    });
-    let val: Value = serde_json::from_str(&stdout[start..])
-        .unwrap_or_else(|e| panic!("JSON parse: {e}\n{stdout}"));
-    (out.status.success(), val)
+    run_verb_json(repo, &["heuristics", "schema-bindings"], field)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

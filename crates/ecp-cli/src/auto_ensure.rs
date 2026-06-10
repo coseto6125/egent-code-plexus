@@ -58,6 +58,7 @@ pub mod test_counters {
         TANTIVY_JOIN_COUNT.store(0, Ordering::Relaxed);
         WARM_ATTACH_COUNT.store(0, Ordering::Relaxed);
         BEHIND_HEAD_HEAL_COUNT.store(0, Ordering::Relaxed);
+        super::BEHIND_HEAD_SPAWNED.store(false, Ordering::Relaxed);
     }
 
     pub fn reanalyze_calls() -> usize {
@@ -559,13 +560,17 @@ pub fn load_ensured(
             // queries read L2 only, so the engine must self-flag or a
             // `found:false` would read as a definitive "does not exist".
             engine.behind_head = graph_behind_head(graph_path, worktree_root);
-            if engine.behind_head {
-                // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
-                // sidecar to the current HEAD, so `ensure_index` keeps
-                // answering Ready and a behind-HEAD L2 never rebuilds on its
-                // own (observed: 15 days stale before a manual --force).
-                // Reuse the warm-attach spawn — flock-deduped, skipped under
-                // ECP_SKIP_BG_REBUILD.
+            // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
+            // sidecar to the current HEAD, so `ensure_index` keeps answering
+            // Ready and a behind-HEAD L2 never rebuilds on its own (observed:
+            // 15 days stale before a manual --force). Reuse the warm-attach
+            // spawn — flock-deduped, skipped under ECP_SKIP_BG_REBUILD. The
+            // once-per-process guard matters for long-lived MCP processes,
+            // which would otherwise fork a probe `sh` on every query for the
+            // whole rebuild window; CLI one-shots pay one spawn either way.
+            if engine.behind_head
+                && !BEHIND_HEAD_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
                 test_counters::BEHIND_HEAD_HEAL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!("l2.behind-head rebuild=background");
@@ -618,6 +623,14 @@ fn graph_behind_head(graph_path: &Path, worktree_root: &Path) -> bool {
 /// the new SHA's graph short-circuits `ensure_fresh` itself before reaching
 /// this path, so cache staleness across rebuilds is harmless.
 static SIBLING_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> = OnceLock::new();
+
+/// Once-per-process gate for the behind-HEAD self-heal spawn. Not reset when
+/// the heal lands: after a successful rebuild `graph_behind_head` goes false,
+/// and a repo that falls behind AGAIN within one MCP process lifetime keeps
+/// the caveat but waits for the next process to re-spawn — an accepted
+/// trade-off against re-introducing a per-query fork.
+static BEHIND_HEAD_SPAWNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Returns the `graph.bin` path of the best published sibling commit dir for
 /// this repo to warm-attach, or `None` if none qualifies.

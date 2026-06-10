@@ -58,15 +58,16 @@ fn ecp_index(repo: &Path) {
     );
 }
 
-fn run_find_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
-    let mut args = vec!["find-event-mirrors", "--format", "json"];
+fn run_verb_json(repo: &Path, verb: &[&str], extra: &[&str]) -> (Value, String) {
+    let mut args = verb.to_vec();
+    args.extend_from_slice(&["--format", "json"]);
     args.extend_from_slice(extra);
     let out = Command::new(ecp_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("find-event-mirrors failed to spawn");
+        .unwrap_or_else(|e| panic!("{args:?} failed to spawn: {e}"));
     assert!(
         out.status.success(),
         "{args:?} failed:\nstderr={}\nstdout={}",
@@ -82,28 +83,12 @@ fn run_find_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
     (json, stdout)
 }
 
+fn run_find_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
+    run_verb_json(repo, &["find-event-mirrors"], extra)
+}
+
 fn run_heuristics_event_mirrors(repo: &Path, extra: &[&str]) -> (Value, String) {
-    let mut args = vec!["heuristics", "event-mirrors", "--format", "json"];
-    args.extend_from_slice(extra);
-    let out = Command::new(ecp_bin())
-        .args(&args)
-        .current_dir(repo)
-        .env("HOME", repo)
-        .output()
-        .expect("heuristics event-mirrors failed to spawn");
-    assert!(
-        out.status.success(),
-        "{args:?} failed:\nstderr={}\nstdout={}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout),
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let json_start = stdout
-        .find('{')
-        .unwrap_or_else(|| panic!("{args:?} did not return JSON\nstdout={stdout}"));
-    let json: Value = serde_json::from_str(&stdout[json_start..])
-        .unwrap_or_else(|e| panic!("{args:?} invalid JSON: {e}\nstdout={stdout}"));
-    (json, stdout)
+    run_verb_json(repo, &["heuristics", "event-mirrors"], extra)
 }
 
 fn run_find_mirrors_text(repo: &Path, extra: &[&str]) -> String {

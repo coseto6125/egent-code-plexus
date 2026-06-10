@@ -13,9 +13,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-fn ecp_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ecp")
-}
+mod common;
+use common::ecp_bin;
 
 const SOURCE_CORE: &str = r#"
 export class Base {
@@ -300,5 +299,25 @@ fn impact_batch_empty_stdin_emits_no_blocks_and_stderr_hint() {
     assert!(
         stderr.contains("batch") && stderr.contains("stdin"),
         "expected hint about missing stdin targets:\n{stderr}"
+    );
+}
+
+/// A positional name combined with --batch would be silently discarded
+/// (stdin is the single source of targets) — clap must reject it instead.
+#[test]
+fn impact_batch_rejects_positional_name() {
+    let out = Command::new(ecp_bin())
+        .args(["impact", "someSymbol", "--batch"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "positional name + --batch must be a clap error"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "expected clap conflict error, got: {stderr}"
     );
 }

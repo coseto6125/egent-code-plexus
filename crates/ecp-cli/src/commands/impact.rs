@@ -148,8 +148,10 @@ pub struct ImpactArgs {
     /// --include-tests apply uniformly to all targets.
     ///
     /// Symbol-mode only: `--batch` combined with `--baseline` or `--literal`
-    /// is rejected as an invalid argument.
-    #[arg(long, conflicts_with_all = ["baseline", "literal", "literal_coherence"])]
+    /// is rejected as an invalid argument. A positional name is also rejected
+    /// — stdin is the single source of targets, so a positional would be
+    /// silently ignored otherwise.
+    #[arg(long, conflicts_with_all = ["name", "baseline", "literal", "literal_coherence"])]
     pub batch: bool,
 }
 

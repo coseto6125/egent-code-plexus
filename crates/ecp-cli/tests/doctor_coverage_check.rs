@@ -13,9 +13,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn ecp_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ecp")
-}
+mod common;
+use common::ecp_bin;
 
 fn run_ecp(args: &[&str], home: &Path, cwd: &Path) -> std::process::Output {
     Command::new(ecp_bin())

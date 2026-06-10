@@ -58,21 +58,16 @@ fn ecp_index(repo: &Path) {
     );
 }
 
-fn run_find_tx(repo: &Path, extra: &[&str]) -> Value {
-    let mut args = vec![
-        "find-transaction-patterns",
-        "--repo",
-        ".",
-        "--format",
-        "json",
-    ];
+fn run_verb_json(repo: &Path, verb: &[&str], extra: &[&str]) -> Value {
+    let mut args = verb.to_vec();
+    args.extend_from_slice(&["--repo", ".", "--format", "json"]);
     args.extend_from_slice(extra);
     let out = Command::new(ecp_bin())
         .args(&args)
         .current_dir(repo)
         .env("HOME", repo)
         .output()
-        .expect("find-transaction-patterns failed to spawn");
+        .unwrap_or_else(|e| panic!("{args:?} failed to spawn: {e}"));
     assert!(
         out.status.success(),
         "{args:?} failed:\nstderr={}\nstdout={}",
@@ -87,27 +82,12 @@ fn run_find_tx(repo: &Path, extra: &[&str]) -> Value {
         .unwrap_or_else(|e| panic!("{args:?} invalid JSON: {e}\nstdout={stdout}"))
 }
 
+fn run_find_tx(repo: &Path, extra: &[&str]) -> Value {
+    run_verb_json(repo, &["find-transaction-patterns"], extra)
+}
+
 fn run_heuristics_saga(repo: &Path, extra: &[&str]) -> Value {
-    let mut args = vec!["heuristics", "saga", "--repo", ".", "--format", "json"];
-    args.extend_from_slice(extra);
-    let out = Command::new(ecp_bin())
-        .args(&args)
-        .current_dir(repo)
-        .env("HOME", repo)
-        .output()
-        .expect("heuristics saga failed to spawn");
-    assert!(
-        out.status.success(),
-        "{args:?} failed:\nstderr={}\nstdout={}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout),
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let json_start = stdout
-        .find('{')
-        .unwrap_or_else(|| panic!("{args:?} did not return JSON\nstdout={stdout}"));
-    serde_json::from_str(&stdout[json_start..])
-        .unwrap_or_else(|e| panic!("{args:?} invalid JSON: {e}\nstdout={stdout}"))
+    run_verb_json(repo, &["heuristics", "saga"], extra)
 }
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────

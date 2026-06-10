@@ -202,6 +202,13 @@ pub fn find_latest_by_mtime(commits_dir: &Path) -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
+/// Newest published `graph.bin` for a registry repo dir — the graph queries
+/// warm-attach and serve when HEAD has no build yet. Shared by group impact,
+/// summary coverage reporting, and `doctor coverage`.
+pub fn latest_graph_bin(home_ecp: &Path, dir_name: &str) -> Option<PathBuf> {
+    find_latest_by_mtime(&home_ecp.join(dir_name).join("commits")).map(|dir| dir.join("graph.bin"))
+}
+
 /// Like `find_latest_by_mtime`, but returns ALL candidate commit dirs sorted
 /// newest-first. Used by warm-attach to try the next-best sibling when the
 /// single newest one fails a downstream gate (compatibility / commit distance)
