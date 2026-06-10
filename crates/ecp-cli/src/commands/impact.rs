@@ -389,6 +389,11 @@ struct ImpactStderrHints {
     hidden_edges: u64,
     /// Heuristic edges hidden by the is_heuristic() filter (T-H1).
     hidden_heuristic_edges: u64,
+    /// Payload caveat (not a stderr hint): the target name collides with
+    /// other definitions, so bare calls were Tier-3-suppressed at index time
+    /// and the caller set is a lower bound. Merged with `Engine::caveat()`
+    /// into the `result` field by `run`.
+    ambiguity_caveat: Option<String>,
 }
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
@@ -419,7 +424,11 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             hints.hidden_heuristic_edges
         );
     }
-    emit_with_caveat(&payload, format, engine.caveat())
+    let caveat = match (engine.caveat(), hints.ambiguity_caveat) {
+        (Some(stale), Some(ambig)) => Some(format!("{stale} {ambig}")),
+        (stale, ambig) => stale.or(ambig),
+    };
+    emit_with_caveat(&payload, format, caveat)
 }
 
 /// Library API: returns the JSON payload only, dropping stderr hints.
@@ -879,6 +888,10 @@ fn impact_by_name(
     let file_needle = args.file.as_deref();
     let kind_needle = args.kind.as_deref().map(|s| s.to_ascii_lowercase());
 
+    // Same-name def count BEFORE --kind/--file/FQN narrowing: the Tier-3
+    // resolver defence keys on the global name collision, not on whichever
+    // single def the user disambiguated to.
+    let mut same_name_defs = 0usize;
     let matches: Vec<usize> = graph
         .nodes
         .iter()
@@ -893,6 +906,7 @@ fn impact_by_name(
             if !node.has_owning_file() {
                 return false;
             }
+            same_name_defs += 1;
             if let Some(ref kn) = kind_needle {
                 let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
                 if &node_kind != kn {
@@ -1075,6 +1089,21 @@ fn impact_by_name(
         result_obj["coverage"] = build_coverage_json(analyses);
     }
 
+    // FU-2026-05-29-011: with ≥2 same-named defs in the graph, the resolver
+    // suppressed every bare call to this name at index time
+    // (`DecisionTier::AmbiguousGlobal`), so the upstream caller set is a
+    // lower bound — the payload must say so instead of reading as complete.
+    let ambiguity_caveat = (same_name_defs >= 2
+        && matches!(args.direction, Direction::Up | Direction::Both))
+    .then(|| {
+        format!(
+            "caller set may be incomplete: {same_name_defs} same-named definitions of \
+             '{bare_name}' exist, so bare calls (no import/qualifier context) were \
+             ambiguity-suppressed at index time. Cross-check call sites with grep \
+             before trusting the blast radius."
+        )
+    });
+
     Ok((
         result_obj,
         ImpactStderrHints {
@@ -1082,6 +1111,7 @@ fn impact_by_name(
             empty_hint_is_field,
             hidden_edges: hidden_edges_total,
             hidden_heuristic_edges: hidden_heuristic_total,
+            ambiguity_caveat,
         },
     ))
 }
