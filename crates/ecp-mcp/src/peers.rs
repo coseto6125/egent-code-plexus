@@ -44,6 +44,14 @@ fn tool_peers() -> DerivedTool {
                     "type": "string",
                     "description": "[plan] Comma-separated symbols a lead intends to split across agents; reports blast-radius overlaps + disjoint work packages."
                 },
+                "depth": {
+                    "type": "integer",
+                    "description": "[plan] Max impact traversal depth per target (default 5)."
+                },
+                "include_tests": {
+                    "type": "boolean",
+                    "description": "[plan] Count test-only symbols as collisions (default false)."
+                },
                 "peer": {
                     "type": "string",
                     "description": "[diff] Peer session ID or agent name (from subcmd=status). [log] Filter messages to/from this peer."
