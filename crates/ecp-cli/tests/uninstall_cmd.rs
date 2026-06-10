@@ -199,8 +199,13 @@ fn test_uninstall_agent_flag_filters_to_one_agent() {
     );
 }
 
+// Telemetry showed 14/33 (42%) uninstall invocations failing with
+// "invalid argument: unknown agent 'unknown-agent'" (an automated caller
+// passing a stale variable). The value stays a hard error — a typo like
+// `--agent claud` exiting 0 while leaving claude installed would be a silent
+// no-op — but it now fails at the clap layer, listing the allowed values.
 #[test]
-fn test_uninstall_invalid_agent_errors() {
+fn test_uninstall_unknown_agent_fails_at_argparse_listing_values() {
     let out = Command::new(ecp_bin())
         .args(["uninstall", "--agent", "unknown-agent", "--dry-run"])
         .output()
@@ -208,13 +213,39 @@ fn test_uninstall_invalid_agent_errors() {
 
     assert!(
         !out.status.success(),
-        "invalid --agent should cause non-zero exit"
+        "unknown --agent must fail, not silently no-op"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("unknown agent") || stderr.contains("unknown-agent"),
-        "error message should mention the unknown agent, got: {stderr}"
+        stderr.contains("claude") && stderr.contains("codex") && stderr.contains("gemini"),
+        "error should list allowed values, got: {stderr}"
     );
+}
+
+// A second run on an already-clean install (no agent files present) must
+// also succeed — idempotent uninstall is load-bearing for automated workflows
+// that call `ecp uninstall --agent <x>` regardless of current install state.
+#[test]
+fn test_uninstall_agent_on_clean_install_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    // Empty HOME: no claude/codex/gemini integration files exist.
+    for &agent in &["claude", "codex", "gemini"] {
+        let out = Command::new(ecp_bin())
+            .args(["uninstall", "--agent", agent, "--keep-cache"])
+            .env("HOME", tmp.path())
+            .env("ECP_HOME", tmp.path().join(".ecp"))
+            // Suppress PATH lookups for claude/gemini CLIs so we don't spawn
+            // actual system binaries; the test only cares about exit code.
+            .env("PATH", tmp.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            out.status.success(),
+            "uninstall --agent {agent} on clean install must exit 0, got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]
