@@ -58,6 +58,8 @@ pub enum PeersCmd {
     },
     /// Ƀ Print message thread by msg_id (current session msg.log)
     Thread { msg_id: String },
+    /// Set this session's agent name (shown in status / payloads, targetable by say --to)
+    Name { name: String },
     /// Start, stop, or check the inotify-driven peer-dirty watcher daemon.
     Watch(super::watch::WatchArgs),
     /// Rotate logs + cleanup
@@ -94,6 +96,7 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
             super::peers_msg::cmd_say(&repo_root, &body, to.as_deref(), reply.as_deref())
         }
         PeersCmd::Inbox { limit } => super::peers_msg::cmd_inbox(&repo_root, limit),
+        PeersCmd::Name { name } => cmd_name(&repo_root, &name),
         PeersCmd::Thread { msg_id } => super::peers_msg::cmd_thread(&repo_root, &msg_id),
         PeersCmd::Watch(wargs) => super::watch::run(wargs).map_err(io_from_ecp),
         PeersCmd::Gc => cmd_gc(&repo_root),
@@ -163,11 +166,26 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
     Ok(())
 }
 
+fn cmd_name(repo_root: &std::path::Path, name: &str) -> std::io::Result<()> {
+    let me = resolve_session_id(None);
+    let meta_path = repo_root
+        .join("sessions")
+        .join(&me)
+        .join("session_meta.json");
+    let mut meta = ecp_core::session::SessionMeta::read(&meta_path)?;
+    meta.agent_name = Some(name.to_string());
+    ecp_core::session::SessionMeta::write_atomic(&meta_path, &meta)?;
+    println!("session={me} name={name}");
+    Ok(())
+}
+
 fn cmd_diff(repo_root: &std::path::Path, peer: &str, symbol: Option<&str>) -> std::io::Result<()> {
     use ecp_core::session::overlay::DirtyFiles;
+    let me = resolve_session_id(None);
+    let peer = super::peers_msg::resolve_target_session(repo_root, &me, peer)?;
     let path = repo_root
         .join("sessions")
-        .join(peer)
+        .join(&peer)
         .join("dirty_files.json");
     let peer_dirty = DirtyFiles::read(&path)?;
     for (path_key, entry) in &peer_dirty.entries {
