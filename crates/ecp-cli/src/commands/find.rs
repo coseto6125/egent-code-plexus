@@ -30,7 +30,7 @@
 
 use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
-use crate::output::{emit, emit_with_caveat, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedZeroCopyGraph, FileCategory};
@@ -140,6 +140,21 @@ pub fn run(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
         ));
     }
 
+    // Registry selectors (`@all`, comma lists, repo names) are resolved by
+    // the bm25 fan-out only; exact/fuzzy always query the single engine
+    // main.rs loaded. Reject the combination instead of silently answering
+    // from the cwd repo as if it covered the requested set.
+    if mode != FindMode::Bm25 {
+        if let Some(sel) = args.repo.as_deref() {
+            if !matches!(sel, "." | "") && !std::path::Path::new(sel).is_dir() {
+                return Err(EcpError::InvalidArgument(format!(
+                    "--repo {sel}: registry selectors are only supported with `--mode bm25` \
+                     (exact/fuzzy query one repo); pass a repo path instead"
+                )));
+            }
+        }
+    }
+
     match mode {
         FindMode::Exact | FindMode::Fuzzy => run_exact_or_fuzzy(args, engine, mode),
         FindMode::Bm25 => run_bm25(args, engine),
@@ -159,7 +174,8 @@ fn run_bm25(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
     let targets = resolve_targets(args.repo.as_deref())?;
 
     if targets.is_empty() {
-        run_single(pattern, args.mode, args.kind, format, engine, None)
+        let caveat = engine.caveat();
+        run_single(pattern, args.mode, args.kind, format, engine, None, caveat)
     } else if targets.len() == 1 {
         let target = targets.into_iter().next().unwrap();
         let local_engine = crate::auto_ensure::load_ensured(
@@ -167,6 +183,7 @@ fn run_bm25(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
             std::path::Path::new(&target.worktree_root),
         )
         .map_err(|e| EcpError::Rkyv(format!("{}: {e}", target.display_name)))?;
+        let caveat = single_target_caveat(&target, &local_engine);
         run_single(
             pattern,
             args.mode,
@@ -174,6 +191,7 @@ fn run_bm25(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
             format,
             &local_engine,
             Some(target.display_name),
+            caveat,
         )
     } else {
         run_multi(pattern, args.mode, args.kind, format, targets)
@@ -539,6 +557,16 @@ fn run_batch(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
         None
     };
 
+    // Staleness is a property of the loaded engines, not of any one query —
+    // compute the caveat once and stamp it on every per-pattern emission.
+    let batch_caveat: Option<String> = if let Some(loaded) = multi_repo_engines.as_ref() {
+        stale_repos_caveat(&targets, loaded)
+    } else if let Some((_, local_engine)) = single_repo_engine.as_ref() {
+        single_target_caveat(&targets[0], local_engine)
+    } else {
+        engine.caveat()
+    };
+
     for pattern in &queries {
         println!("=== pattern: {pattern} ===");
 
@@ -561,7 +589,7 @@ fn run_batch(args: FindArgs, engine: &Engine) -> Result<(), EcpError> {
         };
 
         let buckets = BucketedResults::partition(hits);
-        emit_bucketed(&buckets, format, None)?;
+        emit_bucketed(&buckets, format, None, batch_caveat.clone())?;
     }
     Ok(())
 }
@@ -736,6 +764,7 @@ fn run_single(
     format: OutputFormat,
     engine: &Engine,
     repo_label: Option<String>,
+    caveat: Option<String>,
 ) -> Result<(), EcpError> {
     let (hits, truncated_total) =
         compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
@@ -748,7 +777,7 @@ fn run_single(
     } else {
         None
     };
-    emit_bucketed_with_metadata(&buckets, format, summary, truncated_total)
+    emit_bucketed_with_metadata(&buckets, format, summary, truncated_total, caveat)
 }
 
 /// Pure compute path for single-repo search: returns owned Hit rows, all
@@ -1006,9 +1035,22 @@ fn run_multi(
     format: OutputFormat,
     targets: Vec<RepoTarget>, // (repo_name, graph_path_str, worktree_root)
 ) -> Result<(), EcpError> {
-    let (hits, summary) = compute_multi(&pattern, &mode, kind_filter.as_deref(), targets)?;
+    let loaded = load_engines_lossy(&targets);
+    let caveat = stale_repos_caveat(&targets, &loaded);
+    let (hits, summary) =
+        compute_multi_with_engines(&pattern, &mode, kind_filter.as_deref(), &loaded);
     let buckets = BucketedResults::partition(hits);
-    emit_bucketed(&buckets, format, Some(summary))
+    emit_bucketed(&buckets, format, Some(summary), caveat)
+}
+
+/// Caveat for a single resolved target: HEAD-mismatch staleness names the
+/// repo; otherwise the engine's own warm-attach caveat (if any) applies.
+fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> {
+    if target.stale_for_head {
+        stale_graph_caveat(&[target.display_name.as_str()])
+    } else {
+        engine.caveat()
+    }
 }
 
 /// Pre-load engines for a batch of target repos. Each engine load is
@@ -1130,26 +1172,6 @@ pub fn compute_multi_with_engines(
     (hits, summary)
 }
 
-/// Pure compute path for multi-repo fan-out. Loads all engines up-front
-/// then delegates to `compute_multi_with_engines`. Single-shot callers
-/// (single query × multi-repo) use this directly; batch callers should
-/// pre-load engines themselves and call `compute_multi_with_engines`
-/// inside the per-query loop to avoid reloading per query.
-fn compute_multi(
-    pattern: &str,
-    mode: &FindMode,
-    kind_filter: Option<&str>,
-    targets: Vec<RepoTarget>, // (repo_name, graph_path_str, worktree_root)
-) -> Result<(Vec<Hit>, String), EcpError> {
-    let loaded = load_engines_lossy(&targets);
-    Ok(compute_multi_with_engines(
-        pattern,
-        mode,
-        kind_filter,
-        &loaded,
-    ))
-}
-
 /// Per-repo BM25 entry point for `ecp group search` and `ecp group find`.
 /// Loads the engine internally from a pre-resolved graph path.
 /// Returns raw `Hit` rows without emitting anything.
@@ -1200,8 +1222,10 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpErro
         )
         .map(|(hits, _truncated)| hits)
     } else {
-        compute_multi(pattern, &args.mode, args.kind.as_deref(), targets)
-            .map(|(hits, _summary)| hits)
+        let loaded = load_engines_lossy(&targets);
+        let (hits, _summary) =
+            compute_multi_with_engines(pattern, &args.mode, args.kind.as_deref(), &loaded);
+        Ok(hits)
     }
 }
 
@@ -1217,6 +1241,13 @@ pub(crate) struct RepoTarget {
     display_name: String,
     graph_path: String,
     worktree_root: String,
+    /// The picked commit dir (latest published, by mtime) is behind the
+    /// target worktree's HEAD. Queries read L2 only, so commits made after
+    /// the last index are invisible for this repo — surfaced as a `result`
+    /// caveat. The warm-attach flag can't represent this: the old graph
+    /// EXISTS, so `ensure_fresh` takes the Stale → L1-refresh path and
+    /// reports Ready.
+    stale_for_head: bool,
 }
 
 /// Resolve `--repo` to `Vec<RepoTarget>`.
@@ -1291,10 +1322,17 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         ))
         .to_string_lossy()
         .into_owned();
+        // Commit dirs are named `branch_<branch>__<sha>`; a HEAD that no
+        // longer matches the picked dir's suffix means the graph predates it.
+        let stale_for_head = crate::git_cache::head_sha(std::path::Path::new(&worktree_root))
+            .zip(graph_path.parent().and_then(|d| d.file_name()))
+            .map(|(head, dir)| !dir.to_string_lossy().ends_with(&head))
+            .unwrap_or(false);
         targets.push(RepoTarget {
             display_name,
             graph_path: graph_path.to_string_lossy().into_owned(),
             worktree_root,
+            stale_for_head,
         });
     }
 
@@ -1343,8 +1381,40 @@ fn emit_bucketed(
     buckets: &BucketedResults,
     format: OutputFormat,
     summary: Option<String>,
+    caveat: Option<String>,
 ) -> Result<(), EcpError> {
-    emit_bucketed_with_metadata(buckets, format, summary, 0)
+    emit_bucketed_with_metadata(buckets, format, summary, 0, caveat)
+}
+
+/// Completeness caveat naming exactly WHICH repos answered from a graph
+/// behind their worktree's HEAD, so fresh repos' rows keep their trust and a
+/// stale repo's "no hits" can't read as definitive.
+fn stale_graph_caveat(names: &[&str]) -> Option<String> {
+    (!names.is_empty()).then(|| {
+        format!(
+            "results may be incomplete for repo(s) {}: graph predates the current HEAD there; \
+             symbols added since are invisible. Rerun, or `ecp admin index --force` in the \
+             stale repo for a definitive answer.",
+            names.join(", ")
+        )
+    })
+}
+
+/// Cross-repo staleness sweep: a repo is stale when its picked commit dir is
+/// behind HEAD (`stale_for_head`) or its engine warm-attached a sibling SHA.
+fn stale_repos_caveat(
+    targets: &[RepoTarget],
+    loaded: &[(String, Result<Engine, String>)],
+) -> Option<String> {
+    let stale: Vec<&str> = targets
+        .iter()
+        .zip(loaded)
+        .filter(|(target, (_, result))| {
+            target.stale_for_head || result.as_ref().is_ok_and(|engine| engine.is_stale_for_sha)
+        })
+        .map(|(target, _)| target.display_name.as_str())
+        .collect();
+    stale_graph_caveat(&stale)
 }
 
 /// Same as `emit_bucketed` but threads the substring-fallback pre-truncate
@@ -1357,6 +1427,7 @@ fn emit_bucketed_with_metadata(
     format: OutputFormat,
     summary: Option<String>,
     bm25_pre_truncate_total: u64,
+    caveat: Option<String>,
 ) -> Result<(), EcpError> {
     let all_empty = buckets.source.is_empty()
         && buckets.examples.is_empty()
@@ -1369,13 +1440,16 @@ fn emit_bucketed_with_metadata(
         let hint = "No matches found. Try a shorter pattern or `ecp find --mode fuzzy <fragment>`.";
         match format {
             OutputFormat::Text => {
-                return emit(
+                return emit_with_caveat(
                     &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),
                     format,
+                    caveat,
                 );
             }
             _ => {
-                return emit(
+                // A stale graph's "no matches" is the most dangerous shape —
+                // the caveat is what stops it reading as a definitive miss.
+                return emit_with_caveat(
                     &serde_json::json!({
                         "status": "success",
                         "source": [],
@@ -1388,6 +1462,7 @@ fn emit_bucketed_with_metadata(
                         "hint": hint,
                     }),
                     format,
+                    caveat,
                 );
             }
         }
@@ -1416,7 +1491,7 @@ fn emit_bucketed_with_metadata(
                     }
                 }
             }
-            emit(&serde_json::json!({ "results": lines }), format)
+            emit_with_caveat(&serde_json::json!({ "results": lines }), format, caveat)
         }
         OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
             let bucket_json = |bucket: &[Hit]| -> serde_json::Value {
@@ -1435,7 +1510,7 @@ fn emit_bucketed_with_metadata(
             if let Some(s) = summary {
                 payload["summary"] = serde_json::Value::String(s);
             }
-            emit(&payload, format)
+            emit_with_caveat(&payload, format, caveat)
         }
     }
 }

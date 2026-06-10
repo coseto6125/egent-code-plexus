@@ -182,7 +182,15 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
     // Agent commands + ShapeCheck (hidden internal) — need graph
     let repo_opt = match &cli.command {
         Commands::Inspect(args) => args.repo.as_deref(),
-        Commands::Find(args) => args.repo.as_deref(),
+        // `find --repo` doubles as a registry selector (`@all`, comma list,
+        // repo name) for the bm25 fan-out; those aren't paths, and feeding
+        // them to ensure_fresh as a cwd dies with "Error preparing index for
+        // @all". Only treat the value as this process's repo when it's a real
+        // directory; selectors resolve inside find::run_bm25.
+        Commands::Find(args) => args
+            .repo
+            .as_deref()
+            .filter(|r| std::path::Path::new(r).is_dir()),
         Commands::Impact(args) => args.repo.as_deref(),
         Commands::Rename(args) => args.repo.as_deref(),
         Commands::Cypher(args) => args.repo.as_deref(),
