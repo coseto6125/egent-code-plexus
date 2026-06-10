@@ -172,7 +172,12 @@ fn cmd_name(repo_root: &std::path::Path, name: &str) -> std::io::Result<()> {
         .join("sessions")
         .join(&me)
         .join("session_meta.json");
-    let mut meta = ecp_core::session::SessionMeta::read(&meta_path)?;
+    let mut meta = ecp_core::session::SessionMeta::read(&meta_path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("session '{me}' not enrolled yet (run any ecp query in this repo first): {e}"),
+        )
+    })?;
     meta.agent_name = Some(name.to_string());
     ecp_core::session::SessionMeta::write_atomic(&meta_path, &meta)?;
     println!("session={me} name={name}");
