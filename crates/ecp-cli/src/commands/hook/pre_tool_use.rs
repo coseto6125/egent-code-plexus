@@ -52,6 +52,7 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
         all: false,
         include_tests: false,
         kind: None,
+        file: None,
         repo: None,
         format: None,
         batch: false,

@@ -95,6 +95,11 @@ pub struct FindArgs {
     #[arg(long)]
     pub kind: Option<String>,
 
+    /// Disambiguate when name has multiple matches: substring on file path.
+    /// Same matching rule as `ecp impact --file`.
+    #[arg(long)]
+    pub file: Option<String>,
+
     /// Repository selector (path | name | @all | csv mix). Defaults to cwd.
     /// `@<group>` is rejected at the top level — use `ecp group find` instead.
     #[arg(long)]
@@ -297,6 +302,7 @@ fn overlay_only_matches(
     pattern: &str,
     mode: FindMode,
     kind_filter: Option<&[String]>,
+    file_filter: Option<&str>,
 ) -> Vec<FindMatch> {
     use ecp_core::graph::NodeKind;
     let Some(dir) = engine.overlay_dir() else {
@@ -319,6 +325,7 @@ fn overlay_only_matches(
                 kinds.iter().any(|want| want == &k)
             })
         })
+        .filter(|h| file_filter.is_none_or(|needle| h.rel_path.contains(needle)))
         .collect();
     if matched.is_empty() {
         return Vec::new();
@@ -339,14 +346,16 @@ fn overlay_only_matches(
             } else {
                 "Source"
             };
+            let kind_str = crate::commands::format::node_kind_to_str(&h.kind).to_string();
+            let signature = format!("{kind_str} {}", h.name);
             FindMatch {
                 file: h.rel_path,
                 line: h.line,
                 name: h.name,
-                kind: crate::commands::format::node_kind_to_str(&h.kind).to_string(),
+                kind: kind_str,
                 category: category.to_string(),
                 caller_count: 0,
-                signature: h.uid.to_string(),
+                signature,
             }
         })
         .collect()
@@ -365,6 +374,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             .filter(|p| !p.is_empty())
             .collect()
     });
+    let file_filter: Option<&str> = args.file.as_deref();
 
     // A ranked candidate. `src` is the base-graph node index, or an overlay-only
     // symbol that has no base node. Tuple fields after it: caller_count, category
@@ -401,6 +411,14 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 return None;
             }
             let file = &graph.files[node.file_idx.to_native() as usize];
+            let file_path = file.path.resolve(&graph.string_pool).to_string();
+
+            if let Some(needle) = file_filter {
+                if !file_path.contains(needle) {
+                    return None;
+                }
+            }
+
             let is_exact = matches!(mode, FindMode::Exact);
             if !args.include_tests
                 && !is_exact
@@ -412,7 +430,6 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
 
             let prio = category_priority(&file.category);
             let caller_count = count_incoming(graph, node_idx);
-            let file_path = file.path.resolve(&graph.string_pool).to_string();
             Some((CandSrc::Base(node_idx), caller_count, prio, file_path))
         })
         .collect();
@@ -423,7 +440,14 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     // touching the graph when no overlay dir is attached. Overlay nodes have no
     // base file entry / edges, so caller_count is 0 and category is derived from
     // the path; full edge/impact integration is the T7-7 promotion concern.
-    for m in overlay_only_matches(engine, graph, pattern, mode, kind_filter.as_deref()) {
+    for m in overlay_only_matches(
+        engine,
+        graph,
+        pattern,
+        mode,
+        kind_filter.as_deref(),
+        file_filter,
+    ) {
         let prio = category_priority_for_path(&m.file);
         candidates.push((CandSrc::Overlay(m), 0, prio, String::new()));
     }
@@ -449,14 +473,16 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             CandSrc::Base(node_idx) => {
                 let node = &graph.nodes[node_idx];
                 let file = &graph.files[node.file_idx.to_native() as usize];
+                let kind_str = kind_to_str(&node.kind).to_string();
+                let signature = format!("{kind_str} {}", node.name.resolve(&graph.string_pool));
                 FindMatch {
                     file: file.path.resolve(&graph.string_pool).to_string(),
                     line: node.start_line(),
                     name: node.name.resolve(&graph.string_pool).to_string(),
-                    kind: kind_to_str(&node.kind).to_string(),
+                    kind: kind_str,
                     category: category_to_str(&file.category).to_string(),
                     caller_count,
-                    signature: node.uid.to_native().to_string(),
+                    signature,
                 }
             }
         })

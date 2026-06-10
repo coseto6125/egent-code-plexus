@@ -477,3 +477,148 @@ fn find_ranking_prefers_higher_caller_count_within_same_category() {
     assert_eq!(matches[0]["caller_count"], 2);
     assert_eq!(matches[0]["file"], "src/a.rs");
 }
+
+// ── Task A: signature must never be a bare uid string ─────────────────────────
+
+#[test]
+fn find_signature_is_not_a_bare_uid() {
+    let (_dir, graph) = build_graph(
+        &[NodeSpec {
+            name: "compute_hits",
+            kind: NodeKind::Function,
+            category: FileCategory::Source,
+            file: "src/find.rs",
+            line: 10,
+        }],
+        &[],
+    );
+    let out = run_find(&graph, &["compute_hits", "--format", "json"]);
+    assert!(out.status.success());
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["found"], true);
+    let sig = json["matches"][0]["signature"].as_str().unwrap();
+    // A pure-digit string means a raw uid leaked — the signature must be human-readable.
+    assert!(
+        !sig.chars().all(|c| c.is_ascii_digit()),
+        "signature must not be a bare uid number, got: {sig}"
+    );
+    // Expect "{Kind} {name}" form.
+    assert!(
+        sig.contains("compute_hits"),
+        "signature must include the symbol name, got: {sig}"
+    );
+}
+
+#[test]
+fn find_signature_contains_kind_and_name() {
+    let (_dir, graph) = build_graph(
+        &[NodeSpec {
+            name: "MyStruct",
+            kind: NodeKind::Struct,
+            category: FileCategory::Source,
+            file: "src/types.rs",
+            line: 5,
+        }],
+        &[],
+    );
+    let out = run_find(&graph, &["MyStruct", "--format", "json"]);
+    assert!(out.status.success());
+    let json = parse_json_stdout(&out);
+    let sig = json["matches"][0]["signature"].as_str().unwrap();
+    // Must be "Struct MyStruct" form.
+    assert_eq!(sig, "Struct MyStruct", "unexpected signature: {sig}");
+}
+
+// ── Task B: --file filter ─────────────────────────────────────────────────────
+
+#[test]
+fn find_file_filter_picks_correct_file() {
+    // Two functions named `connect` in different files; --file should pick the right one.
+    let (_dir, graph) = build_graph(
+        &[
+            NodeSpec {
+                name: "connect",
+                kind: NodeKind::Function,
+                category: FileCategory::Source,
+                file: "src/db.rs",
+                line: 1,
+            },
+            NodeSpec {
+                name: "connect",
+                kind: NodeKind::Function,
+                category: FileCategory::Source,
+                file: "src/network.rs",
+                line: 1,
+            },
+        ],
+        &[],
+    );
+    let out = run_find(&graph, &["connect", "--file", "db", "--format", "json"]);
+    assert!(out.status.success());
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["found"], true);
+    let matches = json["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1, "file filter should narrow to one match");
+    assert_eq!(matches[0]["file"], "src/db.rs");
+}
+
+#[test]
+fn find_file_filter_no_match_returns_found_false() {
+    let (_dir, graph) = build_graph(
+        &[NodeSpec {
+            name: "connect",
+            kind: NodeKind::Function,
+            category: FileCategory::Source,
+            file: "src/db.rs",
+            line: 1,
+        }],
+        &[],
+    );
+    // --file substring that matches nothing → honest found:false, no fabrication.
+    let out = run_find(
+        &graph,
+        &["connect", "--file", "nonexistent_path", "--format", "json"],
+    );
+    assert!(out.status.success());
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["found"], false);
+    assert_eq!(json["matches"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn find_file_filter_composes_with_kind() {
+    // Two matches for "process": one Function in proc.rs, one Method in handler.rs.
+    // --file proc --kind function should match only the Function.
+    let (_dir, graph) = build_graph(
+        &[
+            NodeSpec {
+                name: "process",
+                kind: NodeKind::Function,
+                category: FileCategory::Source,
+                file: "src/proc.rs",
+                line: 1,
+            },
+            NodeSpec {
+                name: "process",
+                kind: NodeKind::Method,
+                category: FileCategory::Source,
+                file: "src/handler.rs",
+                line: 10,
+            },
+        ],
+        &[],
+    );
+    let out = run_find(
+        &graph,
+        &[
+            "process", "--file", "proc", "--kind", "function", "--format", "json",
+        ],
+    );
+    assert!(out.status.success());
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["found"], true);
+    let matches = json["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["file"], "src/proc.rs");
+    assert_eq!(matches[0]["kind"], "Function");
+}
