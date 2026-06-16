@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.7.1 - 2026-06-16
+
+- (no user-facing changes)
 ## v0.7.0 - 2026-06-10
 
 ### Features
