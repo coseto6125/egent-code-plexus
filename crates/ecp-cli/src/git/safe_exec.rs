@@ -94,13 +94,40 @@ pub fn head_short(repo_root: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A command that sleeps ~30s, portable across the test runners. `sleep`/
+    /// `printf` are absent on Windows (shell built-ins, not executables), so the
+    /// timeout tests must dispatch on the OS.
+    fn long_running_cmd() -> Command {
+        if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/C", "ping -n 31 127.0.0.1 >NUL"]);
+            cmd
+        } else {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("30");
+            cmd
+        }
+    }
+
+    /// Echo `hello` to stdout, portable across runners. Windows `cmd /C echo`
+    /// appends a trailing CRLF, so callers compare against the trimmed output.
+    fn echo_hello_cmd() -> Command {
+        if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/C", "echo hello"]);
+            cmd
+        } else {
+            let mut cmd = Command::new("printf");
+            cmd.arg("hello");
+            cmd
+        }
+    }
+
     #[test]
     fn output_with_timeout_kills_a_hanging_child() {
-        // `sleep 30` far outlives the 200ms bound — must be killed and return None.
-        let mut cmd = Command::new("sleep");
-        cmd.arg("30");
+        // The child far outlives the 200ms bound — must be killed and return None.
         let start = Instant::now();
-        let result = output_with_timeout(cmd, Duration::from_millis(200));
+        let result = output_with_timeout(long_running_cmd(), Duration::from_millis(200));
         assert!(result.is_none(), "expected None for a timed-out child");
         assert!(
             start.elapsed() < Duration::from_secs(2),
@@ -110,11 +137,11 @@ mod tests {
 
     #[test]
     fn output_with_timeout_returns_fast_command_output() {
-        let mut cmd = Command::new("printf");
-        cmd.arg("hello");
-        let out = output_with_timeout(cmd, Duration::from_secs(5)).expect("printf should finish");
+        let out = output_with_timeout(echo_hello_cmd(), Duration::from_secs(5))
+            .expect("echo should finish");
         assert!(out.status.success());
-        assert_eq!(out.stdout, b"hello");
+        let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+        assert_eq!(stdout.trim(), "hello");
     }
 
     #[test]
