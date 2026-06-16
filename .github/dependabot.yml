@@ -4,6 +4,17 @@ version: 2
 # pair (the `all-minor-patch` group). Major bumps still open one PR each so we
 # review them individually. Auto-merge for patch/minor is handled by
 # .github/workflows/dependabot-auto-merge.yml once CI is green.
+#
+# Scope is deliberately limited to the root workspace. The vendored grammars
+# under crates/vendor/** are upstream snapshots: ecp builds them via their Rust
+# `path` crate (build.rs compiles src/parser.c) and never runs npm/go/cargo
+# install against the snapshot. So their package.json (node-gyp, prebuildify),
+# go.mod, and pinned Cargo deps (tree-sitter-language, our customized
+# tree-sitter = "0.26") are NOT on ecp's build path. Bumping them only produces
+# churn PRs that drift the snapshot from upstream and get overwritten on the
+# next re-vendor. Grammar updates happen by re-vendoring the upstream release
+# (see chore/revendor-*), not by Dependabot. Vendored ecosystems are therefore
+# left unconfigured.
 
 updates:
   - package-ecosystem: github-actions
@@ -17,114 +28,6 @@ updates:
 
   - package-ecosystem: cargo
     directory: /
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: cargo
-    directory: /crates/vendor/tree-sitter-move
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: gomod
-    directory: /crates/vendor/tree-sitter-move/bindings/go
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: npm
-    directory: /crates/vendor/tree-sitter-move
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: cargo
-    directory: /crates/vendor/tree-sitter-nim
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: gomod
-    directory: /crates/vendor/tree-sitter-nim/bindings/go
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: gomod
-    directory: /crates/vendor/tree-sitter-nim
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: npm
-    directory: /crates/vendor/tree-sitter-nim
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: gomod
-    directory: /crates/vendor/tree-sitter-swift
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: npm
-    directory: /crates/vendor/tree-sitter-swift
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: npm
-    directory: /crates/vendor/tree-sitter-swift/test-npm-package
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: gomod
-    directory: /crates/vendor/tree-sitter-vyper
-    schedule:
-      interval: daily
-    groups:
-      all-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-
-  - package-ecosystem: npm
-    directory: /crates/vendor/tree-sitter-vyper
     schedule:
       interval: daily
     groups:
