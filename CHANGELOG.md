@@ -2,7 +2,21 @@
 
 ## v0.7.1 - 2026-06-16
 
-- (no user-facing changes)
+### Grammar
+
+- Swift: re-vendored tree-sitter-swift 0.7.2 → 0.7.3 (#580). New syntax now
+  parses cleanly (previously produced ERROR nodes that dropped the enclosing
+  symbol): consume/discard operators, typed throws (`do throws(E)` /
+  `func f() throws(E)`), `#if` directives inside type bodies,
+  `nonisolated(unsafe)`/`nonisolated(nonsending)`, bracket-qualified nested
+  type access, and double-optional `Type??` in lambda parameters.
+
+### CI / Internal
+
+- Make the `safe_exec` timeout tests portable to the new `windows-2025-vs2026`
+  GitHub runner image (#579).
+- Scope Dependabot to the root workspace; stop churn PRs against vendored
+  grammar snapshots (#581).
 ## v0.7.0 - 2026-06-10
 
 ### Features
