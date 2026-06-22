@@ -16,7 +16,7 @@ sha2 = "0.11.0"
 
 [dependencies]
 ecp-core = { workspace = true }
-phf = { version = "0.13", features = ["macros"] }
+phf = { version = "0.14", features = ["macros"] }
 tree-sitter = "0.26"
 tree-sitter-typescript = "*"
 rayon = "1.10.0"
