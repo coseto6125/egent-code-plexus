@@ -7,9 +7,9 @@ use ecp_analyzer::{
     docker_compose::parser::DockerComposeProvider, dockerfile::parser::DockerfileProvider,
     github_actions::parser::GitHubActionsProvider, go::parser::GoProvider,
     hcl::parser::HclProvider, java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
-    kotlin::parser::KotlinProvider, lua::parser::LuaProvider, markdown::parser::MarkdownProvider,
-    move_lang::parser::MoveProvider, nim::parser::NimProvider,
-    openapi::schema_scan::OpenApiProvider, php::parser::PhpProvider,
+    kotlin::parser::KotlinProvider, kubernetes::parser::KubernetesProvider,
+    lua::parser::LuaProvider, markdown::parser::MarkdownProvider, move_lang::parser::MoveProvider,
+    nim::parser::NimProvider, openapi::schema_scan::OpenApiProvider, php::parser::PhpProvider,
     protobuf::parser::ProtobufProvider, python::parser::PythonProvider, ruby::parser::RubyProvider,
     rust::parser::RustProvider, solidity::parser::SolidityProvider, sql::parser::SqlProvider,
     svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
@@ -211,6 +211,7 @@ pub fn run_analyzer_for_paths(
     add!(needed.docker_compose, DockerComposeProvider::new());
     add!(needed.protobuf, ProtobufProvider::new());
     add!(needed.openapi, OpenApiProvider::new());
+    add!(needed.kubernetes, KubernetesProvider::new());
 
     use rayon::prelude::*;
     let providers: Vec<Box<dyn ecp_core::analyzer::provider::LanguageProvider>> = factories
@@ -552,6 +553,7 @@ struct NeededProviders {
     svelte: bool,
     protobuf: bool,
     openapi: bool,
+    kubernetes: bool,
 }
 
 /// Walk the scanned file list, set the flag for each language whose files we
@@ -611,7 +613,14 @@ fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -
             "astro" => n.astro = true,
             "svelte" => n.svelte = true,
             "proto" => n.protobuf = true,
-            "yml" | "yaml" => n.yaml = true,
+            // `.yaml`/`.yml` route to the Kubernetes provider (see
+            // `provider_name_for_path`), which content-gates on
+            // `apiVersion:`+`kind:`; non-k8s YAML returns empty. `n.yaml` stays
+            // set for the YamlProvider's document-block path.
+            "yml" | "yaml" => {
+                n.yaml = true;
+                n.kubernetes = true;
+            }
             // `.json` files are checked for OpenAPI 3.x / Swagger 2.0 markers
             // by the provider itself; non-OpenAPI JSON is returned empty.
             "json" => n.openapi = true,
@@ -709,6 +718,11 @@ fn should_analyze_path(path: &std::path::Path) -> bool {
                 | "svelte"
                 | "proto"
                 | "json"
+                // `.yaml`/`.yml` are scanned so k8s manifests reach the
+                // content-sniffing Kubernetes provider; non-k8s YAML is gated
+                // out cheaply by the provider, not here.
+                | "yml"
+                | "yaml"
         )
     )
 }

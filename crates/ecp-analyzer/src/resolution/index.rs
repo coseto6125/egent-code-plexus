@@ -66,6 +66,9 @@ pub enum Language {
     GitHubActions,
     Yaml,
     Markdown,
+    // Appended at the end to keep variant order stable (defensive — `Language`
+    // is not rkyv-archived today, but other resolution code matches on it).
+    Kubernetes,
 }
 
 impl Language {
@@ -184,6 +187,7 @@ impl Language {
             Self::GitHubActions => "GitHubActions",
             Self::Yaml => "YAML",
             Self::Markdown => "Markdown",
+            Self::Kubernetes => "Kubernetes",
         }
     }
 }

@@ -88,7 +88,8 @@ impl AnalyzerPipeline {
     /// of paying the full 20-provider tree-sitter `Query` compile (~0.65s) to
     /// reparse one changed file (~8ms). Path-based special cases (Dockerfile,
     /// docker-compose, GitHub Actions workflows) are resolved before the
-    /// extension table. `.h` routes to C++ (near-superset of C); see the
+    /// extension table; remaining `.yaml`/`.yml` route to the content-sniffing
+    /// Kubernetes provider. `.h` routes to C++ (near-superset of C); see the
     /// indexing-pipeline note that made this the load-bearing dispatch.
     pub fn provider_name_for_path(path: &std::path::Path) -> Option<&'static str> {
         let file_name = path.file_name()?.to_str()?;
@@ -111,6 +112,12 @@ impl AnalyzerPipeline {
                 if is_gha {
                     return Some("github-actions");
                 }
+                // Any other `.yaml`/`.yml` routes to the Kubernetes provider,
+                // which applies a cheap ≤1KB `apiVersion:`+`kind:` content gate
+                // (mirrors `.json` → "openapi"). Non-k8s YAML returns empty at
+                // near-zero cost — path alone can't tell a k8s manifest from
+                // arbitrary YAML.
+                return Some("kubernetes");
             }
         }
 
@@ -384,5 +391,20 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
+    }
+
+    #[test]
+    fn yaml_routes_to_kubernetes_provider() {
+        use std::path::Path;
+        let pn = AnalyzerPipeline::provider_name_for_path;
+        // Plain `.yaml`/`.yml` → kubernetes (content-sniffed inside the provider).
+        assert_eq!(pn(Path::new("k8s/deploy.yaml")), Some("kubernetes"));
+        assert_eq!(pn(Path::new("manifest.yml")), Some("kubernetes"));
+        // Filename/path specials still win over the kubernetes fallback.
+        assert_eq!(pn(Path::new("docker-compose.yml")), Some("docker-compose"));
+        assert_eq!(
+            pn(Path::new(".github/workflows/ci.yml")),
+            Some("github-actions")
+        );
     }
 }

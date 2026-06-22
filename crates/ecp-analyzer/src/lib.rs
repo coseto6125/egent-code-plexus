@@ -34,6 +34,7 @@ pub mod indirect_dispatch;
 pub mod java;
 pub mod javascript;
 pub mod kotlin;
+pub mod kubernetes;
 pub mod lua;
 pub mod markdown;
 pub mod move_lang;
