@@ -7,7 +7,8 @@ use super::schema_extractors::{
     classify_protobuf_type, PROTOBUF_FIELD_MODIFIERS, PROTOBUF_FRAMEWORK,
 };
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawRoute, RawSchemaField};
+use ecp_core::analyzer::types::{LocalGraph, RawNode, RawRoute, RawSchemaField};
+use ecp_core::graph::NodeKind;
 use std::path::Path;
 
 pub struct ProtobufProvider;
@@ -27,11 +28,12 @@ impl LanguageProvider for ProtobufProvider {
         let text = std::str::from_utf8(source)
             .map_err(|e| anyhow::anyhow!("protobuf: UTF-8 decode error in {:?}: {}", path, e))?;
 
-        let fields = extract_proto_fields(text);
+        let (fields, messages) = extract_proto_fields(text);
         let schema_fields = (!fields.is_empty()).then(|| fields.into_boxed_slice());
 
         Ok(LocalGraph {
             file_path: path.to_path_buf(),
+            nodes: messages,
             schema_fields,
             routes: extract_proto_services(text),
             ..Default::default()
@@ -39,7 +41,16 @@ impl LanguageProvider for ProtobufProvider {
     }
 }
 
-/// Line-oriented proto lexer.
+/// Line-oriented proto lexer — single pass extracting message fields AND the
+/// owning `message` as a `NodeKind::Struct` node.
+///
+/// The Struct node is load-bearing: `schema_field_mirrors` resolves each
+/// `RawSchemaField.owner_class` against the SymbolTable to attach a
+/// `HasProperty` edge, and silently drops fields whose owner isn't a known
+/// node. Without emitting the message as a node, every proto field was
+/// dropped end-to-end (the fields parsed but never reached the graph).
+/// `Struct` (not `Class`) because a proto message is a value-type aggregate
+/// with no inheritance / vtable — LLMs must not pattern-match OO conventions.
 ///
 /// State machine:
 /// - `current_message`: name of the enclosing `message { }` block, or `None`
@@ -47,9 +58,16 @@ impl LanguageProvider for ProtobufProvider {
 /// - `depth`: brace nesting depth.  A top-level `message` bumps depth to 1;
 ///   any nested `{` (including nested messages, oneofs, options) bumps it
 ///   further.  Fields are only emitted when `depth == 1`.
-fn extract_proto_fields(text: &str) -> Vec<RawSchemaField> {
+///
+/// Only messages that actually carry ≥1 field get a Struct node — an empty
+/// message has no schema surface to own, so a node would be an orphan.
+fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
     let mut out: Vec<RawSchemaField> = Vec::new();
+    let mut messages: Vec<RawNode> = Vec::new();
     let mut current_message: Option<String> = None;
+    // (name, header_span, has_field) for the open top-level message, deferred
+    // until the block closes so the node is emitted iff it had a field.
+    let mut pending: Option<(String, (u32, u32, u32, u32), bool)> = None;
     let mut depth: u32 = 0;
 
     for (line_idx, raw_line) in text.lines().enumerate() {
@@ -72,7 +90,8 @@ fn extract_proto_fields(text: &str) -> Vec<RawSchemaField> {
         // v1 limitation documented in mod.rs.
         if depth == 0 {
             if let Some(name) = parse_message_header(line) {
-                current_message = Some(name);
+                current_message = Some(name.clone());
+                pending = Some((name, (row, 0, row, line.len() as u32), false));
                 // The `{` on this line is already counted below via `opens`.
             }
         }
@@ -82,9 +101,14 @@ fn extract_proto_fields(text: &str) -> Vec<RawSchemaField> {
         depth = depth.saturating_add(opens).saturating_sub(closes);
 
         // After depth update: if we just closed the outermost message block,
-        // clear the message context.
+        // flush the pending Struct node (iff it owned ≥1 field) and clear ctx.
         if depth == 0 {
             current_message = None;
+            if let Some((name, span, has_field)) = pending.take() {
+                if has_field {
+                    messages.push(message_struct_node(name, span));
+                }
+            }
         }
 
         // ── Field extraction — only at depth 1 inside a known message ───────
@@ -107,10 +131,32 @@ fn extract_proto_fields(text: &str) -> Vec<RawSchemaField> {
                 framework: PROTOBUF_FRAMEWORK,
                 span,
             });
+            if let Some(p) = pending.as_mut() {
+                p.2 = true;
+            }
         }
     }
 
-    out
+    (out, messages)
+}
+
+/// Build the `NodeKind::Struct` node for a proto `message` (the owner of its
+/// schema fields). `owner_class: None` — a top-level message is not nested in
+/// another type.
+fn message_struct_node(name: String, span: (u32, u32, u32, u32)) -> RawNode {
+    RawNode {
+        name,
+        kind: NodeKind::Struct,
+        span,
+        is_exported: true,
+        heritage: vec![],
+        type_annotation: None,
+        decorators: vec![],
+        calls: vec![],
+        field_reads: vec![],
+        owner_class: None,
+        content_hash: 0,
+    }
 }
 
 /// Line-oriented `service { rpc … }` extractor — gRPC service contracts.

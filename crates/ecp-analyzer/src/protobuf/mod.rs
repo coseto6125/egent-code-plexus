@@ -1,4 +1,5 @@
-//! Protobuf `.proto` file analysis — T4-5 schema-field detector.
+//! Protobuf `.proto` file analysis — message structs, schema fields, and
+//! gRPC service contracts.
 //!
 //! Uses a hand-rolled line-oriented lexer (Option B) because no
 //! `tree-sitter-protobuf` crate exists in the workspace.  The lexer handles
@@ -10,6 +11,11 @@
 //!     repeated int32  ids  = 2;
 //! }
 //! ```
+//!
+//! Each top-level `message` with ≥1 field becomes a `NodeKind::Struct`
+//! (value-type aggregate — no inheritance/vtable, distinct from `Class`),
+//! owning its fields via `HasProperty`. Without this owner node the schema
+//! fields are dropped at `schema_field_mirrors` and never reach the graph.
 //!
 //! **Acknowledged limitations (v1)**:
 //! - Nested `message` definitions are skipped (parser does not recurse).
