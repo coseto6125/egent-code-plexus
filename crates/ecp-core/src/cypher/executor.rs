@@ -701,7 +701,7 @@ fn eval_return_expr(
                 Ok(v.clone())
             } else if let Some(&idx) = b.node_vars.get(var) {
                 Ok(match graph.mnode(idx) {
-                    Some(m) => Value::Str(m.name(&graph).to_string()),
+                    Some(m) => Value::Str(m.name(&graph).into()),
                     None => Value::Null,
                 })
             } else {
@@ -744,8 +744,8 @@ fn eval_return_item_rich(
                 };
                 return Value::NodeRef {
                     idx,
-                    name: m.name(&graph).to_string(),
-                    kind: m.kind().as_str().to_string(),
+                    name: m.name(&graph).into(),
+                    kind: m.kind().as_str().into(),
                     file_path: m.file_path(&graph).unwrap_or("").to_string(),
                 };
             }
@@ -949,10 +949,10 @@ fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) ->
                 return Value::Null;
             };
             if let Some(e) = graph.overlay_edge(eidx) {
-                return Value::Str(e.rel_type.as_str().to_string());
+                return Value::Str(e.rel_type.as_str().into());
             }
             let e = &graph.edges[eidx as usize];
-            Value::Str(RelType::from(&e.rel_type).as_str().to_string())
+            Value::Str(RelType::from(&e.rel_type).as_str().into())
         }
         "ID" => {
             // id(n) — args[0] must be a Var bound to a node.
@@ -973,7 +973,7 @@ fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) ->
                 return Value::Null;
             };
             match graph.mnode(idx) {
-                Some(m) => Value::List(vec![Value::Str(m.kind().as_str().to_string())]),
+                Some(m) => Value::List(vec![Value::Str(m.kind().as_str().into())]),
                 None => Value::Null,
             }
         }
@@ -1448,9 +1448,9 @@ fn node_prop_no_cache(node_idx: u32, prop: &str, graph: Gv<'_>) -> Value {
     // symbol has no metas yet and takes the sparse defaults.
     let fm = m.fm_idx(node_idx);
     match prop {
-        "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").to_string()),
+        "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").into()),
         "ownerClass" => match m.owner_class(&graph) {
-            Some(oc) => Value::Str(oc.to_string()),
+            Some(oc) => Value::Str(oc.into()),
             None => Value::Null,
         },
         "line" | "startLine" => Value::Int(m.start_line() as i64),
@@ -1610,7 +1610,7 @@ fn eval_expr(
             }
             if let Some(&idx) = b.node_vars.get(var) {
                 return Ok(match graph.mnode(idx) {
-                    Some(m) => Value::Str(m.name(&graph).to_string()),
+                    Some(m) => Value::Str(m.name(&graph).into()),
                     None => Value::Null,
                 });
             }
@@ -2047,7 +2047,7 @@ fn lit_to_value(l: &Literal) -> Value {
         Literal::Bool(b) => Value::Bool(*b),
         Literal::Int(i) => Value::Int(*i),
         Literal::Float(f) => Value::Float(*f),
-        Literal::Str(s) => Value::Str(s.clone()),
+        Literal::Str(s) => Value::Str(s.as_str().into()),
         Literal::List(xs) => Value::List(xs.iter().map(lit_to_value).collect()),
     }
 }
@@ -2108,8 +2108,8 @@ fn prop_value(
                 reason,
             } => match prop {
                 "confidence" => Value::Float(*confidence as f64),
-                "reason" => Value::Str(reason.clone()),
-                "rel_type" => Value::Str(format!("{rel_type:?}")),
+                "reason" => Value::Str(reason.as_str().into()),
+                "rel_type" => Value::Str(format!("{rel_type:?}").into()),
                 _ => Value::Null,
             },
             // Scalar: only bare var reference makes sense; <var>.<prop> returns Null.
@@ -2129,16 +2129,16 @@ fn prop_value(
         if let Some(e) = graph.overlay_edge(edge_idx) {
             return match prop {
                 "confidence" => Value::Float(e.confidence as f64),
-                "reason" => Value::Str("l1-overlay".to_string()),
-                "rel_type" => Value::Str(e.rel_type.as_str().to_string()),
+                "reason" => Value::Str("l1-overlay".into()),
+                "rel_type" => Value::Str(e.rel_type.as_str().into()),
                 _ => Value::Null,
             };
         }
         let e = &graph.edges[edge_idx as usize];
         return match prop {
             "confidence" => Value::Float(e.confidence.to_native() as f64),
-            "reason" => Value::Str(e.reason.resolve(&graph.string_pool).to_string()),
-            "rel_type" => Value::Str(RelType::from(&e.rel_type).as_str().to_string()),
+            "reason" => Value::Str(e.reason.resolve(&graph.string_pool).into()),
+            "rel_type" => Value::Str(RelType::from(&e.rel_type).as_str().into()),
             _ => Value::Null,
         };
     }
@@ -2159,19 +2159,19 @@ fn node_prop_value(node_idx: u32, prop: &str, graph: Gv<'_>, cache: &mut Content
     };
     let fm = m.fm_idx(node_idx);
     match prop {
-        "name" => Value::Str(m.name(&graph).to_string()),
+        "name" => Value::Str(m.name(&graph).into()),
         // u64 uid stored as i64 bits — no allocation per row.
         "uid" => Value::Int(m.uid() as i64),
         "ownerClass" => match m.owner_class(&graph) {
-            Some(oc) => Value::Str(oc.to_string()),
+            Some(oc) => Value::Str(oc.into()),
             None => Value::Null,
         },
-        "kind" => Value::Str(m.kind().as_str().to_string()),
+        "kind" => Value::Str(m.kind().as_str().into()),
         // 1-based, matching impact/find/inspect output (see Node::start_line).
         // `span.0` is the raw 0-based tree-sitter row; never expose it as `line`.
         "line" | "startLine" => Value::Int(m.start_line() as i64),
         "endLine" => Value::Int(m.end_line() as i64),
-        "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").to_string()),
+        "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").into()),
         "content" => {
             let slice = match &m {
                 MNode::Base(n) => {
@@ -2206,7 +2206,7 @@ fn node_prop_value(node_idx: u32, prop: &str, graph: Gv<'_>, cache: &mut Content
                         .unwrap_or_default()
                 }
             };
-            Value::Str(slice)
+            Value::Str(slice.into())
         }
         // ── FunctionMeta flag properties ────────────────────────────────────
         // FunctionMeta is sparse (only Function/Method/Constructor nodes).
@@ -2293,7 +2293,7 @@ fn archived_fm_decorators(graph: Gv<'_>, node_idx: u32) -> Value {
             .map(|d| {
                 let s = d.resolve(&graph.string_pool);
                 let normalized = s.strip_prefix('@').unwrap_or(s);
-                Value::Str(normalized.to_string())
+                Value::Str(normalized.into())
             })
             .collect(),
         Err(_) => vec![],
@@ -3778,7 +3778,7 @@ mod tests {
         assert_eq!(result.columns, vec!["a.content"]);
         assert_eq!(result.rows.len(), 1);
         let content = match &result.rows[0][0] {
-            Value::Str(s) => s.clone(),
+            Value::Str(s) => s.to_string(),
             other => panic!("expected Str, got {other:?}"),
         };
         // span (0,0,2,1) covers "function hello() {\n  return 42;\n}"
@@ -3971,7 +3971,7 @@ mod tests {
                 .rows
                 .iter()
                 .map(|row| match &row[0] {
-                    Value::Str(s) => s.clone(),
+                    Value::Str(s) => s.to_string(),
                     other => panic!("expected Str, got {other:?}"),
                 })
                 .collect();
@@ -3995,7 +3995,7 @@ mod tests {
                 .rows
                 .iter()
                 .map(|row| match &row[0] {
-                    Value::Str(s) => s.clone(),
+                    Value::Str(s) => s.to_string(),
                     other => panic!("expected Str, got {other:?}"),
                 })
                 .collect();

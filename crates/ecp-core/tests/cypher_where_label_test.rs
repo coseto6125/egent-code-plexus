@@ -95,7 +95,7 @@ fn names_returned(cypher_query: &str) -> Vec<String> {
         .rows
         .iter()
         .map(|r| match &r[0] {
-            cypher::Value::Str(s) => s.clone(),
+            cypher::Value::Str(s) => s.to_string(),
             v => panic!("expected Str, got {v:?}"),
         })
         .collect()
