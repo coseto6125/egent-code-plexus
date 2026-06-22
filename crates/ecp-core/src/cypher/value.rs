@@ -1,4 +1,5 @@
 use crate::graph::RelType;
+use compact_str::CompactString;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -6,14 +7,20 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(String),
+    /// `CompactString` inlines values ≤24 bytes with no heap allocation. The
+    /// dominant result strings — symbol `kind` ("Function", "Class"…) and
+    /// `rel_type` ("Calls", "Implements"…) — always fit, so a query returning
+    /// N edges drops N heap allocs for those columns.
+    Str(CompactString),
     List(Vec<Value>),
     /// Reference to a graph node. CLI side resolves `.name`/`.kind`/`.filePath`
-    /// for human-readable serialization.
+    /// for human-readable serialization. `name`/`kind` inline as `CompactString`
+    /// (kind always; realistic symbol names usually); `file_path` stays `String`
+    /// since paths routinely exceed the inline budget.
     NodeRef {
         idx: u32,
-        name: String,
-        kind: String,
+        name: CompactString,
+        kind: CompactString,
         file_path: String,
     },
     EdgeRef {

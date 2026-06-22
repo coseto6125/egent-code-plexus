@@ -166,6 +166,26 @@ fn is_excluded(contract_id: &str, cfg: &GroupConfig) -> bool {
     false
 }
 
+/// Normalize a `contract_id` into a BM25-safe token stream for BOTH index and
+/// query sides. Beyond `:` (field-qualifier syntax), Tantivy's query parser
+/// treats `+ - && || ! ( ) { } [ ] ^ " ~ * ? \ /` as operators — so a REST
+/// path-param like `http:GET:/users/{id}` parsed verbatim raises a SyntaxError,
+/// and `bm25_search` silently returns no match for EVERY path-param contract.
+/// Mapping any non-alphanumeric (keeping `_`) to a space matches the default
+/// tokenizer's word splitting and keeps the two sides symmetric.
+fn normalize_for_bm25(contract_id: &str) -> String {
+    contract_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
 fn build_bm25_schema() -> (Schema, tantivy::schema::Field, tantivy::schema::Field) {
     let mut builder = Schema::builder();
     // `contract_id` is queried, never retrieved from the doc store (results read
@@ -196,9 +216,7 @@ fn build_bm25_index(index_dir: &Path, kept: &[&StoredContract]) -> Result<(), St
         .map_err(|e| format!("acquire contracts writer: {e}"))?;
 
     for c in kept {
-        // Escape `:` → space so Tantivy's query parser doesn't treat
-        // `http:GET:/users` as field-qualified sub-queries.
-        let escaped = c.inner.contract_id.replace(':', " ");
+        let escaped = normalize_for_bm25(&c.inner.contract_id);
         let mut doc = tantivy::TantivyDocument::default();
         doc.add_text(contract_id_field, &escaped);
         doc.add_text(uid_field, &c.inner.symbol_uid);
@@ -247,8 +265,8 @@ fn bm25_search(
     contract_id: &str,
     limit: usize,
 ) -> Vec<(String, f32)> {
-    // Escape `:` same way as at index time.
-    let escaped = contract_id.replace(':', " ");
+    // Normalize the same way as at index time.
+    let escaped = normalize_for_bm25(contract_id);
     let Ok(query) = parser.parse_query(&escaped) else {
         return Vec::new();
     };
@@ -273,4 +291,91 @@ fn bm25_search(
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_for_bm25;
+    use tantivy::query::QueryParser;
+    use tantivy::schema::{Schema, TEXT};
+    use tantivy::Index;
+
+    fn parses(raw: &str) -> bool {
+        let mut b = Schema::builder();
+        let f = b.add_text_field("contract_id", TEXT);
+        let index = Index::create_in_ram(b.build());
+        let parser = QueryParser::for_index(&index, vec![f]);
+        parser.parse_query(&normalize_for_bm25(raw)).is_ok()
+    }
+
+    #[test]
+    fn normalize_for_bm25_path_param_contract_parses() {
+        // Regression: `{id}` is Tantivy query syntax; verbatim parse raised a
+        // SyntaxError so every REST path-param contract silently matched nothing.
+        assert!(parses("http:GET:/users/{id}"));
+        assert!(parses(
+            "http:DELETE:/api/v2/orders/{orderId}/items/{itemId}"
+        ));
+        assert!(parses("grpc:UserService:GetUser"));
+    }
+
+    #[test]
+    fn normalize_for_bm25_strips_query_operators_to_spaces() {
+        // All Tantivy operator chars map to spaces; alphanumerics and `_` survive.
+        let n = normalize_for_bm25("http:GET:/users/{id}?a=1&b=2");
+        assert_eq!(n, "http GET  users  id  a 1 b 2");
+        assert!(!n.contains('{') && !n.contains('}') && !n.contains(':') && !n.contains('/'));
+    }
+
+    /// End-to-end: a path-param consumer must BM25-match its same-id provider in
+    /// another repo. Before the normalize fix the `{id}` raised a parse error and
+    /// this returned no match — so this exercises the real index→query pipeline,
+    /// which is what "index/query symmetry" actually has to guarantee.
+    #[test]
+    fn bm25_matches_path_param_contract_across_repos() {
+        use super::{build_bm25_index, open_bm25_searcher};
+        use crate::commands::group::types::{
+            ContractRole, ContractType, ExtractedContract, StoredContract, SymbolRef,
+        };
+
+        fn contract(repo: &str, role: ContractRole, uid: &str) -> StoredContract {
+            StoredContract {
+                repo: repo.to_string(),
+                inner: ExtractedContract {
+                    contract_id: "http:GET:/users/{id}".to_string(),
+                    contract_type: ContractType::Http,
+                    role,
+                    symbol_uid: uid.to_string(),
+                    symbol_ref: SymbolRef {
+                        file_path: format!("{repo}/api.rs"),
+                        name: "handler".to_string(),
+                    },
+                    confidence: 1.0,
+                    service: None,
+                    meta: vec![],
+                },
+            }
+        }
+
+        let provider = contract("svc-a", ContractRole::Provider, "uid-provider");
+        let consumer = contract("svc-b", ContractRole::Consumer, "uid-consumer");
+        let kept = [&provider, &consumer];
+
+        let dir = tempfile::tempdir().unwrap();
+        let index_dir = dir.path().join("contracts_index");
+        build_bm25_index(&index_dir, &kept).unwrap();
+        let (searcher, parser, uid_field) = open_bm25_searcher(&index_dir).unwrap();
+
+        let hits = super::bm25_search(
+            &searcher,
+            &parser,
+            uid_field,
+            &consumer.inner.contract_id,
+            16,
+        );
+        assert!(
+            hits.iter().any(|(uid, _)| uid == "uid-provider"),
+            "path-param consumer should BM25-match the provider; got {hits:?}"
+        );
+    }
 }
