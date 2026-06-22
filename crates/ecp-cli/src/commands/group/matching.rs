@@ -168,7 +168,9 @@ fn is_excluded(contract_id: &str, cfg: &GroupConfig) -> bool {
 
 fn build_bm25_schema() -> (Schema, tantivy::schema::Field, tantivy::schema::Field) {
     let mut builder = Schema::builder();
-    let contract_id_field = builder.add_text_field("contract_id", TEXT | STORED);
+    // `contract_id` is queried, never retrieved from the doc store (results read
+    // only `uid`), so STORED would bloat the index for no read benefit.
+    let contract_id_field = builder.add_text_field("contract_id", TEXT);
     let uid_field = builder.add_text_field("uid", STRING | STORED);
     let schema = builder.build();
     (schema, contract_id_field, uid_field)
