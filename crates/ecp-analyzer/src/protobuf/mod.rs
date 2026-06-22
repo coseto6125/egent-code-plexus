@@ -16,7 +16,10 @@
 //! - `oneof` blocks are not supported — fields inside them are not emitted.
 //! - `map<K,V>` fields are not supported — skipped with no emission.
 //! - `enum` definitions are ignored (no `SchemaField` equivalent).
-//! - RPC / service blocks are ignored.
+//! - `service { rpc … }` blocks ARE captured: each `rpc` becomes a
+//!   `NodeKind::Route` (method `GRPC`, path `/<package.>Service/Method`) so
+//!   gRPC service contracts are visible to `ecp routes` / `ecp contracts`.
+//!   Nested services and rpc request/response message types are not captured.
 //! - Multi-line comments (`/* … */`) are treated as opaque — a field
 //!   declaration whose line falls inside a block comment may be emitted.
 //!   Single-line `//` comments are stripped correctly.
