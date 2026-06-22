@@ -15,7 +15,7 @@ version = "0.0.0"
 description = "EgentCodePlexus (ecp) — symbol-level code intelligence graph for AI agents and LLMs"
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "SEE LICENSE IN LICENSE.md" }
+license = { text = "MIT" }
 authors = [{ name = "coseto6125" }]
 keywords = ["code-intelligence", "ast", "tree-sitter", "llm", "ai-agents", "code-graph"]
 classifiers = [

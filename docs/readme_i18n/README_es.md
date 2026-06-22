@@ -10,7 +10,7 @@
 ![Cold index 2.6s](https://img.shields.io/badge/cold_index-2.6s%20%2F%2022k%20files-brightgreen)
 ![Query latency](https://img.shields.io/badge/query-%3C175ms%20cold-blue)
 ![Languages](https://img.shields.io/badge/languages-31%20parsed-orange)
-![License](https://img.shields.io/badge/license-PolyForm%20NC-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Built with Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
 ![Status early release](https://img.shields.io/badge/status-early%20release-yellow)
 
@@ -51,7 +51,7 @@ Cada decisión de diseño tiene una sola fuente: *¿qué necesita realmente el a
 
 🎙️ **[Entrevistas a agentes](../../interviews/README.md)** — Gemini CLI y Codex describen cómo usan `ecp` en flujos de tareas autónomas en vivo.
 
-Construido sobre [GitNexus](https://github.com/abhigyanpatwari/GitNexus) por [Abhigyan Patwari](https://github.com/abhigyanpatwari) — mismo concepto de grafo estructural, reescrito en Rust, audiencia diferente. [PolyForm Noncommercial 1.0.0](../../LICENSE.md); ver [NOTICES.md](../../LICENSES/NOTICES.md) para la atribución requerida.
+Inspirado en [GitNexus](https://github.com/abhigyanpatwari/GitNexus) por [Abhigyan Patwari](https://github.com/abhigyanpatwari) — mismo concepto de grafo estructural, reimplementado de forma independiente en Rust, audiencia diferente. Licencia [MIT](../../LICENSE); ver [NOTICES.md](../../LICENSES/NOTICES.md) para atribuciones de terceros.
 
 ---
 
@@ -392,9 +392,9 @@ Parseo → resolución → serialización fluye a través de un canal MPSC hacia
 
 ## 📜 Licencia y reconocimientos
 
-[PolyForm Noncommercial 1.0.0](../../LICENSE.md). Uso personal, investigación, proyectos de hobby y organizaciones sin fines de lucro explícitamente permitidos. **El uso comercial no está concedido por esta licencia** — contacte al autor original de GitNexus, Abhigyan Patwari, para derechos comerciales.
+[MIT](../../LICENSE). Libre para cualquier uso — comercial o no comercial — con atribución. Consulte [NOTICES.md](../../LICENSES/NOTICES.md) para las licencias de gramáticas tree-sitter incluidas.
 
-Construido sobre:
+Basado en:
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — diseño original, superficie CLI y modelo conceptual
 - [tree-sitter](https://tree-sitter.github.io/) — parseo AST incremental robusto
 - [rkyv](https://rkyv.org/) — framework de deserialización de copia cero

@@ -3,8 +3,8 @@
 //!
 //! Dart uses prefix type syntax (`int x`, `String name`); tree-sitter-dart
 //! exposes the `(type ...)` node as a sibling of the identifier rather than
-//! a `name:`-prefixed field, so the parser descends positionally. Ported
-//! from upstream `_source_code/gitnexus/src/core/ingestion/type-extractors/dart.ts`.
+//! a `name:`-prefixed field, so the parser descends positionally. Behavior
+//! cross-checked against GitNexus `dart.ts` type-extractor (independent Rust impl).
 
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

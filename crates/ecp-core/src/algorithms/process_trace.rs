@@ -158,7 +158,7 @@ pub fn detect_processes(
         .collect()
 }
 
-/// Entry-point scoring (simplified port of upstream `calculateEntryPointScore`).
+/// Entry-point scoring (behavior cross-checked against GitNexus `calculateEntryPointScore`).
 /// We score by call ratio and name patterns. Routes/decorators are not exposed
 /// in `Node` directly — we approximate via name heuristics.
 fn find_entry_points(

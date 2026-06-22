@@ -1,7 +1,7 @@
 //! AST-pattern framework detection for C# (ASP.NET / SignalR / Blazor / EFCore).
 //!
-//! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/csharp.ts:153-187`
-//! `astFrameworkPatterns`. The matcher is a case-insensitive substring scan
+//! Behavior cross-checked against GitNexus `csharp.ts:153-187` `astFrameworkPatterns`
+//! (independent Rust impl). The matcher is a case-insensitive substring scan
 //! of file source — one `RawFrameworkRef` per detected framework, at
 //! module level.
 

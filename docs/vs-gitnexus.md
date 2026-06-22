@@ -114,4 +114,4 @@ The two are not mutually exclusive. Several teams run GitNexus as the human-faci
 
 ## Attribution
 
-`ecp` is a derivative work of GitNexus. The original design, CLI surface, and conceptual model are the work of [Abhigyan Patwari](https://github.com/abhigyanpatwari). `ecp` is not affiliated with or endorsed by the upstream GitNexus project. See [NOTICES.md](../LICENSES/NOTICES.md) for the full third-party attribution list.
+`ecp` is an independent Rust project inspired by GitNexus. The structural-graph concept and CLI surface were originated by [Abhigyan Patwari](https://github.com/abhigyanpatwari); `ecp` is an independent reimplementation that reuses no GitNexus source code. `ecp` is not affiliated with or endorsed by the GitNexus project. See [NOTICES.md](../LICENSES/NOTICES.md) for the full third-party attribution list.

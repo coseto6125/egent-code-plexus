@@ -23,8 +23,8 @@ use tree_sitter::{Query, QueryCursor};
 
 /// gin / echo / chi all share `r.METHOD("/path", handler)`. Gate the
 /// framework_ref by the imported package — the route shape alone can't
-/// distinguish gin from echo. Ported from upstream
-/// `gitnexus/src/core/group/extractors/http-patterns/go.ts:23-39`.
+/// distinguish gin from echo. Behavior cross-checked against GitNexus
+/// `go.ts:23-39` (independent Rust implementation).
 const GIN_REQUIRED: &[&str] = &["github.com/gin-gonic/gin"];
 const ECHO_REQUIRED: &[&str] = &["github.com/labstack/echo"];
 

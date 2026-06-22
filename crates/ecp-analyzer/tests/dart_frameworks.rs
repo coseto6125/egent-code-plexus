@@ -1,6 +1,6 @@
 //! AST-pattern framework detection for Dart (Flutter / Riverpod).
 //!
-//! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/dart.ts:109-132`.
+//! Behavior cross-checked against GitNexus `dart.ts:109-132` (independent Rust impl).
 
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

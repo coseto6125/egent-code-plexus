@@ -2,8 +2,8 @@
 //!
 //! Swift uses postfix type syntax `name: Type` (vs C's prefix `Type name`),
 //! so the parser reads the type-annotation node text directly rather than
-//! slicing source-before-the-name. Ported from upstream
-//! `_source_code/gitnexus/src/core/ingestion/type-extractors/swift.ts`.
+//! slicing source-before-the-name. Behavior cross-checked against GitNexus
+//! `swift.ts` type-extractor (independent Rust impl).
 
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

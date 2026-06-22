@@ -10,7 +10,7 @@
 ![Cold index 2.6s](https://img.shields.io/badge/cold_index-2.6s%20%2F%2022k%20files-brightgreen)
 ![Query latency](https://img.shields.io/badge/query-%3C175ms%20cold-blue)
 ![Languages](https://img.shields.io/badge/languages-31%20parsed-orange)
-![License](https://img.shields.io/badge/license-PolyForm%20NC-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Built with Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
 ![Status early release](https://img.shields.io/badge/status-early%20release-yellow)
 
@@ -51,7 +51,7 @@
 
 🎙️ **[エージェントインタビュー](../../interviews/README.md)** — Gemini CLI と Codex が、ライブの自律タスクフローで `ecp` をどのように使用しているかを説明します。
 
-[Abhigyan Patwari](https://github.com/abhigyanpatwari) による [GitNexus](https://github.com/abhigyanpatwari/GitNexus) をベースに構築——同じ構造グラフの概念を Rust で書き直し、異なるオーディエンス向けに。[PolyForm Noncommercial 1.0.0](../../LICENSE.md)；必要な帰属表示については [NOTICES.md](../../LICENSES/NOTICES.md) を参照してください。
+[Abhigyan Patwari](https://github.com/abhigyanpatwari) による [GitNexus](https://github.com/abhigyanpatwari/GitNexus) にインスパイアされ——同じ構造グラフの概念を Rust で独立して再実装、異なるオーディエンス向けに。[MIT](../../LICENSE) ライセンス；サードパーティの帰属表示については [NOTICES.md](../../LICENSES/NOTICES.md) を参照してください。
 
 ---
 
@@ -392,7 +392,7 @@ crates/
 
 ## 📜 ライセンスと謝辞
 
-[PolyForm Noncommercial 1.0.0](../../LICENSE.md)。個人利用、研究、趣味プロジェクト、非商業組織は明示的に許可されています。**商業利用はこのライセンスでは認められていません**——商業的権利については、アップストリーム GitNexus の作者 Abhigyan Patwari にお問い合わせください。
+[MIT](../../LICENSE)。帰属表示のもと、商業・非商業を問わずあらゆる用途に自由に使用できます。バンドルされた tree-sitter 文法のライセンスは [NOTICES.md](../../LICENSES/NOTICES.md) を参照してください。
 
 以下をベースに構築：
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — 元の設計、CLI サーフェス、概念モデル

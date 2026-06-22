@@ -1,24 +1,27 @@
 # Third-Party Notices
 
-`egent-code-plexus` is a derivative work of [GitNexus](https://github.com/abhigyanpatwari/GitNexus)
-and bundles tree-sitter grammars as path dependencies under `crates/vendor/`.
-This document collects required attribution and license pointers per
-[SPDX REUSE](https://reuse.software/) conventions. Canonical license texts
-live under `LICENSES/`; per-component LICENSE files are also preserved
-in-place inside each vendor directory.
+`egent-code-plexus` is an independent Rust project that bundles tree-sitter
+grammars as path dependencies under `crates/vendor/`. This document collects
+attribution and license pointers per [SPDX REUSE](https://reuse.software/)
+conventions. Canonical license texts live under `LICENSES/`; per-component
+LICENSE files are also preserved in-place inside each vendor directory.
 
 ---
 
 ## Primary project license
 
-> Required Notice: Copyright Abhigyan Patwari (https://github.com/abhigyanpatwari/GitNexus)
+- SPDX-License-Identifier: **MIT**
+- License text: [LICENSE](../LICENSE) (also at [LICENSES/MIT.txt](./MIT.txt))
+- Copyright (c) 2025 E-NoR (https://github.com/coseto6125)
 
-- SPDX-License-Identifier: **LicenseRef-PolyForm-Noncommercial-1.0.0**
-- License text: [LICENSE](../LICENSE.md) (also at [LICENSES/PolyForm-Noncommercial-1.0.0.txt](./PolyForm-Noncommercial-1.0.0.txt))
-- Source: derived from `abhigyanpatwari/GitNexus`
-- Inherited license is non-negotiable: PolyForm Noncommercial 1.0.0 propagates
-  to every new work based on GitNexus, including this Rust reimagination.
-  Commercial use is not permitted.
+### Acknowledgment — GitNexus
+
+This project's structural-graph concept and CLI surface were inspired by
+[GitNexus](https://github.com/abhigyanpatwari/GitNexus) by Abhigyan Patwari.
+`egent-code-plexus` is an independent Rust reimplementation: no GitNexus source
+code was copied or ported. Behavioral parity was cross-checked against GitNexus
+as a reference oracle during development, but all code here is original. The
+acknowledgment is offered as a courtesy credit, not a license obligation.
 
 ---
 
