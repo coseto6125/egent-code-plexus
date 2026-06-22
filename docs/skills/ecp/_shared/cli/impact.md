@@ -2,7 +2,7 @@
 
 Two modes:
 
-1. **Symbol blast radius** — given a function / method / class, list callers and risk level.
+1. **Symbol blast radius** — given a function / method / class, list every caller (upstream) or callee (downstream) with file:line and caller counts.
 2. **Path-literal site lookup** — given an exact path string (`--literal VALUE`), list every place that string appears in the graph, with sink classification (`sink:read` / `sink:write` / `sink:join` / `sink:free`).
 
 ## Usage
@@ -46,6 +46,6 @@ ecp impact --literal-coherence --format json
 
 Scans all PathLiteral nodes and emits likely filename split-brain candidate pairs. A pair is reported only when the literals have the same extension, similar basenames, nearby source directories, and separated access patterns (one read-only, one write-only). Use this before guessing candidate pairs manually.
 
-## Risk Levels (blast-radius mode)
-- **LOW**: Few callers, strictly localized.
-- **HIGH/CRITICAL**: Many callers or core library impact. **Stop and confirm with user.**
+## Reading the blast radius
+
+`impact` returns the raw caller / callee set — it does not assign a risk label. Judge change risk from the result directly: a large upstream caller count, or callers in core / widely-imported modules, means a wide blast radius — stop and confirm with the user before a breaking change. Caller counts are a **lower bound** (the resolver suppresses ambiguous bare calls to common names); a suspiciously low count warrants a `grep` cross-check before trusting it.

@@ -30,7 +30,7 @@ pub enum Direction {
 pub const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.85;
 
 /// Symbol-level blast radius. From `<name>` traverses call-graph for upstream
-/// callers / downstream callees with risk_level. From `--baseline <ref>`
+/// callers / downstream callees. From `--baseline <ref>`
 /// detects symbols changed vs the baseline and runs the same traversal per
 /// change. For edge-level resolver delta (tier degradation, silent break),
 /// use `ecp diff --section bindings` instead.

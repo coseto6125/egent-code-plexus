@@ -26,7 +26,7 @@ pub enum Commands {
     /// Exact / fuzzy return a single most-likely definition (or all via `--all`); bm25 returns top-K
     /// partitioned into source / tests / reference / document / config buckets and supports stdin `--batch`.
     Find(commands::find::FindArgs),
-    /// Symbol blast radius — affected callers + risk_level.
+    /// Symbol blast radius — affected callers (counts + call sites).
     ///
     /// For binding tier-degradation or resolver delta, use `ecp diff`.
     Impact(commands::impact::ImpactArgs),
