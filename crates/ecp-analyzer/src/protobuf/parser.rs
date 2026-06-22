@@ -64,9 +64,10 @@ impl LanguageProvider for ProtobufProvider {
 fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
     let mut out: Vec<RawSchemaField> = Vec::new();
     let mut messages: Vec<RawNode> = Vec::new();
-    let mut current_message: Option<String> = None;
-    // (name, header_span, has_field) for the open top-level message, deferred
-    // until the block closes so the node is emitted iff it had a field.
+    // The open top-level message: (name, header_span, has_field). Holds the
+    // owner name for field attribution AND defers the Struct-node emission to
+    // block-close so it lands iff the message owned ≥1 field. `Some` ⟺ inside
+    // a top-level message.
     let mut pending: Option<(String, (u32, u32, u32, u32), bool)> = None;
     let mut depth: u32 = 0;
 
@@ -90,7 +91,6 @@ fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
         // v1 limitation documented in mod.rs.
         if depth == 0 {
             if let Some(name) = parse_message_header(line) {
-                current_message = Some(name.clone());
                 pending = Some((name, (row, 0, row, line.len() as u32), false));
                 // The `{` on this line is already counted below via `opens`.
             }
@@ -101,9 +101,8 @@ fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
         depth = depth.saturating_add(opens).saturating_sub(closes);
 
         // After depth update: if we just closed the outermost message block,
-        // flush the pending Struct node (iff it owned ≥1 field) and clear ctx.
+        // flush the pending Struct node (iff it owned ≥1 field).
         if depth == 0 {
-            current_message = None;
             if let Some((name, span, has_field)) = pending.take() {
                 if has_field {
                     messages.push(message_struct_node(name, span));
@@ -112,12 +111,12 @@ fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
         }
 
         // ── Field extraction — only at depth 1 inside a known message ───────
-        let Some(ref owner) = current_message else {
+        // depth 0 = outside any message; depth ≥ 2 = nested block (oneof,
+        // nested message, options block) — skip in v1.
+        let Some(p) = pending.as_mut() else {
             continue;
         };
         if depth != 1 {
-            // depth 0 = outside any message; depth ≥ 2 = nested block (oneof,
-            // nested message, options block) — skip in v1.
             continue;
         }
 
@@ -127,13 +126,11 @@ fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
             out.push(RawSchemaField {
                 name: field_name.into_boxed_str(),
                 type_class,
-                owner_class: Box::from(owner.as_str()),
+                owner_class: Box::from(p.0.as_str()),
                 framework: PROTOBUF_FRAMEWORK,
                 span,
             });
-            if let Some(p) = pending.as_mut() {
-                p.2 = true;
-            }
+            p.2 = true;
         }
     }
 
