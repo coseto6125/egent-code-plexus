@@ -219,9 +219,12 @@ message Outer {
     assert!(types.contains(&SchemaType::Bool), "active: bool");
 }
 
-/// `oneof` blocks (depth ≥ 2) — fields inside oneof are not emitted in v1.
+/// `oneof` is a mutual-exclusion grouping of the enclosing message's OWN
+/// fields, so `text` and `data` belong to `Request` alongside `id`. (Unlike a
+/// nested `message`, a `oneof` is transparent — its variants are the message's
+/// fields.)
 #[test]
-fn test_oneof_fields_not_emitted() {
+fn test_oneof_fields_belong_to_enclosing_message() {
     let src = r#"
 syntax = "proto3";
 message Request {
@@ -233,13 +236,15 @@ message Request {
 }
 "#;
     let fields = parse(src);
-    // Only `id` at depth 1; `text` and `data` are inside oneof at depth 2.
     assert_eq!(
         fields.len(),
-        1,
-        "oneof fields not emitted in v1; only id captured"
+        3,
+        "id + oneof variants text/data all belong to Request"
     );
-    assert_eq!(fields[0].type_class, SchemaType::Int);
+    let names: Vec<&str> = fields.iter().map(|f| &*f.name).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"text"));
+    assert!(names.contains(&"data"));
 }
 
 /// `//` inline comments are stripped before field parsing.
