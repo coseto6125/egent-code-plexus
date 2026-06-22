@@ -65,6 +65,19 @@ pub fn detect_from_decorator(decorator: &str) -> Option<DetectedRoute> {
 
 pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
     let lower = raw.method.to_lowercase();
+
+    // gRPC fast path: the protobuf provider emits already-normalized records
+    // (method `GRPC`, path `/<package.>Service/Method`) from `service { rpc }`
+    // blocks — these are confirmed service endpoints, not literals to be
+    // filtered, so they bypass the HTTP-method allowlist below (which exists
+    // to reject non-route call sites that happen to carry a path-like string).
+    if lower == "grpc" && raw.path.starts_with('/') {
+        return Some(DetectedRoute {
+            method: "GRPC".to_string(),
+            path: raw.path.clone(),
+        });
+    }
+
     let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
 
     // Raw path may arrive wrapped in `"…"` / `'…'` because Python / TS
@@ -191,6 +204,24 @@ mod tests {
         let r = detect_from_call(&raw("use", "'/api/v1'")).unwrap();
         assert_eq!(r.method, "USE");
         assert_eq!(r.path, "/api/v1");
+    }
+
+    #[test]
+    fn detect_from_call_accepts_grpc_service_method() {
+        // The protobuf provider emits `GRPC` / `/pkg.Service/Method` from a
+        // `service { rpc }` block. `grpc` is not an HTTP method, so without
+        // the gRPC fast path the route is dropped at builder.rs and the
+        // service contract never reaches the graph.
+        let r = detect_from_call(&raw("GRPC", "/helloworld.Greeter/SayHello")).unwrap();
+        assert_eq!(r.method, "GRPC");
+        assert_eq!(r.path, "/helloworld.Greeter/SayHello");
+    }
+
+    #[test]
+    fn detect_from_call_grpc_requires_leading_slash() {
+        // A malformed gRPC path without the wire-format leading slash is not a
+        // valid endpoint — reject rather than emit a junk Route.
+        assert!(detect_from_call(&raw("GRPC", "Greeter/SayHello")).is_none());
     }
 
     // -- lax helper: per-framework bare-path support -------------------------
