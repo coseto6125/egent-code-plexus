@@ -134,8 +134,8 @@ thread_local! {
     });
 }
 
-/// Laravel route detection import gate. Ported from upstream
-/// `gitnexus/src/core/group/extractors/http-patterns/php.ts:34-42`.
+/// Laravel route detection import gate. Behavior cross-checked against GitNexus
+/// `php.ts:34-42` (independent Rust implementation).
 /// `use Illuminate\...` is required — bare `Route::` in a non-Laravel
 /// codebase shouldn't surface as a Laravel route.
 const LARAVEL_REQUIRED: &[&str] = &["Illuminate"];

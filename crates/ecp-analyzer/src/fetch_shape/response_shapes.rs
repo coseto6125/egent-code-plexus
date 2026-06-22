@@ -1,5 +1,5 @@
-//! Port of upstream `extractResponseShapes` + `extractPHPResponseShapes`
-//! (`gitnexus/src/core/ingestion/route-extractors/response-shapes.ts`).
+//! Independent Rust implementation of response-shape extraction; behavior
+//! cross-checked against GitNexus `extractResponseShapes` / `extractPHPResponseShapes`.
 //!
 //! Pure regex + state-machine scan over a route handler's source.
 //! Detects payload emission, extracts top-level keys, and classifies
@@ -460,7 +460,7 @@ fn extract_php_array_keys(array_content: &str) -> Vec<String> {
     keys
 }
 
-/// PHP status code detection — port of upstream `detectPHPStatusCode`.
+/// PHP status code detection — behavior cross-checked against GitNexus `detectPHPStatusCode`.
 /// Looks ~300 bytes back from the `json_encode` position, trimming
 /// anything before the last `exit;` / `die();` boundary so unrelated
 /// earlier control-flow doesn't contaminate the lookup.

@@ -1,6 +1,6 @@
 //! AST-pattern framework detection for Swift (UIKit / SwiftUI / Vapor).
 //!
-//! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/swift.ts:281-316`.
+//! Behavior cross-checked against GitNexus `swift.ts:281-316` (independent Rust impl).
 
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

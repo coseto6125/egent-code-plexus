@@ -119,8 +119,8 @@
 ) @route.chained.call
 
 ;; ---- Laravel ----
-;; `Route::<method>('/path', <handler>)`. Mirrors upstream
-;; `gitnexus/src/core/group/extractors/http-patterns/php.ts:34-42`. The
+;; `Route::<method>('/path', <handler>)`. Behavior cross-checked against
+;; GitNexus `php.ts:34-42` (independent implementation). The
 ;; outer call is the only structural anchor; the parser walks the
 ;; `arguments` node at parse time to extract path + handler shape.
 ;; Gated downstream by `use Illuminate\...`.

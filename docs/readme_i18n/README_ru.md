@@ -10,7 +10,7 @@
 ![Cold index 2.6s](https://img.shields.io/badge/cold_index-2.6s%20%2F%2022k%20files-brightgreen)
 ![Query latency](https://img.shields.io/badge/query-%3C175ms%20cold-blue)
 ![Languages](https://img.shields.io/badge/languages-31%20parsed-orange)
-![License](https://img.shields.io/badge/license-PolyForm%20NC-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Built with Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
 ![Status early release](https://img.shields.io/badge/status-early%20release-yellow)
 
@@ -51,7 +51,7 @@
 
 🎙️ **[Интервью с агентами](../../interviews/README.md)** — Gemini CLI и Codex рассказывают, как они используют `ecp` в реальных автономных рабочих процессах.
 
-Основан на [GitNexus](https://github.com/abhigyanpatwari/GitNexus) от [Abhigyan Patwari](https://github.com/abhigyanpatwari) — та же концепция структурного графа, переписанная на Rust, другая аудитория. [PolyForm Noncommercial 1.0.0](../../LICENSE.md); см. [NOTICES.md](../../LICENSES/NOTICES.md) для обязательного указания авторства.
+Вдохновлён [GitNexus](https://github.com/abhigyanpatwari/GitNexus) от [Abhigyan Patwari](https://github.com/abhigyanpatwari) — та же концепция структурного графа, независимо переработанная на Rust, другая аудитория. Лицензия [MIT](../../LICENSE); см. [NOTICES.md](../../LICENSES/NOTICES.md) для указания авторства сторонних компонентов.
 
 ---
 
@@ -392,7 +392,7 @@ crates/
 
 ## 📜 Лицензия и благодарности
 
-[PolyForm Noncommercial 1.0.0](../../LICENSE.md). Личное использование, исследования, хобби-проекты и некоммерческие организации явно разрешены. **Коммерческое использование не предоставляется данной лицензией** — обратитесь к автору GitNexus Abhigyan Patwari для коммерческих прав.
+[MIT](../../LICENSE). Свободно для любого использования — коммерческого или некоммерческого — при указании авторства. Лицензии включённых грамматик tree-sitter см. в [NOTICES.md](../../LICENSES/NOTICES.md).
 
 Основан на:
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — оригинальный дизайн, интерфейс CLI и концептуальная модель

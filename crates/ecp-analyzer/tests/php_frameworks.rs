@@ -1,6 +1,6 @@
 //! Framework detection (Laravel) for the PHP parser.
 //!
-//! Ported from upstream `gitnexus/src/core/group/extractors/http-patterns/php.ts`.
+//! Behavior cross-checked against GitNexus `php.ts` (independent Rust impl).
 //! Laravel route detection is gated by the `Illuminate` use statement;
 //! bare `Route::` in a non-Laravel codebase must NOT surface as a route.
 

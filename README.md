@@ -10,7 +10,7 @@
 ![Cold index 2.6s](https://img.shields.io/badge/cold_index-2.6s%20%2F%2022k%20files-brightgreen)
 ![Query latency](https://img.shields.io/badge/query-%3C175ms%20cold-blue)
 ![Languages](https://img.shields.io/badge/languages-31%20parsed-orange)
-![License](https://img.shields.io/badge/license-PolyForm%20NC-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Built with Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
 ![Status early release](https://img.shields.io/badge/status-early%20release-yellow)
 
@@ -58,7 +58,7 @@ Each design decision has one source: *what does the receiving agent actually nee
 
 🎙️ **[Agent Interviews](./interviews/README.md)** — Gemini CLI and Codex describe how they use `ecp` in live autonomous task flows.
 
-Built on [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same structural-graph concept, rewritten in Rust, different audience. [PolyForm Noncommercial 1.0.0](./LICENSE.md); see [NOTICES.md](./LICENSES/NOTICES.md) for required attribution.
+Inspired by [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan Patwari](https://github.com/abhigyanpatwari) — same structural-graph concept, independently reimplemented in Rust for a different audience. Licensed [MIT](./LICENSE); see [NOTICES.md](./LICENSES/NOTICES.md) for third-party attributions.
 
 ---
 
@@ -437,10 +437,10 @@ Parse → resolve → serialize runs through an MPSC channel into a single build
 
 ## 📜 License & acknowledgments
 
-[PolyForm Noncommercial 1.0.0](./LICENSE.md). Personal use, research, hobby projects, and noncommercial organizations explicitly permitted. **Commercial use is not granted by this license** — contact the upstream GitNexus author Abhigyan Patwari for commercial rights.
+[MIT](./LICENSE). Free for any use — commercial or noncommercial — with attribution. See [NOTICES.md](./LICENSES/NOTICES.md) for bundled tree-sitter grammar licenses.
 
-Built on:
-- [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — original design, CLI surface, and conceptual model
+Acknowledgments:
+- [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — inspired the structural-graph concept and CLI surface; this project is an independent Rust reimplementation, no code reused
 - [tree-sitter](https://tree-sitter.github.io/) — robust incremental AST parsing
 - [rkyv](https://rkyv.org/) — zero-copy deserialization framework
 - [Tantivy](https://github.com/quickwit-oss/tantivy) — full-text search engine

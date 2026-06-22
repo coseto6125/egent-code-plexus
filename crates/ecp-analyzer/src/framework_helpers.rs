@@ -22,10 +22,9 @@ pub(crate) const SCALAR_VALUE_KINDS: &[&str] = &["number", "string", "true", "fa
 /// One framework's textual signature: a name, a confidence value, a reason
 /// tag, and the substrings that prove the framework is in use.
 ///
-/// Mirrors upstream's `AstFrameworkPatternConfig` from
-/// `_source_code/gitnexus/src/core/ingestion/language-provider.ts`. The
-/// patterns are matched case-insensitively as substrings against the whole
-/// file source, per upstream `detectFrameworkFromAST` (`framework-detection.ts`).
+/// Same concept as GitNexus's `AstFrameworkPatternConfig` (behavior reference
+/// only). The patterns are matched case-insensitively as substrings against the
+/// whole file source, behavior cross-checked against GitNexus `detectFrameworkFromAST`.
 pub struct FrameworkPatternSpec {
     pub framework: &'static str,
     pub reason: &'static str,

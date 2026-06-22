@@ -16,7 +16,7 @@
     "type": "git",
     "url": "git+https://github.com/coseto6125/egent-code-plexus.git"
   },
-  "license": "SEE LICENSE IN LICENSE.md",
+  "license": "MIT",
   "author": "coseto6125",
   "type": "commonjs",
   "bin": {

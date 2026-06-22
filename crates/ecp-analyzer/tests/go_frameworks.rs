@@ -2,8 +2,8 @@
 //!
 //! Both frameworks share `r.METHOD("/path", handler)` shape, so detection
 //! is fully gated by the imported package — same source code with
-//! different imports yields different `RawFrameworkRef`s. Ported from
-//! upstream `gitnexus/src/core/group/extractors/http-patterns/go.ts`.
+//! different imports yields different `RawFrameworkRef`s. Behavior
+//! cross-checked against GitNexus `go.ts` (independent Rust impl).
 
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

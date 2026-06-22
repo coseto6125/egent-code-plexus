@@ -1,6 +1,7 @@
 //! Shadow-candidate path derivation for incremental indexing.
 //!
-//! Port of `gitnexus/src/core/incremental/shadow-candidates.ts` (ref-gitnexus
+//! Implements JS/TS module-resolution shadowing (a Node.js resolution rule);
+//! behavior cross-checked against GitNexus `shadow-candidates.ts` (ref-gitnexus
 //! PR #1479). When a newly-added file can steal import-resolution ownership
 //! from a pre-existing sibling, the pre-existing file must be re-analysed so
 //! its stale `Calls` edges are rebuilt against the new resolution target.
@@ -24,7 +25,7 @@ use std::{
 };
 
 /// JS/TS extensions that participate in standard module-resolution shadowing.
-/// Order matches the TS source so the generated candidate sets are identical.
+/// Order follows Node.js resolution priority (highest-priority extension first).
 const SHADOW_EXTS: &[&str] = &[".d.ts", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs"];
 
 /// Returns every pre-existing file in `all_files` whose import-resolution

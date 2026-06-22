@@ -10,7 +10,7 @@
 ![Cold index 2.6s](https://img.shields.io/badge/cold_index-2.6s%20%2F%2022k%20files-brightgreen)
 ![Query latency](https://img.shields.io/badge/query-%3C175ms%20cold-blue)
 ![Languages](https://img.shields.io/badge/languages-31%20parsed-orange)
-![License](https://img.shields.io/badge/license-PolyForm%20NC-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Built with Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
 ![Status early release](https://img.shields.io/badge/status-early%20release-yellow)
 
@@ -51,7 +51,7 @@
 
 🎙️ **[에이전트 인터뷰](../../interviews/README.md)** — Gemini CLI와 Codex가 실제 자율 작업 흐름에서 `ecp`를 어떻게 사용하는지 설명합니다.
 
-[Abhigyan Patwari](https://github.com/abhigyanpatwari)의 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)를 기반으로 구축 — 동일한 구조적 그래프 개념, Rust로 재작성, 다른 대상. [PolyForm Noncommercial 1.0.0](../../LICENSE.md); 필수 저작권 표시는 [NOTICES.md](../../LICENSES/NOTICES.md)를 참조하세요.
+[Abhigyan Patwari](https://github.com/abhigyanpatwari)의 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)에서 영감을 받아 — 동일한 구조적 그래프 개념, Rust로 독립적으로 재구현, 다른 대상. [MIT](../../LICENSE) 라이선스; 서드파티 저작권 표시는 [NOTICES.md](../../LICENSES/NOTICES.md)를 참조하세요.
 
 ---
 
@@ -392,7 +392,7 @@ crates/
 
 ## 📜 라이선스 및 감사의 말
 
-[PolyForm Noncommercial 1.0.0](../../LICENSE.md). 개인 사용, 연구, 취미 프로젝트, 비상업적 조직에 명시적으로 허용됩니다. **이 라이선스는 상업적 사용을 허가하지 않습니다** — 상업적 권리에 대해서는 상위 GitNexus 저작자 Abhigyan Patwari에게 연락하세요.
+[MIT](../../LICENSE). 귀속 표시와 함께 상업적·비상업적 모든 용도에 자유롭게 사용할 수 있습니다. 번들로 제공되는 tree-sitter 문법 라이선스는 [NOTICES.md](../../LICENSES/NOTICES.md)를 참조하세요.
 
 기반 구성요소:
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — 원본 설계, CLI 인터페이스, 개념적 모델

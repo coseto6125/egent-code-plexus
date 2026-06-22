@@ -1,7 +1,7 @@
 //! AST-pattern framework detection for C++ (Qt).
 //!
-//! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/c-cpp.ts:414-431`.
-//! Upstream's `cProvider` has no `astFrameworkPatterns`, so this is C++-only.
+//! Behavior cross-checked against GitNexus `c-cpp.ts:414-431` (independent Rust impl).
+//! GitNexus's `cProvider` has no `astFrameworkPatterns`, so this is C++-only.
 
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

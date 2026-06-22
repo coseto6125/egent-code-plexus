@@ -1,6 +1,6 @@
 //! AST-pattern framework detection for Ruby (Rails / Sinatra).
 //!
-//! Ported from upstream `_source_code/gitnexus/src/core/ingestion/languages/ruby.ts:156-178`.
+//! Behavior cross-checked against GitNexus `ruby.ts:156-178` (independent Rust impl).
 
 use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

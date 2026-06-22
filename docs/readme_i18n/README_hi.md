@@ -10,7 +10,7 @@
 ![Cold index 2.6s](https://img.shields.io/badge/cold_index-2.6s%20%2F%2022k%20files-brightgreen)
 ![Query latency](https://img.shields.io/badge/query-%3C175ms%20cold-blue)
 ![Languages](https://img.shields.io/badge/languages-31%20parsed-orange)
-![License](https://img.shields.io/badge/license-PolyForm%20NC-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Built with Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
 ![Status early release](https://img.shields.io/badge/status-early%20release-yellow)
 
@@ -51,7 +51,7 @@
 
 🎙️ **[Agent Interviews](../../interviews/README.md)** — Gemini CLI और Codex बताते हैं कि वे live autonomous task flows में `ecp` का उपयोग कैसे करते हैं।
 
-[Abhigyan Patwari](https://github.com/abhigyanpatwari) के [GitNexus](https://github.com/abhigyanpatwari/GitNexus) पर built — same structural-graph concept, Rust में rewritten, अलग audience। [PolyForm Noncommercial 1.0.0](../../LICENSE.md); required attribution के लिए [NOTICES.md](../../LICENSES/NOTICES.md) देखें।
+[Abhigyan Patwari](https://github.com/abhigyanpatwari) के [GitNexus](https://github.com/abhigyanpatwari/GitNexus) से प्रेरित — same structural-graph concept, Rust में independently reimplemented, अलग audience। [MIT](../../LICENSE) license; third-party attributions के लिए [NOTICES.md](../../LICENSES/NOTICES.md) देखें।
 
 ---
 
@@ -392,7 +392,7 @@ Parse → resolve → serialize एक MPSC channel के माध्यम �
 
 ## 📜 License और acknowledgments
 
-[PolyForm Noncommercial 1.0.0](../../LICENSE.md)। Personal use, research, hobby projects, और noncommercial organizations को स्पष्ट रूप से permitted। **Commercial use इस license द्वारा granted नहीं है** — commercial rights के लिए upstream GitNexus author Abhigyan Patwari से संपर्क करें।
+[MIT](../../LICENSE)। Attribution के साथ किसी भी उपयोग के लिए स्वतंत्र — व्यावसायिक या व्यक्तिगत। Bundled tree-sitter grammar licenses के लिए [NOTICES.md](../../LICENSES/NOTICES.md) देखें।
 
 Built on:
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — original design, CLI surface, और conceptual model

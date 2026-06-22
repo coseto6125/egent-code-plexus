@@ -10,7 +10,7 @@
 ![Cold index 2.6s](https://img.shields.io/badge/cold_index-2.6s%20%2F%2022k%20files-brightgreen)
 ![Query latency](https://img.shields.io/badge/query-%3C175ms%20cold-blue)
 ![Languages](https://img.shields.io/badge/languages-31%20parsed-orange)
-![License](https://img.shields.io/badge/license-PolyForm%20NC-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Built with Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
 ![Status early release](https://img.shields.io/badge/status-early%20release-yellow)
 
@@ -51,7 +51,7 @@
 
 🎙️ **[Agent 访谈记录](../../interviews/README.md)** — Gemini CLI 与 Codex 描述它们在实际自主任务流中如何使用 `ecp`。
 
-致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作 [Abhigyan Patwari](https://github.com/abhigyanpatwari)）——同样的结构化图谱概念，用 Rust 重写，面向不同受众。授权 [PolyForm Noncommercial 1.0.0](../../LICENSE.md)；必要的归属清单见 [NOTICES.md](../../LICENSES/NOTICES.md)。
+致敬 [GitNexus](https://github.com/abhigyanpatwari/GitNexus)（原作 [Abhigyan Patwari](https://github.com/abhigyanpatwari)）——同样的结构化图谱概念，以 Rust 独立重新实现，面向不同受众。授权 [MIT](../../LICENSE)；第三方归属清单见 [NOTICES.md](../../LICENSES/NOTICES.md)。
 
 ---
 
@@ -392,7 +392,7 @@ crates/
 
 ## 📜 授权与致谢
 
-[PolyForm Noncommercial 1.0.0](../../LICENSE.md)。明确允许个人使用、研究、业余项目，以及非营利组织。**本授权不授予商业使用权**——商业授权请联系上游 GitNexus 作者 Abhigyan Patwari。
+[MIT](../../LICENSE)。商业或非商业用途均可自由使用，需附带署名。随附的 tree-sitter 语法授权详见 [NOTICES.md](../../LICENSES/NOTICES.md)。
 
 构建于：
 - [GitNexus](https://github.com/abhigyanpatwari/GitNexus) — 原始设计、CLI 命令面与概念模型

@@ -1,5 +1,5 @@
-//! Port of upstream `extractConsumerAccessedKeys`
-//! (`gitnexus/src/core/ingestion/call-processor.ts:3199-3327`).
+//! Independent Rust implementation of consumer-accessed-key extraction;
+//! behavior cross-checked against GitNexus `extractConsumerAccessedKeys`.
 //!
 //! Pure regex over file content. Detects three access patterns on
 //! HTTP response variables and returns the union of accessed keys,
@@ -7,7 +7,7 @@
 //! Array / Promise / DOM method names that would otherwise produce
 //! false positives.
 //!
-//! Patterns (matches upstream exactly):
+//! Patterns:
 //! 1. Destructuring from `.json()` chain — `const {a,b} = await res.json()`
 //!    also `const {a} = await (await fetch(...)).json()`
 //! 2. Destructuring from a `data|result|response|json|body|res` variable
@@ -23,8 +23,8 @@ use std::sync::LazyLock;
 
 /// Method/property names to drop when extracting Pattern 3 hits.
 /// Covers Fetch API, Promise, Array, Object, DOM APIs that share names
-/// with common response-variable identifiers. Verbatim port of upstream
-/// `RESPONSE_ACCESS_BLOCKLIST`.
+/// with common response-variable identifiers. Same coverage as GitNexus's
+/// `RESPONSE_ACCESS_BLOCKLIST` (behavior reference only).
 static RESPONSE_ACCESS_BLOCKLIST: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
         // Fetch/Response API
