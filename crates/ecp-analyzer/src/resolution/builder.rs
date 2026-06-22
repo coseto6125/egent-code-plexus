@@ -3477,6 +3477,33 @@ mod tests {
             .to_string()
     }
 
+    /// gRPC end-to-end: a `RawRoute { method: "GRPC", path: "/pkg.Svc/M" }`
+    /// (as the protobuf provider emits from a `service { rpc }` block) must
+    /// survive `detect_from_call` and land as a `NodeKind::Route`. Regression
+    /// for the HTTP-only gatekeeper that previously dropped every gRPC route.
+    #[test]
+    fn grpc_raw_route_promotes_to_route_node() {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(route_local_graph(
+            "svc.proto",
+            "GRPC",
+            "/helloworld.Greeter/SayHello",
+            "SayHello",
+        ));
+        let graph = builder.build();
+
+        let route_nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Route)
+            .collect();
+        assert_eq!(route_nodes.len(), 1, "exactly one gRPC Route node");
+        assert_eq!(
+            s(&graph, route_nodes[0].name),
+            "GRPC /helloworld.Greeter/SayHello"
+        );
+    }
+
     /// TS route emitting `res.json({ id, name })` → RouteShape with
     /// response_keys `["id", "name"]` (sorted). Locks in that Pass 1.6a
     /// reads the source via `repo_root` and runs `response_shapes::extract`.
