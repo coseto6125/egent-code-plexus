@@ -760,9 +760,7 @@ fn eval_return_item_rich(
                     };
                 }
                 let e = &graph.edges[eidx as usize];
-                let rt: crate::graph::RelType =
-                    rkyv::deserialize::<crate::graph::RelType, rkyv::rancor::Error>(&e.rel_type)
-                        .unwrap();
+                let rt = crate::graph::RelType::from(&e.rel_type);
                 return Value::EdgeRef {
                     src: e.source.to_native(),
                     tgt: e.target.to_native(),

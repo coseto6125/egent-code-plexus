@@ -183,7 +183,18 @@ impl Engine {
     }
 
     pub fn graph(&self) -> Result<&ArchivedZeroCopyGraph, Error> {
-        rkyv::access::<ArchivedZeroCopyGraph, Error>(&self.mmap)
+        // Every constructor (`load` / `load_warm` / `open`) runs the validated
+        // `rkyv::access` in `validate_header` before the engine exists, and the
+        // mmap is read-only + atomic-renamed, so its bytes never change while
+        // the engine is alive. Re-validating on each `graph()` call (26 hot-path
+        // sites, O(graph size) structural walk each) is therefore redundant;
+        // `access_unchecked` skips it.
+        //
+        // SAFETY: `self.mmap` passed `validate_header` (full `rkyv::access`
+        // structural validation) at construction time and is an immutable,
+        // never-reopened read-only mapping, so the archive layout invariants
+        // `access_unchecked` assumes still hold.
+        Ok(unsafe { rkyv::access_unchecked::<ArchivedZeroCopyGraph>(&self.mmap) })
     }
 
     /// Resolved L2 commit directory: `graph.bin` lives directly inside
