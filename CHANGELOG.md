@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.0 - 2026-06-22
+
+### Performance
+
+- skip redundant rkyv re-validation + tighten contracts BM25 schema (#590)
 ## v0.7.1 - 2026-06-16
 
 ### Grammar
