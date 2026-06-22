@@ -61,14 +61,16 @@ impl LanguageProvider for ProtobufProvider {
 ///
 /// Only messages that actually carry ≥1 field get a Struct node — an empty
 /// message has no schema surface to own, so a node would be an orphan.
+/// The open top-level message during a single-pass walk: `(name, header_span,
+/// has_field)`. Holds the owner name for field attribution AND defers the
+/// Struct-node emission to block-close so it lands iff the message owned ≥1
+/// field. `Some` ⟺ inside a top-level message.
+type PendingMessage = (String, (u32, u32, u32, u32), bool);
+
 fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
     let mut out: Vec<RawSchemaField> = Vec::new();
     let mut messages: Vec<RawNode> = Vec::new();
-    // The open top-level message: (name, header_span, has_field). Holds the
-    // owner name for field attribution AND defers the Struct-node emission to
-    // block-close so it lands iff the message owned ≥1 field. `Some` ⟺ inside
-    // a top-level message.
-    let mut pending: Option<(String, (u32, u32, u32, u32), bool)> = None;
+    let mut pending: Option<PendingMessage> = None;
     let mut depth: u32 = 0;
 
     for (line_idx, raw_line) in text.lines().enumerate() {
