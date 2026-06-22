@@ -32,4 +32,4 @@ ecp processes trace <PATTERN> [--limit N] [--repo <PATH>]
 | "Who calls X and who do they call" (blast radius, depth-bounded) | `ecp impact <X> --direction down --depth N` |
 | "Full ordered execution sequence inside this flow" (Entry → … → Terminal) | `ecp processes trace <pattern>` |
 
-`processes trace` gives a single deterministic step list, no depth tuning. `impact --direction down` gives a caller-tree with risk levels but no execution order — branches are union'd, not sequenced.
+`processes trace` gives a single deterministic step list, no depth tuning. `impact --direction down` gives a caller-tree but no execution order — branches are union'd, not sequenced.

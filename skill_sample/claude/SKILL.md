@@ -80,7 +80,7 @@ ecp diff --section bindings --baseline origin/main --repo .
 ecp routes /api/foo --repo .
 ```
 
-HIGH / CRITICAL risk_level → **stop + confirm with user** before pushing. Cross-repo contract changes → `ecp contracts --repo @all --unmatched-only` for orphaned consumers.
+Wide blast radius (many upstream callers, or callers in core / widely-imported modules) → **stop + confirm with user** before pushing. Cross-repo contract changes → `ecp contracts --repo @all --unmatched-only` for orphaned consumers.
 
 ## Group / multi-repo
 

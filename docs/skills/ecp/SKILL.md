@@ -38,7 +38,7 @@ Before concluding "ecp is broken", verify against source (definition, fresh rein
 **Symbol mode** (you know the symbol name):
 | Command | Use for |
 |---|---|
-| `ecp impact <name>` | Upstream callers + risk_level (default depth 5, dir `up`) |
+| `ecp impact <name>` | Upstream callers with file:line + counts (default depth 5, dir `up`) |
 | `ecp impact <n> --direction down --depth N` | Custom traversal (`up` / `down` / `both`) |
 
 **Baseline mode** (no symbol — derive from git diff):

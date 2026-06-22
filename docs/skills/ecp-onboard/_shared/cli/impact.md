@@ -1,4 +1,4 @@
-Symbol blast radius — affected callers + risk_level. For binding tier-degradation or resolver delta, use `ecp diff`
+Symbol blast radius — affected callers (counts + call sites). For binding tier-degradation or resolver delta, use `ecp diff`
 
 Usage: ecp impact [OPTIONS] [NAME]
 
