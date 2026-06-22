@@ -30,7 +30,7 @@ rustc-hash = "2"
 toml = "1.1"
 regex = "1"
 tracing = "0.1"
-phf = { version = "0.13", features = ["macros"] }
+phf = { version = "0.14", features = ["macros"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memmap2 = "0.9.10"
 smallvec = "1.13"
