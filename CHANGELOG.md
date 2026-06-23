@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.8.1 - 2026-06-23
+
+- (no user-facing changes)
 ## v0.8.0 - 2026-06-22
 
 ### Performance
