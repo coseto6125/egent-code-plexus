@@ -281,7 +281,7 @@ jobs:
       # is pure git data. Hit lets the script's `.git`-presence check no-op.
       - name: Cache sample repos
         if: needs.detect-changes.outputs.code == 'true'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: .sample_repo
           key: sample-repos-${{ hashFiles('scripts/parity/bootstrap_sample_repos.sh') }}
