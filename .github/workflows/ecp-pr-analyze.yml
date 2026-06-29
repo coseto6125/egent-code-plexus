@@ -100,7 +100,7 @@ jobs:
       #     they change every PR anyway, caching them just wastes the 10 GB
       #     GHA cache budget that L1+L2 actually benefit from.
       - name: Cache cargo source crates (L1, registry)
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -112,7 +112,7 @@ jobs:
             cargo-reg-${{ runner.os }}-
 
       - name: Cache compiled deps (L2, target/release/{deps,build,fingerprint})
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             target/release/.fingerprint
@@ -124,7 +124,7 @@ jobs:
             cargo-deps-${{ runner.os }}-
 
       - name: Cache ecp graph index
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.ECP_HOME }}
           # Keyed by main HEAD SHA so a fresh PR opened after main moves
