@@ -476,6 +476,11 @@ jobs:
         run: |
           set -euo pipefail
           brew tap coseto6125/tap
+          # Newer Homebrew gates third-party taps behind HOMEBREW_REQUIRE_TAP_TRUST
+          # and refuses to load the formula until it is trusted. `brew trust` is
+          # itself recent, so tolerate its absence on older brew where the gate
+          # doesn't exist.
+          brew trust --formula coseto6125/tap/egent-code-plexus || true
           brew install egent-code-plexus
           want="${GITHUB_REF_NAME#v}"
           ecp --version | tee /dev/stderr | grep -qF "$want" \
