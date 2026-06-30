@@ -108,10 +108,10 @@ impl rmcp::ServerHandler for RmcpHandler {
             };
             match server.call_tool(&request.name, args).await {
                 Ok(output) => Ok(rmcp::model::CallToolResult::success(vec![
-                    rmcp::model::Content::text(output),
+                    rmcp::model::ContentBlock::text(output),
                 ])),
                 Err(e) => Ok(rmcp::model::CallToolResult::error(vec![
-                    rmcp::model::Content::text(e.to_string()),
+                    rmcp::model::ContentBlock::text(e.to_string()),
                 ])),
             }
         }
