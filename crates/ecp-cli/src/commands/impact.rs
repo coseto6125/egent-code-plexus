@@ -3,7 +3,7 @@ use crate::commands::symbol_id::{format_fqn, resolve_owner_class, split_fqn_targ
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
-use crate::reanalyze::make_pipeline;
+use crate::reanalyze::make_pipeline_for_names;
 use clap::{Args, ValueEnum};
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::config;
@@ -1293,7 +1293,23 @@ fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, Ecp
     // and merge at the end. `pipeline.parse_file_raw` is the same call path
     // that `pipeline.analyze`'s `into_par_iter` already uses, so providers
     // are Send + Sync by construction.
-    let pipeline = make_pipeline();
+    //
+    // Scoped to the languages this diff actually touches (mirrors the
+    // incremental-reanalyze path) instead of `make_pipeline()`'s full
+    // 20-provider tree-sitter `Query` compile (~0.65s) — a 2-file diff was
+    // paying that fixed cost for ~8ms of real parse work. `provider_name_for_path`
+    // never routes a path to "Markdown"/"YAML" (no extension dispatch exists
+    // for either — confirmed dead in `make_pipeline()` too), so skipping them
+    // here changes nothing observable.
+    let needed: HashSet<&str> = parsed_paths
+        .iter()
+        .filter_map(|p| {
+            ecp_core::analyzer::pipeline::AnalyzerPipeline::provider_name_for_path(
+                std::path::Path::new(p),
+            )
+        })
+        .collect();
+    let pipeline = make_pipeline_for_names(needed.iter().copied());
     type NewEntry = ((&'static str, String, String), (u64, u32));
     type OldEntry = ((&'static str, String, String), u64);
 
