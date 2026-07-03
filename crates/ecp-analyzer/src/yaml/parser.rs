@@ -123,20 +123,23 @@ impl LanguageProvider for YamlProvider {
         // Only attempt when the 200-byte gate fires; zero cost for non-OpenAPI
         // YAML (k8s, Helm, CI configs, etc.).
         let probe = &source[..source.len().min(200)];
-        let schema_fields = if has_openapi_marker(probe) {
-            extract_openapi_fields(path, source)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .map(|v| v.into_boxed_slice())
+        let (schema_fields, schemas) = if has_openapi_marker(probe) {
+            match extract_openapi_fields(path, source).ok() {
+                Some((fields, schemas)) => (
+                    (!fields.is_empty()).then(|| fields.into_boxed_slice()),
+                    schemas,
+                ),
+                None => (None, vec![]),
+            }
         } else {
-            None
+            (None, vec![])
         };
 
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
             file_path: path.to_path_buf(),
-            nodes: vec![],
+            nodes: schemas,
             documents,
             imports: vec![],
             framework_refs: vec![],
