@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.3 - 2026-07-03
+
+### Bug Fixes
+
+- emit schema as Struct node so schema fields reach graph (#616)
+- trust third-party tap before brew install in release smoke (#611)
+
+### Performance
+
+- scope --baseline pipeline to the diff's languages (#618)
 ## v0.8.2 - 2026-06-30
 
 - (no user-facing changes)
