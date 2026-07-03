@@ -13,9 +13,15 @@
 //! The provider first inspects the first 200 bytes for `openapi:` or
 //! `swagger:` at column 0.  Non-OpenAPI YAML (k8s manifests, CI configs, Helm
 //! values) is rejected before any parse work — zero serde overhead.
+//!
+//! Each schema with ≥1 property becomes a `NodeKind::Struct` (value-type
+//! aggregate — no inheritance/vtable, distinct from `Class`), owning its
+//! fields via `HasProperty`. Without this owner node the schema fields are
+//! dropped at `schema_field_mirrors` and never reach the graph.
 
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawSchemaField, SchemaType};
+use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawNode, RawSchemaField, SchemaType};
+use ecp_core::graph::NodeKind;
 use serde_json::Value;
 use std::path::Path;
 
@@ -45,11 +51,12 @@ impl LanguageProvider for OpenApiProvider {
             });
         }
 
-        let fields = extract_fields(path, source)?;
+        let (fields, schemas) = extract_fields(path, source)?;
         let schema_fields = (!fields.is_empty()).then(|| fields.into_boxed_slice());
 
         Ok(LocalGraph {
             file_path: path.to_path_buf(),
+            nodes: schemas,
             schema_fields,
             ..Default::default()
         })
@@ -99,9 +106,24 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Dispatch on file extension to parse as YAML or JSON, then walk schema tree.
-/// `pub` so `YamlProvider` can call this after confirming the OpenAPI marker.
-pub fn extract_fields(path: &Path, source: &[u8]) -> anyhow::Result<Vec<RawSchemaField>> {
+/// Dispatch on file extension to parse as YAML or JSON, then walk schema
+/// tree, collecting fields AND the owning schema as a `NodeKind::Struct`
+/// node in a single pass. `pub` so `YamlProvider` can call this after
+/// confirming the OpenAPI marker.
+///
+/// The Struct node is load-bearing: `schema_field_mirrors` resolves each
+/// `RawSchemaField.owner_class` against the SymbolTable to attach a
+/// `HasProperty` edge, and silently drops fields whose owner isn't a known
+/// node. `Struct` (not `Class`) because an OpenAPI schema is a value-type
+/// aggregate with no inheritance / vtable — LLMs must not pattern-match OO
+/// conventions onto it.
+///
+/// Only schemas that carry ≥1 property get a Struct node — a property-less
+/// schema has no schema surface to own, so a node would be an orphan.
+pub fn extract_fields(
+    path: &Path,
+    source: &[u8],
+) -> anyhow::Result<(Vec<RawSchemaField>, Vec<RawNode>)> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -122,14 +144,18 @@ pub fn extract_fields(path: &Path, source: &[u8]) -> anyhow::Result<Vec<RawSchem
 
     let (framework, schemas_map) = resolve_schemas(&root);
     let Some(schemas_map) = schemas_map else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
 
     let mut out = Vec::new();
+    let mut schemas = Vec::new();
     for (schema_name, schema_def) in schemas_map {
         let Some(props) = schema_def.get("properties").and_then(Value::as_object) else {
             continue;
         };
+        if props.is_empty() {
+            continue;
+        }
         for (field_name, field_def) in props {
             let type_class = classify_openapi_type(field_def);
             // Span (0,0,0,0) — serde_json/serde_yaml Values carry no byte
@@ -143,9 +169,30 @@ pub fn extract_fields(path: &Path, source: &[u8]) -> anyhow::Result<Vec<RawSchem
                 span: (0, 0, 0, 0),
             });
         }
+        schemas.push(schema_struct_node(schema_name.clone()));
     }
 
-    Ok(out)
+    Ok((out, schemas))
+}
+
+/// Build the `NodeKind::Struct` node for an OpenAPI/Swagger schema (the
+/// owner of its `RawSchemaField`s). `owner_class: None` — a top-level
+/// component schema is not nested in another type. Span (0,0,0,0) matches
+/// its fields — serde Values carry no byte offsets.
+fn schema_struct_node(name: String) -> RawNode {
+    RawNode {
+        name,
+        kind: NodeKind::Struct,
+        span: (0, 0, 0, 0),
+        is_exported: true,
+        heritage: vec![],
+        type_annotation: None,
+        decorators: vec![],
+        calls: vec![],
+        field_reads: vec![],
+        owner_class: None,
+        content_hash: 0,
+    }
 }
 
 /// Return `(FrameworkId, Option<schema map>)` for the document.
