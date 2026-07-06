@@ -49,7 +49,7 @@ tree-sitter-bash = "0.25.1"
 tree-sitter-solidity = "1.2.13"
 tree-sitter-crystal = { git = "https://github.com/crystal-lang-tools/tree-sitter-crystal" }
 tree-sitter-move = { path = "../vendor/tree-sitter-move" }
-tree-sitter-containerfile = "0.8.0"
+tree-sitter-containerfile = "0.9.2"
 tree-sitter-hcl = "1.1.0"
 tree-sitter-cairo = { path = "../vendor/tree-sitter-cairo" }
 # tree-sitter-nim is not published to crates.io; using vendored alaviss/tree-sitter-nim
