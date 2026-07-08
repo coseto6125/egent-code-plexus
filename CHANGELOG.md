@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.8.4 - 2026-07-08
+
+- (no user-facing changes)
 ## v0.8.3 - 2026-07-03
 
 ### Bug Fixes
