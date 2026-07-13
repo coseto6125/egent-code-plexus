@@ -34,7 +34,7 @@ phf = { version = "0.14", features = ["macros"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memmap2 = "0.9.10"
 smallvec = "1.13"
-compact_str = { version = "0.9", features = ["serde"] }
+compact_str = { version = "0.10", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }
