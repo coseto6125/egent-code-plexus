@@ -7,7 +7,7 @@
 //!
 //! Files included in the fingerprint (under `src/`):
 //!   * every `parser.rs`
-//!   * every `queries.scm`
+//!   * every tree-sitter query (`*.scm`)
 //!   * top-level `calls.rs`, `framework_helpers.rs`, `route_detector.rs`
 
 use std::fs;
@@ -79,6 +79,9 @@ fn main() {
 
 /// Recursively collect files under `dir` whose names match the parser set.
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    // Individual file watches catch content changes; the directory watch also
+    // reruns the build script when a new parser or query file is added.
+    println!("cargo:rerun-if-changed={}", dir.display());
     let entries = match fs::read_dir(dir) {
         Ok(it) => it,
         Err(_) => return,
@@ -102,18 +105,20 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
             None => continue,
         };
 
-        // Language subdir files (`src/<lang>/...`): any `.rs` plus
-        // `queries.scm`. `parser.rs` alone misses helpers like
+        // Language subdir files (`src/<lang>/...`): any `.rs` plus every
+        // tree-sitter query. `parser.rs` alone misses helpers like
         // `python/receiver_types.rs` and `python/identifier_finder.rs`
         // which feed into the parser's output and so must invalidate the
-        // cache on change. Including `mod.rs` is harmless — it usually
-        // just declares submodules so its hash co-varies with theirs.
+        // cache on change. Framework queries are included because parsers
+        // concatenate them with `queries.scm`. Including `mod.rs` is harmless
+        // — it usually just declares submodules so its hash co-varies with
+        // theirs.
         let in_lang_subdir = path.parent() != Some(root);
         let is_lang_source = in_lang_subdir && name.ends_with(".rs");
-        let is_queries = name == "queries.scm";
+        let is_query = in_lang_subdir && name.ends_with(".scm");
         let is_top_level_helper = path.parent() == Some(root) && TOP_LEVEL_FILES.contains(&name);
 
-        if is_lang_source || is_queries || is_top_level_helper {
+        if is_lang_source || is_query || is_top_level_helper {
             out.push(path);
         }
     }

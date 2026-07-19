@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.5 - 2026-07-18
+
+### Bug Fixes
+
+- invalidate parser caches when framework tree-sitter queries change
+- reject query shapes affected by the tree-sitter 0.26.11 sibling-anchor regression
+
+### Performance
+
+- add an end-to-end Cypher short-string projection benchmark for `compact_str` updates
+
 ## v0.8.4 - 2026-07-08
 
 - (no user-facing changes)

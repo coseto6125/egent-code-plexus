@@ -54,3 +54,7 @@ workspace = true
 [[bench]]
 name = "bfs_bench"
 harness = false
+
+[[bench]]
+name = "cypher_bench"
+harness = false
