@@ -79,16 +79,29 @@ pub fn make_pipeline() -> AnalyzerPipeline {
     pipeline
 }
 
-/// Build a pipeline holding only the named providers (dedup'd). The incremental
-/// reanalyze path uses this to construct a pipeline for exactly the languages a
-/// dirty set touches, avoiding the full 20-provider tree-sitter `Query` compile
-/// (~0.65s) when reparsing a handful of changed files (~8ms of actual parse).
+/// Build a pipeline holding only the named providers (dedup'd), constrained
+/// to `ALL_PROVIDER_NAMES` — every caller (incremental reanalyze, `impact
+/// --baseline`'s scoped pipeline, `make_pipeline` itself) must see the same
+/// language coverage as the full pipeline. Names outside the subset (e.g.
+/// "bash", not yet wired into these scoped paths) are silently dropped here,
+/// same as they are on the full pipeline — enforced once, in this shared
+/// helper, rather than at each call site, so a caller can't accidentally
+/// regain coverage `PROVIDER_CONSTRUCTORS` grew but `ALL_PROVIDER_NAMES`
+/// deliberately excludes.
+///
+/// The incremental reanalyze path uses this to construct a pipeline for
+/// exactly the languages a dirty set touches, avoiding the full 20-provider
+/// tree-sitter `Query` compile (~0.65s) when reparsing a handful of changed
+/// files (~8ms of actual parse).
 pub(crate) fn make_pipeline_for_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
 ) -> AnalyzerPipeline {
     let mut pipeline = AnalyzerPipeline::new();
     let mut seen: FxHashSet<&str> = FxHashSet::default();
     for name in names {
+        if !ALL_PROVIDER_NAMES.contains(&name) {
+            continue;
+        }
         if seen.insert(name) {
             if let Some(Ok(provider)) = make_provider(name) {
                 pipeline.register_provider(provider);
@@ -152,17 +165,12 @@ pub fn reanalyze_files(repo: &Path, scope: &DiffScope, rel_paths: &[String]) -> 
     // map to — reparsing a handful of files no longer pays the full
     // 20-provider tree-sitter compile. The full `pipeline()` singleton stays
     // reserved for the cold-index path that touches every language at once.
-    //
-    // Filtered through `ALL_PROVIDER_NAMES` (not just deduped) so this stays
-    // parity with `pipeline()`/`make_pipeline()`: a name `provider_name_for_path`
-    // can return but `ALL_PROVIDER_NAMES` deliberately excludes (e.g. "bash",
-    // not yet wired into the reanalyze path) must resolve to no provider here
-    // exactly as it does on the full pipeline, not silently gain incremental-only
-    // coverage now that `make_provider` resolves the full provider_registry.
+    // `make_pipeline_for_names` itself constrains to `ALL_PROVIDER_NAMES`, so
+    // this call sees the same language coverage as the full pipeline without
+    // needing its own filter.
     let needed: FxHashSet<&str> = rel_paths
         .iter()
         .filter_map(|p| AnalyzerPipeline::provider_name_for_path(Path::new(p)))
-        .filter(|name| ALL_PROVIDER_NAMES.contains(name))
         .collect();
     if needed.is_empty() {
         return Vec::new();
@@ -293,6 +301,33 @@ mod tests {
             full.provider_count(),
             subset.provider_count() + 2,
             "make_pipeline should be the named subset plus markdown + yaml"
+        );
+    }
+
+    /// Every scoped-pipeline caller (incremental reanalyze, `impact
+    /// --baseline`) goes through `make_pipeline_for_names`, so the
+    /// `ALL_PROVIDER_NAMES` constraint must live here, not at each call
+    /// site. "bash" is constructible via `provider_registry::PROVIDER_CONSTRUCTORS`
+    /// (it backs `.sh` on the full-repo cold-index path) but is deliberately
+    /// absent from `ALL_PROVIDER_NAMES` — not yet wired into these scoped
+    /// paths — so it must not register here even though `make_provider("bash")`
+    /// succeeds.
+    #[test]
+    fn test_make_pipeline_for_names_nonsubset_name_skipped() {
+        assert!(
+            !ALL_PROVIDER_NAMES.contains(&"bash"),
+            "test premise broken: \"bash\" is now in ALL_PROVIDER_NAMES"
+        );
+        assert!(
+            make_provider("bash").is_some(),
+            "test premise broken: \"bash\" is no longer constructible via provider_registry"
+        );
+
+        let pipeline = make_pipeline_for_names(["bash"]);
+        assert_eq!(
+            pipeline.provider_count(),
+            0,
+            "make_pipeline_for_names registered a provider for \"bash\", a name outside ALL_PROVIDER_NAMES"
         );
     }
 }
