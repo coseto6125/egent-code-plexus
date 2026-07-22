@@ -385,8 +385,8 @@ fn execute_inner(
             .collect();
 
         // Identify aggregate positions once so the per-row loop avoids re-scanning.
-        // Each entry: (expanded_items index, is_count_star, arg expr, name, distinct).
-        let agg_positions: Vec<(usize, bool, Option<&Expr>, &str, bool)> = expanded_items
+        // Each entry: (expanded_items index, is_count_star, arg expr, kind, distinct).
+        let agg_positions: Vec<(usize, bool, Option<&Expr>, AggregateKind, bool)> = expanded_items
             .iter()
             .enumerate()
             .filter_map(|(i, (_, e))| {
@@ -396,11 +396,10 @@ fn execute_inner(
                     args,
                 } = e
                 {
-                    if is_aggregate_fn(name) {
-                        let is_cs = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
-                        let arg = if is_cs { None } else { args.first() };
-                        return Some((i, is_cs, arg, name.as_str(), *distinct));
-                    }
+                    let kind = AggregateKind::parse(name)?;
+                    let is_cs = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
+                    let arg = if is_cs { None } else { args.first() };
+                    return Some((i, is_cs, arg, kind, *distinct));
                 }
                 None
             })
@@ -437,7 +436,7 @@ fn execute_inner(
                 let slot = *key_index.entry(key_str).or_insert_with(|| {
                     let accums = agg_positions
                         .iter()
-                        .map(|(_, _, _, name, distinct)| Accumulator::new(name, *distinct))
+                        .map(|(_, _, _, kind, distinct)| Accumulator::new(*kind, *distinct))
                         .collect();
                     groups.push((key_vals.clone(), accums));
                     groups.len() - 1
@@ -457,7 +456,7 @@ fn execute_inner(
             if groups.is_empty() && group_items.is_empty() {
                 let accums = agg_positions
                     .iter()
-                    .map(|(_, _, _, name, distinct)| Accumulator::new(name, *distinct))
+                    .map(|(_, _, _, kind, distinct)| Accumulator::new(*kind, *distinct))
                     .collect();
                 groups.push((vec![], accums));
             }
@@ -687,35 +686,96 @@ fn expand_return_items(
     Ok(out)
 }
 
+/// How a bound `Var` collapses when a `ReturnExpr::Var` is evaluated. The two
+/// callers only ever disagree on this one axis — `Prop`/`Star`/`FunCall` are
+/// identical either way — so it is the sole parameter distinguishing them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VarCollapse {
+    /// Node/edge vars resolve to their display name (`Value::Str`) — used by
+    /// the plain RETURN projection path, matching legacy scalar semantics.
+    ToStr,
+    /// Node/edge vars resolve to `Value::NodeRef`/`Value::EdgeRef`, preserving
+    /// identity — used by WITH group-key computation so `a.name` still
+    /// resolves after aggregation clears `node_vars`.
+    ToRef,
+}
+
+/// Evaluate a ReturnExpr against a binding. Single dispatch point shared by
+/// the plain RETURN projection path and WITH group-key computation; `collapse`
+/// selects the one axis where they differ (see `VarCollapse`).
+fn eval_return_expr_with(
+    expr: &ReturnExpr,
+    b: &Binding,
+    graph: Gv<'_>,
+    cache: &mut ContentCache,
+    collapse: VarCollapse,
+) -> Value {
+    match expr {
+        ReturnExpr::Var(var) => {
+            if let Some(v) = b.computed.get(var) {
+                return v.clone();
+            }
+            if let Some(&idx) = b.node_vars.get(var) {
+                let Some(m) = graph.mnode(idx) else {
+                    return Value::Null;
+                };
+                return match collapse {
+                    VarCollapse::ToStr => Value::Str(m.name(&graph).into()),
+                    VarCollapse::ToRef => Value::NodeRef {
+                        idx,
+                        name: m.name(&graph).into(),
+                        kind: m.kind().as_str().into(),
+                        file_path: m.file_path(&graph).unwrap_or("").to_string(),
+                    },
+                };
+            }
+            if collapse == VarCollapse::ToRef {
+                if let Some(&eidx) = b.edge_vars.get(var) {
+                    if let Some(e) = graph.overlay_edge(eidx) {
+                        return Value::EdgeRef {
+                            src: e.source,
+                            tgt: e.target,
+                            rel_type: e.rel_type,
+                            confidence: e.confidence,
+                            reason: "l1-overlay".to_string(),
+                        };
+                    }
+                    let e = &graph.edges[eidx as usize];
+                    let rt = crate::graph::RelType::from(&e.rel_type);
+                    return Value::EdgeRef {
+                        src: e.source.to_native(),
+                        tgt: e.target.to_native(),
+                        rel_type: rt,
+                        confidence: e.confidence.to_native(),
+                        reason: e.reason.resolve(&graph.string_pool).to_string(),
+                    };
+                }
+            }
+            Value::Null
+        }
+        ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph, cache),
+        ReturnExpr::Star => Value::Null,
+        ReturnExpr::FunCall { name, args, .. } => eval_scalar_funcall(name, args, b, graph),
+    }
+}
+
 /// Evaluate a ReturnExpr directly against a binding (used in the non-agg projection path).
+/// Aggregate FunCalls reach this path only when the caller already verified
+/// there is no aggregate in the projection — so treating them as scalar is a
+/// safe no-op (returns Null via `eval_scalar_funcall`'s unknown-name fallback).
 fn eval_return_expr(
     expr: &ReturnExpr,
     b: &Binding,
     graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Result<Value, CypherError> {
-    match expr {
-        ReturnExpr::Prop(var, prop) => Ok(prop_value(var, prop, b, graph, cache)),
-        ReturnExpr::Var(var) => {
-            if let Some(v) = b.computed.get(var) {
-                Ok(v.clone())
-            } else if let Some(&idx) = b.node_vars.get(var) {
-                Ok(match graph.mnode(idx) {
-                    Some(m) => Value::Str(m.name(&graph).into()),
-                    None => Value::Null,
-                })
-            } else {
-                Ok(Value::Null)
-            }
-        }
-        ReturnExpr::Star => Ok(Value::Null),
-        ReturnExpr::FunCall { name, args, .. } => {
-            // Aggregate FunCalls reach this path only when the caller already
-            // verified there is no aggregate in the projection — so treating
-            // them as scalar is a safe no-op (returns Null).
-            Ok(eval_scalar_funcall(name, args, b, graph))
-        }
-    }
+    Ok(eval_return_expr_with(
+        expr,
+        b,
+        graph,
+        cache,
+        VarCollapse::ToStr,
+    ))
 }
 
 /// Stable string key for a Value (used as group-by key; avoids Hash on Value).
@@ -732,49 +792,7 @@ fn eval_return_item_rich(
     graph: Gv<'_>,
     cache: &mut ContentCache,
 ) -> Value {
-    match &item.expr {
-        ReturnExpr::Var(var) => {
-            // Check computed first.
-            if let Some(v) = b.computed.get(var) {
-                return v.clone();
-            }
-            if let Some(&idx) = b.node_vars.get(var) {
-                let Some(m) = graph.mnode(idx) else {
-                    return Value::Null;
-                };
-                return Value::NodeRef {
-                    idx,
-                    name: m.name(&graph).into(),
-                    kind: m.kind().as_str().into(),
-                    file_path: m.file_path(&graph).unwrap_or("").to_string(),
-                };
-            }
-            if let Some(&eidx) = b.edge_vars.get(var) {
-                if let Some(e) = graph.overlay_edge(eidx) {
-                    return Value::EdgeRef {
-                        src: e.source,
-                        tgt: e.target,
-                        rel_type: e.rel_type,
-                        confidence: e.confidence,
-                        reason: "l1-overlay".to_string(),
-                    };
-                }
-                let e = &graph.edges[eidx as usize];
-                let rt = crate::graph::RelType::from(&e.rel_type);
-                return Value::EdgeRef {
-                    src: e.source.to_native(),
-                    tgt: e.target.to_native(),
-                    rel_type: rt,
-                    confidence: e.confidence.to_native(),
-                    reason: e.reason.resolve(&graph.string_pool).to_string(),
-                };
-            }
-            Value::Null
-        }
-        ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph, cache),
-        ReturnExpr::Star => Value::Null,
-        ReturnExpr::FunCall { name, args, .. } => eval_scalar_funcall(name, args, b, graph),
-    }
+    eval_return_expr_with(&item.expr, b, graph, cache, VarCollapse::ToRef)
 }
 
 /// Execute a WITH clause: rebind plain items into `computed`, or group+aggregate.
@@ -809,7 +827,7 @@ fn exec_with(
             .collect();
 
         // Aggregate positions for the WITH clause.
-        let with_agg_specs: Vec<(String, bool, Option<&Expr>, &str, bool)> = agg_items
+        let with_agg_specs: Vec<(String, bool, Option<&Expr>, AggregateKind, bool)> = agg_items
             .iter()
             .map(|ai| {
                 let col = ai
@@ -824,7 +842,9 @@ fn exec_with(
                 {
                     let is_cs = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
                     let arg = if is_cs { None } else { args.first() };
-                    (col, is_cs, arg, name.as_str(), *distinct)
+                    let kind = AggregateKind::parse(name)
+                        .expect("agg_items filtered to is_aggregate_fn names");
+                    (col, is_cs, arg, kind, *distinct)
                 } else {
                     unreachable!("agg_items filtered to FunCall aggregates")
                 }
@@ -855,7 +875,7 @@ fn exec_with(
             let slot = *key_index.entry(key_str).or_insert_with(|| {
                 let accums = with_agg_specs
                     .iter()
-                    .map(|(_, _, _, name, distinct)| Accumulator::new(name, *distinct))
+                    .map(|(_, _, _, kind, distinct)| Accumulator::new(*kind, *distinct))
                     .collect();
                 groups.push((key_pairs.clone(), accums));
                 groups.len() - 1
@@ -925,19 +945,51 @@ fn exec_with(
     Ok(out)
 }
 
-/// Names recognized as aggregate functions. Anything else parsed as a
-/// FunCall is treated as a scalar function (`type(r)`, `id(n)`, `labels(n)`).
+/// Single source of truth for which FunCall names are aggregates. Parsed once
+/// per FunCall (`AggregateKind::parse`) instead of re-checked via a hardcoded
+/// string list at every classification site; `Accumulator::new` then matches
+/// on the enum exhaustively, so adding a variant without wiring an accumulator
+/// arm is a compile error instead of a silent fallback to `Counter(0)`.
 /// Pre-uppercased — the parser normalizes (`parser.rs:382/398/572/588`).
-fn is_aggregate_fn(name: &str) -> bool {
-    matches!(name, "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "COLLECT")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AggregateKind {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Collect,
 }
 
-/// Evaluate a scalar (non-aggregate) function call. Returns `Value::Null` for
-/// unknown functions rather than erroring — matches the OpenCypher convention
-/// that missing-data scalars degrade gracefully (see graph_query rel-type
-/// `matches!` path). Supports the three functions LLM agents reach for most:
-/// `type(r)` → edge rel-type as Str; `id(n)` → node index as Int;
-/// `labels(n)` → single-element list of node-kind Str.
+impl AggregateKind {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "COUNT" => Self::Count,
+            "SUM" => Self::Sum,
+            "AVG" => Self::Avg,
+            "MIN" => Self::Min,
+            "MAX" => Self::Max,
+            "COLLECT" => Self::Collect,
+            _ => return None,
+        })
+    }
+}
+
+/// Anything else parsed as a FunCall is treated as a scalar function
+/// (`type(r)`, `id(n)`, `labels(n)`).
+fn is_aggregate_fn(name: &str) -> bool {
+    AggregateKind::parse(name).is_some()
+}
+
+/// Evaluate a scalar (non-aggregate) function call. Single dispatch point
+/// shared by WHERE, plain RETURN, and rich-RETURN (WITH group-key) — a new
+/// scalar function is wired here once and all three evaluators pick it up.
+/// Returns `Value::Null` for unknown functions rather than erroring —
+/// matches the OpenCypher convention that missing-data scalars degrade
+/// gracefully (see graph_query rel-type `matches!` path). Supports the three
+/// functions LLM agents reach for most: `type(r)` → edge rel-type as Str;
+/// `id(n)` → node index as Int; `labels(n)` → single-element list of
+/// node-kind Str.
 fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) -> Value {
     match name {
         "TYPE" => {
@@ -1006,31 +1058,32 @@ enum Accumulator {
 }
 
 impl Accumulator {
-    fn new(name: &str, distinct: bool) -> Self {
-        match name {
-            "COUNT" => {
+    /// Exhaustive over `AggregateKind` — a new variant without a matching arm
+    /// here is a compile error, not a silent fallback to `Counter(0)`.
+    fn new(kind: AggregateKind, distinct: bool) -> Self {
+        match kind {
+            AggregateKind::Count => {
                 if distinct {
                     Accumulator::CounterDistinct(HashSet::new())
                 } else {
                     Accumulator::Counter(0)
                 }
             }
-            "SUM" => Accumulator::Summer {
+            AggregateKind::Sum => Accumulator::Summer {
                 sum_i: 0,
                 sum_f: 0.0,
                 has_float: false,
             },
-            "MIN" => Accumulator::MinAccum(None),
-            "MAX" => Accumulator::MaxAccum(None),
-            "COLLECT" => {
+            AggregateKind::Min => Accumulator::MinAccum(None),
+            AggregateKind::Max => Accumulator::MaxAccum(None),
+            AggregateKind::Collect => {
                 if distinct {
                     Accumulator::CollectorDistinct(Vec::new(), HashSet::new())
                 } else {
                     Accumulator::Collector(Vec::new())
                 }
             }
-            "AVG" => Accumulator::Avg { sum: 0.0, count: 0 },
-            _ => Accumulator::Counter(0),
+            AggregateKind::Avg => Accumulator::Avg { sum: 0.0, count: 0 },
         }
     }
 
@@ -1747,9 +1800,17 @@ fn eval_expr(
         ExistsPattern { pattern, negated } => {
             Ok(Value::Bool(pattern_exists(pattern, b, graph)? ^ negated))
         }
-        FunCall { .. } => Err(CypherError::Exec {
-            msg: "function calls in WHERE not yet supported".into(),
-        }),
+        FunCall { name, args, .. } => {
+            // Aggregates have no meaning against a single row's binding — same
+            // restriction as OpenCypher (`WHERE count(n) > 1` is a semantic
+            // error there too, not a WHERE-specific gap in this executor).
+            if is_aggregate_fn(name) {
+                return Err(CypherError::Exec {
+                    msg: format!("aggregate function {name}() not allowed in WHERE"),
+                });
+            }
+            Ok(eval_scalar_funcall(name, args, b, graph))
+        }
     }
 }
 
@@ -2951,6 +3012,124 @@ mod tests {
             assert_eq!(r.rows[0][0], Value::Str("Calls".into()));
             assert_eq!(r.rows[0][1], Value::Int(1));
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // WHERE-clause function calls — enabled by the single scalar dispatch
+    // (`eval_scalar_funcall`) shared with RETURN and WITH group-key paths.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exec_where_type_of_edge_filters_correctly() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) WHERE TYPE(r) = 'Calls' RETURN a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+        });
+    }
+
+    #[test]
+    fn exec_where_type_of_edge_mismatch_returns_empty() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) WHERE TYPE(r) = 'Imports' RETURN a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 0);
+        });
+    }
+
+    #[test]
+    fn exec_where_labels_of_node_filters_correctly() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function) WHERE 'Function' IN labels(a) RETURN a.name ORDER BY a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2);
+        });
+    }
+
+    #[test]
+    fn exec_where_aggregate_funcall_is_rejected() {
+        with_two(|g| {
+            let q = parse("MATCH (a:Function) WHERE count(a) > 1 RETURN a.name").unwrap();
+            let err = execute(&q, g, None, Path::new(".")).unwrap_err();
+            assert!(
+                matches!(&err, CypherError::Exec { msg } if msg.contains("aggregate") && msg.contains("WHERE")),
+                "expected aggregate-in-WHERE error, got {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn scalar_funcall_identical_across_where_return_and_with() {
+        // Same TYPE(r) call through all three evaluators must agree —
+        // regression guard for the unified `eval_scalar_funcall` dispatch.
+        with_two(|g| {
+            let where_q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) WHERE TYPE(r) = 'Calls' RETURN TYPE(r)",
+            )
+            .unwrap();
+            let where_r = execute(&where_q, g, None, Path::new(".")).unwrap();
+
+            let return_q =
+                parse("MATCH (a:Function)-[r:Calls]->(b:Function) RETURN TYPE(r)").unwrap();
+            let return_r = execute(&return_q, g, None, Path::new(".")).unwrap();
+
+            let with_q =
+                parse("MATCH (a:Function)-[r:Calls]->(b:Function) WITH TYPE(r) AS t RETURN t")
+                    .unwrap();
+            let with_r = execute(&with_q, g, None, Path::new(".")).unwrap();
+
+            assert_eq!(where_r.rows.len(), 1);
+            assert_eq!(where_r.rows, return_r.rows);
+            assert_eq!(where_r.rows, with_r.rows);
+            assert_eq!(where_r.rows[0][0], Value::Str("Calls".into()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // AggregateKind exhaustiveness — every variant must produce a distinct,
+    // working `Accumulator`. Guards the failure mode the old string-matched
+    // `Accumulator::new` fallback (`_ => Counter(0)`) could hit silently.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn aggregate_kind_every_variant_builds_a_working_accumulator() {
+        let kinds = [
+            AggregateKind::Count,
+            AggregateKind::Sum,
+            AggregateKind::Avg,
+            AggregateKind::Min,
+            AggregateKind::Max,
+            AggregateKind::Collect,
+        ];
+        for kind in kinds {
+            let mut acc = Accumulator::new(kind, false);
+            acc.feed(Value::Int(1), false);
+            let out = acc.finalize();
+            assert_ne!(
+                out,
+                Value::Null,
+                "{kind:?} accumulator produced Null after feeding one row"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_kind_parse_matches_is_aggregate_fn_for_all_known_names() {
+        for name in ["COUNT", "SUM", "AVG", "MIN", "MAX", "COLLECT"] {
+            assert!(is_aggregate_fn(name));
+            assert!(AggregateKind::parse(name).is_some());
+        }
+        assert!(!is_aggregate_fn("TYPE"));
+        assert!(AggregateKind::parse("TYPE").is_none());
     }
 
     // -----------------------------------------------------------------------
