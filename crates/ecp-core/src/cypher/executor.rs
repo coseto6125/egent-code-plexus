@@ -991,42 +991,49 @@ fn is_aggregate_fn(name: &str) -> bool {
 /// `id(n)` → node index as Int; `labels(n)` → single-element list of
 /// node-kind Str.
 fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) -> Value {
+    let Some(Expr::Var(var)) = args.first() else {
+        return Value::Null;
+    };
     match name {
         "TYPE" => {
-            // type(r) — args[0] must be a Var bound to an edge.
-            let Some(Expr::Var(var)) = args.first() else {
-                return Value::Null;
-            };
-            let Some(&eidx) = b.edge_vars.get(var) else {
-                return Value::Null;
-            };
-            if let Some(e) = graph.overlay_edge(eidx) {
-                return Value::Str(e.rel_type.as_str().into());
+            // type(r) — args[0] must be a Var bound to an edge, either
+            // directly (edge_vars) or via a WITH alias / aggregate grouping
+            // key that stashed the resolved EdgeRef in `computed` (WITH
+            // rebinding and aggregation both clear node_vars/edge_vars).
+            if let Some(&eidx) = b.edge_vars.get(var) {
+                if let Some(e) = graph.overlay_edge(eidx) {
+                    return Value::Str(e.rel_type.as_str().into());
+                }
+                let e = &graph.edges[eidx as usize];
+                return Value::Str(RelType::from(&e.rel_type).as_str().into());
             }
-            let e = &graph.edges[eidx as usize];
-            Value::Str(RelType::from(&e.rel_type).as_str().into())
+            match b.computed.get(var) {
+                Some(Value::EdgeRef { rel_type, .. }) => Value::Str(rel_type.as_str().into()),
+                _ => Value::Null,
+            }
         }
         "ID" => {
-            // id(n) — args[0] must be a Var bound to a node.
-            let Some(Expr::Var(var)) = args.first() else {
-                return Value::Null;
-            };
-            let Some(&idx) = b.node_vars.get(var) else {
-                return Value::Null;
-            };
-            Value::Int(idx as i64)
+            // id(n) — args[0] must be a Var bound to a node, directly or via
+            // a `computed` NodeRef (same WITH-alias / aggregation gap as TYPE).
+            if let Some(&idx) = b.node_vars.get(var) {
+                return Value::Int(idx as i64);
+            }
+            match b.computed.get(var) {
+                Some(Value::NodeRef { idx, .. }) => Value::Int(*idx as i64),
+                _ => Value::Null,
+            }
         }
         "LABELS" => {
             // labels(n) — single-kind list per ecp's one-label-per-node model.
-            let Some(Expr::Var(var)) = args.first() else {
-                return Value::Null;
-            };
-            let Some(&idx) = b.node_vars.get(var) else {
-                return Value::Null;
-            };
-            match graph.mnode(idx) {
-                Some(m) => Value::List(vec![Value::Str(m.kind().as_str().into())]),
-                None => Value::Null,
+            if let Some(&idx) = b.node_vars.get(var) {
+                return match graph.mnode(idx) {
+                    Some(m) => Value::List(vec![Value::Str(m.kind().as_str().into())]),
+                    None => Value::Null,
+                };
+            }
+            match b.computed.get(var) {
+                Some(Value::NodeRef { kind, .. }) => Value::List(vec![Value::Str(kind.clone())]),
+                _ => Value::Null,
             }
         }
         _ => Value::Null,
@@ -3091,6 +3098,35 @@ mod tests {
             assert_eq!(where_r.rows, return_r.rows);
             assert_eq!(where_r.rows, with_r.rows);
             assert_eq!(where_r.rows[0][0], Value::Str("Calls".into()));
+        });
+    }
+
+    #[test]
+    fn exec_where_funcall_on_with_alias_preserves_rows() {
+        // Plain (non-aggregate) WITH rebinding clears node_vars/edge_vars and
+        // stashes a NodeRef in `computed` instead — a WHERE funcall on the
+        // aliased var must recover identity from there, not just node_vars.
+        with_two(|g| {
+            let q = parse("MATCH (a:Function) WITH a AS x WHERE ID(x) IS NOT NULL RETURN x.name")
+                .unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2, "both nodes must survive ID(x) IS NOT NULL");
+        });
+    }
+
+    #[test]
+    fn exec_where_funcall_on_aggregate_with_grouping_key_resolves() {
+        // Aggregating WITH also clears node_vars/edge_vars; the grouping-key
+        // var (`a`) must still resolve through `computed` for TYPE(r)/ID(a).
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) WITH a, r, COUNT(b) AS n WHERE TYPE(r) = 'Calls' RETURN a.name, n",
+            )
+            .unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 1);
+            assert_eq!(r.rows[0][0], Value::Str("caller".into()));
+            assert_eq!(r.rows[0][1], Value::Int(1));
         });
     }
 
