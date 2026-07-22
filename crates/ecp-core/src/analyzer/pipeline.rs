@@ -81,6 +81,71 @@ impl AnalyzerPipeline {
             .map(|p| p.as_ref())
     }
 
+    /// Plain-extension → provider-`name` table, data-driven so it is the
+    /// single place that lists this mapping — every other extension-based
+    /// consumer (needed-provider detection, path-filter allowlists) derives
+    /// from this instead of re-listing the arms. Path-based special cases
+    /// (Dockerfile, docker-compose, GitHub Actions, `.yaml`/`.yml` content
+    /// sniffing) are NOT extension-derivable and stay in
+    /// `provider_name_for_path` below.
+    pub const EXTENSION_TABLE: &'static [(&'static str, &'static str)] = &[
+        ("ts", "typescript"),
+        ("tsx", "typescript"),
+        ("py", "python"),
+        ("pyi", "python"),
+        ("go", "go"),
+        ("rs", "rust"),
+        ("java", "java"),
+        ("js", "javascript"),
+        ("jsx", "javascript"),
+        ("mjs", "javascript"),
+        ("cjs", "javascript"),
+        ("php", "php"),
+        ("rb", "ruby"),
+        ("kt", "kotlin"),
+        ("kts", "kotlin"),
+        ("cs", "c_sharp"),
+        ("c", "c"),
+        // `.h` routes to C++ (near-superset of C); see the indexing-pipeline
+        // note that made this the load-bearing dispatch.
+        ("cpp", "cpp"),
+        ("hpp", "cpp"),
+        ("cc", "cpp"),
+        ("hh", "cpp"),
+        ("cxx", "cpp"),
+        ("hxx", "cpp"),
+        ("h", "cpp"),
+        ("swift", "swift"),
+        ("dart", "dart"),
+        ("sh", "bash"),
+        ("bash", "bash"),
+        ("lua", "lua"),
+        ("luau", "lua"),
+        ("dockerfile", "dockerfile"),
+        ("cr", "crystal"),
+        ("move", "move"),
+        ("sol", "solidity"),
+        ("tf", "hcl"),
+        ("tfvars", "hcl"),
+        ("hcl", "hcl"),
+        ("nim", "nim"),
+        ("sql", "sql"),
+        ("vy", "vyper"),
+        ("cairo", "cairo"),
+        ("v", "verilog"),
+        ("sv", "verilog"),
+        ("vh", "verilog"),
+        ("svh", "verilog"),
+        ("zig", "zig"),
+        ("vue", "vue"),
+        ("astro", "astro"),
+        ("svelte", "svelte"),
+        ("proto", "protobuf"),
+        // `.json` routes to the OpenAPI provider; it applies a cheap
+        // 200-byte prefix gate so non-OpenAPI JSON costs near-zero.
+        ("json", "openapi"),
+    ];
+
     /// The single source of truth mapping a file path to the provider `name`
     /// that should parse it. `find_provider` resolves this name against the
     /// registered providers; the incremental path (`reanalyze`) uses it to
@@ -122,43 +187,10 @@ impl AnalyzerPipeline {
         }
 
         let ext = path.extension()?.to_str()?;
-        Some(match ext {
-            "ts" | "tsx" => "typescript",
-            "py" | "pyi" => "python",
-            "go" => "go",
-            "rs" => "rust",
-            "java" => "java",
-            "js" | "jsx" | "mjs" | "cjs" => "javascript",
-            "php" => "php",
-            "rb" => "ruby",
-            "kt" | "kts" => "kotlin",
-            "cs" => "c_sharp",
-            "c" => "c",
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => "cpp",
-            "swift" => "swift",
-            "dart" => "dart",
-            "sh" | "bash" => "bash",
-            "lua" | "luau" => "lua",
-            "dockerfile" => "dockerfile",
-            "cr" => "crystal",
-            "move" => "move",
-            "sol" => "solidity",
-            "tf" | "tfvars" | "hcl" => "hcl",
-            "nim" => "nim",
-            "sql" => "sql",
-            "vy" => "vyper",
-            "cairo" => "cairo",
-            "v" | "sv" | "vh" | "svh" => "verilog",
-            "zig" => "zig",
-            "vue" => "vue",
-            "astro" => "astro",
-            "svelte" => "svelte",
-            "proto" => "protobuf",
-            // `.json` routes to the OpenAPI provider; it applies a cheap
-            // 200-byte prefix gate so non-OpenAPI JSON costs near-zero.
-            "json" => "openapi",
-            _ => return None,
-        })
+        Self::EXTENSION_TABLE
+            .iter()
+            .find(|(e, _)| *e == ext)
+            .map(|(_, name)| *name)
     }
 
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture

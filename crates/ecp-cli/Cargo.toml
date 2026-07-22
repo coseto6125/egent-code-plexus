@@ -32,6 +32,7 @@ path = "src/lib.rs"
 ecp-core = { workspace = true }
 ecp-analyzer = { workspace = true }
 ecp-mcp = { workspace = true }
+anyhow = "1.0.82"
 tokio = { version = "1", features = ["rt"] }
 clap = { version = "4.5.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
