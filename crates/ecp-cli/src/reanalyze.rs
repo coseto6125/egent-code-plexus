@@ -152,9 +152,17 @@ pub fn reanalyze_files(repo: &Path, scope: &DiffScope, rel_paths: &[String]) -> 
     // map to — reparsing a handful of files no longer pays the full
     // 20-provider tree-sitter compile. The full `pipeline()` singleton stays
     // reserved for the cold-index path that touches every language at once.
+    //
+    // Filtered through `ALL_PROVIDER_NAMES` (not just deduped) so this stays
+    // parity with `pipeline()`/`make_pipeline()`: a name `provider_name_for_path`
+    // can return but `ALL_PROVIDER_NAMES` deliberately excludes (e.g. "bash",
+    // not yet wired into the reanalyze path) must resolve to no provider here
+    // exactly as it does on the full pipeline, not silently gain incremental-only
+    // coverage now that `make_provider` resolves the full provider_registry.
     let needed: FxHashSet<&str> = rel_paths
         .iter()
         .filter_map(|p| AnalyzerPipeline::provider_name_for_path(Path::new(p)))
+        .filter(|name| ALL_PROVIDER_NAMES.contains(name))
         .collect();
     if needed.is_empty() {
         return Vec::new();

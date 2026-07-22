@@ -320,3 +320,35 @@ fn parity_gate_smoke() {
 fn parity_gate_heavy() {
     run_parity_cases(200);
 }
+
+/// Regression for the provider-registry refactor: `reanalyze_files` must not
+/// gain coverage the full pipeline lacks. `.sh` resolves to the `"bash"`
+/// provider via `provider_name_for_path`, but `"bash"` is not in
+/// `reanalyze::ALL_PROVIDER_NAMES` (not yet wired into the incremental path)
+/// — `pipeline().analyze(...)` therefore returns no graph for a `.sh` file,
+/// and `reanalyze_files` must match that, not silently start producing one
+/// just because `provider_registry::PROVIDER_CONSTRUCTORS` can construct a
+/// `BashProvider` by name.
+#[test]
+fn test_reanalyze_files_nonsubset_extension_yields_no_graph_matching_full_pipeline() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let rel = "script.sh";
+    std::fs::write(tmp.path().join(rel), "#!/bin/sh\necho hi\n").expect("write fixture");
+
+    let direct = ecp_cli::reanalyze::pipeline()
+        .analyze(vec![(tmp.path().join(rel), std::path::PathBuf::from(rel))]);
+    let incremental =
+        ecp_cli::reanalyze::reanalyze_files(tmp.path(), &DiffScope::All, &[rel.to_owned()]);
+
+    assert!(
+        direct.is_empty(),
+        "full pipeline unexpectedly produced a graph for {rel} — bash must not be in ALL_PROVIDER_NAMES for this test to be meaningful"
+    );
+    assert_eq!(
+        incremental.len(),
+        direct.len(),
+        "reanalyze_files produced {} graph(s) for {rel} but the full pipeline produced {} — incremental/full parity broken",
+        incremental.len(),
+        direct.len()
+    );
+}
