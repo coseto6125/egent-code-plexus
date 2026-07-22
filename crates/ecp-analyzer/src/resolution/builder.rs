@@ -241,6 +241,10 @@ use std::collections::HashMap;
 /// `pending_call_metas` entries are `(pre_sort_edge_idx, flags, dispatch_type)`.
 type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>);
 
+/// Pass 1.5 output: `(route_node_idx, file_idx, route_method, route_path)`
+/// per emitted Route node, consumed by Pass 1.6's fetch-shape route index.
+type EmittedRoute = (u32, u32, String, String);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CallMetaKey {
     caller_span: (u32, u32, u32, u32),
@@ -629,120 +633,13 @@ impl GraphBuilder {
         }
         let _t_pass15 = std::time::Instant::now();
         // Pass 1.5: Extract Routes
-        let mut route_edges = Vec::new();
-        let mut current_handler_idx = 0;
-        // (route_node_idx, file_idx, route_method, route_path) — drives Pass 1.6 below.
-        let mut emitted_routes: Vec<(u32, u32, String, String)> = Vec::new();
-        for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
-            let file_idx = file_idx as u32;
-            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
-            // Skip Route emission for genuinely non-production files
-            // (Test/Reference). `Example` is INTENTIONALLY NOT skipped —
-            // framework example apps (Express `examples/auth/`, Flask
-            // `examples/tutorial/`) are canonical "how to wire routes"
-            // content that LLM consumers explicitly want to navigate.
-            // Tests (`/tests/`, `.spec.`, `Test.java` …) stay skipped
-            // because their `@app.route('/test_setup')` fixture routes
-            // would pollute the production-route surface. Reads the
-            // category already computed in Pass 1 (line 229) — avoids
-            // re-running `determine_category` (~36 string scans per file).
-            // `current_handler_idx` still advances by the file's node count
-            // so downstream alignment stays correct.
-            let is_non_production = matches!(
-                files[file_idx as usize].category,
-                FileCategory::Test | FileCategory::Reference
-            );
-            if is_non_production {
-                current_handler_idx += local_graph.nodes.len() as u32;
-                continue;
-            }
-
-            for raw_node in &local_graph.nodes {
-                let handler_idx = current_handler_idx;
-
-                for dec in &raw_node.decorators {
-                    if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
-                        let route_name = format!("{} {}", detected.method, detected.path);
-
-                        let route_idx = nodes.len() as u32;
-                        nodes.push(Node {
-                            uid: ecp_core::uid::compute(
-                                NodeKind::Route,
-                                &path_str,
-                                None,
-                                &route_name,
-                            ),
-                            name: string_pool.add(&route_name),
-                            file_idx,
-                            kind: ecp_core::graph::NodeKind::Route,
-                            span: raw_node.span,
-                            community_id: 0,
-                            owner_class: StrRef::default(),
-                            content_hash: 0,
-                        });
-
-                        route_edges.push(Edge {
-                            source: handler_idx,
-                            target: route_idx,
-                            rel_type: RelType::HandlesRoute,
-                            confidence: 1.0,
-                            reason: string_pool.add("decorator"),
-                        });
-
-                        emitted_routes.push((
-                            route_idx,
-                            file_idx,
-                            detected.method.clone(),
-                            detected.path.clone(),
-                        ));
-                    }
-                }
-                current_handler_idx += 1;
-            }
-
-            for raw_route in &local_graph.routes {
-                if let Some(detected) = crate::route_detector::detect_from_call(raw_route) {
-                    let route_name = format!("{} {}", detected.method, detected.path);
-
-                    let route_idx = nodes.len() as u32;
-                    nodes.push(Node {
-                        uid: ecp_core::uid::compute(NodeKind::Route, &path_str, None, &route_name),
-                        name: string_pool.add(&route_name),
-                        file_idx,
-                        kind: ecp_core::graph::NodeKind::Route,
-                        span: raw_route.span,
-                        community_id: 0,
-                        owner_class: StrRef::default(),
-                        content_hash: 0,
-                    });
-
-                    // Resolve the imperative-route handler, if the parser captured
-                    // a named handler (e.g. `app.get("/x", loginHandler)`). The
-                    // handler must be a function/method registered in the same
-                    // file; inline arrow functions are not captured.
-                    if let Some(handler_name) = raw_route.handler.as_deref() {
-                        if let Some(handler_node_id) =
-                            symbol_table.lookup_in_file(&path_str, handler_name)
-                        {
-                            route_edges.push(Edge {
-                                source: handler_node_id,
-                                target: route_idx,
-                                rel_type: RelType::HandlesRoute,
-                                confidence: 1.0,
-                                reason: string_pool.add("call-arg"),
-                            });
-                        }
-                    }
-
-                    emitted_routes.push((
-                        route_idx,
-                        file_idx,
-                        detected.method.clone(),
-                        detected.path.clone(),
-                    ));
-                }
-            }
-        }
+        let (route_edges, emitted_routes) = pass1_5_extract_routes(
+            &self.local_graphs,
+            &files,
+            &symbol_table,
+            &mut string_pool,
+            &mut nodes,
+        );
 
         if prof {
             eprintln!(
@@ -752,199 +649,12 @@ impl GraphBuilder {
         }
         let _t_pass16 = std::time::Instant::now();
         // Pass 1.6: Fetch-shape extraction.
-        //
-        // Two sub-passes — both gated on `repo_root` being available (it
-        // is the only way to resolve `LocalGraph.file_path` back to an
-        // absolute path so we can re-read the source). Test harnesses that
-        // don't set a repo root simply opt out of fetch-shape data.
-        //
-        // 1.6a — for each Route node, run `response_shapes::extract` on
-        //        its handler file and stash a `RouteShape` if it produced
-        //        any keys (sparse — empty payloads do not appear).
-        // 1.6b — build a path→route_idx map, then for every non-handler
-        //        file in `local_graphs` scan for `fetch(url) /
-        //        axios.get(url)` literals and emit `RelType::Fetches`
-        //        edges (file_node → route_idx) with the
-        //        `format_reason(keys, fetch_count)` reason payload.
-        //
-        // Assumption (MVP): exact path match — `fetch('/users')` only
-        // hits a route whose path is exactly `/users`. Dynamic-segment
-        // normalisation (upstream `normalizeFetchURL` + `routeMatches`)
-        // is intentionally NOT ported here; it can land later without
-        // touching the wire format.
-        let mut route_shapes_out: Vec<RouteShape> = Vec::new();
-        let mut fetches_edges: Vec<Edge> = Vec::new();
-
-        if let Some(repo_root) = self.repo_root.as_ref() {
-            // Per-file content cache — multiple routes may share a handler file
-            // (Express-style `router.get('/a')`/`router.get('/b')` in one file),
-            // and consumer files re-read once even if they fetch many URLs.
-            let mut content_cache: FxHashMap<u32, Option<String>> = FxHashMap::default();
-            let read_content = |file_idx: u32,
-                                cache: &mut FxHashMap<u32, Option<String>>,
-                                local_graphs: &[LocalGraph]|
-             -> Option<String> {
-                if let Some(slot) = cache.get(&file_idx) {
-                    return slot.clone();
-                }
-                let lg = &local_graphs[file_idx as usize];
-                let abs = repo_root.join(&lg.file_path);
-                let content = std::fs::read_to_string(&abs).ok();
-                cache.insert(file_idx, content.clone());
-                content
-            };
-
-            // 1.6a — RouteShape per Route.
-            for (route_idx, file_idx, _route_method, _route_path) in &emitted_routes {
-                let lg = &self.local_graphs[*file_idx as usize];
-                let Some(lang) = lang_for_path(&lg.file_path.to_string_lossy()) else {
-                    continue;
-                };
-                let Some(content) = read_content(*file_idx, &mut content_cache, &self.local_graphs)
-                else {
-                    continue;
-                };
-                let shape = response_shapes::extract(&content, lang);
-                if shape.response_keys.is_empty() && shape.error_keys.is_empty() {
-                    continue;
-                }
-                let response_keys: Vec<StrRef> = shape
-                    .response_keys
-                    .iter()
-                    .map(|k| string_pool.add(k))
-                    .collect();
-                let error_keys: Vec<StrRef> = shape
-                    .error_keys
-                    .iter()
-                    .map(|k| string_pool.add(k))
-                    .collect();
-                route_shapes_out.push(RouteShape {
-                    node_idx: *route_idx,
-                    response_keys,
-                    error_keys,
-                });
-            }
-
-            // 1.6b — Fetches edges.
-            //
-            // RouteIndex: (UPPERCASED_METHOD, normalized_path) → Vec<route_idx>.
-            // `normalize_route_path` coalesces `:param` / `{param}` / `<param>`
-            // to `:*` so `app.get('/api/users/:id')` and
-            // `fetch('/api/users/42')` both resolve to `("GET", "api/users/:*")`
-            // and produce a Fetches edge.
-            let mut route_index: FxHashMap<(String, String), Vec<u32>> = FxHashMap::default();
-            for (route_idx, _file_idx, route_method, route_path) in &emitted_routes {
-                let (norm_path, _) = normalize_route_path(route_path);
-                route_index
-                    .entry((route_method.to_uppercase(), norm_path))
-                    .or_default()
-                    .push(*route_idx);
-            }
-
-            // File-node index lookup: the source of a Fetches edge is the
-            // *file* (per upstream `generateId('File', filePath)`), but
-            // egent-code-plexus-rs doesn't currently create File nodes. Use the
-            // first node in the file as a reasonable proxy (typically a
-            // top-level function/class) so the edge has a real `source`.
-            // When a file has no nodes we skip it — there's nothing to
-            // attach the edge to.
-            let file_first_node: Vec<Option<u32>> = {
-                let mut v = Vec::with_capacity(self.local_graphs.len());
-                let mut acc: u32 = 0;
-                for lg in &self.local_graphs {
-                    if lg.nodes.is_empty() {
-                        v.push(None);
-                    } else {
-                        v.push(Some(acc));
-                    }
-                    acc += lg.nodes.len() as u32;
-                }
-                v
-            };
-
-            // Files that themselves emit a Route are handlers, not
-            // consumers — skip them on the consumer pass to avoid
-            // self-loops where a file `fetch()`es its own route.
-            let handler_files: rustc_hash::FxHashSet<u32> =
-                emitted_routes.iter().map(|(_, fi, _, _)| *fi).collect();
-
-            // Parallel phase: pure read-only work per file.
-            // Each worker reads the file directly (no shared cache) and
-            // returns (file_idx, source_node, matched, reason_str).
-            // string_pool.add and Edge construction happen serially below.
-            #[allow(clippy::type_complexity)]
-            let parallel_results: Vec<(u32, u32, Vec<(u32, bool)>, String)> = self
-                .local_graphs
-                .par_iter()
-                .enumerate()
-                .filter_map(|(file_idx_usize, lg)| {
-                    let file_idx = file_idx_usize as u32;
-                    if handler_files.contains(&file_idx) {
-                        return None;
-                    }
-                    let source_node = file_first_node[file_idx_usize]?;
-                    let path_str = lg.file_path.to_string_lossy();
-                    // Allowlist: extensions where `fetch_urls::extract` produces
-                    // useful hits. PHP is a route-server language, not a consumer
-                    // here; all other unknown extensions are skipped cheaply.
-                    if !is_consumer_extension(&path_str) {
-                        return None;
-                    }
-                    // Read directly — the cache is serial-only (1.6a) and each
-                    // consumer file is visited at most once in this subpass.
-                    let abs = repo_root.join(&lg.file_path);
-                    let content = std::fs::read_to_string(&abs).ok()?;
-                    let client_calls = fetch_urls::extract(&content);
-                    if client_calls.is_empty() {
-                        return None;
-                    }
-                    let keys = consumer_keys::extract(&content);
-
-                    // Resolve each (method, url) pair against the RouteIndex.
-                    // Cross-repo misses (no matching Route node) are silently
-                    // skipped — ecp contracts handles those separately.
-                    let mut matched: Vec<(u32, bool)> = Vec::new(); // (route_idx, is_templated)
-                    for (client_method, client_url) in &client_calls {
-                        let (norm_url, client_templated) = normalize_route_path(client_url);
-                        // Route side also normalized via `:*`; the index key carries
-                        // `:*` segments whenever the route had a param placeholder.
-                        let route_templated = norm_url.contains(":*");
-                        if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
-                            for &route_idx in targets {
-                                matched.push((route_idx, client_templated || route_templated));
-                            }
-                        }
-                    }
-                    if matched.is_empty() {
-                        return None;
-                    }
-                    let fetch_count = matched.len() as u32;
-                    let reason_str = format_reason(&keys, fetch_count);
-                    Some((file_idx, source_node, matched, reason_str))
-                })
-                .collect();
-
-            // Serial phase: intern strings and push edges in file_idx order.
-            // rayon's `collect::<Vec<_>>()` preserves source order even though
-            // `filter_map` drops the IndexedParallelIterator bound — so
-            // parallel_results stays in file_idx order, identical to the old
-            // serial loop's edge order; no extra sort needed.
-            for (_file_idx, source_node, matched, reason_str) in parallel_results {
-                let reason_ref = string_pool.add(&reason_str);
-                for (route_idx, is_templated) in matched {
-                    // Confidence: 0.8 for exact-path matches, 0.6 for any
-                    // templated segment — caller or callee side.
-                    let confidence = if is_templated { 0.6 } else { 0.8 };
-                    fetches_edges.push(Edge {
-                        source: source_node,
-                        target: route_idx,
-                        rel_type: RelType::Fetches,
-                        confidence,
-                        reason: reason_ref,
-                    });
-                }
-            }
-        }
+        let (route_shapes_out, fetches_edges) = pass1_6_fetch_shapes(
+            &self.local_graphs,
+            self.repo_root.as_deref(),
+            &emitted_routes,
+            &mut string_pool,
+        );
 
         if prof {
             eprintln!(
@@ -954,71 +664,12 @@ impl GraphBuilder {
         }
         let _t_pass17 = std::time::Instant::now();
         // Pass 1.7: Entry-point scoring (cross-language).
-        //
-        // Pure consumer of `RawRoute` + `RawFrameworkRef` + `main()`
-        // detection — see `crate::entry_points` for the scoring matrix.
-        // Closes the ⚠️ Entry column for Java / Kotlin / C# / Go / Rust /
-        // Swift / C / C++ / Dart in the README Language Matrix.
-        //
-        // Emits one `NodeKind::EntryPoint` marker node per scored entry
-        // point and a `References` edge from the marker to the underlying
-        // handler (looked up by name in the same file's SymbolTable). The
-        // edge's `reason` carries the scoring provenance so downstream
-        // LLM tooling can render "this is an HTTP route handler at
-        // confidence 1.0" without re-running the scorer.
-        let mut entry_edges: Vec<Edge> = Vec::new();
-        for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
-            let file_idx = file_idx as u32;
-            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
-            let entries = crate::entry_points::score_entry_points(
-                &local_graph.routes,
-                &local_graph.framework_refs,
-                &local_graph.nodes,
-            );
-            for ep in entries {
-                let handler_idx = symbol_table.lookup_in_file(&path_str, &ep.uid);
-                let Some(handler_idx) = handler_idx else {
-                    // Handler not found in this file — happens when a
-                    // RawRoute's handler name is a string literal that
-                    // doesn't match any parsed symbol (e.g. an external
-                    // reference). Skip silently; the EntryPoint without
-                    // a target would be a dangling marker.
-                    continue;
-                };
-                let entry_name = format!("{}@{}", ep.kind.tag(), ep.uid);
-                // EntryPoint UID encodes kind-tag + handler-uid in the name segment
-                // so two entry points for the same handler (route + main) don't collide.
-                let entry_uid_name = format!("{}:{}", ep.kind.tag(), ep.uid);
-                let entry_idx = nodes.len() as u32;
-                nodes.push(Node {
-                    uid: ecp_core::uid::compute(
-                        NodeKind::EntryPoint,
-                        &path_str,
-                        None,
-                        &entry_uid_name,
-                    ),
-                    name: string_pool.add(&entry_name),
-                    file_idx,
-                    kind: NodeKind::EntryPoint,
-                    span: (0, 0, 0, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                });
-
-                // Encode score in the edge reason: "{tag}:{score}:{reason}".
-                // Downstream parsing is trivial (split on first ':') and
-                // the reason text is preserved as-is for LLM rendering.
-                let edge_reason = format!("{}:{:.2}:{}", ep.kind.tag(), ep.score, ep.reason);
-                entry_edges.push(Edge {
-                    source: entry_idx,
-                    target: handler_idx,
-                    rel_type: RelType::References,
-                    confidence: ep.score,
-                    reason: string_pool.add(&edge_reason),
-                });
-            }
-        }
+        let entry_edges = pass1_7_entry_points(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &mut nodes,
+        );
 
         if prof {
             eprintln!(
@@ -1028,64 +679,8 @@ impl GraphBuilder {
         }
         let _t_pass18 = std::time::Instant::now();
         // Pass 1.8: FunctionMeta collection.
-        //
-        // For each LocalGraph that has populated `raw_function_metas`, pair each
-        // entry with the corresponding graph node by span, then intern the strings
-        // into the pool and produce a `FunctionMeta`. The result is sorted by
-        // `node_idx` so `ZeroCopyGraph::function_meta()` binary-search works.
-        let mut function_metas: Vec<FunctionMeta> = Vec::new();
-        {
-            let mut node_offset: u32 = 0;
-            for local_graph in &self.local_graphs {
-                if !local_graph.raw_function_metas.is_empty() {
-                    let base = node_offset;
-                    // Sorted index → binary_search per node, so the inner loop
-                    // is O(N log F) instead of O(N*F).
-                    let mut meta_idx: Vec<(Span, usize)> = local_graph
-                        .raw_function_metas
-                        .iter()
-                        .enumerate()
-                        .map(|(i, m)| (m.span, i))
-                        .collect();
-                    meta_idx.sort_by_key(|(s, _)| *s);
-                    for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
-                        if !matches!(
-                            raw_node.kind,
-                            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                        ) {
-                            continue;
-                        }
-                        let node_idx = base + raw_idx as u32;
-                        let Ok(slot) = meta_idx.binary_search_by_key(&raw_node.span, |(s, _)| *s)
-                        else {
-                            continue;
-                        };
-                        let rfm = &local_graph.raw_function_metas[meta_idx[slot].1];
-                        let params: Vec<StrRef> =
-                            rfm.params.iter().map(|s| string_pool.add(s)).collect();
-                        let return_type = string_pool.add(&rfm.return_type);
-                        let decorators: Vec<StrRef> =
-                            rfm.decorators.iter().map(|s| string_pool.add(s)).collect();
-                        function_metas.push(FunctionMeta {
-                            node_idx,
-                            flags: rfm.flags,
-                            params,
-                            return_type,
-                            decorators,
-                        });
-                    }
-                }
-                node_offset += local_graph.nodes.len() as u32;
-            }
-        }
-        // Sort by node_idx so binary search in function_meta() is valid.
-        function_metas.sort_unstable_by_key(|m| m.node_idx);
-        let mut node_flags: Vec<u8> = vec![0u8; nodes.len()];
-        for meta in &function_metas {
-            if let Some(slot) = node_flags.get_mut(meta.node_idx as usize) {
-                *slot = (meta.flags & 0x00ff) as u8;
-            }
-        }
+        let (function_metas, node_flags) =
+            pass1_8_function_metas(&self.local_graphs, nodes.len(), &mut string_pool);
         if prof {
             eprintln!(
                 "prof build.pass18_function_meta: {:.3}s  count={}",
@@ -2051,6 +1646,470 @@ fn enclosing_class_heritage<'a>(
         }
     }
     best.map(|n| n.heritage.as_slice()).unwrap_or(&[])
+}
+
+/// Pass 1.5: Extract Routes.
+///
+/// Returns `(route_edges, emitted_routes)` where `emitted_routes` is
+/// `(route_node_idx, file_idx, route_method, route_path)` — consumed by
+/// Pass 1.6 to build the fetch-shape route index.
+fn pass1_5_extract_routes(
+    local_graphs: &[LocalGraph],
+    files: &[File],
+    symbol_table: &SymbolTable,
+    string_pool: &mut StringPool,
+    nodes: &mut Vec<Node>,
+) -> (Vec<Edge>, Vec<EmittedRoute>) {
+    let mut route_edges = Vec::new();
+    let mut current_handler_idx = 0;
+    let mut emitted_routes: Vec<EmittedRoute> = Vec::new();
+    for (file_idx, local_graph) in local_graphs.iter().enumerate() {
+        let file_idx = file_idx as u32;
+        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        // Skip Route emission for genuinely non-production files
+        // (Test/Reference). `Example` is INTENTIONALLY NOT skipped —
+        // framework example apps (Express `examples/auth/`, Flask
+        // `examples/tutorial/`) are canonical "how to wire routes"
+        // content that LLM consumers explicitly want to navigate.
+        // Tests (`/tests/`, `.spec.`, `Test.java` …) stay skipped
+        // because their `@app.route('/test_setup')` fixture routes
+        // would pollute the production-route surface. Reads the
+        // category already computed in Pass 1 (line 229) — avoids
+        // re-running `determine_category` (~36 string scans per file).
+        // `current_handler_idx` still advances by the file's node count
+        // so downstream alignment stays correct.
+        let is_non_production = matches!(
+            files[file_idx as usize].category,
+            FileCategory::Test | FileCategory::Reference
+        );
+        if is_non_production {
+            current_handler_idx += local_graph.nodes.len() as u32;
+            continue;
+        }
+
+        for raw_node in &local_graph.nodes {
+            let handler_idx = current_handler_idx;
+
+            for dec in &raw_node.decorators {
+                if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
+                    let route_name = format!("{} {}", detected.method, detected.path);
+
+                    let route_idx = nodes.len() as u32;
+                    nodes.push(Node {
+                        uid: ecp_core::uid::compute(NodeKind::Route, &path_str, None, &route_name),
+                        name: string_pool.add(&route_name),
+                        file_idx,
+                        kind: ecp_core::graph::NodeKind::Route,
+                        span: raw_node.span,
+                        community_id: 0,
+                        owner_class: StrRef::default(),
+                        content_hash: 0,
+                    });
+
+                    route_edges.push(Edge {
+                        source: handler_idx,
+                        target: route_idx,
+                        rel_type: RelType::HandlesRoute,
+                        confidence: 1.0,
+                        reason: string_pool.add("decorator"),
+                    });
+
+                    emitted_routes.push((
+                        route_idx,
+                        file_idx,
+                        detected.method.clone(),
+                        detected.path.clone(),
+                    ));
+                }
+            }
+            current_handler_idx += 1;
+        }
+
+        for raw_route in &local_graph.routes {
+            if let Some(detected) = crate::route_detector::detect_from_call(raw_route) {
+                let route_name = format!("{} {}", detected.method, detected.path);
+
+                let route_idx = nodes.len() as u32;
+                nodes.push(Node {
+                    uid: ecp_core::uid::compute(NodeKind::Route, &path_str, None, &route_name),
+                    name: string_pool.add(&route_name),
+                    file_idx,
+                    kind: ecp_core::graph::NodeKind::Route,
+                    span: raw_route.span,
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                });
+
+                // Resolve the imperative-route handler, if the parser captured
+                // a named handler (e.g. `app.get("/x", loginHandler)`). The
+                // handler must be a function/method registered in the same
+                // file; inline arrow functions are not captured.
+                if let Some(handler_name) = raw_route.handler.as_deref() {
+                    if let Some(handler_node_id) =
+                        symbol_table.lookup_in_file(&path_str, handler_name)
+                    {
+                        route_edges.push(Edge {
+                            source: handler_node_id,
+                            target: route_idx,
+                            rel_type: RelType::HandlesRoute,
+                            confidence: 1.0,
+                            reason: string_pool.add("call-arg"),
+                        });
+                    }
+                }
+
+                emitted_routes.push((
+                    route_idx,
+                    file_idx,
+                    detected.method.clone(),
+                    detected.path.clone(),
+                ));
+            }
+        }
+    }
+    (route_edges, emitted_routes)
+}
+
+/// Pass 1.6: Fetch-shape extraction.
+///
+/// Two sub-passes — both gated on `repo_root` being available (it
+/// is the only way to resolve `LocalGraph.file_path` back to an
+/// absolute path so we can re-read the source). Test harnesses that
+/// don't set a repo root simply opt out of fetch-shape data.
+///
+/// 1.6a — for each Route node, run `response_shapes::extract` on
+///        its handler file and stash a `RouteShape` if it produced
+///        any keys (sparse — empty payloads do not appear).
+/// 1.6b — build a path→route_idx map, then for every non-handler
+///        file in `local_graphs` scan for `fetch(url) /
+///        axios.get(url)` literals and emit `RelType::Fetches`
+///        edges (file_node → route_idx) with the
+///        `format_reason(keys, fetch_count)` reason payload.
+///
+/// Assumption (MVP): exact path match — `fetch('/users')` only
+/// hits a route whose path is exactly `/users`. Dynamic-segment
+/// normalisation (upstream `normalizeFetchURL` + `routeMatches`)
+/// is intentionally NOT ported here; it can land later without
+/// touching the wire format.
+fn pass1_6_fetch_shapes(
+    local_graphs: &[LocalGraph],
+    repo_root: Option<&std::path::Path>,
+    emitted_routes: &[EmittedRoute],
+    string_pool: &mut StringPool,
+) -> (Vec<RouteShape>, Vec<Edge>) {
+    let mut route_shapes_out: Vec<RouteShape> = Vec::new();
+    let mut fetches_edges: Vec<Edge> = Vec::new();
+
+    if let Some(repo_root) = repo_root {
+        // Per-file content cache — multiple routes may share a handler file
+        // (Express-style `router.get('/a')`/`router.get('/b')` in one file),
+        // and consumer files re-read once even if they fetch many URLs.
+        let mut content_cache: FxHashMap<u32, Option<String>> = FxHashMap::default();
+        let read_content = |file_idx: u32,
+                            cache: &mut FxHashMap<u32, Option<String>>,
+                            local_graphs: &[LocalGraph]|
+         -> Option<String> {
+            if let Some(slot) = cache.get(&file_idx) {
+                return slot.clone();
+            }
+            let lg = &local_graphs[file_idx as usize];
+            let abs = repo_root.join(&lg.file_path);
+            let content = std::fs::read_to_string(&abs).ok();
+            cache.insert(file_idx, content.clone());
+            content
+        };
+
+        // 1.6a — RouteShape per Route.
+        for (route_idx, file_idx, _route_method, _route_path) in emitted_routes {
+            let lg = &local_graphs[*file_idx as usize];
+            let Some(lang) = lang_for_path(&lg.file_path.to_string_lossy()) else {
+                continue;
+            };
+            let Some(content) = read_content(*file_idx, &mut content_cache, local_graphs) else {
+                continue;
+            };
+            let shape = response_shapes::extract(&content, lang);
+            if shape.response_keys.is_empty() && shape.error_keys.is_empty() {
+                continue;
+            }
+            let response_keys: Vec<StrRef> = shape
+                .response_keys
+                .iter()
+                .map(|k| string_pool.add(k))
+                .collect();
+            let error_keys: Vec<StrRef> = shape
+                .error_keys
+                .iter()
+                .map(|k| string_pool.add(k))
+                .collect();
+            route_shapes_out.push(RouteShape {
+                node_idx: *route_idx,
+                response_keys,
+                error_keys,
+            });
+        }
+
+        // 1.6b — Fetches edges.
+        //
+        // RouteIndex: (UPPERCASED_METHOD, normalized_path) → Vec<route_idx>.
+        // `normalize_route_path` coalesces `:param` / `{param}` / `<param>`
+        // to `:*` so `app.get('/api/users/:id')` and
+        // `fetch('/api/users/42')` both resolve to `("GET", "api/users/:*")`
+        // and produce a Fetches edge.
+        let mut route_index: FxHashMap<(String, String), Vec<u32>> = FxHashMap::default();
+        for (route_idx, _file_idx, route_method, route_path) in emitted_routes {
+            let (norm_path, _) = normalize_route_path(route_path);
+            route_index
+                .entry((route_method.to_uppercase(), norm_path))
+                .or_default()
+                .push(*route_idx);
+        }
+
+        // File-node index lookup: the source of a Fetches edge is the
+        // *file* (per upstream `generateId('File', filePath)`), but
+        // egent-code-plexus-rs doesn't currently create File nodes. Use the
+        // first node in the file as a reasonable proxy (typically a
+        // top-level function/class) so the edge has a real `source`.
+        // When a file has no nodes we skip it — there's nothing to
+        // attach the edge to.
+        let file_first_node: Vec<Option<u32>> = {
+            let mut v = Vec::with_capacity(local_graphs.len());
+            let mut acc: u32 = 0;
+            for lg in local_graphs {
+                if lg.nodes.is_empty() {
+                    v.push(None);
+                } else {
+                    v.push(Some(acc));
+                }
+                acc += lg.nodes.len() as u32;
+            }
+            v
+        };
+
+        // Files that themselves emit a Route are handlers, not
+        // consumers — skip them on the consumer pass to avoid
+        // self-loops where a file `fetch()`es its own route.
+        let handler_files: rustc_hash::FxHashSet<u32> =
+            emitted_routes.iter().map(|(_, fi, _, _)| *fi).collect();
+
+        // Parallel phase: pure read-only work per file.
+        // Each worker reads the file directly (no shared cache) and
+        // returns (file_idx, source_node, matched, reason_str).
+        // string_pool.add and Edge construction happen serially below.
+        #[allow(clippy::type_complexity)]
+        let parallel_results: Vec<(u32, u32, Vec<(u32, bool)>, String)> = local_graphs
+            .par_iter()
+            .enumerate()
+            .filter_map(|(file_idx_usize, lg)| {
+                let file_idx = file_idx_usize as u32;
+                if handler_files.contains(&file_idx) {
+                    return None;
+                }
+                let source_node = file_first_node[file_idx_usize]?;
+                let path_str = lg.file_path.to_string_lossy();
+                // Allowlist: extensions where `fetch_urls::extract` produces
+                // useful hits. PHP is a route-server language, not a consumer
+                // here; all other unknown extensions are skipped cheaply.
+                if !is_consumer_extension(&path_str) {
+                    return None;
+                }
+                // Read directly — the cache is serial-only (1.6a) and each
+                // consumer file is visited at most once in this subpass.
+                let abs = repo_root.join(&lg.file_path);
+                let content = std::fs::read_to_string(&abs).ok()?;
+                let client_calls = fetch_urls::extract(&content);
+                if client_calls.is_empty() {
+                    return None;
+                }
+                let keys = consumer_keys::extract(&content);
+
+                // Resolve each (method, url) pair against the RouteIndex.
+                // Cross-repo misses (no matching Route node) are silently
+                // skipped — ecp contracts handles those separately.
+                let mut matched: Vec<(u32, bool)> = Vec::new(); // (route_idx, is_templated)
+                for (client_method, client_url) in &client_calls {
+                    let (norm_url, client_templated) = normalize_route_path(client_url);
+                    // Route side also normalized via `:*`; the index key carries
+                    // `:*` segments whenever the route had a param placeholder.
+                    let route_templated = norm_url.contains(":*");
+                    if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
+                        for &route_idx in targets {
+                            matched.push((route_idx, client_templated || route_templated));
+                        }
+                    }
+                }
+                if matched.is_empty() {
+                    return None;
+                }
+                let fetch_count = matched.len() as u32;
+                let reason_str = format_reason(&keys, fetch_count);
+                Some((file_idx, source_node, matched, reason_str))
+            })
+            .collect();
+
+        // Serial phase: intern strings and push edges in file_idx order.
+        // rayon's `collect::<Vec<_>>()` preserves source order even though
+        // `filter_map` drops the IndexedParallelIterator bound — so
+        // parallel_results stays in file_idx order, identical to the old
+        // serial loop's edge order; no extra sort needed.
+        for (_file_idx, source_node, matched, reason_str) in parallel_results {
+            let reason_ref = string_pool.add(&reason_str);
+            for (route_idx, is_templated) in matched {
+                // Confidence: 0.8 for exact-path matches, 0.6 for any
+                // templated segment — caller or callee side.
+                let confidence = if is_templated { 0.6 } else { 0.8 };
+                fetches_edges.push(Edge {
+                    source: source_node,
+                    target: route_idx,
+                    rel_type: RelType::Fetches,
+                    confidence,
+                    reason: reason_ref,
+                });
+            }
+        }
+    }
+    (route_shapes_out, fetches_edges)
+}
+
+/// Pass 1.7: Entry-point scoring (cross-language).
+///
+/// Pure consumer of `RawRoute` + `RawFrameworkRef` + `main()`
+/// detection — see `crate::entry_points` for the scoring matrix.
+/// Closes the ⚠️ Entry column for Java / Kotlin / C# / Go / Rust /
+/// Swift / C / C++ / Dart in the README Language Matrix.
+///
+/// Emits one `NodeKind::EntryPoint` marker node per scored entry
+/// point and a `References` edge from the marker to the underlying
+/// handler (looked up by name in the same file's SymbolTable). The
+/// edge's `reason` carries the scoring provenance so downstream
+/// LLM tooling can render "this is an HTTP route handler at
+/// confidence 1.0" without re-running the scorer.
+fn pass1_7_entry_points(
+    local_graphs: &[LocalGraph],
+    symbol_table: &SymbolTable,
+    string_pool: &mut StringPool,
+    nodes: &mut Vec<Node>,
+) -> Vec<Edge> {
+    let mut entry_edges: Vec<Edge> = Vec::new();
+    for (file_idx, local_graph) in local_graphs.iter().enumerate() {
+        let file_idx = file_idx as u32;
+        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let entries = crate::entry_points::score_entry_points(
+            &local_graph.routes,
+            &local_graph.framework_refs,
+            &local_graph.nodes,
+        );
+        for ep in entries {
+            let handler_idx = symbol_table.lookup_in_file(&path_str, &ep.uid);
+            let Some(handler_idx) = handler_idx else {
+                // Handler not found in this file — happens when a
+                // RawRoute's handler name is a string literal that
+                // doesn't match any parsed symbol (e.g. an external
+                // reference). Skip silently; the EntryPoint without
+                // a target would be a dangling marker.
+                continue;
+            };
+            let entry_name = format!("{}@{}", ep.kind.tag(), ep.uid);
+            // EntryPoint UID encodes kind-tag + handler-uid in the name segment
+            // so two entry points for the same handler (route + main) don't collide.
+            let entry_uid_name = format!("{}:{}", ep.kind.tag(), ep.uid);
+            let entry_idx = nodes.len() as u32;
+            nodes.push(Node {
+                uid: ecp_core::uid::compute(NodeKind::EntryPoint, &path_str, None, &entry_uid_name),
+                name: string_pool.add(&entry_name),
+                file_idx,
+                kind: NodeKind::EntryPoint,
+                span: (0, 0, 0, 0),
+                community_id: 0,
+                owner_class: StrRef::default(),
+                content_hash: 0,
+            });
+
+            // Encode score in the edge reason: "{tag}:{score}:{reason}".
+            // Downstream parsing is trivial (split on first ':') and
+            // the reason text is preserved as-is for LLM rendering.
+            let edge_reason = format!("{}:{:.2}:{}", ep.kind.tag(), ep.score, ep.reason);
+            entry_edges.push(Edge {
+                source: entry_idx,
+                target: handler_idx,
+                rel_type: RelType::References,
+                confidence: ep.score,
+                reason: string_pool.add(&edge_reason),
+            });
+        }
+    }
+    entry_edges
+}
+
+/// Pass 1.8: FunctionMeta collection.
+///
+/// For each LocalGraph that has populated `raw_function_metas`, pair each
+/// entry with the corresponding graph node by span, then intern the strings
+/// into the pool and produce a `FunctionMeta`. The result is sorted by
+/// `node_idx` so `ZeroCopyGraph::function_meta()` binary-search works.
+///
+/// `node_count` is `nodes.len()` at the point Pass 1.8 runs — used to
+/// pre-size the returned `node_flags` bitmap.
+fn pass1_8_function_metas(
+    local_graphs: &[LocalGraph],
+    node_count: usize,
+    string_pool: &mut StringPool,
+) -> (Vec<FunctionMeta>, Vec<u8>) {
+    let mut function_metas: Vec<FunctionMeta> = Vec::new();
+    {
+        let mut node_offset: u32 = 0;
+        for local_graph in local_graphs {
+            if !local_graph.raw_function_metas.is_empty() {
+                let base = node_offset;
+                // Sorted index → binary_search per node, so the inner loop
+                // is O(N log F) instead of O(N*F).
+                let mut meta_idx: Vec<(Span, usize)> = local_graph
+                    .raw_function_metas
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| (m.span, i))
+                    .collect();
+                meta_idx.sort_by_key(|(s, _)| *s);
+                for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
+                    if !matches!(
+                        raw_node.kind,
+                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                    ) {
+                        continue;
+                    }
+                    let node_idx = base + raw_idx as u32;
+                    let Ok(slot) = meta_idx.binary_search_by_key(&raw_node.span, |(s, _)| *s)
+                    else {
+                        continue;
+                    };
+                    let rfm = &local_graph.raw_function_metas[meta_idx[slot].1];
+                    let params: Vec<StrRef> =
+                        rfm.params.iter().map(|s| string_pool.add(s)).collect();
+                    let return_type = string_pool.add(&rfm.return_type);
+                    let decorators: Vec<StrRef> =
+                        rfm.decorators.iter().map(|s| string_pool.add(s)).collect();
+                    function_metas.push(FunctionMeta {
+                        node_idx,
+                        flags: rfm.flags,
+                        params,
+                        return_type,
+                        decorators,
+                    });
+                }
+            }
+            node_offset += local_graph.nodes.len() as u32;
+        }
+    }
+    // Sort by node_idx so binary search in function_meta() is valid.
+    function_metas.sort_unstable_by_key(|m| m.node_idx);
+    let mut node_flags: Vec<u8> = vec![0u8; node_count];
+    for meta in &function_metas {
+        if let Some(slot) = node_flags.get_mut(meta.node_idx as usize) {
+            *slot = (meta.flags & 0x00ff) as u8;
+        }
+    }
+    (function_metas, node_flags)
 }
 
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
