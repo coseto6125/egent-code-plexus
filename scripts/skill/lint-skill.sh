@@ -9,7 +9,9 @@ ROOT="${1:-docs/skills/ecp-onboard}"
 
 fail() { echo "lint FAIL: $1" >&2; exit 1; }
 
-# --- Check 1: SKILL.md exists with valid frontmatter (name, description, when-to-use) ---
+# --- Check 1: SKILL.md exists with valid frontmatter (name, description) ---
+# when-to-use is NOT required: skill loaders surface only `description` to the
+# model, so trigger phrases must live there.
 skill="$ROOT/SKILL.md"
 [[ -f "$skill" ]] || fail "SKILL.md missing at $skill"
 
@@ -17,7 +19,7 @@ skill="$ROOT/SKILL.md"
 fm=$(awk '/^---\r?$/{c++; next} c==1' "$skill")
 [[ -n "$fm" ]] || fail "SKILL.md has no frontmatter"
 
-for key in name description when-to-use; do
+for key in name description; do
     grep -qE "^${key}:" <<<"$fm" || fail "SKILL.md frontmatter missing '$key'"
 done
 

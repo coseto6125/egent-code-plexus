@@ -1,50 +1,22 @@
 ---
 name: ecp
-description: Use for ecp command and workflow reference. Start here for command selection, help routing, and links into the detailed guides.
+description: Exploring code structure in an indexed repo — reach here before grep, and never guess `ecp` syntax from memory. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, full context→`ecp inspect`, routes/contracts→`ecp routes`/`ecp contracts`. Flags and admin subcommands: help routing inside.
 ---
 
 # ecp — Entry Point
 
-This is the **single entry point** for the Codex-facing `ecp` skill set.
+Single entry point for the Codex-facing `ecp` skill set. Identify the task category, then open the matching guide — guides and `--help` are ground truth, not memory.
 
-When you need to use `ecp`, do not guess from memory. First identify the task category, then open the matching guide.
+## Core directives
 
----
+1. **Help routing.** `ecp --help` = top-level command map; `ecp admin --help` = admin subcommand map; `ecp <command> --help` = per-command flags. `ecp admin` without a subcommand launches the interactive TUI — never run it just to see the reference.
+2. **Smallest command that fits.** If one subcommand's help page answers the task, use it before reading any broader reference.
 
-## Layer 1: Core Directives
+## Decision tree
 
-These rules apply to every `ecp` task.
-
-### Directive 1: Use the actual help output
-`ecp --help` is the top-level command map.
-`ecp admin --help` is the admin subcommand map.
-
-Do not treat `ecp admin` as a help command; it launches the interactive TUI by default.
-
-### Directive 2: Prefer the smallest command that fits
-If a task can be answered by the top-level help or a single subcommand help page, use that before reading any broader reference.
-
-### Directive 3: Keep task-specific workflows separate
-Command syntax, review workflows, and broader repository guidance should live in separate guides instead of one large doc.
-
----
-
-## Layer 2: Decision Tree
-
-| If you need... | Open guide |
+| If you need... | Open |
 |---|---|
 | Command names, flags, output formats, or admin subcommands | [`guides/command-reference.md`](./guides/command-reference.md) |
 | Change review workflow for changed files | [`../simplify/SKILL.md`](../simplify/SKILL.md) |
 
-> If you are unsure which command to use, start with `ecp --help`, then open the matching guide.
-
----
-
-## Layer 3: On-Demand References
-
-These are support files, not entry points.
-
-- `guides/` — detailed command and workflow references
-- `../simplify/SKILL.md` — graph-aware review workflow built on top of `ecp`
-
-If you find yourself reading every file under `skill_sample/codex/` for one task, you skipped Layer 2.
+Reading every file under `skill_sample/codex/` for one task means you skipped this table.

@@ -24,7 +24,7 @@ Fall back to grep or an Explore agent only when the target is non-code text, or 
 
 ## Before any refactor / rename / signature change
 
-`ecp impact --target <symbol> --direction upstream` to see callers. HIGH/CRITICAL risk → confirm with user.
+`ecp impact --target <symbol> --direction upstream` to see callers. Many callers, or callers in core / widely-imported modules → confirm with user.
 
 ## Reading output — four tells
 
