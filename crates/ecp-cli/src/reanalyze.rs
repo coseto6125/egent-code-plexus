@@ -103,7 +103,22 @@ pub(crate) fn make_pipeline_for_names<'a>(
             continue;
         }
         if seen.insert(name) {
-            if let Some(Ok(provider)) = make_provider(name) {
+            // Pre-refactor, every arm of the old inline `match` `.unwrap()`'d
+            // its constructor — a malformed tree-sitter query panicked
+            // immediately instead of silently dropping that language from the
+            // pipeline. `make_provider` returning `Option<Result<_>>` must not
+            // downgrade that to a silent skip: an incomplete incremental
+            // reanalyze / `impact --baseline` result with no failure signal
+            // would violate this repo's "honest no-data beats a silent guess"
+            // discipline. `make_pipeline_for_names` has no `Result` in its
+            // signature (its callers — `make_pipeline()` via
+            // `OnceLock::get_or_init`, `reanalyze_files`, `impact_with_baseline`
+            // — mix `Result`-free and `Result`-returning shapes), so this
+            // restores the same fail-fast behaviour via `.expect()` rather than
+            // threading `Result` through all three.
+            if let Some(result) = make_provider(name) {
+                let provider = result
+                    .unwrap_or_else(|e| panic!("provider constructor for {name:?} failed: {e}"));
                 pipeline.register_provider(provider);
             }
         }
