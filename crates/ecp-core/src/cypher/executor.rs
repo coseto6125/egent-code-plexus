@@ -994,46 +994,48 @@ fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) ->
     let Some(Expr::Var(var)) = args.first() else {
         return Value::Null;
     };
+    // `computed` takes precedence over node_vars/edge_vars whenever the var
+    // is present there at all — same order `prop_value` uses. A WITH clause
+    // that shadows a surviving name (`WITH b AS a`) only overwrites
+    // `computed["a"]`; the plain-rebind branch of `exec_with` deliberately
+    // preserves node_vars/edge_vars unchanged for downstream MATCH traversal,
+    // so an old node_vars["a"] can still be sitting there stale. Falling
+    // back to it after a `computed` miss would resolve the funcall against
+    // the wrong entity — the pre-WITH one — while every other evaluator
+    // (prop_value, eval_return_expr_with) already reads the new binding.
+    if let Some(computed_val) = b.computed.get(var) {
+        return match (name, computed_val) {
+            ("TYPE", Value::EdgeRef { rel_type, .. }) => Value::Str(rel_type.as_str().into()),
+            ("ID", Value::NodeRef { idx, .. }) => Value::Int(*idx as i64),
+            ("LABELS", Value::NodeRef { kind, .. }) => Value::List(vec![Value::Str(kind.clone())]),
+            _ => Value::Null,
+        };
+    }
     match name {
         "TYPE" => {
-            // type(r) — args[0] must be a Var bound to an edge, either
-            // directly (edge_vars) or via a WITH alias / aggregate grouping
-            // key that stashed the resolved EdgeRef in `computed` (WITH
-            // rebinding and aggregation both clear node_vars/edge_vars).
-            if let Some(&eidx) = b.edge_vars.get(var) {
-                if let Some(e) = graph.overlay_edge(eidx) {
-                    return Value::Str(e.rel_type.as_str().into());
-                }
-                let e = &graph.edges[eidx as usize];
-                return Value::Str(RelType::from(&e.rel_type).as_str().into());
+            let Some(&eidx) = b.edge_vars.get(var) else {
+                return Value::Null;
+            };
+            if let Some(e) = graph.overlay_edge(eidx) {
+                return Value::Str(e.rel_type.as_str().into());
             }
-            match b.computed.get(var) {
-                Some(Value::EdgeRef { rel_type, .. }) => Value::Str(rel_type.as_str().into()),
-                _ => Value::Null,
-            }
+            let e = &graph.edges[eidx as usize];
+            Value::Str(RelType::from(&e.rel_type).as_str().into())
         }
         "ID" => {
-            // id(n) — args[0] must be a Var bound to a node, directly or via
-            // a `computed` NodeRef (same WITH-alias / aggregation gap as TYPE).
-            if let Some(&idx) = b.node_vars.get(var) {
-                return Value::Int(idx as i64);
-            }
-            match b.computed.get(var) {
-                Some(Value::NodeRef { idx, .. }) => Value::Int(*idx as i64),
-                _ => Value::Null,
-            }
+            let Some(&idx) = b.node_vars.get(var) else {
+                return Value::Null;
+            };
+            Value::Int(idx as i64)
         }
         "LABELS" => {
             // labels(n) — single-kind list per ecp's one-label-per-node model.
-            if let Some(&idx) = b.node_vars.get(var) {
-                return match graph.mnode(idx) {
-                    Some(m) => Value::List(vec![Value::Str(m.kind().as_str().into())]),
-                    None => Value::Null,
-                };
-            }
-            match b.computed.get(var) {
-                Some(Value::NodeRef { kind, .. }) => Value::List(vec![Value::Str(kind.clone())]),
-                _ => Value::Null,
+            let Some(&idx) = b.node_vars.get(var) else {
+                return Value::Null;
+            };
+            match graph.mnode(idx) {
+                Some(m) => Value::List(vec![Value::Str(m.kind().as_str().into())]),
+                None => Value::Null,
             }
         }
         _ => Value::Null,
@@ -3127,6 +3129,34 @@ mod tests {
             assert_eq!(r.rows.len(), 1);
             assert_eq!(r.rows[0][0], Value::Str("caller".into()));
             assert_eq!(r.rows[0][1], Value::Int(1));
+        });
+    }
+
+    #[test]
+    fn exec_where_funcall_on_shadowing_with_alias_uses_new_binding() {
+        // `WITH b AS a` shadows the surviving `a` name: computed["a"] becomes
+        // the new binding (callee, idx 1), but the plain-rebind branch of
+        // exec_with deliberately preserves the OLD node_vars["a"] (caller,
+        // idx 0) unchanged for downstream MATCH traversal. `ID(a) = 1` only
+        // stays true if the funcall resolves against the shadowed (new)
+        // binding — a lookup-order bug that falls back to node_vars first
+        // would evaluate `ID(a)` as 0, filtering the row out entirely, while
+        // RETURN a.name (via prop_value, which already checks computed
+        // first) would still project "callee" had the row survived — i.e.
+        // the bug manifests as an incorrectly EMPTY result here, not a
+        // wrong-but-present value.
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function)-[r:Calls]->(b:Function) WITH b AS a WHERE ID(a) = 1 RETURN a.name",
+            )
+            .unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(
+                r.rows.len(),
+                1,
+                "WHERE ID(a) = 1 must resolve against the shadowed (new) binding, matching what RETURN a.name projects"
+            );
+            assert_eq!(r.rows[0][0], Value::Str("callee".into()));
         });
     }
 
