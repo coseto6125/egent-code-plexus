@@ -44,4 +44,16 @@ cat > "$tmp/docs/skills/ecp-onboard/guides/01-install.md" <<'EOF'
 EOF
 assert_exit 0 bash "$LINT" "$tmp/docs/skills/ecp-onboard"
 
+# Case 5: name + description only (no when-to-use) → passes; triggers live in
+# description because skill loaders never surface when-to-use to the model.
+cat > "$tmp/docs/skills/ecp-onboard/SKILL.md" <<'EOF2'
+---
+name: ecp-onboard
+description: Install wizard. Use when the user asks to install or set up ecp.
+---
+- Jump table:
+  - install → guides/01-install.md
+EOF2
+assert_exit 0 bash "$LINT" "$tmp/docs/skills/ecp-onboard"
+
 pass
