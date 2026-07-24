@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.8.6 - 2026-07-24
+
+### Refactor
+
+- single provider registry — collapse 3 hand-synced dispatch tables (#649)
+- single scalar/aggregate dispatch — unify the 3-way evaluator split (#653)
+- extract build() passes 1.5-1.8 into named functions (#652)
+- split five modes into impact/ submodules + fixture-based unit tests (#648)
 ## v0.8.5 - 2026-07-18
 
 ### Bug Fixes
