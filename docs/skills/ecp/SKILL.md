@@ -1,29 +1,18 @@
 ---
 name: ecp
-description: When you want to explore code structure — where a symbol is defined, who calls it, a refactor's blast radius, routes/contracts, or to trace how code connects — reach here before grep or an Explore agent. Verb by question: where→find, who-calls/blast-radius→impact, full-context→inspect, where-a-filename-is-read-vs-written→impact --literal, routes/contracts→those, trace-flow→processes, graph-question-with-no-verb (orphans, all-impls)→cypher. Grep only for non-code text: config values, log strings, fs layout.
+description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
 ---
 
 # EgentCodePlexus (ecp) — Structural Analysis Entry
 
----
+## Core rules
 
-## 🧭 Core Principles
+1. **ecp-first.** The moment you'd fan out to read files or grep a symbol to understand structure, that IS the ecp trigger — any indexed repo, ecp's own included. "Who calls X" → `ecp impact` (returns the caller *list*); `ecp find` only locates the definition.
+2. **Blast radius before refactor — and it's a lower bound.** Before changing a function or class, run `ecp impact <name>`; many callers, or callers in core / widely-imported modules → confirm with the user first. The resolver suppresses ambiguous bare calls to common names, so the caller set is a lower bound: a suspiciously low count for a common name → `grep` the call sites to cross-check.
+3. **Honest miss.** `found:false` carrying a `result` caveat field is provisional — do what the caveat says (rerun, or `ecp admin index --force --repo .`). `found:false` with no caveat is trustworthy: try `ecp find <fragment> --mode fuzzy` for name drift, then report "doesn't exist" — never synthesize a caller list or blast radius for a symbol ecp couldn't find.
+4. **Text → grep.** String literals, log messages, config keys, fs layout, vendored / generated code: grep / Read. ecp parses code, not text. For any other surprising output, find the root cause before calling it a bug: [`guides/troubleshooting.md`](./guides/troubleshooting.md).
 
-### Directive 1: ecp-first reflex (full rule in @ECP.md §"The reflex")
-The moment you'd fan out to read files or grep for a symbol to understand structure, that's the ecp trigger — for any indexed repo, ecp's own included. Verb map is in the description above. Two traps weak models hit: (a) **"who calls X" → `ecp impact`, not `ecp find`** — find locates the definition + a caller *count*; impact returns the caller *list* you need before a refactor; (b) on an **ambiguous-name error** (`'handle' is ambiguous`), don't fall back to Read — re-run with `--file <f>` or `--kind function`.
-
-### Directive 2: Blast Radius before Refactor — and it's a lower bound
-Before modifying a function or class, run `ecp impact` for callers (HIGH / CRITICAL → confirm with user). The caller set is a **lower bound**: a bare call to a common name can be suppressed by the resolver's ambiguity cap. **Tell:** suspiciously low caller count → `grep` the call sites to cross-check.
-
-### Directive 3: `found:false` is two-valued — and a real miss means "report it, don't invent"
-`found:false` can mean "doesn't exist" OR "warm-attach, HEAD not indexed yet". **Tell:** a `result` caveat field (it states how far to trust the rows) or `l2.warm-attach` / `note:` on stderr → provisional; rerun or `ecp admin index --force --repo .`. Then `ecp find <fragment> --mode fuzzy` for a genuine miss. **If the symbol truly isn't there, say exactly that — never synthesize a blast radius / caller list for a symbol ecp couldn't find** (that's the fabrication ecp exists to prevent).
-
-### Directive 4: Surprising output has a root cause; grep is right for text
-Before concluding "ecp is broken", verify against source (definition, fresh reindex, grep cross-check) — doc-comment inference ≠ verification. **Tell:** non-code text — string literals, error messages, config keys, vendored / generated code, fs layout — belongs to grep / Read; ecp parses code, not text.
-
----
-
-## ⚡ Quick Reference
+## Quick Reference
 
 ### Symbol lookup
 | Command | Use for |
@@ -75,11 +64,8 @@ Run in order `sync` → `contracts` → `impact`: `ecp group sync <name>` (cross
 ### Schema introspection (no graph load)
 `ecp schema blindspots` (per-lang BlindSpot coverage), `reltypes` (RelType edges + LLM-utility + heuristic flag), `node-kinds` (NodeKind variants + Struct-vs-Class etc.), `graph-version` (graph.bin format version).
 
----
-
-## 📚 On-Demand References
+## On-Demand References
 
 - [`guides/troubleshooting.md`](./guides/troubleshooting.md) — `found:false`, index staleness, resolver misses, output-trust tells.
 - `_shared/cli/` — Per-command flag references (`inspect`, `impact`, `cypher`, `group`, `processes`, …).
 - `_shared/refs/` — Cypher syntax, repo resolution.
-

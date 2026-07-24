@@ -56,19 +56,22 @@ OUT="$tmp/skill/_shared/cli"
 mkdir -p "$OUT"
 bash "$GEN" "$tmp/mock-ecp" "$OUT"
 
-# Expect: 9.9.9-test version directory with per-command .md files
-assert_file_exists "$OUT/9.9.9-test/find.md"
-assert_file_exists "$OUT/9.9.9-test/impact.md"
-assert_file_exists "$OUT/9.9.9-test/admin-index.md"
-assert_grep '^Usage: ecp find' "$OUT/9.9.9-test/find.md"
-assert_grep '^Usage: ecp impact' "$OUT/9.9.9-test/impact.md"
-assert_grep '^Usage: ecp admin index' "$OUT/9.9.9-test/admin-index.md"
+# Expect: flat per-command .md files directly under the output dir.
+# Versioned subdirs + manifest.json were eliminated in PR #189 — only the
+# latest references live under _shared/cli/ (what SKILL.md links point at).
+assert_file_exists "$OUT/find.md"
+assert_file_exists "$OUT/impact.md"
+assert_file_exists "$OUT/admin-index.md"
+assert_grep '^Usage: ecp find' "$OUT/find.md"
+assert_grep '^Usage: ecp impact' "$OUT/impact.md"
+assert_grep '^Usage: ecp admin index' "$OUT/admin-index.md"
 
-# Manifest.json present and lists the version
-assert_file_exists "$OUT/manifest.json"
-v=$(jq -r '.latest' "$OUT/manifest.json")
-assert_equal "9.9.9-test" "$v" "manifest latest"
-n=$(jq -r '.versions | length' "$OUT/manifest.json")
-assert_equal "1" "$n" "manifest versions count"
+# Pin the flat layout: no per-version directory, no manifest.
+if [[ -d "$OUT/9.9.9-test" ]]; then
+    echo "FAIL: unexpected versioned dir $OUT/9.9.9-test (flat layout since PR #189)" >&2; exit 1
+fi
+if [[ -f "$OUT/manifest.json" ]]; then
+    echo "FAIL: unexpected manifest.json (removed in PR #189)" >&2; exit 1
+fi
 
 pass

@@ -1,10 +1,8 @@
 ---
 name: ecp-onboard
-description: Personalized install + config wizard for egent-code-plexus. Walks the
-  user from "no ecp installed" → "ecp ready + indexed + agent integrated (native
-  else MCP) + next steps".
-when-to-use: User says "install ecp" / "set up egent-code-plexus" / "onboard me
-  to ecp", OR opened an ONBOARDING share link / pasted a bootstrap URL.
+description: Personalized install + config wizard for egent-code-plexus. Use when
+  the user asks to install, set up, or onboard ecp ("install ecp", "set up
+  egent-code-plexus"), opened an ONBOARDING share link, or pasted a bootstrap URL.
 ---
 
 # ecp-onboard
