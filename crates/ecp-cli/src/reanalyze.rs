@@ -7,19 +7,9 @@
 //! mmap-backed graph.
 
 use crate::git::{safe_exec, DiffScope};
-use ecp_analyzer::{
-    astro::parser::AstroProvider, c::parser::CProvider, c_sharp::parser::CSharpProvider,
-    cpp::parser::CppProvider, dart::parser::DartProvider, go::parser::GoProvider,
-    incremental::shadow_candidates::detect_shadow_candidates, java::parser::JavaProvider,
-    javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
-    kubernetes::parser::KubernetesProvider, markdown::parser::MarkdownProvider,
-    openapi::schema_scan::OpenApiProvider, php::parser::PhpProvider,
-    python::parser::PythonProvider, ruby::parser::RubyProvider, rust::parser::RustProvider,
-    svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
-    typescript::parser::TypeScriptProvider, vue::parser::VueProvider, yaml::parser::YamlProvider,
-};
+use crate::provider_registry::make_provider;
+use ecp_analyzer::incremental::shadow_candidates::detect_shadow_candidates;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
-use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
@@ -33,40 +23,14 @@ pub fn pipeline() -> &'static AnalyzerPipeline {
     PIPELINE.get_or_init(make_pipeline)
 }
 
-/// Build one provider by its `provider_name_for_path` name. Returns `None`
-/// for names that `make_pipeline` does not register (e.g. crystal/zig/sql —
-/// not yet wired into the reanalyze path), so the caller silently skips them
-/// exactly as the full pipeline would (their files resolve to no provider).
-fn make_provider(name: &str) -> Option<Box<dyn LanguageProvider>> {
-    let p: Box<dyn LanguageProvider> = match name {
-        "typescript" => Box::new(TypeScriptProvider::new().unwrap()),
-        "python" => Box::new(PythonProvider::new().unwrap()),
-        "go" => Box::new(GoProvider::new().unwrap()),
-        "rust" => Box::new(RustProvider::new().unwrap()),
-        "java" => Box::new(JavaProvider::new().unwrap()),
-        "javascript" => Box::new(JavaScriptProvider::new().unwrap()),
-        "php" => Box::new(PhpProvider::new().unwrap()),
-        "ruby" => Box::new(RubyProvider::new().unwrap()),
-        "kotlin" => Box::new(KotlinProvider::new().unwrap()),
-        "c_sharp" => Box::new(CSharpProvider::new().unwrap()),
-        "c" => Box::new(CProvider::new().unwrap()),
-        "cpp" => Box::new(CppProvider::new().unwrap()),
-        "swift" => Box::new(SwiftProvider::new().unwrap()),
-        "dart" => Box::new(DartProvider::new().unwrap()),
-        "openapi" => Box::new(OpenApiProvider::new().unwrap()),
-        "kubernetes" => Box::new(KubernetesProvider::new().unwrap()),
-        "vue" => Box::new(VueProvider::new().unwrap()),
-        "astro" => Box::new(AstroProvider::new().unwrap()),
-        "svelte" => Box::new(SvelteProvider::new().unwrap()),
-        _ => return None,
-    };
-    Some(p)
-}
-
-/// All provider names `make_pipeline` registers, in registration order. The
-/// full pipeline is `make_pipeline_for_names(ALL_PROVIDER_NAMES)` plus the two
-/// providers (markdown, yaml) that have no `provider_name_for_path` extension
-/// mapping and so are only reachable from the full `analyze` path.
+/// All provider names `make_pipeline` registers, in registration order. A
+/// deliberate subset of `provider_registry::PROVIDER_CONSTRUCTORS` — e.g.
+/// crystal/zig/sql are registered there but not here (not yet wired into the
+/// reanalyze path), so their files silently resolve to no provider on this
+/// path, exactly as the full pipeline would. The full pipeline is
+/// `make_pipeline_for_names(ALL_PROVIDER_NAMES)` plus the two providers
+/// (markdown, yaml) that have no `provider_name_for_path` extension mapping
+/// and so are only reachable from the full `analyze` path.
 const ALL_PROVIDER_NAMES: &[&str] = &[
     "typescript",
     "python",
@@ -100,25 +64,61 @@ pub fn make_pipeline() -> AnalyzerPipeline {
     let mut pipeline = make_pipeline_for_names(ALL_PROVIDER_NAMES.iter().copied());
     // markdown + yaml have no extension dispatch in provider_name_for_path
     // (only the GitHub-Actions / docker-compose path specials route to yaml),
-    // so make_provider does not list them; register them here to keep the full
-    // pipeline byte-identical to the pre-refactor set.
-    pipeline.register_provider(Box::new(MarkdownProvider::new().unwrap()));
-    pipeline.register_provider(Box::new(YamlProvider::new().unwrap()));
+    // so ALL_PROVIDER_NAMES does not list them; register them here to keep the
+    // full pipeline byte-identical to the pre-refactor set.
+    pipeline.register_provider(
+        make_provider("markdown")
+            .expect("provider_registry has a \"markdown\" entry")
+            .unwrap(),
+    );
+    pipeline.register_provider(
+        make_provider("yaml")
+            .expect("provider_registry has a \"yaml\" entry")
+            .unwrap(),
+    );
     pipeline
 }
 
-/// Build a pipeline holding only the named providers (dedup'd). The incremental
-/// reanalyze path uses this to construct a pipeline for exactly the languages a
-/// dirty set touches, avoiding the full 20-provider tree-sitter `Query` compile
-/// (~0.65s) when reparsing a handful of changed files (~8ms of actual parse).
+/// Build a pipeline holding only the named providers (dedup'd), constrained
+/// to `ALL_PROVIDER_NAMES` — every caller (incremental reanalyze, `impact
+/// --baseline`'s scoped pipeline, `make_pipeline` itself) must see the same
+/// language coverage as the full pipeline. Names outside the subset (e.g.
+/// "bash", not yet wired into these scoped paths) are silently dropped here,
+/// same as they are on the full pipeline — enforced once, in this shared
+/// helper, rather than at each call site, so a caller can't accidentally
+/// regain coverage `PROVIDER_CONSTRUCTORS` grew but `ALL_PROVIDER_NAMES`
+/// deliberately excludes.
+///
+/// The incremental reanalyze path uses this to construct a pipeline for
+/// exactly the languages a dirty set touches, avoiding the full 20-provider
+/// tree-sitter `Query` compile (~0.65s) when reparsing a handful of changed
+/// files (~8ms of actual parse).
 pub(crate) fn make_pipeline_for_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
 ) -> AnalyzerPipeline {
     let mut pipeline = AnalyzerPipeline::new();
     let mut seen: FxHashSet<&str> = FxHashSet::default();
     for name in names {
+        if !ALL_PROVIDER_NAMES.contains(&name) {
+            continue;
+        }
         if seen.insert(name) {
-            if let Some(provider) = make_provider(name) {
+            // Pre-refactor, every arm of the old inline `match` `.unwrap()`'d
+            // its constructor — a malformed tree-sitter query panicked
+            // immediately instead of silently dropping that language from the
+            // pipeline. `make_provider` returning `Option<Result<_>>` must not
+            // downgrade that to a silent skip: an incomplete incremental
+            // reanalyze / `impact --baseline` result with no failure signal
+            // would violate this repo's "honest no-data beats a silent guess"
+            // discipline. `make_pipeline_for_names` has no `Result` in its
+            // signature (its callers — `make_pipeline()` via
+            // `OnceLock::get_or_init`, `reanalyze_files`, `impact_with_baseline`
+            // — mix `Result`-free and `Result`-returning shapes), so this
+            // restores the same fail-fast behaviour via `.expect()` rather than
+            // threading `Result` through all three.
+            if let Some(result) = make_provider(name) {
+                let provider = result
+                    .unwrap_or_else(|e| panic!("provider constructor for {name:?} failed: {e}"));
                 pipeline.register_provider(provider);
             }
         }
@@ -180,6 +180,9 @@ pub fn reanalyze_files(repo: &Path, scope: &DiffScope, rel_paths: &[String]) -> 
     // map to — reparsing a handful of files no longer pays the full
     // 20-provider tree-sitter compile. The full `pipeline()` singleton stays
     // reserved for the cold-index path that touches every language at once.
+    // `make_pipeline_for_names` itself constrains to `ALL_PROVIDER_NAMES`, so
+    // this call sees the same language coverage as the full pipeline without
+    // needing its own filter.
     let needed: FxHashSet<&str> = rel_paths
         .iter()
         .filter_map(|p| AnalyzerPipeline::provider_name_for_path(Path::new(p)))
@@ -313,6 +316,33 @@ mod tests {
             full.provider_count(),
             subset.provider_count() + 2,
             "make_pipeline should be the named subset plus markdown + yaml"
+        );
+    }
+
+    /// Every scoped-pipeline caller (incremental reanalyze, `impact
+    /// --baseline`) goes through `make_pipeline_for_names`, so the
+    /// `ALL_PROVIDER_NAMES` constraint must live here, not at each call
+    /// site. "bash" is constructible via `provider_registry::PROVIDER_CONSTRUCTORS`
+    /// (it backs `.sh` on the full-repo cold-index path) but is deliberately
+    /// absent from `ALL_PROVIDER_NAMES` — not yet wired into these scoped
+    /// paths — so it must not register here even though `make_provider("bash")`
+    /// succeeds.
+    #[test]
+    fn test_make_pipeline_for_names_nonsubset_name_skipped() {
+        assert!(
+            !ALL_PROVIDER_NAMES.contains(&"bash"),
+            "test premise broken: \"bash\" is now in ALL_PROVIDER_NAMES"
+        );
+        assert!(
+            make_provider("bash").is_some(),
+            "test premise broken: \"bash\" is no longer constructible via provider_registry"
+        );
+
+        let pipeline = make_pipeline_for_names(["bash"]);
+        assert_eq!(
+            pipeline.provider_count(),
+            0,
+            "make_pipeline_for_names registered a provider for \"bash\", a name outside ALL_PROVIDER_NAMES"
         );
     }
 }

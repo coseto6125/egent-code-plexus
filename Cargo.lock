@@ -962,6 +962,7 @@ dependencies = [
 name = "egent-code-plexus"
 version = "0.8.5"
 dependencies = [
+ "anyhow",
  "chrono",
  "clap",
  "crossterm",

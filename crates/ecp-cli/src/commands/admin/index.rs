@@ -1,22 +1,5 @@
 use clap::Args;
 use ecp_analyzer::resolution::builder::GraphBuilder;
-use ecp_analyzer::{
-    astro::parser::AstroProvider, bash::parser::BashProvider, c::parser::CProvider,
-    c_sharp::parser::CSharpProvider, cairo::parser::CairoProvider, cpp::parser::CppProvider,
-    crystal::parser::CrystalProvider, dart::parser::DartProvider,
-    docker_compose::parser::DockerComposeProvider, dockerfile::parser::DockerfileProvider,
-    github_actions::parser::GitHubActionsProvider, go::parser::GoProvider,
-    hcl::parser::HclProvider, java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
-    kotlin::parser::KotlinProvider, kubernetes::parser::KubernetesProvider,
-    lua::parser::LuaProvider, markdown::parser::MarkdownProvider, move_lang::parser::MoveProvider,
-    nim::parser::NimProvider, openapi::schema_scan::OpenApiProvider, php::parser::PhpProvider,
-    protobuf::parser::ProtobufProvider, python::parser::PythonProvider, ruby::parser::RubyProvider,
-    rust::parser::RustProvider, solidity::parser::SolidityProvider, sql::parser::SqlProvider,
-    svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
-    typescript::parser::TypeScriptProvider, verilog::parser::VerilogProvider,
-    vue::parser::VueProvider, vyper::parser::VyperProvider, yaml::parser::YamlProvider,
-    zig::parser::ZigProvider,
-};
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ignore::WalkBuilder;
 
@@ -149,74 +132,20 @@ pub fn run_analyzer_for_paths(
     // construction order doesn't matter for runtime semantics (file
     // routing is keyed on the lowercase `name()` string, not ordering).
     let needed = detect_needed_providers(&files_to_analyze);
-    type ProviderFactory = Box<
-        dyn FnOnce() -> std::io::Result<Box<dyn ecp_core::analyzer::provider::LanguageProvider>>
-            + Send,
-    >;
-    let mut factories: Vec<ProviderFactory> = Vec::new();
-    macro_rules! add {
-        ($flag:expr, $ctor:expr) => {
-            if $flag {
-                factories.push(Box::new(|| {
-                    $ctor
-                        .map(|p| {
-                            Box::new(p) as Box<dyn ecp_core::analyzer::provider::LanguageProvider>
-                        })
-                        .map_err(std::io::Error::other)
-                }));
-            }
-        };
-    }
-    add!(needed.typescript, TypeScriptProvider::new());
-    add!(needed.python, PythonProvider::new());
-    add!(needed.go, GoProvider::new());
-    add!(needed.rust, RustProvider::new());
-    add!(needed.java, JavaProvider::new());
-    add!(needed.javascript, JavaScriptProvider::new());
-    add!(needed.php, PhpProvider::new());
-    add!(needed.ruby, RubyProvider::new());
-    add!(needed.kotlin, KotlinProvider::new());
-    add!(needed.csharp, CSharpProvider::new());
-    add!(needed.c, CProvider::new());
-    add!(needed.cpp, CppProvider::new());
-    if needed.swift {
-        // SwiftProvider::new returns anyhow::Result that the original site
-        // unwrapped — preserve that contract.
-        factories.push(Box::new(|| {
-            SwiftProvider::new()
-                .map(|p| Box::new(p) as Box<dyn ecp_core::analyzer::provider::LanguageProvider>)
-                .map_err(std::io::Error::other)
-        }));
-    }
-    add!(needed.dart, DartProvider::new());
-    add!(needed.markdown, MarkdownProvider::new());
-    add!(needed.yaml, YamlProvider::new());
-    add!(needed.github_actions, GitHubActionsProvider::new());
-    add!(needed.bash, BashProvider::new());
-    add!(needed.lua, LuaProvider::new());
-    add!(needed.crystal, CrystalProvider::new());
-    add!(needed.move_lang, MoveProvider::new());
-    add!(needed.solidity, SolidityProvider::new());
-    add!(needed.dockerfile, DockerfileProvider::new());
-    add!(needed.nim, NimProvider::new());
-    add!(needed.hcl, HclProvider::new());
-    add!(needed.sql, SqlProvider::new());
-    add!(needed.vyper, VyperProvider::new());
-    add!(needed.verilog, VerilogProvider::new());
-    add!(needed.cairo, CairoProvider::new());
-    add!(needed.zig, ZigProvider::new());
-    add!(needed.vue, VueProvider::new());
-    add!(needed.astro, AstroProvider::new());
-    add!(needed.svelte, SvelteProvider::new());
-    add!(needed.docker_compose, DockerComposeProvider::new());
-    add!(needed.protobuf, ProtobufProvider::new());
-    add!(needed.openapi, OpenApiProvider::new());
-    add!(needed.kubernetes, KubernetesProvider::new());
+    let needed_names: Vec<&'static str> = crate::provider_registry::PROVIDER_CONSTRUCTORS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| needed.is_set(name))
+        .collect();
 
     use rayon::prelude::*;
-    let providers: Vec<Box<dyn ecp_core::analyzer::provider::LanguageProvider>> = factories
+    let providers: Vec<Box<dyn ecp_core::analyzer::provider::LanguageProvider>> = needed_names
         .into_par_iter()
-        .map(|f| f())
+        .map(|name| {
+            crate::provider_registry::make_provider(name)
+                .expect("name sourced from PROVIDER_CONSTRUCTORS")
+                .map_err(std::io::Error::other)
+        })
         .collect::<std::io::Result<Vec<_>>>()?;
     let mut pipeline = AnalyzerPipeline::new();
     for p in providers {
@@ -556,75 +485,130 @@ struct NeededProviders {
     kubernetes: bool,
 }
 
+impl NeededProviders {
+    /// True when the flag for `provider_registry`'s `name` is set. Inverse of
+    /// `set_needed_flag`; kept as a matching table alongside it so the two
+    /// stay easy to diff against each other.
+    fn is_set(&self, name: &str) -> bool {
+        match name {
+            "typescript" => self.typescript,
+            "python" => self.python,
+            "go" => self.go,
+            "rust" => self.rust,
+            "java" => self.java,
+            "javascript" => self.javascript,
+            "php" => self.php,
+            "ruby" => self.ruby,
+            "kotlin" => self.kotlin,
+            "c_sharp" => self.csharp,
+            "c" => self.c,
+            "cpp" => self.cpp,
+            "swift" => self.swift,
+            "dart" => self.dart,
+            "markdown" => self.markdown,
+            "yaml" => self.yaml,
+            "github-actions" => self.github_actions,
+            "bash" => self.bash,
+            "lua" => self.lua,
+            "crystal" => self.crystal,
+            "move" => self.move_lang,
+            "solidity" => self.solidity,
+            "dockerfile" => self.dockerfile,
+            "nim" => self.nim,
+            "hcl" => self.hcl,
+            "sql" => self.sql,
+            "vyper" => self.vyper,
+            "verilog" => self.verilog,
+            "cairo" => self.cairo,
+            "zig" => self.zig,
+            "docker-compose" => self.docker_compose,
+            "vue" => self.vue,
+            "astro" => self.astro,
+            "svelte" => self.svelte,
+            "protobuf" => self.protobuf,
+            "openapi" => self.openapi,
+            "kubernetes" => self.kubernetes,
+            _ => false,
+        }
+    }
+}
+
+/// Set the `NeededProviders` flag matching a `provider_name_for_path` name.
+/// The one place mapping registry names to `NeededProviders` fields — table
+/// form keeps it diffable against `NeededProviders`' own field list (see
+/// `needed_providers_test_is_set_covers_every_struct_field` below).
+fn set_needed_flag(n: &mut NeededProviders, name: &str) {
+    match name {
+        "typescript" => n.typescript = true,
+        "python" => n.python = true,
+        "go" => n.go = true,
+        "rust" => n.rust = true,
+        "java" => n.java = true,
+        "javascript" => n.javascript = true,
+        "php" => n.php = true,
+        "ruby" => n.ruby = true,
+        "kotlin" => n.kotlin = true,
+        "c_sharp" => n.csharp = true,
+        "c" => n.c = true,
+        "cpp" => n.cpp = true,
+        "swift" => n.swift = true,
+        "dart" => n.dart = true,
+        "markdown" => n.markdown = true,
+        "bash" => n.bash = true,
+        "lua" => n.lua = true,
+        "crystal" => n.crystal = true,
+        "move" => n.move_lang = true,
+        "solidity" => n.solidity = true,
+        "dockerfile" => n.dockerfile = true,
+        "nim" => n.nim = true,
+        "hcl" => n.hcl = true,
+        "sql" => n.sql = true,
+        "vyper" => n.vyper = true,
+        "verilog" => n.verilog = true,
+        "cairo" => n.cairo = true,
+        "zig" => n.zig = true,
+        "docker-compose" => n.docker_compose = true,
+        "vue" => n.vue = true,
+        "astro" => n.astro = true,
+        "svelte" => n.svelte = true,
+        "protobuf" => n.protobuf = true,
+        "openapi" => n.openapi = true,
+        "github-actions" => n.github_actions = true,
+        // `.yaml`/`.yml` route to the Kubernetes provider (see
+        // `provider_name_for_path`), which content-gates on
+        // `apiVersion:`+`kind:`; non-k8s YAML returns empty. `n.yaml` stays
+        // set for the YamlProvider's document-block path.
+        "kubernetes" => {
+            n.yaml = true;
+            n.kubernetes = true;
+        }
+        _ => {}
+    }
+}
+
 /// Walk the scanned file list, set the flag for each language whose files we
 /// actually intend to parse. Returning a struct instead of a `HashSet<&str>`
 /// keeps the `if needed.X` call-sites obvious in the caller and avoids
-/// stringly-typed lookups at every register_provider step.
+/// stringly-typed lookups at every register_provider step. Resolves each
+/// path through the canonical `AnalyzerPipeline::provider_name_for_path` so
+/// this stays in sync with the single dispatch source of truth instead of
+/// re-deriving its own extension table (this repo has twice shipped drift
+/// bugs from hand-copied dispatch tables: PR #141/#142, PR #595).
 fn detect_needed_providers(files: &[(std::path::PathBuf, std::path::PathBuf)]) -> NeededProviders {
     let mut n = NeededProviders::default();
     for (path, _) in files {
-        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(file_name, "Dockerfile" | "dockerfile") {
-            n.dockerfile = true;
-            continue;
-        }
+        // `md`/`txt`/`rst` route to markdown but are outside
+        // `provider_name_for_path` (markdown has no path-dispatch entry —
+        // see `reanalyze::make_pipeline`'s doc comment); handle here.
         if matches!(
-            file_name,
-            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+            path.extension().and_then(|s| s.to_str()),
+            Some("md" | "txt" | "rst")
         ) {
-            n.docker_compose = true;
+            n.markdown = true;
             continue;
         }
-        if is_github_actions_workflow(path) {
-            n.github_actions = true;
-            continue;
-        }
-        match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
-            "ts" | "tsx" => n.typescript = true,
-            "py" | "pyi" => n.python = true,
-            "go" => n.go = true,
-            "rs" => n.rust = true,
-            "java" => n.java = true,
-            "js" | "jsx" | "mjs" | "cjs" => n.javascript = true,
-            "php" => n.php = true,
-            "rb" => n.ruby = true,
-            "kt" | "kts" => n.kotlin = true,
-            "cs" => n.csharp = true,
-            "c" => n.c = true,
-            // `.h` routes to C++ — matches `Language::from_normalized_path` dispatch.
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => n.cpp = true,
-            "swift" => n.swift = true,
-            "dart" => n.dart = true,
-            "md" | "txt" | "rst" => n.markdown = true,
-            "sh" | "bash" => n.bash = true,
-            "lua" | "luau" => n.lua = true,
-            "cr" => n.crystal = true,
-            "move" => n.move_lang = true,
-            "sol" => n.solidity = true,
-            "dockerfile" => n.dockerfile = true,
-            "nim" => n.nim = true,
-            "tf" | "tfvars" | "hcl" => n.hcl = true,
-            "sql" => n.sql = true,
-            "vy" => n.vyper = true,
-            "v" | "sv" | "vh" | "svh" => n.verilog = true,
-            "cairo" => n.cairo = true,
-            "zig" => n.zig = true,
-            "vue" => n.vue = true,
-            "astro" => n.astro = true,
-            "svelte" => n.svelte = true,
-            "proto" => n.protobuf = true,
-            // `.yaml`/`.yml` route to the Kubernetes provider (see
-            // `provider_name_for_path`), which content-gates on
-            // `apiVersion:`+`kind:`; non-k8s YAML returns empty. `n.yaml` stays
-            // set for the YamlProvider's document-block path.
-            "yml" | "yaml" => {
-                n.yaml = true;
-                n.kubernetes = true;
-            }
-            // `.json` files are checked for OpenAPI 3.x / Swagger 2.0 markers
-            // by the provider itself; non-OpenAPI JSON is returned empty.
-            "json" => n.openapi = true,
-            _ => {}
+        if let Some(name) = AnalyzerPipeline::provider_name_for_path(path) {
+            set_needed_flag(&mut n, name);
         }
     }
     n
@@ -768,5 +752,85 @@ mod tests {
     #[test]
     fn keeps_real_dart_path() {
         assert!(should_analyze_path(Path::new("lib/main.dart")));
+    }
+
+    /// Every plain extension the canonical `EXTENSION_TABLE` routes must
+    /// produce a `NeededProviders` flag `detect_needed_providers` can derive
+    /// (a `set_needed_flag` arm exists for its provider name), pinning the
+    /// three-table sync invariant this refactor introduces. Exhaustively
+    /// covers the extension list the pre-refactor `detect_needed_providers`
+    /// hand-duplicated, so a dropped extension here fails loudly instead of
+    /// silently (this repo shipped that exact bug for `.yaml` in PR #595).
+    #[test]
+    fn detect_needed_providers_test_every_extension_table_entry_sets_a_flag() {
+        for (ext, name) in ecp_core::analyzer::pipeline::AnalyzerPipeline::EXTENSION_TABLE {
+            let path = std::path::PathBuf::from(format!("f.{ext}"));
+            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
+            assert!(
+                needed.is_set(name),
+                "extension {ext:?} routes to provider {name:?} but no NeededProviders flag is set"
+            );
+        }
+    }
+
+    /// The special-case path dispatches (Dockerfile, docker-compose, GitHub
+    /// Actions workflow, generic `.yaml`/`.yml` → kubernetes) must also set
+    /// their `NeededProviders` flag — these aren't in `EXTENSION_TABLE` so
+    /// the test above doesn't cover them.
+    #[test]
+    fn detect_needed_providers_test_path_specials_set_flags() {
+        let cases: &[(&str, &str)] = &[
+            ("Dockerfile", "dockerfile"),
+            ("docker-compose.yml", "docker-compose"),
+            (".github/workflows/ci.yml", "github-actions"),
+            ("k8s/deployment.yaml", "kubernetes"),
+        ];
+        for (rel, name) in cases {
+            let path = std::path::PathBuf::from(rel);
+            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
+            assert!(
+                needed.is_set(name),
+                "path {rel:?} should set the {name:?} NeededProviders flag"
+            );
+        }
+    }
+
+    /// `md`/`txt`/`rst` route to markdown outside `provider_name_for_path`
+    /// (see `detect_needed_providers`'s doc comment) — pin that special case
+    /// too since it isn't covered by the extension-table sweep above.
+    #[test]
+    fn detect_needed_providers_test_markdown_extensions_set_flag() {
+        for ext in ["md", "txt", "rst"] {
+            let path = std::path::PathBuf::from(format!("f.{ext}"));
+            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
+            assert!(
+                needed.markdown,
+                "extension {ext:?} should set the markdown flag"
+            );
+        }
+    }
+
+    /// `NeededProviders::is_set` must recognize every registry name that
+    /// `set_needed_flag` sets directly by name — the two tables (declared
+    /// side by side in the source) must agree, or a future field added to
+    /// one and not the other silently reports `false` for a language that IS
+    /// needed. `"yaml"` is a deliberate exception: no path ever resolves to
+    /// the name `"yaml"` (see `provider_name_for_path`), so `set_needed_flag`
+    /// has no `"yaml"` arm — `n.yaml` is only reachable as a side effect of
+    /// the `"kubernetes"` arm, matching `reanalyze::make_pipeline`'s
+    /// register-by-hand treatment of the same provider.
+    #[test]
+    fn needed_providers_test_is_set_covers_every_struct_field() {
+        for (name, _) in crate::provider_registry::PROVIDER_CONSTRUCTORS {
+            if *name == "yaml" {
+                continue;
+            }
+            let mut n = super::NeededProviders::default();
+            super::set_needed_flag(&mut n, name);
+            assert!(
+                n.is_set(name),
+                "set_needed_flag({name:?}) set a flag that is_set({name:?}) does not read back"
+            );
+        }
     }
 }
