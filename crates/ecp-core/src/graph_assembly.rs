@@ -48,6 +48,10 @@ pub struct GraphAssembly {
     /// bounds the trace of the k-th process after it. Given, not derived:
     /// later passes append non-Process nodes behind the Process block, so
     /// the boundary is a fact about how the caller ordered `nodes`.
+    ///
+    /// With no Process block the canonical value is `nodes.len()`, but the
+    /// `Default` of `0` is equally safe: every consumer bounds the block by
+    /// the trace count (`traces_offsets.len() - 1`), which is then zero.
     pub process_start: u32,
     pub traces_offsets: Vec<u32>,
     pub traces_data: Vec<u32>,
@@ -150,8 +154,12 @@ impl GraphAssembly {
 
         // `function_meta()` binary-searches by node_idx; `node_flags` is its
         // dense low-byte mirror, read by the hot boolean filters. Deriving
-        // both here is what keeps them from drifting apart.
-        function_metas.sort_unstable_by_key(|m| m.node_idx);
+        // both here is what keeps them from drifting apart — which needs the
+        // dedup as much as the sort: with two metas on one node the binary
+        // search may return either, while the mirror would hold whichever the
+        // scatter wrote last. Keep the first, as `call_metas` does.
+        function_metas.sort_by_key(|m| m.node_idx);
+        function_metas.dedup_by_key(|m| m.node_idx);
         let mut node_flags: Vec<u8> = vec![0u8; num_nodes];
         for meta in &function_metas {
             if let Some(slot) = node_flags.get_mut(meta.node_idx as usize) {
@@ -326,6 +334,83 @@ mod tests {
     }
 
     #[test]
+    fn finish_keeps_equal_source_edges_in_insertion_order() {
+        // The permutation and the edge sort must agree, and both must be
+        // stable: a caller's `call_metas` index into the order it supplied.
+        let mut pool = StringPool::new();
+        let nodes = vec![
+            node(&mut pool, "a", NodeKind::Function),
+            node(&mut pool, "b", NodeKind::Function),
+            node(&mut pool, "c", NodeKind::Function),
+        ];
+        let mut first = edge(0, 2);
+        first.confidence = 0.5;
+        let mut second = edge(0, 1);
+        second.confidence = 0.25;
+        let g = GraphAssembly {
+            string_pool: pool,
+            nodes,
+            edges: vec![edge(1, 0), first, second],
+            ..Default::default()
+        }
+        .finish();
+
+        let start = g.out_offsets[0] as usize;
+        let end = g.out_offsets[1] as usize;
+        let order: Vec<(u32, f32)> = g.edges[start..end]
+            .iter()
+            .map(|e| (e.target, e.confidence))
+            .collect();
+        assert_eq!(order, vec![(2, 0.5), (1, 0.25)]);
+    }
+
+    #[test]
+    fn finish_keeps_the_first_of_two_metas_on_one_slot() {
+        let mut pool = StringPool::new();
+        let nodes = vec![
+            node(&mut pool, "a", NodeKind::Function),
+            node(&mut pool, "b", NodeKind::Function),
+        ];
+        let meta = |flags| FunctionMeta {
+            node_idx: 1,
+            flags,
+            params: Vec::new(),
+            return_type: StrRef::default(),
+            decorators: Vec::new(),
+        };
+        let g = GraphAssembly {
+            string_pool: pool,
+            nodes,
+            edges: vec![edge(0, 1), edge(0, 1)],
+            call_metas: vec![
+                CallMeta {
+                    edge_idx: 0,
+                    flags: CallMeta::FLAG_DIRECT,
+                    dispatch_type: StrRef::default(),
+                },
+                CallMeta {
+                    edge_idx: 0,
+                    flags: CallMeta::FLAG_CALLBACK,
+                    dispatch_type: StrRef::default(),
+                },
+            ],
+            function_metas: vec![
+                meta(FunctionMeta::FLAG_TEST),
+                meta(FunctionMeta::FLAG_ASYNC),
+            ],
+            ..Default::default()
+        }
+        .finish();
+
+        assert_eq!(g.call_metas.len(), 1);
+        assert!(g.call_metas[0].is_direct(), "first call meta wins");
+        assert_eq!(g.function_metas.len(), 1);
+        assert!(g.function_meta(1).unwrap().is_test(), "first meta wins");
+        // The dense mirror must agree with what the binary search returns.
+        assert_eq!(g.node_flags[1], FunctionMeta::FLAG_TEST as u8);
+    }
+
+    #[test]
     fn finish_drops_call_meta_pointing_past_the_edge_list() {
         let mut pool = StringPool::new();
         let nodes = vec![node(&mut pool, "a", NodeKind::Function)];
@@ -396,7 +481,8 @@ mod tests {
             rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
                 .unwrap();
 
-        let hits: Vec<u32> = archived.nodes_by_name("alpha").collect();
+        let mut hits: Vec<u32> = archived.nodes_by_name("alpha").collect();
+        hits.sort_unstable(); // hash-equal entries have no guaranteed order
         assert_eq!(hits, vec![0, 2]);
         assert_eq!(archived.nodes_by_name("").count(), 0);
     }

@@ -1438,10 +1438,15 @@ impl GraphBuilder {
         // pre-sort space; `finish()` remaps them when it sorts the edges.
         let call_metas: Vec<CallMeta> = pending_call_metas_global
             .into_iter()
-            .map(|(pre_idx, flags, dispatch_type)| CallMeta {
-                edge_idx: pre_idx as u32,
-                flags,
-                dispatch_type: string_pool.add(&dispatch_type),
+            .filter_map(|(pre_idx, flags, dispatch_type)| {
+                // Reject rather than truncate: a wrapped index would name a
+                // real, wrong edge, where `finish()` can only drop what is
+                // out of range.
+                Some(CallMeta {
+                    edge_idx: u32::try_from(pre_idx).ok()?,
+                    flags,
+                    dispatch_type: string_pool.add(&dispatch_type),
+                })
             })
             .collect();
 

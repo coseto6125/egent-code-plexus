@@ -1,5 +1,12 @@
 //! Synthetic graphs for tests, declared as symbols and edges.
 //!
+//! Test support, not product surface: it is `pub` because integration tests
+//! in the sibling crates link `ecp-core` as an ordinary dependency, and
+//! `#[doc(hidden)]` because nothing outside a test should build a graph this
+//! way. A cargo feature would be the tidier gate, but `ecp-core`'s own
+//! `tests/` cannot enable a feature on the crate under test without a
+//! self-dev-dependency, which compiles a second copy of the crate.
+//!
 //! A hand-written [`ZeroCopyGraph`] literal makes every test know the
 //! storage layout — 22 fields, four index arrays that must agree with the
 //! edge list, uid hashing, and string interning — to say something as small
