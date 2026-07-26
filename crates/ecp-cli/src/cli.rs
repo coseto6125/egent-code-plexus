@@ -148,3 +148,94 @@ pub enum Commands {
     /// `--source cli|mcp|all` (default `all`) filters which telemetry files feed the dashboard.
     Usage(commands::usage::UsageArgs),
 }
+
+impl Commands {
+    /// Whether this command needs a loaded graph before it can run. Exhaustive
+    /// (no `_` arm) so a new variant forces a decision here at compile time,
+    /// instead of silently falling through to graph-loading (or skipping it)
+    /// in `main.rs`'s dispatch.
+    pub fn needs_graph(&self) -> bool {
+        match self {
+            Commands::Inspect(_)
+            | Commands::Find(_)
+            | Commands::Impact(_)
+            | Commands::Rename(_)
+            | Commands::Cypher(_)
+            | Commands::Routes(_)
+            | Commands::ShapeCheck(_)
+            | Commands::ToolMap(_)
+            | Commands::Review(_)
+            | Commands::Heuristics(_)
+            | Commands::FindTransactionPatterns(_)
+            | Commands::Processes(_)
+            | Commands::FindSchemaBindings(_)
+            | Commands::FindEventMirrors(_) => true,
+            Commands::Summary(_)
+            | Commands::Contracts(_)
+            | Commands::Diff(_)
+            | Commands::Admin { .. }
+            | Commands::Dev { .. }
+            | Commands::HookHandle(_)
+            | Commands::HookWatcher(_)
+            | Commands::Hook(_)
+            | Commands::Watch(_)
+            | Commands::Peers(_)
+            | Commands::Group { .. }
+            | Commands::Schema(_)
+            | Commands::Insight(_)
+            | Commands::Usage(_)
+            | Commands::Uninstall(_) => false,
+        }
+    }
+
+    /// This variant's `--repo` value, or `None` for variants without one
+    /// (including every `needs_graph() == false` variant). Exhaustive for the
+    /// same reason as `needs_graph`.
+    pub fn repo(&self) -> Option<&str> {
+        match self {
+            Commands::Inspect(args) => args.repo.as_deref(),
+            // `find --repo` doubles as a registry selector (`@all`, comma list,
+            // repo name) for the bm25 fan-out; those aren't paths, and feeding
+            // them to ensure_fresh as a cwd dies with "Error preparing index for
+            // @all". Only treat the value as this process's repo when it's a real
+            // directory; selectors resolve inside find::run_bm25. Trade-off: a
+            // registry name shadowed by an identically-named local directory is
+            // read as the path — path semantics win on ambiguity.
+            Commands::Find(args) => args
+                .repo
+                .as_deref()
+                .filter(|r| std::path::Path::new(r).is_dir()),
+            Commands::Impact(args) => args.repo.as_deref(),
+            Commands::Rename(args) => args.repo.as_deref(),
+            Commands::Cypher(args) => args.repo.as_deref(),
+            Commands::Routes(args) => args.repo.as_deref(),
+            Commands::ShapeCheck(args) => args.repo.as_deref(),
+            Commands::ToolMap(args) => args.repo.as_deref(),
+            Commands::Review(args) => args.repo.as_deref(),
+            Commands::Heuristics(args) => match &args.kind {
+                commands::heuristics::HeuristicsKind::Saga(a) => a.repo.as_deref(),
+                commands::heuristics::HeuristicsKind::SchemaBindings(a) => a.repo.as_deref(),
+                commands::heuristics::HeuristicsKind::EventMirrors(a) => a.repo.as_deref(),
+            },
+            Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
+            Commands::Processes(args) => args.repo.as_deref(),
+            Commands::FindSchemaBindings(args) => args.repo.as_deref(),
+            Commands::FindEventMirrors(args) => args.repo.as_deref(),
+            Commands::Summary(_)
+            | Commands::Contracts(_)
+            | Commands::Diff(_)
+            | Commands::Admin { .. }
+            | Commands::Dev { .. }
+            | Commands::HookHandle(_)
+            | Commands::HookWatcher(_)
+            | Commands::Hook(_)
+            | Commands::Watch(_)
+            | Commands::Peers(_)
+            | Commands::Group { .. }
+            | Commands::Schema(_)
+            | Commands::Insight(_)
+            | Commands::Usage(_)
+            | Commands::Uninstall(_) => None,
+        }
+    }
+}
