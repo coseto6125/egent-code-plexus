@@ -5,6 +5,7 @@ pub mod cypher;
 pub mod daemon;
 pub mod error;
 pub mod graph;
+pub mod graph_assembly;
 pub mod graph_query;
 pub mod peer;
 pub mod pool;
