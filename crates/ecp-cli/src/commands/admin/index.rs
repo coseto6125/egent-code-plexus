@@ -675,6 +675,23 @@ mod tests {
         }
     }
 
+    /// A generic `.yaml`/`.yml` selects TWO providers: `kubernetes` (which
+    /// content-gates on `apiVersion:`+`kind:`) and `yaml` (its document-block
+    /// path). The pairing is the one special case `detect_needed_providers`
+    /// carries by hand, so it needs a test of its own — the extension-table
+    /// sweep never reaches it, since no extension maps to the name `"yaml"`.
+    #[test]
+    fn detect_needed_providers_test_generic_yaml_selects_kubernetes_and_yaml() {
+        for rel in ["k8s/deployment.yaml", "config/app.yml"] {
+            let path = std::path::PathBuf::from(rel);
+            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
+            assert!(
+                needed.contains("kubernetes") && needed.contains("yaml"),
+                "{rel:?} must select both kubernetes and yaml, got {needed:?}"
+            );
+        }
+    }
+
     /// Every name the canonical dispatch can produce must be constructible —
     /// the set carries names straight from `provider_name_for_path` to
     /// `PROVIDER_CONSTRUCTORS`, so a name with no constructor is a silently
