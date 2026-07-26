@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.8.7 - 2026-07-26
+
+An internals release: six refactors that each collapse a rule the codebase was
+keeping in several places by hand. No new commands or flags.
+
+### Changed behaviour
+
+- `ecp impact --baseline` output is now deterministic. Two runs of the same
+  binary over the same tree used to order `changed_symbols` differently
+  (the collection loops iterate hash maps), so diffing two `ecp` outputs was
+  unreliable and an agent asking the same question twice got different answers.
+  Same content, stable order. (#659)
+- The `--prof` timing label `build.csr_assembly` is now `build.graph_assembly`.
+  It spans more of the build than it used to, so a number compared against the
+  old label would read as a regression that never happened. (#657)
+
+### Refactor
+
+- **Graph assembly** — `out_offsets`, `in_offsets`, `in_edge_idx`,
+  `name_index`, `kind_offsets`, `kind_node_idx` and `node_flags` are derived:
+  given the nodes and edges there is one correct value for each. That
+  derivation lived only inside `GraphBuilder::build()`, so every test fixture
+  reimplemented it by hand. `GraphAssembly::finish()` owns it now, and 48
+  fixtures across 28 files declare symbols and edges instead of laying out
+  index arrays. Fixtures built this way carry the indices a real graph has —
+  several were previously exercising fallback paths production never takes,
+  including the cypher benchmark. (#657)
+- **Overlay traversal** — applying the L1 overlay (uncommitted edits) to a
+  traversal was a three-step protocol written out five times across cypher and
+  impact; missing a step answered from a graph nobody edited, silently.
+  `MergedGraph` performs it once, behind `out_edges` / `in_edges` /
+  `all_edges`. (#658, #661)
+- **`impact --baseline` payload** — was a `serde_json::Value` that `ecp review`
+  and `ecp dev pr-analyze` navigated by string key, the latter through its own
+  hand-synced mirror structs. One typed declaration now serves both, so a
+  renamed field is a compile error rather than a silent `unwrap_or("?")` in a
+  risk calculation. (#659)
+- **Language dispatch** — the cold-index path decided which parsers to build
+  through a 37-field bool struct plus two match tables kept in sync by comment;
+  a provider name with no arm was silently never constructed. Now a set of
+  registry names, 141 lines lighter. The resolver's private extension list for
+  fetch-shape extraction routes through the canonical table too. (#660)
+- **CLI dispatch** — "does this command need a graph" was written three times
+  in `main.rs`, and the first copy ended in a catch-all, so a new command that
+  forgot an arm silently fell into graph loading. Two exhaustive accessors on
+  `Commands` now hold it, and a new variant does not compile until it declares
+  itself. (#662)
+
+### Performance
+
+- `MergedEdge::reason` is `#[inline]`: `run_bfs` calls it once per result node
+  from the other crate, and only `release-dist` builds with LTO. (#661)
 ## v0.8.6 - 2026-07-24
 
 ### Refactor
