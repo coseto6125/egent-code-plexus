@@ -1,5 +1,6 @@
 use super::bfs::{merged_node_meta, run_bfs};
 use super::coverage::{build_coverage_json, coverage_analyses};
+use super::payload::{BaselinePayload, ChangedSymbol, ImpactBySymbol};
 use super::{parse_csv_lower, resolve_min_conf, tag_heuristic, ImpactArgs};
 use crate::commands::format::{kind_to_str, node_kind_to_str};
 use crate::commands::impact::{attach_heuristic_fields, attach_hidden_edges, Direction};
@@ -10,11 +11,79 @@ use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::graph::NodeKind;
 use ecp_core::EcpError;
 use rayon::prelude::*;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+/// Bundles the typed envelope with the enrichment inputs that only the
+/// JSON-emitting path (`impact_with_baseline`) needs. Computed once in
+/// [`compute_baseline`] so [`impact_with_baseline`] and
+/// [`build_baseline_payload`] never re-run the diff/parse/BFS pass.
+struct BaselineComputation {
+    payload: BaselinePayload,
+    hidden_edges_total: u64,
+    hidden_heuristic_total: u64,
+    per_symbol_bfs: Vec<(usize, Vec<Value>)>,
+    min_conf: f32,
+    rel_filter: Option<Vec<String>>,
+    effective_include_tests: bool,
+    /// True on the "0 changes detected" short-circuit — the pre-refactor
+    /// code returned straight from that branch, skipping hidden-edge /
+    /// heuristic / coverage enrichment entirely. Callers must replicate
+    /// that early return rather than run enrichment over the empty payload.
+    no_changes: bool,
+}
+
+/// In-process typed accessor for the baseline envelope, used by
+/// `review::aggregate` to avoid `Value` string-key navigation. Enrichment
+/// fields (`hidden_edges`, `heuristic_callers`, `coverage`) live only in the
+/// `Value` returned by [`impact_with_baseline`] — they aren't part of the
+/// typed envelope.
+pub fn build_baseline_payload(
+    args: &ImpactArgs,
+    engine: &Engine,
+) -> Result<BaselinePayload, EcpError> {
+    compute_baseline(args, engine).map(|c| c.payload)
+}
+
 pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, EcpError> {
+    let comp = compute_baseline(args, engine)?;
+    let mut result =
+        serde_json::to_value(&comp.payload).map_err(|e| EcpError::Serialization(e.to_string()))?;
+    if comp.no_changes {
+        return Ok(result);
+    }
+
+    attach_hidden_edges(&mut result, comp.hidden_edges_total);
+    attach_heuristic_fields(
+        &mut result,
+        comp.hidden_heuristic_total,
+        vec![],
+        !args.no_heuristic,
+        args.explain_confidence,
+        args.confidence_threshold,
+    );
+
+    if args.test_coverage {
+        let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
+        let view = engine.overlay_view();
+        let analyses = coverage_analyses(
+            graph,
+            view,
+            &comp.per_symbol_bfs,
+            &args.direction,
+            args.depth,
+            comp.min_conf,
+            comp.effective_include_tests,
+            &comp.rel_filter,
+        );
+        result["coverage"] = build_coverage_json(analyses);
+    }
+
+    Ok(result)
+}
+
+fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComputation, EcpError> {
     let baseline_ref = args.baseline.as_deref().unwrap();
     let repo_path = PathBuf::from(args.repo.as_deref().unwrap_or("."));
 
@@ -30,14 +99,23 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
     let changed_paths: Vec<String> = file_diffs.iter().map(|fd| fd.file_path.clone()).collect();
 
     if file_diffs.is_empty() {
-        return Ok(json!({
-            "status": "success",
-            "baseline": baseline_ref,
-            "message": "0 changes detected — no symbols to assess",
-            "changed_paths": changed_paths,
-            "changed_symbols": [],
-            "impact_by_symbol": [],
-        }));
+        return Ok(BaselineComputation {
+            payload: BaselinePayload {
+                status: "success".to_string(),
+                baseline: baseline_ref.to_string(),
+                message: Some("0 changes detected — no symbols to assess".to_string()),
+                changed_paths,
+                changed_symbols: vec![],
+                impact_by_symbol: vec![],
+            },
+            hidden_edges_total: 0,
+            hidden_heuristic_total: 0,
+            per_symbol_bfs: vec![],
+            min_conf: 0.0,
+            rel_filter: None,
+            effective_include_tests: false,
+            no_changes: true,
+        });
     }
 
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
@@ -155,18 +233,18 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
     }
 
     // Collect changed symbol keys + their graph indices.
-    let mut changed_symbols: Vec<Value> = Vec::new();
+    let mut changed_symbols: Vec<ChangedSymbol> = Vec::new();
     let mut changed_node_indices: Vec<usize> = Vec::new();
 
     for (key, (_, start_row)) in &new_map {
         if !old_map.contains_key(key) {
-            changed_symbols.push(json!({
-                "name": key.2,
-                "kind": key.0,
-                "filePath": key.1,
-                "line": start_row,
-                "change_type": "added",
-            }));
+            changed_symbols.push(ChangedSymbol {
+                name: key.2.clone(),
+                kind: key.0.to_string(),
+                file_path: key.1.clone(),
+                line: *start_row,
+                change_type: "added".to_string(),
+            });
             if let Some(&idx) = old_graph_idx.get(key) {
                 if !changed_node_indices.contains(&idx) {
                     changed_node_indices.push(idx);
@@ -179,13 +257,13 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
         match new_map.get(key) {
             Some((new_hash, start_row)) => {
                 if old_hash != new_hash {
-                    changed_symbols.push(json!({
-                        "name": key.2,
-                        "kind": key.0,
-                        "filePath": key.1,
-                        "line": start_row,
-                        "change_type": "modified",
-                    }));
+                    changed_symbols.push(ChangedSymbol {
+                        name: key.2.clone(),
+                        kind: key.0.to_string(),
+                        file_path: key.1.clone(),
+                        line: *start_row,
+                        change_type: "modified".to_string(),
+                    });
                     if let Some(&idx) = old_graph_idx.get(key) {
                         if !changed_node_indices.contains(&idx) {
                             changed_node_indices.push(idx);
@@ -194,13 +272,13 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
                 }
             }
             None => {
-                changed_symbols.push(json!({
-                    "name": key.2,
-                    "kind": key.0,
-                    "filePath": key.1,
-                    "line": 0u32,
-                    "change_type": "removed",
-                }));
+                changed_symbols.push(ChangedSymbol {
+                    name: key.2.clone(),
+                    kind: key.0.to_string(),
+                    file_path: key.1.clone(),
+                    line: 0,
+                    change_type: "removed".to_string(),
+                });
                 if let Some(&idx) = old_graph_idx.get(key) {
                     if !changed_node_indices.contains(&idx) {
                         changed_node_indices.push(idx);
@@ -210,13 +288,26 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
         }
     }
 
+    // `new_map` / `old_map` are hash maps, so the two loops above visit
+    // symbols in an order that varies between runs of the same binary
+    // (verified: two runs, same tree, same binary, different output order).
+    // A consumer asking the same question twice must get the same answer, so
+    // fix the order here; `changed_node_indices` drives `impact_by_symbol`,
+    // so it needs the same treatment.
+    // `kind` is part of the key: a struct and its impl block can share a
+    // file, line and name, and without it those two stay hash-ordered.
+    changed_symbols.sort_by(|a, b| {
+        (&a.file_path, a.line, &a.name, &a.kind).cmp(&(&b.file_path, b.line, &b.name, &b.kind))
+    });
+    changed_node_indices.sort_unstable();
+
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
     // --test-coverage implies --include-tests so test callers are reachable.
     let effective_include_tests = args.include_tests || args.test_coverage;
 
     // Run BFS from each changed symbol.
-    let mut impact_by_symbol: Vec<Value> = Vec::new();
+    let mut impact_by_symbol: Vec<ImpactBySymbol> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
     let mut hidden_heuristic_total: u64 = 0;
     let mut per_symbol_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
@@ -248,13 +339,15 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
             &rel_filter,
             !args.no_heuristic,
         );
-        let mut sym_entry = json!({
-            "symbol": sym_name,
-            "filePath": sym_file,
-            "impact": det_results.clone(),
-        });
+        let mut sym_entry = ImpactBySymbol {
+            symbol: sym_name,
+            file_path: sym_file,
+            impact: det_results.clone(),
+            heuristic_callers: None,
+            downstream_callees: None,
+        };
         if !args.no_heuristic {
-            sym_entry["heuristic_callers"] = json!(tag_heuristic(heur_results));
+            sym_entry.heuristic_callers = Some(tag_heuristic(heur_results));
         }
         // Orphan-symbol fallback: when upstream-only mode finds no callers,
         // attach depth-1 downstream callees so the changed symbol still
@@ -274,7 +367,7 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
                 !args.no_heuristic,
             );
             if downstream_results.len() > 1 {
-                sym_entry["downstream_callees"] = json!(downstream_results);
+                sym_entry.downstream_callees = Some(downstream_results);
             }
         }
         impact_by_symbol.push(sym_entry);
@@ -283,38 +376,23 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
         per_symbol_bfs.push((start_idx, det_results));
     }
 
-    let mut result = json!({
-        "status": "success",
-        "baseline": baseline_ref,
-        "changed_paths": changed_paths,
-        "changed_symbols": changed_symbols,
-        "impact_by_symbol": impact_by_symbol,
-    });
-    attach_hidden_edges(&mut result, hidden_edges_total);
-    attach_heuristic_fields(
-        &mut result,
+    Ok(BaselineComputation {
+        payload: BaselinePayload {
+            status: "success".to_string(),
+            baseline: baseline_ref.to_string(),
+            message: None,
+            changed_paths,
+            changed_symbols,
+            impact_by_symbol,
+        },
+        hidden_edges_total,
         hidden_heuristic_total,
-        vec![],
-        !args.no_heuristic,
-        args.explain_confidence,
-        args.confidence_threshold,
-    );
-
-    if args.test_coverage {
-        let analyses = coverage_analyses(
-            graph,
-            view,
-            &per_symbol_bfs,
-            &args.direction,
-            args.depth,
-            min_conf,
-            effective_include_tests,
-            &rel_filter,
-        );
-        result["coverage"] = build_coverage_json(analyses);
-    }
-
-    Ok(result)
+        per_symbol_bfs,
+        min_conf,
+        rel_filter,
+        effective_include_tests,
+        no_changes: false,
+    })
 }
 
 /// FNV-64 hash of the source lines spanning [start_row, end_row] (inclusive,

@@ -5,7 +5,7 @@
 
 use super::findings::{Finding, Report, Severity, Source};
 use crate::commands::diff::{self, bindings::BindingsDiff, DiffArgs, DiffSection};
-use crate::commands::impact::{self, Direction, ImpactArgs};
+use crate::commands::impact::{self, BaselinePayload, Direction, ImpactArgs};
 use crate::commands::shape_check::{self, ShapeCheckArgs};
 use crate::commands::tool_map::{self, ToolMapArgs};
 use crate::engine::Engine;
@@ -107,11 +107,11 @@ fn run_impact(
         literal_coherence: false,
         batch: false,
     };
-    let v = match impact::build_payload(&args, engine) {
-        Ok(v) => v,
+    let payload = match impact::build_baseline_payload(&args, engine) {
+        Ok(p) => p,
         Err(_) => return vec![],
     };
-    impact_findings(&v, file_scope)
+    impact_findings(&payload, file_scope)
 }
 
 /// Extract impact findings, attributing each to the changed symbol's own
@@ -119,39 +119,20 @@ fn run_impact(
 /// in `file_scope` are skipped. Caller-count >= 4 → `medium` risk → info.
 /// Line numbers come from `changed_symbols[]` (joined on name+filePath)
 /// because `impact_by_symbol[]` does not carry line.
-pub fn impact_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> {
-    let by_sym = match v.get("impact_by_symbol").and_then(|v| v.as_array()) {
-        Some(arr) => arr,
-        None => return vec![],
-    };
-    let line_lookup: std::collections::HashMap<(String, String), u32> = v
-        .get("changed_symbols")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| {
-                    let name = s["name"].as_str()?.to_string();
-                    let file = s["filePath"].as_str()?.to_string();
-                    let line = s["line"].as_u64()? as u32;
-                    Some(((name, file), line))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+pub fn impact_findings(payload: &BaselinePayload, file_scope: &HashSet<String>) -> Vec<Finding> {
+    let line_lookup: std::collections::HashMap<(&str, &str), u32> = payload
+        .changed_symbols
+        .iter()
+        .map(|s| ((s.name.as_str(), s.file_path.as_str()), s.line))
+        .collect();
     let mut findings = Vec::new();
-    for entry in by_sym {
-        let Some(file_path) = entry["filePath"].as_str() else {
-            continue;
-        };
-        if !path_in_scope(file_path, file_scope) {
+    for entry in &payload.impact_by_symbol {
+        if !path_in_scope(&entry.file_path, file_scope) {
             continue;
         }
-        let sym = entry["symbol"].as_str().unwrap_or("?");
-        let callers = match entry["impact"].as_array() {
-            Some(c) => c,
-            None => continue,
-        };
-        let caller_count = callers
+        let sym = entry.symbol.as_str();
+        let caller_count = entry
+            .impact
             .iter()
             .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
             .count();
@@ -159,11 +140,11 @@ pub fn impact_findings(v: &Value, file_scope: &HashSet<String>) -> Vec<Finding> 
             continue;
         }
         let line = line_lookup
-            .get(&(sym.to_string(), file_path.to_string()))
+            .get(&(sym, entry.file_path.as_str()))
             .copied()
             .unwrap_or(0);
         findings.push(Finding {
-            file: file_path.into(),
+            file: entry.file_path.clone(),
             line,
             kind: "impact",
             severity: Severity::Info,
@@ -547,6 +528,7 @@ pub fn literal_coherence_findings(v: &Value, file_scope: &HashSet<String>) -> Ve
 mod tests {
     use super::*;
     use crate::commands::diff::bindings::{BindingChange, BindingDecision, BindingsDiff};
+    use crate::commands::impact::{ChangedSymbol, ImpactBySymbol};
     use serde_json::json;
 
     fn scope_one(path: &str) -> HashSet<String> {
@@ -555,53 +537,72 @@ mod tests {
         s
     }
 
+    fn impact_entry(symbol: &str, file_path: &str, impact: Vec<Value>) -> ImpactBySymbol {
+        ImpactBySymbol {
+            symbol: symbol.into(),
+            file_path: file_path.into(),
+            impact,
+            heuristic_callers: None,
+            downstream_callees: None,
+        }
+    }
+
+    fn baseline_payload(
+        changed_symbols: Vec<ChangedSymbol>,
+        impact_by_symbol: Vec<ImpactBySymbol>,
+    ) -> BaselinePayload {
+        BaselinePayload {
+            status: "success".into(),
+            baseline: "HEAD~1".into(),
+            message: None,
+            changed_paths: vec![],
+            changed_symbols,
+            impact_by_symbol,
+        }
+    }
+
     #[test]
     fn impact_findings_baseline_mode_below_threshold_emits_nothing() {
-        let v = json!({
-            "status": "success",
-            "baseline": "HEAD~1",
-            "changed_symbols": [],
-            "impact_by_symbol": [
-                {
-                    "symbol": "foo",
-                    "filePath": "src/foo.rs",
-                    "line": 12,
-                    "impact": [
-                        {"depth": 0, "name": "foo"},
-                        {"depth": 1, "name": "a"},
-                        {"depth": 1, "name": "b"},
-                        {"depth": 1, "name": "c"}
-                    ]
-                }
-            ]
-        });
-        let findings = impact_findings(&v, &scope_one("src/foo.rs"));
+        let payload = baseline_payload(
+            vec![],
+            vec![impact_entry(
+                "foo",
+                "src/foo.rs",
+                vec![
+                    json!({"depth": 0, "name": "foo"}),
+                    json!({"depth": 1, "name": "a"}),
+                    json!({"depth": 1, "name": "b"}),
+                    json!({"depth": 1, "name": "c"}),
+                ],
+            )],
+        );
+        let findings = impact_findings(&payload, &scope_one("src/foo.rs"));
         assert!(findings.is_empty(), "expected no findings for 3 callers");
     }
 
     #[test]
     fn impact_findings_baseline_mode_at_threshold_emits_finding_with_correct_file() {
-        let v = json!({
-            "status": "success",
-            "baseline": "HEAD~1",
-            "changed_symbols": [
-                {"name": "bar", "filePath": "src/bar.rs", "line": 42, "kind": "Function", "change_type": "modified"}
-            ],
-            "impact_by_symbol": [
-                {
-                    "symbol": "bar",
-                    "filePath": "src/bar.rs",
-                    "impact": [
-                        {"depth": 0, "name": "bar"},
-                        {"depth": 1, "name": "a"},
-                        {"depth": 1, "name": "b"},
-                        {"depth": 1, "name": "c"},
-                        {"depth": 1, "name": "d"}
-                    ]
-                }
-            ]
-        });
-        let findings = impact_findings(&v, &scope_one("src/bar.rs"));
+        let payload = baseline_payload(
+            vec![ChangedSymbol {
+                name: "bar".into(),
+                kind: "Function".into(),
+                file_path: "src/bar.rs".into(),
+                line: 42,
+                change_type: "modified".into(),
+            }],
+            vec![impact_entry(
+                "bar",
+                "src/bar.rs",
+                vec![
+                    json!({"depth": 0, "name": "bar"}),
+                    json!({"depth": 1, "name": "a"}),
+                    json!({"depth": 1, "name": "b"}),
+                    json!({"depth": 1, "name": "c"}),
+                    json!({"depth": 1, "name": "d"}),
+                ],
+            )],
+        );
+        let findings = impact_findings(&payload, &scope_one("src/bar.rs"));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file, "src/bar.rs");
         assert_eq!(findings[0].line, 42);
@@ -611,23 +612,21 @@ mod tests {
 
     #[test]
     fn impact_findings_skips_symbols_outside_file_scope() {
-        let v = json!({
-            "impact_by_symbol": [
-                {
-                    "symbol": "outside",
-                    "filePath": "src/other.rs",
-                    "line": 1,
-                    "impact": [
-                        {"depth": 0, "name": "outside"},
-                        {"depth": 1, "name": "a"},
-                        {"depth": 1, "name": "b"},
-                        {"depth": 1, "name": "c"},
-                        {"depth": 1, "name": "d"}
-                    ]
-                }
-            ]
-        });
-        let findings = impact_findings(&v, &scope_one("src/in_scope.rs"));
+        let payload = baseline_payload(
+            vec![],
+            vec![impact_entry(
+                "outside",
+                "src/other.rs",
+                vec![
+                    json!({"depth": 0, "name": "outside"}),
+                    json!({"depth": 1, "name": "a"}),
+                    json!({"depth": 1, "name": "b"}),
+                    json!({"depth": 1, "name": "c"}),
+                    json!({"depth": 1, "name": "d"}),
+                ],
+            )],
+        );
+        let findings = impact_findings(&payload, &scope_one("src/in_scope.rs"));
         assert!(findings.is_empty(), "out-of-scope symbol must not appear");
     }
 
