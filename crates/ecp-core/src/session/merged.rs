@@ -89,6 +89,7 @@ impl<'a> MergedEdge<'a> {
 
     /// Why the edge exists. Overlay edges carry a static marker so a consumer
     /// can tell a caller comes from an uncommitted edit.
+    #[inline]
     pub fn reason(&self, graph: &'a ArchivedZeroCopyGraph) -> &'a str {
         match self.origin {
             EdgeOrigin::Base(e) => e.reason.resolve(&graph.string_pool),
