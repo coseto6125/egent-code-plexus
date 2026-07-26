@@ -148,17 +148,17 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         };
     }
 
-    let needs_graph = cli.command.needs_graph();
-    let repo_opt = cli.command.repo();
-    let cwd = repo_opt
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
     // graph_path::resolve / auto_ensure do real I/O (git HEAD lookup, commit
     // index scan, background reindex spawn); graph-free commands must not pay
-    // for it, so the whole load is skipped rather than run and discarded.
-    let (engine, graph_path) = if needs_graph {
+    // for it, so the whole load is skipped rather than run and discarded —
+    // down to the `current_dir()` syscall.
+    let (engine, graph_path) = if cli.command.needs_graph() {
+        let cwd = cli
+            .command
+            .repo()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let mut graph_path = graph_path::resolve(&cli.graph, &cwd);
 
         // An explicit `--graph <path>` is taken literally. If it does not exist,
