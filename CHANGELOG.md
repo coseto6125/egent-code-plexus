@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.7 - 2026-07-26
+
+### Performance
+
+- inline MergedEdge::reason (#661)
+
+### Refactor
+
+- one place per command to declare its shape (#662)
+- finish the language-dispatch collapse (#660)
+- type the --baseline payload, and make its order stable (#659)
+- one merged traversal view for cypher and impact (#658)
+- GraphAssembly owns the derived half of ZeroCopyGraph + fixture builder (#657)
 ## v0.8.6 - 2026-07-24
 
 ### Refactor
