@@ -1,9 +1,8 @@
 use super::Direction;
-use crate::commands::format::{kind_to_str, node_kind_to_str, rel_to_str};
+use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use crate::commands::symbol_id::resolve_owner_class;
 use ecp_core::algorithms::process_trace::is_test_path;
-use ecp_core::graph::RelType;
-use ecp_core::session::{OverlayView, ViewEdge};
+use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -23,72 +22,16 @@ pub(super) fn merged_node_meta(
     view: Option<&OverlayView>,
     idx: usize,
 ) -> MergedNodeMeta {
-    if let Some(vn) = view.and_then(|v| v.node(idx as u32)) {
-        return MergedNodeMeta {
-            uid: vn.uid,
-            name: vn.name.clone(),
-            kind: node_kind_to_str(&vn.kind),
-            file_path: vn.rel_path.to_string(),
-            line: vn.start_line,
-        };
-    }
-    let node = &graph.nodes[idx];
+    let merged = MergedGraph::new(graph, view);
+    let node = merged
+        .node(idx as u32)
+        .expect("merged_node_meta called with an index outside merged space");
     MergedNodeMeta {
-        uid: node.uid.to_native(),
-        name: node.name.resolve(&graph.string_pool).to_string(),
-        kind: kind_to_str(&node.kind),
-        file_path: graph.files[node.file_idx.to_native() as usize]
-            .path
-            .resolve(&graph.string_pool)
-            .to_string(),
+        uid: node.uid(),
+        name: node.name(&merged).to_string(),
+        kind: node_kind_to_str(&node.kind()),
+        file_path: node.file_path(&merged).unwrap_or_default().to_string(),
         line: node.start_line(),
-    }
-}
-
-/// One edge under merged traversal: an archived base-graph edge or an
-/// overlay-resolved [`ViewEdge`]. Unifies the filter chain (confidence,
-/// containment, heuristic, `--relation-types`) so base and overlay edges
-/// can never drift on traversal policy.
-enum MergedEdgeRef<'a> {
-    Base(&'a ecp_core::graph::ArchivedEdge),
-    Overlay(&'a ViewEdge),
-}
-
-impl MergedEdgeRef<'_> {
-    fn confidence(&self) -> f32 {
-        match self {
-            Self::Base(e) => e.confidence.to_native(),
-            Self::Overlay(e) => e.confidence,
-        }
-    }
-
-    fn rel_type(&self) -> RelType {
-        match self {
-            Self::Base(e) => RelType::from(&e.rel_type),
-            Self::Overlay(e) => e.rel_type,
-        }
-    }
-
-    fn rel_str(&self) -> &'static str {
-        match self {
-            Self::Base(e) => rel_to_str(&e.rel_type),
-            Self::Overlay(e) => {
-                debug_assert!(
-                    matches!(e.rel_type, RelType::Calls),
-                    "extend rel_str when the overlay gains new edge kinds"
-                );
-                "calls"
-            }
-        }
-    }
-
-    /// `viaReason` for the BFS payload. Overlay edges carry a static marker
-    /// so consumers can tell a caller comes from an uncommitted edit.
-    fn reason(&self, graph: &ecp_core::graph::ArchivedZeroCopyGraph) -> String {
-        match self {
-            Self::Base(e) => e.reason.resolve(&graph.string_pool).to_string(),
-            Self::Overlay(_) => "l1-overlay".to_string(),
-        }
     }
 }
 
@@ -111,11 +54,9 @@ impl MergedEdgeRef<'_> {
 /// `--include-tests` / `--relation-types` / `min_conf` are applied here;
 /// `--kind` / `--file` emission-only filtering is NOT applied here.
 ///
-/// With a view, the masking invariant (mask ⊆ rebuild) governs base edges:
-/// sourced-in-dirty-file edges are masked only for rels the overlay
-/// re-resolves (`Calls` today — overlay adjacency is that file's truth);
-/// other rels keep their base edges. Either endpoint in a dirty file is
-/// redirected (replaced) into merged space or dropped (suppressed).
+/// Traversal goes through [`MergedGraph`], which owns the overlay merge —
+/// masking, endpoint redirection, and overlay adjacency. This function sees
+/// edges, not a base graph and a delta.
 ///
 /// **Invariant:** the deterministic result vec always begins with the start
 /// node itself at `depth = 0` (so `len() == 1` means "no neighbours reached").
@@ -137,6 +78,7 @@ pub(super) fn run_bfs(
     type ViaEdge = Option<(String, f32)>;
     type Step = (usize, usize, ViaEdge, bool);
 
+    let merged = MergedGraph::new(graph, view);
     let base_len = graph.nodes.len();
     let mut visited = HashSet::new();
     let mut queue: VecDeque<Step> = VecDeque::new();
@@ -229,7 +171,7 @@ pub(super) fn run_bfs(
 
         // ── expansion ───────────────────────────────────────────────────
         // Shared filter chain + enqueue for base and overlay edges.
-        let mut consider = |edge: MergedEdgeRef<'_>, next_idx: usize| {
+        let mut consider = |edge: &MergedEdge<'_>, next_idx: usize| {
             let edge_conf = edge.confidence();
             if edge_conf < min_conf {
                 hidden_conf_edges += 1;
@@ -249,7 +191,7 @@ pub(super) fn run_bfs(
                 return;
             }
             if let Some(rels) = rel_filter.as_ref() {
-                let rel_str = edge.rel_str();
+                let rel_str = rel_type_to_str(rel);
                 if !rels.iter().any(|r| r == rel_str) {
                     return;
                 }
@@ -259,93 +201,23 @@ pub(super) fn run_bfs(
                 queue.push_back((
                     next_idx,
                     curr_depth + 1,
-                    Some((edge.reason(graph), edge_conf)),
+                    Some((edge.reason(graph).to_string(), edge_conf)),
                     is_heur,
                 ));
             }
         };
 
         if matches!(direction, Direction::Up | Direction::Both) {
-            // Base IN-edges anchor: the node itself when base; the replaced
-            // base twin when virtual (clean-file callers still point at it);
-            // None for a brand-new virtual symbol — no base edge can target
-            // it, so only the overlay reverse index below applies.
-            let in_anchor = if curr_idx < base_len {
-                Some(curr_idx)
-            } else {
-                view.and_then(|v| v.node(curr_idx as u32))
-                    .and_then(|n| n.replaced_base)
-                    .map(|b| b as usize)
-            };
-            if let Some(anchor) = in_anchor {
-                let in_start = graph.in_offsets[anchor].to_native() as usize;
-                let in_end = graph.in_offsets[anchor + 1].to_native() as usize;
-                for i in in_start..in_end {
-                    let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-                    let edge = &graph.edges[edge_idx];
-                    let src = edge.source.to_native() as usize;
-                    // mask ⊆ rebuild: drop a dirty-file source's edge only
-                    // for rels the overlay re-resolves (its truth is in
-                    // overlay_in below); other rels keep the base edge with
-                    // the source redirected into merged space.
-                    let next_idx = match view {
-                        Some(v) => {
-                            if v.masks_base_edge(src as u32, RelType::from(&edge.rel_type)) {
-                                continue;
-                            }
-                            match v.redirect(src as u32) {
-                                Some(s) => s as usize,
-                                None => continue, // source deleted on disk
-                            }
-                        }
-                        None => src,
-                    };
-                    consider(MergedEdgeRef::Base(edge), next_idx);
-                }
-            }
-            if let Some(v) = view {
-                for (_, e) in v.overlay_in(curr_idx as u32) {
-                    consider(MergedEdgeRef::Overlay(e), e.source as usize);
-                }
+            for edge in merged.in_edges(curr_idx as u32) {
+                let source = edge.source as usize;
+                consider(&edge, source);
             }
         }
 
         if matches!(direction, Direction::Down | Direction::Both) {
-            // Base OUT-edges anchor mirrors in_anchor: a replaced virtual
-            // node keeps its base twin's edges for rels the overlay can't
-            // rebuild (masks_base_edge filters the rebuilt ones).
-            let out_anchor = if curr_idx < base_len {
-                Some(curr_idx)
-            } else {
-                view.and_then(|v| v.node(curr_idx as u32))
-                    .and_then(|n| n.replaced_base)
-                    .map(|b| b as usize)
-            };
-            if let Some(anchor) = out_anchor {
-                let out_start = graph.out_offsets[anchor].to_native() as usize;
-                let out_end = graph.out_offsets[anchor + 1].to_native() as usize;
-                for i in out_start..out_end {
-                    let edge = &graph.edges[i];
-                    let target = edge.target.to_native() as usize;
-                    let next_idx = match view {
-                        Some(v) => {
-                            if v.masks_base_edge(anchor as u32, RelType::from(&edge.rel_type)) {
-                                continue;
-                            }
-                            match v.redirect(target as u32) {
-                                Some(t) => t as usize,
-                                None => continue, // target deleted on disk
-                            }
-                        }
-                        None => target,
-                    };
-                    consider(MergedEdgeRef::Base(edge), next_idx);
-                }
-            }
-            if let Some(v) = view {
-                for (_, e) in v.overlay_out(curr_idx as u32) {
-                    consider(MergedEdgeRef::Overlay(e), e.target as usize);
-                }
+            for edge in merged.out_edges(curr_idx as u32) {
+                let target = edge.target as usize;
+                consider(&edge, target);
             }
         }
     }

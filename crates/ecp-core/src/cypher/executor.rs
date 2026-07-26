@@ -1,137 +1,12 @@
 use crate::cypher::ast::*;
 use crate::cypher::error::CypherError;
 use crate::cypher::value::{QueryResult, Value};
-use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
-use crate::session::{OverlayView, ViewEdge, ViewNode};
+use crate::graph::{ArchivedZeroCopyGraph, RelType};
+use crate::session::{MergedGraph, MergedNode, OverlayView};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-/// Base graph + optional L1 overlay view, threaded through the executor as
-/// one `Copy` bundle. Derefs to the base graph so the existing `graph.nodes`
-/// / `graph.edges` / `graph.string_pool` expressions read unchanged; all
-/// merged-space awareness lives in the helpers below. With `view: None`
-/// every helper degenerates to the pre-overlay behaviour.
-#[derive(Clone, Copy)]
-struct Gv<'a> {
-    g: &'a ArchivedZeroCopyGraph,
-    v: Option<&'a OverlayView>,
-}
-
-impl std::ops::Deref for Gv<'_> {
-    type Target = ArchivedZeroCopyGraph;
-    fn deref(&self) -> &Self::Target {
-        self.g
-    }
-}
-
-/// One merged-space node: a base archived node or an overlay virtual node.
-enum MNode<'a> {
-    Base(&'a crate::graph::ArchivedNode),
-    Virt(&'a ViewNode),
-}
-
-impl<'a> Gv<'a> {
-    fn base_len(&self) -> u32 {
-        self.g.nodes.len() as u32
-    }
-
-    /// Merged-space node fetch. `None` for an out-of-range virtual index.
-    fn mnode(&self, idx: u32) -> Option<MNode<'a>> {
-        if idx < self.base_len() {
-            Some(MNode::Base(&self.g.nodes[idx as usize]))
-        } else {
-            self.v.and_then(|v| v.node(idx)).map(MNode::Virt)
-        }
-    }
-
-    /// Scan visibility of a BASE index: false when the view suppressed it
-    /// (deleted on disk) or replaced it (its virtual twin scans instead).
-    fn base_visible(&self, idx: u32) -> bool {
-        match self.v {
-            Some(v) => v.redirect(idx) == Some(idx),
-            None => true,
-        }
-    }
-
-    /// Overlay edge behind a merged edge index (`>= g.edges.len()`), if any.
-    fn overlay_edge(&self, merged_edge_idx: u32) -> Option<&'a ViewEdge> {
-        let n = self.g.edges.len() as u32;
-        merged_edge_idx
-            .checked_sub(n)
-            .and_then(|i| self.v.and_then(|v| v.edge(i)))
-    }
-}
-
-impl<'a> MNode<'a> {
-    fn kind(&self) -> NodeKind {
-        match self {
-            Self::Base(n) => NodeKind::from(&n.kind),
-            Self::Virt(n) => n.kind,
-        }
-    }
-
-    fn uid(&self) -> u64 {
-        match self {
-            Self::Base(n) => n.uid.to_native(),
-            Self::Virt(n) => n.uid,
-        }
-    }
-
-    fn name(&self, gv: &Gv<'a>) -> &'a str {
-        match self {
-            Self::Base(n) => n.name.resolve(&gv.g.string_pool),
-            Self::Virt(n) => n.name.as_str(),
-        }
-    }
-
-    fn owner_class(&self, gv: &Gv<'a>) -> Option<&'a str> {
-        match self {
-            Self::Base(n) => {
-                let oc = n.owner_class.resolve(&gv.g.string_pool);
-                (!oc.is_empty()).then_some(oc)
-            }
-            Self::Virt(n) => n.owner_class.as_deref(),
-        }
-    }
-
-    fn file_path(&self, gv: &Gv<'a>) -> Option<&'a str> {
-        match self {
-            Self::Base(n) => n.has_owning_file().then(|| {
-                gv.g.files[n.file_idx.to_native() as usize]
-                    .path
-                    .resolve(&gv.g.string_pool)
-            }),
-            Self::Virt(n) => Some(&n.rel_path),
-        }
-    }
-
-    fn start_line(&self) -> u32 {
-        match self {
-            Self::Base(n) => n.start_line(),
-            Self::Virt(n) => n.start_line,
-        }
-    }
-
-    fn end_line(&self) -> u32 {
-        match self {
-            Self::Base(n) => n.end_line(),
-            Self::Virt(n) => n.end_line,
-        }
-    }
-
-    /// Base index to consult for function-meta / span-keyed side tables
-    /// (flags, decorators, content spans): the node itself when base, the
-    /// uid-identical base twin when replaced, `None` for a brand-new symbol
-    /// (no metas exist for it yet).
-    fn fm_idx(&self, idx: u32) -> Option<u32> {
-        match self {
-            Self::Base(_) => Some(idx),
-            Self::Virt(n) => n.replaced_base,
-        }
-    }
-}
 
 /// Small-N variable lookup. Replaces `HashMap<String, u32>` on the
 /// `Binding` fields cloned once per matched node in `exec_pattern`'s
@@ -224,7 +99,7 @@ pub fn execute(
     view: Option<&OverlayView>,
     repo_root: &Path,
 ) -> Result<QueryResult, CypherError> {
-    let gv = Gv { g: graph, v: view };
+    let gv = MergedGraph::new(graph, view);
     let mut cache = ContentCache::new(repo_root.to_path_buf());
     let rewritten = pushdown_where(query);
     execute_inner(rewritten.as_ref().unwrap_or(query), gv, &mut cache)
@@ -333,7 +208,7 @@ fn split_and<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 
 fn execute_inner(
     query: &Query,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<QueryResult, CypherError> {
     // Produce bindings from MATCH clauses.
@@ -706,7 +581,7 @@ enum VarCollapse {
 fn eval_return_expr_with(
     expr: &ReturnExpr,
     b: &Binding,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     cache: &mut ContentCache,
     collapse: VarCollapse,
 ) -> Value {
@@ -716,7 +591,7 @@ fn eval_return_expr_with(
                 return v.clone();
             }
             if let Some(&idx) = b.node_vars.get(var) {
-                let Some(m) = graph.mnode(idx) else {
+                let Some(m) = graph.node(idx) else {
                     return Value::Null;
                 };
                 return match collapse {
@@ -737,7 +612,7 @@ fn eval_return_expr_with(
                             tgt: e.target,
                             rel_type: e.rel_type,
                             confidence: e.confidence,
-                            reason: "l1-overlay".to_string(),
+                            reason: crate::session::OVERLAY_EDGE_REASON.to_string(),
                         };
                     }
                     let e = &graph.edges[eidx as usize];
@@ -766,7 +641,7 @@ fn eval_return_expr_with(
 fn eval_return_expr(
     expr: &ReturnExpr,
     b: &Binding,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<Value, CypherError> {
     Ok(eval_return_expr_with(
@@ -789,7 +664,7 @@ fn value_key(v: &Value) -> String {
 fn eval_return_item_rich(
     item: &ReturnItem,
     b: &Binding,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Value {
     eval_return_expr_with(&item.expr, b, graph, cache, VarCollapse::ToRef)
@@ -799,7 +674,7 @@ fn eval_return_item_rich(
 fn exec_with(
     wc: &WithClause,
     bindings: Vec<Binding>,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<Vec<Binding>, CypherError> {
     let has_agg = wc
@@ -990,7 +865,7 @@ fn is_aggregate_fn(name: &str) -> bool {
 /// functions LLM agents reach for most: `type(r)` → edge rel-type as Str;
 /// `id(n)` → node index as Int; `labels(n)` → single-element list of
 /// node-kind Str.
-fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) -> Value {
+fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: MergedGraph<'_>) -> Value {
     let Some(Expr::Var(var)) = args.first() else {
         return Value::Null;
     };
@@ -1033,7 +908,7 @@ fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: Gv<'_>) ->
             let Some(&idx) = b.node_vars.get(var) else {
                 return Value::Null;
             };
-            match graph.mnode(idx) {
+            match graph.node(idx) {
                 Some(m) => Value::List(vec![Value::Str(m.kind().as_str().into())]),
                 None => Value::Null,
             }
@@ -1210,7 +1085,7 @@ impl Accumulator {
 fn exec_match_clause(
     mc: &MatchClause,
     prior: &[Binding],
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
 ) -> Result<Vec<Binding>, CypherError> {
     let mut out = Vec::new();
     for pat in &mc.patterns {
@@ -1236,8 +1111,8 @@ fn exec_match_clause(
 /// Push every overlay virtual node matching `np` — the virtual complement of
 /// the base scans (which skip suppressed/replaced base indices). Linear over
 /// O(dirty symbols); no-op without a view.
-fn seed_virtuals(graph: Gv<'_>, np: &NodePat, mut push: impl FnMut(u32)) {
-    if let Some(v) = graph.v {
+fn seed_virtuals(graph: MergedGraph<'_>, np: &NodePat, mut push: impl FnMut(u32)) {
+    if let Some(v) = graph.view() {
         for i in 0..v.virtual_nodes().len() as u32 {
             let idx = graph.base_len() + i;
             if node_matches(idx, np, graph) {
@@ -1247,7 +1122,11 @@ fn seed_virtuals(graph: Gv<'_>, np: &NodePat, mut push: impl FnMut(u32)) {
     }
 }
 
-fn exec_pattern(pat: &Pattern, base: &Binding, graph: Gv<'_>) -> Result<Vec<Binding>, CypherError> {
+fn exec_pattern(
+    pat: &Pattern,
+    base: &Binding,
+    graph: MergedGraph<'_>,
+) -> Result<Vec<Binding>, CypherError> {
     // If the first node is unbound but the last one is already bound, walk the
     // pattern right-to-left: reverse nodes/rels and invert each hop direction.
     // Seeding from the bound endpoint replaces a full-node scan per prior row
@@ -1423,7 +1302,7 @@ fn exec_pattern(pat: &Pattern, base: &Binding, graph: Gv<'_>) -> Result<Vec<Bind
 fn bfs_var_len(
     start: u32,
     rel: &RelPat,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     min: u32,
     max: u32,
 ) -> Vec<(u32, Option<u32>)> {
@@ -1453,8 +1332,8 @@ fn bfs_var_len(
 }
 
 /// Merged-space node filter: `node_idx` may be a base or virtual index.
-fn node_matches(node_idx: u32, np: &NodePat, graph: Gv<'_>) -> bool {
-    let Some(m) = graph.mnode(node_idx) else {
+fn node_matches(node_idx: u32, np: &NodePat, graph: MergedGraph<'_>) -> bool {
+    let Some(m) = graph.node(node_idx) else {
         return false;
     };
     // Zero-cost discriminant read; reused by both label filter and prop_value below.
@@ -1501,14 +1380,14 @@ fn node_matches(node_idx: u32, np: &NodePat, graph: Gv<'_>) -> bool {
 /// so that `literal_matches_value` falls through to `false` (no match).
 /// "name", "kind", "uid" are handled by the hot-3 in `node_matches` and
 /// never reach this function.
-fn node_prop_no_cache(node_idx: u32, prop: &str, graph: Gv<'_>) -> Value {
-    let Some(m) = graph.mnode(node_idx) else {
+fn node_prop_no_cache(node_idx: u32, prop: &str, graph: MergedGraph<'_>) -> Value {
+    let Some(m) = graph.node(node_idx) else {
         return Value::Null;
     };
     // Function-meta side tables are span/idx-keyed on the BASE graph: a
     // replaced virtual node reads its uid-identical base twin; a brand-new
     // symbol has no metas yet and takes the sparse defaults.
-    let fm = m.fm_idx(node_idx);
+    let fm = m.meta_idx(node_idx);
     match prop {
         "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").into()),
         "ownerClass" => match m.owner_class(&graph) {
@@ -1568,89 +1447,24 @@ fn literal_matches_value(lit: &Literal, val: &Value) -> bool {
 /// per matching edge. Closure-based instead of returning `Vec` so the frontier-expansion
 /// loop in `exec_pattern` doesn't pay a per-source-node allocation — at 110k+ source nodes
 /// the cumulative `Vec::new()` cost was ~6 ms of edge-traversal query time.
-/// Merged-space hop: `from` may be a base or virtual index; emitted targets
-/// and edge indices are merged-space (overlay edges live at
-/// `graph.edges.len() + i`). Base adjacency anchors on the node itself
-/// (base) or its replaced base twin (virtual); the mask ⊆ rebuild invariant
-/// drops base edges whose rel the overlay re-resolves, and endpoints
-/// redirect into merged space. With no view this is exactly the old walk.
-fn walk_rel<F: FnMut(u32, u32)>(from: u32, rel: &RelPat, graph: Gv<'_>, mut emit: F) {
-    let dir = rel.dir;
-
+/// Merged-space hop: `from` may be a base or virtual index, and the emitted
+/// targets and edge indices are merged-space too. The overlay merge itself
+/// belongs to [`MergedGraph::out_edges`] / [`MergedGraph::in_edges`]; what is
+/// left here is the rel-type filter.
+fn walk_rel<F: FnMut(u32, u32)>(from: u32, rel: &RelPat, graph: MergedGraph<'_>, mut emit: F) {
     let type_ok = |rt: RelType| -> bool { rel.types.is_empty() || rel.types.contains(&rt) };
 
-    // Base CSR anchor: None for a brand-new virtual symbol.
-    let anchor = if from < graph.base_len() {
-        Some(from as usize)
-    } else {
-        graph
-            .v
-            .and_then(|v| v.node(from))
-            .and_then(|n| n.replaced_base)
-            .map(|b| b as usize)
-    };
-
-    if matches!(dir, Direction::Out | Direction::Both) {
-        if let Some(a) = anchor {
-            let s = graph.out_offsets[a].to_native() as usize;
-            let e = graph.out_offsets[a + 1].to_native() as usize;
-            for (i, edge) in graph.edges[s..e].iter().enumerate() {
-                let rt = RelType::from(&edge.rel_type);
-                if !type_ok(rt) {
-                    continue;
-                }
-                let target = edge.target.to_native();
-                match graph.v {
-                    Some(v) => {
-                        if v.masks_base_edge(a as u32, rt) {
-                            continue;
-                        }
-                        if let Some(t) = v.redirect(target) {
-                            emit(t, (s + i) as u32);
-                        }
-                    }
-                    None => emit(target, (s + i) as u32),
-                }
-            }
-        }
-        if let Some(v) = graph.v {
-            for (ei, e) in v.overlay_out(from) {
-                if type_ok(e.rel_type) {
-                    emit(e.target, graph.g.edges.len() as u32 + ei);
-                }
+    if matches!(rel.dir, Direction::Out | Direction::Both) {
+        for edge in graph.out_edges(from) {
+            if type_ok(edge.rel_type()) {
+                emit(edge.target, edge.idx);
             }
         }
     }
-    if matches!(dir, Direction::In | Direction::Both) {
-        if let Some(a) = anchor {
-            let s = graph.in_offsets[a].to_native() as usize;
-            let e = graph.in_offsets[a + 1].to_native() as usize;
-            for i in s..e {
-                let edge_idx = graph.in_edge_idx[i].to_native();
-                let edge = &graph.edges[edge_idx as usize];
-                let rt = RelType::from(&edge.rel_type);
-                if !type_ok(rt) {
-                    continue;
-                }
-                let source = edge.source.to_native();
-                match graph.v {
-                    Some(v) => {
-                        if v.masks_base_edge(source, rt) {
-                            continue;
-                        }
-                        if let Some(src) = v.redirect(source) {
-                            emit(src, edge_idx);
-                        }
-                    }
-                    None => emit(source, edge_idx),
-                }
-            }
-        }
-        if let Some(v) = graph.v {
-            for (ei, e) in v.overlay_in(from) {
-                if type_ok(e.rel_type) {
-                    emit(e.source, graph.g.edges.len() as u32 + ei);
-                }
+    if matches!(rel.dir, Direction::In | Direction::Both) {
+        for edge in graph.in_edges(from) {
+            if type_ok(edge.rel_type()) {
+                emit(edge.source, edge.idx);
             }
         }
     }
@@ -1659,7 +1473,7 @@ fn walk_rel<F: FnMut(u32, u32)>(from: u32, rel: &RelPat, graph: Gv<'_>, mut emit
 fn eval_expr(
     e: &Expr,
     b: &Binding,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<Value, CypherError> {
     use Expr::*;
@@ -1671,7 +1485,7 @@ fn eval_expr(
                 return Ok(v.clone());
             }
             if let Some(&idx) = b.node_vars.get(var) {
-                return Ok(match graph.mnode(idx) {
+                return Ok(match graph.node(idx) {
                     Some(m) => Value::Str(m.name(&graph).into()),
                     None => Value::Null,
                 });
@@ -1687,7 +1501,7 @@ fn eval_expr(
                         tgt: e.target,
                         rel_type: e.rel_type,
                         confidence: e.confidence,
-                        reason: "l1-overlay".to_string(),
+                        reason: crate::session::OVERLAY_EDGE_REASON.to_string(),
                     });
                 }
                 let e = &graph.edges[eidx as usize];
@@ -1795,7 +1609,7 @@ fn eval_expr(
             };
             // Category labels were normalized to member kind names at parse
             // time, so this stays an allocation-free per-row string compare.
-            let Some(m) = graph.mnode(idx) else {
+            let Some(m) = graph.node(idx) else {
                 return Ok(Value::Null);
             };
             let kind_str = m.kind().as_str();
@@ -1836,7 +1650,11 @@ fn eval_expr(
 ///   pattern walker — `exec_pattern` anchors on a bound endpoint via its
 ///   right-to-left reversal, but materialises matches rather than
 ///   short-circuiting, so it requires at least one bound variable.
-fn pattern_exists(pattern: &Pattern, b: &Binding, graph: Gv<'_>) -> Result<bool, CypherError> {
+fn pattern_exists(
+    pattern: &Pattern,
+    b: &Binding,
+    graph: MergedGraph<'_>,
+) -> Result<bool, CypherError> {
     if pattern.rels.is_empty() {
         return Ok(pattern
             .nodes
@@ -1892,50 +1710,21 @@ fn pattern_exists(pattern: &Pattern, b: &Binding, graph: Gv<'_>) -> Result<bool,
 
 /// "Does any edge match" for a single-hop pattern with no bound endpoint:
 /// scan the flat edge slice and short-circuit on the first hit.
-fn edge_scan_exists(n0: &NodePat, n1: &NodePat, rel: &RelPat, graph: Gv<'_>) -> bool {
+fn edge_scan_exists(n0: &NodePat, n1: &NodePat, rel: &RelPat, graph: MergedGraph<'_>) -> bool {
     let fits = |a: u32, pa: &NodePat, z: u32, pz: &NodePat| {
         node_matches(a, pa, graph) && node_matches(z, pz, graph)
     };
-    let base_hit = graph.edges.iter().any(|edge| {
-        let rt = RelType::from(&edge.rel_type);
-        if !rel.types.is_empty() && !rel.types.contains(&rt) {
+    graph.all_edges().any(|edge| {
+        if !rel.types.is_empty() && !rel.types.contains(&edge.rel_type()) {
             return false;
         }
-        let s = edge.source.to_native();
-        // mask ⊆ rebuild + endpoint redirect, mirroring walk_rel.
-        let (s, t) = match graph.v {
-            Some(v) => {
-                if v.masks_base_edge(s, rt) {
-                    return false;
-                }
-                match (v.redirect(s), v.redirect(edge.target.to_native())) {
-                    (Some(s), Some(t)) => (s, t),
-                    _ => return false,
-                }
-            }
-            None => (s, edge.target.to_native()),
-        };
+        let (s, t) = (edge.source, edge.target);
         match rel.dir {
             Direction::Out => fits(s, n0, t, n1),
             Direction::In => fits(t, n0, s, n1),
             Direction::Both => fits(s, n0, t, n1) || fits(t, n0, s, n1),
         }
-    });
-    base_hit
-        || graph.v.is_some_and(|v| {
-            v.edges().iter().any(|e| {
-                if !rel.types.is_empty() && !rel.types.contains(&e.rel_type) {
-                    return false;
-                }
-                match rel.dir {
-                    Direction::Out => fits(e.source, n0, e.target, n1),
-                    Direction::In => fits(e.target, n0, e.source, n1),
-                    Direction::Both => {
-                        fits(e.source, n0, e.target, n1) || fits(e.target, n0, e.source, n1)
-                    }
-                }
-            })
-        })
+    })
 }
 
 fn invert_dir(d: Direction) -> Direction {
@@ -1976,7 +1765,7 @@ fn invert_pattern(pat: &Pattern) -> Pattern {
 /// pattern are tracked in `local` so a var repeated within the pattern
 /// (a cycle probe like `(x)-->(y)-->(x)`) stays consistent. Edge vars are
 /// ignored — a boolean answer never reads them.
-fn exists_dfs(pat: &Pattern, base: &Binding, graph: Gv<'_>) -> Result<bool, CypherError> {
+fn exists_dfs(pat: &Pattern, base: &Binding, graph: MergedGraph<'_>) -> Result<bool, CypherError> {
     let bound_in_base = |np: &NodePat| {
         np.var
             .as_deref()
@@ -1995,7 +1784,7 @@ fn exists_dfs(pat: &Pattern, base: &Binding, graph: Gv<'_>) -> Result<bool, Cyph
         cur: u32,
         base: &Binding,
         local: &mut Vec<(String, u32)>,
-        graph: Gv<'_>,
+        graph: MergedGraph<'_>,
     ) -> bool {
         if depth == pat.rels.len() {
             return true;
@@ -2076,9 +1865,7 @@ fn exists_dfs(pat: &Pattern, base: &Binding, graph: Gv<'_>) -> Result<bool, Cyph
             .kinds
             .iter()
             .all(|k| graph.kind_offsets.len() > k.as_index() + 1);
-    let virtual_range = || {
-        graph.base_len()..graph.base_len() + graph.v.map_or(0, |v| v.virtual_nodes().len()) as u32
-    };
+    let virtual_range = || graph.base_len()..graph.node_count();
     if use_kind_csr {
         for &kind in &first_np.kinds {
             let kidx = kind.as_index();
@@ -2161,7 +1948,7 @@ fn prop_value(
     var: &str,
     prop: &str,
     b: &Binding,
-    graph: Gv<'_>,
+    graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Value {
     // Check computed values first (set by WITH clause).
@@ -2199,7 +1986,7 @@ fn prop_value(
         if let Some(e) = graph.overlay_edge(edge_idx) {
             return match prop {
                 "confidence" => Value::Float(e.confidence as f64),
-                "reason" => Value::Str("l1-overlay".into()),
+                "reason" => Value::Str(crate::session::OVERLAY_EDGE_REASON.into()),
                 "rel_type" => Value::Str(e.rel_type.as_str().into()),
                 _ => Value::Null,
             };
@@ -2223,11 +2010,16 @@ fn prop_value(
 /// The set of names matched here is mirrored by `diagnostics::KNOWN_NODE_PROPS`
 /// (the unknown-property warning). A new arm added below must be added there
 /// too, or legal queries using it will false-positive as unknown.
-fn node_prop_value(node_idx: u32, prop: &str, graph: Gv<'_>, cache: &mut ContentCache) -> Value {
-    let Some(m) = graph.mnode(node_idx) else {
+fn node_prop_value(
+    node_idx: u32,
+    prop: &str,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Value {
+    let Some(m) = graph.node(node_idx) else {
         return Value::Null;
     };
-    let fm = m.fm_idx(node_idx);
+    let fm = m.meta_idx(node_idx);
     match prop {
         "name" => Value::Str(m.name(&graph).into()),
         // u64 uid stored as i64 bits — no allocation per row.
@@ -2244,7 +2036,7 @@ fn node_prop_value(node_idx: u32, prop: &str, graph: Gv<'_>, cache: &mut Content
         "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").into()),
         "content" => {
             let slice = match &m {
-                MNode::Base(n) => {
+                MergedNode::Base(n) => {
                     // Lazy file read + span slice.
                     let file_idx = n.file_idx.to_native();
                     let span = (
@@ -2261,7 +2053,7 @@ fn node_prop_value(node_idx: u32, prop: &str, graph: Gv<'_>, cache: &mut Content
                 // Virtual node: the dirty file on disk is the truth, and the
                 // fragment carries line-resolution spans only — slice whole
                 // lines. Uncached read, bounded by dirty symbols per query.
-                MNode::Virt(vn) => {
+                MergedNode::Virtual(vn) => {
                     std::fs::read_to_string(cache.repo_root.join(vn.rel_path.as_ref()))
                         .map(|body| {
                             let start = vn.start_line.saturating_sub(1) as usize;
@@ -2312,15 +2104,15 @@ fn node_prop_value(node_idx: u32, prop: &str, graph: Gv<'_>, cache: &mut Content
     }
 }
 
-/// `archived_fm_flag` over an optional BASE index (`MNode::fm_idx`): a
+/// `archived_fm_flag` over an optional BASE index (`MergedNode::meta_idx`): a
 /// brand-new virtual symbol has no meta record and takes the sparse default.
-fn fm_flag(graph: Gv<'_>, base_idx: Option<u32>, flag: u16) -> bool {
+fn fm_flag(graph: MergedGraph<'_>, base_idx: Option<u32>, flag: u16) -> bool {
     base_idx.is_some_and(|i| archived_fm_flag(graph, i, flag))
 }
 
 /// Return true when the node's FunctionMeta has the given flag set.
 /// Nodes with no FunctionMeta record return false (sparse-record default).
-fn archived_fm_flag(graph: Gv<'_>, node_idx: u32, flag: u16) -> bool {
+fn archived_fm_flag(graph: MergedGraph<'_>, node_idx: u32, flag: u16) -> bool {
     if flag <= u8::MAX as u16 && graph.node_flags.len() > node_idx as usize {
         return graph.node_flags[node_idx as usize] & flag as u8 != 0;
     }
@@ -2336,7 +2128,7 @@ fn archived_fm_flag(graph: Gv<'_>, node_idx: u32, flag: u16) -> bool {
 
 /// Return the 3-bit visibility code for the node's FunctionMeta.
 /// Nodes with no FunctionMeta record return 0 (public default).
-fn archived_fm_visibility(graph: Gv<'_>, node_idx: u32) -> u8 {
+fn archived_fm_visibility(graph: MergedGraph<'_>, node_idx: u32) -> u8 {
     match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
@@ -2352,7 +2144,7 @@ fn archived_fm_visibility(graph: Gv<'_>, node_idx: u32) -> u8 {
 /// Nodes with no FunctionMeta record return an empty list.
 /// TODO: the per-row Vec allocation here is unavoidable with the current
 /// Value::List representation; profile if decorators filtering becomes a hotspot.
-fn archived_fm_decorators(graph: Gv<'_>, node_idx: u32) -> Value {
+fn archived_fm_decorators(graph: MergedGraph<'_>, node_idx: u32) -> Value {
     let items = match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
@@ -2391,7 +2183,7 @@ fn const_str_in_decorators<'e>(
 /// Walk the archived decorator slice for `node_idx` and return true if any entry,
 /// after stripping a leading `@`, equals `needle`. Zero heap allocation — reads
 /// directly from the rkyv-archived string pool.
-fn archived_decorator_contains(graph: Gv<'_>, node_idx: u32, needle: &str) -> bool {
+fn archived_decorator_contains(graph: MergedGraph<'_>, node_idx: u32, needle: &str) -> bool {
     match graph
         .function_metas
         .binary_search_by_key(&node_idx, |m| m.node_idx.to_native())
@@ -2495,7 +2287,9 @@ fn return_item_default_col(item: &ReturnItem) -> String {
 mod tests {
     use super::*;
     use crate::cypher::parse;
-    use crate::graph::ZeroCopyGraph;
+    // `NodeKind` is no longer imported by the parent module — the merged-node
+    // accessors that used it moved to `session::merged`.
+    use crate::graph::{NodeKind, ZeroCopyGraph};
     use crate::graph_fixture::GraphFixture;
 
     // -----------------------------------------------------------------------
@@ -4385,7 +4179,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4403,7 +4197,7 @@ mod tests {
                 negated: true,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(false),
@@ -4423,7 +4217,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(false),
@@ -4470,7 +4264,7 @@ mod tests {
                 negated: true,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4512,7 +4306,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4559,7 +4353,7 @@ mod tests {
                 negated: false,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
@@ -4603,7 +4397,7 @@ mod tests {
                 negated: true,
             };
             let mut cache = ContentCache::new(PathBuf::from("."));
-            let result = eval_expr(&expr, &binding, Gv { g, v: None }, &mut cache).unwrap();
+            let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
             assert_eq!(
                 result,
                 Value::Bool(true),
