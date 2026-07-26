@@ -6,6 +6,7 @@ use crate::resolution::index::{ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
 use aho_corasick::{AhoCorasick, MatchKind};
+use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, File, FileCategory, FunctionMeta, Node, NodeKind, RelType,
@@ -1478,16 +1479,19 @@ impl GraphBuilder {
     }
 }
 
-/// Map a file path's extension to the language hint accepted by
-/// `response_shapes::extract` / `consumer_keys::extract`. Returns `None`
-/// for extensions outside the supported set so callers can skip the
-/// fetch-shape pass for those files cheaply.
+/// Map a file path to the language hint accepted by
+/// `response_shapes::extract` / `consumer_keys::extract`. `None` for
+/// languages with no fetch-shape extractor, so the pass skips those files
+/// cheaply.
+///
+/// Routing goes through the canonical provider table rather than a private
+/// extension list: which extensions are TypeScript is a fact the analyzer
+/// already owns, and this repo has twice shipped drift from a hand-copied
+/// dispatch table (PR #141/#142, PR #595).
 fn lang_for_path(path: &str) -> Option<response_shapes::Lang> {
-    let dot = path.rfind('.')?;
-    let ext = &path[dot + 1..];
-    match ext {
-        "ts" | "tsx" => Some(response_shapes::Lang::TypeScript),
-        "js" | "jsx" | "mjs" | "cjs" => Some(response_shapes::Lang::JavaScript),
+    match AnalyzerPipeline::provider_name_for_path(std::path::Path::new(path))? {
+        "typescript" => Some(response_shapes::Lang::TypeScript),
+        "javascript" => Some(response_shapes::Lang::JavaScript),
         "php" => Some(response_shapes::Lang::Php),
         _ => None,
     }
