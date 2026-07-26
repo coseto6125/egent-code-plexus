@@ -190,8 +190,13 @@ impl BaselinePayload {
 fn run_impact_subprocess(baseline: &str) -> Result<BaselinePayload, EcpError> {
     let stdout =
         crate::subprocess::run_self(&["impact", "--baseline", baseline, "--format", "json"])?;
-    serde_json::from_slice(&stdout)
-        .map_err(|e| EcpError::Serialization(format!("parse impact JSON: {e}")))
+    let payload: BaselinePayload = serde_json::from_slice(&stdout)
+        .map_err(|e| EcpError::Serialization(format!("parse impact JSON: {e}")))?;
+    // A malformed BFS entry must fail here, not shrink the impact set and
+    // hand back a lower risk label than the change deserves.
+    crate::commands::impact::payload::validate_impact_entries(&payload)
+        .map_err(EcpError::Serialization)?;
+    Ok(payload)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
