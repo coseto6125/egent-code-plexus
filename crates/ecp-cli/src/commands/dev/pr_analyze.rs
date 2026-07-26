@@ -5,11 +5,13 @@
 //! Black-box wraps `ecp impact --baseline <ref> --format json` (subprocess),
 //! so no tight coupling to impact's internal API.
 
+use crate::commands::impact::BaselinePayload;
 use crate::git::safe_exec;
 use crate::output::OutputFormat;
 use clap::Args;
 use ecp_core::EcpError;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::Path;
 
 const CACHE_MARKER: &str = "<!-- ecp-impact-cache:V1 -->";
@@ -131,89 +133,22 @@ pub struct PrAnalyzeOutput {
     pub suggested_status: StatusSuggestion,
 }
 
-// ── impact subprocess types ──────────────────────────────────────────────────
+// ── impact subprocess derived views ──────────────────────────────────────────
+//
+// `run_impact_subprocess` shells out to `ecp impact --baseline <ref> --format
+// json` (a subprocess whose `ecp` version this binary doesn't control) and
+// deserializes the shared `BaselinePayload` (`crate::commands::impact::payload`)
+// instead of a hand-synced mirror struct — a renamed field there is now a
+// compile error here, not a silent `unwrap_or("?")`.
 
-/// One symbol that changed between baseline and HEAD.
-/// Fields match the live `ecp impact --baseline --format json` shape.
-#[derive(Deserialize, Debug)]
-struct ChangedSymbol {
-    pub name: String,
-    /// `"Function"`, `"Method"`, `"Struct"`, `"Module"`, etc.
-    #[allow(dead_code)]
-    pub kind: String,
-    /// Repo-relative path (forward slashes). No longer consumed (area
-    /// classification uses `git diff --name-only` for comment-only-diff
-    /// coverage) but kept so the deserializer doesn't fail on the field.
-    #[serde(rename = "filePath")]
-    #[allow(dead_code)]
-    pub file_path: String,
-    #[allow(dead_code)]
-    pub line: u32,
-    #[allow(dead_code)]
-    pub change_type: String,
-}
-
-/// One entry inside `impact_by_symbol[*].impact`.
-#[derive(Deserialize, Debug)]
-struct ImpactEntry {
-    pub name: String,
-    /// 0 = the changed symbol itself; >0 = transitive callers.
-    pub depth: u32,
-}
-
-/// Per-symbol BFS result emitted by `ecp impact --baseline`.
-#[derive(Deserialize, Debug)]
-struct ImpactBySymbol {
-    #[allow(dead_code)]
-    pub symbol: String,
-    #[allow(dead_code)]
-    #[serde(rename = "filePath", default)]
-    pub file_path: String,
-    #[serde(default)]
-    pub impact: Vec<ImpactEntry>,
-}
-
-/// Top-level JSON envelope from `ecp impact --baseline <ref> --format json`.
-///
-/// Live shape (confirmed from source + runtime probe):
-/// ```json
-/// {
-///   "status": "success",
-///   "baseline": "<ref>",
-///   "changed_paths": [ "<repo-relative path>", ... ],
-///   "changed_symbols": [ { "name", "kind", "filePath", "line", "change_type" } ],
-///   "impact_by_symbol": [ { "symbol", "filePath", "impact": [ { "name", "depth", ... } ] } ],
-///   "hidden_heuristic_edges": 0
-/// }
-/// ```
-/// `changed_paths` is the un-filtered `git diff --name-only` list (includes
-/// docs / whitespace-only / comment-only files that produce zero
-/// `changed_symbols`). Used by `run()` for area classification, replacing
-/// what was previously a second `git diff` subprocess.
-#[allow(dead_code)]
-#[derive(Deserialize, Debug)]
-struct ImpactJson {
-    /// All files touched between baseline and HEAD (un-filtered).
-    /// Empty by default so older `ecp` binaries that don't emit the field
-    /// still deserialize cleanly (deprecation-friendly fallback).
-    #[serde(default)]
-    pub changed_paths: Vec<String>,
-    /// Symbols whose source body changed between baseline and HEAD.
-    #[serde(default)]
-    pub changed_symbols: Vec<ChangedSymbol>,
-    /// Per-changed-symbol BFS results (callers reachable upstream).
-    #[serde(default)]
-    pub impact_by_symbol: Vec<ImpactBySymbol>,
-}
-
-impl ImpactJson {
+impl BaselinePayload {
     /// Files that contain at least one *semantically* changed symbol.
     /// Distinct from `changed_paths`: this view skips whitespace-only and
     /// comment-only diffs (those produce zero `changed_symbols`). Kept on
     /// the library surface so LLM consumers can ask "which files actually
     /// had code changes?" without re-deriving from `changed_symbols`.
     /// Mirrors `impact_set_names` / `changed_symbol_names` for derived-view
-    /// symmetry on ImpactJson.
+    /// symmetry on `BaselinePayload`.
     #[allow(dead_code)]
     pub fn changed_files(&self) -> Vec<String> {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -225,14 +160,19 @@ impl ImpactJson {
     }
 
     /// All symbol names reachable from changed symbols (depth > 0), deduplicated.
-    /// Used to size the impact set for risk classification.
+    /// Used to size the impact set for risk classification. `impact` entries
+    /// stay untyped `Value` (see `payload.rs`), so `depth`/`name` are read
+    /// by key the same way `review::aggregate::impact_findings` does.
     pub fn impact_set_names(&self) -> Vec<String> {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         self.impact_by_symbol
             .iter()
             .flat_map(|entry| entry.impact.iter())
-            .filter(|e| e.depth > 0 && seen.insert(e.name.as_str()))
-            .map(|e| e.name.clone())
+            .filter_map(|e: &Value| {
+                let depth = e.get("depth").and_then(Value::as_u64).unwrap_or(0);
+                let name = e.get("name")?.as_str()?;
+                (depth > 0 && seen.insert(name)).then(|| name.to_string())
+            })
             .collect()
     }
 
@@ -247,11 +187,16 @@ impl ImpactJson {
 
 /// Shells out to `ecp impact --baseline <ref> --format json` and parses.
 /// Returns an error if the impact CLI exits non-zero or produces invalid JSON.
-fn run_impact_subprocess(baseline: &str) -> Result<ImpactJson, EcpError> {
+fn run_impact_subprocess(baseline: &str) -> Result<BaselinePayload, EcpError> {
     let stdout =
         crate::subprocess::run_self(&["impact", "--baseline", baseline, "--format", "json"])?;
-    serde_json::from_slice(&stdout)
-        .map_err(|e| EcpError::Serialization(format!("parse impact JSON: {e}")))
+    let payload: BaselinePayload = serde_json::from_slice(&stdout)
+        .map_err(|e| EcpError::Serialization(format!("parse impact JSON: {e}")))?;
+    // A malformed BFS entry must fail here, not shrink the impact set and
+    // hand back a lower risk label than the change deserves.
+    crate::commands::impact::payload::validate_impact_entries(&payload)
+        .map_err(EcpError::Serialization)?;
+    Ok(payload)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -759,7 +704,7 @@ mod tests {
     #[test]
     fn parse_impact_json_fixture() {
         let raw = include_str!("../../../tests/fixtures/pr_analyze/sample_impact.json");
-        let parsed: ImpactJson = serde_json::from_str(raw).unwrap();
+        let parsed: BaselinePayload = serde_json::from_str(raw).unwrap();
         // 2 directly changed symbols
         assert_eq!(parsed.changed_symbol_names(), vec!["FnA", "MethodB"]);
         // 3 unique callers at depth > 0: CallerC, CallerD, CallerE
@@ -793,7 +738,7 @@ mod tests {
             "changed_symbols": [],
             "impact_by_symbol": []
         }"#;
-        let parsed: ImpactJson = serde_json::from_str(legacy).unwrap();
+        let parsed: BaselinePayload = serde_json::from_str(legacy).unwrap();
         assert!(parsed.changed_paths.is_empty());
         assert!(parsed.changed_symbols.is_empty());
     }
