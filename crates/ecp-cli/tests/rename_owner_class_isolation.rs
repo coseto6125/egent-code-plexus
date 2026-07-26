@@ -17,11 +17,7 @@
 mod common;
 
 use common::run_git;
-use ecp_core::graph::{
-    File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::StringPool;
-use rkyv::rancor::Error;
+use ecp_core::graph_fixture::GraphFixture;
 use std::path::Path;
 use std::process::Command;
 
@@ -77,93 +73,16 @@ fn build_index(repo: &Path) {
     );
 }
 
-fn serialize_graph(graph: &ZeroCopyGraph) -> Vec<u8> {
-    rkyv::to_bytes::<Error>(graph)
-        .expect("serialize graph")
-        .into_vec()
-}
-
 /// Build a graph with two `Method` nodes both named `validate`, one owned by
 /// `Foo` (in foo.py) and one owned by `Bar` (in bar.py).  No edges needed —
 /// the owner_class filter alone determines which node the rename targets.
 fn two_class_validate_graph(foo_file: &str, bar_file: &str) -> Vec<u8> {
-    let mut pool = StringPool::new();
-
-    let foo_path_ref = pool.add(foo_file);
-    let bar_path_ref = pool.add(bar_file);
-
-    let name_ref = pool.add("validate");
-    let owner_foo_ref = pool.add("Foo");
-    let owner_bar_ref = pool.add("Bar");
-
-    let uid_foo = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Method,
-        foo_file,
-        Some("Foo"),
-        "validate",
-    );
-    let uid_bar = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Method,
-        bar_file,
-        Some("Bar"),
-        "validate",
-    );
-
-    let files = vec![
-        File {
-            path: foo_path_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: bar_path_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-
-    let nodes = vec![
-        Node {
-            uid: uid_foo,
-            name: name_ref,
-            file_idx: 0,
-            kind: NodeKind::Method,
-            span: (2, 4, 3, 0),
-            community_id: 0,
-            owner_class: owner_foo_ref,
-            content_hash: 0,
-        },
-        Node {
-            uid: uid_bar,
-            name: name_ref,
-            file_idx: 1,
-            kind: NodeKind::Method,
-            span: (2, 4, 3, 0),
-            community_id: 0,
-            owner_class: owner_bar_ref,
-            content_hash: 0,
-        },
-    ];
-
-    let n = nodes.len();
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    serialize_graph(&ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges: vec![],
-        out_offsets: vec![0u32, 0, 0],
-        in_offsets: vec![0u32, 0, 0],
-        in_edge_idx: vec![],
-        name_index,
-        process_start: n as u32,
-        ..ZeroCopyGraph::default()
-    })
+    let mut fx = GraphFixture::new();
+    let foo_node = fx.method(foo_file, "Foo", "validate");
+    fx.span(foo_node, (2, 4, 3, 0));
+    let bar_node = fx.method(bar_file, "Bar", "validate");
+    fx.span(bar_node, (2, 4, 3, 0));
+    fx.into_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -318,44 +237,10 @@ fn test_rename_bare_name_hits_top_level_function() {
     // owner_class = StrRef::default() (top-level / no class).
     let graph_bin = find_graph_bin(root);
     let synthetic = {
-        let mut pool = StringPool::new();
-        let path_ref = pool.add("util.py");
-        let name_ref = pool.add("validate");
-        let uid_ref = ecp_core::uid::compute(
-            ecp_core::graph::NodeKind::Function,
-            "util.py",
-            None,
-            "validate",
-        );
-
-        serialize_graph(&ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: path_ref,
-                mtime: 0,
-                content_hash: [0; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![Node {
-                uid: uid_ref,
-                name: name_ref,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (1, 0, 2, 0),
-                community_id: 0,
-                owner_class: ecp_core::pool::StrRef::default(),
-                content_hash: 0,
-            }],
-            edges: vec![],
-            out_offsets: vec![0u32, 0],
-            in_offsets: vec![0u32, 0],
-            in_edge_idx: vec![],
-            name_index: Vec::new(),
-            process_start: 1,
-            ..ZeroCopyGraph::default()
-        })
+        let mut fx = GraphFixture::new();
+        let v = fx.func("util.py", "validate");
+        fx.span(v, (1, 0, 2, 0));
+        fx.into_bytes()
     };
     std::fs::write(&graph_bin, synthetic).unwrap();
 

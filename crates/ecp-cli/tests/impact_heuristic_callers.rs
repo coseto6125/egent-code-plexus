@@ -8,12 +8,8 @@
 //! 0.85, plus an unrelated plain function `unrelated_plain_fn` that has no
 //! heuristic edge.
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use std::path::Path;
 use std::process::Command;
 
@@ -120,133 +116,25 @@ fn find_graph_bin(repo: &Path) -> std::path::PathBuf {
 /// Upstream BFS from `consume_order` will reach the heuristic edge.
 /// Upstream BFS from `unrelated_plain_fn` will find no heuristic edges.
 fn synthetic_event_mirror_graph() -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let file_pub = pool.add("svc/publisher.py");
-    let file_sub = pool.add("svc/subscriber.py");
-    let file_plain = pool.add("svc/plain.py");
-
-    let pub_uid = ecp_core::uid::compute(
-        NodeKind::Function,
-        "svc/publisher.py",
-        None,
-        "publish_order",
-    );
-    let sub_uid = ecp_core::uid::compute(
-        NodeKind::Function,
-        "svc/subscriber.py",
-        None,
-        "consume_order",
-    );
-    let plain_uid = ecp_core::uid::compute(
-        NodeKind::Function,
-        "svc/plain.py",
-        None,
-        "unrelated_plain_fn",
-    );
-
-    let pub_name = pool.add("publish_order");
-    let sub_name = pool.add("consume_order");
-    let plain_name = pool.add("unrelated_plain_fn");
-    let reason_ref = pool.add("redis-pubsub-orders");
-
-    let files = vec![
-        File {
-            path: file_pub,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_sub,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_plain,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-
-    let nodes = vec![
-        Node {
-            uid: pub_uid,
-            name: pub_name,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (4, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: sub_uid,
-            name: sub_name,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (4, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: plain_uid,
-            name: plain_name,
-            file_idx: 2,
-            kind: NodeKind::Function,
-            span: (2, 0, 3, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
+    let mut fx = GraphFixture::new();
+    let publisher = fx.func("svc/publisher.py", "publish_order");
+    fx.span(publisher, (4, 0, 5, 0));
+    let subscriber = fx.func("svc/subscriber.py", "consume_order");
+    fx.span(subscriber, (4, 0, 5, 0));
+    let plain = fx.func("svc/plain.py", "unrelated_plain_fn");
+    fx.span(plain, (2, 0, 3, 0));
 
     // publish_order (0) ──[EventTopicMirror, 0.85]──▶ consume_order (1)
     // unrelated_plain_fn (2) — no edges
-    let edges = vec![Edge {
-        source: 0,
-        target: 1,
-        rel_type: RelType::EventTopicMirror,
-        confidence: 0.85,
-        reason: reason_ref,
-    }];
+    fx.edge_with(
+        publisher,
+        subscriber,
+        RelType::EventTopicMirror,
+        0.85,
+        "redis-pubsub-orders",
+    );
 
-    // CSR outgoing: publish_order has edge 0; consume_order has none; plain has none.
-    let out_offsets = vec![0u32, 1, 1, 1];
-    // CSR incoming: publish_order has none; consume_order has edge 0; plain has none.
-    let in_offsets = vec![0u32, 0, 1, 1];
-    let in_edge_idx = vec![0u32];
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: 2,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-
-    rkyv::to_bytes::<Error>(&graph)
-        .expect("serialize synthetic graph")
-        .into_vec()
+    fx.into_bytes()
 }
 
 /// Invoke `ecp impact <symbol> --format json --repo .` (default, no --no-heuristic)

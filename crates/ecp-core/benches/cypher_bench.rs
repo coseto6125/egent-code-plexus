@@ -1,78 +1,26 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use ecp_core::cypher::{execute, parse};
-use ecp_core::graph::{Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use std::hint::black_box;
 use std::path::Path;
 
 const FANOUT: usize = 1_024;
 
+/// Star graph: one caller, `fanout` callees, one `Calls` edge each — built
+/// through the same assembler the indexer uses, so the query under
+/// measurement takes production's index paths (kind CSR, name index) rather
+/// than the empty-index fallbacks.
 fn build_fanout_graph(fanout: usize) -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let caller_name = pool.add("caller");
-    let file_path = pool.add("src/compact.rs");
-    let reason = pool.add("ast-call");
-
-    let mut nodes = Vec::with_capacity(fanout + 1);
-    nodes.push(Node {
-        uid: ecp_core::uid::compute(NodeKind::Function, "src/compact.rs", None, "caller"),
-        name: caller_name,
-        file_idx: 0,
-        kind: NodeKind::Function,
-        span: (0, 0, 6, 0),
-        community_id: 0,
-        owner_class: StrRef::default(),
-        content_hash: 0,
-    });
-
-    let mut edges = Vec::with_capacity(fanout);
+    let mut fx = GraphFixture::new();
+    let caller = fx.func("src/compact.rs", "caller");
+    fx.span(caller, (0, 0, 6, 0));
     for index in 0..fanout {
-        let name = format!("callee_{index:04}");
-        let name_ref = pool.add(&name);
-        nodes.push(Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/compact.rs", None, &name),
-            name: name_ref,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (index as u32 + 1, 0, index as u32 + 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        });
-        edges.push(Edge {
-            source: 0,
-            target: index as u32 + 1,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason,
-        });
+        let callee = fx.func("src/compact.rs", &format!("callee_{index:04}"));
+        fx.span(callee, (index as u32 + 1, 0, index as u32 + 2, 0));
+        fx.edge(caller, callee, RelType::Calls);
     }
-
-    let mut in_offsets = Vec::with_capacity(fanout + 2);
-    in_offsets.extend([0, 0]);
-    in_offsets.extend(1..=fanout as u32);
-
-    let graph = ZeroCopyGraph {
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: file_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes,
-        edges,
-        out_offsets: std::iter::once(0)
-            .chain(std::iter::repeat_n(fanout as u32, fanout + 1))
-            .collect(),
-        in_offsets,
-        in_edge_idx: (0..fanout as u32).collect(),
-        process_start: fanout as u32 + 1,
-        ..ZeroCopyGraph::default()
-    };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&graph)
-        .expect("archive benchmark graph")
-        .to_vec()
+    fx.into_bytes()
 }
 
 fn benchmark_cypher_short_string_projection(criterion: &mut Criterion) {

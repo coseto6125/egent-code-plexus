@@ -6,11 +6,8 @@ use ecp_cli::commands::find::{compute_hits, FindArgs, FindMode, Hit, ScoreSource
 use ecp_cli::commands::hook::pre_tool_use::format_hits;
 use ecp_cli::engine::Engine;
 use ecp_cli::search::TantivyEngine;
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::{RelType, ZeroCopyGraph};
+use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use std::fs;
 use tempfile::tempdir;
@@ -27,103 +24,34 @@ fn make_config_graph() -> ZeroCopyGraph {
         "initApp",           // caller of parseConfig
         "tokenize",          // callee of parseConfig
     ];
-    let mut pool = StringPool::new();
-    let file_path_ref = pool.add("src/config.rs");
-    let nodes: Vec<Node> = names
+    let mut fx = GraphFixture::new();
+    let ids: Vec<u32> = names
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let name_ref = pool.add(name);
-            Node {
-                uid: ecp_core::uid::compute(NodeKind::Function, "src/config.rs", None, name),
-                name: name_ref,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (i as u32, 0, i as u32 + 1, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            }
+            let id = fx.func("src/config.rs", name);
+            fx.span(id, (i as u32, 0, i as u32 + 1, 0));
+            id
         })
         .collect();
 
     // Edges: loadSettings -> parseConfig, initApp -> parseConfig,
-    //        parseConfig -> tokenize. Sorted by source for CSR.
-    let parse_config_idx = 0u32;
-    let load_settings_idx = 3u32;
-    let init_app_idx = 4u32;
-    let tokenize_idx = 5u32;
-    let reason_ref = pool.add("call");
-    let edges = vec![
-        Edge {
-            source: parse_config_idx,
-            target: tokenize_idx,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason: reason_ref,
-        },
-        Edge {
-            source: load_settings_idx,
-            target: parse_config_idx,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason: reason_ref,
-        },
-        Edge {
-            source: init_app_idx,
-            target: parse_config_idx,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason: reason_ref,
-        },
-    ];
-    // out_offsets[i..i+1] slices into edges; nodes sorted as above.
-    // node 0 (parseConfig): edges[0..1] -> 1 outgoing (tokenize)
-    // node 1 (configParser): 0 outgoing
-    // node 2 (parse_config_file): 0 outgoing
-    // node 3 (loadSettings): edges[1..2] -> 1 outgoing (parseConfig)
-    // node 4 (initApp): edges[2..3] -> 1 outgoing (parseConfig)
-    // node 5 (tokenize): 0 outgoing
-    let out_offsets = vec![0u32, 1, 1, 1, 2, 3, 3];
+    //        parseConfig -> tokenize.
+    let parse_config_idx = ids[0];
+    let load_settings_idx = ids[3];
+    let init_app_idx = ids[4];
+    let tokenize_idx = ids[5];
+    fx.edge_with(parse_config_idx, tokenize_idx, RelType::Calls, 1.0, "call");
+    fx.edge_with(
+        load_settings_idx,
+        parse_config_idx,
+        RelType::Calls,
+        1.0,
+        "call",
+    );
+    fx.edge_with(init_app_idx, parse_config_idx, RelType::Calls, 1.0, "call");
 
-    // in_edge_idx + in_offsets — incoming for each node by indexing into edges.
-    // parseConfig (0): edges[1], edges[2] incoming
-    // configParser (1): none
-    // parse_config_file (2): none
-    // loadSettings (3): none
-    // initApp (4): none
-    // tokenize (5): edges[0] incoming
-    let in_edge_idx = vec![1u32, 2, 0];
-    let in_offsets = vec![0u32, 2, 2, 2, 2, 2, 3];
-
-    ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: file_path_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index: Vec::new(),
-        process_start: 6,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    }
+    fx.build()
 }
 
 /// Persist graph.bin into `<index_dir>/graph.bin`. The tempdir itself

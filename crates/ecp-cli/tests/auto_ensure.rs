@@ -1,7 +1,7 @@
 use ecp_cli::auto_ensure::{
     ensure_index, head_sha_sidecar_path, write_head_sha_sidecar_with_sha, EnsureResult,
 };
-use ecp_core::graph::{ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use ecp_core::graph_fixture::GraphFixture;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -53,31 +53,8 @@ fn wait_for_sidecar(path: &Path) {
 /// graph carries no nodes / edges; only the magic + version fields matter
 /// for these tests.
 fn write_valid_empty_graph(path: &Path) {
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: Vec::new(),
-        files: Vec::new(),
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        out_offsets: vec![0],
-        in_offsets: vec![0],
-        in_edge_idx: Vec::new(),
-        name_index: Vec::new(),
-        process_start: 0,
-        traces_offsets: Vec::new(),
-        traces_data: Vec::new(),
-        blind_spots: Vec::new(),
-        route_shapes: Vec::new(),
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
-    fs::write(path, &*bytes).unwrap();
+    let bytes = GraphFixture::new().into_bytes();
+    fs::write(path, &bytes).unwrap();
 }
 
 #[test]

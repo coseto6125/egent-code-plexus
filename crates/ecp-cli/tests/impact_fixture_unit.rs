@@ -9,207 +9,37 @@
 
 use ecp_cli::commands::impact::{run_for_symbol, ImpactArgs};
 use ecp_cli::engine::Engine;
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 
 /// `entry(0) -[:Calls]-> middle(1) -[:Calls]-> leaf(2)`, one node per file.
 /// Direction `Up` from `leaf` reaches `middle` then `entry`; `Down` from
 /// `entry` reaches `middle` then `leaf`.
 fn build_chain_graph() -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let file_entry = pool.add("src/entry.ts");
-    let file_middle = pool.add("src/middle.ts");
-    let file_leaf = pool.add("src/leaf.ts");
-
-    let name_entry = pool.add("entry");
-    let name_middle = pool.add("middle");
-    let name_leaf = pool.add("leaf");
-    let reason_a = pool.add("call");
-    let reason_b = pool.add("call");
-
-    let files = vec![
-        File {
-            path: file_entry,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_middle,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_leaf,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-
-    let nodes = vec![
-        Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/entry.ts", None, "entry"),
-            name: name_entry,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (0, 0, 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/middle.ts", None, "middle"),
-            name: name_middle,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (0, 0, 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/leaf.ts", None, "leaf"),
-            name: name_leaf,
-            file_idx: 2,
-            kind: NodeKind::Function,
-            span: (0, 0, 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
+    let mut fx = GraphFixture::new();
+    let entry = fx.func("src/entry.ts", "entry");
+    fx.span(entry, (0, 0, 2, 0));
+    let middle = fx.func("src/middle.ts", "middle");
+    fx.span(middle, (0, 0, 2, 0));
+    let leaf = fx.func("src/leaf.ts", "leaf");
+    fx.span(leaf, (0, 0, 2, 0));
 
     // entry(0) -> middle(1) -> leaf(2)
-    let edges = vec![
-        Edge {
-            source: 0,
-            target: 1,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason: reason_a,
-        },
-        Edge {
-            source: 1,
-            target: 2,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason: reason_b,
-        },
-    ];
-    let out_offsets = vec![0u32, 1, 2, 2];
-    let in_offsets = vec![0u32, 0, 1, 2];
-    let in_edge_idx = vec![0u32, 1];
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: 3,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&graph)
-        .expect("serialize chain graph")
-        .into_vec()
+    fx.edge_with(entry, middle, RelType::Calls, 1.0, "call");
+    fx.edge_with(middle, leaf, RelType::Calls, 1.0, "call");
+    fx.into_bytes()
 }
 
 /// Two disconnected nodes both named `dup`, in different files — a caller
 /// with a plain `dup` positional name cannot disambiguate without --file /
 /// --kind.
 fn build_ambiguous_graph() -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let file_a = pool.add("src/a.ts");
-    let file_b = pool.add("src/b.ts");
-    let name_dup = pool.add("dup");
-
-    let files = vec![
-        File {
-            path: file_a,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_b,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-    let nodes = vec![
-        Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/a.ts", None, "dup"),
-            name: name_dup,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (0, 0, 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/b.ts", None, "dup"),
-            name: name_dup,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (0, 0, 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
-    let out_offsets = vec![0u32, 0, 0];
-    let in_offsets = vec![0u32, 0, 0];
-    let in_edge_idx: Vec<u32> = vec![];
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges: vec![],
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: 2,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&graph)
-        .expect("serialize ambiguous graph")
-        .into_vec()
+    let mut fx = GraphFixture::new();
+    let a = fx.func("src/a.ts", "dup");
+    fx.span(a, (0, 0, 2, 0));
+    let b = fx.func("src/b.ts", "dup");
+    fx.span(b, (0, 0, 2, 0));
+    fx.into_bytes()
 }
 
 fn engine_from_bytes(bytes: &[u8]) -> (tempfile::TempDir, Engine) {

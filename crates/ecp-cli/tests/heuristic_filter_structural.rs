@@ -1,6 +1,5 @@
-use ecp_core::graph::{Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use std::path::Path;
 use std::process::Command;
 
@@ -94,97 +93,19 @@ fn find_graph_bin(repo: &Path) -> std::path::PathBuf {
 /// Build a small synthetic `ZeroCopyGraph` with two `Function` nodes linked by
 /// a `MirrorsField` edge. Returns serialized bytes ready for `graph.bin`.
 fn synthetic_graph_with_mirrors_field() -> Vec<u8> {
-    let mut pool = StringPool::new();
-
-    let file_ref = pool.add("src/a.ts");
-    let producer_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        "src/a.ts",
-        None,
-        "producer",
+    let mut fx = GraphFixture::new();
+    let producer = fx.func("src/a.ts", "producer");
+    fx.span(producer, (2, 0, 4, 0));
+    let consumer = fx.func("src/b.ts", "consumer");
+    fx.span(consumer, (3, 0, 5, 0));
+    fx.edge_with(
+        producer,
+        consumer,
+        RelType::MirrorsField,
+        0.6,
+        "schema-mirror-heuristic",
     );
-    let consumer_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        "src/b.ts",
-        None,
-        "consumer",
-    );
-    let producer_name = pool.add("producer");
-    let consumer_name = pool.add("consumer");
-    let file_b_ref = pool.add("src/b.ts");
-    let reason_ref = pool.add("schema-mirror-heuristic");
-
-    let files = vec![
-        File {
-            path: file_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_b_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-
-    let nodes = vec![
-        Node {
-            uid: producer_uid,
-            name: producer_name,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (2, 0, 4, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: consumer_uid,
-            name: consumer_name,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (3, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
-
-    // MirrorsField edge: producer (0) → consumer (1)
-    let edges = vec![Edge {
-        source: 0,
-        target: 1,
-        rel_type: RelType::MirrorsField,
-        confidence: 0.6,
-        reason: reason_ref,
-    }];
-
-    let n = nodes.len();
-    // out_offsets: producer has 1 outgoing edge (edge 0), consumer has 0.
-    let out_offsets = vec![0u32, 1u32, 1u32];
-    // in_offsets: consumer has 1 incoming (edge 0), producer has 0.
-    let in_offsets = vec![0u32, 0u32, 1u32];
-    let in_edge_idx = vec![0u32];
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: n as u32,
-        ..Default::default()
-    };
-
-    rkyv::to_bytes::<Error>(&graph)
-        .expect("serialize synthetic graph")
-        .into_vec()
+    fx.into_bytes()
 }
 
 /// Two `Function` nodes connected by a `MirrorsField` edge: default `ecp impact`

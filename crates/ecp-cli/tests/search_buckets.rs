@@ -1,7 +1,5 @@
-use ecp_core::graph::{
-    File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::{FileCategory, NodeKind, ZeroCopyGraph};
+use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -15,145 +13,36 @@ fn ecp_bin() -> &'static str {
 /// Build a graph with one function per category. Each function name contains
 /// "widget" so all of them match the same search query.
 fn make_bucket_graph() -> ZeroCopyGraph {
-    let mut pool = StringPool::new();
+    let mut fx = GraphFixture::new();
 
-    let src_path = pool.add("src/widget.rs");
-    let test_path = pool.add("tests/widget_test.rs");
-    let ref_path = pool.add("vendor/tree-sitter/src/widget_grammar.c");
-    let doc_path = pool.add("docs/widget.md");
-    let cfg_path = pool.add("config/widget.toml");
+    fx.file_as("src/widget.rs", FileCategory::Source);
+    let src = fx.func("src/widget.rs", "widget_source");
+    fx.span(src, (1, 0, 5, 0));
 
-    let src_node_name = pool.add("widget_source");
-    let test_node_name = pool.add("widget_test_fn");
-    let ref_node_name = pool.add("widget_ref");
-    let doc_node_name = pool.add("widget_doc");
-    let cfg_node_name = pool.add("widget_cfg");
+    fx.file_as("tests/widget_test.rs", FileCategory::Test);
+    let test = fx.func("tests/widget_test.rs", "widget_test_fn");
+    fx.span(test, (1, 0, 5, 0));
 
-    let nodes = vec![
-        Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/widget.rs", None, "widget_source"),
-            name: src_node_name,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: ecp_core::uid::compute(
-                NodeKind::Function,
-                "tests/widget_test.rs",
-                None,
-                "widget_test_fn",
-            ),
-            name: test_node_name,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: ecp_core::uid::compute(
-                NodeKind::Function,
-                "vendor/tree-sitter/src/widget_grammar.c",
-                None,
-                "widget_ref",
-            ),
-            name: ref_node_name,
-            file_idx: 2,
-            kind: NodeKind::Function,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: ecp_core::uid::compute(NodeKind::Document, "docs/widget.md", None, "widget_doc"),
-            name: doc_node_name,
-            file_idx: 3,
-            kind: NodeKind::Document,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: ecp_core::uid::compute(
-                NodeKind::Function,
-                "config/widget.toml",
-                None,
-                "widget_cfg",
-            ),
-            name: cfg_node_name,
-            file_idx: 4,
-            kind: NodeKind::Function,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
+    fx.file_as(
+        "vendor/tree-sitter/src/widget_grammar.c",
+        FileCategory::Reference,
+    );
+    let reference = fx.node(
+        NodeKind::Function,
+        "vendor/tree-sitter/src/widget_grammar.c",
+        "widget_ref",
+    );
+    fx.span(reference, (1, 0, 5, 0));
 
-    let files = vec![
-        File {
-            path: src_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: test_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Test,
-        },
-        File {
-            path: ref_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Reference,
-        },
-        File {
-            path: doc_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Document,
-        },
-        File {
-            path: cfg_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Config,
-        },
-    ];
+    fx.file_as("docs/widget.md", FileCategory::Document);
+    let doc = fx.node(NodeKind::Document, "docs/widget.md", "widget_doc");
+    fx.span(doc, (1, 0, 5, 0));
 
-    let n = nodes.len() as u32;
-    ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges: vec![],
-        out_offsets: vec![0; (n + 1) as usize],
-        in_offsets: vec![0; (n + 1) as usize],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: n,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    }
+    fx.file_as("config/widget.toml", FileCategory::Config);
+    let cfg = fx.func("config/widget.toml", "widget_cfg");
+    fx.span(cfg, (1, 0, 5, 0));
+
+    fx.build()
 }
 
 fn write_graph(path: &Path, graph: &ZeroCopyGraph) {
@@ -308,53 +197,10 @@ fn language_field_populated_from_extension() {
 
 #[test]
 fn empty_buckets_emit_empty_array_in_json() {
-    let mut pool = StringPool::new();
-    let src_path = pool.add("src/only_source.rs");
-    let uid_ref = ecp_core::uid::compute(
-        NodeKind::Function,
-        "src/only_source.rs",
-        None,
-        "only_source_fn",
-    );
-    let src_name = pool.add("only_source_fn");
-    let n = 1u32;
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: src_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes: vec![Node {
-            uid: uid_ref,
-            name: src_name,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        }],
-        edges: vec![],
-        out_offsets: vec![0; 2],
-        in_offsets: vec![0; 2],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: n,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    let src = fx.func("src/only_source.rs", "only_source_fn");
+    fx.span(src, (1, 0, 5, 0));
+    let graph = fx.build();
     let tmp = TempDir::new().unwrap();
     let graph_path = tmp.path().join("graph.bin");
     write_graph(&graph_path, &graph);
@@ -412,53 +258,10 @@ fn text_format_emits_section_headers() {
 #[test]
 fn text_format_empty_bucket_shows_none() {
     // Only source file — tests/reference/document/config buckets should show (none).
-    let mut pool = StringPool::new();
-    let src_path = pool.add("src/widget_only.rs");
-    let uid_ref = ecp_core::uid::compute(
-        NodeKind::Function,
-        "src/widget_only.rs",
-        None,
-        "widget_only",
-    );
-    let src_name = pool.add("widget_only");
-    let n = 1u32;
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: src_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes: vec![Node {
-            uid: uid_ref,
-            name: src_name,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        }],
-        edges: vec![],
-        out_offsets: vec![0; 2],
-        in_offsets: vec![0; 2],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: n,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    let src = fx.func("src/widget_only.rs", "widget_only");
+    fx.span(src, (1, 0, 5, 0));
+    let graph = fx.build();
     let tmp = TempDir::new().unwrap();
     let graph_path = tmp.path().join("graph.bin");
     write_graph(&graph_path, &graph);
@@ -483,59 +286,13 @@ fn text_format_empty_bucket_shows_none() {
 #[test]
 fn each_bucket_independently_capped_at_top_k() {
     // Build a graph with 25 source functions all named "overflow_src_N".
-    let mut pool = StringPool::new();
-    let src_path = pool.add("src/big.rs");
-    // Pre-allocate all name StrRefs before building nodes vec.
-    let node_data: Vec<(u64, ecp_core::pool::StrRef)> = (0..25usize)
-        .map(|i| {
-            let name = format!("overflow_src_{i}");
-            let uid = ecp_core::uid::compute(NodeKind::Function, "src/big.rs", None, &name);
-            (uid, pool.add(&name))
-        })
-        .collect();
-    let nodes: Vec<Node> = node_data
-        .iter()
-        .enumerate()
-        .map(|(i, (uid_val, name_ref))| Node {
-            uid: *uid_val,
-            name: *name_ref,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (i as u32, 0, i as u32 + 1, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        })
-        .collect();
-    let n = nodes.len() as u32;
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: src_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes,
-        edges: vec![],
-        out_offsets: vec![0; (n + 1) as usize],
-        in_offsets: vec![0; (n + 1) as usize],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: n,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    for i in 0..25usize {
+        let name = format!("overflow_src_{i}");
+        let id = fx.func("src/big.rs", &name);
+        fx.span(id, (i as u32, 0, i as u32 + 1, 0));
+    }
+    let graph = fx.build();
     let tmp = TempDir::new().unwrap();
     let graph_path = tmp.path().join("graph.bin");
     write_graph(&graph_path, &graph);

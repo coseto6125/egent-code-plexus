@@ -8,12 +8,8 @@
 //! - Empty result returns "No matches" hint
 //! - `--top-k` and `--query` flags are gone (regression guards)
 
-use ecp_core::graph::{
-    File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph_fixture::GraphFixture;
 use ecp_core::registry::{GroupEntry, RegistryFile, RepoAlias};
-use rkyv::rancor::Error;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,51 +25,13 @@ fn ecp_bin() -> &'static str {
 /// Seed a graph under the v2 layout: `<home_ecp>/<dir_name>/commits/<sha>/graph.bin`.
 /// Returns the path to the graph.bin.
 fn seed_repo(home_ecp: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]) -> PathBuf {
-    let mut pool = StringPool::new();
-    let nodes: Vec<Node> = node_names
-        .iter()
-        .map(|n| Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, &format!("{dir_name}.rs"), None, n),
-            name: pool.add(n),
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (0, 0, 0, 10),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        })
-        .collect();
-    let files = vec![File {
-        path: pool.add(&format!("{dir_name}.rs")),
-        mtime: 0,
-        content_hash: [0; 8],
-        category: FileCategory::Source,
-    }];
-    let n = nodes.len() as u32;
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges: vec![],
-        out_offsets: vec![0; (n + 1) as usize],
-        in_offsets: vec![0; (n + 1) as usize],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: n,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+    let mut fx = GraphFixture::new();
+    let file_path = format!("{dir_name}.rs");
+    for name in node_names {
+        let id = fx.func(&file_path, name);
+        fx.span(id, (0, 0, 0, 10));
+    }
+    let bytes = fx.into_bytes();
     let commit_dir = home_ecp.join(dir_name).join("commits").join(sha_dir);
     std::fs::create_dir_all(&commit_dir).unwrap();
     let graph_path = commit_dir.join("graph.bin");

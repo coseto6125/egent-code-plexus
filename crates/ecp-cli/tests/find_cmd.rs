@@ -5,12 +5,8 @@
 //! CLI-level subcommand, so one focused test suite is sufficient (noted in PR
 //! body per CLAUDE.md).
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::{FileCategory, NodeKind, RelType};
+use ecp_core::graph_fixture::GraphFixture;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,110 +30,24 @@ struct NodeSpec<'a> {
 /// Edges can be added via `extra_edges` to set caller counts.
 fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
-    let mut pool = StringPool::new();
+    let mut fx = GraphFixture::new();
 
-    // Collect unique file paths
-    let mut file_paths: Vec<&str> = nodes_spec.iter().map(|n| n.file).collect();
-    file_paths.dedup();
-    // Build file list preserving insertion order
-    let mut seen_files: Vec<&str> = Vec::new();
-    for n in nodes_spec {
-        if !seen_files.contains(&n.file) {
-            seen_files.push(n.file);
-        }
+    // A file's category comes from the first NodeSpec that references it —
+    // `file_as` leaves an already-registered path's category alone, so
+    // registering per-spec in order reproduces that "first wins" rule.
+    let mut ids: Vec<u32> = Vec::with_capacity(nodes_spec.len());
+    for ns in nodes_spec {
+        fx.file_as(ns.file, ns.category);
+        let id = fx.node(ns.kind, ns.file, ns.name);
+        fx.span(id, (ns.line, 0, ns.line + 10, 0));
+        ids.push(id);
     }
 
-    let files: Vec<File> = seen_files
-        .iter()
-        .map(|&path| File {
-            path: pool.add(path),
-            mtime: 0,
-            content_hash: [0; 8],
-            category: nodes_spec
-                .iter()
-                .find(|n| n.file == path)
-                .map(|n| n.category)
-                .unwrap_or(FileCategory::Source),
-        })
-        .collect();
-
-    let nodes: Vec<Node> = nodes_spec
-        .iter()
-        .map(|ns| {
-            let file_idx = seen_files.iter().position(|&p| p == ns.file).unwrap() as u32;
-            Node {
-                uid: ecp_core::uid::compute(ns.kind, ns.file, None, ns.name),
-                name: pool.add(ns.name),
-                file_idx,
-                kind: ns.kind,
-                span: (ns.line, 0, ns.line + 10, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            }
-        })
-        .collect();
-
-    let n = nodes.len();
-
-    // Build edges from caller relationships
-    let edges: Vec<Edge> = extra_edges
-        .iter()
-        .map(|&(src, tgt)| Edge {
-            source: src as u32,
-            target: tgt as u32,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason: pool.add("test"),
-        })
-        .collect();
-
-    // out_offsets: no outgoing edges from sources in extra_edges for simplicity
-    // Use a flat out_offsets (all zero) and build in_offsets from extra_edges
-    let out_offsets = vec![0u32; n + 1];
-
-    // Build in_edge_idx and in_offsets
-    let mut incoming_per_node: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (edge_idx, &(_, tgt)) in extra_edges.iter().enumerate() {
-        incoming_per_node[tgt].push(edge_idx);
-    }
-    let mut in_offsets: Vec<u32> = Vec::with_capacity(n + 1);
-    let mut in_edge_idx: Vec<u32> = Vec::new();
-    in_offsets.push(0);
-    for incoming in &incoming_per_node {
-        for &eidx in incoming {
-            in_edge_idx.push(eidx as u32);
-        }
-        in_offsets.push(in_edge_idx.len() as u32);
+    for &(src, tgt) in extra_edges {
+        fx.edge_with(ids[src], ids[tgt], RelType::Calls, 1.0, "test");
     }
 
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: n as u32,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-
-    let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+    let bytes = fx.into_bytes();
     let graph_path = dir.path().join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
     (dir, graph_path)

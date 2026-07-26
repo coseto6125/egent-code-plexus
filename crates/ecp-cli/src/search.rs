@@ -317,37 +317,17 @@ mod tests {
 
     // ── TantivyEngine::search total-count tests ───────────────────────────────
 
-    use ecp_core::graph::{Node, NodeKind, ZeroCopyGraph};
-    use ecp_core::pool::{StrRef, StringPool};
+    use ecp_core::graph::ZeroCopyGraph;
+    use ecp_core::graph_fixture::GraphFixture;
     use tempfile::TempDir;
 
     fn build_graph_with_names(names: &[&str]) -> ZeroCopyGraph {
-        let mut pool = StringPool::new();
-        let nodes: Vec<Node> = names
-            .iter()
-            .enumerate()
-            .map(|(i, &name)| {
-                let name_ref = pool.add(name);
-                Node {
-                    uid: i as u64,
-                    name: name_ref,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (1, 0, 2, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                }
-            })
-            .collect();
-        let node_count = nodes.len();
-        ZeroCopyGraph {
-            string_pool: pool.bytes,
-            nodes,
-            out_offsets: vec![0u32; node_count + 1],
-            in_offsets: vec![0u32; node_count + 1],
-            ..ZeroCopyGraph::default()
+        let mut fx = GraphFixture::new();
+        for name in names {
+            let id = fx.func("src/x.ts", name);
+            fx.span(id, (1, 0, 2, 0));
         }
+        fx.build()
     }
 
     fn index_dir_for(graph: &ZeroCopyGraph) -> TempDir {

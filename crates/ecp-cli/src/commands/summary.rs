@@ -469,11 +469,8 @@ fn count_blind_spots(graph: &ArchivedZeroCopyGraph) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ecp_core::graph::{
-        BlindSpotRecord, Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph,
-        GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-    };
-    use ecp_core::pool::{StrRef, StringPool};
+    use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
+    use ecp_core::graph_fixture::GraphFixture;
 
     /// rkyv-archive an in-memory `ZeroCopyGraph` and pass the borrowed
     /// `ArchivedZeroCopyGraph` into the test body.
@@ -483,36 +480,9 @@ mod tests {
         f(archived);
     }
 
-    fn empty_graph(pool: StringPool) -> ZeroCopyGraph {
-        ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![],
-            nodes: vec![],
-            edges: vec![],
-            out_offsets: vec![0],
-            in_offsets: vec![0],
-            in_edge_idx: vec![],
-            name_index: vec![],
-            process_start: 0,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        }
-    }
-
     #[test]
     fn count_blind_spots_empty_returns_zero_total() {
-        let pool = StringPool::new();
-        let g = empty_graph(pool);
+        let g = GraphFixture::new().build();
         with_archived(g, |archived| {
             let v = count_blind_spots(archived);
             assert_eq!(v["total"], json!(0));
@@ -526,25 +496,16 @@ mod tests {
     /// Inspecting Type 2 buckets is `ecp dev uid-audit`'s job.
     #[test]
     fn count_blind_spots_excludes_dev_metric_kinds() {
-        let mut pool = StringPool::new();
-        let kind_dyn = pool.add("dynamic-import");
-        let kind_uidc = pool.add("uid-collision");
-        let kind_mo = pool.add("method-overload");
-        let kind_idef = pool.add("ifdef-redef");
-        let path = pool.add("src/x.py");
-        let hint = pool.add("");
-        let bs = |k| BlindSpotRecord {
-            kind: k,
-            file_path: path,
-            start_row: 1,
-            start_col: 0,
-            end_row: 1,
-            end_col: 10,
-            hint,
-            is_test: false,
-        };
-        let mut g = empty_graph(pool);
-        g.blind_spots = vec![bs(kind_dyn), bs(kind_uidc), bs(kind_mo), bs(kind_idef)];
+        let mut fx = GraphFixture::new();
+        for kind in [
+            "dynamic-import",
+            "uid-collision",
+            "method-overload",
+            "ifdef-redef",
+        ] {
+            fx.blind_spot(kind, "src/x.py", (1, 0, 1, 10), "");
+        }
+        let g = fx.build();
 
         with_archived(g, |archived| {
             let v = count_blind_spots(archived);
@@ -560,43 +521,11 @@ mod tests {
 
     #[test]
     fn count_blind_spots_groups_by_kind() {
-        let mut pool = StringPool::new();
-        let kind_dyn = pool.add("dynamic-import");
-        let kind_refl = pool.add("reflection");
-        let path = pool.add("src/x.py");
-        let hint = pool.add("");
-        let bs1 = BlindSpotRecord {
-            kind: kind_dyn,
-            file_path: path,
-            start_row: 1,
-            start_col: 0,
-            end_row: 1,
-            end_col: 10,
-            hint,
-            is_test: false,
-        };
-        let bs2 = BlindSpotRecord {
-            kind: kind_dyn,
-            file_path: path,
-            start_row: 2,
-            start_col: 0,
-            end_row: 2,
-            end_col: 10,
-            hint,
-            is_test: false,
-        };
-        let bs3 = BlindSpotRecord {
-            kind: kind_refl,
-            file_path: path,
-            start_row: 3,
-            start_col: 0,
-            end_row: 3,
-            end_col: 10,
-            hint,
-            is_test: false,
-        };
-        let mut g = empty_graph(pool);
-        g.blind_spots = vec![bs1, bs2, bs3];
+        let mut fx = GraphFixture::new();
+        fx.blind_spot("dynamic-import", "src/x.py", (1, 0, 1, 10), "");
+        fx.blind_spot("dynamic-import", "src/x.py", (2, 0, 2, 10), "");
+        fx.blind_spot("reflection", "src/x.py", (3, 0, 3, 10), "");
+        let g = fx.build();
 
         with_archived(g, |archived| {
             let v = count_blind_spots(archived);
@@ -678,82 +607,16 @@ mod tests {
 
     #[test]
     fn count_detected_frameworks_groups_edges_by_framework() {
-        let mut pool = StringPool::new();
-        let name_a = pool.add("a");
-        let name_b = pool.add("b");
-        let path = pool.add("src/x.py");
-        let uid_a =
-            ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, "src/x.py", None, "a");
-        let uid_b =
-            ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, "src/x.py", None, "b");
-        let r_fastapi_dep = pool.add("fastapi-depends");
-        let r_fastapi_route = pool.add("fastapi-route-GET");
-        let r_axum = pool.add("axum-route-handler");
-        let r_unknown = pool.add("ast-call");
-
-        let mut g = empty_graph(pool);
-        g.files = vec![File {
-            path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }];
-        g.nodes = vec![
-            Node {
-                uid: uid_a,
-                name: name_a,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (0, 0, 1, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: uid_b,
-                name: name_b,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (1, 0, 2, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-        ];
-        g.edges = vec![
-            Edge {
-                source: 0,
-                target: 1,
-                rel_type: RelType::Calls,
-                confidence: 1.0,
-                reason: r_fastapi_dep,
-            },
-            Edge {
-                source: 0,
-                target: 1,
-                rel_type: RelType::Calls,
-                confidence: 1.0,
-                reason: r_fastapi_route,
-            },
-            Edge {
-                source: 0,
-                target: 1,
-                rel_type: RelType::Calls,
-                confidence: 1.0,
-                reason: r_axum,
-            },
-            Edge {
-                source: 0,
-                target: 1,
-                rel_type: RelType::Calls,
-                confidence: 1.0,
-                reason: r_unknown,
-            },
-        ];
-        g.out_offsets = vec![0, 4, 4];
-        g.in_offsets = vec![0, 0, 4];
-        g.in_edge_idx = vec![0, 1, 2, 3];
-        g.process_start = 2;
+        let mut fx = GraphFixture::new();
+        let a = fx.func("src/x.py", "a");
+        fx.span(a, (0, 0, 1, 0));
+        let b = fx.func("src/x.py", "b");
+        fx.span(b, (1, 0, 2, 0));
+        fx.edge_with(a, b, RelType::Calls, 1.0, "fastapi-depends");
+        fx.edge_with(a, b, RelType::Calls, 1.0, "fastapi-route-GET");
+        fx.edge_with(a, b, RelType::Calls, 1.0, "axum-route-handler");
+        fx.edge_with(a, b, RelType::Calls, 1.0, "ast-call");
+        let g = fx.build();
 
         with_archived(g, |archived| {
             let v = count_detected_frameworks(archived);
@@ -769,8 +632,7 @@ mod tests {
 
     #[test]
     fn count_detected_frameworks_empty_graph_returns_empty_array() {
-        let pool = StringPool::new();
-        let g = empty_graph(pool);
+        let g = GraphFixture::new().build();
         with_archived(g, |archived| {
             let v = count_detected_frameworks(archived);
             assert_eq!(v, json!([]));
@@ -779,69 +641,17 @@ mod tests {
 
     #[test]
     fn fetch_metrics_counts_nodes_edges_files_and_symbols() {
-        let mut pool = StringPool::new();
-        let name_f = pool.add("f");
-        let name_c = pool.add("C");
-        let name_v = pool.add("v");
-        let path = pool.add("src/x.py");
-        let uid_f =
-            ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, "src/x.py", None, "f");
-        let uid_c = ecp_core::uid::compute(ecp_core::graph::NodeKind::Class, "src/x.py", None, "C");
-        let uid_v =
-            ecp_core::uid::compute(ecp_core::graph::NodeKind::Variable, "src/x.py", None, "v");
-
-        let mut g = empty_graph(pool);
-        g.files = vec![File {
-            path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }];
+        let mut fx = GraphFixture::new();
         // Three nodes: one symbol-eligible (Function), one symbol-eligible
         // (Class), one ineligible (Variable). Expect symbols = 2.
-        g.nodes = vec![
-            Node {
-                uid: uid_f,
-                name: name_f,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (0, 0, 1, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: uid_c,
-                name: name_c,
-                file_idx: 0,
-                kind: NodeKind::Class,
-                span: (2, 0, 3, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: uid_v,
-                name: name_v,
-                file_idx: 0,
-                kind: NodeKind::Variable,
-                span: (4, 0, 5, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-        ];
-        g.edges = vec![Edge {
-            source: 0,
-            target: 1,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason: name_f,
-        }];
-        g.out_offsets = vec![0, 1, 1, 1];
-        g.in_offsets = vec![0, 0, 1, 1];
-        g.in_edge_idx = vec![0];
-        g.process_start = 3;
+        let f = fx.func("src/x.py", "f");
+        fx.span(f, (0, 0, 1, 0));
+        let c = fx.node(NodeKind::Class, "src/x.py", "C");
+        fx.span(c, (2, 0, 3, 0));
+        let var = fx.node(NodeKind::Variable, "src/x.py", "v");
+        fx.span(var, (4, 0, 5, 0));
+        fx.edge(f, c, RelType::Calls);
+        let g = fx.build();
 
         with_archived(g, |archived| {
             let v = fetch_metrics(Some(archived), None, None);

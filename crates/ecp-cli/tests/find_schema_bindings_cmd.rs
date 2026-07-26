@@ -4,12 +4,8 @@
 //! `MirrorsField` edges, injects it into an indexed repo, and asserts the
 //! JSON output of the command.
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::{NodeKind, RelType};
+use ecp_core::graph_fixture::GraphFixture;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -39,34 +35,10 @@ struct SfSpec {
 /// `mirrors` is a list of `(src_sf_idx, tgt_sf_idx, confidence)` index pairs
 /// into the `sfs` slice.
 fn build_graph(sfs: &[SfSpec], mirrors: &[(usize, usize, f32)]) -> Vec<u8> {
-    let mut pool = StringPool::new();
-
-    // Collect unique files.
-    let mut file_paths: Vec<&str> = sfs.iter().map(|s| s.file).collect();
-    file_paths.dedup();
-    file_paths.sort_unstable();
-    file_paths.dedup();
-
-    let file_refs: Vec<StrRef> = file_paths.iter().map(|p| pool.add(p)).collect();
-    let files: Vec<File> = file_refs
-        .iter()
-        .map(|r| File {
-            path: *r,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        })
-        .collect();
-
-    let file_idx_for = |path: &str| -> u32 {
-        file_paths
-            .iter()
-            .position(|&p| p == path)
-            .expect("file not found") as u32
-    };
+    let mut fx = GraphFixture::new();
 
     // Build nodes: one Class per (file, owner), one SchemaField per SfSpec.
-    // Layout: class nodes first (0..n_classes), then SchemaField nodes.
+    // Layout: class nodes first, then SchemaField nodes.
     struct ClassKey {
         file: &'static str,
         owner: &'static str,
@@ -83,125 +55,52 @@ fn build_graph(sfs: &[SfSpec], mirrors: &[(usize, usize, f32)]) -> Vec<u8> {
             });
         }
     }
-    let n_classes = class_keys.len();
 
-    let mut nodes: Vec<Node> = Vec::new();
-    // Class nodes.
-    for ck in &class_keys {
-        let uid = ecp_core::uid::compute(NodeKind::Class, ck.file, None, ck.owner);
-        let name_ref = pool.add(ck.owner);
-        nodes.push(Node {
-            uid,
-            name: name_ref,
-            file_idx: file_idx_for(ck.file),
-            kind: NodeKind::Class,
-            span: (1, 0, 50, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        });
-    }
+    let class_ids: Vec<u32> = class_keys
+        .iter()
+        .map(|ck| {
+            let id = fx.node(NodeKind::Class, ck.file, ck.owner);
+            fx.span(id, (1, 0, 50, 0));
+            id
+        })
+        .collect();
 
-    // SchemaField nodes (indices: n_classes..n_classes+sfs.len()).
-    let sf_node_base = n_classes;
-    for sf in sfs {
-        let uid = ecp_core::uid::compute(NodeKind::SchemaField, sf.file, Some(sf.owner), sf.name);
-        let name_ref = pool.add(sf.name);
-        let owner_ref = pool.add(sf.owner);
-        nodes.push(Node {
-            uid,
-            name: name_ref,
-            file_idx: file_idx_for(sf.file),
-            kind: NodeKind::SchemaField,
-            span: (sf.line, 0, sf.line, 0),
-            community_id: 0,
-            owner_class: owner_ref,
-            content_hash: 0,
-        });
-    }
+    let sf_ids: Vec<u32> = sfs
+        .iter()
+        .map(|sf| {
+            let id = fx.node_owned(NodeKind::SchemaField, sf.file, sf.owner, sf.name);
+            fx.span(id, (sf.line, 0, sf.line, 0));
+            id
+        })
+        .collect();
 
-    let n = nodes.len();
-
-    // Build edges: HasProperty (class → sf) + MirrorsField (sf → sf).
-    let reason_has_property = pool.add("post_process:schema_field:has_property");
-    let reason_mirror = pool.add("post_process:schema_field:mirrors_field");
-
-    let mut edges: Vec<Edge> = Vec::new();
-
-    // HasProperty edges.
+    // HasProperty edges: Class → its SchemaField.
     for (sf_local_idx, sf) in sfs.iter().enumerate() {
         let class_idx = class_keys
             .iter()
             .position(|k| k.file == sf.file && k.owner == sf.owner)
-            .expect("class not found") as u32;
-        let sf_node_idx = (sf_node_base + sf_local_idx) as u32;
-        edges.push(Edge {
-            source: class_idx,
-            target: sf_node_idx,
-            rel_type: RelType::HasProperty,
-            confidence: 1.0,
-            reason: reason_has_property,
-        });
+            .expect("class not found");
+        fx.edge_with(
+            class_ids[class_idx],
+            sf_ids[sf_local_idx],
+            RelType::HasProperty,
+            1.0,
+            "post_process:schema_field:has_property",
+        );
     }
 
     // MirrorsField edges.
     for &(src_sf, tgt_sf, conf) in mirrors {
-        edges.push(Edge {
-            source: (sf_node_base + src_sf) as u32,
-            target: (sf_node_base + tgt_sf) as u32,
-            rel_type: RelType::MirrorsField,
-            confidence: conf,
-            reason: reason_mirror,
-        });
+        fx.edge_with(
+            sf_ids[src_sf],
+            sf_ids[tgt_sf],
+            RelType::MirrorsField,
+            conf,
+            "post_process:schema_field:mirrors_field",
+        );
     }
 
-    // Build CSR offsets. out_offsets[i] = cumulative out-degree for node i.
-    let mut out_counts = vec![0u32; n];
-    let mut in_counts = vec![0u32; n];
-    for e in &edges {
-        out_counts[e.source as usize] += 1;
-        in_counts[e.target as usize] += 1;
-    }
-    let mut out_offsets = vec![0u32; n + 1];
-    let mut in_offsets = vec![0u32; n + 1];
-    for i in 0..n {
-        out_offsets[i + 1] = out_offsets[i] + out_counts[i];
-        in_offsets[i + 1] = in_offsets[i] + in_counts[i];
-    }
-
-    // Reorder edges into CSR order (sorted by source).
-    let mut sorted_edges = edges.clone();
-    sorted_edges.sort_by_key(|e| e.source);
-    // in_edge_idx: for each node (as target), list sorted_edges indices.
-    let mut in_edge_idx: Vec<u32> = Vec::new();
-    for tgt_node in 0..n {
-        for (idx, e) in sorted_edges.iter().enumerate() {
-            if e.target as usize == tgt_node {
-                in_edge_idx.push(idx as u32);
-            }
-        }
-    }
-
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges: sorted_edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: n as u32,
-        ..Default::default()
-    };
-
-    rkyv::to_bytes::<Error>(&graph)
-        .expect("serialize synthetic graph")
-        .into_vec()
+    fx.into_bytes()
 }
 
 // ── Repo fixture helpers ─────────────────────────────────────────────────────

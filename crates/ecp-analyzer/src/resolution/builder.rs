@@ -11,6 +11,7 @@ use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, File, FileCategory, FunctionMeta, Node, NodeKind, RelType,
     RouteShape, ZeroCopyGraph,
 };
+use ecp_core::graph_assembly::GraphAssembly;
 use ecp_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -679,8 +680,7 @@ impl GraphBuilder {
         }
         let _t_pass18 = std::time::Instant::now();
         // Pass 1.8: FunctionMeta collection.
-        let (function_metas, node_flags) =
-            pass1_8_function_metas(&self.local_graphs, nodes.len(), &mut string_pool);
+        let function_metas = pass1_8_function_metas(&self.local_graphs, &mut string_pool);
         if prof {
             eprintln!(
                 "prof build.pass18_function_meta: {:.3}s  count={}",
@@ -1429,150 +1429,52 @@ impl GraphBuilder {
             &mut edges,
         );
 
-        let _t_csr = std::time::Instant::now();
-        // Final pass: Construct CSR (out_offsets and in_offsets)
-        // Sort edges by source to build out_offsets easily.
-        // We need to track where pre-sort indices land after sorting so
-        // `pending_call_metas_global` pre-sort edge indices can be remapped
-        // to the final sorted positions for `ZeroCopyGraph.call_metas`.
-        let n_edges = edges.len();
-        let mut pre_sort_to_sorted: Vec<u32> = vec![0; n_edges];
-        {
-            // Build a permutation vector: sorted_positions[i] = pre-sort index that
-            // lands at sorted position i. Stable sort preserves relative order of
-            // equal keys, mirroring what `edges.sort_by_key` will do.
-            let mut perm: Vec<usize> = (0..n_edges).collect();
-            perm.sort_by_key(|&i| edges[i].source);
-            // Invert: pre_sort_to_sorted[pre_sort_idx] = sorted_idx.
-            for (sorted_idx, &pre_idx) in perm.iter().enumerate() {
-                pre_sort_to_sorted[pre_idx] = sorted_idx as u32;
-            }
-        }
-        edges.sort_by_key(|e| e.source);
-
-        let num_nodes = nodes.len();
-        let mut out_offsets = vec![0; num_nodes + 1];
-        for edge in &edges {
-            out_offsets[edge.source as usize + 1] += 1;
-        }
-        for i in 0..num_nodes {
-            out_offsets[i + 1] += out_offsets[i];
-        }
-
-        // Build in_edge_idx (indices of edges sorted by target).
-        // Same overflow guard as the node accumulator: precompute total in
-        // u64 and assert before the lossy cast would corrupt the index range.
-        assert!(
-            edges.len() as u64 <= u32::MAX as u64,
-            "total edge count {} exceeds u32::MAX — edge index scheme would overflow",
-            edges.len()
-        );
-        let mut in_edge_idx: Vec<u32> = (0..edges.len() as u32).collect();
-        in_edge_idx.sort_by_key(|&idx| edges[idx as usize].target);
-
-        let mut in_offsets = vec![0; num_nodes + 1];
-        for &idx in &in_edge_idx {
-            let edge = &edges[idx as usize];
-            in_offsets[edge.target as usize + 1] += 1;
-        }
-        for i in 0..num_nodes {
-            in_offsets[i + 1] += in_offsets[i];
-        }
-
-        if prof {
-            eprintln!(
-                "prof build.csr_assembly: {:.3}s  total_build: {:.3}s",
-                _t_csr.elapsed().as_secs_f32(),
-                t_total.elapsed().as_secs_f32()
-            );
-        }
-
-        // Promote pending_call_metas_global to ZeroCopyGraph.call_metas.
-        // Remap pre-sort edge indices to sorted positions via `pre_sort_to_sorted`,
-        // intern dispatch_type strings, then sort by edge_idx for binary-search
-        // lookup in graph_query.rs hot paths (ZeroCopyGraph.call_meta() contract).
-        let mut call_metas: Vec<CallMeta> = pending_call_metas_global
+        // Renamed from `build.csr_assembly`: the same timer now spans the whole
+        // assembly — edge sort, both CSR directions, call-meta remap, name and
+        // kind indexes — so a number compared against the old label reads as a
+        // regression that never happened.
+        let _t_assembly = std::time::Instant::now();
+        // Intern dispatch types here — the pool is ours. Edge indices stay in
+        // pre-sort space; `finish()` remaps them when it sorts the edges.
+        let call_metas: Vec<CallMeta> = pending_call_metas_global
             .into_iter()
             .filter_map(|(pre_idx, flags, dispatch_type)| {
-                pre_sort_to_sorted.get(pre_idx).map(|&sorted_idx| CallMeta {
-                    edge_idx: sorted_idx,
+                // Reject rather than truncate: a wrapped index would name a
+                // real, wrong edge, where `finish()` can only drop what is
+                // out of range.
+                Some(CallMeta {
+                    edge_idx: u32::try_from(pre_idx).ok()?,
                     flags,
                     dispatch_type: string_pool.add(&dispatch_type),
                 })
             })
             .collect();
-        call_metas.sort_by_key(|m| m.edge_idx);
-        // Deduplicate: if two RawCallMeta entries map to the same edge (shouldn't
-        // happen in practice, but defensive), keep the first (most specific).
-        call_metas.dedup_by_key(|m| m.edge_idx);
 
-        // Build the v9 name_index: sorted (xxh3_64(name), node_idx) pairs.
-        // O(N) hash + O(N log N) sort, run once at build end. Lookup callers
-        // (find / rename / inspect / cypher MATCH {name: ...}) drop from O(N)
-        // to O(log N + collision_count).
-        let mut name_index: Vec<ecp_core::graph::NameIndexEntry> = nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, n)| {
-                // Skip tombstone nodes (uid-collision survivors with empty name
-                // pushed by the uniqueness invariant); they have no useful name.
-                let name = string_pool.resolve(&n.name);
-                if name.is_empty() {
-                    return None;
-                }
-                Some(ecp_core::graph::NameIndexEntry {
-                    name_hash: ecp_core::uid::xxh3_64_bytes(name.as_bytes()),
-                    node_idx: idx as u32,
-                })
-            })
-            .collect();
-        name_index.sort_unstable_by_key(|e| e.name_hash);
-
-        // Build the v10 kind_offsets CSR. O(N) bucket-count + O(N) scatter.
-        // For each kind k, kind_node_idx[kind_offsets[k]..kind_offsets[k+1]]
-        // is the contiguous slice of node indices with that kind.
-        // Consumers (routes, find-event-mirrors, find-tx-patterns,
-        // find-schema-bindings) drop from O(N) to O(matches).
-        let kind_count = ecp_core::graph::NodeKind::VARIANT_COUNT;
-        let mut kind_offsets: Vec<u32> = vec![0u32; kind_count + 1];
-        for n in &nodes {
-            kind_offsets[n.kind.as_index() + 1] += 1;
-        }
-        // Prefix-sum into start positions.
-        for i in 1..kind_offsets.len() {
-            kind_offsets[i] += kind_offsets[i - 1];
-        }
-        let mut kind_node_idx: Vec<u32> = vec![0u32; nodes.len()];
-        let mut cursors: Vec<u32> = kind_offsets[..kind_count].to_vec();
-        for (idx, n) in nodes.iter().enumerate() {
-            let k = n.kind.as_index();
-            kind_node_idx[cursors[k] as usize] = idx as u32;
-            cursors[k] += 1;
-        }
-
-        ZeroCopyGraph {
-            magic: ecp_core::graph::GRAPH_MAGIC,
-            version: ecp_core::graph::GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: string_pool.bytes,
+        let graph = GraphAssembly {
+            string_pool,
+            files,
             nodes,
             edges,
-            out_offsets,
-            in_offsets,
-            in_edge_idx,
-            name_index,
+            call_metas,
+            function_metas,
+            blind_spots: all_blind_spots,
+            route_shapes: route_shapes_out,
             process_start: process_start_idx,
             traces_offsets,
             traces_data,
-            files,
-            blind_spots: all_blind_spots,
-            route_shapes: route_shapes_out,
-            call_metas,
-            function_metas,
-            kind_offsets,
-            kind_node_idx,
-            node_flags,
+            fingerprint: [0; 32],
         }
+        .finish();
+
+        if prof {
+            eprintln!(
+                "prof build.graph_assembly: {:.3}s  total_build: {:.3}s",
+                _t_assembly.elapsed().as_secs_f32(),
+                t_total.elapsed().as_secs_f32()
+            );
+        }
+
+        graph
     }
 }
 
@@ -2046,16 +1948,15 @@ fn pass1_7_entry_points(
 ///
 /// For each LocalGraph that has populated `raw_function_metas`, pair each
 /// entry with the corresponding graph node by span, then intern the strings
-/// into the pool and produce a `FunctionMeta`. The result is sorted by
-/// `node_idx` so `ZeroCopyGraph::function_meta()` binary-search works.
+/// into the pool and produce a `FunctionMeta`.
 ///
-/// `node_count` is `nodes.len()` at the point Pass 1.8 runs — used to
-/// pre-size the returned `node_flags` bitmap.
+/// Returned unsorted; `GraphAssembly::finish` sorts by `node_idx` — which is
+/// what `ZeroCopyGraph::function_meta()`'s binary search needs — and derives
+/// the dense `node_flags` mirror from the result.
 fn pass1_8_function_metas(
     local_graphs: &[LocalGraph],
-    node_count: usize,
     string_pool: &mut StringPool,
-) -> (Vec<FunctionMeta>, Vec<u8>) {
+) -> Vec<FunctionMeta> {
     let mut function_metas: Vec<FunctionMeta> = Vec::new();
     {
         let mut node_offset: u32 = 0;
@@ -2101,15 +2002,7 @@ fn pass1_8_function_metas(
             node_offset += local_graph.nodes.len() as u32;
         }
     }
-    // Sort by node_idx so binary search in function_meta() is valid.
-    function_metas.sort_unstable_by_key(|m| m.node_idx);
-    let mut node_flags: Vec<u8> = vec![0u8; node_count];
-    for meta in &function_metas {
-        if let Some(slot) = node_flags.get_mut(meta.node_idx as usize) {
-            *slot = (meta.flags & 0x00ff) as u8;
-        }
-    }
-    (function_metas, node_flags)
+    function_metas
 }
 
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type

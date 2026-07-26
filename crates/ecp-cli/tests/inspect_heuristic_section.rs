@@ -7,12 +7,8 @@
 //!   - `heuristic_note` appears iff at least one heuristic edge is present
 //!   - per-candidate `tier`/`checks` shape is present for every heuristic entry
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -34,129 +30,18 @@ struct GraphSpec {
 /// `spec.edges` drives the edge set; source/target are indices into the
 /// two-node list above.
 fn build_graph_bytes(spec: &GraphSpec) -> Vec<u8> {
-    let mut pool = StringPool::new();
-
-    let file_a = pool.add("src/a.ts");
-    let file_b = pool.add("src/b.ts");
-    let uid_alpha = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        "src/a.ts",
-        None,
-        "alpha",
-    );
-    let uid_beta = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        "src/b.ts",
-        None,
-        "beta",
-    );
-    let name_alpha = pool.add("alpha");
-    let name_beta = pool.add("beta");
-
-    let files = vec![
-        File {
-            path: file_a,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_b,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-    let nodes = vec![
-        Node {
-            uid: uid_alpha,
-            name: name_alpha,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 3, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: uid_beta,
-            name: name_beta,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (1, 0, 3, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
-
-    let mut edges = Vec::new();
-    // out_offsets and in_offsets are rebuilt per edge set.
-    let mut out_counts = [0u32; 2];
-    let mut in_counts = [0u32; 2];
+    let mut fx = GraphFixture::new();
+    let alpha = fx.func("src/a.ts", "alpha");
+    fx.span(alpha, (1, 0, 3, 0));
+    let beta = fx.func("src/b.ts", "beta");
+    fx.span(beta, (1, 0, 3, 0));
+    let ids = [alpha, beta];
 
     for &(src, tgt, rel, reason) in &spec.edges {
-        let reason_ref = pool.add(reason);
-        edges.push(Edge {
-            source: src,
-            target: tgt,
-            rel_type: rel,
-            confidence: 0.8,
-            reason: reason_ref,
-        });
-        out_counts[src as usize] += 1;
-        in_counts[tgt as usize] += 1;
+        fx.edge_with(ids[src as usize], ids[tgt as usize], rel, 0.8, reason);
     }
 
-    // Build CSR offset arrays (nodes sorted by source for out_offsets,
-    // by target for in_offsets).
-    let n = nodes.len();
-    let mut out_offsets = vec![0u32; n + 1];
-    let mut in_offsets = vec![0u32; n + 1];
-    for i in 0..n {
-        out_offsets[i + 1] = out_offsets[i] + out_counts[i];
-        in_offsets[i + 1] = in_offsets[i] + in_counts[i];
-    }
-
-    // in_edge_idx: for each node, list edge indices where that node is target.
-    let mut in_edge_idx: Vec<u32> = Vec::new();
-    for tgt_node in 0..n {
-        for (idx, &(_, tgt, _, _)) in spec.edges.iter().enumerate() {
-            if tgt as usize == tgt_node {
-                in_edge_idx.push(idx as u32);
-            }
-        }
-    }
-
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: n as u32,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-
-    rkyv::to_bytes::<Error>(&graph)
-        .expect("serialize synthetic graph")
-        .into_vec()
+    fx.into_bytes()
 }
 
 // ── Harness helpers ───────────────────────────────────────────────────────

@@ -1210,7 +1210,7 @@ impl Default for ZeroCopyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::StringPool;
+    use crate::graph_fixture::GraphFixture;
     use rkyv::rancor::Error;
 
     #[test]
@@ -1240,59 +1240,22 @@ mod tests {
         }
     }
 
-    fn make_base_graph(pool: StringPool, name_ref: StrRef, uid_val: u64) -> ZeroCopyGraph {
-        ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: name_ref,
-                mtime: 0,
-                content_hash: [0; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![Node {
-                uid: uid_val,
-                name: name_ref,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (1, 0, 5, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            }],
-            edges: vec![Edge {
-                source: 0,
-                target: 0,
-                rel_type: RelType::Calls,
-                confidence: 1.0,
-                reason: name_ref,
-            }],
-            out_offsets: vec![0, 0],
-            in_offsets: vec![0, 0],
-            in_edge_idx: vec![],
-            name_index: vec![],
-            process_start: 1,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        }
+    /// A single self-referential node: `name` (at `path`) calls itself.
+    /// Returns the still-open fixture plus the node's index and the
+    /// self-loop edge's (pre-sort) index, so a test can layer call/function
+    /// meta on top before calling `build`.
+    fn make_base_fixture(path: &str, name: &str) -> (GraphFixture, u32, u32) {
+        let mut fx = GraphFixture::new();
+        let node = fx.func(path, name);
+        fx.span(node, (1, 0, 5, 0));
+        let edge = fx.edge_with(node, node, RelType::Calls, 1.0, name);
+        (fx, node, edge)
     }
 
     #[test]
     fn test_serialize_deserialize_graph() {
-        let mut pool = StringPool::new();
-        let name_ref = pool.add("main");
-        let uid_val = crate::uid::compute(NodeKind::Function, "src/main.ts", None, "main");
-
-        let graph = make_base_graph(pool, name_ref, uid_val);
+        let (fx, node, _edge) = make_base_fixture("src/main.ts", "main");
+        let graph = fx.build();
 
         // Serialize
         let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
@@ -1308,30 +1271,28 @@ mod tests {
         let archived_node = &archived.nodes[0];
         let name_str = archived_node.name.resolve(&archived.string_pool);
         assert_eq!(name_str, "main");
-        assert_eq!(archived_node.uid.to_native(), uid_val);
+        assert_eq!(
+            archived_node.uid.to_native(),
+            graph.nodes[node as usize].uid
+        );
     }
 
     #[test]
     fn test_side_table_roundtrip() {
-        let mut pool = StringPool::new();
-        let name_ref = pool.add("main");
-        let uid_val = crate::uid::compute(NodeKind::Function, "src/main.ts", None, "main");
-        let dispatch_ref = pool.add("Box<dyn Trait>");
-
-        let mut graph = make_base_graph(pool, name_ref, uid_val);
-        graph.call_metas = vec![CallMeta {
-            edge_idx: 0,
-            flags: CallMeta::FLAG_DYNAMIC_DISPATCH,
-            dispatch_type: dispatch_ref,
-        }];
-        graph.function_metas = vec![FunctionMeta {
-            node_idx: 0,
+        let (mut fx, node, edge) = make_base_fixture("src/main.ts", "main");
+        let name_ref = fx.intern("main");
+        fx.call_meta(edge, CallMeta::FLAG_DYNAMIC_DISPATCH, "Box<dyn Trait>");
+        // params / return_type have no helper on GraphFixture; the escape
+        // hatch is the assembly directly.
+        fx.assembly_mut().function_metas.push(FunctionMeta {
+            node_idx: node,
             flags: FunctionMeta::FLAG_ASYNC | FunctionMeta::FLAG_TEST,
             params: vec![name_ref],
             return_type: name_ref,
             decorators: vec![name_ref],
-        }];
+        });
 
+        let graph = fx.build();
         let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
         let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
 
@@ -1353,18 +1314,16 @@ mod tests {
 
     #[test]
     fn test_call_meta_binary_search() {
-        let mut pool = StringPool::new();
-        let name_ref = pool.add("f");
-        let uid_val = crate::uid::compute(NodeKind::Function, "src/f.rs", None, "f");
-        let empty_ref = pool.add("");
-
-        let mut graph = make_base_graph(pool, name_ref, uid_val);
-        // 10 entries at even edge_idx values: 0, 2, 4, ..., 18
+        let (fx, ..) = make_base_fixture("src/f.rs", "f");
+        let mut graph = fx.build();
+        // 10 entries at even edge_idx values: 0, 2, 4, ..., 18 — deliberately
+        // out of range of the fixture's single real edge; this test exercises
+        // `call_meta`'s binary search in isolation, not edge-sort remapping.
         graph.call_metas = (0u32..10)
             .map(|i| CallMeta {
                 edge_idx: i * 2,
                 flags: CallMeta::FLAG_DIRECT,
-                dispatch_type: empty_ref,
+                dispatch_type: StrRef::default(),
             })
             .collect();
 

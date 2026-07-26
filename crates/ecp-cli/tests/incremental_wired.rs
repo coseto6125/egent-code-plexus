@@ -12,7 +12,7 @@
 //! does not touch the counters — so it does not need the lock.
 
 use ecp_cli::auto_ensure::test_counters;
-use ecp_core::graph::{ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use ecp_core::graph_fixture::GraphFixture;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -57,31 +57,8 @@ fn git_init_with_commit(p: &Path) -> String {
 /// match the current reader. Used to exercise the header-compatible fast path
 /// without running a full `build_l2`.
 fn write_valid_empty_graph(path: &Path) {
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: Vec::new(),
-        files: Vec::new(),
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        out_offsets: vec![0],
-        in_offsets: vec![0],
-        in_edge_idx: Vec::new(),
-        name_index: Vec::new(),
-        process_start: 0,
-        traces_offsets: Vec::new(),
-        traces_data: Vec::new(),
-        blind_spots: Vec::new(),
-        route_shapes: Vec::new(),
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
-    fs::write(path, &*bytes).unwrap();
+    let bytes = GraphFixture::new().into_bytes();
+    fs::write(path, &bytes).unwrap();
 }
 
 // ── T7-4 test 1 ──────────────────────────────────────────────────────────────
@@ -313,29 +290,11 @@ fn test_version_incompatible_falls_through_to_build_l2() {
     // GRAPH_FORMAT_VERSION is guaranteed > 0, so this is always incompatible.
     let graph_path = worktree.join(".ecp").join("graph.bin");
     fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
-    let bad_graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: 0, // always incompatible — GRAPH_FORMAT_VERSION >= 1
-        fingerprint: [0; 32],
-        string_pool: Vec::new(),
-        files: Vec::new(),
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        out_offsets: vec![0],
-        in_offsets: vec![0],
-        in_edge_idx: Vec::new(),
-        name_index: Vec::new(),
-        process_start: 0,
-        traces_offsets: Vec::new(),
-        traces_data: Vec::new(),
-        blind_spots: Vec::new(),
-        route_shapes: Vec::new(),
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    // `version` is a derived field GraphFixture always sets to the current
+    // GRAPH_FORMAT_VERSION — there's no builder setter for "wrong version",
+    // so build a valid graph and override the field directly.
+    let mut bad_graph = GraphFixture::new().build();
+    bad_graph.version = 0; // always incompatible — GRAPH_FORMAT_VERSION >= 1
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&bad_graph).unwrap();
     fs::write(&graph_path, &*bytes).unwrap();
 

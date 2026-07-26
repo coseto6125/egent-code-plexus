@@ -6,51 +6,20 @@
 //! moment a field is dereferenced.
 
 use ecp_cli::engine::Engine;
-use ecp_core::graph::{File, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::{GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use tempfile::tempdir;
 
+/// One-node graph whose header fields are caller-chosen — the point of these
+/// tests is a *rejected* header, which the fixture builder always gets right.
 fn make_graph(magic: [u8; 8], version: u32) -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let name_ref = pool.add("entry");
-    let g = ZeroCopyGraph {
-        magic,
-        version,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: name_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: ecp_core::graph::FileCategory::Source,
-        }],
-        nodes: vec![Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/main.ts", None, "entry"),
-            name: name_ref,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 5, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        }],
-        edges: vec![],
-        out_offsets: vec![0, 0],
-        in_offsets: vec![0, 0],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: 1,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    let entry = fx.func("src/main.ts", "entry");
+    fx.span(entry, (1, 0, 5, 0));
+    let mut g = fx.build();
+    g.magic = magic;
+    g.version = version;
     rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
 }
 

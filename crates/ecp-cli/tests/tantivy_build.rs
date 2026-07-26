@@ -10,65 +10,19 @@
 //! (3) the error is surfaced as `Err` rather than a panic.
 
 use ecp_cli::search::TantivyEngine;
-use ecp_core::graph::{File, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::{NodeKind, ZeroCopyGraph};
+use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use std::fs;
 use tempfile::tempdir;
 
 fn make_graph_with_names(names: &[&str]) -> ZeroCopyGraph {
-    let mut pool = StringPool::new();
-    let file_path_ref = pool.add("src/main.rs");
-    let nodes = names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let name_ref = pool.add(name);
-            Node {
-                uid: ecp_core::uid::compute(
-                    ecp_core::graph::NodeKind::Function,
-                    "src/main.rs",
-                    None,
-                    name,
-                ),
-                name: name_ref,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (i as u32, 0, i as u32 + 1, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            }
-        })
-        .collect();
-    ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: file_path_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: ecp_core::graph::FileCategory::Source,
-        }],
-        nodes,
-        edges: vec![],
-        out_offsets: vec![0, 0],
-        in_offsets: vec![0, 0],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: 0,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
+    let mut fx = GraphFixture::new();
+    for (i, name) in names.iter().enumerate() {
+        let id = fx.func("src/main.rs", name);
+        fx.span(id, (i as u32, 0, i as u32 + 1, 0));
     }
+    fx.build()
 }
 
 // rkyv round-trips through to_bytes — exercise it to keep the test's

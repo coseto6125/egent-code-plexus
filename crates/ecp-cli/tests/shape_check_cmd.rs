@@ -8,12 +8,8 @@
 //! clap parsing, and emit() output path.
 
 use ecp_analyzer::fetch_shape::format_reason;
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, RouteShape, ZeroCopyGraph,
-    GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::{NodeKind, RelType};
+use ecp_core::graph_fixture::GraphFixture;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -31,143 +27,21 @@ fn build_graph(
     edges_spec: &[(u32, u32, RelType, &str)],
     route_shape_keys: Option<(Vec<&str>, Vec<&str>)>,
 ) -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let file_ref = pool.add("src/consumer.ts");
-    let route_file_ref = pool.add("src/api.ts");
-    let consumer_name = pool.add("fetchUser");
-    let consumer_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        "src/consumer.ts",
-        None,
-        "fetchUser",
-    );
-    let route_name = pool.add("GET /users/:id");
-    let route_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Route,
-        "src/api.ts",
-        None,
-        "GET /users/:id",
-    );
+    let mut fx = GraphFixture::new();
+    let consumer = fx.func("src/consumer.ts", "fetchUser");
+    fx.span(consumer, (1, 0, 5, 0));
+    let route = fx.node(NodeKind::Route, "src/api.ts", "GET /users/:id");
+    fx.span(route, (1, 0, 5, 0));
 
-    // Pre-intern edge reasons so each Edge.reason can resolve out of
-    // the same pool. We collect (offset,len) for the actual Edge build
-    // below — clap routes them through StrRef.
-    let edge_reasons: Vec<_> = edges_spec.iter().map(|(_, _, _, r)| pool.add(r)).collect();
-
-    // Optionally build a RouteShape entry pointing at node_idx=1 (the Route).
-    let route_shapes = match route_shape_keys {
-        Some((resp, err)) => {
-            let resp_refs: Vec<_> = resp.iter().map(|k| pool.add(k)).collect();
-            let err_refs: Vec<_> = err.iter().map(|k| pool.add(k)).collect();
-            vec![RouteShape {
-                node_idx: 1,
-                response_keys: resp_refs,
-                error_keys: err_refs,
-            }]
-        }
-        None => vec![],
-    };
-
-    let edges: Vec<Edge> = edges_spec
-        .iter()
-        .zip(edge_reasons.iter())
-        .map(|((src, tgt, rel, _), reason_ref)| Edge {
-            source: *src,
-            target: *tgt,
-            rel_type: *rel,
-            confidence: 1.0,
-            reason: *reason_ref,
-        })
-        .collect();
-
-    // CSR offsets: 2 nodes → out_offsets/in_offsets have length 3.
-    // Build out_offsets by counting outgoing edges per source.
-    let n_nodes = 2usize;
-    let mut out_counts = vec![0u32; n_nodes];
-    let mut in_counts = vec![0u32; n_nodes];
-    for e in &edges {
-        out_counts[e.source as usize] += 1;
-        in_counts[e.target as usize] += 1;
-    }
-    let mut out_offsets = vec![0u32; n_nodes + 1];
-    for i in 0..n_nodes {
-        out_offsets[i + 1] = out_offsets[i] + out_counts[i];
-    }
-    // Edges are stored sorted by source (so out_offsets is a direct slice);
-    // the test only supplies pre-sorted edges so this matches the build.
-    let mut in_offsets = vec![0u32; n_nodes + 1];
-    for i in 0..n_nodes {
-        in_offsets[i + 1] = in_offsets[i] + in_counts[i];
-    }
-    // in_edge_idx maps each incoming slot to the edge index. Build by
-    // walking edges and bucketing by target.
-    let mut in_edge_idx = vec![0u32; edges.len()];
-    let mut cursor = in_offsets.clone();
-    for (eidx, e) in edges.iter().enumerate() {
-        let t = e.target as usize;
-        in_edge_idx[cursor[t] as usize] = eidx as u32;
-        cursor[t] += 1;
+    for &(src, tgt, rel, reason) in edges_spec {
+        fx.edge_with(src, tgt, rel, 1.0, reason);
     }
 
-    let g = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![
-            File {
-                path: file_ref,
-                mtime: 0,
-                content_hash: [0; 8],
-                category: FileCategory::Source,
-            },
-            File {
-                path: route_file_ref,
-                mtime: 0,
-                content_hash: [0; 8],
-                category: FileCategory::Source,
-            },
-        ],
-        nodes: vec![
-            Node {
-                uid: consumer_uid,
-                name: consumer_name,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (1, 0, 5, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: route_uid,
-                name: route_name,
-                file_idx: 1,
-                kind: NodeKind::Route,
-                span: (1, 0, 5, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-        ],
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index: Vec::new(),
-        process_start: 2,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes,
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    if let Some((resp, err)) = route_shape_keys {
+        fx.route_shape(route, &resp, &err);
+    }
 
-    rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
+    fx.into_bytes()
 }
 
 fn write_graph(dir: &Path, bytes: &[u8]) -> std::path::PathBuf {

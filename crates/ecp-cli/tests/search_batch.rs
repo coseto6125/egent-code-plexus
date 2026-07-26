@@ -4,11 +4,7 @@
 //! amortise Engine load + mmap setup + tantivy open across N queries
 //! inside a single process.
 
-use ecp_core::graph::{
-    File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph_fixture::GraphFixture;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -25,54 +21,13 @@ struct BatchFixture {
 
 fn setup_fixture() -> BatchFixture {
     let home = TempDir::new().unwrap();
-    let mut pool = StringPool::new();
-    let file_path = pool.add("src.rs");
-    let node_names = ["compute_hits", "build_hit"];
-    let nodes: Vec<Node> = node_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src.rs", None, name),
-            name: pool.add(name),
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (i as u32, 0, i as u32 + 1, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        })
-        .collect();
-    let n = nodes.len() as u32;
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: file_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes,
-        edges: vec![],
-        out_offsets: vec![0; (n + 1) as usize],
-        in_offsets: vec![0; (n + 1) as usize],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: n,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    for (i, name) in ["compute_hits", "build_hit"].iter().enumerate() {
+        let id = fx.func("src.rs", name);
+        fx.span(id, (i as u32, 0, i as u32 + 1, 0));
+    }
     let graph_path = home.path().join("graph.bin");
-    std::fs::write(&graph_path, rkyv::to_bytes::<Error>(&graph).unwrap()).unwrap();
+    std::fs::write(&graph_path, fx.into_bytes()).unwrap();
     BatchFixture {
         _home: home,
         graph: graph_path,
