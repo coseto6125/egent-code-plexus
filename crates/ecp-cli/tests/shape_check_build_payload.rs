@@ -5,12 +5,8 @@
 //! The fixture writes a minimal `graph.bin` (same helper as `shape_check_cmd.rs`)
 //! and confirms `build_payload` returns `{status, total_fetches, drift_count, drift}`.
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use serde_json::Value;
 use std::process::Command;
 
@@ -18,96 +14,17 @@ mod common;
 use common::{ecp_bin, write_graph};
 
 fn build_empty_graph() -> Vec<u8> {
-    let pool = StringPool::new();
-    let g = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![],
-        nodes: vec![],
-        edges: vec![],
-        out_offsets: vec![0],
-        in_offsets: vec![0],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: 0,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
+    GraphFixture::new().into_bytes()
 }
 
 fn build_graph_with_calls_edge() -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let file_ref = pool.add("src/a.ts");
-    let name_a = pool.add("foo");
-    let name_b = pool.add("bar");
-    let reason = pool.add("ast-call");
-
-    let g = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: file_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes: vec![
-            Node {
-                uid: ecp_core::uid::compute(NodeKind::Function, "src/a.ts", None, "foo"),
-                name: name_a,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (0, 0, 1, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: ecp_core::uid::compute(NodeKind::Function, "src/a.ts", None, "bar"),
-                name: name_b,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (2, 0, 3, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-        ],
-        edges: vec![Edge {
-            source: 0,
-            target: 1,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason,
-        }],
-        out_offsets: vec![0, 1, 1],
-        in_offsets: vec![0, 0, 1],
-        in_edge_idx: vec![0],
-        name_index: Vec::new(),
-        process_start: 2,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    rkyv::to_bytes::<Error>(&g).unwrap().to_vec()
+    let mut fx = GraphFixture::new();
+    let caller = fx.func("src/a.ts", "foo");
+    fx.span(caller, (0, 0, 1, 0));
+    let callee = fx.func("src/a.ts", "bar");
+    fx.span(callee, (2, 0, 3, 0));
+    fx.edge(caller, callee, RelType::Calls);
+    fx.into_bytes()
 }
 
 #[test]

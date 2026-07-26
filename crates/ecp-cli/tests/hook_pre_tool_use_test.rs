@@ -7,11 +7,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use ecp_cli::search::TantivyEngine;
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::{RelType, ZeroCopyGraph};
+use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use std::fs;
 use tempfile::tempdir;
@@ -89,81 +86,18 @@ fn glob_pattern_with_no_index_no_op() {
 /// Build a minimal 3-node graph with one CALLS edge so the hook has
 /// enough fixture to surface a hit + a `Called by:` line.
 fn make_graph() -> ZeroCopyGraph {
-    let mut pool = StringPool::new();
-    let file_path = pool.add("src/lib.rs");
-    let reason = pool.add("call");
-    let load_name = pool.add("loadConfig");
-    let parse_name = pool.add("parseConfig");
-    let tok_name = pool.add("tokenize");
-    let load_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "loadConfig");
-    let parse_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "parseConfig");
-    let tok_uid = ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, "tokenize");
-    let mk = |uid: u64, name, line: u32| Node {
-        uid,
-        name,
-        file_idx: 0,
-        kind: NodeKind::Function,
-        span: (line, 0, line + 1, 0),
-        community_id: 0,
-        owner_class: StrRef::default(),
-        content_hash: 0,
-    };
+    let mut fx = GraphFixture::new();
     // node 0 = parseConfig, 1 = loadConfig, 2 = tokenize.
-    // edges: parseConfig→tokenize (e0), loadConfig→parseConfig (e1).
-    let edges = vec![
-        Edge {
-            source: 0,
-            target: 2,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason,
-        },
-        Edge {
-            source: 1,
-            target: 0,
-            rel_type: RelType::Calls,
-            confidence: 1.0,
-            reason,
-        },
-    ];
-    // out_offsets: parseConfig has 1 (e0), loadConfig has 1 (e1), tokenize 0.
-    let out_offsets = vec![0u32, 1, 2, 2];
-    // in_edge_idx + in_offsets: parseConfig has e1 in; tokenize has e0 in.
-    let in_edge_idx = vec![1u32, 0];
-    let in_offsets = vec![0u32, 1, 1, 2];
-
-    ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: file_path,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes: vec![
-            mk(parse_uid, parse_name, 10),
-            mk(load_uid, load_name, 20),
-            mk(tok_uid, tok_name, 30),
-        ],
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index: Vec::new(),
-        process_start: 3,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    }
+    // edges: parseConfig→tokenize, loadConfig→parseConfig.
+    let parse = fx.func("src/lib.rs", "parseConfig");
+    fx.span(parse, (10, 0, 11, 0));
+    let load = fx.func("src/lib.rs", "loadConfig");
+    fx.span(load, (20, 0, 21, 0));
+    let tok = fx.func("src/lib.rs", "tokenize");
+    fx.span(tok, (30, 0, 31, 0));
+    fx.edge_with(parse, tok, RelType::Calls, 1.0, "call");
+    fx.edge_with(load, parse, RelType::Calls, 1.0, "call");
+    fx.build()
 }
 
 #[test]

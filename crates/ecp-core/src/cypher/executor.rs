@@ -2495,79 +2495,31 @@ fn return_item_default_col(item: &ReturnItem) -> String {
 mod tests {
     use super::*;
     use crate::cypher::parse;
-    use crate::graph::{
-        Edge, File, FileCategory, Node, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-    };
-    use crate::pool::{StrRef, StringPool};
+    use crate::graph::ZeroCopyGraph;
+    use crate::graph_fixture::GraphFixture;
 
     // -----------------------------------------------------------------------
     // Fixture helpers
     // -----------------------------------------------------------------------
 
-    /// Two-node fixture:
-    ///   caller(0) -[:Calls]-> callee(1)
-    fn build_two_node() -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let caller_name = pool.add("caller");
-        let callee_name = pool.add("callee");
-        let file_path = pool.add("src/x.ts");
-        let reason = pool.add("ast-call");
+    /// Two-node fixture: `caller`(0) -[:Calls]-> `callee`(1), one file.
+    fn two_node_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        let caller = fx.func("src/x.ts", "caller");
+        fx.span(caller, (0, 0, 5, 1));
+        let callee = fx.func("src/x.ts", "callee");
+        fx.span(callee, (6, 0, 8, 1));
+        fx.edge(caller, callee, RelType::Calls);
+        fx.build()
+    }
 
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: file_path,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "caller"),
-                    name: caller_name,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (0, 0, 5, 1),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "callee"),
-                    name: callee_name,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (6, 0, 8, 1),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-            ],
-            edges: vec![Edge {
-                source: 0,
-                target: 1,
-                rel_type: RelType::Calls,
-                confidence: 1.0,
-                reason,
-            }],
-            out_offsets: vec![0, 1, 1],
-            in_offsets: vec![0, 0, 1],
-            in_edge_idx: vec![0],
-            name_index: vec![],
-            process_start: 2,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
+    /// The same graph with the v10 kind CSR stripped — the shape a v9 cache
+    /// upgraded in place has, and the one that exercises the linear-scan
+    /// fallback in `nodes_by_kind`. `build_two_node_with_csr` is the pair.
+    fn build_two_node() -> Vec<u8> {
+        let mut g = two_node_graph();
+        g.kind_offsets.clear();
+        g.kind_node_idx.clear();
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
     }
 
@@ -2581,89 +2533,16 @@ mod tests {
 
     /// Three-node chain: a(0) -[:Calls]-> b(1) -[:Calls]-> c(2)
     fn build_three_chain() -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let na = pool.add("a");
-        let nb = pool.add("b");
-        let nc = pool.add("c");
-        let fp = pool.add("src/x.ts");
-        let r1 = pool.add("r1");
-        let r2 = pool.add("r2");
-
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: fp,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "a"),
-                    name: na,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (0, 0, 1, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "b"),
-                    name: nb,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (2, 0, 3, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "c"),
-                    name: nc,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (4, 0, 5, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-            ],
-            edges: vec![
-                Edge {
-                    source: 0,
-                    target: 1,
-                    rel_type: RelType::Calls,
-                    confidence: 1.0,
-                    reason: r1,
-                },
-                Edge {
-                    source: 1,
-                    target: 2,
-                    rel_type: RelType::Calls,
-                    confidence: 1.0,
-                    reason: r2,
-                },
-            ],
-            out_offsets: vec![0, 1, 2, 2],
-            in_offsets: vec![0, 0, 1, 2],
-            in_edge_idx: vec![0, 1],
-            name_index: vec![],
-            process_start: 3,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+        let mut fx = GraphFixture::new();
+        let a = fx.func("src/x.ts", "a");
+        fx.span(a, (0, 0, 1, 0));
+        let b = fx.func("src/x.ts", "b");
+        fx.span(b, (2, 0, 3, 0));
+        let c = fx.func("src/x.ts", "c");
+        fx.span(c, (4, 0, 5, 0));
+        fx.edge_with(a, b, RelType::Calls, 1.0, "r1");
+        fx.edge_with(b, c, RelType::Calls, 1.0, "r2");
+        fx.into_bytes()
     }
 
     fn with_three<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
@@ -2676,77 +2555,20 @@ mod tests {
 
     /// Four-node chain: a(0)->b(1)->c(2)->d(3) all :Calls
     fn build_four_chain() -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let names = ["a", "b", "c", "d"];
-        let nrefs: Vec<_> = names.iter().map(|n| pool.add(n)).collect();
-        let fp = pool.add("src/x.ts");
-        let reasons: Vec<_> = (0..3).map(|i| pool.add(&format!("r{i}"))).collect();
-
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: fp,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: names
-                .iter()
-                .zip(nrefs.iter())
-                .enumerate()
-                .map(|(i, (name, &nref))| Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, name),
-                    name: nref,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (i as u32 * 2, 0, i as u32 * 2 + 1, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                })
-                .collect(),
-            edges: vec![
-                Edge {
-                    source: 0,
-                    target: 1,
-                    rel_type: RelType::Calls,
-                    confidence: 1.0,
-                    reason: reasons[0],
-                },
-                Edge {
-                    source: 1,
-                    target: 2,
-                    rel_type: RelType::Calls,
-                    confidence: 1.0,
-                    reason: reasons[1],
-                },
-                Edge {
-                    source: 2,
-                    target: 3,
-                    rel_type: RelType::Calls,
-                    confidence: 1.0,
-                    reason: reasons[2],
-                },
-            ],
-            out_offsets: vec![0, 1, 2, 3, 3],
-            in_offsets: vec![0, 0, 1, 2, 3],
-            in_edge_idx: vec![0, 1, 2],
-            name_index: vec![],
-            process_start: 4,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+        let mut fx = GraphFixture::new();
+        let ids: Vec<u32> = ["a", "b", "c", "d"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let id = fx.func("src/x.ts", name);
+                fx.span(id, (i as u32 * 2, 0, i as u32 * 2 + 1, 0));
+                id
+            })
+            .collect();
+        for i in 0..3 {
+            fx.edge_with(ids[i], ids[i + 1], RelType::Calls, 1.0, &format!("r{i}"));
+        }
+        fx.into_bytes()
     }
 
     fn with_four<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
@@ -3204,48 +3026,10 @@ mod tests {
 
     /// Single isolated node with no outgoing edges.
     fn build_lone_node() -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let nm = pool.add("lone");
-        let fp = pool.add("src/x.ts");
-
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: fp,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![Node {
-                uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "lone"),
-                name: nm,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (0, 0, 1, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            }],
-            edges: vec![],
-            out_offsets: vec![0, 0],
-            in_offsets: vec![0, 0],
-            in_edge_idx: vec![],
-            name_index: vec![],
-            process_start: 1,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+        let mut fx = GraphFixture::new();
+        let lone = fx.func("src/x.ts", "lone");
+        fx.span(lone, (0, 0, 1, 0));
+        fx.into_bytes()
     }
 
     fn with_lone<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
@@ -3295,91 +3079,16 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn build_fan() -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let n_fan = pool.add("fan");
-        let n_leaf_a = pool.add("leaf_a");
-        let n_leaf_b = pool.add("leaf_b");
-        let fp = pool.add("src/x.ts");
-        let r1 = pool.add("r1");
-        let r2 = pool.add("r2");
-
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: fp,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "fan"),
-                    name: n_fan,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (0, 0, 1, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "leaf_a"),
-                    name: n_leaf_a,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (2, 0, 3, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "leaf_b"),
-                    name: n_leaf_b,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (4, 0, 5, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-            ],
-            edges: vec![
-                Edge {
-                    source: 0,
-                    target: 1,
-                    rel_type: RelType::Calls,
-                    confidence: 0.8,
-                    reason: r1,
-                },
-                Edge {
-                    source: 0,
-                    target: 2,
-                    rel_type: RelType::Calls,
-                    confidence: 0.6,
-                    reason: r2,
-                },
-            ],
-            // Node 0 has edges 0..2 out; nodes 1,2 have no outgoing.
-            out_offsets: vec![0, 2, 2, 2],
-            // Node 1 has edge 0 incoming; node 2 has edge 1 incoming.
-            in_offsets: vec![0, 0, 1, 2],
-            in_edge_idx: vec![0, 1],
-            name_index: vec![],
-            process_start: 3,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+        let mut fx = GraphFixture::new();
+        let fan = fx.func("src/x.ts", "fan");
+        fx.span(fan, (0, 0, 1, 0));
+        let leaf_a = fx.func("src/x.ts", "leaf_a");
+        fx.span(leaf_a, (2, 0, 3, 0));
+        let leaf_b = fx.func("src/x.ts", "leaf_b");
+        fx.span(leaf_b, (4, 0, 5, 0));
+        fx.edge_with(fan, leaf_a, RelType::Calls, 0.8, "r1");
+        fx.edge_with(fan, leaf_b, RelType::Calls, 0.6, "r2");
+        fx.into_bytes()
     }
 
     fn with_fan<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
@@ -3809,61 +3518,12 @@ mod tests {
 
     /// Build a graph with one Function node and one Method node.
     fn build_func_and_method() -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let n_func = pool.add("my_func");
-        let n_meth = pool.add("my_method");
-        let fp = pool.add("src/x.ts");
-
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: fp,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "my_func"),
-                    name: n_func,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (0, 0, 1, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Method, "src/x.ts", None, "my_method"),
-                    name: n_meth,
-                    file_idx: 0,
-                    kind: NodeKind::Method,
-                    span: (2, 0, 3, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-            ],
-            edges: vec![],
-            out_offsets: vec![0, 0, 0],
-            in_offsets: vec![0, 0, 0],
-            in_edge_idx: vec![],
-            name_index: vec![],
-            process_start: 2,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+        let mut fx = GraphFixture::new();
+        let f = fx.func("src/x.ts", "my_func");
+        fx.span(f, (0, 0, 1, 0));
+        let m = fx.node(NodeKind::Method, "src/x.ts", "my_method");
+        fx.span(m, (2, 0, 3, 0));
+        fx.into_bytes()
     }
 
     fn with_func_and_method<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
@@ -3970,49 +3630,11 @@ mod tests {
         }
         let rel_path = "hello.ts";
 
-        let mut pool = StringPool::new();
-        let n_name = pool.add("hello");
-        let fp = pool.add(rel_path);
-
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: fp,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![Node {
-                uid: crate::uid::compute(NodeKind::Function, "hello.ts", None, "hello"),
-                name: n_name,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                // span: start_row=0, start_col=0, end_row=2, end_col=1
-                span: (0, 0, 2, 1),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            }],
-            edges: vec![],
-            out_offsets: vec![0, 0],
-            in_offsets: vec![0, 0],
-            in_edge_idx: vec![],
-            name_index: vec![],
-            process_start: 1,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec();
+        let mut fx = GraphFixture::new();
+        let hello = fx.func(rel_path, "hello");
+        // span: start_row=0, start_col=0, end_row=2, end_col=1
+        fx.span(hello, (0, 0, 2, 1));
+        let bytes = fx.into_bytes();
         let archived =
             rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
                 .unwrap();
@@ -4043,158 +3665,39 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn build_function_meta_graph() -> Vec<u8> {
-        use crate::graph::{FunctionMeta, NodeKind};
-
-        let mut pool = StringPool::new();
-        let fp = pool.add("src/x.ts");
-
-        let n_sync = pool.add("sync_fn");
-        let n_async = pool.add("async_fn");
-        let n_test = pool.add("test_fn");
-        let n_both = pool.add("both_fn");
-        let n_override = pool.add("override_method");
-        let n_route = pool.add("py_route");
-
-        let dec_override = pool.add("@Override");
-        let dec_appget = pool.add("app.get");
+        use crate::graph::FunctionMeta;
 
         // visibility=private (2) encodes into bits 6-8: 2 << 6 = 0x80
         const PRIVATE_VISIBILITY: u16 = 2 << 6;
 
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: fp,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "sync_fn"),
-                    name: n_sync,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (0, 0, 1, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "async_fn"),
-                    name: n_async,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (2, 0, 3, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "test_fn"),
-                    name: n_test,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (4, 0, 5, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "both_fn"),
-                    name: n_both,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (6, 0, 7, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Method, "src/x.ts", None, "override_method"),
-                    name: n_override,
-                    file_idx: 0,
-                    kind: NodeKind::Method,
-                    span: (8, 0, 9, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "py_route"),
-                    name: n_route,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (10, 0, 11, 0),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-            ],
-            edges: vec![],
-            out_offsets: vec![0, 0, 0, 0, 0, 0, 0],
-            in_offsets: vec![0, 0, 0, 0, 0, 0, 0],
-            in_edge_idx: vec![],
-            name_index: vec![],
-            process_start: 6,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            // node_idx 0 intentionally absent (tests sparse-record absence for sync_fn)
-            function_metas: vec![
-                FunctionMeta {
-                    node_idx: 1,
-                    flags: FunctionMeta::FLAG_ASYNC,
-                    params: vec![],
-                    return_type: StrRef::default(),
-                    decorators: vec![],
-                },
-                FunctionMeta {
-                    node_idx: 2,
-                    flags: FunctionMeta::FLAG_TEST,
-                    params: vec![],
-                    return_type: StrRef::default(),
-                    decorators: vec![],
-                },
-                FunctionMeta {
-                    node_idx: 3,
-                    flags: FunctionMeta::FLAG_TEST | FunctionMeta::FLAG_ASYNC,
-                    params: vec![],
-                    return_type: StrRef::default(),
-                    decorators: vec![],
-                },
-                FunctionMeta {
-                    node_idx: 4,
-                    flags: PRIVATE_VISIBILITY,
-                    params: vec![],
-                    return_type: StrRef::default(),
-                    decorators: vec![dec_override],
-                },
-                FunctionMeta {
-                    node_idx: 5,
-                    flags: 0,
-                    params: vec![],
-                    return_type: StrRef::default(),
-                    decorators: vec![dec_appget],
-                },
-            ],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![
-                0,
-                FunctionMeta::FLAG_ASYNC as u8,
-                FunctionMeta::FLAG_TEST as u8,
-                (FunctionMeta::FLAG_TEST | FunctionMeta::FLAG_ASYNC) as u8,
-                0,
-                0,
-            ],
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+        let mut fx = GraphFixture::new();
+        let mut ids = Vec::new();
+        for (i, (kind, name)) in [
+            (NodeKind::Function, "sync_fn"),
+            (NodeKind::Function, "async_fn"),
+            (NodeKind::Function, "test_fn"),
+            (NodeKind::Function, "both_fn"),
+            (NodeKind::Method, "override_method"),
+            (NodeKind::Function, "py_route"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = fx.node(kind, "src/x.ts", name);
+            fx.span(id, (i as u32 * 2, 0, i as u32 * 2 + 1, 0));
+            ids.push(id);
+        }
+        // ids[0] intentionally has no FunctionMeta (sparse-record absence).
+        fx.function_meta(ids[1], FunctionMeta::FLAG_ASYNC, &[]);
+        fx.function_meta(ids[2], FunctionMeta::FLAG_TEST, &[]);
+        fx.function_meta(
+            ids[3],
+            FunctionMeta::FLAG_TEST | FunctionMeta::FLAG_ASYNC,
+            &[],
+        );
+        fx.function_meta(ids[4], PRIVATE_VISIBILITY, &["@Override"]);
+        fx.function_meta(ids[5], 0, &["app.get"]);
+        fx.into_bytes()
     }
 
     fn with_fm<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {
@@ -4662,92 +4165,12 @@ mod tests {
         });
     }
 
-    /// Build a two-node Function graph WITH kind_offsets populated (real-graph CSR).
-    /// caller(idx=0), callee(idx=1), both :Function.
-    /// kind_offsets: File=0..0, Function=0..2, Class=2..2, ...
+    /// `two_node_graph` as built — with the v10 kind CSR the real builder
+    /// emits, exercising the `use_kind_csr = true` branch in `exec_pattern`.
     fn build_two_node_with_csr() -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let caller_name = pool.add("caller");
-        let callee_name = pool.add("callee");
-        let file_path = pool.add("src/x.ts");
-        let reason = pool.add("ast-call");
-
-        // 29 NodeKind variants → kind_offsets has 30 entries (VARIANT_COUNT+1).
-        // Function = variant 1. Both nodes are Function, so:
-        //   kind_offsets[0]=0  (File, 0 nodes)   [1]=0
-        //   kind_offsets[1]=0  (Function, start)  [2]=2 (Function, end)
-        //   rest = 2 (no other kinds)
-        let variant_count = crate::graph::NodeKind::VARIANT_COUNT;
-        let mut kind_offsets: Vec<u32> = vec![0u32; variant_count + 1];
-        let function_idx = NodeKind::Function as usize;
-        kind_offsets[function_idx] = 0;
-        kind_offsets[function_idx + 1] = 2;
-        // Pad remaining entries at 2 (no more nodes after the two functions)
-        for entry in kind_offsets
-            .iter_mut()
-            .take(variant_count + 1)
-            .skip(function_idx + 2)
-        {
-            *entry = 2;
-        }
-        let kind_node_idx: Vec<u32> = vec![0, 1]; // caller=0, callee=1
-
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes,
-            files: vec![File {
-                path: file_path,
-                mtime: 0,
-                content_hash: [0u8; 8],
-                category: FileCategory::Source,
-            }],
-            nodes: vec![
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "caller"),
-                    name: caller_name,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (0, 0, 5, 1),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-                Node {
-                    uid: crate::uid::compute(NodeKind::Function, "src/x.ts", None, "callee"),
-                    name: callee_name,
-                    file_idx: 0,
-                    kind: NodeKind::Function,
-                    span: (6, 0, 8, 1),
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                },
-            ],
-            edges: vec![Edge {
-                source: 0,
-                target: 1,
-                rel_type: RelType::Calls,
-                confidence: 1.0,
-                reason,
-            }],
-            out_offsets: vec![0, 1, 1],
-            in_offsets: vec![0, 0, 1],
-            in_edge_idx: vec![0],
-            name_index: vec![],
-            process_start: 2,
-            traces_offsets: vec![],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets,
-            kind_node_idx,
-            node_flags: vec![],
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec()
+        rkyv::to_bytes::<rkyv::rancor::Error>(&two_node_graph())
+            .unwrap()
+            .to_vec()
     }
 
     fn with_two_csr<F: FnOnce(&crate::graph::ArchivedZeroCopyGraph)>(f: F) {

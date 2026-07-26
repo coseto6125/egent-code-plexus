@@ -3,12 +3,8 @@
 //! Each test builds a minimal synthetic `ZeroCopyGraph`, injects it as
 //! `graph.bin` after `admin index`, then drives `ecp impact` via `Command`.
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use std::path::Path;
 use std::process::Command;
 
@@ -88,105 +84,15 @@ fn find_graph_bin(repo: &Path) -> std::path::PathBuf {
 
 /// Two `Function` nodes: `source` (idx 0) and `target` (idx 1), linked by a
 /// single directed edge of the given `rel_type` (source → target).
-///
-/// CSR layout:
-/// - out_offsets: source has 1 outgoing edge, target has 0.
-/// - in_offsets: target has 1 incoming edge (edge 0), source has 0.
 fn synthetic_graph_two_nodes(rel_type: RelType, reason_str: &str) -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let file_a = pool.add("src/a.ts");
-    let file_b = pool.add("src/b.ts");
-    let src_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        "src/a.ts",
-        None,
-        "source",
-    );
-    let tgt_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        "src/b.ts",
-        None,
-        "target",
-    );
-    let src_name = pool.add("source");
-    let tgt_name = pool.add("target");
-    let reason_ref = pool.add(reason_str);
-
-    let files = vec![
-        File {
-            path: file_a,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: file_b,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-    let nodes = vec![
-        Node {
-            uid: src_uid,
-            name: src_name,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 3, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: tgt_uid,
-            name: tgt_name,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (2, 0, 4, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
+    let mut fx = GraphFixture::new();
+    let source = fx.func("src/a.ts", "source");
+    fx.span(source, (1, 0, 3, 0));
+    let target = fx.func("src/b.ts", "target");
+    fx.span(target, (2, 0, 4, 0));
     // source (0) → target (1)
-    let edges = vec![Edge {
-        source: 0,
-        target: 1,
-        rel_type,
-        confidence: 0.6,
-        reason: reason_ref,
-    }];
-    let out_offsets = vec![0u32, 1, 1];
-    let in_offsets = vec![0u32, 0, 1];
-    let in_edge_idx = vec![0u32];
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: 2,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    rkyv::to_bytes::<Error>(&graph)
-        .expect("serialize synthetic graph")
-        .into_vec()
+    fx.edge_with(source, target, rel_type, 0.6, reason_str);
+    fx.into_bytes()
 }
 
 /// Clean graph: `source` and `target` connected by a deterministic `Calls`

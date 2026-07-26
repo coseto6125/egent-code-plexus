@@ -1,7 +1,5 @@
-use ecp_core::graph::{
-    ArchivedZeroCopyGraph, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::ArchivedZeroCopyGraph;
+use ecp_core::graph_fixture::GraphFixture;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
 use std::fs::File;
@@ -14,45 +12,13 @@ fn test_mmap_graph_access() {
     let file_path = dir.path().join("graph.bin");
 
     // 1. Create and Serialize Graph
-    let mut pool = StringPool::new();
-    let name_ref = pool.add("mmap_func");
-    let uid_val = ecp_core::uid::compute(NodeKind::Function, "test.ts", None, "mmap_func");
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [1; 32],
-        string_pool: pool.bytes,
-        files: vec![],
-        nodes: vec![Node {
-            uid: uid_val,
-            name: name_ref,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 10, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        }],
-        edges: vec![],
-        out_offsets: vec![0, 0],
-        in_offsets: vec![0, 0],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: 1,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    let f = fx.func("test.ts", "mmap_func");
+    fx.span(f, (1, 0, 10, 0));
+    fx.assembly_mut().fingerprint = [1; 32];
 
     // Use rkyv::to_bytes for rkyv 0.8.x
-    let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+    let bytes = fx.into_bytes();
 
     let mut file = File::create(&file_path).unwrap();
     file.write_all(&bytes).unwrap();

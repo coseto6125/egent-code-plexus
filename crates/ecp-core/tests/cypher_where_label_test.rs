@@ -9,78 +9,21 @@
 use ecp_core::cypher;
 use ecp_core::cypher::lexer::tokenize;
 use ecp_core::cypher::parser::parse_query;
-use ecp_core::graph::{
-    ArchivedZeroCopyGraph, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind};
+use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use tempfile::tempdir;
 
 fn fixture_archived(bytes: &mut Vec<u8>) -> &ArchivedZeroCopyGraph {
-    let mut pool = StringPool::new();
-    let f_name = pool.add("alpha");
-    let c_name = pool.add("Beta");
-    let m_name = pool.add("gamma");
-    let f_uid = ecp_core::uid::compute(NodeKind::Function, "test.rs", None, "alpha");
-    let c_uid = ecp_core::uid::compute(NodeKind::Class, "test.rs", None, "Beta");
-    let m_uid = ecp_core::uid::compute(NodeKind::Method, "test.rs", Some("Beta"), "gamma");
+    let mut fx = GraphFixture::new();
+    let f = fx.func("test.rs", "alpha");
+    fx.span(f, (1, 0, 2, 0));
+    let c = fx.node(NodeKind::Class, "test.rs", "Beta");
+    fx.span(c, (3, 0, 4, 0));
+    let m = fx.method("test.rs", "Beta", "gamma");
+    fx.span(m, (5, 0, 6, 0));
 
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![],
-        nodes: vec![
-            Node {
-                uid: f_uid,
-                name: f_name,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (1, 0, 2, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: c_uid,
-                name: c_name,
-                file_idx: 0,
-                kind: NodeKind::Class,
-                span: (3, 0, 4, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: m_uid,
-                name: m_name,
-                file_idx: 0,
-                kind: NodeKind::Method,
-                span: (5, 0, 6, 0),
-                community_id: 0,
-                owner_class: c_name,
-                content_hash: 0,
-            },
-        ],
-        edges: vec![],
-        out_offsets: vec![0, 0, 0, 0],
-        in_offsets: vec![0, 0, 0, 0],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: 3,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-
-    *bytes = rkyv::to_bytes::<Error>(&graph).unwrap().into_vec();
+    *bytes = fx.into_bytes();
     rkyv::access::<ArchivedZeroCopyGraph, Error>(bytes).unwrap()
 }
 

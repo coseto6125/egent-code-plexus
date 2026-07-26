@@ -476,11 +476,7 @@ fn path_matches_segment(rel_path: &str, segment: &str) -> bool {
 mod tests {
     use super::*;
     use crate::analyzer::types::RawImport;
-    use crate::graph::{
-        Edge, File, FileCategory, NameIndexEntry, Node, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-        GRAPH_MAGIC,
-    };
-    use crate::pool::StringPool;
+    use crate::graph_fixture::GraphFixture;
     use rkyv::rancor::Error as RkyvError;
 
     /// Fixture: a base graph with a real `name_index` and uid-correct nodes.
@@ -490,17 +486,13 @@ mod tests {
     ///         3 dup_fn(clean) · 4 dup_fn(other) · 5 imp_fn(other)
     ///         6 imp_fn(clean)
     fn base_graph_bytes() -> Vec<u8> {
-        let mut pool = StringPool::new();
+        let mut fx = GraphFixture::new();
+        // Pre-register in this order so `file_idx` matches the doc comment
+        // above regardless of which file a node references first.
         let paths = ["src/clean.rs", "src/dirty.rs", "src/other.rs"];
-        let files: Vec<File> = paths
-            .iter()
-            .map(|p| File {
-                path: pool.add(p),
-                mtime: 0,
-                content_hash: [0; 8],
-                category: FileCategory::Source,
-            })
-            .collect();
+        for p in paths {
+            fx.file(p);
+        }
 
         let specs: &[(&str, usize)] = &[
             ("keep_fn", 1),
@@ -511,57 +503,11 @@ mod tests {
             ("imp_fn", 2),
             ("imp_fn", 0),
         ];
-        let nodes: Vec<Node> = specs
-            .iter()
-            .map(|(name, file_idx)| Node {
-                uid: crate::uid::compute(NodeKind::Function, paths[*file_idx], None, name),
-                name: pool.add(name),
-                file_idx: *file_idx as u32,
-                kind: NodeKind::Function,
-                span: (0, 0, 0, 0),
-                community_id: 0,
-                owner_class: crate::pool::StrRef::default(),
-                content_hash: 0,
-            })
-            .collect();
+        for (name, file_idx) in specs {
+            fx.func(paths[*file_idx], name);
+        }
 
-        let mut name_index: Vec<NameIndexEntry> = specs
-            .iter()
-            .enumerate()
-            .map(|(i, (name, _))| NameIndexEntry {
-                name_hash: crate::uid::xxh3_64_bytes(name.as_bytes()),
-                node_idx: i as u32,
-            })
-            .collect();
-        name_index.sort_unstable_by_key(|e| e.name_hash);
-
-        let n = nodes.len();
-        let g = ZeroCopyGraph {
-            magic: GRAPH_MAGIC,
-            version: GRAPH_FORMAT_VERSION,
-            fingerprint: [0; 32],
-            string_pool: pool.bytes.clone(),
-            files,
-            nodes,
-            edges: Vec::<Edge>::new(),
-            out_offsets: vec![0u32; n + 1],
-            in_offsets: vec![0u32; n + 1],
-            in_edge_idx: vec![],
-            name_index,
-            process_start: 0,
-            traces_offsets: vec![0],
-            traces_data: vec![],
-            blind_spots: vec![],
-            route_shapes: vec![],
-            call_metas: vec![],
-            function_metas: vec![],
-            kind_offsets: vec![],
-            kind_node_idx: vec![],
-            node_flags: vec![],
-        };
-        rkyv::to_bytes::<RkyvError>(&g)
-            .expect("serialize")
-            .into_vec()
+        fx.into_bytes()
     }
 
     fn sym(name: &str, calls: &[&str]) -> OverlaySymbol {

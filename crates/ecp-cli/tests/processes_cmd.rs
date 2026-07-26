@@ -9,12 +9,8 @@
 //! 14-language coverage doesn't apply — Process emission is post-process,
 //! parser-agnostic (driven by Calls edges).
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::{NodeKind, RelType};
+use ecp_core::graph_fixture::GraphFixture;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,90 +35,29 @@ fn build_process_graph(
         "fixture length mismatch"
     );
     let dir = TempDir::new().unwrap();
-    let mut pool = StringPool::new();
+    let mut fx = GraphFixture::new();
 
-    let file_path = pool.add("src/lib.rs");
-    let files = vec![File {
-        path: file_path,
-        mtime: 0,
-        content_hash: [0; 8],
-        category: FileCategory::Source,
-    }];
-
-    let mut nodes: Vec<Node> = member_names
+    let ids: Vec<u32> = member_names
         .iter()
         .zip(communities.iter())
         .enumerate()
-        .map(|(i, (name, comm))| Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, name),
-            name: pool.add(name),
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: ((i * 10) as u32 + 1, 0, (i * 10) as u32 + 5, 0),
-            community_id: *comm,
-            owner_class: StrRef::default(),
-            content_hash: 0,
+        .map(|(i, (name, comm))| {
+            let id = fx.func("src/lib.rs", name);
+            fx.span(id, ((i * 10) as u32 + 1, 0, (i * 10) as u32 + 5, 0));
+            fx.community(id, *comm);
+            id
         })
         .collect();
 
-    let process_start = nodes.len() as u32;
-    let process_community = communities[0];
-    nodes.push(Node {
-        uid: ecp_core::uid::compute(NodeKind::Process, "src/lib.rs", None, process_label),
-        name: pool.add(process_label),
-        file_idx: 0,
-        kind: NodeKind::Process,
-        span: (1, 0, 5, 0),
-        community_id: process_community,
-        owner_class: StrRef::default(),
-        content_hash: 0,
-    });
+    let process = fx.process("src/lib.rs", process_label, &ids);
+    fx.span(process, (1, 0, 5, 0));
+    fx.community(process, communities[0]);
 
-    let n = nodes.len();
-    let process_idx = process_start;
-    let reason = pool.add("step:test");
-    let edges: Vec<Edge> = (0..member_names.len() as u32)
-        .map(|i| Edge {
-            source: i,
-            target: process_idx,
-            rel_type: RelType::StepInProcess,
-            confidence: 1.0,
-            reason,
-        })
-        .collect();
+    for &id in &ids {
+        fx.edge_with(id, process, RelType::StepInProcess, 1.0, "step:test");
+    }
 
-    let out_offsets = vec![0u32; n + 1];
-    let in_offsets = vec![0u32; n + 1];
-    let in_edge_idx: Vec<u32> = Vec::new();
-
-    let traces_data: Vec<u32> = (0..member_names.len() as u32).collect();
-    let traces_offsets = vec![0u32, traces_data.len() as u32];
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index: Vec::new(),
-        process_start,
-        traces_offsets,
-        traces_data,
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-
-    let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+    let bytes = fx.into_bytes();
     let graph_path = dir.path().join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
     (dir, graph_path)
@@ -233,92 +168,32 @@ fn trace_no_match_returns_not_found() {
 /// with `--limit` ≥ that miscount panicked at `traces_offsets[k+1]`).
 fn build_graph_with_trailing_non_process_nodes() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
-    let mut pool = StringPool::new();
-    let file_path = pool.add("src/lib.rs");
-    let files = vec![File {
-        path: file_path,
-        mtime: 0,
-        content_hash: [0; 8],
-        category: FileCategory::Source,
-    }];
+    let mut fx = GraphFixture::new();
 
     let member_names = ["entry", "middle", "terminal"];
-    let mut nodes: Vec<Node> = member_names
+    let ids: Vec<u32> = member_names
         .iter()
         .enumerate()
-        .map(|(i, name)| Node {
-            uid: ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, name),
-            name: pool.add(name),
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: ((i * 10) as u32 + 1, 0, (i * 10) as u32 + 5, 0),
-            community_id: 1,
-            owner_class: StrRef::default(),
-            content_hash: 0,
+        .map(|(i, name)| {
+            let id = fx.func("src/lib.rs", name);
+            fx.span(id, ((i * 10) as u32 + 1, 0, (i * 10) as u32 + 5, 0));
+            fx.community(id, 1);
+            id
         })
         .collect();
 
-    let process_start = nodes.len() as u32;
-    nodes.push(Node {
-        uid: ecp_core::uid::compute(NodeKind::Process, "src/lib.rs", None, "Entry → Terminal"),
-        name: pool.add("Entry → Terminal"),
-        file_idx: 0,
-        kind: NodeKind::Process,
-        span: (1, 0, 5, 0),
-        community_id: 1,
-        owner_class: StrRef::default(),
-        content_hash: 0,
-    });
+    let process = fx.process("src/lib.rs", "Entry → Terminal", &ids);
+    fx.span(process, (1, 0, 5, 0));
+    fx.community(process, 1);
 
     // Trailing non-Process nodes after the single Process — the regression: a
     // naive `nodes.len() - process_start` would count these as processes.
     for i in 0..20 {
-        nodes.push(Node {
-            uid: ecp_core::uid::compute(
-                NodeKind::PathLiteral,
-                "src/lib.rs",
-                None,
-                &format!("p{i}"),
-            ),
-            name: pool.add(&format!("path/{i}")),
-            file_idx: 0,
-            kind: NodeKind::PathLiteral,
-            span: (1, 0, 1, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        });
+        let p = fx.node(NodeKind::PathLiteral, "src/lib.rs", &format!("path/{i}"));
+        fx.span(p, (1, 0, 1, 0));
     }
 
-    let n = nodes.len();
-    let traces_data: Vec<u32> = (0..member_names.len() as u32).collect();
-    let traces_offsets = vec![0u32, traces_data.len() as u32];
-
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges: Vec::new(),
-        out_offsets: vec![0u32; n + 1],
-        in_offsets: vec![0u32; n + 1],
-        in_edge_idx: Vec::new(),
-        name_index: Vec::new(),
-        process_start,
-        traces_offsets,
-        traces_data,
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-
-    let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+    let bytes = fx.into_bytes();
     let graph_path = dir.path().join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
     (dir, graph_path)
@@ -370,15 +245,7 @@ fn trace_does_not_panic_with_trailing_non_process_nodes() {
 ///   P4 "LongIntra7"    — 7 steps, intra_community  → should pass (>=7)
 fn build_multi_process_graph() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
-    let mut pool = StringPool::new();
-
-    let file_path = pool.add("src/lib.rs");
-    let files = vec![File {
-        path: file_path,
-        mtime: 0,
-        content_hash: [0; 8],
-        category: FileCategory::Source,
-    }];
+    let mut fx = GraphFixture::new();
 
     // Pre-allocate member functions (indices 0..N) then Process nodes.
     // Communities: comm=1 for intra, comms 1+2 for cross.
@@ -415,15 +282,13 @@ fn build_multi_process_graph() -> (TempDir, PathBuf) {
         },
     ];
 
-    let mut nodes: Vec<Node> = Vec::new();
-
-    // Track (member_start, member_end) per process so we can build
-    // traces_offsets / traces_data.
-    let mut member_ranges: Vec<(u32, u32)> = Vec::new();
+    // Track each process's member node indices so we can build the trace
+    // and the StepInProcess edges once every Process node exists.
+    let mut member_ranges: Vec<Vec<u32>> = Vec::new();
     let mut total_members: u32 = 0;
 
     for spec in &specs {
-        let start = total_members;
+        let mut ids = Vec::new();
         for j in 0..spec.steps as u32 {
             let comm: u16 = if spec.cross && j == 1 { 2 } else { 1 };
             let name_str = format!(
@@ -431,87 +296,30 @@ fn build_multi_process_graph() -> (TempDir, PathBuf) {
                 spec.label.split_whitespace().next().unwrap_or("x"),
                 j
             );
-            nodes.push(Node {
-                uid: ecp_core::uid::compute(NodeKind::Function, "src/lib.rs", None, &name_str),
-                name: pool.add(&name_str),
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (total_members * 10 + 1, 0, total_members * 10 + 5, 0),
-                community_id: comm,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            });
+            let id = fx.func("src/lib.rs", &name_str);
+            fx.span(id, (total_members * 10 + 1, 0, total_members * 10 + 5, 0));
+            fx.community(id, comm);
+            ids.push(id);
             total_members += 1;
         }
-        member_ranges.push((start, total_members));
+        member_ranges.push(ids);
     }
 
-    let process_start = nodes.len() as u32;
-    for spec in &specs {
-        nodes.push(Node {
-            uid: ecp_core::uid::compute(NodeKind::Process, "src/lib.rs", None, spec.label),
-            name: pool.add(spec.label),
-            file_idx: 0,
-            kind: NodeKind::Process,
-            span: (1, 0, 5, 0),
-            community_id: 1,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        });
+    let mut proc_ids = Vec::new();
+    for (spec, ids) in specs.iter().zip(member_ranges.iter()) {
+        let p = fx.process("src/lib.rs", spec.label, ids);
+        fx.span(p, (1, 0, 5, 0));
+        fx.community(p, 1);
+        proc_ids.push(p);
     }
 
-    let n = nodes.len();
-
-    // traces_offsets[k] / traces_data: one entry per Process node.
-    let mut traces_offsets: Vec<u32> = vec![0];
-    let mut traces_data: Vec<u32> = Vec::new();
-    for (start, end) in &member_ranges {
-        for idx in *start..*end {
-            traces_data.push(idx);
-        }
-        traces_offsets.push(traces_data.len() as u32);
-    }
-
-    let reason = pool.add("step:test");
-    let mut edges: Vec<Edge> = Vec::new();
-    for (k, (start, end)) in member_ranges.iter().enumerate() {
-        let proc_idx = process_start + k as u32;
-        for idx in *start..*end {
-            edges.push(Edge {
-                source: idx,
-                target: proc_idx,
-                rel_type: RelType::StepInProcess,
-                confidence: 1.0,
-                reason,
-            });
+    for (ids, &proc_idx) in member_ranges.iter().zip(proc_ids.iter()) {
+        for &idx in ids {
+            fx.edge_with(idx, proc_idx, RelType::StepInProcess, 1.0, "step:test");
         }
     }
 
-    let graph = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets: vec![0u32; n + 1],
-        in_offsets: vec![0u32; n + 1],
-        in_edge_idx: Vec::new(),
-        name_index: Vec::new(),
-        process_start,
-        traces_offsets,
-        traces_data,
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-
-    let bytes = rkyv::to_bytes::<Error>(&graph).unwrap();
+    let bytes = fx.into_bytes();
     let graph_path = dir.path().join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
     (dir, graph_path)

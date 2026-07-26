@@ -4,9 +4,8 @@
 //! iteration count.  Tombstone / deletion is NOT supported in v1 — see the
 //! `test_merge_deletion_via_tombstone` test for the documented limitation.
 
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
+use ecp_core::graph::{File, FileCategory, Node, NodeKind};
+use ecp_core::graph_fixture::GraphFixture;
 use ecp_core::pool::{StrRef, StringPool};
 use ecp_core::session::{merge_archived, ArchivedOverlay, Overlay};
 use rkyv::rancor::Error as RkyvError;
@@ -27,42 +26,22 @@ fn make_node(uid: u64, name_ref: StrRef, kind: NodeKind) -> Node {
 }
 
 /// Build a minimal valid `ZeroCopyGraph` archive from the given nodes.
+///
+/// `nodes` carry `StrRef`s pre-resolved against `pool_bytes` (synthetic
+/// uids from `make_node`, not real symbols) — too raw for `GraphFixture`'s
+/// name-interning helpers, so this reaches into the assembly directly.
 fn build_graph(pool_bytes: Vec<u8>, nodes: Vec<Node>) -> Vec<u8> {
-    let n = nodes.len();
-    // out_offsets / in_offsets: n+1 zero entries (no edges).
-    let out_offsets = vec![0u32; n + 1];
-    let in_offsets = vec![0u32; n + 1];
-    let g = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool_bytes,
-        files: vec![File {
-            path: StrRef::default(),
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        }],
-        nodes,
-        edges: Vec::<Edge>::new(),
-        out_offsets,
-        in_offsets,
-        in_edge_idx: vec![],
-        name_index: vec![],
-        process_start: 0,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
-    rkyv::to_bytes::<RkyvError>(&g)
-        .expect("serialize graph")
-        .into_vec()
+    let mut fx = GraphFixture::new();
+    let asm = fx.assembly_mut();
+    asm.string_pool.bytes = pool_bytes;
+    asm.nodes = nodes;
+    asm.files.push(File {
+        path: StrRef::default(),
+        mtime: 0,
+        content_hash: [0; 8],
+        category: FileCategory::Source,
+    });
+    fx.into_bytes()
 }
 
 /// Build a minimal valid `Overlay` archive from the given nodes.

@@ -2,11 +2,8 @@
 //! and that `WHERE n.uid = <numeric>` / `WHERE n.uid = "string"` behave correctly.
 
 use ecp_core::cypher::{self, Value};
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use ecp_core::uid;
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -15,49 +12,11 @@ use std::path::Path;
 
 /// Single-node graph: Function "target" at "src/t.ts".
 fn build_single() -> (Vec<u8>, u64) {
-    let mut pool = StringPool::new();
-    let name = pool.add("target");
-    let fp = pool.add("src/t.ts");
-
-    let node_uid = uid::compute(NodeKind::Function, "src/t.ts", None, "target");
-
-    let g = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: fp,
-            mtime: 0,
-            content_hash: [0u8; 8],
-            category: FileCategory::Source,
-        }],
-        nodes: vec![Node {
-            uid: node_uid,
-            name,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (0, 0, 1, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        }],
-        edges: vec![],
-        out_offsets: vec![0, 0],
-        in_offsets: vec![0, 0],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: 1,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    let target = fx.func("src/t.ts", "target");
+    fx.span(target, (0, 0, 1, 0));
+    let g = fx.build();
+    let node_uid = g.nodes[target as usize].uid;
 
     (
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec(),
@@ -67,70 +26,15 @@ fn build_single() -> (Vec<u8>, u64) {
 
 /// Two-node graph: a(0) -[:Calls]-> b(1), so WHERE queries can distinguish.
 fn build_two() -> (Vec<u8>, u64, u64) {
-    let mut pool = StringPool::new();
-    let na = pool.add("a");
-    let nb = pool.add("b");
-    let fp = pool.add("src/t.ts");
-    let reason = pool.add("r");
-
-    let uid_a = uid::compute(NodeKind::Function, "src/t.ts", None, "a");
-    let uid_b = uid::compute(NodeKind::Function, "src/t.ts", None, "b");
-
-    let g = ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files: vec![File {
-            path: fp,
-            mtime: 0,
-            content_hash: [0u8; 8],
-            category: FileCategory::Source,
-        }],
-        nodes: vec![
-            Node {
-                uid: uid_a,
-                name: na,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (0, 0, 1, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-            Node {
-                uid: uid_b,
-                name: nb,
-                file_idx: 0,
-                kind: NodeKind::Function,
-                span: (2, 0, 3, 0),
-                community_id: 0,
-                owner_class: StrRef::default(),
-                content_hash: 0,
-            },
-        ],
-        edges: vec![Edge {
-            source: 0,
-            target: 1,
-            rel_type: ecp_core::graph::RelType::Calls,
-            confidence: 1.0,
-            reason,
-        }],
-        out_offsets: vec![0, 1, 1],
-        in_offsets: vec![0, 0, 1],
-        in_edge_idx: vec![0],
-        name_index: vec![],
-        process_start: 2,
-        traces_offsets: vec![],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    };
+    let mut fx = GraphFixture::new();
+    let a = fx.func("src/t.ts", "a");
+    fx.span(a, (0, 0, 1, 0));
+    let b = fx.func("src/t.ts", "b");
+    fx.span(b, (2, 0, 3, 0));
+    fx.edge(a, b, RelType::Calls);
+    let g = fx.build();
+    let uid_a = g.nodes[a as usize].uid;
+    let uid_b = g.nodes[b as usize].uid;
 
     (
         rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap().to_vec(),

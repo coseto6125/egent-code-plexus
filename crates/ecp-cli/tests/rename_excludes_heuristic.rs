@@ -11,12 +11,8 @@
 mod common;
 
 use common::run_git;
-use ecp_core::graph::{
-    Edge, File, FileCategory, Node, NodeKind, RelType, ZeroCopyGraph, GRAPH_FORMAT_VERSION,
-    GRAPH_MAGIC,
-};
-use ecp_core::pool::{StrRef, StringPool};
-use rkyv::rancor::Error;
+use ecp_core::graph::RelType;
+use ecp_core::graph_fixture::GraphFixture;
 use std::path::Path;
 use std::process::Command;
 
@@ -77,13 +73,6 @@ fn build_index(repo: &Path) {
     );
 }
 
-/// Serialize a `ZeroCopyGraph` to bytes suitable for writing as `graph.bin`.
-fn serialize_graph(graph: &ZeroCopyGraph) -> Vec<u8> {
-    rkyv::to_bytes::<Error>(graph)
-        .expect("serialize graph")
-        .into_vec()
-}
-
 // ---------------------------------------------------------------------------
 // Synthetic graph builders
 // ---------------------------------------------------------------------------
@@ -95,164 +84,33 @@ fn serialize_graph(graph: &ZeroCopyGraph) -> Vec<u8> {
 ///   node 0  email       file 0  src/model.py   (definition)
 ///   node 1  email_copy  file 1  src/schema.py  (mirror, heuristic)
 ///   edges[0]: node 1 → node 0, MirrorsField
-///
-/// CSR:
-///   out_offsets: [0, 0, 1]   (node 0 has 0 outgoing; node 1 has 1 outgoing)
-///   in_offsets:  [0, 1, 1]   (node 0 has 1 incoming; node 1 has 0 incoming)
-///   in_edge_idx: [0]          (node 0's single inbound edge is edges[0])
 fn mirrors_field_graph(
     model_symbol: &str,
     mirror_symbol: &str,
     model_file: &str,
     mirror_file: &str,
 ) -> Vec<u8> {
-    let mut pool = StringPool::new();
-
-    let model_path_ref = pool.add(model_file);
-    let mirror_path_ref = pool.add(mirror_file);
-    let model_name_ref = pool.add(model_symbol);
-    let mirror_name_ref = pool.add(mirror_symbol);
-    let model_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        model_file,
-        None,
-        model_symbol,
+    let mut fx = GraphFixture::new();
+    let model = fx.func(model_file, model_symbol);
+    fx.span(model, (1, 0, 2, 0));
+    let mirror = fx.func(mirror_file, mirror_symbol);
+    fx.span(mirror, (1, 0, 2, 0));
+    fx.edge_with(
+        mirror,
+        model,
+        RelType::MirrorsField,
+        0.6,
+        "schema-mirror-heuristic",
     );
-    let mirror_uid = ecp_core::uid::compute(
-        ecp_core::graph::NodeKind::Function,
-        mirror_file,
-        None,
-        mirror_symbol,
-    );
-    let reason_ref = pool.add("schema-mirror-heuristic");
-
-    let files = vec![
-        File {
-            path: model_path_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-        File {
-            path: mirror_path_ref,
-            mtime: 0,
-            content_hash: [0; 8],
-            category: FileCategory::Source,
-        },
-    ];
-
-    let nodes = vec![
-        Node {
-            uid: model_uid,
-            name: model_name_ref,
-            file_idx: 0,
-            kind: NodeKind::Function,
-            span: (1, 0, 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-        Node {
-            uid: mirror_uid,
-            name: mirror_name_ref,
-            file_idx: 1,
-            kind: NodeKind::Function,
-            span: (1, 0, 2, 0),
-            community_id: 0,
-            owner_class: StrRef::default(),
-            content_hash: 0,
-        },
-    ];
-
-    // MirrorsField: mirror node (1) → model node (0).
-    let edges = vec![Edge {
-        source: 1,
-        target: 0,
-        rel_type: RelType::MirrorsField,
-        confidence: 0.6,
-        reason: reason_ref,
-    }];
-
-    // out_offsets: node 0 has 0 outgoing, node 1 has 1 outgoing (edges[0]).
-    let out_offsets = vec![0u32, 0, 1];
-    // in_offsets: node 0 has 1 incoming (edges[0]), node 1 has 0 incoming.
-    let in_offsets = vec![0u32, 1, 1];
-    let in_edge_idx = vec![0u32];
-    let n = nodes.len();
-    let name_index: Vec<ecp_core::graph::NameIndexEntry> = Vec::new();
-
-    serialize_graph(&ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges,
-        out_offsets,
-        in_offsets,
-        in_edge_idx,
-        name_index,
-        process_start: n as u32,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    })
+    fx.into_bytes()
 }
 
 /// Graph with a single `Function` node and no heuristic edges (zero mirrors).
 fn zero_mirrors_graph(symbol: &str, file: &str) -> Vec<u8> {
-    let mut pool = StringPool::new();
-    let path_ref = pool.add(file);
-    let name_ref = pool.add(symbol);
-    let uid_ref = ecp_core::uid::compute(ecp_core::graph::NodeKind::Function, file, None, symbol);
-
-    let files = vec![File {
-        path: path_ref,
-        mtime: 0,
-        content_hash: [0; 8],
-        category: FileCategory::Source,
-    }];
-    let nodes = vec![Node {
-        uid: uid_ref,
-        name: name_ref,
-        file_idx: 0,
-        kind: NodeKind::Function,
-        span: (1, 0, 2, 0),
-        community_id: 0,
-        owner_class: StrRef::default(),
-        content_hash: 0,
-    }];
-
-    serialize_graph(&ZeroCopyGraph {
-        magic: GRAPH_MAGIC,
-        version: GRAPH_FORMAT_VERSION,
-        fingerprint: [0; 32],
-        string_pool: pool.bytes,
-        files,
-        nodes,
-        edges: vec![],
-        out_offsets: vec![0u32, 0],
-        in_offsets: vec![0u32, 0],
-        in_edge_idx: vec![],
-        name_index: Vec::new(),
-        process_start: 1,
-        traces_offsets: vec![0],
-        traces_data: vec![],
-        blind_spots: vec![],
-        route_shapes: vec![],
-        call_metas: vec![],
-        function_metas: vec![],
-        kind_offsets: vec![],
-        kind_node_idx: vec![],
-        node_flags: vec![],
-    })
+    let mut fx = GraphFixture::new();
+    let n = fx.func(file, symbol);
+    fx.span(n, (1, 0, 2, 0));
+    fx.into_bytes()
 }
 
 // ---------------------------------------------------------------------------
