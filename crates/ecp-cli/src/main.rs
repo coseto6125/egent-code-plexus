@@ -148,180 +148,146 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         };
     }
 
-    // Dispatch table for commands that don't need a graph loaded.
-    macro_rules! run_no_graph {
-        ($expr:expr) => {{
-            return $expr.map(|_| ());
-        }};
-    }
+    // graph_path::resolve / auto_ensure do real I/O (git HEAD lookup, commit
+    // index scan, background reindex spawn); graph-free commands must not pay
+    // for it, so the whole load is skipped rather than run and discarded —
+    // down to the `current_dir()` syscall.
+    let (engine, graph_path) = if cli.command.needs_graph() {
+        let cwd = cli
+            .command
+            .repo()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let mut graph_path = graph_path::resolve(&cli.graph, &cwd);
 
-    match &cli.command {
-        Commands::HookHandle(args) => run_no_graph!(commands::hook_handle::run(args.clone())),
-        Commands::HookWatcher(args) => run_no_graph!(commands::hook_watcher::run(args.clone())),
-        Commands::Summary(args) => {
-            run_no_graph!(commands::summary::run(args.clone(), &cli.graph))
-        }
-        Commands::Dev { command } => run_no_graph!(commands::dev::run(command.clone(), &cli.graph)),
-        Commands::Contracts(args) => run_no_graph!(commands::contracts::run(args.clone())),
-        Commands::Diff(args) => run_no_graph!(commands::diff::run(args.clone())),
-        Commands::Hook(args) => run_no_graph!(commands::hook::run(args.clone())),
-        Commands::Watch(args) => run_no_graph!(commands::watch::run(args.clone())),
-        Commands::Peers(args) => {
-            return commands::peers::run(args.clone()).map_err(ecp_core::EcpError::from)
-        }
-        Commands::Group { cmd } => run_no_graph!(commands::group::run(cmd.clone())),
-        Commands::Schema(args) => run_no_graph!(commands::schema::run(args.clone())),
-        Commands::Insight(args) => run_no_graph!(commands::insight::run(args.clone())),
-        Commands::Usage(args) => run_no_graph!(commands::usage::run(args.clone())),
-        Commands::Uninstall(args) => {
-            run_no_graph!(commands::uninstall::run(args.clone()))
-        }
-        _ => {} // fall through to graph-loading path
-    }
-
-    // Agent commands + ShapeCheck (hidden internal) — need graph
-    let repo_opt = match &cli.command {
-        Commands::Inspect(args) => args.repo.as_deref(),
-        // `find --repo` doubles as a registry selector (`@all`, comma list,
-        // repo name) for the bm25 fan-out; those aren't paths, and feeding
-        // them to ensure_fresh as a cwd dies with "Error preparing index for
-        // @all". Only treat the value as this process's repo when it's a real
-        // directory; selectors resolve inside find::run_bm25. Trade-off: a
-        // registry name shadowed by an identically-named local directory is
-        // read as the path — path semantics win on ambiguity.
-        Commands::Find(args) => args
-            .repo
-            .as_deref()
-            .filter(|r| std::path::Path::new(r).is_dir()),
-        Commands::Impact(args) => args.repo.as_deref(),
-        Commands::Rename(args) => args.repo.as_deref(),
-        Commands::Cypher(args) => args.repo.as_deref(),
-        Commands::Routes(args) => args.repo.as_deref(),
-        Commands::ShapeCheck(args) => args.repo.as_deref(),
-        Commands::ToolMap(args) => args.repo.as_deref(),
-        Commands::Review(args) => args.repo.as_deref(),
-        Commands::Heuristics(args) => match &args.kind {
-            commands::heuristics::HeuristicsKind::Saga(a) => a.repo.as_deref(),
-            commands::heuristics::HeuristicsKind::SchemaBindings(a) => a.repo.as_deref(),
-            commands::heuristics::HeuristicsKind::EventMirrors(a) => a.repo.as_deref(),
-        },
-        Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
-        Commands::Processes(args) => args.repo.as_deref(),
-        Commands::FindSchemaBindings(args) => args.repo.as_deref(),
-        Commands::FindEventMirrors(args) => args.repo.as_deref(),
-        Commands::Summary(_)
-        | Commands::Contracts(_)
-        | Commands::Diff(_)
-        | Commands::Admin { .. }
-        | Commands::Dev { .. }
-        | Commands::HookHandle(_)
-        | Commands::HookWatcher(_)
-        | Commands::Hook(_)
-        | Commands::Watch(_)
-        | Commands::Peers(_)
-        | Commands::Group { .. }
-        | Commands::Schema(_)
-        | Commands::Insight(_)
-        | Commands::Usage(_)
-        | Commands::Uninstall(_) => None,
-    };
-    let cwd = repo_opt
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mut graph_path = graph_path::resolve(&cli.graph, &cwd);
-
-    // An explicit `--graph <path>` is taken literally. If it does not exist,
-    // error rather than warm-attaching to cwd's graph — answering a directed
-    // query against the wrong graph is worse than an honest failure.
-    if graph_path::is_custom(&cli.graph) && !graph_path.exists() {
-        return Err(ecp_core::EcpError::InvalidArgument(format!(
-            "Error: --graph path does not exist: {}",
-            graph_path.display()
-        )));
-    }
-
-    let engine = match auto_ensure::ensure_fresh(&graph_path, &cwd) {
-        Err(err) => {
+        // An explicit `--graph <path>` is taken literally. If it does not exist,
+        // error rather than warm-attaching to cwd's graph — answering a directed
+        // query against the wrong graph is worse than an honest failure.
+        if graph_path::is_custom(&cli.graph) && !graph_path.exists() {
             return Err(ecp_core::EcpError::InvalidArgument(format!(
-                "Error preparing index for {}: {err}",
-                cwd.display()
+                "Error: --graph path does not exist: {}",
+                graph_path.display()
             )));
         }
-        Ok(auto_ensure::EnsureFreshOutcome::WarmAttach { sibling_graph_path }) => {
-            // The sibling passed auto_ensure's distance gate (≤1 commit behind),
-            // so it serves silently while the background rebuild runs. No "may be
-            // stale" note: a per-invocation apology for a near-current graph is
-            // context noise the LLM can't act on, and a too-stale sibling never
-            // reaches this arm. The actionable hint is reserved for load failure.
-            match Engine::load_warm(&sibling_graph_path) {
-                Ok(e) => e,
-                Err(err) => {
-                    return Err(ecp_core::EcpError::InvalidArgument(format!(
-                        "warm-attach graph load failed ({}): {err}. \
-                         Rebuild the index with `ecp admin index --force --repo .`",
-                        sibling_graph_path.display(),
-                    )));
-                }
-            }
-        }
-        Ok(auto_ensure::EnsureFreshOutcome::Ready) => {
-            graph_path = graph_path::resolve(&cli.graph, &cwd);
-            match Engine::load(&graph_path) {
-                Ok(e) => e,
-                Err(err) => {
-                    return Err(ecp_core::EcpError::InvalidArgument(format!(
-                        "Error loading graph from {}: {}",
-                        graph_path.display(),
-                        err
-                    )));
-                }
-            }
-        }
-    };
 
-    // Attach the session's L1 overlay dir (if one resolves) so query commands
-    // can surface uncommitted working-tree edits the L2 graph hasn't absorbed.
-    // Agent hosts inject a stable session id (ECP_SESSION_ID /
-    // CLAUDE_CODE_SESSION_ID); a bare CLI invocation falls back to a
-    // per-process id, so the fragments `ensure_fresh` just wrote above are
-    // still read back by this same process. Empty/absent overlay = zero
-    // query-path cost.
-    let engine = match auto_ensure::resolve_session_overlay_dir(&cwd) {
-        Some(dir) if dir.is_dir() => engine.with_overlay(dir, cwd.clone()),
-        _ => engine,
+        let engine = match auto_ensure::ensure_fresh(&graph_path, &cwd) {
+            Err(err) => {
+                return Err(ecp_core::EcpError::InvalidArgument(format!(
+                    "Error preparing index for {}: {err}",
+                    cwd.display()
+                )));
+            }
+            Ok(auto_ensure::EnsureFreshOutcome::WarmAttach { sibling_graph_path }) => {
+                // The sibling passed auto_ensure's distance gate (≤1 commit behind),
+                // so it serves silently while the background rebuild runs. No "may be
+                // stale" note: a per-invocation apology for a near-current graph is
+                // context noise the LLM can't act on, and a too-stale sibling never
+                // reaches this arm. The actionable hint is reserved for load failure.
+                match Engine::load_warm(&sibling_graph_path) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        return Err(ecp_core::EcpError::InvalidArgument(format!(
+                            "warm-attach graph load failed ({}): {err}. \
+                             Rebuild the index with `ecp admin index --force --repo .`",
+                            sibling_graph_path.display(),
+                        )));
+                    }
+                }
+            }
+            Ok(auto_ensure::EnsureFreshOutcome::Ready) => {
+                graph_path = graph_path::resolve(&cli.graph, &cwd);
+                match Engine::load(&graph_path) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        return Err(ecp_core::EcpError::InvalidArgument(format!(
+                            "Error loading graph from {}: {}",
+                            graph_path.display(),
+                            err
+                        )));
+                    }
+                }
+            }
+        };
+
+        // Attach the session's L1 overlay dir (if one resolves) so query commands
+        // can surface uncommitted working-tree edits the L2 graph hasn't absorbed.
+        // Agent hosts inject a stable session id (ECP_SESSION_ID /
+        // CLAUDE_CODE_SESSION_ID); a bare CLI invocation falls back to a
+        // per-process id, so the fragments `ensure_fresh` just wrote above are
+        // still read back by this same process. Empty/absent overlay = zero
+        // query-path cost.
+        let engine = match auto_ensure::resolve_session_overlay_dir(&cwd) {
+            Some(dir) if dir.is_dir() => engine.with_overlay(dir, cwd.clone()),
+            _ => engine,
+        };
+
+        (Some(engine), Some(graph_path))
+    } else {
+        (None, None)
     };
+    let engine = engine.as_ref();
 
     let result: Result<(), ecp_core::EcpError> = match cli.command {
-        Commands::Inspect(args) => commands::inspect::run(args, &engine, &graph_path),
-        Commands::Find(args) => commands::find::run(args, &engine),
-        Commands::Impact(args) => commands::impact::run(args, &engine),
-        Commands::Rename(args) => commands::rename::run(args, &engine),
-        Commands::Cypher(args) => commands::cypher::run(args, &engine),
-        Commands::Routes(args) => commands::routes::run(args, &engine),
-        Commands::ShapeCheck(args) => commands::shape_check::run(args, &engine),
-        Commands::ToolMap(args) => commands::tool_map::run(args, &engine),
-        Commands::Review(args) => commands::review::run(args, &engine),
-        Commands::Heuristics(args) => commands::heuristics::run(args, &engine),
-        Commands::FindTransactionPatterns(args) => commands::find_tx_patterns::run(args, &engine),
-        Commands::FindSchemaBindings(args) => commands::find_schema_bindings::run(args, &engine),
-        Commands::FindEventMirrors(args) => commands::find_event_mirrors::run(args, &engine),
-        Commands::Processes(args) => commands::processes::run(args, &engine),
-        Commands::Summary(_)
-        | Commands::Contracts(_)
-        | Commands::Diff(_)
-        | Commands::Admin { .. }
-        | Commands::Dev { .. }
-        | Commands::HookHandle(_)
-        | Commands::HookWatcher(_)
-        | Commands::Hook(_)
-        | Commands::Watch(_)
-        | Commands::Peers(_)
-        | Commands::Group { .. }
-        | Commands::Schema(_)
-        | Commands::Insight(_)
-        | Commands::Usage(_)
-        | Commands::Uninstall(_) => unreachable!("handled before graph load"),
+        Commands::Inspect(args) => commands::inspect::run(
+            args,
+            engine.expect("needs_graph() gates this arm"),
+            graph_path.as_ref().expect("needs_graph() gates this arm"),
+        ),
+        Commands::Find(args) => {
+            commands::find::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::Impact(args) => {
+            commands::impact::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::Rename(args) => {
+            commands::rename::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::Cypher(args) => {
+            commands::cypher::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::Routes(args) => {
+            commands::routes::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::ShapeCheck(args) => {
+            commands::shape_check::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::ToolMap(args) => {
+            commands::tool_map::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::Review(args) => {
+            commands::review::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::Heuristics(args) => {
+            commands::heuristics::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::FindTransactionPatterns(args) => {
+            commands::find_tx_patterns::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::FindSchemaBindings(args) => {
+            commands::find_schema_bindings::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::FindEventMirrors(args) => {
+            commands::find_event_mirrors::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::Processes(args) => {
+            commands::processes::run(args, engine.expect("needs_graph() gates this arm"))
+        }
+        Commands::HookHandle(args) => commands::hook_handle::run(args),
+        Commands::HookWatcher(args) => commands::hook_watcher::run(args),
+        Commands::Summary(args) => commands::summary::run(args, &cli.graph),
+        Commands::Dev { command } => commands::dev::run(command, &cli.graph),
+        Commands::Contracts(args) => commands::contracts::run(args),
+        Commands::Diff(args) => commands::diff::run(args),
+        Commands::Hook(args) => commands::hook::run(args),
+        Commands::Watch(args) => commands::watch::run(args),
+        Commands::Peers(args) => commands::peers::run(args).map_err(ecp_core::EcpError::from),
+        Commands::Group { cmd } => commands::group::run(cmd),
+        Commands::Schema(args) => commands::schema::run(args),
+        Commands::Insight(args) => commands::insight::run(args),
+        Commands::Usage(args) => commands::usage::run(args),
+        Commands::Uninstall(args) => commands::uninstall::run(args),
+        Commands::Admin { .. } => unreachable!("handled before graph load"),
     };
     result
 }
