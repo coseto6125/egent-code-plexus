@@ -1051,9 +1051,9 @@ dependencies = [
 
 [[package]]
 name = "etoon"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ee222bdd589679826f66ff57eff63831ec5dbe3d2b52f0952f5511aacb29f4c"
+checksum = "ad4bb67af1c42f52b1162eaab5bb3a7093d6636211e74750e1c05212d9aacfdb"
 dependencies = [
  "itoa",
  "memchr",
