@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.8.8 - 2026-08-05
+
+A dependency release. The MCP server moves to the 2026-07-28 protocol SDK; no
+commands, flags or output formats change.
+
+### Dependencies
+
+- **rmcp 2.2 → 3.1.0.** rmcp 3.0 tracks MCP 2026-07-28, whose one breaking
+  change reaching this crate is SEP-2322 MRTR: `ServerHandler::call_tool`
+  returns a `CallToolResponse` enum (`Complete` / `InputRequired` / `Task`)
+  instead of `CallToolResult`. `ecp admin mcp serve` is spawn-mode only, so
+  every call runs its subcommand to completion and resolves as `Complete`.
+
+  **Existing MCP clients need no change.** Checked against a real
+  2025-06-18 stdio session: a `tools/call` still comes back as plain
+  `{"content":[…]}` with no `resultType` field, byte-identical to rmcp 2.2.
+  Three dependabot PRs (#668, #670, #673) stalled on this bump because a
+  lockfile-only update cannot carry the source migration. (#676)
+- Full `cargo update`, including etoon 0.7.1, whose encoder collapses nested
+  field groups and keyed tabular forms, so `--format toon` output gets smaller
+  on its own. (#675)
+
+### Refactor
+
+- The two hand-rolled `OnceLock<Regex>` accessors now use `regex!` from
+  regex 1.13, which expands to the same `static Lazy<Regex>` shape. Identical
+  behaviour, less boilerplate. (#676)
+
 ## v0.8.7 - 2026-07-26
 
 An internals release: six refactors that each collapse a rule the codebase was
