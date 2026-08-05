@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.8.8 - 2026-08-05
+
+- (no user-facing changes)
 ## v0.8.7 - 2026-07-26
 
 An internals release: six refactors that each collapse a rule the codebase was
