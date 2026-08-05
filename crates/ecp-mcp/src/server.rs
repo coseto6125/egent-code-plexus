@@ -97,7 +97,7 @@ impl rmcp::ServerHandler for RmcpHandler {
         &self,
         request: rmcp::model::CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
+    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>>
            + rmcp::service::MaybeSendFuture
            + '_ {
         let server = Arc::clone(&self.0);
@@ -106,14 +106,22 @@ impl rmcp::ServerHandler for RmcpHandler {
                 Some(map) => serde_json::Value::Object(map),
                 None => serde_json::Value::Object(Default::default()),
             };
-            match server.call_tool(&request.name, args).await {
-                Ok(output) => Ok(rmcp::model::CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(output),
-                ])),
-                Err(e) => Ok(rmcp::model::CallToolResult::error(vec![
-                    rmcp::model::ContentBlock::text(e.to_string()),
-                ])),
-            }
+            // Spawn-mode dispatch runs the subcommand to completion in one shot, so
+            // every call resolves as `Complete` — the MRTR `InputRequired` / `Task`
+            // variants have no counterpart in this server.
+            let result = match server.call_tool(&request.name, args).await {
+                Ok(output) => {
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                        output,
+                    )])
+                }
+                Err(e) => {
+                    rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                        e.to_string(),
+                    )])
+                }
+            };
+            Ok(result.into())
         }
     }
 }

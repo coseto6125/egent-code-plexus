@@ -7,7 +7,6 @@ use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
 use ecp_core::EcpError;
-use std::sync::OnceLock;
 
 const MAX_HITS: usize = 5;
 const MAX_BYTES: usize = 2048;
@@ -16,8 +15,7 @@ const HITS_HEADER: &str = "ecp graph hits:\n";
 /// Glob-stem extractor. Compiled once per process — PreToolUse fires
 /// on every Grep / Glob / Bash so amortising the regex build matters.
 fn glob_stem_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"[*/]([a-zA-Z][a-zA-Z0-9_-]{2,})").unwrap())
+    regex::regex!(r"[*/]([a-zA-Z][a-zA-Z0-9_-]{2,})")
 }
 
 pub fn handle(input: &HookInput) -> Result<(), EcpError> {
