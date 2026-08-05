@@ -1,5 +1,4 @@
 use regex::Regex;
-use std::sync::OnceLock;
 
 /// Canonicalizes event topic identifiers per docs/specs/2026-05-21-event-topic-normalization.md.
 ///
@@ -53,8 +52,7 @@ pub fn canonicalize(s: &str) -> String {
 }
 
 fn get_version_regex() -> &'static Regex {
-    static VERSION_REGEX: OnceLock<Regex> = OnceLock::new();
-    VERSION_REGEX.get_or_init(|| Regex::new(r"\.v\d+$").expect("valid regex"))
+    regex::regex!(r"\.v\d+$")
 }
 
 /// Convert a single segment from CamelCase to slash-separated words.
