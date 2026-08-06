@@ -46,12 +46,22 @@ pub struct CallRecord<'a> {
 }
 
 /// Append one jsonl line to `dir/filename`. Best-effort: all I/O errors are
-/// silently dropped — telemetry MUST NOT affect the caller's result. Single
-/// `O_APPEND` write of a sub-PIPE_BUF line is atomic under POSIX, so no lock.
+/// silently dropped — telemetry MUST NOT affect the caller's result.
+///
+/// A single `O_APPEND` write of a sub-PIPE_BUF buffer is atomic under POSIX,
+/// which is why no lock is needed — but only if the newline travels in the
+/// *same* write. `writeln!` does not do that: it expands to `write_fmt`, which
+/// walks the format pieces and issues one write for the record and another for
+/// `"\n"`. A concurrent `ecp` process appending between the two yields
+/// `{a}{b}\n`, a line that parses as neither record — `ecp usage` then skips it
+/// and `prune_retention` keeps it forever through its unparseable-line
+/// fallback. Observed at 8% of lines in this repo's own telemetry, the busiest
+/// one on this machine.
 pub fn append_record(dir: &Path, filename: &str, record: &CallRecord<'_>) {
-    let Ok(line) = serde_json::to_string(record) else {
+    let Ok(mut line) = serde_json::to_string(record) else {
         return;
     };
+    line.push('\n');
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
@@ -60,7 +70,7 @@ pub fn append_record(dir: &Path, filename: &str, record: &CallRecord<'_>) {
         .append(true)
         .open(dir.join(filename))
     {
-        let _ = writeln!(f, "{line}");
+        let _ = f.write_all(line.as_bytes());
     }
 }
 
