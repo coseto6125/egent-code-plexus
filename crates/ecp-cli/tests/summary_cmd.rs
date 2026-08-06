@@ -244,6 +244,101 @@ fn summary_with_repo_includes_health_sections() {
     );
 }
 
+/// `--repo <path>` on a repo that was never indexed must index it rather than
+/// failing. The graph-loading commands (`find` / `impact` / `inspect`) already
+/// do this through `auto_ensure`; a Registry-backed reader refusing the same
+/// path forces the user to run `ecp admin index` by hand for no reason.
+#[test]
+fn summary_with_unindexed_repo_path_indexes_it() {
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo_tmp = tempfile::tempdir().unwrap();
+    init_git_repo(repo_tmp.path());
+    // Deliberately no `admin index` — this path is unknown to the registry.
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "summary",
+            "--format",
+            "json",
+            "--repo",
+            repo_tmp.path().to_str().unwrap(),
+        ])
+        .env("HOME", home_tmp.path())
+        .output()
+        .expect("summary failed to spawn");
+    assert!(
+        out.status.success(),
+        "summary on an unindexed path exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("not valid JSON: {e}\nstdout: {stdout}"));
+    let per_repo = v["summary"]["per_repo"]
+        .as_array()
+        .expect("per_repo must be an array after the path is indexed");
+    assert!(
+        !per_repo.is_empty(),
+        "per_repo should describe the freshly-indexed repo, got: {stdout}"
+    );
+}
+
+/// Every unregistered path in a multi-atom selector gets indexed, not just the
+/// one that happened to fail first. `contracts --repo <a>,<b>` needs ≥2 repos,
+/// so stopping after the first would still leave it unusable.
+#[test]
+fn summary_with_several_unindexed_repo_paths_indexes_all_of_them() {
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo_a = tempfile::tempdir().unwrap();
+    let repo_b = tempfile::tempdir().unwrap();
+    init_git_repo(repo_a.path());
+    init_git_repo(repo_b.path());
+
+    let selector = format!(
+        "{},{}",
+        repo_a.path().to_str().unwrap(),
+        repo_b.path().to_str().unwrap()
+    );
+    let out = Command::new(ecp_bin())
+        .args(["summary", "--format", "json", "--repo", &selector])
+        .env("HOME", home_tmp.path())
+        .output()
+        .expect("summary failed to spawn");
+    assert!(
+        out.status.success(),
+        "summary over two unindexed paths exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("not valid JSON: {e}\nstdout: {stdout}"));
+    let per_repo = v["summary"]["per_repo"].as_array().expect("per_repo array");
+    assert_eq!(
+        per_repo.len(),
+        2,
+        "both paths should be indexed and reported, got: {stdout}"
+    );
+}
+
+/// A `--repo <name>` that matches nothing still fails: there is no path to
+/// index, so inventing one would answer a directed query against the wrong
+/// repo.
+#[test]
+fn summary_with_unknown_repo_name_still_fails() {
+    let home_tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(ecp_bin())
+        .args(["summary", "--repo", "no-such-repo-name"])
+        .env("HOME", home_tmp.path())
+        .output()
+        .expect("summary failed to spawn");
+    assert!(
+        !out.status.success(),
+        "an unresolvable repo NAME must not be silently indexed"
+    );
+}
+
 /// `--repo @unknown-group` must not panic. An unknown group returns exit 1
 /// with an error message (not a panic) per the current selector behaviour.
 #[test]

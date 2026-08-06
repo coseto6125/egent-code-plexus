@@ -54,13 +54,24 @@ fn parse_atom(part: &str) -> Result<Atom, ParseError> {
         }
         return Ok(Atom::Group(rest.to_string()));
     }
-    // Heuristic: anything containing '/' or starting with '.' is a path;
-    // otherwise treat as registry name. Path canonicalization happens in
-    // the resolver, not here.
-    if part.starts_with('.') || part.starts_with('/') {
+    if looks_like_path(part) {
         return Ok(Atom::Path(PathBuf::from(part)));
     }
     Ok(Atom::Name(part.to_string()))
+}
+
+/// Registry names are `<repo>__<hash8>`, so they carry no separator and no
+/// drive prefix — anything that does is a path. Canonicalization happens in
+/// the resolver, not here.
+///
+/// The drive-prefix arm is load-bearing on Windows: `C:\repo` starts with
+/// neither `.` nor `/`, so it used to parse as a registry name and fail with
+/// "repo not found in registry" no matter what the caller passed.
+fn looks_like_path(part: &str) -> bool {
+    part.starts_with('.')
+        || part.contains('/')
+        || part.contains('\\')
+        || matches!(part.as_bytes(), [c, b':', ..] if c.is_ascii_alphabetic())
 }
 
 // ── Resolver ────────────────────────────────────────────────────────────────
@@ -89,6 +100,8 @@ pub enum ResolveError {
     PathNotRegistered(String),
     #[error("`@{group}` cannot be used at the top level — use `ecp group {hint}` instead")]
     GroupAtTopLevel { group: String, hint: String },
+    #[error("indexing {path} failed: {reason}")]
+    IndexFailed { path: String, reason: String },
 }
 
 /// Thin wrapper around `resolve` that rejects `@<group>` atoms before
@@ -111,6 +124,65 @@ pub fn resolve_top_level(
         }
     }
     resolve(sel, registry, cwd)
+}
+
+/// Resolve like [`resolve_top_level`], but index an unregistered *path* rather
+/// than rejecting it.
+///
+/// The graph-loading commands (`find` / `impact` / `inspect`) already index on
+/// demand via `auto_ensure::ensure_fresh`. The Registry-backed readers
+/// (`summary` / `contracts`) resolve through this module instead, so they used
+/// to fail on any path the user had not indexed by hand — the same repo that
+/// `ecp find` would have indexed silently.
+///
+/// Only `Cwd` / `Path` atoms are indexable. A `Name` or `@group` that resolves
+/// to nothing has no directory to build from, and picking one would answer a
+/// directed query against the wrong repo.
+pub fn resolve_top_level_indexing(
+    sel: &Selector,
+    registry: &RegistryFile,
+    cwd: &str,
+    verb_hint: &str,
+) -> Result<Vec<ResolvedRepo>, ResolveError> {
+    // A selector can name several unregistered paths (`--repo <a>,<b>`), and
+    // `resolve` reports only the first. Loop so each one gets its turn;
+    // `attempted` stops a path that indexes without becoming resolvable from
+    // spinning forever.
+    let mut attempted = HashSet::<String>::new();
+    let mut reopened: Option<ecp_core::registry::Registry> = None;
+
+    loop {
+        let outcome = {
+            let reg = reopened.as_ref().map_or(registry, |r| r.snapshot());
+            resolve_top_level(sel, reg, cwd, verb_hint)
+        };
+        let err = match outcome {
+            Ok(repos) => return Ok(repos),
+            Err(e) => e,
+        };
+        let ResolveError::PathNotRegistered(path) = &err else {
+            return Err(err);
+        };
+        if !Path::new(path).is_dir() || !attempted.insert(path.clone()) {
+            return Err(err);
+        }
+
+        let fail = |reason: String| ResolveError::IndexFailed {
+            path: path.clone(),
+            reason,
+        };
+        let mut built = crate::build::orchestrator::build_l2(Path::new(path), None)
+            .map_err(|e| fail(e.to_string()))?;
+        // Mirrors `admin index`: don't return while the background tantivy
+        // writer still has open segments under the publish dir.
+        built.join_background();
+
+        // `build_l2` upserts the global registry, so the snapshot resolved
+        // against above predates this repo's entry.
+        let home_ecp = ecp_core::registry::resolve_home_ecp();
+        reopened =
+            Some(ecp_core::registry::Registry::open(&home_ecp).map_err(|e| fail(e.to_string()))?);
+    }
 }
 
 /// Resolve a selector to a deduplicated list of repos. Preserves first
