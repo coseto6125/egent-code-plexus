@@ -206,222 +206,36 @@ fn split_and<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
+/// Cypher pipeline: MATCH → WHERE → WITH → RETURN → ORDER BY → DISTINCT →
+/// SKIP/LIMIT → UNION. Each arrow below is one stage function — adding a
+/// clause (e.g. UNWIND, which would rebind `bindings` between WITH and
+/// RETURN the way `exec_with` does) means inserting one call in this list,
+/// not splicing into a shared block.
 fn execute_inner(
     query: &Query,
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<QueryResult, CypherError> {
-    // Produce bindings from MATCH clauses.
-    let mut bindings: Vec<Binding> = vec![Binding::default()];
-    for mc in &query.matches {
-        bindings = exec_match_clause(mc, &bindings, graph)?;
-    }
+    let bindings = exec_matches(query, graph)?;
+    let bindings = apply_where(query.where_.as_ref(), bindings, graph, cache)?;
+    let bindings = match &query.with {
+        Some(wc) => exec_with(wc, bindings, graph, cache)?,
+        None => bindings,
+    };
 
-    // Apply WHERE filter.
-    if let Some(w) = &query.where_ {
-        // Collect retain mask separately to avoid simultaneous &mut borrows.
-        // Propagate eval errors (e.g. uid string-literal misuse) to the caller.
-        let mask: Vec<bool> = bindings
-            .iter()
-            .map(|b| eval_expr(w, b, graph, cache).map(|v| value_truthy(&v)))
-            .collect::<Result<_, _>>()?;
-        let mut mask_iter = mask.into_iter();
-        bindings.retain(|_| mask_iter.next().unwrap_or(false));
-    }
+    let (columns, rows) = project_return(&query.return_.items, &bindings, graph, cache)?;
 
-    // WITH clause rebinds / aggregates into a new binding set.
-    if let Some(wc) = &query.with {
-        bindings = exec_with(wc, bindings, graph, cache)?;
-    }
-
-    // Pre-expand bare Var RETURN items into concrete prop columns.
-    // We use the first binding to infer whether each var is node/edge/computed-bound.
-    let expanded_items: Vec<(String, ReturnExpr)> =
-        expand_return_items(&query.return_.items, bindings.first())?;
-
-    // RETURN projection — detect aggregation in expanded items. Scalar
-    // function calls (`type(r)`, `id(n)`, `labels(n)`) are NOT aggregates and
-    // must not trigger the group-by path; they project per-row in the else
-    // branch via `eval_return_expr`.
-    let has_agg = expanded_items
-        .iter()
-        .any(|(_, e)| matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)));
-
-    let mut columns: Vec<String> = Vec::new();
-    let mut rows: Vec<Vec<Value>> = Vec::new();
-
-    if has_agg {
-        // Partition expanded items into group-key items and aggregate items.
-        let group_items: Vec<&(String, ReturnExpr)> = expanded_items
-            .iter()
-            .filter(
-                |(_, e)| !matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)),
-            )
-            .collect();
-
-        // Identify aggregate positions once so the per-row loop avoids re-scanning.
-        // Each entry: (expanded_items index, is_count_star, arg expr, kind, distinct).
-        let agg_positions: Vec<(usize, bool, Option<&Expr>, AggregateKind, bool)> = expanded_items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (_, e))| {
-                if let ReturnExpr::FunCall {
-                    name,
-                    distinct,
-                    args,
-                } = e
-                {
-                    let kind = AggregateKind::parse(name)?;
-                    let is_cs = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
-                    let arg = if is_cs { None } else { args.first() };
-                    return Some((i, is_cs, arg, kind, *distinct));
-                }
-                None
-            })
-            .collect();
-
-        // Fast path: ungrouped COUNT(*) is just the binding count — no per-row work.
-        if group_items.is_empty() && agg_positions.len() == 1 && agg_positions[0].1
-        // is_count_star
-        {
-            columns = expanded_items.iter().map(|(col, _)| col.clone()).collect();
-            rows.push(vec![Value::Int(bindings.len() as i64)]);
-        } else {
-            // Build column names.
-            for (col, _) in &expanded_items {
-                columns.push(col.clone());
-            }
-
-            // Groups keyed by serialized group-key string.
-            // Value: (key_vals, Vec<Accumulator> — one per agg_position slot).
-            let mut groups: Vec<(Vec<Value>, Vec<Accumulator>)> = Vec::new();
-            let mut key_index: HashMap<String, usize> = HashMap::new();
-
-            for b in &bindings {
-                let key_vals: Result<Vec<Value>, CypherError> = group_items
-                    .iter()
-                    .map(|(_, e)| eval_return_expr(e, b, graph, cache))
-                    .collect();
-                let key_vals = key_vals?;
-                let key_str: String = key_vals
-                    .iter()
-                    .map(value_key)
-                    .collect::<Vec<_>>()
-                    .join("\x00");
-                let slot = *key_index.entry(key_str).or_insert_with(|| {
-                    let accums = agg_positions
-                        .iter()
-                        .map(|(_, _, _, kind, distinct)| Accumulator::new(*kind, *distinct))
-                        .collect();
-                    groups.push((key_vals.clone(), accums));
-                    groups.len() - 1
-                });
-                let accums = &mut groups[slot].1;
-                for (ai, (_, is_cs, arg_expr, _, _)) in agg_positions.iter().enumerate() {
-                    let v = if *is_cs {
-                        Value::Null
-                    } else {
-                        eval_expr(arg_expr.unwrap(), b, graph, cache)?
-                    };
-                    accums[ai].feed(v, *is_cs);
-                }
-            }
-
-            // If no bindings at all and no group keys: emit one zero-row.
-            if groups.is_empty() && group_items.is_empty() {
-                let accums = agg_positions
-                    .iter()
-                    .map(|(_, _, _, kind, distinct)| Accumulator::new(*kind, *distinct))
-                    .collect();
-                groups.push((vec![], accums));
-            }
-
-            for (key_vals, accums) in groups {
-                let mut row = Vec::with_capacity(expanded_items.len());
-                let mut key_iter = key_vals.into_iter();
-                let mut agg_iter = accums.into_iter();
-                for (_, expr) in &expanded_items {
-                    if let ReturnExpr::FunCall { name, .. } = expr {
-                        if is_aggregate_fn(name) {
-                            row.push(agg_iter.next().unwrap().finalize());
-                        } else {
-                            row.push(key_iter.next().unwrap_or(Value::Null));
-                        }
-                    } else {
-                        row.push(key_iter.next().unwrap_or(Value::Null));
-                    }
-                }
-                rows.push(row);
-            }
-        }
-    } else {
-        // No aggregation: simple row-by-row projection.
-        columns = expanded_items.iter().map(|(col, _)| col.clone()).collect();
-        for b in &bindings {
-            let mut row = Vec::new();
-            for (_, expr) in &expanded_items {
-                row.push(eval_return_expr(expr, b, graph, cache)?);
-            }
-            rows.push(row);
-        }
-    }
-
-    // ORDER BY.
-    if !query.order_by.is_empty() {
-        // Pre-build column index once rather than scanning per comparison.
-        let col_index: HashMap<String, usize> = columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.clone(), i))
-            .collect();
-        rows.sort_by(|a, b| {
-            for oi in &query.order_by {
-                let col_name = match &oi.expr {
-                    ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
-                    ReturnExpr::Var(v) => v.clone(),
-                    ReturnExpr::Star => "*".into(),
-                    ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
-                };
-                let col_idx = col_index.get(&col_name).copied();
-                let av = col_idx.and_then(|i| a.get(i));
-                let bv = col_idx.and_then(|i| b.get(i));
-                let ord = cmp_values(av, bv);
-                let ord = if oi.desc { ord.reverse() } else { ord };
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-    }
-
-    // DISTINCT dedup.
-    if query.return_.distinct {
-        dedup_rows(&mut rows);
-    }
-
-    // SKIP + LIMIT.
-    let skip = query.skip.unwrap_or(0) as usize;
-    if skip > 0 {
-        rows = rows.into_iter().skip(skip).collect();
-    }
-    if let Some(lim) = query.limit {
-        rows.truncate(lim as usize);
-    }
-
-    // UNION / UNION ALL.
-    if let Some(union_query) = &query.union {
-        let right = execute_inner(union_query, graph, cache)?;
-        if right.columns.len() != columns.len() {
-            return Err(CypherError::Semantic {
-                msg: "UNION column count mismatch".into(),
-            });
-        }
-        rows.extend(right.rows);
-        if !query.union_all {
-            dedup_rows(&mut rows);
-        }
-    }
+    let rows = apply_order_by(&query.order_by, &columns, rows);
+    let rows = apply_distinct(query.return_.distinct, rows);
+    let rows = apply_skip_limit(query.skip, query.limit, rows);
+    let rows = apply_union(
+        query.union.as_deref(),
+        query.union_all,
+        &columns,
+        rows,
+        graph,
+        cache,
+    )?;
 
     // Width invariant — every row must carry exactly one value per
     // projected column. Downstream consumers (e.g. `cypher::build_payload`
@@ -436,6 +250,286 @@ fn execute_inner(
     );
 
     Ok(QueryResult { columns, rows })
+}
+
+/// MATCH stage: fold each clause's patterns over the running binding set.
+fn exec_matches(query: &Query, graph: MergedGraph<'_>) -> Result<Vec<Binding>, CypherError> {
+    let mut bindings: Vec<Binding> = vec![Binding::default()];
+    for mc in &query.matches {
+        bindings = exec_match_clause(mc, &bindings, graph)?;
+    }
+    Ok(bindings)
+}
+
+/// WHERE stage: retain bindings whose predicate evaluates truthy.
+fn apply_where(
+    where_: Option<&Expr>,
+    mut bindings: Vec<Binding>,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<Vec<Binding>, CypherError> {
+    let Some(w) = where_ else {
+        return Ok(bindings);
+    };
+    // Collect retain mask separately to avoid simultaneous &mut borrows.
+    // Propagate eval errors (e.g. uid string-literal misuse) to the caller.
+    let mask: Vec<bool> = bindings
+        .iter()
+        .map(|b| eval_expr(w, b, graph, cache).map(|v| value_truthy(&v)))
+        .collect::<Result<_, _>>()?;
+    let mut mask_iter = mask.into_iter();
+    bindings.retain(|_| mask_iter.next().unwrap_or(false));
+    Ok(bindings)
+}
+
+/// RETURN stage: expand bare-var items into concrete columns, then dispatch
+/// to the aggregate or plain projection depending on what's in the list.
+fn project_return(
+    return_items: &[ReturnItem],
+    bindings: &[Binding],
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), CypherError> {
+    // Pre-expand bare Var RETURN items into concrete prop columns.
+    // We use the first binding to infer whether each var is node/edge/computed-bound.
+    let expanded_items: Vec<(String, ReturnExpr)> =
+        expand_return_items(return_items, bindings.first())?;
+
+    // Detect aggregation in expanded items. Scalar function calls (`type(r)`,
+    // `id(n)`, `labels(n)`) are NOT aggregates and must not trigger the
+    // group-by path; `plain_rows` projects them per-row via `eval_return_expr`.
+    let has_agg = expanded_items
+        .iter()
+        .any(|(_, e)| matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)));
+
+    if has_agg {
+        aggregate_rows(&expanded_items, bindings, graph, cache)
+    } else {
+        plain_rows(&expanded_items, bindings, graph, cache)
+    }
+}
+
+/// No aggregation: simple row-by-row projection.
+fn plain_rows(
+    expanded_items: &[(String, ReturnExpr)],
+    bindings: &[Binding],
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), CypherError> {
+    let columns: Vec<String> = expanded_items.iter().map(|(col, _)| col.clone()).collect();
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    for b in bindings {
+        let mut row = Vec::new();
+        for (_, expr) in expanded_items {
+            row.push(eval_return_expr(expr, b, graph, cache)?);
+        }
+        rows.push(row);
+    }
+    Ok((columns, rows))
+}
+
+/// Group-key + accumulator machinery for a RETURN list containing at least
+/// one aggregate function.
+fn aggregate_rows(
+    expanded_items: &[(String, ReturnExpr)],
+    bindings: &[Binding],
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), CypherError> {
+    // Partition expanded items into group-key items and aggregate items.
+    let group_items: Vec<&(String, ReturnExpr)> = expanded_items
+        .iter()
+        .filter(|(_, e)| !matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)))
+        .collect();
+
+    // Identify aggregate positions once so the per-row loop avoids re-scanning.
+    // Each entry: (expanded_items index, is_count_star, arg expr, kind, distinct).
+    let agg_positions: Vec<(usize, bool, Option<&Expr>, AggregateKind, bool)> = expanded_items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, e))| {
+            if let ReturnExpr::FunCall {
+                name,
+                distinct,
+                args,
+            } = e
+            {
+                let kind = AggregateKind::parse(name)?;
+                let is_cs = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
+                let arg = if is_cs { None } else { args.first() };
+                return Some((i, is_cs, arg, kind, *distinct));
+            }
+            None
+        })
+        .collect();
+
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+
+    // Fast path: ungrouped COUNT(*) is just the binding count — no per-row work.
+    if group_items.is_empty() && agg_positions.len() == 1 && agg_positions[0].1
+    // is_count_star
+    {
+        columns = expanded_items.iter().map(|(col, _)| col.clone()).collect();
+        rows.push(vec![Value::Int(bindings.len() as i64)]);
+    } else {
+        // Build column names.
+        for (col, _) in expanded_items {
+            columns.push(col.clone());
+        }
+
+        // Groups keyed by serialized group-key string.
+        // Value: (key_vals, Vec<Accumulator> — one per agg_position slot).
+        let mut groups: Vec<(Vec<Value>, Vec<Accumulator>)> = Vec::new();
+        let mut key_index: HashMap<String, usize> = HashMap::new();
+
+        for b in bindings {
+            let key_vals: Result<Vec<Value>, CypherError> = group_items
+                .iter()
+                .map(|(_, e)| eval_return_expr(e, b, graph, cache))
+                .collect();
+            let key_vals = key_vals?;
+            let key_str: String = key_vals
+                .iter()
+                .map(value_key)
+                .collect::<Vec<_>>()
+                .join("\x00");
+            let slot = *key_index.entry(key_str).or_insert_with(|| {
+                let accums = agg_positions
+                    .iter()
+                    .map(|(_, _, _, kind, distinct)| Accumulator::new(*kind, *distinct))
+                    .collect();
+                groups.push((key_vals.clone(), accums));
+                groups.len() - 1
+            });
+            let accums = &mut groups[slot].1;
+            for (ai, (_, is_cs, arg_expr, _, _)) in agg_positions.iter().enumerate() {
+                let v = if *is_cs {
+                    Value::Null
+                } else {
+                    eval_expr(arg_expr.unwrap(), b, graph, cache)?
+                };
+                accums[ai].feed(v, *is_cs);
+            }
+        }
+
+        // If no bindings at all and no group keys: emit one zero-row.
+        if groups.is_empty() && group_items.is_empty() {
+            let accums = agg_positions
+                .iter()
+                .map(|(_, _, _, kind, distinct)| Accumulator::new(*kind, *distinct))
+                .collect();
+            groups.push((vec![], accums));
+        }
+
+        for (key_vals, accums) in groups {
+            let mut row = Vec::with_capacity(expanded_items.len());
+            let mut key_iter = key_vals.into_iter();
+            let mut agg_iter = accums.into_iter();
+            for (_, expr) in expanded_items {
+                if let ReturnExpr::FunCall { name, .. } = expr {
+                    if is_aggregate_fn(name) {
+                        row.push(agg_iter.next().unwrap().finalize());
+                    } else {
+                        row.push(key_iter.next().unwrap_or(Value::Null));
+                    }
+                } else {
+                    row.push(key_iter.next().unwrap_or(Value::Null));
+                }
+            }
+            rows.push(row);
+        }
+    }
+
+    Ok((columns, rows))
+}
+
+/// ORDER BY stage: no-op when the clause is absent.
+fn apply_order_by(
+    order_by: &[OrderItem],
+    columns: &[String],
+    mut rows: Vec<Vec<Value>>,
+) -> Vec<Vec<Value>> {
+    if order_by.is_empty() {
+        return rows;
+    }
+    // Pre-build column index once rather than scanning per comparison.
+    let col_index: HashMap<String, usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.clone(), i))
+        .collect();
+    rows.sort_by(|a, b| {
+        for oi in order_by {
+            let col_name = match &oi.expr {
+                ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
+                ReturnExpr::Var(v) => v.clone(),
+                ReturnExpr::Star => "*".into(),
+                ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
+            };
+            let col_idx = col_index.get(&col_name).copied();
+            let av = col_idx.and_then(|i| a.get(i));
+            let bv = col_idx.and_then(|i| b.get(i));
+            let ord = cmp_values(av, bv);
+            let ord = if oi.desc { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    rows
+}
+
+/// DISTINCT stage.
+fn apply_distinct(distinct: bool, mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    if distinct {
+        dedup_rows(&mut rows);
+    }
+    rows
+}
+
+/// SKIP + LIMIT stage.
+fn apply_skip_limit(
+    skip: Option<u64>,
+    limit: Option<u64>,
+    rows: Vec<Vec<Value>>,
+) -> Vec<Vec<Value>> {
+    let skip = skip.unwrap_or(0) as usize;
+    let mut rows = if skip > 0 {
+        rows.into_iter().skip(skip).collect()
+    } else {
+        rows
+    };
+    if let Some(lim) = limit {
+        rows.truncate(lim as usize);
+    }
+    rows
+}
+
+/// UNION / UNION ALL stage: recurse into the right-hand query and append.
+fn apply_union(
+    union_query: Option<&Query>,
+    union_all: bool,
+    columns: &[String],
+    mut rows: Vec<Vec<Value>>,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<Vec<Vec<Value>>, CypherError> {
+    let Some(union_query) = union_query else {
+        return Ok(rows);
+    };
+    let right = execute_inner(union_query, graph, cache)?;
+    if right.columns.len() != columns.len() {
+        return Err(CypherError::Semantic {
+            msg: "UNION column count mismatch".into(),
+        });
+    }
+    rows.extend(right.rows);
+    if !union_all {
+        dedup_rows(&mut rows);
+    }
+    Ok(rows)
 }
 
 fn dedup_rows(rows: &mut Vec<Vec<Value>>) {
