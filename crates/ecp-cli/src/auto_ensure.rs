@@ -478,50 +478,38 @@ pub fn ensure_fresh(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<EnsureFreshOutcome, String> {
-    let outcome = ensure_fresh_near_current(graph_path, worktree_root)?;
-    match (need, &outcome) {
-        (IndexNeed::ExactSha(sha), EnsureFreshOutcome::WarmAttach { .. }) => {
-            build_l2_foreground(worktree_root, sha)?;
-            Ok(EnsureFreshOutcome::Ready)
-        }
-        _ => Ok(outcome),
-    }
-}
-
-/// Build this exact commit's graph and wait for it. Used when a warm sibling
-/// is not an acceptable answer; the graph path is re-resolved by the caller
-/// afterwards so a freshly published commit dir wins over the legacy
-/// `.ecp/graph.bin`.
-fn build_l2_foreground(worktree_root: &Path, sha: Option<&str>) -> Result<(), String> {
-    crate::build::orchestrator::build_l2(worktree_root, sha)
-        .map(|_| ())
-        .map_err(|e| format!("build exact-sha graph: {e}"))
-}
-
-fn ensure_fresh_near_current(
-    graph_path: &Path,
-    worktree_root: &Path,
-) -> Result<EnsureFreshOutcome, String> {
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
+    // `ExactSha` carries the commit to build; `NearCurrent` builds HEAD.
+    let target_sha = match need {
+        IndexNeed::ExactSha(sha) => sha,
+        IndexNeed::NearCurrent => None,
+    };
     match state {
         EnsureResult::Ready => Ok(EnsureFreshOutcome::Ready),
         EnsureResult::Missing => {
-            if let Some(sibling) = attach_latest_sibling_sha(worktree_root) {
-                spawn_background_rebuild(worktree_root);
-                test_counters::WARM_ATTACH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!(
-                    "l2.warm-attach sibling={} rebuild=background",
-                    sibling.display()
-                );
-                return Ok(EnsureFreshOutcome::WarmAttach {
-                    sibling_graph_path: sibling,
-                });
+            // A sibling is a different commit, so it is only ever an answer to
+            // `NearCurrent`. Deciding here rather than unwinding a warm-attach
+            // afterwards keeps `ExactSha` from announcing an attach it does not
+            // do and from spawning a background rebuild it does not need.
+            if matches!(need, IndexNeed::NearCurrent) {
+                if let Some(sibling) = attach_latest_sibling_sha(worktree_root) {
+                    spawn_background_rebuild(worktree_root);
+                    test_counters::WARM_ATTACH_COUNT
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!(
+                        "l2.warm-attach sibling={} rebuild=background",
+                        sibling.display()
+                    );
+                    return Ok(EnsureFreshOutcome::WarmAttach {
+                        sibling_graph_path: sibling,
+                    });
+                }
             }
             let start = std::time::Instant::now();
             // build_l2 → build_inside_locked writes the HEAD-SHA sidecar in
             // the background as its final step; no extra write needed here.
-            let mut result = crate::build::orchestrator::build_l2(worktree_root, None)
+            let mut result = crate::build::orchestrator::build_l2(worktree_root, target_sha)
                 .map_err(|e| format!("build_l2: {e}"))?;
             drain_tantivy_if_inside_worktree(&mut result, worktree_root);
             eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());

@@ -556,17 +556,25 @@ fn exact_sha_builds_in_foreground_instead_of_warm_attaching() {
         matches!(outcome, EnsureFreshOutcome::Ready),
         "ExactSha must resolve to Ready, got {outcome:?}"
     );
+    // The guarantee this mode exists for. `build_l2_calls` is deliberately not
+    // asserted: that counter tracks the Stale + full-rebuild branch, while this
+    // fixture exercises Missing + synchronous build, which never touches it.
     assert_eq!(
-        test_counters::build_l2_calls(),
-        1,
-        "the sibling must be replaced by a foreground build for this SHA"
+        test_counters::warm_attach_calls(),
+        0,
+        "ExactSha must never attach a sibling commit's graph"
     );
 
-    // The graph now on disk is HEAD's own, not the sibling's.
+    // The graph now on disk is this commit's own, not the sibling's.
     let after = graph_path::resolve(legacy_sentinel, repo);
     assert!(
         after.exists(),
         "ExactSha must leave this commit's graph on disk at {}",
         after.display()
+    );
+    assert_ne!(
+        after, resolved,
+        "resolving after the build must find the freshly published commit dir, \
+         not the pre-build sentinel"
     );
 }
