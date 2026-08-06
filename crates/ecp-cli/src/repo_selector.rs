@@ -54,13 +54,24 @@ fn parse_atom(part: &str) -> Result<Atom, ParseError> {
         }
         return Ok(Atom::Group(rest.to_string()));
     }
-    // Heuristic: anything containing '/' or starting with '.' is a path;
-    // otherwise treat as registry name. Path canonicalization happens in
-    // the resolver, not here.
-    if part.starts_with('.') || part.starts_with('/') {
+    if looks_like_path(part) {
         return Ok(Atom::Path(PathBuf::from(part)));
     }
     Ok(Atom::Name(part.to_string()))
+}
+
+/// Registry names are `<repo>__<hash8>`, so they carry no separator and no
+/// drive prefix — anything that does is a path. Canonicalization happens in
+/// the resolver, not here.
+///
+/// The drive-prefix arm is load-bearing on Windows: `C:\repo` starts with
+/// neither `.` nor `/`, so it used to parse as a registry name and fail with
+/// "repo not found in registry" no matter what the caller passed.
+fn looks_like_path(part: &str) -> bool {
+    part.starts_with('.')
+        || part.contains('/')
+        || part.contains('\\')
+        || matches!(part.as_bytes(), [c, b':', ..] if c.is_ascii_alphabetic())
 }
 
 // ── Resolver ────────────────────────────────────────────────────────────────

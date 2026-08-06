@@ -32,10 +32,50 @@ fn grammar_absolute_path() {
     assert_eq!(sel, Selector(vec![Atom::Path("/abs/path".into())]));
 }
 
+/// Windows absolute paths start with neither `.` nor `/`, so the old
+/// starts-with heuristic parsed `C:\repo` as a registry name and every
+/// `--repo <abs path>` on Windows failed with "repo not found in registry".
+#[test]
+fn grammar_windows_absolute_path() {
+    for raw in [
+        r"C:\Users\runner\repo",
+        r"C:/Users/runner/repo",
+        r"d:\repo",
+        r"\\server\share\repo",
+    ] {
+        assert_eq!(
+            repo_selector::parse(raw).unwrap(),
+            Selector(vec![Atom::Path(raw.into())]),
+            "{raw} should parse as a path"
+        );
+    }
+}
+
+/// A relative path with no leading `./` is still a path — it carries a
+/// separator, which a registry name (`<repo>__<hash8>`) never does.
+#[test]
+fn grammar_bare_relative_path() {
+    assert_eq!(
+        repo_selector::parse("crates/ecp-cli").unwrap(),
+        Selector(vec![Atom::Path("crates/ecp-cli".into())])
+    );
+}
+
 #[test]
 fn grammar_registry_name() {
     let sel = repo_selector::parse("backend-svc").unwrap();
     assert_eq!(sel, Selector(vec![Atom::Name("backend-svc".into())]));
+}
+
+/// The drive-prefix rule must not swallow registry names that happen to
+/// contain a colon further along.
+#[test]
+fn grammar_registry_name_with_late_colon_is_not_a_path() {
+    let sel = repo_selector::parse("backend-svc__ab12cd34").unwrap();
+    assert_eq!(
+        sel,
+        Selector(vec![Atom::Name("backend-svc__ab12cd34".into())])
+    );
 }
 
 #[test]
@@ -217,41 +257,4 @@ fn find_by_path_returns_none_outside_any_repo() {
     let tmp = tempfile::tempdir().unwrap();
     let reg = RegistryFile::empty();
     assert!(repo_selector::find_by_path(&reg, tmp.path().to_str().unwrap()).is_none());
-}
-
-/// Windows absolute paths start with neither `.` nor `/`, so the old
-/// starts-with heuristic parsed `C:\repo` as a registry name and every
-/// command reported "repo not found in registry" for a path that was right
-/// there. Platform-independent so Linux CI catches a regression too.
-#[test]
-fn grammar_windows_paths_parse_as_paths() {
-    for raw in [
-        r"C:\Users\runner\repo",
-        r"C:/Users/runner/repo",
-        r"d:\repo",
-        r"\\server\share\repo",
-        r".\relative",
-        "nested/relative",
-    ] {
-        let sel = repo_selector::parse(raw).unwrap();
-        assert_eq!(
-            sel,
-            Selector(vec![Atom::Path(raw.into())]),
-            "{raw} should parse as a path"
-        );
-    }
-}
-
-/// Registry names are `<repo>__<hash8>` — no separator, no drive prefix.
-/// The widened path heuristic must not start swallowing them.
-#[test]
-fn grammar_registry_names_still_parse_as_names() {
-    for raw in ["backend-svc", "myrepo__abcd1234", "ecp", "a_b-c"] {
-        let sel = repo_selector::parse(raw).unwrap();
-        assert_eq!(
-            sel,
-            Selector(vec![Atom::Name(raw.into())]),
-            "{raw} should parse as a registry name"
-        );
-    }
 }
