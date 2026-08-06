@@ -171,44 +171,46 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             )));
         }
 
-        let engine = match auto_ensure::ensure_fresh(&graph_path, &cwd) {
-            Err(err) => {
-                return Err(ecp_core::EcpError::InvalidArgument(format!(
-                    "Error preparing index for {}: {err}",
-                    cwd.display()
-                )));
-            }
-            Ok(auto_ensure::EnsureFreshOutcome::WarmAttach { sibling_graph_path }) => {
-                // The sibling passed auto_ensure's distance gate (≤1 commit behind),
-                // so it serves silently while the background rebuild runs. No "may be
-                // stale" note: a per-invocation apology for a near-current graph is
-                // context noise the LLM can't act on, and a too-stale sibling never
-                // reaches this arm. The actionable hint is reserved for load failure.
-                match Engine::load_warm(&sibling_graph_path) {
-                    Ok(e) => e,
-                    Err(err) => {
-                        return Err(ecp_core::EcpError::InvalidArgument(format!(
-                            "warm-attach graph load failed ({}): {err}. \
+        let engine =
+            match auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &graph_path, &cwd)
+            {
+                Err(err) => {
+                    return Err(ecp_core::EcpError::InvalidArgument(format!(
+                        "Error preparing index for {}: {err}",
+                        cwd.display()
+                    )));
+                }
+                Ok(auto_ensure::EnsureFreshOutcome::WarmAttach { sibling_graph_path }) => {
+                    // The sibling passed auto_ensure's distance gate (≤1 commit behind),
+                    // so it serves silently while the background rebuild runs. No "may be
+                    // stale" note: a per-invocation apology for a near-current graph is
+                    // context noise the LLM can't act on, and a too-stale sibling never
+                    // reaches this arm. The actionable hint is reserved for load failure.
+                    match Engine::load_warm(&sibling_graph_path) {
+                        Ok(e) => e,
+                        Err(err) => {
+                            return Err(ecp_core::EcpError::InvalidArgument(format!(
+                                "warm-attach graph load failed ({}): {err}. \
                              Rebuild the index with `ecp admin index --force --repo .`",
-                            sibling_graph_path.display(),
-                        )));
+                                sibling_graph_path.display(),
+                            )));
+                        }
                     }
                 }
-            }
-            Ok(auto_ensure::EnsureFreshOutcome::Ready) => {
-                graph_path = graph_path::resolve(&cli.graph, &cwd);
-                match Engine::load(&graph_path) {
-                    Ok(e) => e,
-                    Err(err) => {
-                        return Err(ecp_core::EcpError::InvalidArgument(format!(
-                            "Error loading graph from {}: {}",
-                            graph_path.display(),
-                            err
-                        )));
+                Ok(auto_ensure::EnsureFreshOutcome::Ready) => {
+                    graph_path = graph_path::resolve(&cli.graph, &cwd);
+                    match Engine::load(&graph_path) {
+                        Ok(e) => e,
+                        Err(err) => {
+                            return Err(ecp_core::EcpError::InvalidArgument(format!(
+                                "Error loading graph from {}: {}",
+                                graph_path.display(),
+                                err
+                            )));
+                        }
                     }
                 }
-            }
-        };
+            };
 
         // Attach the session's L1 overlay dir (if one resolves) so query commands
         // can surface uncommitted working-tree edits the L2 graph hasn't absorbed.

@@ -116,8 +116,37 @@ pub enum EnsureResult {
     },
 }
 
+/// What a caller needs from the index before it can answer honestly.
+///
+/// This used to be encoded at each call site, and the sites disagreed:
+/// `main.rs` served a sibling SHA's graph on `WarmAttach`, while `diff`
+/// rejected the identical outcome and forced a foreground rebuild — a
+/// difference no user could see, decided by which file the code lived in.
+/// Naming the need leaves the choice with the caller and the mechanics here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexNeed<'a> {
+    /// A near-current graph answers the question. A sibling SHA that passes
+    /// the distance gate may serve this invocation while a rebuild runs in
+    /// the background. Every query command wants this.
+    NearCurrent,
+    /// No sibling commit's graph may stand in, and any build this triggers
+    /// targets the given commit (`None` = HEAD). `diff` reads two graphs and
+    /// extracts files out of them: a sibling is a *different* commit, and a
+    /// background writer would race the read.
+    ///
+    /// The staleness probe underneath is HEAD-relative — it compares the
+    /// sidecar against `git_head_sha` and walks mtimes — so this does **not**
+    /// verify that HEAD is already the requested commit. Callers passing
+    /// `Some(sha)` are expected to hold a checkout guard, as `diff` does with
+    /// `GitGuard`.
+    ExactSha(Option<&'a str>),
+}
+
 /// Outcome returned by `ensure_fresh`, disambiguating the warm-attach fast
 /// path from a fully synchronous build.
+///
+/// `IndexNeed::ExactSha` never yields `WarmAttach`: rather than borrowing a
+/// sibling commit's graph, it builds in the foreground and returns `Ready`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureFreshOutcome {
     /// Graph is up-to-date (or was synchronously rebuilt / overlaid). No
@@ -449,27 +478,43 @@ fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> {
 ///   file set (T7-4), followed by L1 overlay fragment write (T7-5 will replace
 ///   the overlay write with a zero-copy in-place merge).
 /// - Ready → noop.
-pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFreshOutcome, String> {
+pub fn ensure_fresh(
+    need: IndexNeed<'_>,
+    graph_path: &Path,
+    worktree_root: &Path,
+) -> Result<EnsureFreshOutcome, String> {
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
+    // `ExactSha` carries the commit to build; `NearCurrent` builds HEAD.
+    let target_sha = match need {
+        IndexNeed::ExactSha(sha) => sha,
+        IndexNeed::NearCurrent => None,
+    };
     match state {
         EnsureResult::Ready => Ok(EnsureFreshOutcome::Ready),
         EnsureResult::Missing => {
-            if let Some(sibling) = attach_latest_sibling_sha(worktree_root) {
-                spawn_background_rebuild(worktree_root);
-                test_counters::WARM_ATTACH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!(
-                    "l2.warm-attach sibling={} rebuild=background",
-                    sibling.display()
-                );
-                return Ok(EnsureFreshOutcome::WarmAttach {
-                    sibling_graph_path: sibling,
-                });
+            // A sibling is a different commit, so it is only ever an answer to
+            // `NearCurrent`. Deciding here rather than unwinding a warm-attach
+            // afterwards keeps `ExactSha` from announcing an attach it does not
+            // do and from spawning a background rebuild it does not need.
+            if matches!(need, IndexNeed::NearCurrent) {
+                if let Some(sibling) = attach_latest_sibling_sha(worktree_root) {
+                    spawn_background_rebuild(worktree_root);
+                    test_counters::WARM_ATTACH_COUNT
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!(
+                        "l2.warm-attach sibling={} rebuild=background",
+                        sibling.display()
+                    );
+                    return Ok(EnsureFreshOutcome::WarmAttach {
+                        sibling_graph_path: sibling,
+                    });
+                }
             }
             let start = std::time::Instant::now();
             // build_l2 → build_inside_locked writes the HEAD-SHA sidecar in
             // the background as its final step; no extra write needed here.
-            let mut result = crate::build::orchestrator::build_l2(worktree_root, None)
+            let mut result = crate::build::orchestrator::build_l2(worktree_root, target_sha)
                 .map_err(|e| format!("build_l2: {e}"))?;
             drain_tantivy_if_inside_worktree(&mut result, worktree_root);
             eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
@@ -491,7 +536,7 @@ pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFre
                 test_counters::BUILD_L2_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let start = std::time::Instant::now();
-                let mut result = crate::build::orchestrator::build_l2(worktree_root, None)
+                let mut result = crate::build::orchestrator::build_l2(worktree_root, target_sha)
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
                 drain_tantivy_if_inside_worktree(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
@@ -597,7 +642,7 @@ pub fn load_ensured(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<crate::engine::Engine, String> {
-    match ensure_fresh(graph_path, worktree_root)? {
+    match ensure_fresh(IndexNeed::NearCurrent, graph_path, worktree_root)? {
         EnsureFreshOutcome::Ready => {
             let mut engine = crate::engine::Engine::load(graph_path)
                 .map_err(|e| format!("load graph {}: {e}", graph_path.display()))?;

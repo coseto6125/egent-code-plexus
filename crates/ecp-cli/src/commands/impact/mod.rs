@@ -7,7 +7,7 @@ mod symbol;
 
 pub use baseline::build_baseline_payload;
 pub use literal::build_literal_coherence_payload;
-pub use payload::{BaselinePayload, ChangedSymbol, ImpactBySymbol};
+pub use payload::{BaselinePayload, ChangedSymbol, ImpactBySymbol, SymbolImpactPayload};
 pub use symbol::{run_for_symbol, LocalImpact};
 
 use crate::engine::Engine;

@@ -1,5 +1,6 @@
 use super::bfs::{merged_node_meta, run_bfs};
 use super::coverage::{build_coverage_json, coverage_analyses};
+use super::payload::SymbolImpactPayload;
 use super::{
     parse_csv_lower, resolve_min_conf, ImpactArgs, ImpactHints, DEFAULT_CONFIDENCE_THRESHOLD,
 };
@@ -301,12 +302,14 @@ pub(super) fn impact_by_name(
 
     // Use the original user-supplied name (which may be FQN) as the target
     // label in output — more precise than bare_name when owner was specified.
-    let mut result_obj = json!({
-        "status": "success",
-        "target": format_fqn(owner_filter, bare_name),
-        "direction": direction_str(&args.direction),
-        "impact": all_results,
-    });
+    let payload = SymbolImpactPayload {
+        status: "success".to_string(),
+        target: format_fqn(owner_filter, bare_name),
+        direction: direction_str(&args.direction).to_string(),
+        impact: all_results,
+    };
+    let mut result_obj =
+        serde_json::to_value(&payload).map_err(|e| EcpError::Serialization(e.to_string()))?;
     attach_hidden_edges(&mut result_obj, hidden_edges_total);
     attach_heuristic_fields(
         &mut result_obj,

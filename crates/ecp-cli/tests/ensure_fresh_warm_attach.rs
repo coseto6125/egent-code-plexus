@@ -177,7 +177,7 @@ fn warm_attach_picks_up_sibling_sha_when_missing() {
     // warm-attach fires with SHA-1's graph as the sibling.
     let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
     let resolved = graph_path::resolve(legacy_sentinel, repo);
-    let outcome = auto_ensure::ensure_fresh(&resolved, repo)
+    let outcome = auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &resolved, repo)
         .expect("ensure_fresh should succeed with warm-attach");
 
     assert!(
@@ -238,7 +238,7 @@ fn distant_ancestor_sibling_falls_back_to_sync_build() {
 
     let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
     let resolved = graph_path::resolve(legacy_sentinel, repo);
-    let outcome = auto_ensure::ensure_fresh(&resolved, repo)
+    let outcome = auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &resolved, repo)
         .expect("ensure_fresh should sync-build past a too-distant sibling");
 
     assert!(
@@ -304,7 +304,7 @@ fn within_distance_sibling_attached_despite_newer_distant_sibling() {
 
     let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
     let resolved = graph_path::resolve(legacy_sentinel, repo);
-    let outcome = auto_ensure::ensure_fresh(&resolved, repo)
+    let outcome = auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &resolved, repo)
         .expect("ensure_fresh should warm-attach the within-distance sibling");
 
     assert!(
@@ -365,7 +365,7 @@ fn after_rebuild_ensure_fresh_returns_ready() {
     // real commits/<dir>/graph.bin → ensure_index sees the file → Ready.
     let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
     let resolved = graph_path::resolve(legacy_sentinel, repo);
-    let outcome = auto_ensure::ensure_fresh(&resolved, repo)
+    let outcome = auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &resolved, repo)
         .expect("ensure_fresh should return Ready after rebuild");
 
     assert!(
@@ -405,7 +405,7 @@ fn no_sibling_falls_back_to_sync_build() {
     // sync build_l2 fires.
     let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
     let resolved = graph_path::resolve(legacy_sentinel, repo);
-    let outcome = auto_ensure::ensure_fresh(&resolved, repo)
+    let outcome = auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &resolved, repo)
         .expect("ensure_fresh should succeed via sync build_l2");
 
     assert!(
@@ -445,8 +445,9 @@ fn no_sibling_lookup_does_not_poison_later_warm_attach() {
 
     let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
     let first_resolved = graph_path::resolve(legacy_sentinel, repo);
-    let first = auto_ensure::ensure_fresh(&first_resolved, repo)
-        .expect("first ensure_fresh should sync-build without sibling");
+    let first =
+        auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &first_resolved, repo)
+            .expect("first ensure_fresh should sync-build without sibling");
     assert!(
         matches!(first, EnsureFreshOutcome::Ready),
         "expected initial sync build, got {:?}",
@@ -461,8 +462,9 @@ fn no_sibling_lookup_does_not_poison_later_warm_attach() {
     add_second_commit(repo);
 
     let second_resolved = graph_path::resolve(legacy_sentinel, repo);
-    let second = auto_ensure::ensure_fresh(&second_resolved, repo)
-        .expect("second ensure_fresh should warm-attach to the first build");
+    let second =
+        auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &second_resolved, repo)
+            .expect("second ensure_fresh should warm-attach to the first build");
     assert!(
         matches!(second, EnsureFreshOutcome::WarmAttach { .. }),
         "expected later warm-attach after sync build published a sibling, got {:?}",
@@ -514,5 +516,120 @@ fn stale_flag_propagates_through_load_warm() {
     assert!(
         warm_eng.is_stale_for_sha,
         "Engine::load_warm must set is_stale_for_sha=true"
+    );
+}
+
+// ── ExactSha ─────────────────────────────────────────────────────────────────
+
+/// Same fixture as test 1 — a published sibling SHA exists and HEAD has no
+/// graph — but the caller declares `ExactSha`. A sibling is a *different*
+/// commit, so it must build in the foreground and never hand back WarmAttach.
+///
+/// `diff` used to encode this rule itself; the divergence between it and
+/// `main.rs` was invisible to users and decided by which file the call lived in.
+#[test]
+fn exact_sha_builds_in_foreground_instead_of_warm_attaching() {
+    let _env_guard = lock_env();
+    let _snap = EnvSnapshot::take();
+
+    let repo_tmp = TempDir::new().unwrap();
+    let cache_tmp = TempDir::new().unwrap();
+    let repo = repo_tmp.path();
+    let cache = cache_tmp.path();
+
+    git_init_with_commit(repo);
+    run_admin_index(repo, cache);
+    add_second_commit(repo);
+
+    std::env::set_var("HOME", cache);
+    std::env::remove_var("ECP_HOME");
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
+    test_counters::reset();
+
+    let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
+    let resolved = graph_path::resolve(legacy_sentinel, repo);
+    let outcome =
+        auto_ensure::ensure_fresh(auto_ensure::IndexNeed::ExactSha(None), &resolved, repo)
+            .expect("ExactSha ensure should succeed");
+
+    assert!(
+        matches!(outcome, EnsureFreshOutcome::Ready),
+        "ExactSha must resolve to Ready, got {outcome:?}"
+    );
+    // The guarantee this mode exists for. `build_l2_calls` is deliberately not
+    // asserted: that counter tracks the Stale + full-rebuild branch, while this
+    // fixture exercises Missing + synchronous build, which never touches it.
+    assert_eq!(
+        test_counters::warm_attach_calls(),
+        0,
+        "ExactSha must never attach a sibling commit's graph"
+    );
+
+    // The graph now on disk is this commit's own, not the sibling's.
+    let after = graph_path::resolve(legacy_sentinel, repo);
+    assert!(
+        after.exists(),
+        "ExactSha must leave this commit's graph on disk at {}",
+        after.display()
+    );
+    assert_ne!(
+        after, resolved,
+        "resolving after the build must find the freshly published commit dir, \
+         not the pre-build sentinel"
+    );
+}
+
+/// `ExactSha(Some(sha))` is the variant the parameter exists for — `diff`
+/// passes the baseline commit under a `GitGuard` checkout. Pin that it also
+/// refuses a sibling, not just the `None` form.
+#[test]
+fn exact_sha_with_explicit_commit_also_refuses_a_sibling() {
+    let _env_guard = lock_env();
+    let _snap = EnvSnapshot::take();
+
+    let repo_tmp = TempDir::new().unwrap();
+    let cache_tmp = TempDir::new().unwrap();
+    let repo = repo_tmp.path();
+    let cache = cache_tmp.path();
+
+    git_init_with_commit(repo);
+    run_admin_index(repo, cache);
+    add_second_commit(repo);
+
+    std::env::set_var("HOME", cache);
+    std::env::remove_var("ECP_HOME");
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
+    test_counters::reset();
+
+    // HEAD's own sha, mirroring how `diff` calls this from inside a checkout
+    // guard: the guard has already made HEAD the commit being asked for.
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("git rev-parse")
+            .stdout,
+    )
+    .expect("utf8");
+    let head = head.trim();
+
+    let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
+    let resolved = graph_path::resolve(legacy_sentinel, repo);
+    let outcome = auto_ensure::ensure_fresh(
+        auto_ensure::IndexNeed::ExactSha(Some(head)),
+        &resolved,
+        repo,
+    )
+    .expect("ExactSha ensure should succeed");
+
+    assert!(
+        matches!(outcome, EnsureFreshOutcome::Ready),
+        "ExactSha must resolve to Ready, got {outcome:?}"
+    );
+    assert_eq!(
+        test_counters::warm_attach_calls(),
+        0,
+        "an explicit sha must never attach a sibling commit's graph"
     );
 }

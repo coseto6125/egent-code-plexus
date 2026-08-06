@@ -255,15 +255,9 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
 /// Ensure the graph for the currently-checked-out tree is published and
 /// synchronously on disk, then return its resolved path.
 ///
-/// `ensure_fresh` may return `WarmAttach` when the SHA has no published graph
-/// yet: it borrows a *sibling* SHA's graph and spawns a *detached background*
-/// rebuild. For diff that is wrong twice over — the sibling is a different SHA,
-/// and the correct graph is not on disk yet (a `routes::extract` / `fs::copy`
-/// would race the background writer). So on `WarmAttach` we force a foreground
-/// `build_l2` for this exact SHA. The graph path is resolved *after* the build
-/// so a freshly-published commit dir is picked up instead of falling back to
-/// the legacy `.ecp/graph.bin`. `sha` is `Some` for the baseline side (built
-/// under a GitGuard checkout) and `None` for the current side (HEAD).
+/// `sha` is `Some` for the baseline side (built under a GitGuard checkout) and
+/// `None` for the current side (HEAD). The path is resolved *after* the ensure
+/// so a freshly published commit dir wins over the legacy `.ecp/graph.bin`.
 fn ensure_graph_synchronously(
     repo_dir: &std::path::Path,
     sha: Option<&str>,
@@ -271,14 +265,11 @@ fn ensure_graph_synchronously(
 ) -> Result<std::path::PathBuf, EcpError> {
     let legacy_default = std::path::Path::new(".ecp/graph.bin");
     let probe = crate::graph_path::resolve(legacy_default, repo_dir);
-    match crate::auto_ensure::ensure_fresh(&probe, repo_dir)
-        .map_err(|e| EcpError::Output(format!("ensure {label} graph: {e}")))?
-    {
-        crate::auto_ensure::EnsureFreshOutcome::Ready => {}
-        crate::auto_ensure::EnsureFreshOutcome::WarmAttach { .. } => {
-            crate::build::orchestrator::build_l2(repo_dir, sha)
-                .map_err(|e| EcpError::Output(format!("build {label} graph: {e}")))?;
-        }
-    }
+    crate::auto_ensure::ensure_fresh(
+        crate::auto_ensure::IndexNeed::ExactSha(sha),
+        &probe,
+        repo_dir,
+    )
+    .map_err(|e| EcpError::Output(format!("ensure {label} graph: {e}")))?;
     Ok(crate::graph_path::resolve(legacy_default, repo_dir))
 }
