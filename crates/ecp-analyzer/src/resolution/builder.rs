@@ -247,6 +247,16 @@ type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>);
 /// per emitted Route node, consumed by Pass 1.6's fetch-shape route index.
 type EmittedRoute = (u32, u32, String, String);
 
+/// Pass 1 output: SymbolTable + StringPool own every name interned during
+/// registration, threaded through as live state for every later pass.
+struct Pass1Registration {
+    symbol_table: SymbolTable,
+    string_pool: StringPool,
+    nodes: Vec<Node>,
+    files: Vec<File>,
+    collision_blind_spots: Vec<BlindSpotRecord>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CallMetaKey {
     caller_span: (u32, u32, u32, u32),
@@ -391,241 +401,21 @@ impl GraphBuilder {
         }
         let _t_pass1 = std::time::Instant::now();
 
-        // Pre-size accumulators from known input cardinalities. Each
-        // LocalGraph contributes 1 File node + N symbol nodes. Plus a
-        // small per-graph slack for Pass 1.5 Route nodes (one per
-        // routing decorator). Vec growth from 0 → 297k goes through
-        // ~17 reallocations + memcopies; sizing once avoids that.
-        let total_symbol_nodes: usize = self.local_graphs.iter().map(|g| g.nodes.len()).sum();
-        let total_files = self.local_graphs.len();
-        // 10% slack for Pass 1.5 Route synthetics; over-shoot is cheap
-        // (single tail growth), under-shoot just reverts to default.
-        let mut symbol_table = SymbolTable::new();
-        let mut string_pool = StringPool::new();
-        let mut nodes = Vec::with_capacity(total_symbol_nodes + total_symbol_nodes / 10);
-        let mut files = Vec::with_capacity(total_files);
-        // Maps forward-slashed file_path → File node index. Populated in
-        // Pass 1, consumed by `post_process::imports_edges` to wire
-        // (File)-[:Imports]->(symbol) edges. File nodes are deliberately
+        let Pass1Registration {
+            symbol_table,
+            mut string_pool,
+            mut nodes,
+            files,
+            collision_blind_spots,
+        } = pass1_register_nodes(&self.local_graphs);
+        // Maps forward-slashed file_path → File node index. Populated by the
+        // File-node loop after Pass 4, consumed by `post_process::imports_edges`
+        // to wire (File)-[:Imports]->(symbol) edges. File nodes are deliberately
         // NOT registered in SymbolTable — File is metadata, not a symbol,
         // and a SymbolTable hit on a File node would create spurious
         // Calls/Accesses edges in the resolver tiers.
-        // Pre-size to one bucket per file — exact, since each file
-        // contributes exactly one entry.
         let mut file_node_idx: FxHashMap<String, u32> =
-            FxHashMap::with_capacity_and_hasher(total_files, Default::default());
-
-        // Pass 1: Register all nodes into SymbolTable and StringPool
-        let mut current_node_idx = 0;
-        // D1 collision set: uid_u64 → node_idx of the first occurrence. On a
-        // collision (rare path), the previous node's kind/path/owner/name
-        // are reconstructed from `nodes[prev_idx]` + `files` + `string_pool`
-        // for the BlindSpotRecord hint. Storing only the index keeps the
-        // hot path alloc-free (vs the prior 4-String tuple which allocated
-        // ~1M Strings across 245k nodes on .sample_repo).
-        let mut uid_seen: FxHashMap<u64, u32> =
-            FxHashMap::with_capacity_and_hasher(total_symbol_nodes, Default::default());
-        // Collision BlindSpots are accumulated here and merged into all_blind_spots
-        // after the main blind-spot pass (below). Using a separate vec avoids
-        // borrowing string_pool twice in the node loop.
-        let mut collision_blind_spots: Vec<BlindSpotRecord> = Vec::new();
-
-        for (file_idx, local_graph) in self.local_graphs.iter().enumerate() {
-            let file_idx = file_idx as u32;
-            // Path → string 一律走 forward-slash，讓 UID / lookup / 顯示在 Windows
-            // 上與 Linux/macOS 一致（與 resolver.rs / registry/path.rs 既有 idiom 對齊）。
-            // Cow: `to_string_lossy()` returns Cow; `.replace()` always allocates.
-            // Skip the replace + alloc on Linux/macOS where paths use `/` already.
-            let raw_path = local_graph.file_path.to_string_lossy();
-            let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
-                std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
-            } else {
-                raw_path
-            };
-            let path_ref = string_pool.add(&path_str);
-            // Hoisted once per file. `register_node` would otherwise call
-            // `FileMeta::from_path` per node (~25× redundant on the
-            // .sample_repo distribution), each allocating one `String`
-            // for the `\\` → `/` normalisation. `path_str` is already
-            // forward-slash, so use the `_normalized_path` fast path.
-            let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
-
-            files.push(File {
-                path: path_ref,
-                mtime: 0, // In a real implementation, fetch actual mtime
-                content_hash: local_graph.content_hash,
-                category: determine_category(&path_str),
-            });
-
-            for raw_node in &local_graph.nodes {
-                // T1-5: canonical xxh3-64 UID — zero heap alloc, no string-pool entry.
-                // Canonical stream: kind_as_str \0 path \0 owner_class_or_empty \0 name
-                let uid_u64 = ecp_core::uid::compute(
-                    raw_node.kind,
-                    &path_str,
-                    raw_node.owner_class.as_deref(),
-                    &raw_node.name,
-                );
-
-                // D1 collision recovery: if two distinct symbol definitions hash to the
-                // same u64, drop the second and record a BlindSpot for manual review.
-                //
-                // Collision nodes must NOT be registered in the SymbolTable — they
-                // have no valid graph node backing them (we don't push them into
-                // `nodes`). The SymbolTable maps name→node_id, and a phantom node_id
-                // >= nodes.len() at CSR time causes an OOB panic in the out_offsets
-                // loop (builder.rs:1549).
-                //
-                // However, `nodes` MUST still receive a placeholder entry to preserve
-                // position alignment: Pass 2's `start_indices` prefix-sums over
-                // `lg.nodes.len()` (all raw nodes, including collision ones). If we
-                // skip the `nodes.push` without also adjusting `start_indices`, every
-                // subsequent file's node IDs in `start_indices` are off by the collision
-                // count, producing wrong `current_node_idx` values and broken edges.
-                //
-                // Solution: push a tombstone Node (kind=File is reused as the most
-                // benign placeholder; it doesn't enter SymbolTable so it's unreachable
-                // from any query) to occupy the position, keeping nodes.len() ≡
-                // current_node_idx throughout Pass 1.
-                if let Some(&prev_idx) = uid_seen.get(&uid_u64) {
-                    // Reclassify the collision based on (kind, lang) — most
-                    // collisions are not parser bugs but legitimate semantic
-                    // ambiguities the indexer can't resolve without semantic
-                    // analysis. Triaging them up front lets `uid-collision`
-                    // mean "true parser ambiguity worth investigating".
-                    //
-                    //   - method-overload : Method/Constructor with same
-                    //     (kind, path, owner, name) but distinct param-types
-                    //     (Java/Swift/Kotlin/TS/PHP overloads, C++ `operator new`).
-                    //   - ifdef-redef     : C/C++ Macro/Function/Struct/Enum/
-                    //     Typedef/Variable redefined under `#ifdef` branches
-                    //     (`#define X` for 32/64-bit, `static int foo() { ... }`
-                    //     repeated under different platform guards).
-                    //   - uid-collision   : everything else (real parser bug
-                    //     or unhandled corpus pattern).
-                    let bs_kind = classify_collision(raw_node.kind, &path_str);
-                    // `field-reassign` is the same instance field assigned in
-                    // multiple places; deduping to one node loses no information,
-                    // so it records NO BlindSpot — otherwise it would falsely flag
-                    // `ecp impact`/`inspect` traversal as incomplete for ordinary
-                    // OO code. The tombstone below still runs (the dedup is real).
-                    if bs_kind != "field-reassign" {
-                        // Reconstruct prev info from the first occurrence's Node
-                        // (rare path; the alloc savings on every other node pay
-                        // for this lookup many times over).
-                        let prev_node: &ecp_core::graph::Node = &nodes[prev_idx as usize];
-                        let prev_kind = prev_node.kind.as_str();
-                        let prev_path =
-                            string_pool.resolve(&files[prev_node.file_idx as usize].path);
-                        let prev_name = string_pool.resolve(&prev_node.name);
-                        let prev_owner = if prev_node.owner_class.len > 0 {
-                            string_pool.resolve(&prev_node.owner_class)
-                        } else {
-                            ""
-                        };
-                        let hint = ecp_core::graph::format_hint(
-                            bs_kind,
-                            ecp_core::graph::HintFields {
-                                kind: prev_kind,
-                                path: prev_path,
-                                owner: prev_owner,
-                                name: prev_name,
-                            },
-                            ecp_core::graph::HintFields {
-                                kind: raw_node.kind.as_str(),
-                                path: &path_str,
-                                owner: raw_node.owner_class.as_deref().unwrap_or(""),
-                                name: &raw_node.name,
-                            },
-                        );
-                        collision_blind_spots.push(BlindSpotRecord {
-                            kind: string_pool.add(bs_kind),
-                            file_path: string_pool.add(&path_str),
-                            start_row: raw_node.span.0,
-                            start_col: raw_node.span.1,
-                            end_row: raw_node.span.2,
-                            end_col: raw_node.span.3,
-                            hint: string_pool.add(&hint),
-                            // parser-metric BlindSpot (`DEV_METRIC_BS_KINDS`); not
-                            // LLM-actionable, so is_test is irrelevant — fix false.
-                            is_test: false,
-                        });
-                    }
-                    // Push a tombstone Node + tombstone SymbolTable entry to keep
-                    // both `nodes.len()` and `node_kinds.len()` ≡ current_node_idx.
-                    // The tombstone is NOT registered in file_scoped / global_scoped,
-                    // so it is invisible to all name-based lookups and cannot produce
-                    // OOB edges via class_membership or overrides post-processes.
-                    // Tombstone uid+name MUST differ from the surviving node's;
-                    // otherwise `seen_uids.insert(node.uid)` would falsely flag a
-                    // duplicate and name-based queries (`n.name == X`) would still
-                    // hit the tombstone. The surviving node already owns `uid_u64`
-                    // and the original `raw_node.name`; the tombstone gets bit-
-                    // inverted uid (`!uid_u64`) plus empty name (StrRef::default,
-                    // which resolves to "" against any pool). Bit-invert keeps the
-                    // tombstone uid unique-per-collision without inventing a
-                    // counter, and "" can never match a real symbol-name query.
-                    symbol_table.register_tombstone(raw_node.kind, file_meta);
-                    nodes.push(Node {
-                        uid: !uid_u64,
-                        name: StrRef::default(),
-                        file_idx,
-                        kind: raw_node.kind,
-                        span: raw_node.span,
-                        community_id: 0,
-                        owner_class: StrRef::default(),
-                        content_hash: 0,
-                    });
-                    current_node_idx += 1;
-                    continue;
-                }
-                // Just the index — collision path will reconstruct details
-                // from nodes[prev_idx] + files + string_pool if needed.
-                uid_seen.insert(uid_u64, current_node_idx);
-
-                symbol_table.register_node_with_meta(
-                    &path_str,
-                    file_meta,
-                    &raw_node.name,
-                    current_node_idx,
-                    raw_node.kind,
-                );
-
-                let name_ref = string_pool.add(&raw_node.name);
-                // Skip hash-lookup when there is no owner: `StrRef::default()`
-                // (offset=0, len=0) resolves to "" against any pool. Avoids
-                // ~N hash-table lookups for top-level symbols at build time.
-                let owner_class_ref = match raw_node.owner_class.as_deref() {
-                    Some(s) => string_pool.add(s),
-                    None => StrRef::default(),
-                };
-
-                nodes.push(Node {
-                    uid: uid_u64,
-                    name: name_ref,
-                    file_idx,
-                    kind: raw_node.kind,
-                    span: raw_node.span,
-                    community_id: 0,
-                    owner_class: owner_class_ref,
-                    content_hash: raw_node.content_hash,
-                });
-
-                current_node_idx += 1;
-            }
-
-            // NOTE: documents (markdown/yaml section/doc nodes) are parsed into
-            // `local_graph.documents` but the graph.bin DocumentBlock storage is
-            // not wired up yet. Skipped here intentionally — re-enable when the
-            // `DocumentBlock` type lands in `ecp_core::graph`.
-        }
-
-        // Finalize the basename-stem → file paths view consumed by the
-        // resolver's Tier-4 module-file fallback. Pass 1 is the only writer
-        // of `file_scoped`, so finalizing here gives every subsequent pass
-        // (and the resolver) an O(1) `files_by_stem` lookup instead of an
-        // O(N_files) scan per qualified call.
-        symbol_table.build_stem_index();
+            FxHashMap::with_capacity_and_hasher(self.local_graphs.len(), Default::default());
 
         if prof {
             eprintln!(
@@ -690,309 +480,18 @@ impl GraphBuilder {
             );
         }
         let _t_pass2 = std::time::Instant::now();
-        // Pass 2: Resolve imports and build edges
-        //
-        // Pass 2 strategy: dump-disabled path (production hot path) runs in
-        // parallel over `local_graphs` via rayon. Dump-enabled path (oracle
-        // harness, off by default) stays serial so one resolver owns the
-        // decision stream and preserves deterministic dump order.
-        //
-        // To enable parallelism we pre-compute two artifacts serially before
-        // the par_iter so the inner closure only needs read-only access to
-        // the resolver + symbol_table:
-        //   1. `start_indices[graph_idx]` — base `current_node_idx` for each
-        //      `local_graph` (prefix-sum of node counts). Replaces the
-        //      `current_node_idx += 1` accumulator that previously coupled
-        //      graphs sequentially.
-        //   2. `reason_cache` — every unique `framework_refs.reason` /
-        //      `fanout_refs.reason` interned into `string_pool` up front.
-        //      `string_pool.add` is `&mut self` so the inner loop can't
-        //      touch it; pre-interning + lookup-by-cache is `&StrRef`-only.
-
-        let mut start_indices: Vec<u32> = Vec::with_capacity(self.local_graphs.len());
-        {
-            // Precompute as u64 so we detect overflow before the lossy cast
-            // would corrupt indices. Hitting this means >4.29B total RawNodes
-            // — not currently observed in any real repo, but a single int
-            // truncation would silently misalign every downstream index.
-            let total: u64 = self
-                .local_graphs
-                .iter()
-                .map(|lg| lg.nodes.len() as u64)
-                .sum();
-            assert!(
-                total <= u32::MAX as u64,
-                "total RawNode count {} exceeds u32::MAX — graph node ID scheme would overflow",
-                total
-            );
-            let mut acc: u32 = 0;
-            for lg in &self.local_graphs {
-                start_indices.push(acc);
-                acc += lg.nodes.len() as u32;
-            }
-        }
-
-        let reason_heritage = string_pool.add("heritage");
-        let reason_implements = string_pool.add("pass2:implements");
-        let reason_type = string_pool.add("type_annotation");
-        let reason_call = string_pool.add("call");
-        let reason_reads_field = string_pool.add("field_read");
-
-        let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
-        for lg in &self.local_graphs {
-            for fw_ref in &lg.framework_refs {
-                reason_cache
-                    .entry(fw_ref.reason.clone())
-                    .or_insert_with(|| string_pool.add(&fw_ref.reason));
-            }
-            for fanout_ref in &lg.fanout_refs {
-                reason_cache
-                    .entry(fanout_ref.reason.clone())
-                    .or_insert_with(|| string_pool.add(&fanout_ref.reason));
-            }
-        }
-
-        let dump_enabled = self.resolver_dump_path.is_some();
-        let path_aliases = self.path_aliases.clone();
-
-        // Build the Rust workspace module tree once before Pass 2. This is
-        // Tier 3.5: resolves `crate::a::b::fn` FQN calls to concrete files
-        // by walking the filesystem mod tree from each crate root. Gated on
-        // `repo_root` being set — test harnesses that don't set a repo root
-        // simply skip module-tree resolution.
-        let mod_tree_opt: Option<crate::rust::module_tree::RustWorkspaceModTree> = self
-            .repo_root
-            .as_ref()
-            .map(|root| crate::rust::module_tree::RustWorkspaceModTree::build(root));
-
-        // When dumping is enabled we run the serial path so a single resolver
-        // owns the decision stream. When disabled (the production case) we
-        // create a fresh `Resolver` *inside* each par_iter worker so each
-        // thread owns its own state.
-        let mut resolver_for_dump = if dump_enabled {
-            let mut r = Resolver::new(&symbol_table).with_path_aliases(path_aliases.clone());
-            if let (Some(mt), Some(root)) = (mod_tree_opt.as_ref(), self.repo_root.as_ref()) {
-                r = r.with_mod_tree(mt, root.clone());
-            }
-            r.enable_dump();
-            Some(r)
-        } else {
-            None
-        };
-
-        let local_graphs = &self.local_graphs;
-        let symbol_table_ref = &symbol_table;
-        let reason_cache_ref = &reason_cache;
-        // T7-6: reference to skip-set (None = full reanalyze for all files).
-        let symbol_skip_ref = self.symbol_skip_set.as_ref();
-
-        // Pre-build per-graph indirect-call lookup keyed by caller span and
-        // call index so same-name functions/methods in one file do not collide.
-        let indirect_lookups: Vec<FxHashMap<CallMetaKey, (u8, String)>> = local_graphs
-            .iter()
-            .map(|lg| {
-                lg.call_metas
-                    .iter()
-                    .map(|m| {
-                        (
-                            CallMetaKey::new(m.caller_span, m.call_index),
-                            (m.flags, m.dispatch_type.clone()),
-                        )
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // `pending_call_metas`: pairs of (pre-sort edge index, RawCallMeta ref).
-        // Collected alongside edges and promoted to ZeroCopyGraph.call_metas after
-        // the final edge sort remaps pre-sort indices to sorted positions.
-        let mut pending_call_metas_global: Vec<(usize, u8, String)> = Vec::new();
-
-        let edges: Vec<Edge> = if let Some(resolver) = resolver_for_dump.as_mut() {
-            // Serial dump path — original loop, with reason lookups going
-            // through `reason_cache` (filled above) instead of inline
-            // `string_pool.add`.
-            let mut edges = Vec::new();
-            let mut current_node_idx = 0u32;
-            for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
-                let lookup = &indirect_lookups[graph_idx];
-                // T7-6: per-file skip set. `None` = no diff data → resolve all.
-                let file_skip = symbol_skip_ref.and_then(|m| {
-                    let raw = local_graph.file_path.to_string_lossy();
-                    let p: std::borrow::Cow<'_, str> = if raw.contains('\\') {
-                        std::borrow::Cow::Owned(raw.replace('\\', "/"))
-                    } else {
-                        raw
-                    };
-                    m.get(p.as_ref())
-                });
-                for raw_node in &local_graph.nodes {
-                    // T7-6: skip resolver work for symbols whose body hash is
-                    // unchanged. `file_skip` being `None` means either no diff
-                    // data or the file needs full reanalyze — always emit in
-                    // both cases. An empty inner set means all symbols changed.
-                    let skip = file_skip.is_some_and(|skip_uids| {
-                        let uid = ecp_core::uid::compute(
-                            raw_node.kind,
-                            &local_graph.file_path.to_string_lossy().replace('\\', "/"),
-                            raw_node.owner_class.as_deref(),
-                            &raw_node.name,
-                        );
-                        skip_uids.contains(&uid)
-                    });
-                    if skip {
-                        current_node_idx += 1;
-                        continue;
-                    }
-                    pass2_emit_node_edges(
-                        resolver,
-                        local_graph,
-                        raw_node,
-                        current_node_idx,
-                        reason_heritage,
-                        reason_implements,
-                        reason_type,
-                        reason_call,
-                        reason_reads_field,
-                        &symbol_table,
-                        &mut edges,
-                        lookup,
-                        &mut pending_call_metas_global,
-                    );
-                    current_node_idx += 1;
-                }
-                // T7-6: skip framework/fanout edges when all symbols in this
-                // file are in the skip set (import set unchanged → no new
-                // resolution targets for framework refs either).
-                let all_skipped = file_skip.is_some_and(|skip_uids| {
-                    local_graph.nodes.iter().all(|n| {
-                        let uid = ecp_core::uid::compute(
-                            n.kind,
-                            &local_graph.file_path.to_string_lossy().replace('\\', "/"),
-                            n.owner_class.as_deref(),
-                            &n.name,
-                        );
-                        skip_uids.contains(&uid)
-                    })
-                });
-                if !all_skipped {
-                    pass2_emit_framework_and_fanout(
-                        resolver,
-                        symbol_table_ref,
-                        local_graph,
-                        reason_cache_ref,
-                        &mut edges,
-                    );
-                }
-            }
-            edges
-        } else {
-            // Parallel path. Each rayon worker drives a `flat_map` chunk;
-            // we pay one Resolver construction per local_graph (cheap —
-            // borrows symbol_table, clones path_aliases). For ~14k files
-            // on .sample_repo that's ~14k path_aliases.clone() calls
-            // totalling a few ms — far below the parallelism gain.
-            //
-            // The mod_tree borrow is `&RustWorkspaceModTree` (read-only,
-            // `Sync`), so sharing it across rayon workers is safe.
-            let mod_tree_ref = mod_tree_opt.as_ref();
-            let workspace_root_ref = self.repo_root.as_ref();
-            // Collect (local_edges, local_pending) per graph, then stitch.
-            let per_graph: Vec<PerGraphPass2> = local_graphs
-                .par_iter()
-                .enumerate()
-                .map(|(graph_idx, local_graph)| {
-                    let mut resolver =
-                        Resolver::new(symbol_table_ref).with_path_aliases(path_aliases.clone());
-                    if let (Some(mt), Some(root)) = (mod_tree_ref, workspace_root_ref) {
-                        resolver = resolver.with_mod_tree(mt, root.clone());
-                    }
-                    let start_idx = start_indices[graph_idx];
-                    let lookup = &indirect_lookups[graph_idx];
-                    let mut local_edges: Vec<Edge> = Vec::new();
-                    let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
-                    // T7-6: per-file skip set lookup (parallel path).
-                    let file_path_str = {
-                        let raw = local_graph.file_path.to_string_lossy();
-                        if raw.contains('\\') {
-                            raw.replace('\\', "/")
-                        } else {
-                            raw.into_owned()
-                        }
-                    };
-                    let file_skip: Option<&FxHashSet<u64>> =
-                        symbol_skip_ref.and_then(|m| m.get(&file_path_str));
-                    for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
-                        let current_node_idx = start_idx + node_offset as u32;
-                        // T7-6: skip resolver work for unchanged-body symbols.
-                        let skip = file_skip.is_some_and(|skip_uids| {
-                            let uid = ecp_core::uid::compute(
-                                raw_node.kind,
-                                &file_path_str,
-                                raw_node.owner_class.as_deref(),
-                                &raw_node.name,
-                            );
-                            skip_uids.contains(&uid)
-                        });
-                        if skip {
-                            continue;
-                        }
-                        pass2_emit_node_edges(
-                            &resolver,
-                            local_graph,
-                            raw_node,
-                            current_node_idx,
-                            reason_heritage,
-                            reason_implements,
-                            reason_type,
-                            reason_call,
-                            reason_reads_field,
-                            symbol_table_ref,
-                            &mut local_edges,
-                            lookup,
-                            &mut local_pending,
-                        );
-                    }
-                    // T7-6: skip framework/fanout edges only when ALL symbols
-                    // in this file are unchanged.
-                    let all_skipped = file_skip.is_some_and(|skip_uids| {
-                        local_graph.nodes.iter().all(|n| {
-                            let uid = ecp_core::uid::compute(
-                                n.kind,
-                                &file_path_str,
-                                n.owner_class.as_deref(),
-                                &n.name,
-                            );
-                            skip_uids.contains(&uid)
-                        })
-                    });
-                    if !all_skipped {
-                        pass2_emit_framework_and_fanout(
-                            &resolver,
-                            symbol_table_ref,
-                            local_graph,
-                            reason_cache_ref,
-                            &mut local_edges,
-                        );
-                    }
-                    (local_edges, local_pending)
-                })
-                .collect();
-
-            // Stitch per-graph results: compute global edge offset for each graph's
-            // local_pending indices, then merge into the global pending vec.
-            let mut all_edges: Vec<Edge> = Vec::new();
-            for (local_edges, local_pending) in per_graph {
-                let edge_offset = all_edges.len();
-                for (local_idx, flags, dispatch_type) in local_pending {
-                    pending_call_metas_global.push((edge_offset + local_idx, flags, dispatch_type));
-                }
-                all_edges.extend(local_edges);
-            }
-            all_edges
-        };
-        let mut edges = edges;
-        let resolver_dump_drain = resolver_for_dump.as_mut();
+        // Pass 2: resolve imports and build edges (rayon-vs-serial dual
+        // path; see `pass2_resolve_edges` for the pre-computation +
+        // dispatch logic).
+        let (mut edges, pending_call_metas_global) = pass2_resolve_edges(
+            &self.local_graphs,
+            &symbol_table,
+            &mut string_pool,
+            &self.path_aliases,
+            self.repo_root.as_deref(),
+            self.resolver_dump_path.as_deref(),
+            self.symbol_skip_set.as_ref(),
+        );
 
         edges.extend(route_edges);
         edges.extend(entry_edges);
@@ -1028,21 +527,6 @@ impl GraphBuilder {
         // was moved into ZeroCopyGraph). BlindSpotRecord StrRefs are already valid
         // because `string_pool` was borrowed mutably in Pass 1 when they were pushed.
         all_blind_spots.extend(collision_blind_spots);
-
-        // Optional: flush the resolver decision dump now that pass 2 is done.
-        // Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
-        // Only the serial dump-enabled path keeps a `Resolver` alive past
-        // Pass 2; the parallel path constructs ephemeral per-graph resolvers
-        // with `decisions: None`, so a dump-disabled run has nothing to flush.
-        if let Some(dump_path) = self.resolver_dump_path.as_ref() {
-            if let Some(resolver) = resolver_dump_drain {
-                if let Some(decisions) = resolver.take_decisions() {
-                    if let Err(e) = write_resolver_dump(dump_path, &decisions, &symbol_table) {
-                        tracing::warn!("Failed to write resolver dump to {:?}: {}", dump_path, e);
-                    }
-                }
-            }
-        }
 
         if prof {
             eprintln!(
@@ -1476,6 +960,243 @@ impl GraphBuilder {
         }
 
         graph
+    }
+}
+
+/// Pass 1: register every `LocalGraph`'s File + symbol nodes into the
+/// SymbolTable/StringPool, assigning canonical UIDs and tombstoning D1
+/// hash collisions (see BlindSpotRecord `uid-collision`/`method-overload`/
+/// `ifdef-redef` kinds).
+fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
+    // Pre-size accumulators from known input cardinalities. Each
+    // LocalGraph contributes 1 File node + N symbol nodes. Plus a
+    // small per-graph slack for Pass 1.5 Route nodes (one per
+    // routing decorator). Vec growth from 0 → 297k goes through
+    // ~17 reallocations + memcopies; sizing once avoids that.
+    let total_symbol_nodes: usize = local_graphs.iter().map(|g| g.nodes.len()).sum();
+    let total_files = local_graphs.len();
+    // 10% slack for Pass 1.5 Route synthetics; over-shoot is cheap
+    // (single tail growth), under-shoot just reverts to default.
+    let mut symbol_table = SymbolTable::new();
+    let mut string_pool = StringPool::new();
+    let mut nodes = Vec::with_capacity(total_symbol_nodes + total_symbol_nodes / 10);
+    let mut files = Vec::with_capacity(total_files);
+    let mut current_node_idx = 0;
+    // D1 collision set: uid_u64 → node_idx of the first occurrence. On a
+    // collision (rare path), the previous node's kind/path/owner/name
+    // are reconstructed from `nodes[prev_idx]` + `files` + `string_pool`
+    // for the BlindSpotRecord hint. Storing only the index keeps the
+    // hot path alloc-free (vs the prior 4-String tuple which allocated
+    // ~1M Strings across 245k nodes on .sample_repo).
+    let mut uid_seen: FxHashMap<u64, u32> =
+        FxHashMap::with_capacity_and_hasher(total_symbol_nodes, Default::default());
+    // Collision BlindSpots are accumulated here and merged into all_blind_spots
+    // after the main blind-spot pass (below). Using a separate vec avoids
+    // borrowing string_pool twice in the node loop.
+    let mut collision_blind_spots: Vec<BlindSpotRecord> = Vec::new();
+
+    for (file_idx, local_graph) in local_graphs.iter().enumerate() {
+        let file_idx = file_idx as u32;
+        // Path → string 一律走 forward-slash，讓 UID / lookup / 顯示在 Windows
+        // 上與 Linux/macOS 一致（與 resolver.rs / registry/path.rs 既有 idiom 對齊）。
+        // Cow: `to_string_lossy()` returns Cow; `.replace()` always allocates.
+        // Skip the replace + alloc on Linux/macOS where paths use `/` already.
+        let raw_path = local_graph.file_path.to_string_lossy();
+        let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
+            std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
+        } else {
+            raw_path
+        };
+        let path_ref = string_pool.add(&path_str);
+        // Hoisted once per file. `register_node` would otherwise call
+        // `FileMeta::from_path` per node (~25× redundant on the
+        // .sample_repo distribution), each allocating one `String`
+        // for the `\\` → `/` normalisation. `path_str` is already
+        // forward-slash, so use the `_normalized_path` fast path.
+        let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
+
+        files.push(File {
+            path: path_ref,
+            mtime: 0, // In a real implementation, fetch actual mtime
+            content_hash: local_graph.content_hash,
+            category: determine_category(&path_str),
+        });
+
+        for raw_node in &local_graph.nodes {
+            // T1-5: canonical xxh3-64 UID — zero heap alloc, no string-pool entry.
+            // Canonical stream: kind_as_str \0 path \0 owner_class_or_empty \0 name
+            let uid_u64 = ecp_core::uid::compute(
+                raw_node.kind,
+                &path_str,
+                raw_node.owner_class.as_deref(),
+                &raw_node.name,
+            );
+
+            // D1 collision recovery: if two distinct symbol definitions hash to the
+            // same u64, drop the second and record a BlindSpot for manual review.
+            //
+            // Collision nodes must NOT be registered in the SymbolTable — they
+            // have no valid graph node backing them (we don't push them into
+            // `nodes`). The SymbolTable maps name→node_id, and a phantom node_id
+            // >= nodes.len() at CSR time causes an OOB panic in the out_offsets
+            // loop (builder.rs:1549).
+            //
+            // However, `nodes` MUST still receive a placeholder entry to preserve
+            // position alignment: Pass 2's `start_indices` prefix-sums over
+            // `lg.nodes.len()` (all raw nodes, including collision ones). If we
+            // skip the `nodes.push` without also adjusting `start_indices`, every
+            // subsequent file's node IDs in `start_indices` are off by the collision
+            // count, producing wrong `current_node_idx` values and broken edges.
+            //
+            // Solution: push a tombstone Node (kind=File is reused as the most
+            // benign placeholder; it doesn't enter SymbolTable so it's unreachable
+            // from any query) to occupy the position, keeping nodes.len() ≡
+            // current_node_idx throughout Pass 1.
+            if let Some(&prev_idx) = uid_seen.get(&uid_u64) {
+                // Reclassify the collision based on (kind, lang) — most
+                // collisions are not parser bugs but legitimate semantic
+                // ambiguities the indexer can't resolve without semantic
+                // analysis. Triaging them up front lets `uid-collision`
+                // mean "true parser ambiguity worth investigating".
+                //
+                //   - method-overload : Method/Constructor with same
+                //     (kind, path, owner, name) but distinct param-types
+                //     (Java/Swift/Kotlin/TS/PHP overloads, C++ `operator new`).
+                //   - ifdef-redef     : C/C++ Macro/Function/Struct/Enum/
+                //     Typedef/Variable redefined under `#ifdef` branches
+                //     (`#define X` for 32/64-bit, `static int foo() { ... }`
+                //     repeated under different platform guards).
+                //   - uid-collision   : everything else (real parser bug
+                //     or unhandled corpus pattern).
+                let bs_kind = classify_collision(raw_node.kind, &path_str);
+                // `field-reassign` is the same instance field assigned in
+                // multiple places; deduping to one node loses no information,
+                // so it records NO BlindSpot — otherwise it would falsely flag
+                // `ecp impact`/`inspect` traversal as incomplete for ordinary
+                // OO code. The tombstone below still runs (the dedup is real).
+                if bs_kind != "field-reassign" {
+                    // Reconstruct prev info from the first occurrence's Node
+                    // (rare path; the alloc savings on every other node pay
+                    // for this lookup many times over).
+                    let prev_node: &ecp_core::graph::Node = &nodes[prev_idx as usize];
+                    let prev_kind = prev_node.kind.as_str();
+                    let prev_path = string_pool.resolve(&files[prev_node.file_idx as usize].path);
+                    let prev_name = string_pool.resolve(&prev_node.name);
+                    let prev_owner = if prev_node.owner_class.len > 0 {
+                        string_pool.resolve(&prev_node.owner_class)
+                    } else {
+                        ""
+                    };
+                    let hint = ecp_core::graph::format_hint(
+                        bs_kind,
+                        ecp_core::graph::HintFields {
+                            kind: prev_kind,
+                            path: prev_path,
+                            owner: prev_owner,
+                            name: prev_name,
+                        },
+                        ecp_core::graph::HintFields {
+                            kind: raw_node.kind.as_str(),
+                            path: &path_str,
+                            owner: raw_node.owner_class.as_deref().unwrap_or(""),
+                            name: &raw_node.name,
+                        },
+                    );
+                    collision_blind_spots.push(BlindSpotRecord {
+                        kind: string_pool.add(bs_kind),
+                        file_path: string_pool.add(&path_str),
+                        start_row: raw_node.span.0,
+                        start_col: raw_node.span.1,
+                        end_row: raw_node.span.2,
+                        end_col: raw_node.span.3,
+                        hint: string_pool.add(&hint),
+                        // parser-metric BlindSpot (`DEV_METRIC_BS_KINDS`); not
+                        // LLM-actionable, so is_test is irrelevant — fix false.
+                        is_test: false,
+                    });
+                }
+                // Push a tombstone Node + tombstone SymbolTable entry to keep
+                // both `nodes.len()` and `node_kinds.len()` ≡ current_node_idx.
+                // The tombstone is NOT registered in file_scoped / global_scoped,
+                // so it is invisible to all name-based lookups and cannot produce
+                // OOB edges via class_membership or overrides post-processes.
+                // Tombstone uid+name MUST differ from the surviving node's;
+                // otherwise `seen_uids.insert(node.uid)` would falsely flag a
+                // duplicate and name-based queries (`n.name == X`) would still
+                // hit the tombstone. The surviving node already owns `uid_u64`
+                // and the original `raw_node.name`; the tombstone gets bit-
+                // inverted uid (`!uid_u64`) plus empty name (StrRef::default,
+                // which resolves to "" against any pool). Bit-invert keeps the
+                // tombstone uid unique-per-collision without inventing a
+                // counter, and "" can never match a real symbol-name query.
+                symbol_table.register_tombstone(raw_node.kind, file_meta);
+                nodes.push(Node {
+                    uid: !uid_u64,
+                    name: StrRef::default(),
+                    file_idx,
+                    kind: raw_node.kind,
+                    span: raw_node.span,
+                    community_id: 0,
+                    owner_class: StrRef::default(),
+                    content_hash: 0,
+                });
+                current_node_idx += 1;
+                continue;
+            }
+            // Just the index — collision path will reconstruct details
+            // from nodes[prev_idx] + files + string_pool if needed.
+            uid_seen.insert(uid_u64, current_node_idx);
+
+            symbol_table.register_node_with_meta(
+                &path_str,
+                file_meta,
+                &raw_node.name,
+                current_node_idx,
+                raw_node.kind,
+            );
+
+            let name_ref = string_pool.add(&raw_node.name);
+            // Skip hash-lookup when there is no owner: `StrRef::default()`
+            // (offset=0, len=0) resolves to "" against any pool. Avoids
+            // ~N hash-table lookups for top-level symbols at build time.
+            let owner_class_ref = match raw_node.owner_class.as_deref() {
+                Some(s) => string_pool.add(s),
+                None => StrRef::default(),
+            };
+
+            nodes.push(Node {
+                uid: uid_u64,
+                name: name_ref,
+                file_idx,
+                kind: raw_node.kind,
+                span: raw_node.span,
+                community_id: 0,
+                owner_class: owner_class_ref,
+                content_hash: raw_node.content_hash,
+            });
+
+            current_node_idx += 1;
+        }
+
+        // NOTE: documents (markdown/yaml section/doc nodes) are parsed into
+        // `local_graph.documents` but the graph.bin DocumentBlock storage is
+        // not wired up yet. Skipped here intentionally — re-enable when the
+        // `DocumentBlock` type lands in `ecp_core::graph`.
+    }
+
+    // Finalize the basename-stem → file paths view consumed by the
+    // resolver's Tier-4 module-file fallback. Pass 1 is the only writer
+    // of `file_scoped`, so finalizing here gives every subsequent pass
+    // (and the resolver) an O(1) `files_by_stem` lookup instead of an
+    // O(N_files) scan per qualified call.
+    symbol_table.build_stem_index();
+
+    Pass1Registration {
+        symbol_table,
+        string_pool,
+        nodes,
+        files,
+        collision_blind_spots,
     }
 }
 
@@ -2206,6 +1927,328 @@ fn pass2_emit_framework_and_fanout(
             }
         }
     }
+}
+
+/// Pass 2: Resolve imports and build edges
+///
+/// Pass 2 strategy: dump-disabled path (production hot path) runs in
+/// parallel over `local_graphs` via rayon. Dump-enabled path (oracle
+/// harness, off by default) stays serial so one resolver owns the
+/// decision stream and preserves deterministic dump order.
+///
+/// To enable parallelism we pre-compute two artifacts serially before
+/// the par_iter so the inner closure only needs read-only access to
+/// the resolver + symbol_table:
+///   1. `start_indices[graph_idx]` — base `current_node_idx` for each
+///      `local_graph` (prefix-sum of node counts). Replaces the
+///      `current_node_idx += 1` accumulator that previously coupled
+///      graphs sequentially.
+///   2. `reason_cache` — every unique `framework_refs.reason` /
+///      `fanout_refs.reason` interned into `string_pool` up front.
+///      `string_pool.add` is `&mut self` so the inner loop can't
+///      touch it; pre-interning + lookup-by-cache is `&StrRef`-only.
+fn pass2_resolve_edges(
+    local_graphs: &[LocalGraph],
+    symbol_table: &SymbolTable,
+    string_pool: &mut StringPool,
+    path_aliases: &PathAliases,
+    repo_root: Option<&std::path::Path>,
+    resolver_dump_path: Option<&std::path::Path>,
+    symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
+) -> PerGraphPass2 {
+    let mut start_indices: Vec<u32> = Vec::with_capacity(local_graphs.len());
+    {
+        // Precompute as u64 so we detect overflow before the lossy cast
+        // would corrupt indices. Hitting this means >4.29B total RawNodes
+        // — not currently observed in any real repo, but a single int
+        // truncation would silently misalign every downstream index.
+        let total: u64 = local_graphs.iter().map(|lg| lg.nodes.len() as u64).sum();
+        assert!(
+            total <= u32::MAX as u64,
+            "total RawNode count {} exceeds u32::MAX — graph node ID scheme would overflow",
+            total
+        );
+        let mut acc: u32 = 0;
+        for lg in local_graphs {
+            start_indices.push(acc);
+            acc += lg.nodes.len() as u32;
+        }
+    }
+
+    let reason_heritage = string_pool.add("heritage");
+    let reason_implements = string_pool.add("pass2:implements");
+    let reason_type = string_pool.add("type_annotation");
+    let reason_call = string_pool.add("call");
+    let reason_reads_field = string_pool.add("field_read");
+
+    let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
+    for lg in local_graphs {
+        for fw_ref in &lg.framework_refs {
+            reason_cache
+                .entry(fw_ref.reason.clone())
+                .or_insert_with(|| string_pool.add(&fw_ref.reason));
+        }
+        for fanout_ref in &lg.fanout_refs {
+            reason_cache
+                .entry(fanout_ref.reason.clone())
+                .or_insert_with(|| string_pool.add(&fanout_ref.reason));
+        }
+    }
+
+    let dump_enabled = resolver_dump_path.is_some();
+    let path_aliases = path_aliases.clone();
+
+    // Build the Rust workspace module tree once before Pass 2. This is
+    // Tier 3.5: resolves `crate::a::b::fn` FQN calls to concrete files
+    // by walking the filesystem mod tree from each crate root. Gated on
+    // `repo_root` being set — test harnesses that don't set a repo root
+    // simply skip module-tree resolution.
+    let mod_tree_opt: Option<crate::rust::module_tree::RustWorkspaceModTree> =
+        repo_root.map(|root| crate::rust::module_tree::RustWorkspaceModTree::build(root));
+
+    // When dumping is enabled we run the serial path so a single resolver
+    // owns the decision stream. When disabled (the production case) we
+    // create a fresh `Resolver` *inside* each par_iter worker so each
+    // thread owns its own state.
+    let mut resolver_for_dump = if dump_enabled {
+        let mut r = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+        if let (Some(mt), Some(root)) = (mod_tree_opt.as_ref(), repo_root) {
+            r = r.with_mod_tree(mt, root.to_path_buf());
+        }
+        r.enable_dump();
+        Some(r)
+    } else {
+        None
+    };
+
+    let symbol_table_ref = symbol_table;
+    let reason_cache_ref = &reason_cache;
+    // T7-6: reference to skip-set (None = full reanalyze for all files).
+    let symbol_skip_ref = symbol_skip_set;
+
+    // Pre-build per-graph indirect-call lookup keyed by caller span and
+    // call index so same-name functions/methods in one file do not collide.
+    let indirect_lookups: Vec<FxHashMap<CallMetaKey, (u8, String)>> = local_graphs
+        .iter()
+        .map(|lg| {
+            lg.call_metas
+                .iter()
+                .map(|m| {
+                    (
+                        CallMetaKey::new(m.caller_span, m.call_index),
+                        (m.flags, m.dispatch_type.clone()),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+
+    // `pending_call_metas`: pairs of (pre-sort edge index, RawCallMeta ref).
+    // Collected alongside edges and promoted to ZeroCopyGraph.call_metas after
+    // the final edge sort remaps pre-sort indices to sorted positions.
+    let mut pending_call_metas_global: Vec<(usize, u8, String)> = Vec::new();
+
+    let edges: Vec<Edge> = if let Some(resolver) = resolver_for_dump.as_mut() {
+        // Serial dump path — original loop, with reason lookups going
+        // through `reason_cache` (filled above) instead of inline
+        // `string_pool.add`.
+        let mut edges = Vec::new();
+        let mut current_node_idx = 0u32;
+        for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
+            let lookup = &indirect_lookups[graph_idx];
+            // T7-6: per-file skip set. `None` = no diff data → resolve all.
+            let file_skip = symbol_skip_ref.and_then(|m| {
+                let raw = local_graph.file_path.to_string_lossy();
+                let p: std::borrow::Cow<'_, str> = if raw.contains('\\') {
+                    std::borrow::Cow::Owned(raw.replace('\\', "/"))
+                } else {
+                    raw
+                };
+                m.get(p.as_ref())
+            });
+            for raw_node in &local_graph.nodes {
+                // T7-6: skip resolver work for symbols whose body hash is
+                // unchanged. `file_skip` being `None` means either no diff
+                // data or the file needs full reanalyze — always emit in
+                // both cases. An empty inner set means all symbols changed.
+                let skip = file_skip.is_some_and(|skip_uids| {
+                    let uid = ecp_core::uid::compute(
+                        raw_node.kind,
+                        &local_graph.file_path.to_string_lossy().replace('\\', "/"),
+                        raw_node.owner_class.as_deref(),
+                        &raw_node.name,
+                    );
+                    skip_uids.contains(&uid)
+                });
+                if skip {
+                    current_node_idx += 1;
+                    continue;
+                }
+                pass2_emit_node_edges(
+                    resolver,
+                    local_graph,
+                    raw_node,
+                    current_node_idx,
+                    reason_heritage,
+                    reason_implements,
+                    reason_type,
+                    reason_call,
+                    reason_reads_field,
+                    symbol_table,
+                    &mut edges,
+                    lookup,
+                    &mut pending_call_metas_global,
+                );
+                current_node_idx += 1;
+            }
+            // T7-6: skip framework/fanout edges when all symbols in this
+            // file are in the skip set (import set unchanged → no new
+            // resolution targets for framework refs either).
+            let all_skipped = file_skip.is_some_and(|skip_uids| {
+                local_graph.nodes.iter().all(|n| {
+                    let uid = ecp_core::uid::compute(
+                        n.kind,
+                        &local_graph.file_path.to_string_lossy().replace('\\', "/"),
+                        n.owner_class.as_deref(),
+                        &n.name,
+                    );
+                    skip_uids.contains(&uid)
+                })
+            });
+            if !all_skipped {
+                pass2_emit_framework_and_fanout(
+                    resolver,
+                    symbol_table_ref,
+                    local_graph,
+                    reason_cache_ref,
+                    &mut edges,
+                );
+            }
+        }
+        edges
+    } else {
+        // Parallel path. Each rayon worker drives a `flat_map` chunk;
+        // we pay one Resolver construction per local_graph (cheap —
+        // borrows symbol_table, clones path_aliases). For ~14k files
+        // on .sample_repo that's ~14k path_aliases.clone() calls
+        // totalling a few ms — far below the parallelism gain.
+        //
+        // The mod_tree borrow is `&RustWorkspaceModTree` (read-only,
+        // `Sync`), so sharing it across rayon workers is safe.
+        let mod_tree_ref = mod_tree_opt.as_ref();
+        let workspace_root_ref = repo_root;
+        // Collect (local_edges, local_pending) per graph, then stitch.
+        let per_graph: Vec<PerGraphPass2> = local_graphs
+            .par_iter()
+            .enumerate()
+            .map(|(graph_idx, local_graph)| {
+                let mut resolver =
+                    Resolver::new(symbol_table_ref).with_path_aliases(path_aliases.clone());
+                if let (Some(mt), Some(root)) = (mod_tree_ref, workspace_root_ref) {
+                    resolver = resolver.with_mod_tree(mt, root.to_path_buf());
+                }
+                let start_idx = start_indices[graph_idx];
+                let lookup = &indirect_lookups[graph_idx];
+                let mut local_edges: Vec<Edge> = Vec::new();
+                let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
+                // T7-6: per-file skip set lookup (parallel path).
+                let file_path_str = {
+                    let raw = local_graph.file_path.to_string_lossy();
+                    if raw.contains('\\') {
+                        raw.replace('\\', "/")
+                    } else {
+                        raw.into_owned()
+                    }
+                };
+                let file_skip: Option<&FxHashSet<u64>> =
+                    symbol_skip_ref.and_then(|m| m.get(&file_path_str));
+                for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
+                    let current_node_idx = start_idx + node_offset as u32;
+                    // T7-6: skip resolver work for unchanged-body symbols.
+                    let skip = file_skip.is_some_and(|skip_uids| {
+                        let uid = ecp_core::uid::compute(
+                            raw_node.kind,
+                            &file_path_str,
+                            raw_node.owner_class.as_deref(),
+                            &raw_node.name,
+                        );
+                        skip_uids.contains(&uid)
+                    });
+                    if skip {
+                        continue;
+                    }
+                    pass2_emit_node_edges(
+                        &resolver,
+                        local_graph,
+                        raw_node,
+                        current_node_idx,
+                        reason_heritage,
+                        reason_implements,
+                        reason_type,
+                        reason_call,
+                        reason_reads_field,
+                        symbol_table_ref,
+                        &mut local_edges,
+                        lookup,
+                        &mut local_pending,
+                    );
+                }
+                // T7-6: skip framework/fanout edges only when ALL symbols
+                // in this file are unchanged.
+                let all_skipped = file_skip.is_some_and(|skip_uids| {
+                    local_graph.nodes.iter().all(|n| {
+                        let uid = ecp_core::uid::compute(
+                            n.kind,
+                            &file_path_str,
+                            n.owner_class.as_deref(),
+                            &n.name,
+                        );
+                        skip_uids.contains(&uid)
+                    })
+                });
+                if !all_skipped {
+                    pass2_emit_framework_and_fanout(
+                        &resolver,
+                        symbol_table_ref,
+                        local_graph,
+                        reason_cache_ref,
+                        &mut local_edges,
+                    );
+                }
+                (local_edges, local_pending)
+            })
+            .collect();
+
+        // Stitch per-graph results: compute global edge offset for each graph's
+        // local_pending indices, then merge into the global pending vec.
+        let mut all_edges: Vec<Edge> = Vec::new();
+        for (local_edges, local_pending) in per_graph {
+            let edge_offset = all_edges.len();
+            for (local_idx, flags, dispatch_type) in local_pending {
+                pending_call_metas_global.push((edge_offset + local_idx, flags, dispatch_type));
+            }
+            all_edges.extend(local_edges);
+        }
+        all_edges
+    };
+    let resolver_dump_drain = resolver_for_dump.as_mut();
+
+    // Optional: flush the resolver decision dump now that pass 2 is done.
+    // Spec: docs/specs/2026-05-15-resolver-oracle-harness.md
+    // Only the serial dump-enabled path keeps a `Resolver` alive past
+    // Pass 2; the parallel path constructs ephemeral per-graph resolvers
+    // with `decisions: None`, so a dump-disabled run has nothing to flush.
+    if let Some(dump_path) = resolver_dump_path {
+        if let Some(resolver) = resolver_dump_drain {
+            if let Some(decisions) = resolver.take_decisions() {
+                if let Err(e) = write_resolver_dump(dump_path, &decisions, symbol_table) {
+                    tracing::warn!("Failed to write resolver dump to {:?}: {}", dump_path, e);
+                }
+            }
+        }
+    }
+
+    (edges, pending_call_metas_global)
 }
 
 fn write_resolver_dump(
