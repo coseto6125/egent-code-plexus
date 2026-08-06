@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.8.9 - 2026-08-06
+
+Two fixes you can observe, and an internals pass with no behaviour change.
+
+### Changed behaviour
+
+- **`ecp summary --repo <path>` / `ecp contracts --repo <path>` now index a
+  path that was never indexed**, instead of failing with
+  `path not in registry`. The graph-loading commands (`find`, `impact`,
+  `inspect`) already did this through `auto_ensure`; the registry-backed
+  readers went down a different code path and did not. A `--repo <name>` or
+  `--repo @group` that resolves to nothing still fails — there is no directory
+  to build from, and picking one would answer a directed query against the
+  wrong repo. (#679)
+- **`ecp usage --clear` now clears the MCP log too.** It used to remove
+  `cli-calls.jsonl` and print `MCP calls.jsonl kept`, while `ecp usage` reads
+  both by default — so clearing left the dashboard reporting the history you
+  had just asked it to drop. Retention (`ecp admin gc`) reaches both files as
+  well; `calls.jsonl` previously grew unbounded. (#681)
+
+### Fixes
+
+- **CLI telemetry records could interleave on disk.** The writer's own comment
+  said a single `O_APPEND` write is atomic and needs no lock — correct, but it
+  used `writeln!`, which issues one write for the record and another for the
+  newline. A concurrent `ecp` between the two produced `{a}{b}` on one line.
+  Measured before the fix: 45 of 1747 lines unparseable locally, 8% in the
+  busiest repo. Such lines were skipped by `ecp usage` (undercounting) and kept
+  forever by retention (they carry no readable timestamp, so nothing could age
+  them out). The newline now travels in the same write, and unreadable lines
+  are pruned. (#681)
+- Windows absolute paths (`C:\repo`) parsed as registry names rather than
+  paths, so `--repo C:\...` could never resolve. (#679)
+
+### Internals
+
+Six deepening refactors from an architecture review of the repo's churn hot
+spots — no behaviour change intended, and none observed across 4187 tests:
+the cypher pipeline gained per-stage seams (`execute_inner` 231 → 40 lines),
+`GraphBuilder::build()` dropped 1106 → 580 lines with passes 1 and 2 extracted,
+index-readiness policy moved behind a single `IndexNeed` seam that `main` and
+`diff` had been encoding differently, two duplicated `NodeKind` name tables
+were deleted in favour of the one `uid::compute` already hashes, `ecp impact`'s
+symbol-mode envelope got the typed treatment its `--baseline` twin already had,
+and Pass 1's node-ordering and UID-collision invariants became unit-testable.
+(#680)
+
 ## v0.8.8 - 2026-08-05
 
 A dependency release. The MCP server moves to the 2026-07-28 protocol SDK; no
