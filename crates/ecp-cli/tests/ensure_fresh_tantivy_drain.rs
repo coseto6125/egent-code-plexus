@@ -91,7 +91,8 @@ fn ensure_fresh_drains_tantivy_when_ecp_cache_inside_worktree() {
     // graph_path is missing → ensure_fresh takes the `Missing` arm → build_l2
     // spawns the tantivy thread → drain_tantivy_if_inside_worktree must fire.
     let graph_path = worktree.join(".ecp").join("graph.bin");
-    let result = auto_ensure::ensure_fresh(&graph_path, worktree);
+    let result =
+        auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &graph_path, worktree);
     assert!(
         result.is_ok(),
         "ensure_fresh failed in nested-HOME fixture: {:?}",
@@ -125,7 +126,7 @@ fn ensure_fresh_skips_tantivy_drain_when_cache_outside_worktree() {
     test_counters::reset();
 
     let graph_path = worktree.join(".ecp").join("graph.bin");
-    let _ = auto_ensure::ensure_fresh(&graph_path, worktree);
+    let _ = auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &graph_path, worktree);
 
     assert_eq!(
         test_counters::tantivy_join_calls(),

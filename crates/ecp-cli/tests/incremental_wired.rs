@@ -192,7 +192,11 @@ fn test_auto_ensure_dispatches_incremental_for_overlay_dirty() {
     fs::write(worktree.join("lib.rs"), "pub fn changed_fn() {}\n").unwrap();
 
     // ── 4. Run ensure_fresh — expect incremental branch ───────────────────
-    let result = ecp_cli::auto_ensure::ensure_fresh(&graph_path, worktree);
+    let result = ecp_cli::auto_ensure::ensure_fresh(
+        ecp_cli::auto_ensure::IndexNeed::NearCurrent,
+        &graph_path,
+        worktree,
+    );
 
     // ensure_fresh may fail (e.g. session dir write in a minimal tempdir) but
     // the important invariant is which branch was taken BEFORE any error.
@@ -304,7 +308,11 @@ fn test_version_incompatible_falls_through_to_build_l2() {
 
     // Run ensure_fresh — it will enter the incompatible branch and attempt
     // build_l2 (which will fail in the tempdir, but the counter fires first).
-    let _ = ecp_cli::auto_ensure::ensure_fresh(&graph_path, worktree);
+    let _ = ecp_cli::auto_ensure::ensure_fresh(
+        ecp_cli::auto_ensure::IndexNeed::NearCurrent,
+        &graph_path,
+        worktree,
+    );
 
     // build_l2 branch must have fired; reanalyze_files must NOT have fired.
     assert_eq!(

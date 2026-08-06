@@ -75,7 +75,8 @@ impl Drop for EnvSnapshot {
 fn build_initial_graph(worktree: &Path) -> std::path::PathBuf {
     let legacy_default = Path::new(".ecp/graph.bin");
     let graph_path = ecp_cli::graph_path::resolve(legacy_default, worktree);
-    auto_ensure::ensure_fresh(&graph_path, worktree).expect("initial build_l2");
+    auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &graph_path, worktree)
+        .expect("initial build_l2");
     // After the build the registry exists; resolve again to the published path.
     ecp_cli::graph_path::resolve(legacy_default, worktree)
 }

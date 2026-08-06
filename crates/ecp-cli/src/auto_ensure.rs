@@ -116,8 +116,32 @@ pub enum EnsureResult {
     },
 }
 
+/// What a caller needs from the index before it can answer honestly.
+///
+/// This used to be encoded at each call site, and the sites disagreed:
+/// `main.rs` served a sibling SHA's graph on `WarmAttach`, while `diff`
+/// rejected the identical outcome and forced a foreground rebuild — a
+/// difference no user could see, decided by which file the code lived in.
+/// Naming the need leaves the choice with the caller and the mechanics here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexNeed<'a> {
+    /// A near-current graph answers the question. A sibling SHA that passes
+    /// the distance gate may serve this invocation while a rebuild runs in
+    /// the background. Every query command wants this.
+    NearCurrent,
+    /// The graph for this exact commit must be on disk before returning
+    /// (`None` = HEAD). `diff` reads two graphs and extracts files out of
+    /// them: a sibling is a *different* commit, and a background writer would
+    /// race the read.
+    ExactSha(Option<&'a str>),
+}
+
 /// Outcome returned by `ensure_fresh`, disambiguating the warm-attach fast
 /// path from a fully synchronous build.
+///
+/// `IndexNeed::ExactSha` never yields `WarmAttach` — the caller asked for a
+/// specific commit, so a sibling is resolved into a foreground build before
+/// this returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureFreshOutcome {
     /// Graph is up-to-date (or was synchronously rebuilt / overlaid). No
@@ -449,7 +473,35 @@ fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> {
 ///   file set (T7-4), followed by L1 overlay fragment write (T7-5 will replace
 ///   the overlay write with a zero-copy in-place merge).
 /// - Ready → noop.
-pub fn ensure_fresh(graph_path: &Path, worktree_root: &Path) -> Result<EnsureFreshOutcome, String> {
+pub fn ensure_fresh(
+    need: IndexNeed<'_>,
+    graph_path: &Path,
+    worktree_root: &Path,
+) -> Result<EnsureFreshOutcome, String> {
+    let outcome = ensure_fresh_near_current(graph_path, worktree_root)?;
+    match (need, &outcome) {
+        (IndexNeed::ExactSha(sha), EnsureFreshOutcome::WarmAttach { .. }) => {
+            build_l2_foreground(worktree_root, sha)?;
+            Ok(EnsureFreshOutcome::Ready)
+        }
+        _ => Ok(outcome),
+    }
+}
+
+/// Build this exact commit's graph and wait for it. Used when a warm sibling
+/// is not an acceptable answer; the graph path is re-resolved by the caller
+/// afterwards so a freshly published commit dir wins over the legacy
+/// `.ecp/graph.bin`.
+fn build_l2_foreground(worktree_root: &Path, sha: Option<&str>) -> Result<(), String> {
+    crate::build::orchestrator::build_l2(worktree_root, sha)
+        .map(|_| ())
+        .map_err(|e| format!("build exact-sha graph: {e}"))
+}
+
+fn ensure_fresh_near_current(
+    graph_path: &Path,
+    worktree_root: &Path,
+) -> Result<EnsureFreshOutcome, String> {
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
     match state {
@@ -597,7 +649,7 @@ pub fn load_ensured(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<crate::engine::Engine, String> {
-    match ensure_fresh(graph_path, worktree_root)? {
+    match ensure_fresh(IndexNeed::NearCurrent, graph_path, worktree_root)? {
         EnsureFreshOutcome::Ready => {
             let mut engine = crate::engine::Engine::load(graph_path)
                 .map_err(|e| format!("load graph {}: {e}", graph_path.display()))?;
