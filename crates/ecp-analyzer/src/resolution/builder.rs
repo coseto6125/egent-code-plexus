@@ -2644,6 +2644,93 @@ mod tests {
         }
     }
 
+    /// `pass1_register_nodes` became reachable from a test when it was lifted
+    /// out of `build()`. Before that, node ordering — which UIDs hash from —
+    /// could only be observed through a full graph build.
+    #[test]
+    fn pass1_keeps_node_order_and_count_aligned_with_input() {
+        let g = LocalGraph {
+            file_path: "order.py".into(),
+            content_hash: [0; 8],
+            nodes: vec![raw_fn("alpha", 0), raw_fn("beta", 10), raw_fn("gamma", 20)],
+            ..Default::default()
+        };
+
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
+
+        assert_eq!(out.nodes.len(), 3, "one graph node per raw node");
+        assert_eq!(out.files.len(), 1);
+        assert!(
+            out.collision_blind_spots.is_empty(),
+            "distinct names must not collide"
+        );
+        let names: Vec<&str> = out
+            .nodes
+            .iter()
+            .map(|n| out.string_pool.resolve(&n.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "beta", "gamma"],
+            "input order is load-bearing: UIDs and start_indices are derived from it"
+        );
+    }
+
+    /// `uid::compute` hashes (kind, path, owner, name) and deliberately omits
+    /// the span, so two same-named symbols in one file collide by construction
+    /// — C `#ifdef` redefinitions and overloads reach this path for real.
+    ///
+    /// The second one is dropped, but a tombstone takes its slot: `nodes.len()`
+    /// has to stay equal to the raw-node count or every later `start_indices`
+    /// offset shifts and edges land on the wrong symbols.
+    #[test]
+    fn pass1_tombstones_a_uid_collision_without_shifting_indices() {
+        let g = LocalGraph {
+            file_path: "dup.c".into(),
+            content_hash: [0; 8],
+            nodes: vec![raw_fn("twice", 0), raw_fn("twice", 30)],
+            ..Default::default()
+        };
+
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
+
+        assert_eq!(
+            out.nodes.len(),
+            2,
+            "the tombstone must occupy the dropped node's slot"
+        );
+        assert_eq!(
+            out.nodes[1].uid, !out.nodes[0].uid,
+            "tombstone uid is the bit-inverse, so it stays unique without \
+             shadowing the survivor"
+        );
+        assert!(
+            out.string_pool.resolve(&out.nodes[1].name).is_empty(),
+            "an empty name keeps the tombstone out of name-based lookups"
+        );
+        assert_eq!(
+            out.collision_blind_spots.len(),
+            1,
+            "the collision is reported, not silently swallowed"
+        );
+    }
+
+    fn raw_fn(name: &str, start_row: u32) -> RawNode {
+        RawNode {
+            name: name.into(),
+            kind: NodeKind::Function,
+            span: (start_row, 0, start_row + 2, 0),
+            is_exported: false,
+            heritage: vec![],
+            type_annotation: None,
+            decorators: vec![],
+            calls: vec![],
+            field_reads: Vec::new(),
+            owner_class: None,
+            content_hash: 0,
+        }
+    }
+
     #[test]
     fn fanout_ref_emits_n_edges_with_confidence_decay() {
         use ecp_core::analyzer::types::RawFanoutRef;
