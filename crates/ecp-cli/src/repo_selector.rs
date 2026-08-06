@@ -133,33 +133,45 @@ pub fn resolve_top_level_indexing(
     cwd: &str,
     verb_hint: &str,
 ) -> Result<Vec<ResolvedRepo>, ResolveError> {
-    let err = match resolve_top_level(sel, registry, cwd, verb_hint) {
-        Ok(repos) => return Ok(repos),
-        Err(e) => e,
-    };
-    let ResolveError::PathNotRegistered(path) = &err else {
-        return Err(err);
-    };
-    if !Path::new(path).is_dir() {
-        return Err(err);
+    // A selector can name several unregistered paths (`--repo <a>,<b>`), and
+    // `resolve` reports only the first. Loop so each one gets its turn;
+    // `attempted` stops a path that indexes without becoming resolvable from
+    // spinning forever.
+    let mut attempted = HashSet::<String>::new();
+    let mut reopened: Option<ecp_core::registry::Registry> = None;
+
+    loop {
+        let outcome = {
+            let reg = reopened.as_ref().map_or(registry, |r| r.snapshot());
+            resolve_top_level(sel, reg, cwd, verb_hint)
+        };
+        let err = match outcome {
+            Ok(repos) => return Ok(repos),
+            Err(e) => e,
+        };
+        let ResolveError::PathNotRegistered(path) = &err else {
+            return Err(err);
+        };
+        if !Path::new(path).is_dir() || !attempted.insert(path.clone()) {
+            return Err(err);
+        }
+
+        let fail = |reason: String| ResolveError::IndexFailed {
+            path: path.clone(),
+            reason,
+        };
+        let mut built = crate::build::orchestrator::build_l2(Path::new(path), None)
+            .map_err(|e| fail(e.to_string()))?;
+        // Mirrors `admin index`: don't return while the background tantivy
+        // writer still has open segments under the publish dir.
+        built.join_background();
+
+        // `build_l2` upserts the global registry, so the snapshot resolved
+        // against above predates this repo's entry.
+        let home_ecp = ecp_core::registry::resolve_home_ecp();
+        reopened =
+            Some(ecp_core::registry::Registry::open(&home_ecp).map_err(|e| fail(e.to_string()))?);
     }
-
-    let fail = |reason: String| ResolveError::IndexFailed {
-        path: path.clone(),
-        reason,
-    };
-    let mut built = crate::build::orchestrator::build_l2(Path::new(path), None)
-        .map_err(|e| fail(e.to_string()))?;
-    // Mirrors `admin index`: don't return while the background tantivy writer
-    // still has open segments under the publish dir.
-    built.join_background();
-
-    // `build_l2` upserts the global registry, so the snapshot passed in above
-    // predates this repo's entry — reopen before retrying.
-    let home_ecp = ecp_core::registry::resolve_home_ecp();
-    let reopened =
-        ecp_core::registry::Registry::open(&home_ecp).map_err(|e| fail(e.to_string()))?;
-    resolve_top_level(sel, reopened.snapshot(), cwd, verb_hint)
 }
 
 /// Resolve a selector to a deduplicated list of repos. Preserves first
