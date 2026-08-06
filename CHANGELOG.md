@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.9 - 2026-08-06
+
+### Bug Fixes
+
+- write each record in one syscall, and let clearing reach MCP (#681)
+- index an unregistered --repo path instead of refusing it (#679)
+
+### Refactor
+
+- six deepening candidates from the architecture review (#680)
 ## v0.8.8 - 2026-08-05
 
 A dependency release. The MCP server moves to the 2026-07-28 protocol SDK; no
