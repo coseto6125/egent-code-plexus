@@ -6,6 +6,7 @@
 //! `--format json` emits the machine-readable shape below.
 
 use crate::output::{emit, OutputFormat};
+use crate::telemetry_cli::{CLI_TELEMETRY_FILE, MCP_TELEMETRY_FILE};
 use clap::Args;
 use ecp_core::registry::resolve_home_ecp;
 use ecp_core::time::{now_unix_secs, parse_rfc3339_secs};
@@ -34,8 +35,10 @@ pub struct UsageArgs {
     /// Force color off (also honored: NO_COLOR env, non-TTY stdout).
     #[arg(long)]
     pub no_color: bool,
-    /// Delete the CLI telemetry log (cli-calls.jsonl); MCP calls.jsonl is kept.
-    /// Honors -p to scope to the current repo; otherwise clears every repo.
+    /// Delete the telemetry logs — both `cli-calls.jsonl` and MCP
+    /// `calls.jsonl`, since a dashboard that still counts half its history is
+    /// not cleared. Honors -p to scope to the current repo; otherwise clears
+    /// every repo.
     #[arg(long)]
     pub clear: bool,
     /// Hidden: read a single explicit telemetry dir (tests).
@@ -89,16 +92,21 @@ pub fn run(args: UsageArgs) -> Result<(), EcpError> {
     Ok(())
 }
 
-/// Delete `cli-calls.jsonl` in each scanned telemetry dir. MCP `calls.jsonl`
-/// is left intact (it belongs to the MCP path / `ecp insight`). Reports how
-/// many logs were removed. No interactive confirmation — matches the
-/// non-interactive style of `ecp admin drop`; telemetry is cheap to re-accrue.
+/// Delete both telemetry logs in each scanned dir. Reports how many were
+/// removed. No interactive confirmation — matches the non-interactive style of
+/// `ecp admin drop`; telemetry is cheap to re-accrue.
+///
+/// MCP `calls.jsonl` used to be spared here, which left `ecp usage` (whose
+/// default `--source all` reads both) reporting counts and error rates from
+/// history the user had just asked to clear.
 fn run_clear(args: &UsageArgs) -> Result<(), EcpError> {
     let mut removed = 0usize;
     for dir in scan_dirs(args)? {
-        let log = dir.join("cli-calls.jsonl");
-        if log.exists() && std::fs::remove_file(&log).is_ok() {
-            removed += 1;
+        for filename in [CLI_TELEMETRY_FILE, MCP_TELEMETRY_FILE] {
+            let log = dir.join(filename);
+            if log.exists() && std::fs::remove_file(&log).is_ok() {
+                removed += 1;
+            }
         }
     }
     let scope = if args.project {
@@ -106,7 +114,7 @@ fn run_clear(args: &UsageArgs) -> Result<(), EcpError> {
     } else {
         "all repos"
     };
-    println!("cleared CLI telemetry: {removed} log(s) removed ({scope}); MCP calls.jsonl kept");
+    println!("cleared telemetry: {removed} log(s) removed ({scope})");
     Ok(())
 }
 
@@ -135,9 +143,9 @@ fn scan_dirs(args: &UsageArgs) -> Result<Vec<PathBuf>, EcpError> {
 
 fn collect_records(args: &UsageArgs) -> Result<Vec<Rec>, EcpError> {
     let files: &[&str] = match args.source {
-        TelemetrySource::Cli => &["cli-calls.jsonl"],
-        TelemetrySource::Mcp => &["calls.jsonl"],
-        TelemetrySource::All => &["cli-calls.jsonl", "calls.jsonl"],
+        TelemetrySource::Cli => &[CLI_TELEMETRY_FILE],
+        TelemetrySource::Mcp => &[MCP_TELEMETRY_FILE],
+        TelemetrySource::All => &[CLI_TELEMETRY_FILE, MCP_TELEMETRY_FILE],
     };
     let mut recs = Vec::new();
     for dir in scan_dirs(args)? {
@@ -149,30 +157,45 @@ fn collect_records(args: &UsageArgs) -> Result<Vec<Rec>, EcpError> {
     Ok(recs)
 }
 
-/// Rewrite `cli-calls.jsonl` dropping lines older than `retention_days`.
-/// Off the hot path: only `ecp usage` and `ecp admin gc` call this. Best-effort.
-/// MCP `calls.jsonl` is intentionally NOT touched.
+/// Drop telemetry lines older than `retention_days`, for both the CLI and the
+/// MCP file. Off the hot path: only `ecp usage` and `ecp admin gc` call this.
+/// Best-effort — a failed read or write leaves the file as it was.
 pub(crate) fn prune_retention(dir: &Path) {
-    let days = retention_days();
-    let cutoff = now_unix_secs().saturating_sub(days * 86_400);
-    let path = dir.join("cli-calls.jsonl");
-    let Ok(body) = std::fs::read_to_string(&path) else {
+    let cutoff = now_unix_secs().saturating_sub(retention_days() * 86_400);
+    for filename in [CLI_TELEMETRY_FILE, MCP_TELEMETRY_FILE] {
+        prune_file(&dir.join(filename), cutoff);
+    }
+}
+
+fn prune_file(path: &Path, cutoff: u64) {
+    let Ok(body) = std::fs::read_to_string(path) else {
         return;
     };
     let line_count = body.lines().count();
     let kept: Vec<&str> = body
         .lines()
         .filter(|l| {
-            serde_json::from_str::<Value>(l)
+            match serde_json::from_str::<Value>(l)
                 .ok()
                 .and_then(|v| v.get("ts").and_then(Value::as_str).map(str::to_string))
                 .and_then(|ts| parse_rfc3339_secs(&ts))
-                .map(|secs| secs >= cutoff)
-                .unwrap_or(true) // keep unparseable lines
+            {
+                Some(secs) => secs >= cutoff,
+                // A line with no readable timestamp cannot be aged out, so
+                // keeping it means keeping it forever — and the dashboard
+                // cannot count it either. Dropping is the honest option: it is
+                // a record nothing can read, not a record we might need.
+                None => false,
+            }
         })
         .collect();
     if kept.len() != line_count {
-        let _ = std::fs::write(&path, kept.join("\n") + "\n");
+        let body = if kept.is_empty() {
+            String::new()
+        } else {
+            kept.join("\n") + "\n"
+        };
+        let _ = std::fs::write(path, body);
     }
 }
 

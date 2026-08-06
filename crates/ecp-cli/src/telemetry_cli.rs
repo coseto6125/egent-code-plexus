@@ -8,6 +8,9 @@ use ecp_core::EcpError;
 use std::path::PathBuf;
 
 pub const CLI_TELEMETRY_FILE: &str = "cli-calls.jsonl";
+/// Written by `ecp-mcp`, read here by `ecp usage` — named alongside its CLI
+/// twin so retention and clearing cannot silently cover only one of the two.
+pub const MCP_TELEMETRY_FILE: &str = "calls.jsonl";
 
 /// Max bytes of `error_msg` we keep on disk. 200 is enough to identify a
 /// failure mode (`"registry lock timeout after 5s"`, `"failed to load graph:

@@ -156,7 +156,7 @@ fn usage_prunes_lines_older_than_retention() {
 }
 
 #[test]
-fn usage_clear_removes_cli_log_but_keeps_mcp() {
+fn usage_clear_removes_both_logs() {
     let tmp = std::env::temp_dir().join(format!("ecp-usage-clear-{}", std::process::id()));
     let tel = tmp.join(".ecp/telemetry/r__clear");
     std::fs::create_dir_all(&tel).unwrap();
@@ -178,7 +178,11 @@ fn usage_clear_removes_cli_log_but_keeps_mcp() {
         .unwrap();
     assert!(out.status.success(), "clear should exit 0");
     assert!(!cli.exists(), "cli-calls.jsonl must be removed by --clear");
-    assert!(mcp.exists(), "MCP calls.jsonl must be preserved by --clear");
+    assert!(
+        !mcp.exists(),
+        "MCP calls.jsonl must be removed too — `ecp usage` reads both by \
+         default, so sparing it leaves the dashboard reporting cleared history"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -334,5 +338,73 @@ fn usage_source_all_reads_both_files() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["total"], 2, "--source all must count both records: {v}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Retention has to reach the MCP log as well: `ecp admin gc` calls
+/// `prune_retention`, and a file it never touches grows without bound.
+#[test]
+fn usage_prunes_expired_lines_from_both_logs() {
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-prune-both-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__prune");
+    std::fs::create_dir_all(&tel).unwrap();
+    let cli = tel.join("cli-calls.jsonl");
+    let mcp = tel.join("calls.jsonl");
+
+    // Well past any plausible retention window (default 7 days).
+    let old = r#"{"ts":"2020-01-01T00:00:00Z","tool":"inspect","duration_ms":1,"ok":true,"source":"cli","error_kind":null}"#;
+    std::fs::write(&cli, format!("{old}\n")).unwrap();
+    std::fs::write(&mcp, format!("{old}\n")).unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args(["usage", "--telemetry-dir", tel.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    for (path, label) in [(&cli, "cli-calls.jsonl"), (&mcp, "calls.jsonl")] {
+        let body = std::fs::read_to_string(path).unwrap();
+        assert!(
+            body.trim().is_empty(),
+            "{label} should have been pruned, still holds: {body}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A line with no readable timestamp cannot be aged out, so keeping it means
+/// keeping it forever — and `ecp usage` cannot count it either. Concurrent
+/// appends used to produce exactly this shape (`{a}{b}` on one line).
+#[test]
+fn usage_prune_drops_lines_it_cannot_parse() {
+    let tmp = std::env::temp_dir().join(format!("ecp-usage-glued-{}", std::process::id()));
+    let tel = tmp.join(".ecp/telemetry/r__glued");
+    std::fs::create_dir_all(&tel).unwrap();
+    let cli = tel.join("cli-calls.jsonl");
+
+    let fresh = format!(
+        r#"{{"ts":"{}","tool":"find","duration_ms":1,"ok":true,"source":"cli","error_kind":null}}"#,
+        // Far future, so it survives any retention window.
+        "2099-01-01T00:00:00Z"
+    );
+    let glued =
+        r#"{"ts":"2099-01-01T00:00:00Z","tool":"a"}{"ts":"2099-01-01T00:00:00Z","tool":"b"}"#;
+    std::fs::write(&cli, format!("{glued}\n{fresh}\n")).unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args(["usage", "--telemetry-dir", tel.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let body = std::fs::read_to_string(&cli).unwrap();
+    assert!(
+        !body.contains("}{"),
+        "the unparseable glued line should be gone, got: {body}"
+    );
+    assert!(
+        body.contains("\"tool\":\"find\""),
+        "the readable line must survive, got: {body}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
