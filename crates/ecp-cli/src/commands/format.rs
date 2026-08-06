@@ -62,7 +62,7 @@ mod tests {
     /// still hash under a different name.
     #[test]
     fn node_kind_label_matches_the_name_hashed_into_uids() {
-        for kind in NODE_KINDS {
+        for kind in NodeKind::ALL {
             assert_eq!(node_kind_to_str(&kind), kind.as_str(), "{kind:?}");
         }
     }
@@ -71,80 +71,9 @@ mod tests {
     /// `graph.bin` labels its nodes the same way an overlay hit does.
     #[test]
     fn archived_and_live_node_kinds_render_identically() {
-        for kind in NODE_KINDS {
+        for kind in NodeKind::ALL {
             let archived = unsafe { &*(&kind as *const NodeKind as *const ArchivedNodeKind) };
             assert_eq!(kind_to_str(archived), node_kind_to_str(&kind), "{kind:?}");
-        }
-    }
-
-    /// Exhaustive by construction: adding a variant without extending this
-    /// list fails the match below at compile time.
-    const NODE_KINDS: [NodeKind; 29] = [
-        NodeKind::File,
-        NodeKind::Function,
-        NodeKind::Class,
-        NodeKind::Method,
-        NodeKind::Interface,
-        NodeKind::Constructor,
-        NodeKind::Property,
-        NodeKind::Variable,
-        NodeKind::Const,
-        NodeKind::Import,
-        NodeKind::Route,
-        NodeKind::Process,
-        NodeKind::Document,
-        NodeKind::Section,
-        NodeKind::EntryPoint,
-        NodeKind::Struct,
-        NodeKind::Enum,
-        NodeKind::Typedef,
-        NodeKind::Namespace,
-        NodeKind::Module,
-        NodeKind::Macro,
-        NodeKind::Annotation,
-        NodeKind::Trait,
-        NodeKind::Impl,
-        NodeKind::SchemaField,
-        NodeKind::EventTopic,
-        NodeKind::TransactionScope,
-        NodeKind::EnumVariant,
-        NodeKind::PathLiteral,
-    ];
-
-    /// Compile-time guard: a new `NodeKind` variant breaks this match, which
-    /// is the reminder to extend `NODE_KINDS` above.
-    #[allow(dead_code)]
-    fn every_variant_is_listed(kind: NodeKind) {
-        match kind {
-            NodeKind::File
-            | NodeKind::Function
-            | NodeKind::Class
-            | NodeKind::Method
-            | NodeKind::Interface
-            | NodeKind::Constructor
-            | NodeKind::Property
-            | NodeKind::Variable
-            | NodeKind::Const
-            | NodeKind::Import
-            | NodeKind::Route
-            | NodeKind::Process
-            | NodeKind::Document
-            | NodeKind::Section
-            | NodeKind::EntryPoint
-            | NodeKind::Struct
-            | NodeKind::Enum
-            | NodeKind::Typedef
-            | NodeKind::Namespace
-            | NodeKind::Module
-            | NodeKind::Macro
-            | NodeKind::Annotation
-            | NodeKind::Trait
-            | NodeKind::Impl
-            | NodeKind::SchemaField
-            | NodeKind::EventTopic
-            | NodeKind::TransactionScope
-            | NodeKind::EnumVariant
-            | NodeKind::PathLiteral => {}
         }
     }
 }

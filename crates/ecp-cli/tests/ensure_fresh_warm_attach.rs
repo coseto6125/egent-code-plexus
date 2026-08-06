@@ -578,3 +578,58 @@ fn exact_sha_builds_in_foreground_instead_of_warm_attaching() {
          not the pre-build sentinel"
     );
 }
+
+/// `ExactSha(Some(sha))` is the variant the parameter exists for — `diff`
+/// passes the baseline commit under a `GitGuard` checkout. Pin that it also
+/// refuses a sibling, not just the `None` form.
+#[test]
+fn exact_sha_with_explicit_commit_also_refuses_a_sibling() {
+    let _env_guard = lock_env();
+    let _snap = EnvSnapshot::take();
+
+    let repo_tmp = TempDir::new().unwrap();
+    let cache_tmp = TempDir::new().unwrap();
+    let repo = repo_tmp.path();
+    let cache = cache_tmp.path();
+
+    git_init_with_commit(repo);
+    run_admin_index(repo, cache);
+    add_second_commit(repo);
+
+    std::env::set_var("HOME", cache);
+    std::env::remove_var("ECP_HOME");
+    std::env::set_var("ECP_SKIP_BG_REBUILD", "1");
+    test_counters::reset();
+
+    // HEAD's own sha, mirroring how `diff` calls this from inside a checkout
+    // guard: the guard has already made HEAD the commit being asked for.
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("git rev-parse")
+            .stdout,
+    )
+    .expect("utf8");
+    let head = head.trim();
+
+    let legacy_sentinel = std::path::Path::new(".ecp/graph.bin");
+    let resolved = graph_path::resolve(legacy_sentinel, repo);
+    let outcome = auto_ensure::ensure_fresh(
+        auto_ensure::IndexNeed::ExactSha(Some(head)),
+        &resolved,
+        repo,
+    )
+    .expect("ExactSha ensure should succeed");
+
+    assert!(
+        matches!(outcome, EnsureFreshOutcome::Ready),
+        "ExactSha must resolve to Ready, got {outcome:?}"
+    );
+    assert_eq!(
+        test_counters::warm_attach_calls(),
+        0,
+        "an explicit sha must never attach a sibling commit's graph"
+    );
+}

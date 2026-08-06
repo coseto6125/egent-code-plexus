@@ -129,19 +129,24 @@ pub enum IndexNeed<'a> {
     /// the distance gate may serve this invocation while a rebuild runs in
     /// the background. Every query command wants this.
     NearCurrent,
-    /// The graph for this exact commit must be on disk before returning
-    /// (`None` = HEAD). `diff` reads two graphs and extracts files out of
-    /// them: a sibling is a *different* commit, and a background writer would
-    /// race the read.
+    /// No sibling commit's graph may stand in, and any build this triggers
+    /// targets the given commit (`None` = HEAD). `diff` reads two graphs and
+    /// extracts files out of them: a sibling is a *different* commit, and a
+    /// background writer would race the read.
+    ///
+    /// The staleness probe underneath is HEAD-relative — it compares the
+    /// sidecar against `git_head_sha` and walks mtimes — so this does **not**
+    /// verify that HEAD is already the requested commit. Callers passing
+    /// `Some(sha)` are expected to hold a checkout guard, as `diff` does with
+    /// `GitGuard`.
     ExactSha(Option<&'a str>),
 }
 
 /// Outcome returned by `ensure_fresh`, disambiguating the warm-attach fast
 /// path from a fully synchronous build.
 ///
-/// `IndexNeed::ExactSha` never yields `WarmAttach` — the caller asked for a
-/// specific commit, so a sibling is resolved into a foreground build before
-/// this returns.
+/// `IndexNeed::ExactSha` never yields `WarmAttach`: rather than borrowing a
+/// sibling commit's graph, it builds in the foreground and returns `Ready`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureFreshOutcome {
     /// Graph is up-to-date (or was synchronously rebuilt / overlaid). No
@@ -531,7 +536,7 @@ pub fn ensure_fresh(
                 test_counters::BUILD_L2_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let start = std::time::Instant::now();
-                let mut result = crate::build::orchestrator::build_l2(worktree_root, None)
+                let mut result = crate::build::orchestrator::build_l2(worktree_root, target_sha)
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
                 drain_tantivy_if_inside_worktree(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());

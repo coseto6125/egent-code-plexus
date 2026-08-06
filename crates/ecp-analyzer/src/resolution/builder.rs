@@ -2004,7 +2004,7 @@ fn pass2_resolve_edges(
     // `repo_root` being set — test harnesses that don't set a repo root
     // simply skip module-tree resolution.
     let mod_tree_opt: Option<crate::rust::module_tree::RustWorkspaceModTree> =
-        repo_root.map(|root| crate::rust::module_tree::RustWorkspaceModTree::build(root));
+        repo_root.map(crate::rust::module_tree::RustWorkspaceModTree::build);
 
     // When dumping is enabled we run the serial path so a single resolver
     // owns the decision stream. When disabled (the production case) we
