@@ -1,11 +1,19 @@
-//! Typed envelope for `ecp impact --baseline`.
+//! Typed envelopes for `ecp impact` output: [`BaselinePayload`] for
+//! `--baseline <ref>`, [`SymbolImpactPayload`] for plain `<name>` (symbol)
+//! mode.
 //!
-//! Two consumers navigate this payload today: `review::aggregate` in-process
-//! (via `build_baseline_payload`) and `dev::pr_analyze` out-of-process, over
-//! a subprocess's stdout (via `serde_json::from_slice`). Both used to walk a
-//! `serde_json::Value` (or a hand-synced mirror struct) by string key, so a
-//! renamed field was a silent `unwrap_or("?")` at runtime instead of a
-//! compile error. This module is the single source of truth for the shape.
+//! [`BaselinePayload`]: two consumers navigate this payload today:
+//! `review::aggregate` in-process (via `build_baseline_payload`) and
+//! `dev::pr_analyze` out-of-process, over a subprocess's stdout (via
+//! `serde_json::from_slice`). Both used to walk a `serde_json::Value` (or a
+//! hand-synced mirror struct) by string key, so a renamed field was a silent
+//! `unwrap_or("?")` at runtime instead of a compile error.
+//!
+//! [`SymbolImpactPayload`] existed for the same reason before it had a name:
+//! `symbol::impact_by_name` assembled it inline via `json!()`. It has no
+//! external consumer today (unlike `BaselinePayload`), but the field-rename
+//! risk was identical, so it gets the same treatment. This module is the
+//! single source of truth for both shapes.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,6 +40,24 @@ pub struct BaselinePayload {
     pub changed_symbols: Vec<ChangedSymbol>,
     #[serde(default)]
     pub impact_by_symbol: Vec<ImpactBySymbol>,
+}
+
+/// Core JSON envelope emitted by `ecp impact <name>` (symbol mode) —
+/// the shape `symbol::impact_by_name` builds before `attach_hidden_edges` /
+/// `attach_heuristic_fields` and the inline `blind_spot_warning` / `coverage`
+/// mutations extend it further. Those stay `Value` mutations on the
+/// converted payload — the same two-phase flow `impact_with_baseline` uses
+/// for [`BaselinePayload`] — because they depend on state (`ImpactHints`,
+/// `SymbolCoverage`) outside this shape.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolImpactPayload {
+    pub status: String,
+    pub target: String,
+    pub direction: String,
+    /// Same BFS-entry boundary as [`ImpactBySymbol::impact`]: `run_bfs`
+    /// returns `Vec<Value>`, so typing this field would mean typing that
+    /// return too.
+    pub impact: Vec<Value>,
 }
 
 /// One symbol whose source body changed between baseline and HEAD.
@@ -144,5 +170,32 @@ mod tests {
         assert_eq!(p.impact_by_symbol.len(), 1);
         assert!(p.impact_by_symbol[0].impact.is_empty());
         assert!(p.changed_symbols.is_empty());
+    }
+
+    /// `symbol::impact_by_name` used to build this exact shape via `json!()`
+    /// — pinning the field set here catches a rename the compiler would
+    /// otherwise miss for `--format toon`/`--format text` paths that never
+    /// exercise the enrichment mutations layered on top.
+    #[test]
+    fn symbol_impact_payload_serializes_exactly_four_fields() {
+        let p = SymbolImpactPayload {
+            status: "success".into(),
+            target: "caller".into(),
+            direction: "upstream".into(),
+            impact: vec![serde_json::json!({"depth": 0, "name": "caller"})],
+        };
+        let v = serde_json::to_value(&p).expect("serializes");
+        let mut keys: Vec<&str> = v
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["direction", "impact", "status", "target"]);
+        assert_eq!(v["status"], serde_json::json!("success"));
+        assert_eq!(v["target"], serde_json::json!("caller"));
+        assert_eq!(v["direction"], serde_json::json!("upstream"));
+        assert_eq!(v["impact"][0]["name"], serde_json::json!("caller"));
     }
 }
