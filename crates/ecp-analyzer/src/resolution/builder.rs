@@ -243,6 +243,13 @@ use std::collections::HashMap;
 /// `pending_call_metas` entries are `(pre_sort_edge_idx, flags, dispatch_type)`.
 type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>);
 
+/// Pass 2's stitched whole-build output. Same shape as [`PerGraphPass2`], but
+/// named apart because it is the aggregate across every graph, not one graph's
+/// share — `pass2_resolve_edges` does whole-build setup (mod-tree build,
+/// `start_indices` prefix-sum, reason interning) before it fans out, so it is
+/// called once, not once per file.
+type Pass2Output = (Vec<Edge>, Vec<(usize, u8, String)>);
+
 /// Pass 1.5 output: `(route_node_idx, file_idx, route_method, route_path)`
 /// per emitted Route node, consumed by Pass 1.6's fetch-shape route index.
 type EmittedRoute = (u32, u32, String, String);
@@ -1955,7 +1962,7 @@ fn pass2_resolve_edges(
     repo_root: Option<&std::path::Path>,
     resolver_dump_path: Option<&std::path::Path>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
-) -> PerGraphPass2 {
+) -> Pass2Output {
     let mut start_indices: Vec<u32> = Vec::with_capacity(local_graphs.len());
     {
         // Precompute as u64 so we detect overflow before the lossy cast

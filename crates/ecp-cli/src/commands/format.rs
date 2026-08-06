@@ -72,6 +72,10 @@ mod tests {
     #[test]
     fn archived_and_live_node_kinds_render_identically() {
         for kind in NodeKind::ALL {
+            // SAFETY: the reverse of `From<&ArchivedNodeKind> for NodeKind`
+            // (graph.rs) — both are `#[repr(u8)]` with identical discriminants,
+            // so reinterpreting a live variant as its archive is layout-valid.
+            // `kind` comes from `NodeKind::ALL`, so the discriminant is in range.
             let archived = unsafe { &*(&kind as *const NodeKind as *const ArchivedNodeKind) };
             assert_eq!(kind_to_str(archived), node_kind_to_str(&kind), "{kind:?}");
         }
