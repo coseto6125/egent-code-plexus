@@ -89,6 +89,8 @@ pub enum ResolveError {
     PathNotRegistered(String),
     #[error("`@{group}` cannot be used at the top level — use `ecp group {hint}` instead")]
     GroupAtTopLevel { group: String, hint: String },
+    #[error("indexing {path} failed: {reason}")]
+    IndexFailed { path: String, reason: String },
 }
 
 /// Thin wrapper around `resolve` that rejects `@<group>` atoms before
@@ -111,6 +113,53 @@ pub fn resolve_top_level(
         }
     }
     resolve(sel, registry, cwd)
+}
+
+/// Resolve like [`resolve_top_level`], but index an unregistered *path* rather
+/// than rejecting it.
+///
+/// The graph-loading commands (`find` / `impact` / `inspect`) already index on
+/// demand via `auto_ensure::ensure_fresh`. The Registry-backed readers
+/// (`summary` / `contracts`) resolve through this module instead, so they used
+/// to fail on any path the user had not indexed by hand — the same repo that
+/// `ecp find` would have indexed silently.
+///
+/// Only `Cwd` / `Path` atoms are indexable. A `Name` or `@group` that resolves
+/// to nothing has no directory to build from, and picking one would answer a
+/// directed query against the wrong repo.
+pub fn resolve_top_level_indexing(
+    sel: &Selector,
+    registry: &RegistryFile,
+    cwd: &str,
+    verb_hint: &str,
+) -> Result<Vec<ResolvedRepo>, ResolveError> {
+    let err = match resolve_top_level(sel, registry, cwd, verb_hint) {
+        Ok(repos) => return Ok(repos),
+        Err(e) => e,
+    };
+    let ResolveError::PathNotRegistered(path) = &err else {
+        return Err(err);
+    };
+    if !Path::new(path).is_dir() {
+        return Err(err);
+    }
+
+    let fail = |reason: String| ResolveError::IndexFailed {
+        path: path.clone(),
+        reason,
+    };
+    let mut built = crate::build::orchestrator::build_l2(Path::new(path), None)
+        .map_err(|e| fail(e.to_string()))?;
+    // Mirrors `admin index`: don't return while the background tantivy writer
+    // still has open segments under the publish dir.
+    built.join_background();
+
+    // `build_l2` upserts the global registry, so the snapshot passed in above
+    // predates this repo's entry — reopen before retrying.
+    let home_ecp = ecp_core::registry::resolve_home_ecp();
+    let reopened =
+        ecp_core::registry::Registry::open(&home_ecp).map_err(|e| fail(e.to_string()))?;
+    resolve_top_level(sel, reopened.snapshot(), cwd, verb_hint)
 }
 
 /// Resolve a selector to a deduplicated list of repos. Preserves first

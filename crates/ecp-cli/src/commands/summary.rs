@@ -78,10 +78,11 @@ pub fn build_payload(args: &SummaryArgs, _graph_arg: &Path) -> Result<Value, Ecp
         // Explicit selector → per-repo health.
         Some(repo_sel) => {
             let selector = crate::repo_selector::parse(repo_sel)
-                .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
-            let resolved =
-                crate::repo_selector::resolve_top_level(&selector, reg, &cwd_str, "summary")
-                    .map_err(|e| EcpError::Output(format!("selector: {e}")))?;
+                .map_err(|e| EcpError::InvalidArgument(format!("--repo selector: {e}")))?;
+            let resolved = crate::repo_selector::resolve_top_level_indexing(
+                &selector, reg, &cwd_str, "summary",
+            )
+            .map_err(|e| EcpError::InvalidArgument(format!("--repo: {e}")))?;
             let per_repo: Vec<Value> = resolved
                 .iter()
                 .map(|r| build_repo_health(r, args.detailed))
