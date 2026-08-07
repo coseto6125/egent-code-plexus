@@ -85,12 +85,12 @@ impl rmcp::ServerHandler for RmcpHandler {
     fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
            + rmcp::service::MaybeSendFuture
            + '_ {
         let tools = self.0.rmcp_tools.to_vec();
-        std::future::ready(Ok(rmcp::model::ListToolsResult::with_all_items(tools)))
+        std::future::ready(Ok(list_tools_result(tools, context.protocol_version())))
     }
 
     fn call_tool(
@@ -126,6 +126,35 @@ impl rmcp::ServerHandler for RmcpHandler {
     }
 }
 
+/// How long a peer may treat one `tools/list` response as fresh.
+///
+/// The tool set is derived once from the clap tree in `EcpMcpServer::new` and
+/// never changes while the process lives, so any TTL up to the session length
+/// would be honest. It stays short anyway: rmcp's client cache is keyed per
+/// connection, and a spawn-mode session that outlives an `ecp` upgrade should
+/// re-list rather than keep calling a subcommand the new binary dropped.
+const TOOL_LIST_TTL_MS: u64 = 60_000;
+
+/// Attach the SEP-2549 cache hints that protocol `2026-07-28` requires on
+/// `tools/list`. A strict client on that version rejects a response missing
+/// `ttlMs` / `cacheScope` outright, before any tool call. The tool set is
+/// derived from the binary alone — no per-user data — so the scope is public.
+///
+/// Older peers predate both fields and keep the legacy wire shape, matching
+/// how rmcp's own `#[tool_handler]` gates them.
+fn list_tools_result(
+    tools: Vec<rmcp::model::Tool>,
+    protocol: Option<rmcp::model::ProtocolVersion>,
+) -> rmcp::model::ListToolsResult {
+    let result = rmcp::model::ListToolsResult::with_all_items(tools);
+    match protocol {
+        Some(version) if version >= rmcp::model::ProtocolVersion::V_2026_07_28 => result
+            .with_ttl_ms(TOOL_LIST_TTL_MS)
+            .with_cache_scope(rmcp::model::CacheScope::Public),
+        _ => result,
+    }
+}
+
 fn build_rmcp_tools(tools: &[DerivedTool]) -> Vec<rmcp::model::Tool> {
     tools
         .iter()
@@ -141,6 +170,58 @@ fn build_rmcp_tools(tools: &[DerivedTool]) -> Vec<rmcp::model::Tool> {
             rmcp::model::Tool::new(t.name.clone(), t.description.clone(), Arc::new(map))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::ProtocolVersion;
+
+    fn wire(protocol: Option<ProtocolVersion>) -> serde_json::Value {
+        serde_json::to_value(list_tools_result(Vec::new(), protocol)).expect("serialize")
+    }
+
+    #[test]
+    fn peer_on_2026_07_28_gets_the_required_cache_hints() {
+        let json = wire(Some(ProtocolVersion::V_2026_07_28));
+        assert_eq!(json["ttlMs"], serde_json::json!(TOOL_LIST_TTL_MS));
+        assert_eq!(json["cacheScope"], serde_json::json!("public"));
+    }
+
+    /// The gate is `>=`, not `==`: a protocol newer than any this build knows
+    /// about still requires the fields.
+    #[test]
+    fn peer_on_a_later_version_still_gets_the_cache_hints() {
+        let future: ProtocolVersion =
+            serde_json::from_value(serde_json::json!("2027-01-01")).expect("parse version");
+        let json = wire(Some(future));
+        assert_eq!(json["ttlMs"], serde_json::json!(TOOL_LIST_TTL_MS));
+        assert_eq!(json["cacheScope"], serde_json::json!("public"));
+    }
+
+    #[test]
+    fn legacy_peer_keeps_the_wire_shape_that_predates_the_fields() {
+        for version in [
+            ProtocolVersion::V_2025_11_25,
+            ProtocolVersion::V_2025_06_18,
+            ProtocolVersion::V_2024_11_05,
+        ] {
+            let json = wire(Some(version.clone()));
+            assert!(
+                json.get("ttlMs").is_none() && json.get("cacheScope").is_none(),
+                "cache hints leaked to legacy peer {version:?}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn unnegotiated_peer_keeps_the_legacy_wire_shape() {
+        let json = wire(None);
+        assert!(
+            json.get("ttlMs").is_none() && json.get("cacheScope").is_none(),
+            "cache hints emitted without a negotiated version: {json}"
+        );
+    }
 }
 
 pub async fn serve_stdio(server: EcpMcpServer) -> anyhow::Result<()> {
