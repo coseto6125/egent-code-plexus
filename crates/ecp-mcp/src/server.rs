@@ -172,6 +172,14 @@ fn build_rmcp_tools(tools: &[DerivedTool]) -> Vec<rmcp::model::Tool> {
         .collect()
 }
 
+pub async fn serve_stdio(server: EcpMcpServer) -> anyhow::Result<()> {
+    let handler = RmcpHandler(Arc::new(server));
+    let transport = rmcp::transport::stdio();
+    let running = rmcp::serve_server(handler, transport).await?;
+    running.waiting().await.ok();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,12 +230,4 @@ mod tests {
             "cache hints emitted without a negotiated version: {json}"
         );
     }
-}
-
-pub async fn serve_stdio(server: EcpMcpServer) -> anyhow::Result<()> {
-    let handler = RmcpHandler(Arc::new(server));
-    let transport = rmcp::transport::stdio();
-    let running = rmcp::serve_server(handler, transport).await?;
-    running.waiting().await.ok();
-    Ok(())
 }
