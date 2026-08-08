@@ -77,6 +77,7 @@ pub fn run_for_symbol(
     max_depth: Option<u32>,
     timeout_ms: Option<u64>,
     include_tests: bool,
+    max_results: Option<usize>,
 ) -> Result<LocalImpact, EcpError> {
     let dir = match direction.to_ascii_lowercase().as_str() {
         "downstream" | "down" => Direction::Down,
@@ -104,6 +105,7 @@ pub fn run_for_symbol(
         literal: None,
         literal_coherence: false,
         batch: false,
+        max_results,
     };
     let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
     let (payload, _hints) = super::build_payload_with_hints(&args, engine)?;
@@ -272,6 +274,7 @@ pub(super) fn impact_by_name(
             effective_include_tests,
             &rel_filter,
             !args.no_heuristic,
+            args.max_results,
         );
         all_results.extend(det_results.iter().cloned());
         per_match_bfs.push((*start_idx, det_results));

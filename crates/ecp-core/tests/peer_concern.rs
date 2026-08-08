@@ -38,7 +38,7 @@ fn hard_when_same_symbol_modified() {
     ));
 }
 
-/// The identity is `(file, name)`, never the name alone. This repo's own graph
+/// HARD is a shared dirty FILE, never a shared bare name. This repo's own graph
 /// holds 66 definitions of `run`; matching on the name would tell two sessions
 /// that never touched the same code that they both modified it.
 #[test]
@@ -107,19 +107,42 @@ fn hard_takes_precedence_over_soft() {
     }
 }
 
-/// The reason string is read by an LLM, so it has to name the file it matched
-/// on — "both sessions modified `run`" is unactionable when the repo has 66.
+/// `dirty_symbols` is a file's declaration list, not a change set — nothing
+/// compares against the base graph. Two sessions editing DIFFERENT functions of
+/// the same file still both list every declaration in it, so the reason must
+/// claim the shared file and must not claim a shared edit.
 #[test]
-fn hard_reason_names_the_file_it_matched_on() {
-    let mine = vec![sym("run", "src/a.rs")];
-    let peer = vec![sym("run", "src/a.rs")];
+fn hard_reason_claims_the_shared_file_not_a_shared_edit() {
+    let mine = vec![sym("foo", "src/a.rs"), sym("bar", "src/a.rs")];
+    let peer = vec![sym("foo", "src/a.rs"), sym("bar", "src/a.rs")];
     match classify(&peer, &mine, &empty_cache()) {
-        ConcernResult::Hit { reason, .. } => assert!(
-            reason.contains("src/a.rs"),
-            "reason must carry the file: {reason}"
-        ),
+        ConcernResult::Hit { reason, .. } => {
+            assert!(
+                reason.contains("src/a.rs"),
+                "reason must carry the file: {reason}"
+            );
+            assert!(
+                !reason.contains("Both sessions modified `"),
+                "reason must not claim a shared symbol edit it cannot know: {reason}"
+            );
+        }
         other => panic!("expected a hit, got {other:?}"),
     }
+}
+
+/// The corollary: a peer dirty on a file we also have dirty is HARD even when
+/// no declaration name lines up — a shared dirty file is the merge conflict.
+#[test]
+fn shared_dirty_file_is_hard_even_without_a_shared_name() {
+    let mine = vec![sym("foo", "src/a.rs")];
+    let peer = vec![sym("bar", "src/a.rs")];
+    assert!(matches!(
+        classify(&peer, &mine, &empty_cache()),
+        ConcernResult::Hit {
+            kind: ConcernKind::Hard,
+            ..
+        }
+    ));
 }
 
 #[test]

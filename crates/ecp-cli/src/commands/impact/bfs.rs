@@ -73,6 +73,7 @@ pub(super) fn run_bfs(
     include_tests: bool,
     rel_filter: &Option<Vec<String>>,
     include_heuristic: bool,
+    max_results: Option<usize>,
 ) -> (Vec<Value>, Vec<Value>, u64, u64) {
     // (node_idx, depth, via_edge_info, reached_via_heuristic)
     type ViaEdge = Option<(String, f32)>;
@@ -163,6 +164,15 @@ pub(super) fn run_bfs(
             heur_results.push(entry);
         } else {
             det_results.push(entry);
+        }
+
+        // A caller that only wants the first N reached nodes stops the walk
+        // here rather than filtering afterwards: at depth 2 a hub symbol
+        // reaches six figures of nodes, and every one of them is materialised
+        // as an owned `Value` above. `None` keeps the exhaustive traversal the
+        // CLI needs.
+        if max_results.is_some_and(|cap| det_results.len() + heur_results.len() >= cap) {
+            break;
         }
 
         if curr_depth >= max_depth {

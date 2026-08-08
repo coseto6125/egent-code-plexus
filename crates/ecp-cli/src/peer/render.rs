@@ -16,7 +16,10 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
     // deliver the same (peer, symbol, kind) concern more than once between
     // drains. Keep only the LAST occurrence — it carries the freshest
     // peer_delta — by scanning in reverse with a seen-set.
-    let mut seen: std::collections::HashSet<(&str, &str, ConcernKindSer)> =
+    // Keyed on the symbol's FILE as well as its name: a peer concerning us
+    // about `run` in two different files is two distinct concerns, and a
+    // name-only key would render only the last one.
+    let mut seen: std::collections::HashSet<(&str, &str, &str, ConcernKindSer)> =
         std::collections::HashSet::new();
     let mut deduped: Vec<&InboxEntry> = entries
         .iter()
@@ -27,7 +30,12 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
                 symbol,
                 kind,
                 ..
-            } => seen.insert((peer_session.as_str(), symbol.name.as_str(), *kind)),
+            } => seen.insert((
+                peer_session.as_str(),
+                symbol.file.as_str(),
+                symbol.name.as_str(),
+                *kind,
+            )),
             InboxEntry::Message { .. } => true,
         })
         .collect();

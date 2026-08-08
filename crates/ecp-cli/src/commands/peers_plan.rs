@@ -54,6 +54,7 @@ pub fn cmd_plan(
             Some(depth),
             None,
             include_tests,
+            None,
         ) {
             Ok(l) => l,
             // Per-target misses are expected outcomes here, not command

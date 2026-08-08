@@ -386,16 +386,26 @@ static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 // overlay writes and reanalyze hot path) via `crate::reanalyze::pipeline()`.
 use crate::reanalyze::pipeline;
 
-/// `None` for kinds that are not a peer-collision surface — File, Variable,
-/// Import, Route, Process, Document, Section, EntryPoint, Property. `NodeKind`
-/// has no Module/Namespace/Struct/Enum/Trait/Type variants.
+/// `None` for nodes that are not a declaration two sessions can both edit —
+/// File, Import, Route, Process, Document, Section, EntryPoint, Property,
+/// Variable, PathLiteral and the rest of the reference-level tail.
+///
+/// The declaration variants at the end of `NodeKind` (Struct, Enum, Typedef,
+/// Namespace, Module, Trait, Impl, Macro, Annotation) were appended after this
+/// mapping was first written — the schema is append-only — so they used to fall
+/// through the catch-all. A Rust file holding only `pub struct Config` would
+/// then produce an empty declaration list and be invisible to `ecp peers`.
 fn map_node_kind(k: &NodeKind) -> Option<SymbolKind> {
     match k {
         NodeKind::Function => Some(SymbolKind::Function),
         NodeKind::Method | NodeKind::Constructor => Some(SymbolKind::Method),
-        NodeKind::Class => Some(SymbolKind::Struct),
-        NodeKind::Interface => Some(SymbolKind::Trait),
+        NodeKind::Class | NodeKind::Struct | NodeKind::Impl => Some(SymbolKind::Struct),
+        NodeKind::Interface | NodeKind::Trait => Some(SymbolKind::Trait),
+        NodeKind::Enum => Some(SymbolKind::Enum),
+        NodeKind::Typedef => Some(SymbolKind::Type),
+        NodeKind::Module | NodeKind::Namespace => Some(SymbolKind::Module),
         NodeKind::Const => Some(SymbolKind::Const),
+        NodeKind::Macro | NodeKind::Annotation => Some(SymbolKind::Unknown),
         _ => None,
     }
 }
@@ -479,21 +489,28 @@ fn relativise(session_dir: &Path, path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The symbol surface a peer session can collide on.
+/// Declarations per dirty file. Bounded so one generated or bundled file
+/// cannot dominate the manifest, which is deserialized on the agent-blocking
+/// query path and rewritten on every save.
+///
+/// Truncation is visible rather than silent: the entry keeps a final
+/// `SymbolKind::Unknown` marker named `…+N more (truncated)`, so a reader that
+/// finds no overlap can tell "no overlap" from "we stopped looking".
+const MAX_SYMBOLS_PER_ENTRY: usize = 400;
+
+/// The declaration surface a peer session can collide on.
 ///
 /// Load-bearing for `ecp peers`: `peer::concern::classify` reads
 /// `dirty_symbols` and nothing else, so an entry written without them is
 /// invisible to HARD and SOFT alike — both routes into `dirty_files.json`
 /// have to fill it.
 ///
-/// Only the kinds `map_node_kind` recognises are kept. The manifest is read on
-/// the agent-blocking query path and rewritten on every save, so it pays to
-/// carry declarations two sessions can meaningfully both edit rather than every
-/// node the parser emits — locals, imports and expression-level nodes land in
-/// `SymbolKind::Unknown`, where "both sessions modified it" means nothing an
-/// agent can act on.
+/// This is the file's declaration list, NOT a change set: the file is
+/// re-parsed whole and nothing is compared against the base graph, so it
+/// cannot say which of these the session actually edited. `classify` states
+/// HARD at that granularity deliberately.
 fn symbols_from_graph(graph: &LocalGraph, file_str: &str) -> Vec<SymbolRef> {
-    graph
+    let mut symbols: Vec<SymbolRef> = graph
         .nodes
         .iter()
         .filter_map(|n| {
@@ -506,7 +523,25 @@ fn symbols_from_graph(graph: &LocalGraph, file_str: &str) -> Vec<SymbolRef> {
                 line_end: n.span.2 + 1,
             })
         })
-        .collect()
+        .take(MAX_SYMBOLS_PER_ENTRY + 1)
+        .collect();
+    if symbols.len() > MAX_SYMBOLS_PER_ENTRY {
+        let dropped = graph
+            .nodes
+            .iter()
+            .filter(|n| map_node_kind(&n.kind).is_some())
+            .count()
+            - MAX_SYMBOLS_PER_ENTRY;
+        symbols.truncate(MAX_SYMBOLS_PER_ENTRY);
+        symbols.push(SymbolRef {
+            name: format!("…+{dropped} more (truncated)"),
+            kind: SymbolKind::Unknown,
+            file: file_str.to_string(),
+            line_start: 0,
+            line_end: 0,
+        });
+    }
+    symbols
 }
 
 /// Run the pipeline on `path` and convert nodes to `SymbolRef`s.

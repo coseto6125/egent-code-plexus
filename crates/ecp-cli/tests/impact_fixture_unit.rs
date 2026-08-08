@@ -72,6 +72,7 @@ fn base_args(name: &str) -> ImpactArgs {
         literal: None,
         literal_coherence: false,
         batch: false,
+        max_results: None,
     }
 }
 
@@ -205,6 +206,7 @@ fn test_run_for_symbol_wraps_build_payload_and_exposes_direct_symbol_uids() {
         Some(5),
         None,
         false,
+        None,
     )
     .expect("run_for_symbol should resolve `leaf`");
 

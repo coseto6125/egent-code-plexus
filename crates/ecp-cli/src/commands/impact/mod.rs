@@ -156,6 +156,13 @@ pub struct ImpactArgs {
     /// silently ignored otherwise.
     #[arg(long, conflicts_with_all = ["name", "baseline", "literal", "literal_coherence"])]
     pub batch: bool,
+
+    /// Stop the traversal after this many reached nodes. Library-only (no CLI
+    /// flag): the CLI's answer must be exhaustive or its caveat would be a lie.
+    /// Callers that only need a bounded sample — the peers watcher's SOFT
+    /// cache — set it so a hub symbol cannot materialise six figures of nodes.
+    #[arg(skip)]
+    pub max_results: Option<usize>,
 }
 
 /// Split a comma-separated flag value into a normalized lowercase Vec.
@@ -286,6 +293,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             literal: None,
             literal_coherence: false,
             batch: false,
+            max_results: args.max_results,
         };
 
         let payload = match build_payload_with_hints(&per_target_args, engine) {

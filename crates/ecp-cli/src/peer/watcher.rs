@@ -144,10 +144,13 @@ fn handle_event(
     Ok(())
 }
 
-/// True when the current dirty set contains a symbol name absent from the
+/// True when the current dirty set contains a `(file, name)` absent from the
 /// previous cached set. `prev = None` (startup / first write) counts as
 /// gained — rescanning once too often is safe; missing the first transition
 /// recreates the late-writer blind spot.
+///
+/// Keyed on the pair, not the name: going dirty on `run` in a second file has
+/// to count as a gain, or the new file's overlap never reaches our inbox.
 fn my_dirty_gained_symbols(
     my_session_dir: &Path,
     prev: Option<&[ecp_core::session::overlay::SymbolRef]>,
@@ -158,12 +161,14 @@ fn my_dirty_gained_symbols(
     let Ok(now) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
         return false;
     };
-    let prev_names: std::collections::HashSet<&str> =
-        prev.iter().map(|s| s.name.as_str()).collect();
+    let prev_keys: std::collections::HashSet<(&str, &str)> = prev
+        .iter()
+        .map(|s| (s.file.as_str(), s.name.as_str()))
+        .collect();
     now.entries
         .values()
         .flat_map(|e| &e.dirty_symbols)
-        .any(|s| !prev_names.contains(s.name.as_str()))
+        .any(|s| !prev_keys.contains(&(s.file.as_str(), s.name.as_str())))
 }
 
 /// Fail-open per peer: one unreadable peer must not block the rest.
@@ -292,6 +297,11 @@ struct SoftState {
     /// graph traversals on the watcher's single event-loop thread for a result
     /// that cannot have changed.
     seeds: Vec<Seed>,
+    /// Graph path the last failed load resolved to. A session whose index is
+    /// still building must keep retrying, but once the answer is "that exact
+    /// path does not load", repeating the resolve + mmap + header-validate on
+    /// every save buys nothing — the retry waits for the path to move.
+    failed_graph: Option<PathBuf>,
 }
 
 impl SoftState {
@@ -307,17 +317,24 @@ impl SoftState {
         if self.source.is_some() && seeds == self.seeds {
             return;
         }
+        let seeds_changed = seeds != self.seeds;
         self.seeds = seeds;
         self.cache.invalidate();
         if self.seeds.is_empty() {
             return;
         }
-        // Retried while it keeps failing rather than latched off after one
-        // attempt: a session that starts before its first index finishes would
-        // otherwise run the next several hours with SOFT disabled against a
-        // graph that has been on disk the whole time.
+        if seeds_changed {
+            warn_on_truncated_seeds(my_session_dir, self.seeds.len());
+        }
         if self.source.is_none() {
-            self.source = load_impact_source(my_session_dir);
+            match load_impact_source(my_session_dir, self.failed_graph.as_deref()) {
+                LoadOutcome::Loaded(source) => {
+                    self.failed_graph = None;
+                    self.source = Some(source);
+                }
+                LoadOutcome::Failed(path) => self.failed_graph = path,
+                LoadOutcome::SameFailurePath => {}
+            }
         }
         let Some(source) = self.source.as_ref() else {
             return;
@@ -326,26 +343,70 @@ impl SoftState {
     }
 }
 
+enum LoadOutcome {
+    Loaded(ImpactSource),
+    /// Resolution or open failed; carries the path so the next attempt can tell
+    /// whether anything moved. `None` when we never got as far as a path.
+    Failed(Option<PathBuf>),
+    /// The same path that already failed — skipped without touching the disk.
+    SameFailurePath,
+}
+
 /// Resolve the session's own worktree, then open the graph published for it.
 ///
 /// Deliberately `Engine::load` rather than `load_ensured`: the watcher is a
 /// passive observer of other sessions and must never kick off an index build
 /// behind the agent's back — a background rebuild fired from here would land
 /// on the same disk as the edit that triggered it.
-fn load_impact_source(my_session_dir: &Path) -> Option<ImpactSource> {
-    let meta = SessionMeta::read(&my_session_dir.join("session_meta.json")).ok()?;
+fn load_impact_source(my_session_dir: &Path, failed_graph: Option<&Path>) -> LoadOutcome {
+    let Ok(meta) = SessionMeta::read(&my_session_dir.join("session_meta.json")) else {
+        return LoadOutcome::Failed(None);
+    };
     if meta.source_worktree.is_empty() {
-        return None;
+        return LoadOutcome::Failed(None);
     }
     let worktree = PathBuf::from(&meta.source_worktree);
-    let member_repo = crate::repo_identity::repo_dir_name_for_cwd(&worktree).ok()?;
+    let Ok(member_repo) = crate::repo_identity::repo_dir_name_for_cwd(&worktree) else {
+        return LoadOutcome::Failed(None);
+    };
     let graph_path = crate::graph_path::resolve(Path::new(".ecp/graph.bin"), &worktree);
-    let engine = crate::engine::Engine::load(&graph_path).ok()?;
+    if failed_graph == Some(graph_path.as_path()) {
+        return LoadOutcome::SameFailurePath;
+    }
+    let Ok(engine) = crate::engine::Engine::load(&graph_path) else {
+        return LoadOutcome::Failed(Some(graph_path));
+    };
     tracing::info!(graph = %graph_path.display(), "watcher attached graph for SOFT concerns");
-    Some(ImpactSource {
+    LoadOutcome::Loaded(ImpactSource {
         engine,
         member_repo,
     })
+}
+
+/// The seed cap makes SOFT narrower than the `IMPACT(MY_DIRTY_SYMBOLS)` it
+/// documents. Emitted only when the seed set actually changed, so a save loop
+/// on an over-cap dirty set does not write the same line hundreds of times.
+fn warn_on_truncated_seeds(my_session_dir: &Path, kept: usize) {
+    if kept < SOFT_IMPACT_MAX_SEEDS {
+        return;
+    }
+    let Ok(dirty) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
+        return;
+    };
+    let total = dirty
+        .entries
+        .values()
+        .flat_map(|e| &e.dirty_symbols)
+        .map(|s| (s.file.as_str(), s.name.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if total > kept {
+        tracing::warn!(
+            kept,
+            dropped = total - kept,
+            "dirty set exceeds the SOFT seed cap — declarations past the cap get no SOFT coverage"
+        );
+    }
 }
 
 /// Distinct dirty symbols, capped. Order follows `DirtyFiles`' BTreeMap, so
@@ -357,28 +418,16 @@ fn seed_symbols(my_session_dir: &Path) -> Vec<Seed> {
     };
     let mut seen = std::collections::HashSet::new();
     let mut seeds = Vec::new();
-    let mut dropped = 0usize;
     for symbol in dirty.entries.values().flat_map(|e| &e.dirty_symbols) {
-        if !seen.insert((symbol.name.as_str(), symbol.file.as_str())) {
-            continue;
-        }
         if seeds.len() >= SOFT_IMPACT_MAX_SEEDS {
-            dropped += 1;
-            continue;
+            break;
         }
-        seeds.push(Seed {
-            name: symbol.name.clone(),
-            file: symbol.file.clone(),
-        });
-    }
-    // The cap makes SOFT narrower than the `IMPACT(MY_DIRTY_SYMBOLS)` it
-    // documents; say so rather than let the gap look like "no neighbours".
-    if dropped > 0 {
-        tracing::warn!(
-            seeds = SOFT_IMPACT_MAX_SEEDS,
-            dropped,
-            "dirty set exceeds the SOFT seed cap — symbols past the cap get no SOFT coverage"
-        );
+        if seen.insert((symbol.name.as_str(), symbol.file.as_str())) {
+            seeds.push(Seed {
+                name: symbol.name.clone(),
+                file: symbol.file.clone(),
+            });
+        }
     }
     seeds
 }
@@ -398,6 +447,7 @@ fn impacted_names(source: &ImpactSource, seeds: &[Seed]) -> FxHashSet<SymbolKey>
             Some(SOFT_IMPACT_DEPTH),
             None,
             false,
+            Some(SOFT_IMPACT_MAX_NAMES),
         ) else {
             continue;
         };
