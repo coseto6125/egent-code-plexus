@@ -29,6 +29,13 @@ pub fn rotate_if_needed(log: &Path, threshold_bytes: u64, keep: usize) -> io::Re
     if meta.len() < threshold_bytes {
         return Ok(false);
     }
+    rotate_now(log, keep)
+}
+
+/// The rename cascade with no size check — for callers that decided to rotate
+/// on their own terms (see peer::inbox::rotate_if_drained, which gates on the
+/// reader's watermark and holds the inbox lock across this).
+pub fn rotate_now(log: &Path, keep: usize) -> io::Result<bool> {
     let dir = log.parent().unwrap_or_else(|| Path::new("."));
     let stem = log.file_name().and_then(|s| s.to_str()).unwrap_or("log");
     let path_n = |n: usize| -> PathBuf { dir.join(format!("{stem}.{n}")) };

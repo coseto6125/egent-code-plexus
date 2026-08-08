@@ -108,6 +108,7 @@ pub fn append_entry(path: &Path, entry: &InboxEntry) -> io::Result<()> {
         line.len() < 4096,
         "inbox entry must fit in PIPE_BUF for atomic append"
     );
+    let _guard = InboxLock::acquire(path)?;
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     // Bump generation when appending to an empty file (fresh create or truncation).
     if f.metadata()?.len() == 0 {
@@ -115,6 +116,58 @@ pub fn append_entry(path: &Path, entry: &InboxEntry) -> io::Result<()> {
     }
     f.write_all(&line)?;
     Ok(())
+}
+
+/// Exclusive lock shared by every inbox writer, reader and rotator.
+///
+/// O_APPEND alone orders concurrent writes, but says nothing about a reader
+/// snapshotting the length mid-write, or a rotator renaming the file between a
+/// writer opening it and writing its line. Both lost messages. One lock over
+/// all three operations is the cheapest protocol that closes them: an append is
+/// a single sub-PIPE_BUF line and a drain runs once per hook, so contention is
+/// not a factor.
+///
+/// Fail-open: a lock we cannot take must not stop a peer message from being
+/// written, so the caller proceeds unlocked rather than erroring.
+/// The guard is held for its Drop side effect only; the field is never read.
+pub struct InboxLock(#[allow(dead_code)] Option<crate::registry::FileLock>);
+
+impl InboxLock {
+    pub fn acquire(inbox: &Path) -> io::Result<Self> {
+        let lock_path = inbox.with_extension("jsonl.lock");
+        Ok(Self(
+            crate::registry::FileLock::acquire_exclusive(&lock_path).ok(),
+        ))
+    }
+}
+
+/// Rotate the inbox, but only once every entry in it has been delivered.
+///
+/// The generic log rotation cannot be used here: it moves the whole file aside,
+/// and the hook only ever drains the CURRENT file, so any undelivered entry in
+/// a rotated generation was never shown and eventually aged out. The
+/// watermark passed in is the reader's last_drained_offset; rotation is
+/// skipped whenever it does not already cover the whole file.
+pub fn rotate_if_drained(
+    inbox: &Path,
+    watermark: u64,
+    threshold_bytes: u64,
+    keep: usize,
+) -> io::Result<bool> {
+    let _guard = InboxLock::acquire(inbox)?;
+    let len = match std::fs::metadata(inbox) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if len < threshold_bytes {
+        return Ok(false);
+    }
+    let (drained_to, gen) = unpack_watermark(watermark);
+    if drained_to < len || gen != read_gen(inbox)? {
+        return Ok(false);
+    }
+    crate::peer::retention::rotate_now(inbox, keep)
 }
 
 // Watermark encoding: upper 32 bits = generation counter, lower 32 bits =
@@ -158,6 +211,7 @@ pub fn drain(path: &Path, start_offset: u64) -> io::Result<(Vec<InboxEntry>, u64
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(e) => return Err(e),
     };
+    let _guard = InboxLock::acquire(path)?;
     let len = f.metadata()?.len();
     let cur_gen = read_gen(path)?;
 
