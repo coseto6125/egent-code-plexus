@@ -1,5 +1,11 @@
 //! Render drained InboxEntry batches into a Claude Code hook payload.
-//! 4 KB hard cap; HARD kept, SOFT trimmed first when over.
+//!
+//! 4 KB hard cap. What gets trimmed is ordered by whether it can be recovered:
+//! SOFT first, then HARD detail, and messages last and never entirely. A
+//! concern is re-derivable — the peer's manifest is still on disk and the
+//! watcher raises it again on the next write — but a peer message exists only
+//! in this batch, and the caller drops the inbox once this returns. Trimming a
+//! message away is therefore the one loss nothing can undo.
 
 use ecp_core::peer::inbox::{ConcernKindSer, InboxEntry};
 use std::fmt::Write;
@@ -57,6 +63,73 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
             InboxEntry::Message { .. } => msgs.push(e),
         }
     }
+    // Attempts in order of what each sacrifices, stopping at the first that
+    // fits: full detail, then SOFT dropped, then HARD reduced to one line each,
+    // then message bodies squeezed. Messages always survive at least as an id
+    // and sender, because nothing else holds a copy after this returns.
+    let last = ATTEMPTS.len() - 1;
+    for (attempt, plan) in ATTEMPTS.iter().enumerate() {
+        let buf = compose(&hard, &soft, &msgs, *plan);
+        if buf.len() <= PAYLOAD_CAP_BYTES {
+            return buf;
+        }
+        if attempt == last {
+            // Even id-and-sender lines overflow: clamp, and say how much of the
+            // batch the agent is not seeing rather than cutting silently.
+            let mut clamped = buf;
+            clamped.truncate(floor_char_boundary(
+                &clamped,
+                PAYLOAD_CAP_BYTES.saturating_sub(96),
+            ));
+            let _ = writeln!(
+                clamped,
+                "\n... batch too large for the 4KB cap ({} concern(s), {} message(s)) — `ecp peers inbox`",
+                hard.len() + soft.len(),
+                msgs.len()
+            );
+            return clamped;
+        }
+    }
+    unreachable!("ATTEMPTS is non-empty")
+}
+
+#[derive(Clone, Copy)]
+struct Plan {
+    soft: bool,
+    hard_detail: bool,
+    body_budget: usize,
+}
+
+const ATTEMPTS: &[Plan] = &[
+    Plan {
+        soft: true,
+        hard_detail: true,
+        body_budget: 500,
+    },
+    Plan {
+        soft: false,
+        hard_detail: true,
+        body_budget: 500,
+    },
+    Plan {
+        soft: false,
+        hard_detail: false,
+        body_budget: 240,
+    },
+    Plan {
+        soft: false,
+        hard_detail: false,
+        body_budget: 60,
+    },
+    Plan {
+        soft: false,
+        hard_detail: false,
+        body_budget: 0,
+    },
+];
+
+fn compose(hard: &[&InboxEntry], soft: &[&InboxEntry], msgs: &[&InboxEntry], plan: Plan) -> String {
+    let body_budget = plan.body_budget;
     let mut buf = String::new();
     if !hard.is_empty() {
         let _ = writeln!(
@@ -65,11 +138,15 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
             hard.len(),
             if hard.len() == 1 { "" } else { "s" }
         );
-        for e in &hard {
-            render_hard(&mut buf, e);
+        for e in hard {
+            if plan.hard_detail {
+                render_hard(&mut buf, e);
+            } else {
+                render_soft_one_line(&mut buf, e);
+            }
         }
     }
-    if !soft.is_empty() {
+    if plan.soft && !soft.is_empty() {
         let cap = SOFT_EVENTS_DEFAULT_CAP.min(soft.len());
         let _ = writeln!(
             buf,
@@ -87,6 +164,12 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
                 soft.len() - cap
             );
         }
+    } else if !soft.is_empty() {
+        let _ = writeln!(
+            buf,
+            "\n[ecp peers] SOFT overlap ({}) omitted to fit the 4KB cap — `ecp peers status`",
+            soft.len()
+        );
     }
     if !msgs.is_empty() {
         let _ = writeln!(
@@ -95,11 +178,11 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
             msgs.len(),
             if msgs.len() == 1 { "" } else { "s" }
         );
-        for e in &msgs {
-            render_message(&mut buf, e);
+        for e in msgs {
+            render_message(&mut buf, e, body_budget);
         }
     }
-    enforce_cap(buf, &hard)
+    buf
 }
 
 fn render_hard(buf: &mut String, e: &InboxEntry) {
@@ -176,7 +259,7 @@ fn render_soft_one_line(buf: &mut String, e: &InboxEntry) {
     }
 }
 
-fn render_message(buf: &mut String, e: &InboxEntry) {
+fn render_message(buf: &mut String, e: &InboxEntry, body_budget: usize) {
     if let InboxEntry::Message {
         msg_id,
         from,
@@ -196,52 +279,24 @@ fn render_message(buf: &mut String, e: &InboxEntry) {
             .as_ref()
             .map(|r| format!(" (reply to {r})"))
             .unwrap_or_default();
-        let truncated: String = body.chars().take(500).collect();
+        let truncated: String = body.chars().take(body_budget).collect();
+        let elided = body
+            .chars()
+            .count()
+            .saturating_sub(truncated.chars().count());
         let sender = from_name.as_deref().unwrap_or(from);
         let _ = writeln!(buf, "  [{msg_id}] {sender}{to_part}{reply_part} ({ts})");
-        let _ = writeln!(buf, "    {truncated}");
-    }
-}
-
-/// Over the cap, HARD is what survives — but only when there IS a HARD. A
-/// message-only or SOFT-only payload used to be replaced wholesale by a
-/// `HARD overlap (0)` header, which both destroyed every message and announced
-/// an event class that had not occurred.
-fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
-    if buf.len() <= PAYLOAD_CAP_BYTES {
-        return buf;
-    }
-    if hard.is_empty() {
-        buf.truncate(floor_char_boundary(
-            &buf,
-            PAYLOAD_CAP_BYTES.saturating_sub(80),
-        ));
-        buf.push_str("\n... (truncated to fit the 4KB cap; full text: `ecp peers inbox`)\n");
-        return buf;
-    }
-    buf.clear();
-    let _ = writeln!(
-        &mut buf,
-        "[ecp peers] HARD overlap ({}) — payload trimmed to fit 4KB cap",
-        hard.len()
-    );
-    for e in hard {
-        render_hard(&mut buf, e);
-        if buf.len() > PAYLOAD_CAP_BYTES {
-            buf.truncate(floor_char_boundary(
-                &buf,
-                PAYLOAD_CAP_BYTES.saturating_sub(80),
-            ));
-            buf.push_str("\n... (truncated; SOFT and messages: `ecp peers inbox`)\n");
-            break;
+        if elided > 0 {
+            let _ = writeln!(buf, "    {truncated}… (+{elided} chars)");
+        } else {
+            let _ = writeln!(buf, "    {truncated}");
         }
     }
-    buf
 }
 
-/// `String::truncate` panics on a non-boundary index, and peer messages carry
-/// arbitrary user text — a multi-byte character straddling the cap would take
-/// the hook down.
+/// Last-resort clamp for the final attempt. `String::truncate` panics on a
+/// non-boundary index and message bodies carry arbitrary user text, so a
+/// multi-byte character straddling the cap would take the hook down.
 fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
     if idx >= s.len() {
         return s.len();

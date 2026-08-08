@@ -162,6 +162,9 @@ fn unpack_watermark(w: u64) -> (u64, u32) {
 /// the gen mismatch and reset to byte 0, rather than silently missing entries
 /// that were appended between our drain-read and our truncate.
 pub fn truncate_inbox(path: &Path) -> io::Result<()> {
+    // Same lock as `append_entry` and `drain`: without it a sender's line can
+    // land between this write and a reader's length snapshot and be erased.
+    let _guard = InboxLock::acquire(path)?;
     std::fs::write(path, "")?;
     bump_gen(path)?;
     Ok(())

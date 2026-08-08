@@ -209,7 +209,7 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
     let meta_path = session_dir.join("session_meta.json");
     let mut meta = ecp_core::session::SessionMeta::read(&meta_path).ok()?;
 
-    let (entries, new_offset) =
+    let (entries, _new_offset) =
         ecp_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
     if entries.is_empty() {
         return None;
@@ -219,18 +219,15 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
         return None;
     }
 
-    // Advance the watermark; do NOT blank the file. The payload is capped at
-    // 4 KB and drops whatever does not fit, so truncating here destroyed peer
-    // messages that had already been delivered — and the "run `ecp peers
-    // inbox`" hint pointed at a file this had just emptied. `cmd_inbox` reads
-    // the whole file, which is what makes that hint recoverable; `peers gc`
-    // and the watcher's periodic sweep rotate it.
-    meta.last_drained_offset = new_offset;
-    // A failed write means the next hook re-delivers everything shown here.
-    // Duplicated beats dropped, so the payload still goes out — but silently
-    // swallowing the error left the repeat unexplainable.
+    // Truncating is safe again because `render_payload` never drops a message:
+    // it trims SOFT, then HARD detail, then message bodies, and a concern is
+    // re-derived from the peer's manifest on its next write. Keeping the file
+    // instead turned it into a durable log needing rotation, 64-bit offsets and
+    // promotion awareness — see FU-2026-08-09-90261c6d6d7f.
+    let _ = ecp_core::peer::inbox::truncate_inbox(&inbox);
+    meta.last_drained_offset = 0;
     if let Err(e) = ecp_core::session::SessionMeta::write_atomic(&meta_path, &meta) {
-        eprintln!("[ecp peers] could not persist the inbox watermark ({e}); these entries will be shown again");
+        eprintln!("[ecp peers] could not reset the inbox watermark ({e})");
     }
     Some(payload)
 }
