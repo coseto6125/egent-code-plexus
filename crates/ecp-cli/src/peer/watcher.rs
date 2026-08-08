@@ -330,7 +330,7 @@ impl SoftState {
             match load_impact_source(my_session_dir, self.failed_graph.as_deref()) {
                 LoadOutcome::Loaded(source) => {
                     self.failed_graph = None;
-                    self.source = Some(source);
+                    self.source = Some(*source);
                 }
                 LoadOutcome::Failed(path) => self.failed_graph = path,
                 LoadOutcome::SameFailurePath => {}
@@ -344,7 +344,10 @@ impl SoftState {
 }
 
 enum LoadOutcome {
-    Loaded(ImpactSource),
+    // Boxed: the engine holds an mmap handle and dwarfs the other variants,
+    // which clippy's `large_enum_variant` flags — the value is moved into
+    // `SoftState` once and never matched in a hot loop.
+    Loaded(Box<ImpactSource>),
     /// Resolution or open failed; carries the path so the next attempt can tell
     /// whether anything moved. `None` when we never got as far as a path.
     Failed(Option<PathBuf>),
@@ -377,10 +380,10 @@ fn load_impact_source(my_session_dir: &Path, failed_graph: Option<&Path>) -> Loa
         return LoadOutcome::Failed(Some(graph_path));
     };
     tracing::info!(graph = %graph_path.display(), "watcher attached graph for SOFT concerns");
-    LoadOutcome::Loaded(ImpactSource {
+    LoadOutcome::Loaded(Box::new(ImpactSource {
         engine,
         member_repo,
-    })
+    }))
 }
 
 /// The seed cap makes SOFT narrower than the `IMPACT(MY_DIRTY_SYMBOLS)` it
