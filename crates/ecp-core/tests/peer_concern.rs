@@ -20,6 +20,10 @@ fn cache_of(keys: &[(&str, &str)]) -> ImpactCache {
     ImpactCache::from_set(set)
 }
 
+fn files(paths: &[&str]) -> Vec<String> {
+    paths.iter().map(|p| (*p).to_string()).collect()
+}
+
 fn empty_cache() -> ImpactCache {
     ImpactCache::from_set(FxHashSet::default())
 }
@@ -27,8 +31,9 @@ fn empty_cache() -> ImpactCache {
 #[test]
 fn hard_when_same_symbol_modified() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![sym("verify_token", "src/auth.rs")];
-    let r = classify(&peer, &mine, &empty_cache());
+    let r = classify(&peer[0].file, &peer, &my_files, &mine, &empty_cache());
     assert!(matches!(
         r,
         ConcernResult::Hit {
@@ -44,9 +49,10 @@ fn hard_when_same_symbol_modified() {
 #[test]
 fn same_name_in_different_files_is_not_a_hard_overlap() {
     let mine = vec![sym("run", "crates/ecp-cli/src/commands/watch.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![sym("run", "crates/ecp-cli/src/commands/impact/mod.rs")];
     assert!(matches!(
-        classify(&peer, &mine, &empty_cache()),
+        classify(&peer[0].file, &peer, &my_files, &mine, &empty_cache()),
         ConcernResult::Ignore
     ));
 }
@@ -56,10 +62,11 @@ fn same_name_in_different_files_is_not_a_hard_overlap() {
 #[test]
 fn same_name_in_different_files_is_not_a_soft_overlap() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![sym("run", "src/unrelated.rs")];
     let cache = cache_of(&[("src/server.rs", "run")]);
     assert!(matches!(
-        classify(&peer, &mine, &cache),
+        classify(&peer[0].file, &peer, &my_files, &mine, &cache),
         ConcernResult::Ignore
     ));
 }
@@ -67,9 +74,10 @@ fn same_name_in_different_files_is_not_a_soft_overlap() {
 #[test]
 fn soft_when_peer_is_one_hop_neighbor() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![sym("login_handler", "src/handlers/login.rs")];
     let cache = cache_of(&[("src/handlers/login.rs", "login_handler")]);
-    let r = classify(&peer, &mine, &cache);
+    let r = classify(&peer[0].file, &peer, &my_files, &mine, &cache);
     assert!(matches!(
         r,
         ConcernResult::Hit {
@@ -82,20 +90,22 @@ fn soft_when_peer_is_one_hop_neighbor() {
 #[test]
 fn ignore_when_unrelated() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![sym("format_money", "src/utils/money.rs")];
-    let r = classify(&peer, &mine, &empty_cache());
+    let r = classify(&peer[0].file, &peer, &my_files, &mine, &empty_cache());
     assert!(matches!(r, ConcernResult::Ignore));
 }
 
 #[test]
 fn hard_takes_precedence_over_soft() {
     let mine = vec![sym("verify_token", "src/auth.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![
         sym("verify_token", "src/auth.rs"),
         sym("login_handler", "src/login.rs"),
     ];
     let cache = cache_of(&[("src/login.rs", "login_handler")]);
-    match classify(&peer, &mine, &cache) {
+    match classify(&peer[0].file, &peer, &my_files, &mine, &cache) {
         ConcernResult::Hit {
             kind: ConcernKind::Hard,
             symbol,
@@ -114,8 +124,9 @@ fn hard_takes_precedence_over_soft() {
 #[test]
 fn hard_reason_claims_the_shared_file_not_a_shared_edit() {
     let mine = vec![sym("foo", "src/a.rs"), sym("bar", "src/a.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![sym("foo", "src/a.rs"), sym("bar", "src/a.rs")];
-    match classify(&peer, &mine, &empty_cache()) {
+    match classify(&peer[0].file, &peer, &my_files, &mine, &empty_cache()) {
         ConcernResult::Hit { reason, .. } => {
             assert!(
                 reason.contains("src/a.rs"),
@@ -135,9 +146,10 @@ fn hard_reason_claims_the_shared_file_not_a_shared_edit() {
 #[test]
 fn shared_dirty_file_is_hard_even_without_a_shared_name() {
     let mine = vec![sym("foo", "src/a.rs")];
+    let my_files: Vec<String> = mine.iter().map(|s| s.file.clone()).collect();
     let peer = vec![sym("bar", "src/a.rs")];
     assert!(matches!(
-        classify(&peer, &mine, &empty_cache()),
+        classify(&peer[0].file, &peer, &my_files, &mine, &empty_cache()),
         ConcernResult::Hit {
             kind: ConcernKind::Hard,
             ..
@@ -147,10 +159,11 @@ fn shared_dirty_file_is_hard_even_without_a_shared_name() {
 
 #[test]
 fn empty_my_dirty_yields_ignore() {
-    let mine = vec![];
+    let mine: Vec<SymbolRef> = vec![];
+    let my_files: Vec<String> = Vec::new();
     let peer = vec![sym("anything", "src/x.rs")];
     assert!(matches!(
-        classify(&peer, &mine, &empty_cache()),
+        classify(&peer[0].file, &peer, &my_files, &mine, &empty_cache()),
         ConcernResult::Ignore
     ));
 }
@@ -183,4 +196,43 @@ fn impact_cache_invalidate_clears_contents() {
     c.refresh([("src/a.rs".to_string(), "foo".to_string())]);
     c.invalidate();
     assert!(!c.contains("src/a.rs", "foo"));
+}
+
+/// A file the parser found no declarations in — imports-only, or a parse
+/// failure — is still a file both sessions are editing. Deriving the path from
+/// `dirty_symbols` dropped it, while `peers status --pairs` read the manifest
+/// key and still reported it, so the two disagreed.
+#[test]
+fn shared_file_with_no_declarations_is_still_hard() {
+    let mine = vec![sym("anything", "src/prelude.rs")];
+    let my_files = files(&["src/prelude.rs"]);
+    let peer: Vec<SymbolRef> = vec![];
+    match classify("src/prelude.rs", &peer, &my_files, &mine, &empty_cache()) {
+        ConcernResult::Hit {
+            kind: ConcernKind::Hard,
+            symbol,
+            ..
+        } => assert_eq!(symbol.file, "src/prelude.rs"),
+        other => panic!("expected Hard, got {other:?}"),
+    }
+}
+
+/// The reason must not assert an uncommitted edit: an overlay entry only means
+/// the file differs from the PUBLISHED graph, which also covers a clean
+/// worktree whose index has not caught up with HEAD.
+#[test]
+fn hard_reason_does_not_claim_the_file_is_uncommitted() {
+    let mine = vec![sym("foo", "src/a.rs")];
+    let my_files = files(&["src/a.rs"]);
+    let peer = vec![sym("foo", "src/a.rs")];
+    match classify("src/a.rs", &peer, &my_files, &mine, &empty_cache()) {
+        ConcernResult::Hit { reason, .. } => {
+            assert!(reason.contains("src/a.rs"), "{reason}");
+            assert!(
+                reason.contains("index has not caught up"),
+                "reason must name the committed-but-unindexed case: {reason}"
+            );
+        }
+        other => panic!("expected a hit, got {other:?}"),
+    }
 }

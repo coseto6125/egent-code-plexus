@@ -16,9 +16,10 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
     // deliver the same (peer, symbol, kind) concern more than once between
     // drains. Keep only the LAST occurrence — it carries the freshest
     // peer_delta — by scanning in reverse with a seen-set.
-    // Keyed on the symbol's FILE as well as its name: a peer concerning us
-    // about `run` in two different files is two distinct concerns, and a
-    // name-only key would render only the last one.
+    // HARD's identity is the shared FILE, so its witness declaration is not
+    // part of the key: a peer that gains a declaration between two events
+    // would otherwise render as two concerns about one file. SOFT does key on
+    // the declaration, since that is what it actually claims.
     let mut seen: std::collections::HashSet<(&str, &str, &str, ConcernKindSer)> =
         std::collections::HashSet::new();
     let mut deduped: Vec<&InboxEntry> = entries
@@ -30,12 +31,13 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
                 symbol,
                 kind,
                 ..
-            } => seen.insert((
-                peer_session.as_str(),
-                symbol.file.as_str(),
-                symbol.name.as_str(),
-                *kind,
-            )),
+            } => {
+                let witness = match kind {
+                    ConcernKindSer::Hard => "",
+                    ConcernKindSer::Soft => symbol.name.as_str(),
+                };
+                seen.insert((peer_session.as_str(), symbol.file.as_str(), witness, *kind))
+            }
             InboxEntry::Message { .. } => true,
         })
         .collect();
@@ -201,8 +203,20 @@ fn render_message(buf: &mut String, e: &InboxEntry) {
     }
 }
 
+/// Over the cap, HARD is what survives — but only when there IS a HARD. A
+/// message-only or SOFT-only payload used to be replaced wholesale by a
+/// `HARD overlap (0)` header, which both destroyed every message and announced
+/// an event class that had not occurred.
 fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
     if buf.len() <= PAYLOAD_CAP_BYTES {
+        return buf;
+    }
+    if hard.is_empty() {
+        buf.truncate(floor_char_boundary(
+            &buf,
+            PAYLOAD_CAP_BYTES.saturating_sub(80),
+        ));
+        buf.push_str("\n... (truncated to fit the 4KB cap; run `ecp peers inbox`)\n");
         return buf;
     }
     buf.clear();
@@ -214,10 +228,26 @@ fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
     for e in hard {
         render_hard(&mut buf, e);
         if buf.len() > PAYLOAD_CAP_BYTES {
-            buf.truncate(PAYLOAD_CAP_BYTES.saturating_sub(80));
+            buf.truncate(floor_char_boundary(
+                &buf,
+                PAYLOAD_CAP_BYTES.saturating_sub(80),
+            ));
             buf.push_str("\n... (truncated)\n");
             break;
         }
     }
     buf
+}
+
+/// `String::truncate` panics on a non-boundary index, and peer messages carry
+/// arbitrary user text — a multi-byte character straddling the cap would take
+/// the hook down.
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }

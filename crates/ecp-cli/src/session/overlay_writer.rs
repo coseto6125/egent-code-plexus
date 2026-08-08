@@ -387,8 +387,13 @@ static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 use crate::reanalyze::pipeline;
 
 /// `None` for nodes that are not a declaration two sessions can both edit —
-/// File, Import, Route, Process, Document, Section, EntryPoint, Property,
-/// Variable, PathLiteral and the rest of the reference-level tail.
+/// File, Import, Route, Process, Document, Section, EntryPoint, PathLiteral and
+/// the rest of the reference-level tail.
+///
+/// `Property`, `EnumVariant` and `Variable` ARE kept: a struct field is a real
+/// declaration with `field_read` impact edges, so dropping it made a peer
+/// editing `Config.token` invisible to a session whose dirty function reads it.
+/// (Function-body locals never reach here — the indexer drops them by design.)
 ///
 /// The declaration variants at the end of `NodeKind` (Struct, Enum, Typedef,
 /// Namespace, Module, Trait, Impl, Macro, Annotation) were appended after this
@@ -404,7 +409,8 @@ fn map_node_kind(k: &NodeKind) -> Option<SymbolKind> {
         NodeKind::Enum => Some(SymbolKind::Enum),
         NodeKind::Typedef => Some(SymbolKind::Type),
         NodeKind::Module | NodeKind::Namespace => Some(SymbolKind::Module),
-        NodeKind::Const => Some(SymbolKind::Const),
+        NodeKind::Const | NodeKind::EnumVariant => Some(SymbolKind::Const),
+        NodeKind::Property | NodeKind::Variable => Some(SymbolKind::Unknown),
         NodeKind::Macro | NodeKind::Annotation => Some(SymbolKind::Unknown),
         _ => None,
     }

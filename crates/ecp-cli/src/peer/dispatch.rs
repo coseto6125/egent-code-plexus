@@ -13,11 +13,19 @@ pub fn dispatch_peer_dirty_event(
     peer_pid: u32,
     peer_name: Option<&str>,
     ts: &str,
+    peer_file: &str,
     peer_entry: &DirtyEntry,
+    my_dirty_files: &[String],
     my_dirty_symbols: &[SymbolRef],
     impact_cache: &ImpactCache,
 ) -> io::Result<()> {
-    let result = classify(&peer_entry.dirty_symbols, my_dirty_symbols, impact_cache);
+    let result = classify(
+        peer_file,
+        &peer_entry.dirty_symbols,
+        my_dirty_files,
+        my_dirty_symbols,
+        impact_cache,
+    );
     let (kind, symbol, reason) = match result {
         ConcernResult::Hit {
             kind,

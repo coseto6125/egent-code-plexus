@@ -19,6 +19,14 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Our own manifest, split the way `classify` consumes it: entry keys decide
+/// HARD, declaration lists feed SOFT.
+#[derive(Default, Clone)]
+struct MyDirtySurface {
+    files: Vec<String>,
+    symbols: Vec<ecp_core::session::overlay::SymbolRef>,
+}
+
 pub struct WatcherCfg {
     pub repo_root: PathBuf,
     pub my_session_id: String,
@@ -49,8 +57,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     // Cached copy of our own dirty symbols. Invalidated whenever our own
     // dirty_files.json changes (same trigger as impact_cache), avoiding N
     // reads of the same file when N peers fire dirty events in a burst.
-    let my_dirty_cache: Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>> =
-        Arc::new(Mutex::new(None));
+    let my_dirty_cache: Arc<Mutex<Option<MyDirtySurface>>> = Arc::new(Mutex::new(None));
 
     let (tx, rx) = channel::<notify::Result<Event>>();
     let mut watcher = notify::recommended_watcher(tx).map_err(std::io::Error::other)?;
@@ -98,7 +105,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
 fn handle_event(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
     ev: Event,
 ) -> std::io::Result<()> {
     if !matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
@@ -116,7 +123,7 @@ fn handle_event(
             continue;
         };
         if sid == cfg.my_session_id {
-            let prev: Option<Vec<ecp_core::session::overlay::SymbolRef>> = {
+            let prev: Option<MyDirtySurface> = {
                 let mut s = soft.lock().expect("soft state lock poisoned");
                 s.rebuild(&cfg.my_session_dir);
                 // Invalidate my_dirty_cache so next dispatch_peer re-reads the updated file.
@@ -134,7 +141,7 @@ fn handle_event(
             // but only when the set actually GAINED symbols, else every
             // re-save of the same symbol would spam N duplicate concerns
             // into our inbox between hook drains.
-            if my_dirty_gained_symbols(&cfg.my_session_dir, prev.as_deref()) {
+            if my_dirty_gained_symbols(&cfg.my_session_dir, prev.as_ref()) {
                 rescan_peers(cfg, soft, my_dirty_cache);
             }
             continue;
@@ -151,17 +158,22 @@ fn handle_event(
 ///
 /// Keyed on the pair, not the name: going dirty on `run` in a second file has
 /// to count as a gain, or the new file's overlap never reaches our inbox.
-fn my_dirty_gained_symbols(
-    my_session_dir: &Path,
-    prev: Option<&[ecp_core::session::overlay::SymbolRef]>,
-) -> bool {
+fn my_dirty_gained_symbols(my_session_dir: &Path, prev: Option<&MyDirtySurface>) -> bool {
     let Some(prev) = prev else {
         return true;
     };
     let Ok(now) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
         return false;
     };
+    // A newly dirty FILE counts even when it declares nothing, since that is
+    // exactly what HARD keys on now.
+    let prev_files: std::collections::HashSet<&str> =
+        prev.files.iter().map(String::as_str).collect();
+    if now.entries.keys().any(|f| !prev_files.contains(f.as_str())) {
+        return true;
+    }
     let prev_keys: std::collections::HashSet<(&str, &str)> = prev
+        .symbols
         .iter()
         .map(|s| (s.file.as_str(), s.name.as_str()))
         .collect();
@@ -175,7 +187,7 @@ fn my_dirty_gained_symbols(
 fn rescan_peers(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
 ) {
     let sessions_dir = cfg.repo_root.join("sessions");
     let Ok(read) = std::fs::read_dir(&sessions_dir) else {
@@ -205,40 +217,49 @@ fn rescan_peers(
 fn dispatch_peer(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
     peer_sid: &str,
     peer_dirty_path: &Path,
 ) -> std::io::Result<()> {
     let peer_dirty = DirtyFiles::read(peer_dirty_path)?;
     // Populate cache on first call after invalidation; reuse across burst of peer events.
-    let my_dirty = {
+    let (my_files, my_dirty) = {
         let mut guard = my_dirty_cache.lock().expect("my_dirty_cache lock poisoned");
         if guard.is_none() {
             *guard = Some(
                 DirtyFiles::read(&cfg.my_session_dir.join("dirty_files.json"))
                     .map(|d| {
-                        d.entries
+                        // Entry KEYS decide HARD, so they are read directly —
+                        // a file whose parse yielded no declarations still
+                        // counts, and `dirty_symbols` would have dropped it.
+                        let files: Vec<String> = d.entries.keys().cloned().collect();
+                        let symbols: Vec<ecp_core::session::overlay::SymbolRef> = d
+                            .entries
                             .into_values()
                             .flat_map(|e| e.dirty_symbols)
-                            .collect()
+                            .collect();
+                        MyDirtySurface { files, symbols }
                     })
                     .unwrap_or_default(),
             );
         }
-        guard.clone().unwrap_or_default()
+        let surface = guard.clone().unwrap_or_default();
+        (surface.files, surface.symbols)
     };
     let peer_meta = SessionMeta::read(&peer_dirty_path.with_file_name("session_meta.json"))?;
     let peer_pid = peer_meta.pid.unwrap_or(0);
     let ts = Utc::now().to_rfc3339();
     let soft_guard = soft.lock().expect("soft state lock poisoned");
-    for entry in peer_dirty.entries.values() {
+    for (peer_file, entry) in &peer_dirty.entries {
         dispatch_peer_dirty_event(
             &cfg.my_session_dir,
             peer_sid,
             peer_pid,
             peer_meta.agent_name.as_deref(),
             &ts,
+            peer_file,
             entry,
+            &my_files,
             &my_dirty,
             &soft_guard.cache,
         )?;
